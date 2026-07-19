@@ -9,6 +9,12 @@ In genau 4 festen Team-Voice-Kanälen der Kategorie „Scrims" können Team-Mitg
 Coaches manuell eine Sprachaufnahme starten/stoppen. Nach dem Stop postet der Bot die
 Aufnahme als MP3 in den zugehörigen Team-Text-Kanal.
 
+Die Laufzeit nutzt genau zwei Discord-Identitäten: den Hauptbot und den vorhandenen
+Ranked-Bot aus `DISCORD_TOKEN_RANKED`. Damit sind höchstens zwei gleichzeitige Aufnahmen
+innerhalb der Guild möglich. Sind beide Recorder belegt oder nicht bereit, wird ein weiterer
+Start abgewiesen; eine bestehende Voice-Verbindung wird niemals in einen anderen Kanal
+verschoben.
+
 ## Fixe Konfiguration (Guild `1289721245281292288`)
 
 ```rust
@@ -102,9 +108,11 @@ Ein `RecordCommandHandler` implementiert `InteractionHandler` (Trait in
 6. Receive-Handler registrieren: pro SSRC dekodiertes PCM wird direkt in eine **WAV-Datei
    auf Platte** geschrieben (NICHT im RAM puffern — bei 48kHz/Stereo/16-bit sind das
    ~11,5 MB/Minute; eine Stunde im RAM wären ~700 MB pro Session).
-7. Session-Status auf `SessionState::Recording` setzen (gleicher Registry-Eintrag, kein neuer
-   Insert).
-8. Konsens-Nachricht (Platzhalter-Text) in den zugehörigen `team_text_channel_id` posten.
+7. Konsens-Nachricht (Platzhalter-Text) in den zugehörigen `team_text_channel_id` posten.
+   Schlägt der Post fehl, werden Voice-Verbindung, Writer und Temp-Dateien sofort beendet bzw.
+   entfernt und der `Starting`-Claim zurückgerollt.
+8. Erst nach erfolgreichem Konsens-Post den Session-Status auf
+   `SessionState::Recording` setzen (gleicher Registry-Eintrag, kein neuer Insert).
 
 ## Ablauf `stop` (manuell oder automatisch)
 
@@ -191,10 +199,13 @@ type Registry = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<u64,
   Race zwischen zwei parallelen `/record start` aus (Punkt „Start prüft dann trägt ein" ist
   damit EIN Schritt, nicht zwei).
 - `Starting` → *(entfernt)`: Rollback bei Join-Fehlschlag.
+- `Starting` → `Stopping`: ausschließlich beim kontrollierten Prozess-Shutdown, nachdem neue
+  Operationen gesperrt und laufende Start-/Stop-Operationen abgewartet wurden.
 - `Starting` → `Recording`: nach erfolgreichem Join + Receive-Handler-Registrierung.
 - `Recording` → `Stopping`: atomarer Claim, nur wenn aktuell `Recording` — genau ein
   Stop-Trigger (manuell/leerer-Kanal/Cap-Sweep) gewinnt, alle anderen sehen `Stopping` oder
-  gar keinen Eintrag mehr und sind No-Ops.
+  gar keinen Eintrag mehr und sind No-Ops. Der kontrollierte Prozess-Shutdown darf nach seiner
+  exklusiven Lifecycle-Sperre ebenfalls diesen Übergang auslösen.
 - `Stopping` → *(entfernt)`: erst nach vollständigem Cleanup (Dateien gelöscht), unabhängig
   davon ob der Upload erfolgreich war — ein fehlgeschlagener Upload darf den Kanal nicht
   dauerhaft als „belegt" blockieren.
@@ -205,20 +216,35 @@ Lock-geschützte, synchrone Prüfung+Mutation.
 ## Dependencies
 
 - `rust/Cargo.toml` (Workspace): `serenity` Feature-Liste um `"voice"` erweitern (Zeile ~82).
-  Neuer Eintrag `songbird = { version = "0.4", features = ["serenity", "receive"] }`.
-- `crates/dl-voice/Cargo.toml`: `songbird.workspace = true` ergänzen (analog zu
-  `serenity.workspace = true`).
-- `crates/dl-discord/src/gateway.rs:635`: `serenity::Client::builder(...)` Chain um
-  `.register_songbird()` erweitern. Keine neuen Gateway-Intents nötig (`GUILD_VOICE_STATES`
-  ist bereits gesetzt, Zeile 626).
+  Songbird `0.6.0` mit `driver`, `gateway`, `rustls`, `serenity`, `tungstenite` und `receive`
+  verwenden; `0.4` unterstützt das seit März 2026 verpflichtende Discord-DAVE nicht.
+- `hound = "3.5.1"` schreibt die WAV-Datei. `dl-voice`, `dl-discord` und `dl-bot` erhalten
+  jeweils ihre direkt verwendeten Workspace-Abhängigkeiten.
+- Beide Serenity-Clients registrieren je einen getrennten, auf 48 kHz/Stereo/PCM-Decoding
+  konfigurierten Manager über `.register_songbird_with(...)`. Keine neuen Gateway-Intents für
+  den Hauptbot; der zweite Client nutzt nur `GUILDS | GUILD_VOICE_STATES`.
+- Das Aufnahmeverzeichnis liegt direkt unter dem privaten, pro Nutzer isolierten
+  `XDG_RUNTIME_DIR`. Beim Start werden Eigentümer und echte Verzeichnisse geprüft, Symlinks
+  abgelehnt, der Modus auf `0700` gesetzt und ausschließlich alte
+  `scrim-record-*.wav`/`.mp3`-Dateien entfernt. Neue WAV- und MP3-Dateien werden mit `0600`
+  angelegt.
 
 ## Wiring
 
-`bin/dl-bot/src/main.rs`: nach Client-Build `songbird::get(&client).await` holen,
-`RecordCommandHandler` konstruieren, bei `InteractionRouter` registrieren
-(`"record start"`, `"record stop"`), `scrim_record`-Subscriber genauso einhängen wie die
-bestehenden `dl-voice`-Subsysteme (exakte Stelle: dort wo `tracker`/`tempvoice` aktuell
-verdrahtet werden — an dieser Stelle spiegeln, nicht danebenbauen).
+`bin/dl-bot/src/main.rs`: beide Songbird-Manager und den `RecordCommandHandler` vor dem
+Client-Build erzeugen. Den Handler am noch mutablen `InteractionRouter` unter
+`"record start"` und `"record stop"` registrieren. Danach den Haupt-Manager dem bestehenden
+Client und den zweiten Manager einem minimalen Voice-Client mit `DISCORD_TOKEN_RANKED`
+übergeben. Der zweite Client besitzt keine Slash-Commands. Den `scrim_record`-Subscriber
+genauso einhängen wie die bestehenden `dl-voice`-Subsysteme (exakte Stelle: dort wo
+`tracker`/`tempvoice` aktuell verdrahtet werden — an dieser Stelle spiegeln, nicht
+danebenbauen).
+
+Beim kontrollierten Prozessende werden neue Starts gesperrt, laufende Start-/Stop-Operationen
+abgewartet und alle aktiven Recorder finalisiert. Die dabei unvollständigen Audiodateien werden
+ohne Transkodierung oder Upload gelöscht. SIGINT und das von systemd verwendete SIGTERM laufen
+durch denselben Cleanup-Pfad. Der Health-Sweep behandelt einen fehlenden Call sowie einen
+administrativ verschobenen Recorder als Fehler und stoppt die zugehörige Session.
 
 ## Texte (NUR Platzhalter, Claude schreibt final)
 
@@ -228,7 +254,10 @@ keine finalen deutschen User-Texte von Codex:
 - Ephemere Fehlermeldung: falscher Kanal
 - Ephemere Fehlermeldung: keine Berechtigung
 - Ephemere Fehlermeldung: Aufnahme läuft schon
+- Ephemere Fehlermeldung: beide Recorder belegt oder offline
 - Ephemere Fehlermeldung: `/record stop` ohne aktive Aufnahme
+- Ephemere Meldung: technischer Startfehler
+- Ephemere Bestätigung: Start/Stop angenommen
 - Hinweis-Notiz bei Dauer-Cap-Auto-Stop
 - Fallback-Nachricht bei fehlgeschlagenem Upload
 
@@ -254,6 +283,9 @@ Pure/unit-testbar ohne echte Discord-Voice-Verbindung:
   dieselbe `Recording`-Session (nur einer gewinnt den Wechsel zu `Stopping`), Start auf einen
   Kanal dessen letzte Session sich noch im `Stopping`-Zustand befindet (muss `AlreadyRecording`
   liefern, erst nach vollständigem Entfernen wieder frei).
+- Zwei-Recorder-Allocator: zwei unterschiedliche Kanäle belegen beide Identitäten; ein dritter
+  Start sieht fehlende Kapazität; ein nicht bereiter Recorder wird nicht vergeben; der Slot wird
+  erst nach `Stopping`-Cleanup wieder frei.
 
 **Explizit außerhalb der automatisierten Tests:** echte Voice-Audio-Aufnahme + `ffmpeg`-Aufruf
 (kein CI-Harness für echte Discord-Voice-Verbindungen) — das wird live gegen den Testserver

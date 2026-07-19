@@ -2,7 +2,7 @@
 //! hält der Python-Bot die Discord-Session; zwei aktive Handler würden
 //! Events doppelt verarbeiten.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serenity::all::{
@@ -13,6 +13,7 @@ use serenity::all::{
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
+use songbird::{SerenityInit, Songbird};
 
 use crate::adapter::DiscordAdapter;
 use crate::core_user_sync::{
@@ -28,6 +29,14 @@ use crate::invite_tracker::InviteTracker;
 
 const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
 
+fn ready_contains_guild(guild_ids: impl IntoIterator<Item = u64>, guild_id: u64) -> bool {
+    guild_ids.into_iter().any(|candidate| candidate == guild_id)
+}
+
+fn voice_worker_intents() -> GatewayIntents {
+    GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES
+}
+
 struct Handler {
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
@@ -37,6 +46,13 @@ struct Handler {
     reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
     feature_module_count: usize,
     command_prefix: String,
+    recording_readiness: Arc<AtomicBool>,
+    recording_guild_id: u64,
+}
+
+struct VoiceWorkerHandler {
+    readiness: Arc<AtomicBool>,
+    guild_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +247,13 @@ impl Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
+        self.recording_readiness.store(
+            ready_contains_guild(
+                ready.guilds.iter().map(|guild| guild.id.get()),
+                self.recording_guild_id,
+            ),
+            Ordering::Release,
+        );
         let activity_name = presence_activity_name(self.feature_module_count, &self.command_prefix);
         ctx.set_activity(Some(ActivityData::watching(activity_name)));
         self.dispatcher.publish_gateway(GatewayEvent::Ready {
@@ -604,12 +627,30 @@ impl EventHandler for Handler {
     }
 }
 
+#[async_trait]
+impl EventHandler for VoiceWorkerHandler {
+    async fn ready(&self, _ctx: Context, ready: Ready) {
+        let ready_for_guild = ready_contains_guild(
+            ready.guilds.iter().map(|guild| guild.id.get()),
+            self.guild_id,
+        );
+        self.readiness.store(ready_for_guild, Ordering::Release);
+        tracing::info!(
+            guild_id = self.guild_id,
+            ready = ready_for_guild,
+            "Scrim-Record: Voice-Worker READY"
+        );
+    }
+}
+
 pub struct GatewayClientOptions {
     pub reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
     pub pool: sqlx::PgPool,
     pub feature_module_count: usize,
     pub command_prefix: String,
     pub enable_presence_intent: bool,
+    pub recording_readiness: Arc<AtomicBool>,
+    pub recording_guild_id: u64,
 }
 
 /// Baut den serenity-Client. Aufrufer entscheidet über den Start
@@ -620,6 +661,7 @@ pub async fn build_client(
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
     options: GatewayClientOptions,
+    songbird_manager: Arc<Songbird>,
 ) -> serenity::Result<serenity::Client> {
     let mut intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
@@ -633,6 +675,7 @@ pub async fn build_client(
         intents |= GatewayIntents::GUILD_PRESENCES;
     }
     serenity::Client::builder(token, intents)
+        .register_songbird_with(songbird_manager)
         .event_handler(Handler {
             adapter,
             dispatcher,
@@ -642,6 +685,24 @@ pub async fn build_client(
             reaction_roles: options.reaction_roles,
             feature_module_count: options.feature_module_count,
             command_prefix: options.command_prefix,
+            recording_readiness: options.recording_readiness,
+            recording_guild_id: options.recording_guild_id,
+        })
+        .await
+}
+
+/// Baut die zweite, auf Voice-Aufnahme beschränkte Gateway-Identität.
+pub async fn build_voice_worker_client(
+    token: &str,
+    manager: Arc<Songbird>,
+    readiness: Arc<AtomicBool>,
+    guild_id: u64,
+) -> serenity::Result<serenity::Client> {
+    serenity::Client::builder(token, voice_worker_intents())
+        .register_songbird_with(manager)
+        .event_handler(VoiceWorkerHandler {
+            readiness,
+            guild_id,
         })
         .await
 }
@@ -653,6 +714,21 @@ mod tests {
     #[test]
     fn ready_presence_name_matches_python_style() {
         assert_eq!(presence_activity_name(47, "!"), "47 Cogs | !help");
+    }
+
+    #[test]
+    fn recording_readiness_requires_the_fixed_guild_in_ready() {
+        assert!(ready_contains_guild([7, 11, 13], 11));
+        assert!(!ready_contains_guild([7, 13], 11));
+        assert!(!ready_contains_guild([], 11));
+    }
+
+    #[test]
+    fn voice_worker_uses_only_guild_and_voice_state_intents() {
+        assert_eq!(
+            voice_worker_intents(),
+            GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES
+        );
     }
 
     #[test]

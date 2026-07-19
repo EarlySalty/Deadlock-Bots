@@ -19,7 +19,11 @@ mod serversync;
 mod turnierglue;
 mod vanity;
 
-use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
+use std::{
+    collections::HashSet,
+    num::NonZeroU64,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use anyhow::Context;
 use dl_webcore::WebConfig;
@@ -40,6 +44,28 @@ fn env_bool_default(name: &str, default: bool) -> bool {
             )
         })
         .unwrap_or(default)
+}
+
+fn validate_voice_worker_token<'a>(
+    main_token: &str,
+    worker_token: Option<&'a str>,
+) -> Result<&'a str, &'static str> {
+    let worker_token = worker_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or("DISCORD_TOKEN_RANKED fehlt oder ist leer")?;
+    if worker_token == main_token {
+        return Err("DISCORD_TOKEN_RANKED darf nicht der Main-Bot-Token sein");
+    }
+    Ok(worker_token)
+}
+
+struct ReadinessReset(Arc<AtomicBool>);
+
+impl Drop for ReadinessReset {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 fn moderation_enforce_from_lookup<F>(lookup: F) -> bool
@@ -515,6 +541,38 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         voice_pair_store: voice_pair_store.clone(),
         voice_pair_operations: voice_pair_operations.clone(),
     });
+    let recording_main_manager = dl_voice::scrim_record::recording_songbird_manager();
+    let recording_worker_manager = dl_voice::scrim_record::recording_songbird_manager();
+    let recording_main_readiness = Arc::new(AtomicBool::new(false));
+    let recording_worker_readiness = Arc::new(AtomicBool::new(false));
+    let recording_backend = Arc::new(
+        dl_voice::scrim_record::SongbirdRecordingBackend::new(
+            recording_main_manager.clone(),
+            recording_main_readiness.clone(),
+            recording_worker_manager.clone(),
+            recording_worker_readiness.clone(),
+        )
+        .map_err(anyhow::Error::msg)
+        .context("Scrim-Record-Backend bauen")?,
+    );
+    let recording_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .context("XDG_RUNTIME_DIR fehlt fuer Scrim-Record")?;
+    let recording_temp_dir = recording_runtime_dir.join("deadlock-bots-scrim-recordings");
+    dl_voice::scrim_record::prepare_recording_temp_dir(&recording_temp_dir)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("Scrim-Record-Temp-Verzeichnis erstellen")?;
+    let scrim_recorder = dl_voice::scrim_record::ScrimRecorder::new(
+        cache_snapshot.clone(),
+        recording_backend,
+        Arc::new(dl_voice::scrim_record::FfmpegTranscoder),
+        recording_temp_dir,
+    );
+    dl_voice::scrim_record::register(
+        &mut router,
+        dl_voice::scrim_record::RecordCommandHandler::new(scrim_recorder.clone()),
+    );
     let voice_pair_guard = dl_voice::voice_pair_guard::VoicePairGuard::new(
         voice_pair_store.clone(),
         cache_snapshot.clone(),
@@ -1114,7 +1172,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Gateway: user-gated — Python hält die Session bis zum Cutover
     let gateway_enabled = env("DL_BOT_GATEWAY").as_deref() == Some("1");
-    let gateway_task = if gateway_enabled {
+    let mut gateway_task = if gateway_enabled {
+        let voice_worker_token = env("DISCORD_TOKEN_RANKED");
+        let voice_worker_token =
+            validate_voice_worker_token(&discord_token, voice_worker_token.as_deref())
+                .map(str::to_owned)
+                .map_err(anyhow::Error::msg)?;
         let presence_intent_enabled = env_bool_default("DL_ENABLE_PRESENCE_INTENT", false);
         if presence_intent_enabled {
             tracing::info!("GUILD_PRESENCES-Intent aktiviert via DL_ENABLE_PRESENCE_INTENT");
@@ -1177,6 +1240,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_voice::stats::spawn_command(voice_stats, &dispatcher, adapter.clone());
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
+        let _scrim_record_tasks =
+            dl_voice::scrim_record::spawn(scrim_recorder.clone(), &dispatcher);
 
         // Serverweiter Voice-Pair-Guard vor den TempVoice-spezifischen Subscribern.
         dl_voice::voice_pair_guard::spawn(voice_pair_guard.clone(), &dispatcher);
@@ -1525,7 +1590,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 feature_module_count: master::FEATURE_MODULES.len(),
                 command_prefix: env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
                 enable_presence_intent: presence_intent_enabled,
+                recording_readiness: recording_main_readiness.clone(),
+                recording_guild_id: dl_server_as_code::DEFAULT_GUILD_ID,
             },
+            recording_main_manager.clone(),
         )
         .await
         .context("Gateway-Client bauen")?;
@@ -1533,6 +1601,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Kopplung läse die gesamte Glue aus einem leeren Adapter-Cache (alle
         // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
         adapter.link_cache(client.cache.clone());
+        let mut voice_worker_client = dl_discord::gateway::build_voice_worker_client(
+            &voice_worker_token,
+            recording_worker_manager.clone(),
+            recording_worker_readiness.clone(),
+            dl_server_as_code::DEFAULT_GUILD_ID,
+        )
+        .await
+        .context("Scrim-Record-Voice-Worker bauen")?;
         let _vanity_snapshots = vanity::spawn_vanity_snapshots(
             central_pool.clone(),
             discord_token.clone(),
@@ -1568,7 +1644,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         tracing::warn!(
             "Gateway AKTIV — sicherstellen, dass der Python-Bot die Events abgegeben hat"
         );
-        Some(tokio::spawn(async move { client.start().await }))
+        Some(tokio::spawn(async move {
+            let _main_readiness_reset = ReadinessReset(recording_main_readiness);
+            let _worker_readiness_reset = ReadinessReset(recording_worker_readiness);
+            tokio::select! {
+                result = client.start() => result,
+                result = voice_worker_client.start() => result,
+            }
+        }))
     } else {
         tracing::info!("Gateway inaktiv (DL_BOT_GATEWAY != 1) — nur REST/Broker/Changelog");
         None
@@ -1576,14 +1659,32 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     tracing::info!("dl-bot läuft — beenden mit Ctrl+C");
     let mut restart_requested = false;
-    tokio::select! {
-        result = broker_server => result.context("Broker-Server")?,
-        result = changelog_server => result.context("Changelog-Server")?,
-        result = serversync_server => result.context("Server-Sync-Server")?,
-        result = mcp_server => result.context("MCP-Connector-Server")?,
+    let mut terminate_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("SIGTERM-Handler fuer kontrollierten Shutdown registrieren")?;
+    let run_result: anyhow::Result<()> = tokio::select! {
+        result = broker_server => result.context("Broker-Server"),
+        result = changelog_server => result.context("Changelog-Server"),
+        result = serversync_server => result.context("Server-Sync-Server"),
+        result = mcp_server => result.context("MCP-Connector-Server"),
+        result = async {
+            match gateway_task.as_mut() {
+                Some(task) => task.await,
+                None => std::future::pending::<
+                    Result<serenity::Result<()>, tokio::task::JoinError>,
+                >().await,
+            }
+        } => {
+            match result.context("Gateway-Task").and_then(|result| result.context("Gateway-Clients")) {
+                Ok(()) => Err(anyhow::anyhow!("Gateway-Clients unerwartet beendet")),
+                Err(err) => Err(err),
+            }
+        },
         result = &mut scrim_match_driver => {
-            result.context("Scrim-Match-Treiber")?;
-            anyhow::bail!("Scrim-Match-Treiber beendet");
+            match result.context("Scrim-Match-Treiber") {
+                Ok(()) => Err(anyhow::anyhow!("Scrim-Match-Treiber beendet")),
+                Err(err) => Err(err),
+            }
         },
         action = master_action_rx.recv() => {
             match action {
@@ -1595,13 +1696,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     tracing::debug!("Master-Control-Kanal geschlossen");
                 }
             }
+            Ok(())
         },
-        _ = tokio::signal::ctrl_c() => tracing::info!("dl-bot beendet"),
-    }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("dl-bot beendet");
+            Ok(())
+        },
+        _ = terminate_signal.recv() => {
+            tracing::info!("dl-bot per SIGTERM beendet");
+            Ok(())
+        },
+    };
+    scrim_recorder.shutdown().await;
     scrim_match_driver.abort();
     if let Some(task) = gateway_task {
         task.abort();
     }
+    run_result?;
     if restart_requested {
         // Kein process::exit: normaler Return laesst PidLock::drop laufen,
         // der Non-Zero-Code triggert systemd Restart=on-failure.
@@ -1615,7 +1726,7 @@ mod tests {
     use super::{
         brain_channel_allowlist_from_value, legacy_lfg_responder_enabled, lfg_cutover_active,
         lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
-        moderation_enforce_from_lookup,
+        moderation_enforce_from_lookup, validate_voice_worker_token,
     };
     use std::collections::HashMap;
 
@@ -1628,6 +1739,17 @@ mod tests {
         let vars = HashMap::new();
 
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
+
+    #[test]
+    fn voice_worker_token_must_exist_and_differ_from_main_token() {
+        assert_eq!(
+            validate_voice_worker_token("main", Some("worker")),
+            Ok("worker")
+        );
+        assert!(validate_voice_worker_token("main", None).is_err());
+        assert!(validate_voice_worker_token("main", Some("")).is_err());
+        assert!(validate_voice_worker_token("main", Some("main")).is_err());
     }
 
     #[test]

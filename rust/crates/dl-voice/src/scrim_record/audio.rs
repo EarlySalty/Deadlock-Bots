@@ -1,5 +1,7 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs::OpenOptions;
 use std::num::NonZeroU64;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -241,7 +243,21 @@ impl WavWriterTask {
     ) -> Result<Self, String> {
         let (ready_sender, ready_receiver) = oneshot::channel();
         let join = tokio::task::spawn_blocking(move || {
-            let mut writer = match hound::WavWriter::create(&wav_path, WAV_SPEC) {
+            let file = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&wav_path)
+            {
+                Ok(file) => file,
+                Err(err) => {
+                    let error = format!("writer_open_failed: {err}");
+                    failure.fail(error.clone());
+                    let _ = ready_sender.send(Err(error.clone()));
+                    return Err(error);
+                }
+            };
+            let mut writer = match hound::WavWriter::new(file, WAV_SPEC) {
                 Ok(writer) => writer,
                 Err(err) => {
                     let error = format!("writer_open_failed: {err}");
@@ -420,7 +436,7 @@ impl SongbirdRecordingBackend {
     fn slot(&self, identity: RecorderIdentity) -> &BackendSlot {
         match identity {
             RecorderIdentity::MainBot => &self.slots[0],
-            RecorderIdentity::DiscordTokenWorker => &self.slots[1],
+            RecorderIdentity::SecondaryBot => &self.slots[1],
         }
     }
 
@@ -501,6 +517,18 @@ fn songbird_channel_id(channel_id: u64) -> Result<songbird::id::ChannelId, Strin
         .ok_or_else(|| "invalid_zero_channel_id".to_string())
 }
 
+fn validate_current_channel(
+    expected_channel_id: u64,
+    current_channel_id: Option<songbird::id::ChannelId>,
+) -> Result<(), String> {
+    let expected = songbird_channel_id(expected_channel_id)?;
+    match current_channel_id {
+        Some(current) if current == expected => Ok(()),
+        Some(_) => Err("recorder_channel_mismatch".to_string()),
+        None => Err("recorder_not_connected".to_string()),
+    }
+}
+
 fn log_slot_fault(metadata: RecordingMetadata, reason: &'static str) {
     tracing::error!(
         guild_id = metadata.guild_id,
@@ -540,20 +568,31 @@ impl RecordingBackend for SongbirdRecordingBackend {
             voice_channel_id,
             recorder: identity,
         };
-        let state = slot.state.lock().map_err(|_| {
-            log_slot_fault(metadata, "slot_state_lock_poisoned");
-            "slot_state_lock_poisoned".to_string()
-        })?;
-        match &*state {
-            SlotState::Recording(active) if active.metadata == metadata => active.failure_health(),
-            SlotState::Starting(active) if *active == metadata => {
-                Err("recording_still_starting".to_string())
+        {
+            let state = slot.state.lock().map_err(|_| {
+                log_slot_fault(metadata, "slot_state_lock_poisoned");
+                "slot_state_lock_poisoned".to_string()
+            })?;
+            match &*state {
+                SlotState::Recording(active) if active.metadata == metadata => {
+                    active.failure_health()?
+                }
+                SlotState::Starting(active) if *active == metadata => {
+                    return Err("recording_still_starting".to_string());
+                }
+                SlotState::Stopping(active) if *active == metadata => {
+                    return Err("recording_already_stopping".to_string());
+                }
+                _ => return Err("recording_not_active".to_string()),
             }
-            SlotState::Stopping(active) if *active == metadata => {
-                Err("recording_already_stopping".to_string())
-            }
-            _ => Err("recording_not_active".to_string()),
         }
+        let guild_id = songbird_guild_id(guild_id)?;
+        let call = slot
+            .manager
+            .get(guild_id)
+            .ok_or_else(|| "recorder_call_missing".to_string())?;
+        let current_channel = call.lock().await.current_channel();
+        validate_current_channel(voice_channel_id, current_channel)
     }
 
     async fn start(
@@ -674,7 +713,8 @@ impl RecordingBackend for SongbirdRecordingBackend {
             })?;
             let previous = std::mem::replace(&mut *state, SlotState::Stopping(metadata));
             match previous {
-                SlotState::Recording(active) if active.metadata == metadata => active,
+                SlotState::Recording(active) if active.metadata == metadata => Some(active),
+                SlotState::Starting(starting) if starting == metadata => None,
                 SlotState::Idle => {
                     *state = SlotState::Idle;
                     return Ok(());
@@ -690,7 +730,9 @@ impl RecordingBackend for SongbirdRecordingBackend {
             }
         };
 
-        active.sink.deactivate();
+        if let Some(active) = &active {
+            active.sink.deactivate();
+        }
         let mut errors = Vec::new();
         let songbird_guild_id = songbird_guild_id(guild_id)?;
         if let Err(err) = slot.manager.remove(songbird_guild_id).await {
@@ -699,11 +741,13 @@ impl RecordingBackend for SongbirdRecordingBackend {
                 call.lock().await.remove_all_global_events();
             }
         }
-        if let Err(err) = active.sink.queue.close() {
-            errors.push(err);
-        }
-        if let Err(err) = active.writer.finish().await {
-            errors.push(err);
+        if let Some(active) = active {
+            if let Err(err) = active.sink.queue.close() {
+                errors.push(err);
+            }
+            if let Err(err) = active.writer.finish().await {
+                errors.push(err);
+            }
         }
         if let Err(err) = self.force_idle(slot, metadata) {
             errors.push(err);
@@ -720,6 +764,7 @@ impl ActiveRecording {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -862,7 +907,7 @@ mod tests {
         .expect("distinct managers");
 
         let main = backend.slot(RecorderIdentity::MainBot);
-        let worker = backend.slot(RecorderIdentity::DiscordTokenWorker);
+        let worker = backend.slot(RecorderIdentity::SecondaryBot);
         assert!(Arc::ptr_eq(&main.manager, &main_manager));
         assert!(Arc::ptr_eq(&worker.manager, &worker_manager));
         assert!(!Arc::ptr_eq(&main.manager, &worker.manager));
@@ -884,6 +929,24 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn health_channel_validation_requires_the_expected_connected_channel() {
+        let expected = metadata().voice_channel_id;
+
+        assert_eq!(
+            validate_current_channel(expected, Some(songbird_channel_id(expected).expect("id"))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_current_channel(expected, None),
+            Err("recorder_not_connected".to_string())
+        );
+        assert_eq!(
+            validate_current_channel(expected, Some(songbird_channel_id(3).expect("id"))),
+            Err("recorder_channel_mismatch".to_string())
+        );
     }
 
     #[tokio::test]
@@ -931,6 +994,14 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("wav samples");
         assert_eq!(actual, samples);
+        assert_eq!(
+            std::fs::metadata(&wav_path)
+                .expect("wav metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]

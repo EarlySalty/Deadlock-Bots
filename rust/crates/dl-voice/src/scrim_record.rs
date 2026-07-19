@@ -9,8 +9,8 @@ pub mod service;
 
 pub use audio::{recording_songbird_manager, SongbirdRecordingBackend};
 pub use service::{
-    register, spawn, AudioTranscoder, FfmpegTranscoder, RecordCommandHandler, RecordingBackend,
-    ScrimRecordPort, ScrimRecorder, StartError, StopError,
+    prepare_recording_temp_dir, register, spawn, AudioTranscoder, FfmpegTranscoder,
+    RecordCommandHandler, RecordingBackend, ScrimRecordPort, ScrimRecorder, StartError, StopError,
 };
 
 const SCRIM_GUILD_ID: u64 = 1_289_721_245_281_292_288;
@@ -86,7 +86,7 @@ enum SessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecorderIdentity {
     MainBot,
-    DiscordTokenWorker,
+    SecondaryBot,
 }
 
 fn affected_team_voice_channels(event: &VoiceEvent) -> Vec<u64> {
@@ -432,7 +432,7 @@ mod tests {
         );
         assert_eq!(
             claim_start(&mut state, 20, started_at, [true, true]),
-            Ok(RecorderIdentity::DiscordTokenWorker)
+            Ok(RecorderIdentity::SecondaryBot)
         );
         assert_eq!(
             claim_start(&mut state, 30, started_at, [true, true]),
@@ -451,7 +451,7 @@ mod tests {
 
         assert_eq!(
             claim_start(&mut state, 10, started_at, [false, true]),
-            Ok(RecorderIdentity::DiscordTokenWorker)
+            Ok(RecorderIdentity::SecondaryBot)
         );
         assert_eq!(
             claim_start(&mut state, 20, started_at, [false, true]),
@@ -475,15 +475,15 @@ mod tests {
         );
         assert_eq!(
             claim_start(&mut state, 20, started_at, [true, true]),
-            Ok(RecorderIdentity::DiscordTokenWorker)
+            Ok(RecorderIdentity::SecondaryBot)
         );
         assert!(state.mark_recording(10, RecorderIdentity::MainBot));
-        assert!(state.mark_recording(20, RecorderIdentity::DiscordTokenWorker));
+        assert!(state.mark_recording(20, RecorderIdentity::SecondaryBot));
 
         assert!(!state.complete_stop(10, RecorderIdentity::MainBot));
         assert!(state.claim_stop(10).is_some());
         assert!(!state.complete_stop(20, RecorderIdentity::MainBot));
-        assert!(!state.complete_stop(10, RecorderIdentity::DiscordTokenWorker));
+        assert!(!state.complete_stop(10, RecorderIdentity::SecondaryBot));
         assert_eq!(
             claim_start(&mut state, 30, started_at, [true, true]),
             Err(StartError::NoCapacity)

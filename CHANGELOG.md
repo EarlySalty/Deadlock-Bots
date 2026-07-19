@@ -1,3 +1,11 @@
+## #270 — Platzhalter
+
+Problem: Platzhalter.
+
+Änderung: Platzhalter.
+
+Aktuelles Verhalten: Platzhalter.
+
 ## #269 — Interne Discord-Nachrichten lassen sich fristgerecht entfernen
 
 Problem: Interne Dienste konnten Review-Nachrichten über den zentralen Bot versenden und bearbeiten, aber nicht einzeln löschen. Eine eigene Aufbewahrungsfrist ließ sich deshalb nicht zuverlässig auch auf die Discord-Kopie anwenden.

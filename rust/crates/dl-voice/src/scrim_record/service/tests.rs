@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -89,6 +90,14 @@ impl MockPort {
             .expect("mock port lock")
             .successful_posts
             .len()
+    }
+
+    fn successful_posts(&self) -> Vec<(u64, String)> {
+        self.state
+            .lock()
+            .expect("mock port lock")
+            .successful_posts
+            .clone()
     }
 
     fn upload_attempts(&self) -> Vec<(u64, PathBuf)> {
@@ -211,7 +220,7 @@ impl MockBackend {
     fn identity_index(identity: RecorderIdentity) -> usize {
         match identity {
             RecorderIdentity::MainBot => 0,
-            RecorderIdentity::DiscordTokenWorker => 1,
+            RecorderIdentity::SecondaryBot => 1,
         }
     }
 
@@ -425,7 +434,7 @@ async fn two_starts_claim_both_slots_and_third_is_no_capacity() {
     );
     assert_eq!(
         harness.recorder.start(SCRIM_GUILD_ID, 2, &[role_2]).await,
-        Ok(RecorderIdentity::DiscordTokenWorker)
+        Ok(RecorderIdentity::SecondaryBot)
     );
     assert_eq!(
         harness.recorder.start(SCRIM_GUILD_ID, 3, &[role_3]).await,
@@ -435,13 +444,120 @@ async fn two_starts_claim_both_slots_and_third_is_no_capacity() {
 }
 
 #[tokio::test]
+async fn consent_post_identifies_the_user_who_started_recording() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(42, 0);
+
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 42, &[role])
+        .await
+        .expect("start");
+
+    let posts = harness.port.successful_posts();
+    assert_eq!(posts.len(), 1);
+    assert!(posts[0].1.contains("<@42>"));
+}
+
+#[tokio::test]
+async fn temp_dir_is_private_and_only_stale_recording_files_are_purged() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    tokio::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .await
+        .expect("secure root tempdir");
+    let recording_dir = root.path().join("recordings");
+    tokio::fs::create_dir_all(&recording_dir)
+        .await
+        .expect("create recording dir");
+    let stale_wav = recording_dir.join("scrim-record-1-2-3.wav");
+    let stale_mp3 = recording_dir.join("scrim-record-1-2-3.mp3");
+    let unrelated = recording_dir.join("keep.txt");
+    tokio::fs::write(&stale_wav, b"wav").await.expect("wav");
+    tokio::fs::write(&stale_mp3, b"mp3").await.expect("mp3");
+    tokio::fs::write(&unrelated, b"keep").await.expect("keep");
+
+    prepare_recording_temp_dir(&recording_dir)
+        .await
+        .expect("prepare tempdir");
+
+    assert!(!stale_wav.exists());
+    assert!(!stale_mp3.exists());
+    assert!(unrelated.exists());
+    assert_eq!(
+        std::fs::metadata(&recording_dir)
+            .expect("recording dir metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let private_mp3 = recording_dir.join("scrim-record-1-2-4.mp3");
+    create_private_output_file(&private_mp3)
+        .await
+        .expect("create private output");
+    assert_eq!(
+        std::fs::metadata(private_mp3)
+            .expect("private output metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[tokio::test]
+async fn temp_dir_preparation_rejects_a_symlink_without_touching_its_target() {
+    let root = tempfile::tempdir().expect("root tempdir");
+    tokio::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .await
+        .expect("secure root tempdir");
+    let target = tempfile::tempdir().expect("target tempdir");
+    let target_file = target.path().join("scrim-record-1-2-3.wav");
+    tokio::fs::write(&target_file, b"keep")
+        .await
+        .expect("target wav");
+    let recording_dir = root.path().join("recordings");
+    symlink(target.path(), &recording_dir).expect("recording symlink");
+
+    assert!(prepare_recording_temp_dir(&recording_dir).await.is_err());
+    assert_eq!(
+        tokio::fs::read(target_file).await.expect("target survives"),
+        b"keep"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_stops_active_recordings_without_upload_and_rejects_new_starts() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+
+    harness.recorder.shutdown().await;
+
+    assert_eq!(harness.backend.stops().len(), 1);
+    assert_eq!(harness.transcoder.call_count(), 0);
+    assert!(harness.port.upload_attempts().is_empty());
+    assert_eq!(harness.recorder.session_count().await, 0);
+    harness.assert_temp_files_removed();
+    assert_eq!(
+        harness.recorder.start(SCRIM_GUILD_ID, 1, &[role]).await,
+        Err(StartError::SetupFailed)
+    );
+}
+
+#[tokio::test]
 async fn offline_recorders_are_no_capacity() {
     let harness = Harness::new();
     let role = harness.set_user_channel(1, 0);
     harness.backend.set_ready(RecorderIdentity::MainBot, false);
     harness
         .backend
-        .set_ready(RecorderIdentity::DiscordTokenWorker, false);
+        .set_ready(RecorderIdentity::SecondaryBot, false);
 
     assert_eq!(
         harness.recorder.start(SCRIM_GUILD_ID, 1, &[role]).await,

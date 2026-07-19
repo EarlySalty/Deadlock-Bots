@@ -2,7 +2,8 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::Arc,
+    path::Path,
+    sync::{atomic::Ordering, Arc},
 };
 
 use dl_discord::DiscordAdapter;
@@ -506,6 +507,18 @@ fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
     }
 }
 
+fn count_scrim_record_humans(
+    target_channel_id: u64,
+    states: impl IntoIterator<Item = (Option<u64>, Option<bool>)>,
+) -> usize {
+    states
+        .into_iter()
+        .filter(|(channel_id, is_bot)| {
+            *channel_id == Some(target_channel_id) && *is_bot != Some(true)
+        })
+        .count()
+}
+
 pub struct CacheSnapshot {
     pub adapter: Arc<DiscordAdapter>,
     pub voice_pair_store: Arc<VoicePairGuardStore>,
@@ -585,6 +598,77 @@ impl VoiceSnapshot for CacheSnapshot {
             .channels
             .get(&ChannelId::new(channel_id))
             .map(|c| c.name.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::scrim_record::ScrimRecordPort for CacheSnapshot {
+    async fn current_voice_channel(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Option<u64>, String> {
+        if !self.adapter.gateway_ready.load(Ordering::Acquire) {
+            return Err("gateway_not_ready".to_string());
+        }
+        let guild = self
+            .adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .ok_or_else(|| "guild_not_cached".to_string())?;
+        Ok(guild
+            .voice_states
+            .get(&UserId::new(user_id))
+            .and_then(|state| state.channel_id)
+            .map(|channel_id| channel_id.get()))
+    }
+
+    async fn non_bot_member_count(
+        &self,
+        guild_id: u64,
+        voice_channel_id: u64,
+    ) -> Result<Option<usize>, String> {
+        if !self.adapter.gateway_ready.load(Ordering::Acquire) {
+            return Err("gateway_not_ready".to_string());
+        }
+        let guild = self
+            .adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .ok_or_else(|| "guild_not_cached".to_string())?;
+        if !guild
+            .channels
+            .contains_key(&ChannelId::new(voice_channel_id))
+        {
+            return Ok(None);
+        }
+        Ok(Some(count_scrim_record_humans(
+            voice_channel_id,
+            guild.voice_states.iter().map(|(user_id, state)| {
+                (
+                    state.channel_id.map(|channel_id| channel_id.get()),
+                    guild.members.get(user_id).map(|member| member.user.bot),
+                )
+            }),
+        )))
+    }
+
+    async fn post_text(&self, channel_id: u64, content: &str) -> Result<(), String> {
+        let mut body = Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert("allowed_mentions".into(), json!({ "parse": [] }));
+        self.adapter
+            .send_raw_public(channel_id, &body)
+            .await
+            .map(|_| ())
+    }
+
+    async fn upload_attachment(&self, channel_id: u64, path: &Path) -> Result<(), String> {
+        self.adapter
+            .send_attachment_public(channel_id, None, path)
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -2624,6 +2708,25 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn scrim_record_count_excludes_known_bots_and_foreign_channels() {
+        let target = 10;
+        let states = [
+            (Some(target), Some(true)),
+            (Some(target), Some(false)),
+            (Some(target), None),
+            (Some(20), Some(false)),
+            (None, Some(false)),
+        ];
+
+        assert_eq!(count_scrim_record_humans(target, states), 2);
+    }
+
+    #[test]
+    fn scrim_record_count_treats_unknown_members_as_human() {
+        assert_eq!(count_scrim_record_humans(10, [(Some(10), None)]), 1);
+    }
+
     fn test_adapter_with_overwrites(overwrites: Vec<PermissionOverwrite>) -> Arc<DiscordAdapter> {
         let adapter = DiscordAdapter::new("test-token");
         let cache = Arc::new(Cache::new());
@@ -2641,6 +2744,51 @@ mod tests {
         cache.update(&mut event);
         adapter.link_cache(cache);
         adapter
+    }
+
+    fn test_cache_snapshot(adapter: Arc<DiscordAdapter>) -> CacheSnapshot {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test")
+            .expect("lazy pool");
+        CacheSnapshot {
+            adapter,
+            voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
+            voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
+        }
+    }
+
+    #[tokio::test]
+    async fn scrim_record_cache_port_is_fail_closed_before_ready_and_on_cache_miss() {
+        let adapter = test_adapter_with_overwrites(Vec::new());
+        let snapshot = test_cache_snapshot(adapter.clone());
+
+        assert!(
+            crate::scrim_record::ScrimRecordPort::current_voice_channel(&snapshot, 7, 9)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::scrim_record::ScrimRecordPort::non_bot_member_count(&snapshot, 7, 42)
+                .await
+                .is_err()
+        );
+
+        adapter
+            .gateway_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            crate::scrim_record::ScrimRecordPort::non_bot_member_count(&snapshot, 7, 42).await,
+            Ok(Some(0))
+        );
+        assert_eq!(
+            crate::scrim_record::ScrimRecordPort::non_bot_member_count(&snapshot, 7, 99).await,
+            Ok(None)
+        );
+        assert!(
+            crate::scrim_record::ScrimRecordPort::current_voice_channel(&snapshot, 8, 9)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

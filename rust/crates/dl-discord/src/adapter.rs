@@ -19,6 +19,7 @@ use serde_json::{json, Map, Value};
 use serenity::all::{
     Cache, ChannelId, ChannelType, GuildId, Http, MessageId, ReactionType, RoleId, UserId,
 };
+use serenity::builder::CreateAttachment;
 
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
@@ -273,6 +274,25 @@ impl DiscordAdapter {
         body: &Map<String, Value>,
     ) -> Result<u64, serenity::Error> {
         self.send_raw(channel_id, body).await
+    }
+
+    /// Sendet eine lokale Datei als Attachment und liefert die Discord-Message-ID.
+    pub async fn send_attachment_public(
+        &self,
+        channel_id: u64,
+        content: Option<&str>,
+        path: &Path,
+    ) -> Result<u64, serenity::Error> {
+        let attachment = CreateAttachment::path(path).await?;
+        let mut body = Map::new();
+        if let Some(content) = content {
+            body.insert("content".into(), json!(content));
+        }
+        let message = self
+            .http
+            .send_message(ChannelId::new(channel_id), vec![attachment], &body)
+            .await?;
+        Ok(message.id.get())
     }
 
     /// Öffentliche Variante für Panel-Restore/-Edit aus dem Interaction-Dispatch.
@@ -1056,13 +1076,7 @@ impl ChangelogDiscord for DiscordAdapter {
         content: &str,
         path: &Path,
     ) -> Result<(), ChangelogError> {
-        let attachment = serenity::builder::CreateAttachment::path(path)
-            .await
-            .map_err(|err| ChangelogError::Discord(err.to_string()))?;
-        let mut body = Map::new();
-        body.insert("content".into(), json!(content));
-        self.http
-            .send_message(ChannelId::new(channel_id), vec![attachment], &body)
+        self.send_attachment_public(channel_id, Some(content), path)
             .await
             .map(|_| ())
             .map_err(|err| ChangelogError::Discord(err.to_string()))

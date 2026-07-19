@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,19 +10,18 @@ use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
 };
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use super::{
     affected_team_voice_channels, can_operate, duration_cap_reached, register_record_commands,
     OperateDenied, RecorderIdentity, SessionState, TeamChannelConfig, SCRIM_GUILD_ID,
 };
 
-const RECORDER_IDENTITIES: [RecorderIdentity; 2] = [
-    RecorderIdentity::MainBot,
-    RecorderIdentity::DiscordTokenWorker,
-];
+const RECORDER_IDENTITIES: [RecorderIdentity; 2] =
+    [RecorderIdentity::MainBot, RecorderIdentity::SecondaryBot];
 const CAP_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const HEALTH_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+const RECORDING_FILE_PREFIX: &str = "scrim-record-";
 
 // TODO(text): Platzhalter — Consent-Post nach erfolgreichem Aufnahmestart.
 const CONSENT_TEXT: &str = "Platzhalter";
@@ -121,6 +121,102 @@ impl AudioTranscoder for FfmpegTranscoder {
             Err(format!("ffmpeg endete mit Status {status}"))
         }
     }
+}
+
+pub async fn prepare_recording_temp_dir(path: &Path) -> Result<(), String> {
+    let process_uid = std::fs::metadata("/proc/self")
+        .map_err(|err| format!("process_uid_lookup_failed: {err}"))?
+        .uid();
+    let parent = path
+        .parent()
+        .ok_or_else(|| "recording_temp_dir_has_no_parent".to_string())?;
+    let parent_metadata = tokio::fs::symlink_metadata(parent)
+        .await
+        .map_err(|err| format!("recording_temp_parent_metadata_failed: {err}"))?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err("recording_temp_parent_not_real_directory".to_string());
+    }
+    if parent_metadata.uid() != process_uid {
+        return Err("recording_temp_parent_wrong_owner".to_string());
+    }
+    if parent_metadata.permissions().mode() & 0o077 != 0 {
+        return Err("recording_temp_parent_not_private".to_string());
+    }
+
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("recording_temp_path_not_real_directory".to_string());
+            }
+            if metadata.uid() != process_uid {
+                return Err("recording_temp_dir_wrong_owner".to_string());
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            tokio::fs::create_dir(path)
+                .await
+                .map_err(|err| format!("recording_temp_dir_create_failed: {err}"))?;
+        }
+        Err(err) => return Err(format!("recording_temp_dir_metadata_failed: {err}")),
+    }
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .await
+        .map_err(|err| format!("recording_temp_dir_permissions_failed: {err}"))?;
+    let directory_metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|err| format!("recording_temp_dir_verify_failed: {err}"))?;
+    if directory_metadata.file_type().is_symlink()
+        || !directory_metadata.is_dir()
+        || directory_metadata.uid() != process_uid
+    {
+        return Err("recording_temp_dir_verification_failed".to_string());
+    }
+
+    let mut entries = tokio::fs::read_dir(path)
+        .await
+        .map_err(|err| format!("recording_temp_dir_read_failed: {err}"))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| format!("recording_temp_dir_entry_failed: {err}"))?
+    {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let is_recording_file = file_name.starts_with(RECORDING_FILE_PREFIX)
+            && (file_name.ends_with(".wav") || file_name.ends_with(".mp3"));
+        if !is_recording_file {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|err| format!("recording_temp_file_type_failed: {err}"))?;
+        if !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
+        tokio::fs::remove_file(entry.path())
+            .await
+            .map_err(|err| format!("stale_recording_cleanup_failed: {err}"))?;
+        tracing::info!(
+            path = %entry.path().display(),
+            reason = "startup_stale_audio_removed",
+            "Scrim-Record: Verwaiste Temp-Datei beim Start entfernt"
+        );
+    }
+    Ok(())
+}
+
+async fn create_private_output_file(path: &Path) -> Result<(), String> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .await
+        .map(|_| ())
+        .map_err(|err| format!("private_output_create_failed: {err}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +341,16 @@ impl RegistryAllocator {
         Some(session.clone())
     }
 
+    fn claim_shutdown(&mut self) -> Vec<(u64, RecordingSession)> {
+        self.sessions
+            .iter_mut()
+            .map(|(voice_channel_id, session)| {
+                session.state = SessionState::Stopping;
+                (*voice_channel_id, session.clone())
+            })
+            .collect()
+    }
+
     pub(super) fn complete_stop(
         &mut self,
         voice_channel_id: u64,
@@ -284,7 +390,7 @@ impl RegistryAllocator {
 fn recorder_slot_index(recorder: RecorderIdentity) -> usize {
     match recorder {
         RecorderIdentity::MainBot => 0,
-        RecorderIdentity::DiscordTokenWorker => 1,
+        RecorderIdentity::SecondaryBot => 1,
     }
 }
 
@@ -381,6 +487,8 @@ pub struct ScrimRecorder {
     transcoder: Arc<dyn AudioTranscoder>,
     temp_dir: PathBuf,
     state: Mutex<RegistryAllocator>,
+    lifecycle: RwLock<()>,
+    shutting_down: AtomicBool,
     next_file_id: AtomicU64,
 }
 
@@ -397,6 +505,8 @@ impl ScrimRecorder {
             transcoder,
             temp_dir,
             state: Mutex::new(RegistryAllocator::default()),
+            lifecycle: RwLock::new(()),
+            shutting_down: AtomicBool::new(false),
             next_file_id: AtomicU64::new(1),
         })
     }
@@ -407,6 +517,17 @@ impl ScrimRecorder {
         user_id: u64,
         member_role_ids: &[u64],
     ) -> Result<RecorderIdentity, StartError> {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            tracing::warn!(
+                guild_id,
+                channel_id = 0_u64,
+                recorder = "unassigned",
+                reason = "service_shutting_down",
+                "Scrim-Record: Start waehrend Shutdown abgewiesen"
+            );
+            return Err(StartError::SetupFailed);
+        }
         self.start_inner(guild_id, user_id, member_role_ids, None)
             .await
     }
@@ -419,6 +540,10 @@ impl ScrimRecorder {
         member_role_ids: &[u64],
         started_at: Instant,
     ) -> Result<RecorderIdentity, StartError> {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(StartError::SetupFailed);
+        }
         self.start_inner(guild_id, user_id, member_role_ids, Some(started_at))
             .await
     }
@@ -471,9 +596,10 @@ impl ScrimRecorder {
             return Err(StartError::SetupFailed);
         }
 
+        let consent_text = format!("{CONSENT_TEXT} <@{user_id}>");
         if let Err(err) = self
             .port
-            .post_text(config.text_channel_id, CONSENT_TEXT)
+            .post_text(config.text_channel_id, &consent_text)
             .await
         {
             tracing::error!(
@@ -715,6 +841,10 @@ impl ScrimRecorder {
         user_id: u64,
         member_role_ids: &[u64],
     ) -> Result<RecorderIdentity, StopError> {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(StopError::SetupFailed);
+        }
         if guild_id != SCRIM_GUILD_ID {
             tracing::warn!(
                 guild_id,
@@ -844,21 +974,35 @@ impl ScrimRecorder {
             ),
         }
 
-        let transcoded = match self
-            .transcoder
-            .transcode(&files.wav_path, &files.mp3_path)
-            .await
-        {
-            Ok(()) => true,
+        let transcoded = match create_private_output_file(&files.mp3_path).await {
+            Ok(()) => match self
+                .transcoder
+                .transcode(&files.wav_path, &files.mp3_path)
+                .await
+            {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::error!(
+                        %err,
+                        guild_id = SCRIM_GUILD_ID,
+                        channel_id = voice_channel_id,
+                        recorder = ?recorder,
+                        reason = "transcode_failed",
+                        trigger = trigger.reason(),
+                        "Scrim-Record: Audio-Transkodierung fehlgeschlagen"
+                    );
+                    false
+                }
+            },
             Err(err) => {
                 tracing::error!(
                     %err,
                     guild_id = SCRIM_GUILD_ID,
                     channel_id = voice_channel_id,
                     recorder = ?recorder,
-                    reason = "transcode_failed",
+                    reason = "private_output_create_failed",
                     trigger = trigger.reason(),
-                    "Scrim-Record: Audio-Transkodierung fehlgeschlagen"
+                    "Scrim-Record: Private MP3-Datei konnte nicht angelegt werden"
                 );
                 false
             }
@@ -1020,6 +1164,10 @@ impl ScrimRecorder {
     }
 
     pub async fn handle_voice_event(&self, event: VoiceEvent) {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         for voice_channel_id in affected_team_voice_channels(&event) {
             self.stop_if_empty(voice_channel_id, StopTrigger::EmptyChannel)
                 .await;
@@ -1071,10 +1219,18 @@ impl ScrimRecorder {
     }
 
     pub async fn cap_sweep(&self) -> usize {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return 0;
+        }
         self.cap_sweep_at(Instant::now()).await
     }
 
     pub async fn health_sweep(&self) -> usize {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return 0;
+        }
         let active_sessions = {
             let state = self.state.lock().await;
             state
@@ -1145,6 +1301,10 @@ impl ScrimRecorder {
     }
 
     pub async fn reconcile(&self) {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let active_channels = {
             let state = self.state.lock().await;
             state
@@ -1157,6 +1317,32 @@ impl ScrimRecorder {
         };
         for voice_channel_id in active_channels {
             self.stop_if_empty(voice_channel_id, StopTrigger::Reconcile)
+                .await;
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _lifecycle = self.lifecycle.write().await;
+        let sessions = {
+            let mut state = self.state.lock().await;
+            state.claim_shutdown()
+        };
+        for (voice_channel_id, session) in sessions {
+            let recorder = session.recorder;
+            tracing::info!(
+                guild_id = SCRIM_GUILD_ID,
+                channel_id = voice_channel_id,
+                recorder = ?recorder,
+                reason = "shutdown",
+                "Scrim-Record: Aktive Aufnahme wird fuer Shutdown verworfen"
+            );
+            self.stop_backend_best_effort(recorder, voice_channel_id, "shutdown")
+                .await;
+            let mut files =
+                AudioFileGuard::new(session.wav_path, SCRIM_GUILD_ID, voice_channel_id, recorder);
+            files.cleanup().await;
+            self.complete_stop(voice_channel_id, recorder, "shutdown")
                 .await;
         }
     }
