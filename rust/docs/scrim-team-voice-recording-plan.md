@@ -6,8 +6,9 @@ Doku/Pläne im Repo (z. B. tempvoice-umbau, turnier-automatik) — die betreffen
 ## Ziel
 
 In genau 4 festen Team-Voice-Kanälen der Kategorie „Scrims" können Team-Mitglieder oder
-Coaches manuell eine Sprachaufnahme starten/stoppen. Nach dem Stop postet der Bot die
-Aufnahme als MP3 in den zugehörigen Team-Text-Kanal.
+Coaches manuell eine Sprachaufnahme starten und stoppen. Danach versucht der Bot, die
+Aufnahme als MP3 im zugehörigen Team-Text-Kanal bereitzustellen; bei einem Fehler erscheint
+dort stattdessen ein Hinweis.
 
 Die Laufzeit nutzt genau zwei Discord-Identitäten: den Hauptbot und den vorhandenen
 Ranked-Bot aus `DISCORD_TOKEN_RANKED`. Damit sind höchstens zwei gleichzeitige Aufnahmen
@@ -62,7 +63,7 @@ wenn beide gelten:
 
 Reine Funktion, voll unit-testbar, keine Discord-Calls nötig. Unterscheidet explizit
 zwischen „kein Team-Kanal" und „Kanal ok, aber keine Berechtigung", weil beide Fälle
-unterschiedliche Fehlermeldungen auslösen (siehe Texte-Abschnitt):
+unterschiedliche Fehlermeldungen auslösen (siehe Nutzertexte):
 ```rust
 pub enum OperateDenied {
     UnknownChannel,
@@ -94,11 +95,11 @@ Ein `RecordCommandHandler` implementiert `InteractionHandler` (Trait in
 
 1. Voice-State des Aufrufers lesen (denselben Lookup-Weg wie `crates/dl-voice/src/tracker.rs`
    für Session-Tracking nutzt — nicht neu bauen).
-2. `can_operate` prüfen → bei `Err(UnknownChannel)` bzw. `Err(NotPermitted)` jeweils die
-   passende ephemere Fehlermeldung (zwei verschiedene Platzhalter-Texte, siehe Texte-Abschnitt).
+2. `can_operate` prüfen → bei `Err(UnknownChannel)` bzw. `Err(NotPermitted)` jeweils eine
+   passende, klar unterscheidbare ephemere Fehlermeldung (siehe Nutzertexte).
 3. **Atomarer Claim** (siehe Registry-Abschnitt, schließt die Race aus zwei parallelen
    `/record start`): unter EINEM Lock prüfen „läuft schon?" und, falls nicht, sofort einen
-   `SessionState::Starting`-Platzhalter eintragen. Erst danach — außerhalb des Locks — geht es
+   `SessionState::Starting`-Eintrag anlegen. Erst danach — außerhalb des Locks — geht es
    weiter. War schon eine Session da: ephemere Fehlermeldung „läuft schon".
 4. `started_at = Instant::now()` **jetzt** setzen, bevor der Join versucht wird (konservativ:
    die Verbindungsaufbauzeit zählt mit in den Dauer-Cap, nie dagegen).
@@ -108,7 +109,8 @@ Ein `RecordCommandHandler` implementiert `InteractionHandler` (Trait in
 6. Receive-Handler registrieren: pro SSRC dekodiertes PCM wird direkt in eine **WAV-Datei
    auf Platte** geschrieben (NICHT im RAM puffern — bei 48kHz/Stereo/16-bit sind das
    ~11,5 MB/Minute; eine Stunde im RAM wären ~700 MB pro Session).
-7. Konsens-Nachricht (Platzhalter-Text) in den zugehörigen `team_text_channel_id` posten.
+7. Einwilligungshinweis mit Starter, laufender Aufnahme, Zustimmung durch Verbleib,
+   Ausstiegsmöglichkeit und `/record stop` in den zugehörigen `team_text_channel_id` posten.
    Schlägt der Post fehl, werden Voice-Verbindung, Writer und Temp-Dateien sofort beendet bzw.
    entfernt und der `Starting`-Claim zurückgerollt.
 8. Erst nach erfolgreichem Konsens-Post den Session-Status auf
@@ -135,8 +137,9 @@ Schritte:
    transkodieren, `-b:a 96k`.
 4. MP3 per Attachment in `team_text_channel_id` posten (Muster: `CreateAttachment` wie in
    `crates/dl-discord/src/dispatch.rs`).
-   - **Fehlschlag beim Upload:** Fallback-Platzhalter-Nachricht posten. Trotzdem mit Schritt 5
-     fortfahren (kein Sonderpfad).
+   - **Fehlschlag bei Transkodierung oder Upload:** Statt der MP3 einen Hinweis posten, dass
+     sie nicht bereitgestellt wurde und nicht nachträglich aus dem Bot abgerufen werden kann.
+     Trotzdem mit Schritt 5 fortfahren.
 5. WAV- und MP3-Temp-Dateien löschen — **immer**, auch wenn Upload fehlgeschlagen ist
    (Cleanup-Guard, z. B. via `Drop` oder `defer`-artiges Pattern; läuft unabhängig davon, ob
    Schritt 4 erfolgreich war).
@@ -161,8 +164,8 @@ Schritte:
    MP3 sind 61 Minuten ~43,9 MB, immer noch klar unter dem 50 MB-Boost-Tier-2-Limit (die
    50MB/96kbps-Rechnung ergibt theoretisch ~72 Minuten Maximaldauer; 60 Minuten +
    Sweep-Toleranz lässt also weiterhin komfortable Marge, keine Bitrate-Anpassung nötig). Bei
-   Erreichen: `stop_and_post` + zusätzliche Hinweis-Notiz (Platzhalter-Text: „automatisch
-   gestoppt, Maximaldauer erreicht").
+   Erreichen: `stop_and_post` plus zusätzlicher Hinweis auf das erreichte 60-Minuten-Limit
+   und die Möglichkeit, mit `/record start` eine neue Aufnahme zu beginnen.
 
 ## Registry
 
@@ -246,20 +249,13 @@ ohne Transkodierung oder Upload gelöscht. SIGINT und das von systemd verwendete
 durch denselben Cleanup-Pfad. Der Health-Sweep behandelt einen fehlenden Call sowie einen
 administrativ verschobenen Recorder als Fehler und stoppt die zugehörige Session.
 
-## Texte (NUR Platzhalter, Claude schreibt final)
+## Nutzertexte
 
-Jede dieser Stellen bekommt `// TODO(text): Platzhalter — <Kontext>` + einen Dummy-String,
-keine finalen deutschen User-Texte von Codex:
-- Konsens-Post bei Start ("🔴 Aufnahme gestartet von …")
-- Ephemere Fehlermeldung: falscher Kanal
-- Ephemere Fehlermeldung: keine Berechtigung
-- Ephemere Fehlermeldung: Aufnahme läuft schon
-- Ephemere Fehlermeldung: beide Recorder belegt oder offline
-- Ephemere Fehlermeldung: `/record stop` ohne aktive Aufnahme
-- Ephemere Meldung: technischer Startfehler
-- Ephemere Bestätigung: Start/Stop angenommen
-- Hinweis-Notiz bei Dauer-Cap-Auto-Stop
-- Fallback-Nachricht bei fehlgeschlagenem Upload
+Alle Antworten sind kurze, konkrete deutsche Texte. Der öffentliche Start-Hinweis nennt den
+Starter, erklärt die Einwilligung durch Verbleib im Sprachkanal und verweist auf `/record stop`.
+Ephemere Antworten unterscheiden falschen Kanal, fehlende Rolle, laufende Aufnahme, fehlende
+Recorder-Kapazität und technische Fehler. Auto-Stop und Uploadfehler erklären jeweils den
+nächsten sinnvollen Schritt; im ausgelieferten Stand gibt es keine Platzhaltertexte.
 
 ## Tests (TDD-Pflicht, siehe CLAUDE.md)
 
@@ -287,9 +283,10 @@ Pure/unit-testbar ohne echte Discord-Voice-Verbindung:
   Start sieht fehlende Kapazität; ein nicht bereiter Recorder wird nicht vergeben; der Slot wird
   erst nach `Stopping`-Cleanup wieder frei.
 
-**Explizit außerhalb der automatisierten Tests:** echte Voice-Audio-Aufnahme + `ffmpeg`-Aufruf
-(kein CI-Harness für echte Discord-Voice-Verbindungen) — das wird live gegen den Testserver
-verifiziert, nicht in der Unit-Suite.
+**Explizit außerhalb der automatisierten Tests:** echte Voice-Audio-Aufnahme und
+`ffmpeg`-Aufruf. Dieser End-to-End-Pfad muss live gegen den Testserver verifiziert werden.
+Bei der ersten Inbetriebnahme wurden beide Gateway-Identitäten, Recorder-Rechte und der
+Slash-Command bestätigt; der echte Audiolauf steht noch aus, weil er bewusst übersprungen wurde.
 
 ## Branch
 
