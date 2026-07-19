@@ -44,7 +44,7 @@ repository = "https://github.com/NaniDerEchte2/Deadlock-Bots"
 # gesamten Workspace. Crates übernehmen via `<dep>.workspace = true`.
 [workspace.dependencies]
 # Async-Runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "fs"] }
 # Fehler-Typen (Domänen) / Fehler-Kontext (Binaries)
 thiserror = "2"
 anyhow = "1"
@@ -79,7 +79,9 @@ hex = "0.4"
 # Broker: dyn-fähige async Traits + Request-IDs
 async-trait = "0.1"
 # Discord (Gateway erst beim Cutover aktiv; REST sofort nutzbar)
-serenity = { version = "0.12", default-features = false, features = ["client", "http", "gateway", "rustls_backend", "model", "cache", "utils"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "http", "gateway", "rustls_backend", "model", "cache", "utils", "voice"] }
+songbird = { version = "0.6.0", default-features = false, features = ["driver", "gateway", "rustls", "serenity", "tungstenite", "receive"] }
+hound = "3.5.1"
 rand = "0.8"
 # Namens-Normalisierung (streamer_link_matcher: NFKD-Deaccent)
 unicode-normalization = "0.1"
