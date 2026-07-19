@@ -457,6 +457,38 @@ async fn consent_post_identifies_the_user_who_started_recording() {
     let posts = harness.port.successful_posts();
     assert_eq!(posts.len(), 1);
     assert!(posts[0].1.contains("<@42>"));
+    assert!(posts[0].1.contains("stimmst"));
+    assert!(posts[0].1.contains("verlasse ihn jetzt"));
+    assert!(posts[0].1.contains("Teamrolle dieses Kanals"));
+    assert!(posts[0].1.contains("/record stop"));
+}
+
+#[test]
+fn all_scrim_record_user_texts_are_final_and_explain_the_next_step() {
+    let texts = [
+        CONSENT_TEXT,
+        UNKNOWN_CHANNEL_TEXT,
+        NOT_PERMITTED_TEXT,
+        ALREADY_RECORDING_TEXT,
+        NO_CAPACITY_TEXT,
+        SETUP_ERROR_TEXT,
+        START_CONFIRMATION_TEXT,
+        NO_ACTIVE_RECORDING_TEXT,
+        STOP_CONFIRMATION_TEXT,
+        UPLOAD_FALLBACK_TEXT,
+        CAP_REACHED_TEXT,
+    ];
+    assert!(texts.iter().all(|text| !text.contains("Platzhalter")));
+    assert!(UNKNOWN_CHANNEL_TEXT.contains("Scrim-Team-Sprachkanäle"));
+    assert!(NOT_PERMITTED_TEXT.contains("Teamrolle"));
+    assert!(NO_CAPACITY_TEXT.contains("Beide Aufnahmeplätze"));
+    assert!(SETUP_ERROR_TEXT.contains("erneut"));
+    assert!(START_CONFIRMATION_TEXT.contains("Team-Textkanal"));
+    assert!(STOP_CONFIRMATION_TEXT.contains("Team-Textkanal"));
+    assert!(UPLOAD_FALLBACK_TEXT.contains("MP3"));
+    assert!(UPLOAD_FALLBACK_TEXT.contains("nicht nachträglich"));
+    assert!(CAP_REACHED_TEXT.contains("60-Minuten-Limit"));
+    assert!(CAP_REACHED_TEXT.contains("/record start"));
 }
 
 #[tokio::test]

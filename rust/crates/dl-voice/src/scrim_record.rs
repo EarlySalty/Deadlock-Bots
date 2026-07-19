@@ -120,12 +120,10 @@ fn affected_team_voice_channels(event: &VoiceEvent) -> Vec<u64> {
 }
 
 fn record_command_spec() -> CommandSpec {
-    // TODO(text): Platzhalter — Beschreibung des Record-Commands.
-    const RECORD_DESCRIPTION: &str = "Platzhalter";
-    // TODO(text): Platzhalter — Beschreibung des Start-Subcommands.
-    const START_DESCRIPTION: &str = "Platzhalter";
-    // TODO(text): Platzhalter — Beschreibung des Stop-Subcommands.
-    const STOP_DESCRIPTION: &str = "Platzhalter";
+    const RECORD_DESCRIPTION: &str =
+        "Aufnahme im Team-Sprachkanal starten, stoppen und als MP3 bereitstellen";
+    const START_DESCRIPTION: &str = "Aufnahme im aktuellen Team-Sprachkanal starten";
+    const STOP_DESCRIPTION: &str = "Aufnahme im aktuellen Team-Sprachkanal beenden";
     CommandSpec {
         definition: json!({
             "name": "record",
@@ -606,7 +604,20 @@ mod tests {
                 Some(expected_name)
             );
             assert!(option.get("options").is_none());
+            let description = option
+                .get("description")
+                .and_then(|value| value.as_str())
+                .expect("subcommand description");
+            assert!(!description.contains("Platzhalter"));
+            assert!(description.contains("Team-Sprachkanal"));
         }
+        let description = spec
+            .definition
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("record description");
+        assert!(!description.contains("Platzhalter"));
+        assert!(description.contains("MP3"));
     }
 
     #[test]

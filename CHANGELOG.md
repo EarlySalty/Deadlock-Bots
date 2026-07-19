@@ -1,10 +1,10 @@
-## #270 — Platzhalter
+## #270 — Scrim-Aufnahmen landen direkt im Teamkanal
 
-Problem: Platzhalter.
+Problem: Scrim-Teams mussten ihre Sprachaufnahme bisher selbst organisieren, lokal speichern und anschließend manuell verteilen.
 
-Änderung: Platzhalter.
+Änderung: Teammitglieder und Coaches können die Aufnahme in den vier festen Team-Sprachkanälen mit `/record start` und `/record stop` steuern. Ein Einwilligungshinweis macht den Start sichtbar; leere Kanäle und das 60-Minuten-Limit beenden die Aufnahme automatisch.
 
-Aktuelles Verhalten: Platzhalter.
+Aktuelles Verhalten: Nach dem Stop erscheint die MP3 im zugehörigen Team-Textkanal; scheitert die Bereitstellung, meldet der Bot stattdessen den Fehler. Zwei Teams können gleichzeitig aufnehmen; bei fehlender Kapazität gibt der Bot einen klaren Hinweis.
 
 ## #269 — Interne Discord-Nachrichten lassen sich fristgerecht entfernen
 

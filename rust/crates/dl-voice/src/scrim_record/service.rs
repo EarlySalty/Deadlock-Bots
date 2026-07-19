@@ -23,28 +23,24 @@ const CAP_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const HEALTH_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const RECORDING_FILE_PREFIX: &str = "scrim-record-";
 
-// TODO(text): Platzhalter — Consent-Post nach erfolgreichem Aufnahmestart.
-const CONSENT_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fehler bei einem unbekannten oder falschen Voice-Kanal.
-const UNKNOWN_CHANNEL_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fehler bei fehlender Team- oder Coach-Rolle.
-const NOT_PERMITTED_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fehler bei bereits laufender Aufnahme im Kanal.
-const ALREADY_RECORDING_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fehler bei vollständig belegter oder offline Recorder-Kapazität.
-const NO_CAPACITY_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fehler beim technischen Setup oder Start der Aufnahme.
-const SETUP_ERROR_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Bestätigung eines erfolgreichen Aufnahmestarts.
-const START_CONFIRMATION_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fehler beim manuellen Stop ohne aktive Aufnahme.
-const NO_ACTIVE_RECORDING_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Bestätigung eines erfolgreichen manuellen Stops.
-const STOP_CONFIRMATION_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Fallback-Post nach fehlgeschlagener Transkodierung oder Upload.
-const UPLOAD_FALLBACK_TEXT: &str = "Platzhalter";
-// TODO(text): Platzhalter — Hinweis nach Auto-Stop am 60-Minuten-Limit.
-const CAP_REACHED_TEXT: &str = "Platzhalter";
+const CONSENT_TEXT: &str = "Die Sprachaufnahme läuft bereits.";
+const UNKNOWN_CHANNEL_TEXT: &str =
+    "Du musst einem der vier Scrim-Team-Sprachkanäle beitreten, bevor du die Aufnahme steuerst.";
+const NOT_PERMITTED_TEXT: &str = "Du brauchst die Teamrolle dieses Kanals oder die Coach-Rolle.";
+const ALREADY_RECORDING_TEXT: &str = "In diesem Team-Sprachkanal läuft bereits eine Aufnahme.";
+const NO_CAPACITY_TEXT: &str =
+    "Beide Aufnahmeplätze sind gerade belegt oder technisch nicht verfügbar. Versuch es später erneut.";
+const SETUP_ERROR_TEXT: &str =
+    "Der Aufnahmebefehl konnte technisch nicht ausgeführt werden. Versuch es erneut oder melde dich beim Community-Team.";
+const START_CONFIRMATION_TEXT: &str =
+    "Aufnahme gestartet. Im Team-Textkanal steht jetzt der Einwilligungshinweis.";
+const NO_ACTIVE_RECORDING_TEXT: &str = "In diesem Team-Sprachkanal läuft keine Aufnahme.";
+const STOP_CONFIRMATION_TEXT: &str =
+    "Aufnahme beendet. Im Team-Textkanal findest du die MP3 oder bei einem Fehler einen Hinweis.";
+const UPLOAD_FALLBACK_TEXT: &str =
+    "Die Aufnahme wurde beendet, aber die MP3 konnte nicht bereitgestellt werden. Bitte meldet den technischen Fehler beim Community-Team; die Aufnahme kann nicht nachträglich aus dem Bot abgerufen werden.";
+const CAP_REACHED_TEXT: &str =
+    "Die Aufnahme wurde wegen des 60-Minuten-Limits automatisch beendet. Startet bei Bedarf mit /record start eine neue Aufnahme.";
 
 #[async_trait::async_trait]
 pub trait ScrimRecordPort: Send + Sync {
@@ -596,7 +592,9 @@ impl ScrimRecorder {
             return Err(StartError::SetupFailed);
         }
 
-        let consent_text = format!("{CONSENT_TEXT} <@{user_id}>");
+        let consent_text = format!(
+            "{CONSENT_TEXT} Gestartet von <@{user_id}>. Mit deinem Verbleib im Sprachkanal stimmst du der Aufnahme zu; wenn du nicht zustimmst, verlasse ihn jetzt. Wer die Teamrolle dieses Kanals oder die Coach-Rolle hat und im Sprachkanal sitzt, kann sie mit /record stop beenden."
+        );
         if let Err(err) = self
             .port
             .post_text(config.text_channel_id, &consent_text)
