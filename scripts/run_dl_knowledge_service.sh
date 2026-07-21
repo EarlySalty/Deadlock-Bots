@@ -24,14 +24,19 @@ if [[ -z "${INFISICAL_SERVICE_TOKEN:-}" ]]; then
   exit 1
 fi
 
-if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
-  PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
-else
-  PYTHON_BIN="${PYTHON_BIN:-python3}"
-fi
-
 export RUST_LOG="${RUST_LOG:-info}"
 
 cd "$ROOT_DIR"
-exec "$PYTHON_BIN" "$ROOT_DIR/scripts/export_knowledge_infisical_env.py" \
-  --exec "$ROOT_DIR/rust/target/release/dl-knowledge"
+INFISICAL_LOADER="${INFISICAL_LOADER:-/home/naniadm/.local/bin/dl-infisical-env}"
+if [[ "${DL_INFISICAL_READY:-0}" != "1" ]]; then
+  if [[ ! -x "$INFISICAL_LOADER" ]]; then
+    echo "Infisical loader nicht gefunden oder nicht ausführbar: $INFISICAL_LOADER" >&2
+    exit 1
+  fi
+  export DL_INFISICAL_READY=1
+  exec "$INFISICAL_LOADER" --profile knowledge -- "$0" "$@"
+fi
+unset DL_INFISICAL_READY
+unset INFISICAL_SERVICE_TOKEN
+
+exec "$ROOT_DIR/rust/target/release/dl-knowledge"

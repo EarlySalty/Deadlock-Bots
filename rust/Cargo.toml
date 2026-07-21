@@ -32,6 +32,7 @@ members = [
     "bin/dl-brain-feeder",
     "bin/dl-central-migrate",
     "bin/dl-central-sync",
+    "bin/dl-infisical-env",
 ]
 
 [workspace.package]

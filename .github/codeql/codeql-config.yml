@@ -7,8 +7,6 @@ queries:
 
 # Query-Packs für alle Sprachen
 packs:
-  python:
-    - codeql/python-queries
   javascript-typescript:
     - codeql/javascript-queries
   go:

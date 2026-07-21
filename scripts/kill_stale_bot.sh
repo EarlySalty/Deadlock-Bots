@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kills any stale main_bot.py process before a fresh service start.
+# Kills the old pid-file owner before a fresh service start.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,15 +15,3 @@ if [[ -f "$PID_FILE" ]]; then
     fi
     rm -f "$PID_FILE"
 fi
-
-# Fallback: kill any remaining main_bot.py process from this venv
-VENV_PYTHON="$ROOT_DIR/.venv/bin/python"
-for pid in $(pgrep -f "$VENV_PYTHON" 2>/dev/null || true); do
-    cmdline=$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' || true)
-    if echo "$cmdline" | grep -q "main_bot\.py"; then
-        echo "Fallback: killing stale bot PID=$pid"
-        kill "$pid" 2>/dev/null || true
-        sleep 2
-        kill -9 "$pid" 2>/dev/null || true
-    fi
-done

@@ -9,23 +9,3 @@ updates:
       - "security"
     commit-message:
       prefix: "deps"
-
-  - package-ecosystem: "npm"
-    directory: "/cogs/steam/steam_presence"
-    schedule:
-      interval: "daily"
-    labels:
-      - "dependencies"
-      - "security"
-    commit-message:
-      prefix: "deps"
-
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "daily"
-    labels:
-      - "dependencies"
-      - "security"
-    commit-message:
-      prefix: "deps"
