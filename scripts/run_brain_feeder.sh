@@ -30,15 +30,17 @@ if [[ -z "${INFISICAL_SERVICE_TOKEN:-}" ]]; then
   exit 1
 fi
 
-if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
-  PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
-else
-  PYTHON_BIN="${PYTHON_BIN:-python3}"
+INFISICAL_LOADER="${INFISICAL_LOADER:-/home/naniadm/.local/bin/dl-infisical-env}"
+if [[ "${DL_INFISICAL_READY:-0}" != "1" ]]; then
+  if [[ ! -x "$INFISICAL_LOADER" ]]; then
+    echo "Infisical loader nicht gefunden oder nicht ausführbar: $INFISICAL_LOADER" >&2
+    exit 1
+  fi
+  export DL_INFISICAL_READY=1
+  exec "$INFISICAL_LOADER" --profile all -- "$0" "$@"
 fi
-
-# Secrets injizieren (DEADLOCK_CENTRAL_DSN u. a.).
-INFISICAL_EXPORT="$("$PYTHON_BIN" "$ROOT_DIR/scripts/export_infisical_env.py" --format shell)"
-eval "$INFISICAL_EXPORT"
+unset DL_INFISICAL_READY
+unset INFISICAL_SERVICE_TOKEN
 
 # Das Infisical-GITHUB_TOKEN hat keinen Zugriff aufs 2nd-Brain-Repo und würde
 # den funktionierenden git-credential-Helper des Users übersteuern (403 beim

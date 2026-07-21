@@ -1174,6 +1174,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-infisical-env"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "dl-knowledge"
 version = "0.1.0"
 dependencies = [

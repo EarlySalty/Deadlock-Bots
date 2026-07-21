@@ -56,7 +56,6 @@ jobs:
             // Map file extensions -> CodeQL language + sensible build-mode
             const langs = [];
 
-            if (has(['.py']))              langs.push({ language: 'python',                 build: 'none' });
             if (has(['.js','.ts','.tsx'])) langs.push({ language: 'javascript-typescript',  build: 'none' });
             if (has(['.go']))              langs.push({ language: 'go',                     build: 'autobuild' });
             if (has(['.java','.kt','.kts'])) langs.push({ language: 'java-kotlin',          build: 'autobuild' });
@@ -102,12 +101,6 @@ jobs:
           fetch-depth: 0
 
       # Runtimes nur da, wo es hilft – schadet nicht, macht Autobuild stabiler
-      - name: Setup Python
-        if: matrix.language == 'python'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: '3.13'
-
       - name: Setup Node.js
         if: matrix.language == 'javascript-typescript' || matrix.language == 'actions'
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
