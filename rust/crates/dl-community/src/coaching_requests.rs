@@ -2127,10 +2127,31 @@ impl InteractionHandler for CoachingHandler {
                     request_id,
                 })
             }) else {
-                return BridgeReply::ephemeral_text("⚠️ Keine aktive Session mehr für diese Anfrage gefunden.");
+                if let Some((_, status, _, _, _, _)) = c.load_request(request_id).await {
+                    if status == "completed" {
+                        let c = c.clone();
+                        tokio::spawn(async move {
+                            c.update_request_message_terminal(
+                                request_id,
+                                "✅ Coaching abgeschlossen",
+                                "✅ abgeschlossen",
+                                0x2ECC71,
+                            )
+                            .await;
+                        });
+                        return BridgeReply::ephemeral_text(
+                            "ℹ️ Dieses Coaching wurde bereits abgeschlossen.",
+                        );
+                    }
+                }
+                return BridgeReply::ephemeral_text(
+                    "⚠️ Keine aktive Session mehr für diese Anfrage gefunden.",
+                );
             };
             let Some(coach_id) = session.coach_id else {
-                return BridgeReply::ephemeral_text("⚠️ Keine aktive Session mehr für diese Anfrage gefunden.");
+                return BridgeReply::ephemeral_text(
+                    "⚠️ Keine aktive Session mehr für diese Anfrage gefunden.",
+                );
             };
             let is_owner = interaction.user_id == OWNER_EXCLUDE_ID
                 || c.port
@@ -2141,9 +2162,18 @@ impl InteractionHandler for CoachingHandler {
                     "❌ Nur der zugewiesene Coach kann dieses Coaching abschließen.",
                 );
             }
-            if !c.complete_session(session, coach_id).await {
-                return BridgeReply::ephemeral_text("ℹ️ Dieses Coaching wurde bereits abgeschlossen.");
-            }
+            let c = c.clone();
+            tokio::spawn(async move {
+                if !c.complete_session(session, coach_id).await {
+                    c.update_request_message_terminal(
+                        request_id,
+                        "✅ Coaching abgeschlossen",
+                        "✅ abgeschlossen",
+                        0x2ECC71,
+                    )
+                    .await;
+                }
+            });
             return BridgeReply::ephemeral_text("✅ Coaching als abgeschlossen markiert.");
         }
 
@@ -3271,6 +3301,17 @@ mod pg_tests {
             reply.content.as_deref(),
             Some("✅ Coaching als abgeschlossen markiert.")
         );
+        for _ in 0..20 {
+            if !port
+                .request_edits
+                .lock()
+                .expect("request_edits lock")
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
         let request_status = sqlx::query_scalar::<_, String>(
             "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 1",
         )
@@ -3315,6 +3356,173 @@ mod pg_tests {
         assert_eq!(payload["website_request_id"], "web-manual-complete");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["session_status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn complete_button_synct_bereits_abgeschlossene_session_ins_embed() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((12345, vec![COACH_ROLE_ID]));
+        let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-already-complete', 1, 'web-already-complete', 900,
+                'Player900', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                '2026-07-17T21:52', 'Laning', '**Analyse:** Tempo', 'completed', $1, $1,
+                8802, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, coach_id, discord_user_id, discord_username,
+                discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-already-complete', 1, '12345', 900, 'Player900', 500,
+                    'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let reply = CoachingHandler { coaching }
+            .handle(BridgeInteraction {
+                custom_id: "coaching_complete_1".to_string(),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("ℹ️ Dieses Coaching wurde bereits abgeschlossen.")
+        );
+        for _ in 0..20 {
+            if !port
+                .request_edits
+                .lock()
+                .expect("request_edits lock")
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let edits = port
+            .request_edits
+            .lock()
+            .expect("request_edits lock")
+            .clone();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].message_id, 8802);
+        assert_eq!(edits[0].embed["title"], "✅ Coaching abgeschlossen");
+        assert_eq!(edits[0].components, json!([]));
+    }
+
+    #[tokio::test]
+    async fn complete_button_ackt_bevor_abschlussarbeit_haengt() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((12345, vec![COACH_ROLE_ID]));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        port.display_name_barrier
+            .lock()
+            .expect("display_name_barrier lock")
+            .replace(barrier.clone());
+        let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-slow-complete', 1, 'web-slow-complete', 900,
+                'Player900', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                '2026-07-17T21:52', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8803, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, coach_id, discord_user_id, discord_username,
+                discord_channel_id, status, created_at
+            )
+            VALUES ('sess-slow-complete', 1, '12345', 900, 'Player900', 500,
+                    'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            CoachingHandler { coaching }.handle(BridgeInteraction {
+                custom_id: "coaching_complete_1".to_string(),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            }),
+        )
+        .await
+        .expect("button ack should not wait for completion work");
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Coaching als abgeschlossen markiert.")
+        );
+        barrier.wait().await;
+        for _ in 0..20 {
+            if !port
+                .request_edits
+                .lock()
+                .expect("request_edits lock")
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("request edit was not synced");
     }
 
     #[tokio::test]
