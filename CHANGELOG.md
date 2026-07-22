@@ -1,3 +1,11 @@
+## #272 — Coaching-Abschluss reagiert sofort
+
+Problem: Beim Klick auf „Coaching abgeschlossen“ konnte Discord melden, dass der Bot nicht rechtzeitig reagiert hat. War die Session intern schon abgeschlossen, blieb die sichtbare Anfrage trotzdem noch im alten Button-Zustand hängen.
+
+Änderung: Der Klick bestätigt jetzt sofort und zieht die Abschlussarbeit im Hintergrund nach. Erkennt der Bot eine bereits abgeschlossene Session, setzt er die sichtbare Anfrage erneut auf abgeschlossen und entfernt die Buttons.
+
+Aktuelles Verhalten: Coaches bekommen keine Discord-Timeout-Meldung mehr; das Coaching-Embed zeigt nach dem Klick zuverlässig den abgeschlossenen Zustand.
+
 ## #271 — Python-Altstand liegt nur noch im Archiv
 
 Problem: Nach dem Rust-Cutover lag der alte Python-Stand weiter im Hauptrepo. Dadurch war nicht klar, was noch produktiv ist und was nur noch als Referenz dient.
