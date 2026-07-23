@@ -1089,8 +1089,10 @@ async fn set_lobby_request(
 fn is_bot_owned_lobby_state(state: &str) -> bool {
     matches!(
         state,
-        "starting"
+        "start_requested"
+            | "starting"
             | "lobby_posting"
+            | "result_requested"
             | "start_failed"
             | "in_progress"
             | "finished"
@@ -1450,6 +1452,7 @@ mod tests {
         );
 
         let response = app
+            .clone()
             .oneshot(auth_post(
                 "/api/scrims/matches/10/lobby-code",
                 &session_id,
@@ -1458,6 +1461,22 @@ mod tests {
             )?)
             .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        insert_match(db.pool(), 11, "result_requested").await?;
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/matches/11/lobby-code",
+                &session_id,
+                &csrf,
+                json!({ "code": "XYZ99" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let state =
+            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 11")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(state, "result_requested");
         Ok(())
     }
 }

@@ -3498,7 +3498,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             scrimMatchRows.appendChild(tr);
             return;
         }
-        const botStates = new Set(['lobby_posting', 'starting', 'start_failed', 'in_progress', 'finished', 'result_fetching', 'result_failed']);
+        const botStates = new Set(['start_requested', 'lobby_posting', 'starting', 'start_failed', 'in_progress', 'finished', 'result_requested', 'result_fetching', 'result_failed']);
         rows.forEach((match) => {
             const tr = document.createElement('tr');
             const values = [
@@ -3532,7 +3532,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             lobbyBtn.type = 'button';
             lobbyBtn.className = 'load';
             lobbyBtn.textContent = 'Lobby ist offen';
-            lobbyBtn.disabled = state === 'lobby_posting' || state === 'starting' || state === 'in_progress' || state === 'finished';
+            lobbyBtn.disabled = botStates.has(state);
             lobbyBtn.addEventListener('click', () => setScrimLobbyCode(match.id, codeInput.value));
             const resultBtn = document.createElement('button');
             resultBtn.type = 'button';
