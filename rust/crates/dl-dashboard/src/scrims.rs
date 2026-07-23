@@ -1181,6 +1181,7 @@ fn match_request_summary_json(
     let mut teams = Vec::new();
     let mut missing_response_count = 0usize;
     let mut no_slot_count = 0usize;
+    let mut slot_team_available_counts = vec![0usize; slots.len()];
 
     for (team_id, team_name) in [
         (request.team_a_id, Some(request.team_a_name.as_str())),
@@ -1250,6 +1251,11 @@ fn match_request_summary_json(
                 );
             }
         }
+        for (index, available_count) in team_slot_counts.iter().enumerate() {
+            if *available_count > 0 {
+                slot_team_available_counts[index] += 1;
+            }
+        }
 
         teams.push(json!({
             "team_id": team_id,
@@ -1268,9 +1274,12 @@ fn match_request_summary_json(
                 .collect::<Vec<_>>(),
         }));
     }
+    for (index, team_available_count) in slot_team_available_counts.iter().enumerate() {
+        slots[index]["team_available_count"] = json!(team_available_count);
+    }
 
     let recommended_slot_index = if deadline_passed {
-        best_match_request_slot_index(&slots)
+        best_match_request_slot_index(&slots, teams.len())
     } else {
         None
     };
@@ -1294,10 +1303,14 @@ fn match_request_summary_json(
     })
 }
 
-fn best_match_request_slot_index(slots: &[Value]) -> Option<usize> {
+fn best_match_request_slot_index(slots: &[Value], required_team_count: usize) -> Option<usize> {
     let mut best: Option<(usize, u64, u64)> = None;
     for (index, slot) in slots.iter().enumerate() {
         let available = slot["available_count"].as_u64().unwrap_or_default();
+        let team_available = slot["team_available_count"].as_u64().unwrap_or_default() as usize;
+        if available == 0 || team_available < required_team_count {
+            continue;
+        }
         let starters = slot["starter_available_count"].as_u64().unwrap_or_default();
         if best.is_none_or(|(_, best_available, best_starters)| {
             available > best_available || (available == best_available && starters > best_starters)
@@ -1930,6 +1943,32 @@ mod tests {
             .ok_or("missing summaries")?;
         assert_eq!(summaries[0]["batch"]["id"], 90);
         assert_eq!(summaries[0]["matches"][0]["recommended_slot_index"], 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_summary_empfiehlt_nur_slots_mit_zusage_beider_teams(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        insert_match_request_response(db.pool(), 91, 2, 201, 1).await?;
+
+        let response = app
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/90/summary",
+                &session_id,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["matches"][0]["recommended_slot_index"], Value::Null);
         Ok(())
     }
 

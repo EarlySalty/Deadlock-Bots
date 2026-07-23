@@ -3632,10 +3632,13 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                     : null;
                 const meta = document.createElement('div');
                 meta.className = 'scrim-request-meta';
+                const recommendationText = recommendedSlot
+                    ? `Empfehlung: ${scrimSlotLabel(recommendedSlot.slot)}`
+                    : (summary.deadline_passed ? 'Keine gemeinsame Zusage' : 'Empfehlung nach Frist');
                 meta.textContent = [
                     summary.deadline_passed ? 'Frist vorbei' : 'Frist offen',
                     `bis ${scrimDate(batch.deadline_at)}`,
-                    recommendedSlot ? `Empfehlung: ${scrimSlotLabel(recommendedSlot.slot)}` : 'Empfehlung nach Frist',
+                    recommendationText,
                     `${match.missing_response_count || 0} offen`,
                     `${match.no_slot_count || 0} ohne passenden Slot`,
                 ].join(' · ');
