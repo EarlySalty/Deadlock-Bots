@@ -306,6 +306,7 @@ async fn claim_next_pending_match_request_batch(
             SELECT id
               FROM scrim.match_request_batches
              WHERE status = $1
+               AND deadline_at > now()
              ORDER BY created_at, id
              LIMIT 1
              FOR UPDATE SKIP LOCKED
@@ -567,6 +568,7 @@ async fn set_match_request_batch_status(
     batch_id: i64,
     status: &str,
 ) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE scrim.match_request_batches
@@ -577,8 +579,21 @@ async fn set_match_request_batch_status(
     )
     .bind(i32::try_from(batch_id)?)
     .bind(status)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_requests
+           SET status = $2,
+               updated_at = now()
+         WHERE batch_id = $1
+        "#,
+    )
+    .bind(i32::try_from(batch_id)?)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1524,6 +1539,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claim_next_pending_match_request_batch_ignoriert_abgelaufene_drafts() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch_with_deadline_offset(pool, 70, -1).await?;
+
+        assert!(claim_next_pending_match_request_batch(pool)
+            .await?
+            .is_none());
+        assert_eq!(
+            match_request_batch_status(pool, 70).await?,
+            MATCH_REQUEST_STATUS_DRAFT
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn save_match_request_posts_speichert_ids_auch_bei_post_failed() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
@@ -1564,6 +1597,27 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn set_match_request_batch_status_markiert_requests_mit() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, None).await?;
+        insert_match_request_batch(pool, 60).await?;
+
+        set_match_request_batch_status(pool, 60, MATCH_REQUEST_STATUS_POST_FAILED).await?;
+
+        assert_eq!(
+            match_request_batch_status(pool, 60).await?,
+            MATCH_REQUEST_STATUS_POST_FAILED
+        );
+        assert_eq!(
+            match_request_status(pool, 61).await?,
+            MATCH_REQUEST_STATUS_POST_FAILED
+        );
+        Ok(())
+    }
+
     async fn insert_team(
         pool: &PgPool,
         team_id: i32,
@@ -1600,16 +1654,25 @@ mod tests {
     }
 
     async fn insert_match_request_batch(pool: &PgPool, batch_id: i32) -> anyhow::Result<()> {
+        insert_match_request_batch_with_deadline_offset(pool, batch_id, 48).await
+    }
+
+    async fn insert_match_request_batch_with_deadline_offset(
+        pool: &PgPool,
+        batch_id: i32,
+        deadline_offset_hours: i32,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             r#"
             INSERT INTO scrim.match_request_batches(
                 id, template, deadline_at, status, created_by_user_id,
                 created_by_display_name, created_at, updated_at
             )
-            VALUES($1, 'regular_scrim', now() + interval '2 days', 'draft', '42', 'Coach', now(), now())
+            VALUES($1, 'regular_scrim', now() + ($2 * interval '1 hour'), 'draft', '42', 'Coach', now(), now())
             "#,
         )
         .bind(batch_id)
+        .bind(deadline_offset_hours)
         .execute(pool)
         .await?;
         sqlx::query(
@@ -1635,6 +1698,15 @@ mod tests {
         Ok(
             sqlx::query_scalar("SELECT status FROM scrim.match_request_batches WHERE id = $1")
                 .bind(batch_id)
+                .fetch_one(pool)
+                .await?,
+        )
+    }
+
+    async fn match_request_status(pool: &PgPool, request_id: i32) -> anyhow::Result<String> {
+        Ok(
+            sqlx::query_scalar("SELECT status FROM scrim.match_requests WHERE id = $1")
+                .bind(request_id)
                 .fetch_one(pool)
                 .await?,
         )
