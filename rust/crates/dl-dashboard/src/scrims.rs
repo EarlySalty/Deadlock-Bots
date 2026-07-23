@@ -1054,15 +1054,17 @@ async fn set_lobby_request(
     match_id: i32,
     requested_state: &'static str,
 ) -> DashboardDbResult<LobbyRequest> {
+    let mut tx = pool.begin().await?;
     let current = sqlx::query(
         r#"
         SELECT lobby_state
           FROM scrim.matches
          WHERE id = $1
+         FOR UPDATE
         "#,
     )
     .bind(match_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = current else {
         return Ok(LobbyRequest::NotFound);
@@ -1081,8 +1083,9 @@ async fn set_lobby_request(
     )
     .bind(match_id)
     .bind(requested_state)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(LobbyRequest::Updated(requested_state))
 }
 
@@ -1090,6 +1093,7 @@ fn is_bot_owned_lobby_state(state: &str) -> bool {
     matches!(
         state,
         "start_requested"
+            | "lobby_open"
             | "starting"
             | "lobby_posting"
             | "result_requested"
@@ -1418,6 +1422,79 @@ mod tests {
                 .fetch_one(db.pool())
                 .await?;
         assert_eq!(state, "draft");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn result_route_ueberschreibt_lobby_open_nicht() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 12, "lobby_open").await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/matches/12/result",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let state =
+            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 12")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(state, "lobby_open");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn result_route_ueberschreibt_parallelen_lobby_open_nicht(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 13, "draft").await?;
+
+        let mut tx = db.pool().begin().await?;
+        sqlx::query("SELECT id FROM scrim.matches WHERE id = 13 FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let pending_result = tokio::spawn({
+            let app = app.clone();
+            let session_id = session_id.clone();
+            let csrf = csrf.clone();
+            async move {
+                app.oneshot(
+                    auth_post(
+                        "/api/scrims/matches/13/result",
+                        &session_id,
+                        &csrf,
+                        json!({}),
+                    )
+                    .expect("request"),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        sqlx::query("UPDATE scrim.matches SET lobby_state = 'lobby_open' WHERE id = 13")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(5), pending_result).await???;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let state =
+            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 13")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(state, "lobby_open");
         Ok(())
     }
 

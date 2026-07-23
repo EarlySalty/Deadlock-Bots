@@ -1,3 +1,11 @@
+## #276 — Scrim-Lobbycode blockiert Ergebnisaktionen bis zum Bot-Post
+
+Problem: Direkt nach dem Klick auf `Lobby ist offen` konnte ein Ergebnisabruf den noch offenen Lobbycode-Post überschreiben.
+
+Änderung: Der offene Lobbycode gilt jetzt bis zur Bot-Verarbeitung als gesperrter Bot-Zustand.
+
+Aktuelles Verhalten: Erst nachdem der Bot den Lobbycode verarbeitet hat, sind weitere Scrim-Aktionen wieder möglich.
+
 ## #275 — Scrim-Dashboard bekommt den Lobbycode-Button
 
 Problem: Der neue Lobbycode-Flow war backendseitig vorhanden, aber im Scrim-Dashboard fehlte noch der sichtbare Arbeitsweg für Coaches.
