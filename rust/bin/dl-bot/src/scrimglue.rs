@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use chrono::{DateTime, Utc};
 use dl_squads::scrim_match::{
     fetch_scrim_match_result, start_scrim_match, ScrimMatchResultOutcome, StartScrimMatchOutcome,
 };
@@ -22,6 +23,10 @@ const STATE_START_FAILED: &str = "start_failed";
 const STATE_RESULT_REQUESTED: &str = "result_requested";
 const STATE_RESULT_FETCHING: &str = "result_fetching";
 const STATE_RESULT_FAILED: &str = "result_failed";
+const MATCH_REQUEST_STATUS_DRAFT: &str = "draft";
+const MATCH_REQUEST_STATUS_POSTING: &str = "posting";
+const MATCH_REQUEST_STATUS_OPEN: &str = "open";
+const MATCH_REQUEST_STATUS_POST_FAILED: &str = "post_failed";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
 const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
 
@@ -90,6 +95,36 @@ struct ClaimedMatch {
     team_channels: Vec<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchRequestTarget {
+    team_id: i64,
+    team_name: String,
+    channel_id: u64,
+    opponent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClaimedMatchRequest {
+    request_id: i64,
+    slot_options: Value,
+    targets: Vec<MatchRequestTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClaimedMatchRequestBatch {
+    batch_id: i64,
+    template: String,
+    deadline_at: DateTime<Utc>,
+    requests: Vec<ClaimedMatchRequest>,
+}
+
+struct MatchRequestPost {
+    request_id: i64,
+    team_id: i64,
+    channel_id: u64,
+    message_id: u64,
+}
+
 pub fn spawn(
     pool: PgPool,
     adapter: Arc<dl_discord::DiscordAdapter>,
@@ -125,17 +160,21 @@ async fn process_one_pending(
     voice_config: ScrimVoiceConfig,
 ) -> anyhow::Result<()> {
     cleanup_terminal_scrim_voice_channels(pool, tempvoice).await?;
-    let Some(claim) = claim_next_pending_match(pool, announcement_channel_id).await? else {
+    if let Some(claim) = claim_next_pending_match(pool, announcement_channel_id).await? {
+        match claim.action {
+            ScrimDriverAction::PostLobbyCode => handle_lobby_code(pool, adapter, &claim).await,
+            ScrimDriverAction::Start => {
+                handle_start(pool, adapter, tempvoice, voice_config, &claim).await
+            }
+            ScrimDriverAction::FetchResult => handle_result(pool, adapter, tempvoice, &claim).await,
+        }?;
         return Ok(());
-    };
-
-    match claim.action {
-        ScrimDriverAction::PostLobbyCode => handle_lobby_code(pool, adapter, &claim).await,
-        ScrimDriverAction::Start => {
-            handle_start(pool, adapter, tempvoice, voice_config, &claim).await
-        }
-        ScrimDriverAction::FetchResult => handle_result(pool, adapter, tempvoice, &claim).await,
     }
+
+    if let Some(batch) = claim_next_pending_match_request_batch(pool).await? {
+        handle_match_request_batch(pool, adapter, batch).await?;
+    }
+    Ok(())
 }
 
 async fn claim_next_pending_match(
@@ -248,6 +287,249 @@ async fn handle_lobby_code(
             .await;
         }
     }
+    Ok(())
+}
+
+async fn claim_next_pending_match_request_batch(
+    pool: &PgPool,
+) -> anyhow::Result<Option<ClaimedMatchRequestBatch>> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT id
+              FROM scrim.match_request_batches
+             WHERE status = $1
+             ORDER BY created_at, id
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE scrim.match_request_batches b
+           SET status = $2,
+               updated_at = now()
+          FROM candidate
+         WHERE b.id = candidate.id
+        RETURNING b.id::bigint AS batch_id,
+                  b.template,
+                  b.deadline_at
+        "#,
+    )
+    .bind(MATCH_REQUEST_STATUS_DRAFT)
+    .bind(MATCH_REQUEST_STATUS_POSTING)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Scrim-Match-Abfrage-Claim fehlgeschlagen")?;
+
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let batch_id: i64 = row.get("batch_id");
+    let request_rows = sqlx::query(
+        r#"
+        SELECT mr.id::bigint AS request_id,
+               mr.slot_options,
+               ta.id::bigint AS team_a_id,
+               ta.name AS team_a_name,
+               ta.discord_channel_id AS team_a_channel_id,
+               tb.id::bigint AS team_b_id,
+               tb.name AS team_b_name,
+               tb.discord_channel_id AS team_b_channel_id
+          FROM scrim.match_requests mr
+          JOIN scrim.teams ta ON ta.id = mr.team_a_id
+          LEFT JOIN scrim.teams tb ON tb.id = mr.team_b_id
+         WHERE mr.batch_id = $1
+           AND mr.status = $2
+         ORDER BY mr.id
+        "#,
+    )
+    .bind(i32::try_from(batch_id)?)
+    .bind(MATCH_REQUEST_STATUS_DRAFT)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Scrim-Match-Abfragen laden")?;
+    tx.commit().await?;
+
+    let mut requests = Vec::with_capacity(request_rows.len());
+    for row in request_rows {
+        let team_a_id: i64 = row.get("team_a_id");
+        let team_a_name: String = row.get("team_a_name");
+        let team_b_id: Option<i64> = row.get("team_b_id");
+        let team_b_name: Option<String> = row.get("team_b_name");
+        let mut targets = Vec::new();
+        if let Some(channel_id) = valid_channel_id(row.get("team_a_channel_id")) {
+            targets.push(MatchRequestTarget {
+                team_id: team_a_id,
+                team_name: team_a_name.clone(),
+                channel_id,
+                opponent_name: team_b_name.clone(),
+            });
+        }
+        if let (Some(team_id), Some(team_name), Some(channel_id)) = (
+            team_b_id,
+            team_b_name.clone(),
+            valid_channel_id(row.get("team_b_channel_id")),
+        ) {
+            targets.push(MatchRequestTarget {
+                team_id,
+                team_name,
+                channel_id,
+                opponent_name: Some(team_a_name),
+            });
+        }
+        requests.push(ClaimedMatchRequest {
+            request_id: row.get("request_id"),
+            slot_options: row.get("slot_options"),
+            targets,
+        });
+    }
+
+    Ok(Some(ClaimedMatchRequestBatch {
+        batch_id,
+        template: row.get("template"),
+        deadline_at: row.get("deadline_at"),
+        requests,
+    }))
+}
+
+async fn handle_match_request_batch(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    batch: ClaimedMatchRequestBatch,
+) -> anyhow::Result<()> {
+    match send_match_request_batch(adapter, &batch).await {
+        Ok(posts) => {
+            save_match_request_posts(pool, batch.batch_id, &posts).await?;
+            post_log(
+                adapter,
+                match_request_success_log_message(batch.batch_id, posts.len(), line!()),
+                batch.batch_id,
+            )
+            .await;
+        }
+        Err(err) => {
+            set_match_request_batch_status(pool, batch.batch_id, MATCH_REQUEST_STATUS_POST_FAILED)
+                .await?;
+            post_log(
+                adapter,
+                match_request_failure_message(batch.batch_id, &err, line!()),
+                batch.batch_id,
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
+async fn send_match_request_batch(
+    adapter: &dl_discord::DiscordAdapter,
+    batch: &ClaimedMatchRequestBatch,
+) -> Result<Vec<MatchRequestPost>, String> {
+    let mut posts = Vec::new();
+    let mut errors = Vec::new();
+    for request in &batch.requests {
+        if request.targets.is_empty() {
+            errors.push(format!("request {}: kein Teamkanal", request.request_id));
+            continue;
+        }
+        for target in &request.targets {
+            let content = match_request_message(
+                batch.batch_id,
+                &batch.template,
+                &target.team_name,
+                target.opponent_name.as_deref(),
+                batch.deadline_at.timestamp(),
+                &request.slot_options,
+            )
+            .map_err(|err| err.to_string())?;
+            match adapter
+                .send_raw_public(target.channel_id, &message_body(&content))
+                .await
+            {
+                Ok(message_id) => posts.push(MatchRequestPost {
+                    request_id: request.request_id,
+                    team_id: target.team_id,
+                    channel_id: target.channel_id,
+                    message_id,
+                }),
+                Err(err) => errors.push(format!("post {}: {err}", target.channel_id)),
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(posts)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+async fn save_match_request_posts(
+    pool: &PgPool,
+    batch_id: i64,
+    posts: &[MatchRequestPost],
+) -> anyhow::Result<()> {
+    let mut by_request = BTreeMap::<i64, Map<String, Value>>::new();
+    for post in posts {
+        by_request.entry(post.request_id).or_default().insert(
+            post.team_id.to_string(),
+            json!({
+                "channel_id": post.channel_id,
+                "message_id": post.message_id,
+            }),
+        );
+    }
+
+    let mut tx = pool.begin().await?;
+    for (request_id, message_ids) in by_request {
+        sqlx::query(
+            r#"
+            UPDATE scrim.match_requests
+               SET team_query_message_ids = $2::jsonb,
+                   status = $3,
+                   posted_at = COALESCE(posted_at, now()),
+                   updated_at = now()
+             WHERE id = $1
+            "#,
+        )
+        .bind(i32::try_from(request_id)?)
+        .bind(Value::Object(message_ids))
+        .bind(MATCH_REQUEST_STATUS_OPEN)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_batches
+           SET status = $2,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(i32::try_from(batch_id)?)
+    .bind(MATCH_REQUEST_STATUS_OPEN)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn set_match_request_batch_status(
+    pool: &PgPool,
+    batch_id: i64,
+    status: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_batches
+           SET status = $2,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(i32::try_from(batch_id)?)
+    .bind(status)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -881,6 +1163,88 @@ fn lobby_code_message(code: &str) -> String {
     format!("Lobby Code: {}", code.trim().to_ascii_uppercase())
 }
 
+fn match_request_message(
+    batch_id: i64,
+    template: &str,
+    team_name: &str,
+    opponent_name: Option<&str>,
+    deadline_ts: i64,
+    slot_options: &Value,
+) -> anyhow::Result<String> {
+    let slots = slot_options
+        .as_array()
+        .ok_or_else(|| anyhow!("slot_options ist kein Array"))?;
+    let mut lines = vec![
+        format!("Scrim-Terminabfrage #{batch_id}"),
+        format!("Team: {team_name}"),
+        format!("Gegner: {}", opponent_name.unwrap_or("offen")),
+        format!("Vorlage: {}", template_label(template)),
+        format!("Antwortfrist: <t:{deadline_ts}:f>"),
+        "Slots:".to_string(),
+    ];
+    for (index, slot) in slots.iter().enumerate() {
+        lines.push(format!(
+            "{}. {}",
+            index + 1,
+            format_match_request_slot(slot)?
+        ));
+    }
+    lines.push(
+        "Antwortet mit euren passenden Slots oder ergaenzt Freitext hier im Teamkanal.".to_string(),
+    );
+    Ok(lines.join("\n"))
+}
+
+fn template_label(template: &str) -> &str {
+    match template {
+        "regular_scrim" => "Regulaerer Scrim",
+        "testmatch" => "Testmatch",
+        "training" => "Training/Teamspiel",
+        value => value,
+    }
+}
+
+fn format_match_request_slot(slot: &Value) -> anyhow::Result<String> {
+    let day = slot
+        .get("day")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("slot day fehlt"))?;
+    let from = slot
+        .get("from")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("slot from fehlt"))?;
+    let to = slot
+        .get("to")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("slot to fehlt"))?;
+    Ok(format!(
+        "{} {}-{}",
+        day_label(day),
+        minute_label(from)?,
+        minute_label(to)?
+    ))
+}
+
+fn day_label(day: &str) -> &str {
+    match day {
+        "mon" => "Montag",
+        "tue" => "Dienstag",
+        "wed" => "Mittwoch",
+        "thu" => "Donnerstag",
+        "fri" => "Freitag",
+        "sat" => "Samstag",
+        "sun" => "Sonntag",
+        value => value,
+    }
+}
+
+fn minute_label(value: i64) -> anyhow::Result<String> {
+    if !(0..=1440).contains(&value) {
+        return Err(anyhow!("slot minute ausserhalb des Tages"));
+    }
+    Ok(format!("{:02}:{:02}", value / 60, value % 60))
+}
+
 fn lobby_code_success_log_message(
     match_id: i64,
     code: &str,
@@ -895,6 +1259,18 @@ fn lobby_code_success_log_message(
 
 fn lobby_code_failure_message(match_id: i64, reason: &str, _source_line: u32) -> String {
     format!("⚠️ Scrim-Lobbycode konnte nicht gepostet werden (Match {match_id}): {reason}.")
+}
+
+fn match_request_success_log_message(
+    batch_id: i64,
+    target_count: usize,
+    _source_line: u32,
+) -> String {
+    format!("Scrim-Terminabfragen gepostet (Batch {batch_id}, Ziele: {target_count}).")
+}
+
+fn match_request_failure_message(batch_id: i64, reason: &str, _source_line: u32) -> String {
+    format!("⚠️ Scrim-Terminabfragen konnten nicht gepostet werden (Batch {batch_id}): {reason}.")
 }
 
 fn start_failure_message(match_id: i64, _source_line: u32) -> String {
@@ -1021,6 +1397,66 @@ mod tests {
         assert_eq!(body["allowed_mentions"], json!({ "parse": [] }));
     }
 
+    #[test]
+    fn match_request_message_ist_teambezogen_pingfrei_und_enthaelt_slots() -> TestResult {
+        let content = match_request_message(
+            7,
+            "regular_scrim",
+            "Team Alpha",
+            Some("Team Beta"),
+            1_783_354_800,
+            &json!([
+                { "day": "sat", "from": 1200, "to": 1320 },
+                { "day": "sun", "from": 1200, "to": 1320 }
+            ]),
+        )?;
+        assert!(content.contains("Team Alpha"));
+        assert!(content.contains("Team Beta"));
+        assert!(content.contains("Samstag 20:00-22:00"));
+        assert!(content.contains("<t:1783354800:f>"));
+        assert!(!content.contains("<@"));
+        assert_eq!(
+            message_body(&content)["allowed_mentions"],
+            json!({ "parse": [] })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn claim_next_pending_match_request_batch_markiert_batch_als_posting() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+
+        let claim = claim_next_pending_match_request_batch(pool)
+            .await?
+            .expect("claim");
+        assert_eq!(claim.batch_id, 30);
+        assert_eq!(claim.requests.len(), 1);
+        assert_eq!(claim.requests[0].request_id, 31);
+        assert_eq!(
+            claim.requests[0].targets,
+            vec![
+                MatchRequestTarget {
+                    team_id: 1,
+                    team_name: "team-1".to_string(),
+                    channel_id: 100,
+                    opponent_name: Some("team-2".to_string()),
+                },
+                MatchRequestTarget {
+                    team_id: 2,
+                    team_name: "team-2".to_string(),
+                    channel_id: 200,
+                    opponent_name: Some("team-1".to_string()),
+                },
+            ]
+        );
+        assert_eq!(match_request_batch_status(pool, 30).await?, "posting");
+        Ok(())
+    }
+
     async fn insert_team(
         pool: &PgPool,
         team_id: i32,
@@ -1054,6 +1490,47 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    async fn insert_match_request_batch(pool: &PgPool, batch_id: i32) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_request_batches(
+                id, template, deadline_at, status, created_by_user_id,
+                created_by_display_name, created_at, updated_at
+            )
+            VALUES($1, 'regular_scrim', now() + interval '2 days', 'draft', '42', 'Coach', now(), now())
+            "#,
+        )
+        .bind(batch_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_requests(
+                id, batch_id, team_a_id, team_b_id, status, slot_options, created_at, updated_at
+            )
+            VALUES(
+                $1, $2, 1, 2, 'draft',
+                '[{"day":"sat","from":1200,"to":1320},{"day":"sun","from":1200,"to":1320}]'::jsonb,
+                now(), now()
+            )
+            "#,
+        )
+        .bind(batch_id + 1)
+        .bind(batch_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn match_request_batch_status(pool: &PgPool, batch_id: i32) -> anyhow::Result<String> {
+        Ok(
+            sqlx::query_scalar("SELECT status FROM scrim.match_request_batches WHERE id = $1")
+                .bind(batch_id)
+                .fetch_one(pool)
+                .await?,
+        )
     }
 
     async fn lobby_state(pool: &PgPool, match_id: i32) -> anyhow::Result<String> {

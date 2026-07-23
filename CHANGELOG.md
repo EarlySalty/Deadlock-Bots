@@ -1,3 +1,11 @@
+## #277 — Scrim-Terminabfragen gehen in die Teamkanäle
+
+Problem: Angelegte Scrim-Match-Abfragen lagen bisher nur im Dashboard-Speicher. Teams bekamen daraus noch keine konkrete Terminabfrage im eigenen Kanal.
+
+Änderung: Der Bot übernimmt neue Abfrage-Batches, postet je betroffenem Team eine pingfreie Terminabfrage mit Gegner, Frist und Slots und speichert die Nachrichten-IDs für die weitere Auswertung.
+
+Aktuelles Verhalten: Nach dem Anlegen kann der Bot die Terminabfragen in die Teamkanäle bringen; Antwort- und Button-Auswertung bleibt der nächste separate Schritt.
+
 ## #276 — Scrim-Lobbycode blockiert Ergebnisaktionen bis zum Bot-Post
 
 Problem: Direkt nach dem Klick auf `Lobby ist offen` konnte ein Ergebnisabruf den noch offenen Lobbycode-Post überschreiben.
