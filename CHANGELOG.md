@@ -1,3 +1,11 @@
+## #274 — Scrim-Lobbycode läuft über den manuellen Zielsystem-Flow
+
+Problem: Der alte Scrim-Lobby-Pfad konnte eine Custom Lobby vollautomatisch starten und danach lange Discord-Texte wie „Scrim-Lobby steht!" posten. Das passte nicht zum Zielsystem, in dem die Lobby zunächst manuell geöffnet und nur der Code sauber ausgespielt wird.
+
+Änderung: Das Dashboard speichert jetzt einen 5-stelligen Lobbycode am Match, normalisiert ihn auf Großbuchstaben und setzt den Bot-State auf `lobby_open`. Der Bot postet oder editiert daraus in beiden Teamkanälen nur noch die schlichte Textnachricht `Lobby Code: ABC12`. Der alte `/start`-Dashboard-Auslöser startet keine Vollautomatik mehr.
+
+Aktuelles Verhalten: Coaches können den Code als Orga-Fallback setzen; der Bot bringt ihn pingfrei in die Teamkanäle und speichert Message-IDs sowie Korrekturen für die Orga-Spur.
+
 ## #273 — Scrim-Match-Abfragen werden im Rust-Dashboard gespeichert
 
 Problem: Leos Scrim-Planung brauchte eine verbindliche Match-Abfrage als Grundlage, aber im produktiven Rust-Dashboard gab es dafür noch keinen Speichervertrag. Teams, Slots, Fristen und Vorlagen konnten deshalb nicht zentral als Abfrage-Batch angelegt werden.
