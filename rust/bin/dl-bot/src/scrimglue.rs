@@ -108,6 +108,7 @@ struct ClaimedMatchRequest {
     request_id: i64,
     slot_options: Value,
     targets: Vec<MatchRequestTarget>,
+    missing_targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -362,6 +363,7 @@ async fn claim_next_pending_match_request_batch(
         let team_b_id: Option<i64> = row.get("team_b_id");
         let team_b_name: Option<String> = row.get("team_b_name");
         let mut targets = Vec::new();
+        let mut missing_targets = Vec::new();
         if let Some(channel_id) = valid_channel_id(row.get("team_a_channel_id")) {
             targets.push(MatchRequestTarget {
                 team_id: team_a_id,
@@ -369,23 +371,26 @@ async fn claim_next_pending_match_request_batch(
                 channel_id,
                 opponent_name: team_b_name.clone(),
             });
+        } else {
+            missing_targets.push(team_a_name.clone());
         }
-        if let (Some(team_id), Some(team_name), Some(channel_id)) = (
-            team_b_id,
-            team_b_name.clone(),
-            valid_channel_id(row.get("team_b_channel_id")),
-        ) {
-            targets.push(MatchRequestTarget {
-                team_id,
-                team_name,
-                channel_id,
-                opponent_name: Some(team_a_name),
-            });
+        if let (Some(team_id), Some(team_name)) = (team_b_id, team_b_name.clone()) {
+            if let Some(channel_id) = valid_channel_id(row.get("team_b_channel_id")) {
+                targets.push(MatchRequestTarget {
+                    team_id,
+                    team_name,
+                    channel_id,
+                    opponent_name: Some(team_a_name),
+                });
+            } else {
+                missing_targets.push(team_name);
+            }
         }
         requests.push(ClaimedMatchRequest {
             request_id: row.get("request_id"),
             slot_options: row.get("slot_options"),
             targets,
+            missing_targets,
         });
     }
 
@@ -448,6 +453,13 @@ async fn send_match_request_batch(
         errors.push("keine Match-Abfragen".to_string());
     }
     for request in &batch.requests {
+        if !request.missing_targets.is_empty() {
+            errors.push(format!(
+                "request {}: fehlender Teamkanal fuer {}",
+                request.request_id,
+                request.missing_targets.join(", ")
+            ));
+        }
         if request.targets.is_empty() {
             errors.push(format!("request {}: kein Teamkanal", request.request_id));
             continue;
@@ -1490,7 +1502,24 @@ mod tests {
                 },
             ]
         );
+        assert!(claim.requests[0].missing_targets.is_empty());
         assert_eq!(match_request_batch_status(pool, 30).await?, "posting");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn claim_next_pending_match_request_batch_meldet_fehlenden_teamkanal() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, None).await?;
+        insert_match_request_batch(pool, 50).await?;
+
+        let claim = claim_next_pending_match_request_batch(pool)
+            .await?
+            .expect("claim");
+        assert_eq!(claim.requests[0].targets.len(), 1);
+        assert_eq!(claim.requests[0].missing_targets, vec!["team-2"]);
         Ok(())
     }
 
