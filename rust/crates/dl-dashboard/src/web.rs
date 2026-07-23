@@ -414,6 +414,10 @@ pub fn router(app: DashboardApp) -> Router {
             post(crate::scrims::scrims_start_match),
         )
         .route(
+            "/api/scrims/matches/{match_id}/lobby-code",
+            post(crate::scrims::scrims_set_lobby_code),
+        )
+        .route(
             "/api/scrims/matches/{match_id}/result",
             post(crate::scrims::scrims_request_result),
         )

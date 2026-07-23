@@ -16,7 +16,7 @@ use crate::web::{err_text, ok_json, DashboardApp};
 const MATCHES_LOCK: i64 = 42_060_004_003;
 const STATE_DRAFT: &str = "draft";
 const STATE_SCHEDULED: &str = "scheduled";
-const STATE_START_REQUESTED: &str = "start_requested";
+const STATE_LOBBY_OPEN: &str = "lobby_open";
 const STATE_RESULT_REQUESTED: &str = "result_requested";
 const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
@@ -143,10 +143,73 @@ pub async fn scrims_create_match_request_batch(
 
 pub async fn scrims_start_match(
     State(app): State<DashboardApp>,
+    _headers: HeaderMap,
+    Path(_match_id): Path<String>,
+) -> Response {
+    let _ = app;
+    err_text(
+        409,
+        "Automatische Lobby-Erstellung ist deaktiviert; Lobbycode im Dashboard setzen.",
+    )
+}
+
+pub async fn scrims_set_lobby_code(
+    State(app): State<DashboardApp>,
     headers: HeaderMap,
     Path(match_id): Path<String>,
+    body: Bytes,
 ) -> Response {
-    request_state(app, headers, &match_id, STATE_START_REQUESTED).await
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let match_id = match parse_path_i32(&match_id, "match_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let code = match parse_lobby_code(&payload) {
+        Ok(code) => code,
+        Err(resp) => return resp,
+    };
+
+    match set_lobby_code(
+        app.pool(),
+        match_id,
+        &code,
+        &session.user_id.to_string(),
+        &session.display_name,
+    )
+    .await
+    {
+        Ok(LobbyCodeUpdate::Updated(scrim_match)) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match.lobby_code",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                match_id,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "match": scrim_match }))
+        }
+        Ok(LobbyCodeUpdate::NotFound) => err_text(404, "Match not found"),
+        Ok(LobbyCodeUpdate::BotOwned(current)) => err_text(
+            409,
+            &format!(
+                "Lobby state is controlled by bot: {}",
+                current.unwrap_or_default()
+            ),
+        ),
+        Err(err) => {
+            tracing::error!(%err, match_id, "Scrim-Lobbycode-Speicherung fehlgeschlagen");
+            err_text(500, "Save lobby code failed")
+        }
+    }
 }
 
 pub async fn scrims_request_result(
@@ -518,6 +581,17 @@ fn parse_notes(payload: &Value) -> Result<Option<String>, Response> {
     }
 }
 
+fn parse_lobby_code(payload: &Value) -> Result<String, Response> {
+    let raw = match get2(payload, "code", "lobbyCode") {
+        Some(Value::String(value)) => value.trim(),
+        _ => return Err(err_text(400, "code must be string")),
+    };
+    if raw.chars().count() != 5 || !raw.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err(err_text(400, "code must be exactly 5 letters or numbers"));
+    }
+    Ok(raw.to_ascii_uppercase())
+}
+
 async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
     let participants = load_participants(pool).await?;
     let teams = load_teams(pool).await?;
@@ -635,12 +709,17 @@ async fn load_matches(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
                m.when_text,
                m.scheduled_at,
                m.status,
-               m.lobby_state,
-               m.join_code,
-               m.steam_match_id,
-               m.winner_team_id::bigint AS winner_team_id,
-               m.coach_spectator_discord_id,
-               m.created_at,
+	               m.lobby_state,
+	               m.join_code,
+	               m.lobby_code_source_user_id,
+	               m.lobby_code_source_display_name,
+	               m.lobby_code_updated_at,
+	               m.lobby_code_message_ids,
+	               m.lobby_code_corrections,
+	               m.steam_match_id,
+	               m.winner_team_id::bigint AS winner_team_id,
+	               m.coach_spectator_discord_id,
+	               m.created_at,
                m.updated_at
           FROM scrim.matches m
           LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
@@ -662,13 +741,18 @@ fn match_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
         "team_b_name": row.try_get::<Option<String>, _>("team_b_name")?,
         "when_text": row.try_get::<Option<String>, _>("when_text")?,
         "scheduled_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("scheduled_at")?),
-        "status": row.try_get::<String, _>("status")?,
-        "lobby_state": row.try_get::<Option<String>, _>("lobby_state")?,
-        "join_code": row.try_get::<Option<String>, _>("join_code")?,
-        "steam_match_id": row.try_get::<Option<i64>, _>("steam_match_id")?,
-        "winner_team_id": row.try_get::<Option<i64>, _>("winner_team_id")?,
-        "coach_spectator_discord_id": row.try_get::<Option<i64>, _>("coach_spectator_discord_id")?,
-        "created_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("created_at")?),
+            "status": row.try_get::<String, _>("status")?,
+            "lobby_state": row.try_get::<Option<String>, _>("lobby_state")?,
+            "join_code": row.try_get::<Option<String>, _>("join_code")?,
+            "lobby_code_source_user_id": row.try_get::<Option<String>, _>("lobby_code_source_user_id")?,
+            "lobby_code_source_display_name": row.try_get::<Option<String>, _>("lobby_code_source_display_name")?,
+            "lobby_code_updated_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("lobby_code_updated_at")?),
+            "lobby_code_message_ids": row.try_get::<Option<Value>, _>("lobby_code_message_ids")?.unwrap_or_else(|| json!({})),
+            "lobby_code_corrections": row.try_get::<Option<Value>, _>("lobby_code_corrections")?.unwrap_or_else(|| json!([])),
+            "steam_match_id": row.try_get::<Option<i64>, _>("steam_match_id")?,
+            "winner_team_id": row.try_get::<Option<i64>, _>("winner_team_id")?,
+            "coach_spectator_discord_id": row.try_get::<Option<i64>, _>("coach_spectator_discord_id")?,
+            "created_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("created_at")?),
         "updated_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("updated_at")?),
     }))
 }
@@ -857,12 +941,17 @@ async fn load_match(pool: &PgPool, id: i32) -> DashboardDbResult<Option<Value>> 
                m.when_text,
                m.scheduled_at,
                m.status,
-               m.lobby_state,
-               m.join_code,
-               m.steam_match_id,
-               m.winner_team_id::bigint AS winner_team_id,
-               m.coach_spectator_discord_id,
-               m.created_at,
+	               m.lobby_state,
+	               m.join_code,
+	               m.lobby_code_source_user_id,
+	               m.lobby_code_source_display_name,
+	               m.lobby_code_updated_at,
+	               m.lobby_code_message_ids,
+	               m.lobby_code_corrections,
+	               m.steam_match_id,
+	               m.winner_team_id::bigint AS winner_team_id,
+	               m.coach_spectator_discord_id,
+	               m.created_at,
                m.updated_at
           FROM scrim.matches m
           LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
@@ -880,6 +969,84 @@ enum LobbyRequest {
     Updated(&'static str),
     NotFound,
     BotOwned(Option<String>),
+}
+
+enum LobbyCodeUpdate {
+    Updated(Value),
+    NotFound,
+    BotOwned(Option<String>),
+}
+
+async fn set_lobby_code(
+    pool: &PgPool,
+    match_id: i32,
+    code: &str,
+    source_user_id: &str,
+    source_display_name: &str,
+) -> DashboardDbResult<LobbyCodeUpdate> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query(
+        r#"
+        SELECT lobby_state, join_code
+          FROM scrim.matches
+         WHERE id = $1
+         FOR UPDATE
+        "#,
+    )
+    .bind(match_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = current else {
+        return Ok(LobbyCodeUpdate::NotFound);
+    };
+    let lobby_state = row.try_get::<Option<String>, _>("lobby_state")?;
+    if lobby_state.as_deref().is_some_and(is_bot_owned_lobby_state) {
+        return Ok(LobbyCodeUpdate::BotOwned(lobby_state));
+    }
+
+    let previous_code = row.try_get::<Option<String>, _>("join_code")?;
+    let corrections = previous_code
+        .as_deref()
+        .filter(|previous| *previous != code)
+        .map(|previous| {
+            json!([{
+                "from": previous,
+                "to": code,
+                "source_user_id": source_user_id,
+                "source_display_name": source_display_name,
+                "at": Utc::now().timestamp(),
+            }])
+        })
+        .unwrap_or_else(|| json!([]));
+
+    sqlx::query(
+        r#"
+        UPDATE scrim.matches
+           SET join_code = $2,
+               lobby_state = $3,
+               lobby_code_source_user_id = $4,
+               lobby_code_source_display_name = $5,
+               lobby_code_updated_at = now(),
+               lobby_code_corrections = COALESCE(lobby_code_corrections, '[]'::jsonb) || $6::jsonb,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(match_id)
+    .bind(code)
+    .bind(STATE_LOBBY_OPEN)
+    .bind(source_user_id)
+    .bind(source_display_name)
+    .bind(&corrections)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(LobbyCodeUpdate::Updated(
+        load_match(pool, match_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?,
+    ))
 }
 
 async fn set_lobby_request(
@@ -923,6 +1090,7 @@ fn is_bot_owned_lobby_state(state: &str) -> bool {
     matches!(
         state,
         "starting"
+            | "lobby_posting"
             | "start_failed"
             | "in_progress"
             | "finished"
@@ -1227,16 +1395,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_route_setzt_flag_und_ueberschreibt_bot_state_nicht(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn start_route_startet_keine_alte_vollautomatik() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (db, app, session_id, csrf) = app_with_session().await?;
         insert_team(db.pool(), 1, "A").await?;
         insert_team(db.pool(), 2, "B").await?;
         insert_match(db.pool(), 10, "draft").await?;
-        insert_match(db.pool(), 11, "in_progress").await?;
 
         let response = app
-            .clone()
             .oneshot(auth_post(
                 "/api/scrims/matches/10/start",
                 &session_id,
@@ -1244,27 +1410,54 @@ mod tests {
                 json!({}),
             )?)
             .await?;
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         let state =
             sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 10")
                 .fetch_one(db.pool())
                 .await?;
-        assert_eq!(state, "start_requested");
+        assert_eq!(state, "draft");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lobby_code_route_normalisiert_speichert_und_validiert_zielsystem_code(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 10, "draft").await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrims/matches/10/lobby-code",
+                &session_id,
+                &csrf,
+                json!({ "code": "abC12" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let row = sqlx::query("SELECT join_code, lobby_state FROM scrim.matches WHERE id = 10")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(
+            row.try_get::<Option<String>, _>("join_code")?,
+            Some("ABC12".to_string())
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("lobby_state")?,
+            Some("lobby_open".to_string())
+        );
 
         let response = app
             .oneshot(auth_post(
-                "/api/scrims/matches/11/start",
+                "/api/scrims/matches/10/lobby-code",
                 &session_id,
                 &csrf,
-                json!({}),
+                json!({ "code": "ABC-1" }),
             )?)
             .await?;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let state =
-            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 11")
-                .fetch_one(db.pool())
-                .await?;
-        assert_eq!(state, "in_progress");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 }

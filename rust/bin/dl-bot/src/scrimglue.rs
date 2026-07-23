@@ -12,6 +12,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
+const STATE_LOBBY_OPEN: &str = "lobby_open";
+const STATE_LOBBY_POSTING: &str = "lobby_posting";
+const STATE_LOBBY_POSTED: &str = "lobby_posted";
+const STATE_LOBBY_POST_FAILED: &str = "lobby_post_failed";
 const STATE_START_REQUESTED: &str = "start_requested";
 const STATE_STARTING: &str = "starting";
 const STATE_START_FAILED: &str = "start_failed";
@@ -63,6 +67,7 @@ fn decide_scrim_voice_action(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrimDriverAction {
+    PostLobbyCode,
     Start,
     FetchResult,
 }
@@ -70,6 +75,7 @@ enum ScrimDriverAction {
 impl ScrimDriverAction {
     fn from_requested_state(state: &str) -> Option<Self> {
         match state {
+            STATE_LOBBY_OPEN => Some(Self::PostLobbyCode),
             STATE_START_REQUESTED => Some(Self::Start),
             STATE_RESULT_REQUESTED => Some(Self::FetchResult),
             _ => None,
@@ -124,6 +130,7 @@ async fn process_one_pending(
     };
 
     match claim.action {
+        ScrimDriverAction::PostLobbyCode => handle_lobby_code(pool, adapter, &claim).await,
         ScrimDriverAction::Start => {
             handle_start(pool, adapter, tempvoice, voice_config, &claim).await
         }
@@ -145,17 +152,18 @@ async fn claim_next_pending_match(
               FROM scrim.matches m
               LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
               LEFT JOIN scrim.teams tb ON tb.id = m.team_b_id
-             WHERE m.lobby_state IN ($1, $2)
+	             WHERE m.lobby_state IN ($1, $2, $3)
              ORDER BY COALESCE(m.updated_at, m.created_at), m.id
              LIMIT 1
              FOR UPDATE OF m SKIP LOCKED
         )
         UPDATE scrim.matches m
-           SET lobby_state = CASE candidate.requested_state
-                    WHEN $1 THEN $3
-                    WHEN $2 THEN $4
-                    ELSE m.lobby_state
-               END,
+	           SET lobby_state = CASE candidate.requested_state
+	                    WHEN $1 THEN $4
+	                    WHEN $2 THEN $5
+	                    WHEN $3 THEN $6
+	                    ELSE m.lobby_state
+	               END,
                updated_at = now()
           FROM candidate
          WHERE m.id = candidate.id
@@ -167,8 +175,10 @@ async fn claim_next_pending_match(
     )
     .bind(STATE_START_REQUESTED)
     .bind(STATE_RESULT_REQUESTED)
+    .bind(STATE_LOBBY_OPEN)
     .bind(STATE_STARTING)
     .bind(STATE_RESULT_FETCHING)
+    .bind(STATE_LOBBY_POSTING)
     .fetch_optional(pool)
     .await
     .context("Scrim-Match-Claim fehlgeschlagen")?;
@@ -188,6 +198,57 @@ async fn claim_next_pending_match(
             row.get("team_b_channel_id"),
         ),
     }))
+}
+
+async fn handle_lobby_code(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    claim: &ClaimedMatch,
+) -> anyhow::Result<()> {
+    let Some(code) = load_lobby_code(pool, claim.match_id).await? else {
+        set_lobby_state(pool, claim.match_id, STATE_LOBBY_POST_FAILED).await?;
+        post_log(
+            adapter,
+            lobby_code_failure_message(claim.match_id, "Lobbycode fehlt", line!()),
+            claim.match_id,
+        )
+        .await;
+        return Ok(());
+    };
+    if claim.team_channels.is_empty() {
+        set_lobby_state(pool, claim.match_id, STATE_LOBBY_POST_FAILED).await?;
+        post_log(
+            adapter,
+            missing_target_message(claim.match_id, "lobby_code", line!()),
+            claim.match_id,
+        )
+        .await;
+        return Ok(());
+    }
+
+    match sync_lobby_code_messages(pool, adapter, claim.match_id, &claim.team_channels, &code).await
+    {
+        Ok(message_ids) => {
+            save_lobby_code_message_ids(pool, claim.match_id, &message_ids, STATE_LOBBY_POSTED)
+                .await?;
+            post_log(
+                adapter,
+                lobby_code_success_log_message(claim.match_id, &code, message_ids.len(), line!()),
+                claim.match_id,
+            )
+            .await;
+        }
+        Err(err) => {
+            set_lobby_state(pool, claim.match_id, STATE_LOBBY_POST_FAILED).await?;
+            post_log(
+                adapter,
+                lobby_code_failure_message(claim.match_id, &err, line!()),
+                claim.match_id,
+            )
+            .await;
+        }
+    }
+    Ok(())
 }
 
 async fn handle_start(
@@ -282,6 +343,116 @@ async fn set_lobby_state(pool: &PgPool, match_id: i64, lobby_state: &str) -> any
     .execute(pool)
     .await
     .with_context(|| format!("Scrim-Match-State-Update fehlgeschlagen: {match_id}"))?;
+    Ok(())
+}
+
+async fn load_lobby_code(pool: &PgPool, match_id: i64) -> anyhow::Result<Option<String>> {
+    let code = sqlx::query_scalar::<_, Option<String>>(
+        r#"
+        SELECT join_code
+          FROM scrim.matches
+         WHERE id = $1
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("Scrim-Lobbycode-Lookup fehlgeschlagen: {match_id}"))?
+    .flatten()
+    .map(|value| value.trim().to_ascii_uppercase())
+    .filter(|value| !value.is_empty());
+    Ok(code)
+}
+
+async fn load_lobby_code_message_ids(
+    pool: &PgPool,
+    match_id: i64,
+) -> anyhow::Result<BTreeMap<u64, u64>> {
+    let raw = sqlx::query_scalar::<_, Option<Value>>(
+        r#"
+        SELECT lobby_code_message_ids
+          FROM scrim.matches
+         WHERE id = $1
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("Scrim-Lobbycode-Message-Lookup fehlgeschlagen: {match_id}"))?
+    .flatten()
+    .unwrap_or_else(|| json!({}));
+    let mut ids = BTreeMap::new();
+    if let Some(obj) = raw.as_object() {
+        for (channel_id, message_id) in obj {
+            if let (Ok(channel_id), Some(message_id)) = (channel_id.parse(), message_id.as_u64()) {
+                ids.insert(channel_id, message_id);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+async fn sync_lobby_code_messages(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    match_id: i64,
+    team_channels: &[u64],
+    code: &str,
+) -> Result<BTreeMap<u64, u64>, String> {
+    let mut stored = load_lobby_code_message_ids(pool, match_id)
+        .await
+        .map_err(|err| err.to_string())?;
+    let content = lobby_code_message(code);
+    let body = message_body(&content);
+    let mut errors = Vec::new();
+
+    for &channel_id in team_channels {
+        if let Some(message_id) = stored.get(&channel_id).copied() {
+            if let Err(err) = adapter.edit_raw_public(channel_id, message_id, &body).await {
+                errors.push(format!("edit {channel_id}/{message_id}: {err}"));
+            }
+        } else {
+            match adapter.send_raw_public(channel_id, &body).await {
+                Ok(message_id) => {
+                    stored.insert(channel_id, message_id);
+                }
+                Err(err) => errors.push(format!("post {channel_id}: {err}")),
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(stored)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+async fn save_lobby_code_message_ids(
+    pool: &PgPool,
+    match_id: i64,
+    message_ids: &BTreeMap<u64, u64>,
+    lobby_state: &str,
+) -> anyhow::Result<()> {
+    let mut value = Map::new();
+    for (channel_id, message_id) in message_ids {
+        value.insert(channel_id.to_string(), json!(message_id));
+    }
+    sqlx::query(
+        r#"
+        UPDATE scrim.matches
+           SET lobby_code_message_ids = $2::jsonb,
+               lobby_state = $3,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .bind(Value::Object(value))
+    .bind(lobby_state)
+    .execute(pool)
+    .await
+    .with_context(|| format!("Scrim-Lobbycode-Message-Speicherung fehlgeschlagen: {match_id}"))?;
     Ok(())
 }
 
@@ -703,19 +874,27 @@ fn start_success_message(
     outcome: &StartScrimMatchOutcome,
     _source_line: u32,
 ) -> String {
-    let invited = outcome.invited_participants.len();
-    let unlinked = outcome.unlinked_participants.len();
-    let mut msg = format!(
-        "🎮 **Scrim-Lobby steht!**\nDie Custom-Lobby ist erstellt und die Einladungen sind raus.\n**Join-Code:** `{}`\n{invited} Spieler eingeladen.",
-        outcome.join_code,
-    );
-    if unlinked > 0 {
-        msg.push_str(&format!(
-            "\n⚠️ {unlinked} Spieler ohne verknüpften Steam-Account — die kommen per Join-Code manuell rein."
-        ));
-    }
-    msg.push_str("\nViel Erfolg! 🫡");
-    msg
+    lobby_code_message(&outcome.join_code)
+}
+
+fn lobby_code_message(code: &str) -> String {
+    format!("Lobby Code: {}", code.trim().to_ascii_uppercase())
+}
+
+fn lobby_code_success_log_message(
+    match_id: i64,
+    code: &str,
+    target_count: usize,
+    _source_line: u32,
+) -> String {
+    format!(
+        "Scrim-Lobbycode gepostet (Match {match_id}, Ziele: {target_count}, Code: {}).",
+        code
+    )
+}
+
+fn lobby_code_failure_message(match_id: i64, reason: &str, _source_line: u32) -> String {
+    format!("⚠️ Scrim-Lobbycode konnte nicht gepostet werden (Match {match_id}): {reason}.")
 }
 
 fn start_failure_message(match_id: i64, _source_line: u32) -> String {
@@ -797,6 +976,7 @@ mod tests {
         insert_match(pool, 12, STATE_STARTING).await?;
         insert_match(pool, 10, STATE_START_REQUESTED).await?;
         insert_match(pool, 11, STATE_RESULT_REQUESTED).await?;
+        insert_match(pool, 13, "lobby_open").await?;
 
         let first = claim_next_pending_match(pool, None).await?;
         assert_eq!(
@@ -820,8 +1000,25 @@ mod tests {
         );
         assert_eq!(lobby_state(pool, 11).await?, STATE_RESULT_FETCHING);
         assert_eq!(lobby_state(pool, 12).await?, STATE_STARTING);
+        let third = claim_next_pending_match(pool, None).await?;
+        assert_eq!(
+            third,
+            Some(ClaimedMatch {
+                match_id: 13,
+                action: ScrimDriverAction::PostLobbyCode,
+                team_channels: vec![100, 200],
+            })
+        );
+        assert_eq!(lobby_state(pool, 13).await?, "lobby_posting");
         assert_eq!(claim_next_pending_match(pool, None).await?, None);
         Ok(())
+    }
+
+    #[test]
+    fn lobby_code_message_ist_schlicht_und_pingfrei() {
+        assert_eq!(lobby_code_message("ABC12"), "Lobby Code: ABC12");
+        let body = message_body(&lobby_code_message("ABC12"));
+        assert_eq!(body["allowed_mentions"], json!({ "parse": [] }));
     }
 
     async fn insert_team(
