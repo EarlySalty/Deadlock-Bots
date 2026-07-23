@@ -410,6 +410,10 @@ pub fn router(app: DashboardApp) -> Router {
             post(crate::scrims::scrims_create_match_request_batch),
         )
         .route(
+            "/api/scrims/match-requests/{batch_id}/summary",
+            get(crate::scrims::scrims_match_request_summary),
+        )
+        .route(
             "/api/scrims/matches/{match_id}/start",
             post(crate::scrims::scrims_start_match),
         )

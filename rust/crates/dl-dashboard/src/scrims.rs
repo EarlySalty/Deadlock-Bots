@@ -21,6 +21,7 @@ const STATE_RESULT_REQUESTED: &str = "result_requested";
 const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
 const MATCH_REQUEST_MAX_SLOTS: usize = 5;
+const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
 
 pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
     if let Err(resp) = app.guard_full(&headers).await {
@@ -137,6 +138,28 @@ pub async fn scrims_create_match_request_batch(
         Err(MatchRequestCreateError::Db(err)) => {
             tracing::error!(%err, "Scrim-Match-Abfrage-Anlage fehlgeschlagen");
             err_text(500, "Create match request failed")
+        }
+    }
+}
+
+pub async fn scrims_match_request_summary(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(batch_id): Path<String>,
+) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    let batch_id = match parse_path_i32(&batch_id, "batch_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match load_match_request_summary(app.pool(), batch_id).await {
+        Ok(Some(summary)) => ok_json(summary),
+        Ok(None) => err_text(404, "Match request batch not found"),
+        Err(err) => {
+            tracing::error!(%err, batch_id, "Scrim-Match-Abfrage-Auswertung fehlgeschlagen");
+            err_text(500, "Match request summary failed")
         }
     }
 }
@@ -317,6 +340,30 @@ struct MatchRequestBatchInput {
     template: String,
     deadline_at: DateTime<Utc>,
     matches: Vec<MatchRequestInput>,
+}
+
+struct MatchRequestSummarySeed {
+    request_id: i32,
+    team_a_id: i32,
+    team_a_name: String,
+    team_b_id: Option<i32>,
+    team_b_name: Option<String>,
+    status: String,
+    slot_options: Value,
+}
+
+#[derive(Clone)]
+struct MatchRequestMember {
+    participant_id: i32,
+    display_name: String,
+    is_bench: bool,
+}
+
+#[derive(Clone)]
+struct MatchRequestResponse {
+    participant_id: i32,
+    slot_index: i32,
+    response: String,
 }
 
 struct MatchRequestInput {
@@ -596,11 +643,35 @@ async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
     let participants = load_participants(pool).await?;
     let teams = load_teams(pool).await?;
     let matches = load_matches(pool).await?;
+    let match_request_summaries = load_recent_match_request_summaries(pool).await?;
     Ok(json!({
         "teams": teams,
         "participants": participants,
         "matches": matches,
+        "match_request_summaries": match_request_summaries,
     }))
+}
+
+async fn load_recent_match_request_summaries(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
+    let batch_ids = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT id
+          FROM scrim.match_request_batches
+         WHERE status IN ('draft', 'posting', 'open', 'post_failed', 'closed')
+         ORDER BY deadline_at DESC, id DESC
+         LIMIT $1
+        "#,
+    )
+    .bind(MATCH_REQUEST_SUMMARY_LIMIT)
+    .fetch_all(pool)
+    .await?;
+    let mut summaries = Vec::with_capacity(batch_ids.len());
+    for batch_id in batch_ids {
+        if let Some(summary) = load_match_request_summary(pool, batch_id).await? {
+            summaries.push(summary);
+        }
+    }
+    Ok(summaries)
 }
 
 async fn load_participants(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
@@ -928,6 +999,313 @@ async fn create_match_request_batch_record(
         "deadline_at": utc_to_json_unix(Some(input.deadline_at)),
         "matches": matches,
     }))
+}
+
+async fn load_match_request_summary(
+    pool: &PgPool,
+    batch_id: i32,
+) -> DashboardDbResult<Option<Value>> {
+    let Some(batch) = sqlx::query(
+        r#"
+        SELECT id::bigint AS id, template, deadline_at, status
+          FROM scrim.match_request_batches
+         WHERE id = $1
+        "#,
+    )
+    .bind(batch_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let deadline_at = batch.try_get::<DateTime<Utc>, _>("deadline_at")?;
+    let request_rows = sqlx::query(
+        r#"
+        SELECT mr.id,
+               mr.team_a_id,
+               ta.name AS team_a_name,
+               mr.team_b_id,
+               tb.name AS team_b_name,
+               mr.status,
+               mr.slot_options
+          FROM scrim.match_requests mr
+          JOIN scrim.teams ta ON ta.id = mr.team_a_id
+          LEFT JOIN scrim.teams tb ON tb.id = mr.team_b_id
+         WHERE mr.batch_id = $1
+         ORDER BY mr.id ASC
+        "#,
+    )
+    .bind(batch_id)
+    .fetch_all(pool)
+    .await?;
+
+    let requests = request_rows
+        .into_iter()
+        .map(|row| {
+            Ok(MatchRequestSummarySeed {
+                request_id: row.try_get("id")?,
+                team_a_id: row.try_get("team_a_id")?,
+                team_a_name: row.try_get("team_a_name")?,
+                team_b_id: row.try_get("team_b_id")?,
+                team_b_name: row.try_get("team_b_name")?,
+                status: row.try_get("status")?,
+                slot_options: row.try_get("slot_options")?,
+            })
+        })
+        .collect::<DashboardDbResult<Vec<_>>>()?;
+
+    let team_ids = requests
+        .iter()
+        .flat_map(|request| [Some(request.team_a_id), request.team_b_id])
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let request_ids = requests
+        .iter()
+        .map(|request| request.request_id)
+        .collect::<Vec<_>>();
+    let members = load_match_request_members(pool, &team_ids).await?;
+    let responses = load_match_request_responses(pool, &request_ids).await?;
+    let deadline_passed = deadline_at <= Utc::now();
+    let mut matches = Vec::with_capacity(requests.len());
+
+    for request in requests {
+        matches.push(match_request_summary_json(
+            &request,
+            &members,
+            &responses,
+            deadline_passed,
+        ));
+    }
+
+    Ok(Some(json!({
+        "batch": {
+            "id": batch.try_get::<i64, _>("id")?,
+            "template": batch.try_get::<String, _>("template")?,
+            "status": batch.try_get::<String, _>("status")?,
+            "deadline_at": utc_to_json_unix(Some(deadline_at)),
+        },
+        "deadline_passed": deadline_passed,
+        "matches": matches,
+    })))
+}
+
+async fn load_match_request_members(
+    pool: &PgPool,
+    team_ids: &[i32],
+) -> DashboardDbResult<HashMap<i32, Vec<MatchRequestMember>>> {
+    if team_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT tm.team_id,
+               p.id AS participant_id,
+               p.display_name,
+               tm.is_bench
+          FROM scrim.team_members tm
+          JOIN scrim.participants p ON p.id = tm.participant_id
+         WHERE tm.team_id = ANY($1)
+         ORDER BY tm.team_id ASC, tm.is_bench ASC, p.display_name ASC, p.id ASC
+        "#,
+    )
+    .bind(team_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut members: HashMap<i32, Vec<MatchRequestMember>> = HashMap::new();
+    for row in rows {
+        members
+            .entry(row.try_get("team_id")?)
+            .or_default()
+            .push(MatchRequestMember {
+                participant_id: row.try_get("participant_id")?,
+                display_name: row.try_get("display_name")?,
+                is_bench: row.try_get("is_bench")?,
+            });
+    }
+    Ok(members)
+}
+
+async fn load_match_request_responses(
+    pool: &PgPool,
+    request_ids: &[i32],
+) -> DashboardDbResult<HashMap<(i32, i32), Vec<MatchRequestResponse>>> {
+    if request_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT request_id, team_id, participant_id, slot_index, response
+          FROM scrim.match_request_responses
+         WHERE request_id = ANY($1)
+        "#,
+    )
+    .bind(request_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut responses: HashMap<(i32, i32), Vec<MatchRequestResponse>> = HashMap::new();
+    for row in rows {
+        responses
+            .entry((row.try_get("request_id")?, row.try_get("team_id")?))
+            .or_default()
+            .push(MatchRequestResponse {
+                participant_id: row.try_get("participant_id")?,
+                slot_index: row.try_get("slot_index")?,
+                response: row.try_get("response")?,
+            });
+    }
+    Ok(responses)
+}
+
+fn match_request_summary_json(
+    request: &MatchRequestSummarySeed,
+    members: &HashMap<i32, Vec<MatchRequestMember>>,
+    responses: &HashMap<(i32, i32), Vec<MatchRequestResponse>>,
+    deadline_passed: bool,
+) -> Value {
+    let slot_values = request.slot_options.as_array().cloned().unwrap_or_default();
+    let mut slots = slot_values
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            json!({
+                "index": index,
+                "slot": slot,
+                "available_count": 0,
+                "starter_available_count": 0,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut teams = Vec::new();
+    let mut missing_response_count = 0usize;
+    let mut no_slot_count = 0usize;
+
+    for (team_id, team_name) in [
+        (request.team_a_id, Some(request.team_a_name.as_str())),
+        (
+            request.team_b_id.unwrap_or_default(),
+            request.team_b_name.as_deref(),
+        ),
+    ] {
+        if team_id == 0 {
+            continue;
+        }
+        let team_members = members.get(&team_id).cloned().unwrap_or_default();
+        let team_responses = responses
+            .get(&(request.request_id, team_id))
+            .cloned()
+            .unwrap_or_default();
+        let responded = team_responses
+            .iter()
+            .map(|response| response.participant_id)
+            .collect::<BTreeSet<_>>();
+        let mut team_slot_counts = vec![0usize; slots.len()];
+        let mut team_missing = Vec::new();
+        let mut team_no_slot = 0usize;
+        let member_by_id = team_members
+            .iter()
+            .map(|member| (member.participant_id, member))
+            .collect::<HashMap<_, _>>();
+
+        for member in &team_members {
+            if !responded.contains(&member.participant_id) {
+                missing_response_count += 1;
+                team_missing.push(json!({
+                    "participant_id": member.participant_id,
+                    "display_name": member.display_name,
+                }));
+            }
+        }
+
+        for response in &team_responses {
+            if response.slot_index == -1 {
+                if response.response == "unavailable" {
+                    no_slot_count += 1;
+                    team_no_slot += 1;
+                }
+                continue;
+            }
+            let slot_index = response.slot_index as usize;
+            if slot_index >= slots.len() || response.response != "available" {
+                continue;
+            }
+            team_slot_counts[slot_index] += 1;
+            slots[slot_index]["available_count"] = json!(
+                slots[slot_index]["available_count"]
+                    .as_u64()
+                    .unwrap_or_default()
+                    + 1
+            );
+            if member_by_id
+                .get(&response.participant_id)
+                .is_some_and(|member| !member.is_bench)
+            {
+                slots[slot_index]["starter_available_count"] = json!(
+                    slots[slot_index]["starter_available_count"]
+                        .as_u64()
+                        .unwrap_or_default()
+                        + 1
+                );
+            }
+        }
+
+        teams.push(json!({
+            "team_id": team_id,
+            "team_name": team_name.unwrap_or("-"),
+            "member_count": team_members.len(),
+            "missing_response_count": team_missing.len(),
+            "no_slot_count": team_no_slot,
+            "missing": team_missing,
+            "slots": team_slot_counts
+                .into_iter()
+                .enumerate()
+                .map(|(index, available_count)| json!({
+                    "index": index,
+                    "available_count": available_count,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    let recommended_slot_index = if deadline_passed {
+        best_match_request_slot_index(&slots)
+    } else {
+        None
+    };
+
+    json!({
+        "request_id": request.request_id,
+        "status": request.status,
+        "team_a": {
+            "id": request.team_a_id,
+            "name": request.team_a_name,
+        },
+        "team_b": request.team_b_id.map(|id| json!({
+            "id": id,
+            "name": request.team_b_name,
+        })),
+        "slots": slots,
+        "teams": teams,
+        "missing_response_count": missing_response_count,
+        "no_slot_count": no_slot_count,
+        "recommended_slot_index": recommended_slot_index,
+    })
+}
+
+fn best_match_request_slot_index(slots: &[Value]) -> Option<usize> {
+    let mut best: Option<(usize, u64, u64)> = None;
+    for (index, slot) in slots.iter().enumerate() {
+        let available = slot["available_count"].as_u64().unwrap_or_default();
+        let starters = slot["starter_available_count"].as_u64().unwrap_or_default();
+        if best.is_none_or(|(_, best_available, best_starters)| {
+            available > best_available || (available == best_available && starters > best_starters)
+        }) {
+            best = Some((index, available, starters));
+        }
+    }
+    best.map(|(index, _, _)| index)
 }
 
 async fn load_match(pool: &PgPool, id: i32) -> DashboardDbResult<Option<Value>> {
@@ -1260,6 +1638,98 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_team_member(
+        pool: &PgPool,
+        team_id: i32,
+        participant_id: i32,
+        display_name: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.participants(
+                id, display_name, rank_source, status, source, created_at, updated_at
+            )
+            VALUES($1, $2, 'manual', 'assigned', 'test', now(), now())
+            "#,
+        )
+        .bind(participant_id)
+        .bind(display_name)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.team_members(team_id, participant_id, role, is_captain, is_bench)
+            VALUES($1, $2, 'player', false, false)
+            "#,
+        )
+        .bind(team_id)
+        .bind(participant_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_match_request_response(
+        pool: &PgPool,
+        request_id: i32,
+        team_id: i32,
+        participant_id: i32,
+        slot_index: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_request_responses(
+                request_id, team_id, participant_id, discord_user_id, slot_index,
+                response, source, responded_at, updated_at
+            )
+            VALUES($1, $2, $3, $4, $5, $6, 'button', now(), now())
+            "#,
+        )
+        .bind(request_id)
+        .bind(team_id)
+        .bind(participant_id)
+        .bind(i64::from(participant_id) + 10_000)
+        .bind(slot_index)
+        .bind(if slot_index == -1 {
+            "unavailable"
+        } else {
+            "available"
+        })
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_expired_match_request(pool: &PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_request_batches(
+                id, template, deadline_at, status, created_by_user_id,
+                created_by_display_name, created_at, updated_at
+            )
+            VALUES(90, 'regular_scrim', now() - interval '1 hour', 'open', '42', 'Coach', now(), now())
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_requests(
+                id, batch_id, team_a_id, team_b_id, status, slot_options,
+                created_at, updated_at
+            )
+            VALUES(
+                91, 90, 1, 2, 'open',
+                '[{"day":"sat","from":1200,"to":1320},{"day":"sun","from":1200,"to":1320}]'::jsonb,
+                now(), now()
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn create_match_route_insertet_scheduled_draft() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1397,6 +1867,69 @@ mod tests {
             )?)
             .await?;
         assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_summary_empfiehlt_nach_frist_bestgemeinsamen_slot(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 1, 102, "A2").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_team_member(db.pool(), 2, 202, "B2").await?;
+        insert_team_member(db.pool(), 2, 203, "B3").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        insert_match_request_response(db.pool(), 91, 1, 102, -1).await?;
+        insert_match_request_response(db.pool(), 91, 2, 201, 0).await?;
+        insert_match_request_response(db.pool(), 91, 2, 202, 1).await?;
+
+        let response = app
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/90/summary",
+                &session_id,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let first_match = &data["matches"][0];
+        assert_eq!(data["batch"]["id"], 90);
+        assert_eq!(data["deadline_passed"], true);
+        assert_eq!(first_match["recommended_slot_index"], 0);
+        assert_eq!(first_match["slots"][0]["available_count"], 2);
+        assert_eq!(first_match["slots"][1]["available_count"], 1);
+        assert_eq!(first_match["missing_response_count"], 1);
+        assert_eq!(first_match["no_slot_count"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn overview_liefert_match_request_auswertungen() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        insert_match_request_response(db.pool(), 91, 2, 201, 0).await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let summaries = data["match_request_summaries"]
+            .as_array()
+            .ok_or("missing summaries")?;
+        assert_eq!(summaries[0]["batch"]["id"], 90);
+        assert_eq!(summaries[0]["matches"][0]["recommended_slot_index"], 0);
         Ok(())
     }
 

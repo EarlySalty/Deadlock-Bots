@@ -1,3 +1,11 @@
+## #279 — Scrim-Dashboard zeigt Terminabfragen mit Slot-Empfehlung
+
+Problem: Scrim-Teams konnten bereits per Button antworten, aber das Dashboard zeigte daraus noch keine zusammengefasste Planungsbasis nach Fristende.
+
+Änderung: Die Scrim-Übersicht liefert jetzt aktuelle Terminabfragen mit Antwortständen, fehlenden Stimmen, `Kein Slot passt` und einer Slot-Empfehlung nach Fristende. Der Scrim-Tab zeigt diese Auswertung direkt bei den Matches.
+
+Aktuelles Verhalten: Leo sieht im Dashboard, welcher Slot nach den gesammelten Teamantworten vorne liegt. Reminder, Ersatzbedarf und Freigabe bleiben eigene nächste Schritte.
+
 ## #278 — Scrim-Teams antworten per Termin-Button
 
 Problem: Terminabfragen wurden zwar in Teamkanäle gepostet, aber Antworten konnten noch nicht strukturiert über den Bot erfasst werden.
