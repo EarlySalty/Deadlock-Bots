@@ -125,6 +125,11 @@ struct MatchRequestPost {
     message_id: u64,
 }
 
+struct MatchRequestSendResult {
+    posts: Vec<MatchRequestPost>,
+    errors: Vec<String>,
+}
+
 pub fn spawn(
     pool: PgPool,
     adapter: Arc<dl_discord::DiscordAdapter>,
@@ -397,26 +402,38 @@ async fn handle_match_request_batch(
     adapter: &dl_discord::DiscordAdapter,
     batch: ClaimedMatchRequestBatch,
 ) -> anyhow::Result<()> {
-    match send_match_request_batch(adapter, &batch).await {
-        Ok(posts) => {
-            save_match_request_posts(pool, batch.batch_id, &posts).await?;
-            post_log(
-                adapter,
-                match_request_success_log_message(batch.batch_id, posts.len(), line!()),
-                batch.batch_id,
-            )
-            .await;
-        }
-        Err(err) => {
+    let result = send_match_request_batch(adapter, &batch).await;
+    if !result.posts.is_empty() {
+        save_match_request_posts(
+            pool,
+            batch.batch_id,
+            &result.posts,
+            if result.errors.is_empty() {
+                MATCH_REQUEST_STATUS_OPEN
+            } else {
+                MATCH_REQUEST_STATUS_POST_FAILED
+            },
+        )
+        .await?;
+    }
+    if result.errors.is_empty() {
+        post_log(
+            adapter,
+            match_request_success_log_message(batch.batch_id, result.posts.len(), line!()),
+            batch.batch_id,
+        )
+        .await;
+    } else {
+        if result.posts.is_empty() {
             set_match_request_batch_status(pool, batch.batch_id, MATCH_REQUEST_STATUS_POST_FAILED)
                 .await?;
-            post_log(
-                adapter,
-                match_request_failure_message(batch.batch_id, &err, line!()),
-                batch.batch_id,
-            )
-            .await;
         }
+        post_log(
+            adapter,
+            match_request_failure_message(batch.batch_id, &result.errors.join("; "), line!()),
+            batch.batch_id,
+        )
+        .await;
     }
     Ok(())
 }
@@ -424,24 +441,32 @@ async fn handle_match_request_batch(
 async fn send_match_request_batch(
     adapter: &dl_discord::DiscordAdapter,
     batch: &ClaimedMatchRequestBatch,
-) -> Result<Vec<MatchRequestPost>, String> {
+) -> MatchRequestSendResult {
     let mut posts = Vec::new();
     let mut errors = Vec::new();
+    if batch.requests.is_empty() {
+        errors.push("keine Match-Abfragen".to_string());
+    }
     for request in &batch.requests {
         if request.targets.is_empty() {
             errors.push(format!("request {}: kein Teamkanal", request.request_id));
             continue;
         }
         for target in &request.targets {
-            let content = match_request_message(
+            let content = match match_request_message(
                 batch.batch_id,
                 &batch.template,
                 &target.team_name,
                 target.opponent_name.as_deref(),
                 batch.deadline_at.timestamp(),
                 &request.slot_options,
-            )
-            .map_err(|err| err.to_string())?;
+            ) {
+                Ok(content) => content,
+                Err(err) => {
+                    errors.push(format!("request {}: {err}", request.request_id));
+                    continue;
+                }
+            };
             match adapter
                 .send_raw_public(target.channel_id, &message_body(&content))
                 .await
@@ -456,17 +481,14 @@ async fn send_match_request_batch(
             }
         }
     }
-    if errors.is_empty() {
-        Ok(posts)
-    } else {
-        Err(errors.join("; "))
-    }
+    MatchRequestSendResult { posts, errors }
 }
 
 async fn save_match_request_posts(
     pool: &PgPool,
     batch_id: i64,
     posts: &[MatchRequestPost],
+    status: &str,
 ) -> anyhow::Result<()> {
     let mut by_request = BTreeMap::<i64, Map<String, Value>>::new();
     for post in posts {
@@ -493,7 +515,22 @@ async fn save_match_request_posts(
         )
         .bind(i32::try_from(request_id)?)
         .bind(Value::Object(message_ids))
-        .bind(MATCH_REQUEST_STATUS_OPEN)
+        .bind(status)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if status != MATCH_REQUEST_STATUS_OPEN {
+        sqlx::query(
+            r#"
+            UPDATE scrim.match_requests
+               SET status = $2,
+                   updated_at = now()
+             WHERE batch_id = $1
+               AND status <> $2
+            "#,
+        )
+        .bind(i32::try_from(batch_id)?)
+        .bind(status)
         .execute(&mut *tx)
         .await?;
     }
@@ -506,7 +543,7 @@ async fn save_match_request_posts(
         "#,
     )
     .bind(i32::try_from(batch_id)?)
-    .bind(MATCH_REQUEST_STATUS_OPEN)
+    .bind(status)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1454,6 +1491,47 @@ mod tests {
             ]
         );
         assert_eq!(match_request_batch_status(pool, 30).await?, "posting");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn save_match_request_posts_speichert_ids_auch_bei_post_failed() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 40).await?;
+
+        save_match_request_posts(
+            pool,
+            40,
+            &[MatchRequestPost {
+                request_id: 41,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_POST_FAILED,
+        )
+        .await?;
+
+        assert_eq!(
+            match_request_batch_status(pool, 40).await?,
+            MATCH_REQUEST_STATUS_POST_FAILED
+        );
+        let row = sqlx::query(
+            "SELECT status, team_query_message_ids FROM scrim.match_requests WHERE id = 41",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            row.get::<String, _>("status"),
+            MATCH_REQUEST_STATUS_POST_FAILED
+        );
+        assert_eq!(
+            row.get::<Value, _>("team_query_message_ids"),
+            json!({ "1": { "channel_id": 100, "message_id": 9001 } })
+        );
         Ok(())
     }
 
