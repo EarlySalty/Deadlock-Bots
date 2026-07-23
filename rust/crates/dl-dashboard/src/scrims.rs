@@ -837,14 +837,14 @@ async fn create_match_request_batch_record(
                 SELECT mr.team_a_id AS team_id
                   FROM scrim.match_requests mr
                   JOIN scrim.match_request_batches b ON b.id = mr.batch_id
-                 WHERE b.status IN ('draft', 'open')
+                 WHERE b.status IN ('draft', 'posting', 'open', 'post_failed')
                    AND b.deadline_at > now()
                 UNION ALL
                 SELECT mr.team_b_id AS team_id
                   FROM scrim.match_requests mr
                   JOIN scrim.match_request_batches b ON b.id = mr.batch_id
                  WHERE mr.team_b_id IS NOT NULL
-                   AND b.status IN ('draft', 'open')
+                   AND b.status IN ('draft', 'posting', 'open', 'post_failed')
                    AND b.deadline_at > now()
           ) active
          WHERE active.team_id = ANY($1)
