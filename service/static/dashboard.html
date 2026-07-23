@@ -1717,6 +1717,31 @@
         }
         .scrim-message.error { color: #ff8787; }
         .scrim-message.success { color: #69db7c; }
+        .scrim-request-list {
+            display: grid;
+            gap: 0.75rem;
+        }
+        .scrim-request-item {
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding-top: 0.75rem;
+        }
+        .scrim-request-item:first-child {
+            border-top: 0;
+            padding-top: 0;
+        }
+        .scrim-request-title {
+            font-weight: 650;
+            color: #f1f3f5;
+        }
+        .scrim-request-meta,
+        .scrim-request-slots {
+            margin-top: 0.35rem;
+            color: #adb5bd;
+            font-size: 0.88rem;
+        }
+        .scrim-request-slots {
+            padding-left: 1rem;
+        }
         .scrim-team-list {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -2218,6 +2243,10 @@
                         </table>
                     </div>
                 </div>
+                <div class="card">
+                    <h3>Terminabfragen</h3>
+                    <div id="scrim-request-summaries" class="scrim-request-list"></div>
+                </div>
             </div>
         </section>
 
@@ -2692,6 +2721,7 @@
     const scrimScheduledAtInput = document.getElementById('scrim-scheduled-at');
     const scrimCoachSpectatorInput = document.getElementById('scrim-coach-spectator');
     const scrimMatchRows = document.getElementById('scrim-match-rows');
+    const scrimRequestSummaries = document.getElementById('scrim-request-summaries');
     const scrimTeamsContainer = document.getElementById('scrim-teams');
     const scrimParticipantRows = document.getElementById('scrim-participant-rows');
     const voiceHistoryUser = document.getElementById('voice-history-user');
@@ -3465,6 +3495,30 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         return new Date(Number(ts) * 1000).toLocaleString();
     }
 
+    const SCRIM_DAY_LABELS = {
+        mon: 'Mo',
+        tue: 'Di',
+        wed: 'Mi',
+        thu: 'Do',
+        fri: 'Fr',
+        sat: 'Sa',
+        sun: 'So',
+    };
+
+    function scrimTimeLabel(minutes) {
+        const value = Number(minutes);
+        if (!Number.isFinite(value)) return '--:--';
+        const hour = Math.floor(value / 60);
+        const minute = value % 60;
+        return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    }
+
+    function scrimSlotLabel(slot) {
+        if (!slot || typeof slot !== 'object') return '-';
+        const day = SCRIM_DAY_LABELS[slot.day] || slot.day || '-';
+        return `${day} ${scrimTimeLabel(slot.from)}-${scrimTimeLabel(slot.to)}`;
+    }
+
     function renderScrimTeamOptions() {
         [scrimTeamASelect, scrimTeamBSelect].forEach((select) => {
             if (!select) return;
@@ -3546,6 +3600,57 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             actionTd.appendChild(actions);
             tr.appendChild(actionTd);
             scrimMatchRows.appendChild(tr);
+        });
+    }
+
+    function renderScrimRequestSummaries() {
+        if (!scrimRequestSummaries) return;
+        scrimRequestSummaries.innerHTML = '';
+        const summaries = scrimData.match_request_summaries || [];
+        if (!summaries.length) {
+            const empty = document.createElement('div');
+            empty.className = 'scrim-request-meta';
+            empty.textContent = 'Noch keine Terminabfragen.';
+            scrimRequestSummaries.appendChild(empty);
+            return;
+        }
+        summaries.forEach((summary) => {
+            const batch = summary.batch || {};
+            (summary.matches || []).forEach((match) => {
+                const item = document.createElement('div');
+                item.className = 'scrim-request-item';
+                const title = document.createElement('div');
+                title.className = 'scrim-request-title';
+                const teamA = match.team_a && match.team_a.name ? match.team_a.name : `#${match.team_a && match.team_a.id}`;
+                const teamB = match.team_b && match.team_b.name ? match.team_b.name : (match.team_b ? `#${match.team_b.id}` : 'Gegner offen');
+                title.textContent = `#${batch.id} · ${teamA} vs ${teamB}`;
+                item.appendChild(title);
+
+                const recommendation = match.recommended_slot_index;
+                const recommendedSlot = Number.isInteger(recommendation)
+                    ? (match.slots || []).find((slot) => slot.index === recommendation)
+                    : null;
+                const meta = document.createElement('div');
+                meta.className = 'scrim-request-meta';
+                meta.textContent = [
+                    summary.deadline_passed ? 'Frist vorbei' : 'Frist offen',
+                    `bis ${scrimDate(batch.deadline_at)}`,
+                    recommendedSlot ? `Empfehlung: ${scrimSlotLabel(recommendedSlot.slot)}` : 'Empfehlung nach Frist',
+                    `${match.missing_response_count || 0} offen`,
+                    `${match.no_slot_count || 0} ohne passenden Slot`,
+                ].join(' · ');
+                item.appendChild(meta);
+
+                const slots = document.createElement('ul');
+                slots.className = 'scrim-request-slots';
+                (match.slots || []).forEach((slot) => {
+                    const li = document.createElement('li');
+                    li.textContent = `${scrimSlotLabel(slot.slot)}: ${slot.available_count || 0} Zusagen`;
+                    slots.appendChild(li);
+                });
+                item.appendChild(slots);
+                scrimRequestSummaries.appendChild(item);
+            });
         });
     }
 
@@ -3643,6 +3748,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     function renderScrims() {
         renderScrimTeamOptions();
         renderScrimMatches();
+        renderScrimRequestSummaries();
         renderScrimTeams();
         renderScrimParticipants();
     }
@@ -3655,6 +3761,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 teams: Array.isArray(data.teams) ? data.teams : [],
                 participants: Array.isArray(data.participants) ? data.participants : [],
                 matches: Array.isArray(data.matches) ? data.matches : [],
+                match_request_summaries: Array.isArray(data.match_request_summaries) ? data.match_request_summaries : [],
             };
             renderScrims();
             if (scrimUpdated) scrimUpdated.textContent = 'Liste aktualisiert';
