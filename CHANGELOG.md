@@ -1,3 +1,11 @@
+## #275 — Scrim-Dashboard bekommt den Lobbycode-Button
+
+Problem: Der neue Lobbycode-Flow war backendseitig vorhanden, aber im Scrim-Dashboard fehlte noch der sichtbare Arbeitsweg für Coaches.
+
+Änderung: In der Match-Zeile gibt es jetzt ein 5-Zeichen-Feld und den Button `Lobby ist offen`. Der alte `Start`-Button ist aus der UI entfernt.
+
+Aktuelles Verhalten: Coaches geben den Code direkt am Match ein; das Dashboard validiert grob und übergibt an den zielsystem-konformen Lobbycode-Flow.
+
 ## #274 — Scrim-Lobbycode läuft über den manuellen Zielsystem-Flow
 
 Problem: Der alte Scrim-Lobby-Pfad konnte eine Custom Lobby vollautomatisch starten und danach lange Discord-Texte wie „Scrim-Lobby steht!" posten. Das passte nicht zum Zielsystem, in dem die Lobby zunächst manuell geöffnet und nur der Code sauber ausgespielt wird.

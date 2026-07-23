@@ -1699,6 +1699,17 @@
             min-height: 58px;
             resize: vertical;
         }
+        .scrim-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+        }
+        .scrim-lobby-code {
+            width: 5.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0;
+        }
         .scrim-message {
             min-height: 1.2rem;
             font-size: 0.9rem;
@@ -2198,7 +2209,7 @@
                                     <th>Teams</th>
                                     <th>Status</th>
                                     <th>Lobby</th>
-                                    <th>Join-Code</th>
+                                    <th>Lobbycode</th>
                                     <th>Sieger</th>
                                     <th>Aktionen</th>
                                 </tr>
@@ -3487,7 +3498,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             scrimMatchRows.appendChild(tr);
             return;
         }
-        const botStates = new Set(['starting', 'start_failed', 'in_progress', 'finished', 'result_fetching', 'result_failed']);
+        const botStates = new Set(['lobby_posting', 'starting', 'start_failed', 'in_progress', 'finished', 'result_fetching', 'result_failed']);
         rows.forEach((match) => {
             const tr = document.createElement('tr');
             const values = [
@@ -3505,20 +3516,34 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             });
             const actionTd = document.createElement('td');
             const state = String(match.lobby_state || '');
-            const startBtn = document.createElement('button');
-            startBtn.type = 'button';
-            startBtn.className = 'load';
-            startBtn.textContent = 'Start';
-            startBtn.disabled = botStates.has(state) || state === 'start_requested';
-            startBtn.addEventListener('click', () => requestScrimState(match.id, 'start'));
+            const actions = document.createElement('div');
+            actions.className = 'scrim-actions';
+            const codeInput = document.createElement('input');
+            codeInput.type = 'text';
+            codeInput.className = 'scrim-lobby-code';
+            codeInput.maxLength = 5;
+            codeInput.placeholder = 'ABC12';
+            codeInput.value = match.join_code ? String(match.join_code).toUpperCase() : '';
+            codeInput.setAttribute('aria-label', `Lobbycode für Match ${match.id}`);
+            codeInput.addEventListener('input', () => {
+                codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
+            });
+            const lobbyBtn = document.createElement('button');
+            lobbyBtn.type = 'button';
+            lobbyBtn.className = 'load';
+            lobbyBtn.textContent = 'Lobby ist offen';
+            lobbyBtn.disabled = state === 'lobby_posting' || state === 'starting' || state === 'in_progress' || state === 'finished';
+            lobbyBtn.addEventListener('click', () => setScrimLobbyCode(match.id, codeInput.value));
             const resultBtn = document.createElement('button');
             resultBtn.type = 'button';
             resultBtn.className = 'namespace';
             resultBtn.textContent = 'Ergebnis holen';
             resultBtn.disabled = botStates.has(state) || state === 'result_requested';
             resultBtn.addEventListener('click', () => requestScrimState(match.id, 'result'));
-            actionTd.appendChild(startBtn);
-            actionTd.appendChild(resultBtn);
+            actions.appendChild(codeInput);
+            actions.appendChild(lobbyBtn);
+            actions.appendChild(resultBtn);
+            actionTd.appendChild(actions);
             tr.appendChild(actionTd);
             scrimMatchRows.appendChild(tr);
         });
@@ -3690,6 +3715,24 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             await loadScrims();
         } catch (err) {
             setScrimMessage(`Aktion fehlgeschlagen (${err.message || '-'})`, 'error');
+        }
+    }
+
+    async function setScrimLobbyCode(matchId, rawCode) {
+        const code = String(rawCode || '').trim().toUpperCase();
+        if (!/^[A-Z0-9]{5}$/.test(code)) {
+            setScrimMessage('Lobbycode braucht genau 5 Buchstaben oder Zahlen.', 'error');
+            return;
+        }
+        try {
+            await fetchJSON(`/api/scrims/matches/${matchId}/lobby-code`, {
+                method: 'POST',
+                body: JSON.stringify({ code }),
+            });
+            setScrimMessage('Lobbycode gespeichert.', 'success');
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Lobbycode konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
         }
     }
 
