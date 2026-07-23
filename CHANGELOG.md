@@ -1,3 +1,11 @@
+## #278 — Scrim-Teams antworten per Termin-Button
+
+Problem: Terminabfragen wurden zwar in Teamkanäle gepostet, aber Antworten konnten noch nicht strukturiert über den Bot erfasst werden.
+
+Änderung: Jede Terminabfrage bekommt Slot-Buttons und `Kein Slot passt`. Der Bot nimmt Klicks nur aus der gespeicherten Teamnachricht an und speichert sie nur, wenn der User zum betroffenen Team gehört.
+
+Aktuelles Verhalten: Teamantworten landen strukturiert in der zentralen DB; falsche Teamklicks werden abgewiesen. Fristende-Auswertung und Slot-Empfehlung bleiben der nächste Schritt.
+
 ## #277 — Scrim-Terminabfragen gehen in die Teamkanäle
 
 Problem: Angelegte Scrim-Match-Abfragen lagen bisher nur im Dashboard-Speicher. Teams bekamen daraus noch keine konkrete Terminabfrage im eigenen Kanal.

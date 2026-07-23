@@ -27,6 +27,7 @@ const MATCH_REQUEST_STATUS_DRAFT: &str = "draft";
 const MATCH_REQUEST_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_STATUS_OPEN: &str = "open";
 const MATCH_REQUEST_STATUS_POST_FAILED: &str = "post_failed";
+const MATCH_REQUEST_RESPONSE_PREFIX: &str = "scrimreq:v1:";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
 const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
 
@@ -129,6 +130,65 @@ struct MatchRequestPost {
 struct MatchRequestSendResult {
     posts: Vec<MatchRequestPost>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchRequestResponseInput {
+    custom_id: String,
+    user_id: u64,
+    channel_id: u64,
+    message_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MatchRequestResponseOutcome {
+    SavedSlot(i32),
+    SavedNone,
+    InvalidAction,
+    NotOpen,
+    WrongMessage,
+    WrongTeam,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedMatchRequestResponse {
+    request_id: i64,
+    team_id: i64,
+    slot_index: i32,
+}
+
+struct MatchRequestResponseHandler {
+    pool: PgPool,
+}
+
+pub fn register(router: &mut dl_discord::InteractionRouter, pool: PgPool) {
+    router.on_prefix(
+        MATCH_REQUEST_RESPONSE_PREFIX,
+        Arc::new(MatchRequestResponseHandler { pool }),
+    );
+}
+
+#[async_trait::async_trait]
+impl dl_discord::InteractionHandler for MatchRequestResponseHandler {
+    async fn handle(&self, interaction: dl_discord::BridgeInteraction) -> dl_discord::BridgeReply {
+        match record_match_request_response(
+            &self.pool,
+            MatchRequestResponseInput {
+                custom_id: interaction.custom_id,
+                user_id: interaction.user_id,
+                channel_id: interaction.channel_id,
+                message_id: interaction.message_id,
+            },
+        )
+        .await
+        {
+            Ok(outcome) => match_request_response_reply(outcome),
+            Err(err) => {
+                tracing::warn!(%err, "Scrim-Terminantwort konnte nicht gespeichert werden");
+                dl_discord::BridgeReply::ephemeral_text("Antwort konnte nicht gespeichert werden.")
+            }
+        }
+    }
 }
 
 pub fn spawn(
@@ -480,10 +540,19 @@ async fn send_match_request_batch(
                     continue;
                 }
             };
-            match adapter
-                .send_raw_public(target.channel_id, &message_body(&content))
-                .await
-            {
+            let body = match match_request_body(
+                request.request_id,
+                target.team_id,
+                &content,
+                &request.slot_options,
+            ) {
+                Ok(body) => body,
+                Err(err) => {
+                    errors.push(format!("request {}: {err}", request.request_id));
+                    continue;
+                }
+            };
+            match adapter.send_raw_public(target.channel_id, &body).await {
                 Ok(message_id) => posts.push(MatchRequestPost {
                     request_id: request.request_id,
                     team_id: target.team_id,
@@ -1215,6 +1284,20 @@ fn message_body(content: &str) -> Map<String, Value> {
     body
 }
 
+fn match_request_body(
+    request_id: i64,
+    team_id: i64,
+    content: &str,
+    slot_options: &Value,
+) -> anyhow::Result<Map<String, Value>> {
+    let mut body = message_body(content);
+    body.insert(
+        "components".to_string(),
+        match_request_components(request_id, team_id, slot_options)?,
+    );
+    Ok(body)
+}
+
 fn start_success_message(
     _match_id: i64,
     outcome: &StartScrimMatchOutcome,
@@ -1254,9 +1337,251 @@ fn match_request_message(
         ));
     }
     lines.push(
-        "Antwortet mit euren passenden Slots oder ergaenzt Freitext hier im Teamkanal.".to_string(),
+        "Antwortet bitte über die Buttons. Freitext könnt ihr ergänzen, wenn etwas unklar ist."
+            .to_string(),
     );
     Ok(lines.join("\n"))
+}
+
+fn match_request_components(
+    request_id: i64,
+    team_id: i64,
+    slot_options: &Value,
+) -> anyhow::Result<Value> {
+    let slots = slot_options
+        .as_array()
+        .ok_or_else(|| anyhow!("slot_options ist kein Array"))?;
+    let mut buttons = Vec::with_capacity(slots.len() + 1);
+    for index in 0..slots.len() {
+        buttons.push(json!({
+            "type": 2,
+            "style": 3,
+            "label": format!("Slot {} passt", index + 1),
+            "custom_id": format!("{MATCH_REQUEST_RESPONSE_PREFIX}slot:{request_id}:{team_id}:{index}"),
+        }));
+    }
+    buttons.push(json!({
+        "type": 2,
+        "style": 2,
+        "label": "Kein Slot passt",
+        "custom_id": format!("{MATCH_REQUEST_RESPONSE_PREFIX}none:{request_id}:{team_id}"),
+    }));
+
+    Ok(Value::Array(
+        buttons
+            .chunks(5)
+            .map(|chunk| {
+                json!({
+                    "type": 1,
+                    "components": chunk,
+                })
+            })
+            .collect(),
+    ))
+}
+
+fn parse_match_request_response_custom_id(value: &str) -> Option<ParsedMatchRequestResponse> {
+    let rest = value.strip_prefix(MATCH_REQUEST_RESPONSE_PREFIX)?;
+    let mut parts = rest.split(':');
+    let action = parts.next()?;
+    let request_id = parts.next()?.parse().ok()?;
+    let team_id = parts.next()?.parse().ok()?;
+    let slot_index = match action {
+        "slot" => parts.next()?.parse().ok()?,
+        "none" => -1,
+        _ => return None,
+    };
+    if parts.next().is_some() || request_id <= 0 || team_id <= 0 || slot_index < -1 {
+        return None;
+    }
+    Some(ParsedMatchRequestResponse {
+        request_id,
+        team_id,
+        slot_index,
+    })
+}
+
+fn match_request_response_lock_keys(
+    request_id: i64,
+    participant_id: i64,
+) -> anyhow::Result<(i32, i32)> {
+    Ok((i32::try_from(request_id)?, i32::try_from(participant_id)?))
+}
+
+async fn record_match_request_response(
+    pool: &PgPool,
+    input: MatchRequestResponseInput,
+) -> anyhow::Result<MatchRequestResponseOutcome> {
+    let Some(parsed) = parse_match_request_response_custom_id(&input.custom_id) else {
+        return Ok(MatchRequestResponseOutcome::InvalidAction);
+    };
+    let user_id = i64::try_from(input.user_id).context("Discord-User-ID zu gross")?;
+    let channel_id = i64::try_from(input.channel_id).context("Discord-Channel-ID zu gross")?;
+    let message_id = input
+        .message_id
+        .map(i64::try_from)
+        .transpose()
+        .context("Discord-Message-ID zu gross")?;
+
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT mr.status,
+               mr.slot_options,
+               mr.team_query_message_ids,
+               tm.participant_id::bigint AS participant_id
+          FROM scrim.match_requests mr
+          LEFT JOIN scrim.participants p ON p.discord_id = $3
+          LEFT JOIN scrim.team_members tm ON tm.participant_id = p.id AND tm.team_id = $2
+         WHERE mr.id = $1
+           AND (mr.team_a_id = $2 OR mr.team_b_id = $2)
+        "#,
+    )
+    .bind(i32::try_from(parsed.request_id)?)
+    .bind(i32::try_from(parsed.team_id)?)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(MatchRequestResponseOutcome::InvalidAction);
+    };
+
+    let status = row.get::<String, _>("status");
+    if !matches!(
+        status.as_str(),
+        MATCH_REQUEST_STATUS_OPEN | MATCH_REQUEST_STATUS_POST_FAILED
+    ) {
+        return Ok(MatchRequestResponseOutcome::NotOpen);
+    }
+    let participant_id = row.get::<Option<i64>, _>("participant_id");
+    let Some(participant_id) = participant_id else {
+        return Ok(MatchRequestResponseOutcome::WrongTeam);
+    };
+    let slot_options: Value = row.get("slot_options");
+    let slot_count = slot_options
+        .as_array()
+        .ok_or_else(|| anyhow!("slot_options ist kein Array"))?
+        .len();
+    if parsed.slot_index >= 0 && parsed.slot_index as usize >= slot_count {
+        return Ok(MatchRequestResponseOutcome::InvalidAction);
+    }
+    let message_ids: Value = row.get("team_query_message_ids");
+    if !posted_message_matches(&message_ids, parsed.team_id, channel_id, message_id) {
+        return Ok(MatchRequestResponseOutcome::WrongMessage);
+    }
+
+    let mut tx = pool.begin().await?;
+    let (lock_a, lock_b) = match_request_response_lock_keys(parsed.request_id, participant_id)?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(lock_a)
+        .bind(lock_b)
+        .execute(&mut *tx)
+        .await?;
+    if parsed.slot_index == -1 {
+        sqlx::query(
+            r#"
+            DELETE FROM scrim.match_request_responses
+             WHERE request_id = $1
+               AND team_id = $2
+               AND participant_id = $3
+               AND slot_index <> -1
+            "#,
+        )
+        .bind(i32::try_from(parsed.request_id)?)
+        .bind(i32::try_from(parsed.team_id)?)
+        .bind(i32::try_from(participant_id)?)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            DELETE FROM scrim.match_request_responses
+             WHERE request_id = $1
+               AND team_id = $2
+               AND participant_id = $3
+               AND slot_index = -1
+            "#,
+        )
+        .bind(i32::try_from(parsed.request_id)?)
+        .bind(i32::try_from(parsed.team_id)?)
+        .bind(i32::try_from(participant_id)?)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.match_request_responses(
+            request_id, team_id, participant_id, discord_user_id, slot_index, response,
+            source, message_id, channel_id, responded_at, updated_at
+        )
+        VALUES($1, $2, $3, $4, $5, $6, 'button', $7, $8, now(), now())
+        ON CONFLICT(request_id, team_id, participant_id, slot_index) DO UPDATE SET
+            discord_user_id = excluded.discord_user_id,
+            response = excluded.response,
+            source = excluded.source,
+            message_id = excluded.message_id,
+            channel_id = excluded.channel_id,
+            responded_at = now(),
+            updated_at = now()
+        "#,
+    )
+    .bind(i32::try_from(parsed.request_id)?)
+    .bind(i32::try_from(parsed.team_id)?)
+    .bind(i32::try_from(participant_id)?)
+    .bind(user_id)
+    .bind(parsed.slot_index)
+    .bind(if parsed.slot_index == -1 {
+        "unavailable"
+    } else {
+        "available"
+    })
+    .bind(message_id)
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(if parsed.slot_index == -1 {
+        MatchRequestResponseOutcome::SavedNone
+    } else {
+        MatchRequestResponseOutcome::SavedSlot(parsed.slot_index + 1)
+    })
+}
+
+fn posted_message_matches(
+    message_ids: &Value,
+    team_id: i64,
+    channel_id: i64,
+    message_id: Option<i64>,
+) -> bool {
+    let Some(entry) = message_ids.get(team_id.to_string()) else {
+        return false;
+    };
+    entry.get("channel_id").and_then(Value::as_i64) == Some(channel_id)
+        && entry.get("message_id").and_then(Value::as_i64) == message_id
+}
+
+fn match_request_response_reply(outcome: MatchRequestResponseOutcome) -> dl_discord::BridgeReply {
+    let text = match outcome {
+        MatchRequestResponseOutcome::SavedSlot(slot) => {
+            format!("Antwort gespeichert: Slot {slot} passt.")
+        }
+        MatchRequestResponseOutcome::SavedNone => {
+            "Antwort gespeichert: Kein Slot passt.".to_string()
+        }
+        MatchRequestResponseOutcome::InvalidAction => {
+            "Diese Terminantwort ist ungültig.".to_string()
+        }
+        MatchRequestResponseOutcome::NotOpen => {
+            "Diese Abstimmung ist nicht mehr offen.".to_string()
+        }
+        MatchRequestResponseOutcome::WrongMessage => {
+            "Diese Antwort passt nicht zu dieser Terminabfrage.".to_string()
+        }
+        MatchRequestResponseOutcome::WrongTeam => {
+            "Diese Terminabfrage gehört nicht zu deinem Team.".to_string()
+        }
+    };
+    dl_discord::BridgeReply::ephemeral_text(text)
 }
 
 fn template_label(template: &str) -> &str {
@@ -1486,6 +1811,201 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn match_request_components_enthalten_slot_buttons() -> TestResult {
+        let components = match_request_components(
+            31,
+            1,
+            &json!([
+                { "day": "sat", "from": 1200, "to": 1320 },
+                { "day": "sun", "from": 1200, "to": 1320 }
+            ]),
+        )?;
+
+        assert_eq!(
+            components,
+            json!([
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 2,
+                            "style": 3,
+                            "label": "Slot 1 passt",
+                            "custom_id": "scrimreq:v1:slot:31:1:0"
+                        },
+                        {
+                            "type": 2,
+                            "style": 3,
+                            "label": "Slot 2 passt",
+                            "custom_id": "scrimreq:v1:slot:31:1:1"
+                        },
+                        {
+                            "type": 2,
+                            "style": 2,
+                            "label": "Kein Slot passt",
+                            "custom_id": "scrimreq:v1:none:31:1"
+                        }
+                    ]
+                }
+            ])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_buttonantwort_validiert_team_und_speichert_slot() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+
+        let outcome = record_match_request_response(
+            pool,
+            MatchRequestResponseInput {
+                custom_id: "scrimreq:v1:slot:31:1:0".to_string(),
+                user_id: 555,
+                channel_id: 100,
+                message_id: Some(9001),
+            },
+        )
+        .await?;
+
+        assert_eq!(outcome, MatchRequestResponseOutcome::SavedSlot(1));
+        let row = sqlx::query(
+            r#"
+            SELECT request_id, team_id, participant_id, discord_user_id, slot_index, response
+              FROM scrim.match_request_responses
+             WHERE request_id = 31 AND team_id = 1 AND participant_id = 501
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<i32, _>("request_id"), 31);
+        assert_eq!(row.get::<i32, _>("team_id"), 1);
+        assert_eq!(row.get::<i32, _>("participant_id"), 501);
+        assert_eq!(row.get::<i64, _>("discord_user_id"), 555);
+        assert_eq!(row.get::<i32, _>("slot_index"), 0);
+        assert_eq!(row.get::<String, _>("response"), "available");
+
+        let wrong_team = record_match_request_response(
+            pool,
+            MatchRequestResponseInput {
+                custom_id: "scrimreq:v1:slot:31:2:0".to_string(),
+                user_id: 555,
+                channel_id: 200,
+                message_id: Some(9002),
+            },
+        )
+        .await?;
+        assert_eq!(wrong_team, MatchRequestResponseOutcome::WrongTeam);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_buttonantwort_serialisiert_userwechsel() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+
+        let (lock_a, lock_b) = match_request_response_lock_keys(31, 501)?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+            .bind(lock_a)
+            .bind(lock_b)
+            .execute(&mut *tx)
+            .await?;
+
+        let pool_for_click = pool.clone();
+        let mut click = tokio::spawn(async move {
+            record_match_request_response(
+                &pool_for_click,
+                MatchRequestResponseInput {
+                    custom_id: "scrimreq:v1:slot:31:1:0".to_string(),
+                    user_id: 555,
+                    channel_id: 100,
+                    message_id: Some(9001),
+                },
+            )
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut click)
+                .await
+                .is_err(),
+            "zweiter Klick darf denselben User/Request nicht parallel schreiben"
+        );
+        tx.commit().await?;
+        assert_eq!(click.await??, MatchRequestResponseOutcome::SavedSlot(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_buttonantwort_akzeptiert_sichtbare_teilfehler_posts() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, None).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 40).await?;
+        save_match_request_posts(
+            pool,
+            40,
+            &[MatchRequestPost {
+                request_id: 41,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_POST_FAILED,
+        )
+        .await?;
+
+        let outcome = record_match_request_response(
+            pool,
+            MatchRequestResponseInput {
+                custom_id: "scrimreq:v1:slot:41:1:0".to_string(),
+                user_id: 555,
+                channel_id: 100,
+                message_id: Some(9001),
+            },
+        )
+        .await?;
+
+        assert_eq!(outcome, MatchRequestResponseOutcome::SavedSlot(1));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn claim_next_pending_match_request_batch_markiert_batch_als_posting() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
@@ -1632,6 +2152,38 @@ mod tests {
         .bind(team_id)
         .bind(format!("team-{team_id}"))
         .bind(channel_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_team_member(
+        pool: &PgPool,
+        team_id: i32,
+        participant_id: i32,
+        discord_user_id: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.participants(
+                id, discord_id, display_name, rank_source, status, source, created_at, updated_at
+            )
+            VALUES($1, $2, $3, 'manual', 'assigned', 'test', now(), now())
+            "#,
+        )
+        .bind(participant_id)
+        .bind(discord_user_id)
+        .bind(format!("user-{discord_user_id}"))
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.team_members(team_id, participant_id, role, is_captain, is_bench)
+            VALUES($1, $2, 'player', false, false)
+            "#,
+        )
+        .bind(team_id)
+        .bind(participant_id)
         .execute(pool)
         .await?;
         Ok(())

@@ -444,6 +444,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
     dl_community::scrim_signup::register(&mut router, scrim_signup);
+    scrimglue::register(&mut router, central_pool.clone());
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
     let matcher = match &twitch_client {
