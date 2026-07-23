@@ -402,6 +402,14 @@ pub fn router(app: DashboardApp) -> Router {
             post(crate::scrims::scrims_create_match),
         )
         .route(
+            "/api/scrims/match-requests/defaults",
+            get(crate::scrims::scrims_match_request_defaults),
+        )
+        .route(
+            "/api/scrims/match-requests",
+            post(crate::scrims::scrims_create_match_request_batch),
+        )
+        .route(
             "/api/scrims/matches/{match_id}/start",
             post(crate::scrims::scrims_start_match),
         )

@@ -1,3 +1,11 @@
+## #273 — Scrim-Match-Abfragen werden im Rust-Dashboard gespeichert
+
+Problem: Leos Scrim-Planung brauchte eine verbindliche Match-Abfrage als Grundlage, aber im produktiven Rust-Dashboard gab es dafür noch keinen Speichervertrag. Teams, Slots, Fristen und Vorlagen konnten deshalb nicht zentral als Abfrage-Batch angelegt werden.
+
+Änderung: Das Dashboard hat jetzt Endpunkte für Match-Abfrage-Defaults und zum Anlegen von Abfrage-Batches. Gespeichert werden Vorlage, Frist, 2-5 strukturierte Slot-Optionen sowie Team A gegen Team B oder ein offener Gegner. Ein Team kann in einem aktiven Abfragezeitraum nicht doppelt verplant werden.
+
+Aktuelles Verhalten: Die zentrale DB nimmt Scrim-Match-Abfragen mit 48-Stunden-Standardfrist und Wochenende-abends-Preset auf; der Web-Service läuft mit der neuen Rust-Version.
+
 ## #272 — Coaching-Abschluss reagiert sofort
 
 Problem: Beim Klick auf „Coaching abgeschlossen“ konnte Discord melden, dass der Bot nicht rechtzeitig reagiert hat. War die Session intern schon abgeschlossen, blieb die sichtbare Anfrage trotzdem noch im alten Button-Zustand hängen.

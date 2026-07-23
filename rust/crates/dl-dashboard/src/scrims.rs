@@ -1,12 +1,12 @@
 //! Minimaler Coach-Blick auf `scrim.*`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
@@ -18,6 +18,9 @@ const STATE_DRAFT: &str = "draft";
 const STATE_SCHEDULED: &str = "scheduled";
 const STATE_START_REQUESTED: &str = "start_requested";
 const STATE_RESULT_REQUESTED: &str = "result_requested";
+const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
+const MATCH_REQUEST_MIN_SLOTS: usize = 2;
+const MATCH_REQUEST_MAX_SLOTS: usize = 5;
 
 pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
     if let Err(resp) = app.guard_full(&headers).await {
@@ -79,6 +82,61 @@ pub async fn scrims_create_match(
         Err(err) => {
             tracing::error!(%err, "Scrim-Match-Anlage fehlgeschlagen");
             err_text(500, "Create match failed")
+        }
+    }
+}
+
+pub async fn scrims_match_request_defaults(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    ok_json(match_request_defaults_json())
+}
+
+pub async fn scrims_create_match_request_batch(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let input = match parse_match_request_batch(&payload, Utc::now()) {
+        Ok(input) => input,
+        Err(resp) => return resp,
+    };
+    match create_match_request_batch_record(
+        app.pool(),
+        &session.user_id.to_string(),
+        &session.display_name,
+        input,
+    )
+    .await
+    {
+        Ok(batch) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match_request.create",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                batch_id = batch["id"].as_i64().unwrap_or_default(),
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "batch": batch }))
+        }
+        Err(MatchRequestCreateError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestCreateError::Db(err)) => {
+            tracing::error!(%err, "Scrim-Match-Abfrage-Anlage fehlgeschlagen");
+            err_text(500, "Create match request failed")
         }
     }
 }
@@ -192,6 +250,26 @@ struct CreateMatchInput {
     coach_spectator_discord_id: Option<i64>,
 }
 
+struct MatchRequestBatchInput {
+    template: String,
+    deadline_at: DateTime<Utc>,
+    matches: Vec<MatchRequestInput>,
+}
+
+struct MatchRequestInput {
+    team_a_id: i32,
+    team_b_id: Option<i32>,
+    slots: Vec<Value>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MatchRequestCreateError {
+    #[error("{0}")]
+    BadRequest(&'static str),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
 fn parse_create_match(payload: &Value) -> Result<CreateMatchInput, Response> {
     Ok(CreateMatchInput {
         team_a_id: parse_i32(get2(payload, "team_a_id", "teamAId"), "team_a_id")?,
@@ -209,6 +287,146 @@ fn parse_create_match(payload: &Value) -> Result<CreateMatchInput, Response> {
             "coach_spectator_discord_id",
         )?,
     })
+}
+
+fn match_request_defaults_json() -> Value {
+    json!({
+        "default_deadline_hours": MATCH_REQUEST_DEFAULT_DEADLINE_HOURS,
+        "min_slots": MATCH_REQUEST_MIN_SLOTS,
+        "max_slots": MATCH_REQUEST_MAX_SLOTS,
+        "templates": [
+            {
+                "key": "regular_scrim",
+                "name": "Regulärer Scrim",
+                "focus": "Vollständige Lineups und Slot-Findung"
+            },
+            {
+                "key": "testmatch",
+                "name": "Testmatch",
+                "focus": "Bereitschaft und klares Abstimmungsergebnis"
+            },
+            {
+                "key": "training",
+                "name": "Training/Teamspiel",
+                "focus": "Interne Aktivität und Zusammenspiel"
+            }
+        ],
+        "presets": [{
+            "key": "weekend_evening",
+            "name": "Wochenende abends",
+            "slots": [
+                { "day": "sat", "from": 20 * 60, "to": 22 * 60 },
+                { "day": "sun", "from": 20 * 60, "to": 22 * 60 }
+            ]
+        }]
+    })
+}
+
+fn parse_match_request_batch(
+    payload: &Value,
+    now: DateTime<Utc>,
+) -> Result<MatchRequestBatchInput, Response> {
+    let template = match get2(payload, "template", "template") {
+        Some(Value::String(value)) => value.trim().to_string(),
+        _ => return Err(err_text(400, "template must be string")),
+    };
+    if !["regular_scrim", "testmatch", "training"].contains(&template.as_str()) {
+        return Err(err_text(400, "Invalid match request template"));
+    }
+    let deadline_at =
+        parse_optional_datetime(get2(payload, "deadline_at", "deadlineAt"), "deadline_at")?
+            .unwrap_or_else(|| now + ChronoDuration::hours(MATCH_REQUEST_DEFAULT_DEADLINE_HOURS));
+    if deadline_at <= now {
+        return Err(err_text(400, "deadline_at must be in the future"));
+    }
+    let common_slots = match get2(payload, "slots", "slotOptions") {
+        Some(raw) => Some(parse_match_request_slots(raw)?),
+        None => None,
+    };
+    let raw_matches = match payload.get("matches") {
+        Some(Value::Array(values)) if !values.is_empty() => values,
+        _ => return Err(err_text(400, "matches must be a non-empty array")),
+    };
+
+    let mut seen_team_ids = BTreeSet::new();
+    let mut matches = Vec::with_capacity(raw_matches.len());
+    for raw in raw_matches {
+        let Some(obj) = raw.as_object() else {
+            return Err(err_text(400, "matches entries must be objects"));
+        };
+        let team_a_id = parse_i32(
+            obj.get("team_a_id").or_else(|| obj.get("teamAId")),
+            "team_a_id",
+        )?;
+        let team_b_id = parse_optional_i32(
+            obj.get("team_b_id").or_else(|| obj.get("teamBId")),
+            "team_b_id",
+        )?;
+        if team_a_id <= 0 || team_b_id.is_some_and(|id| id <= 0) {
+            return Err(err_text(400, "team ids must be positive"));
+        }
+        if team_b_id == Some(team_a_id) {
+            return Err(err_text(400, "team_a_id and team_b_id must differ"));
+        }
+        for team_id in [Some(team_a_id), team_b_id].into_iter().flatten() {
+            if !seen_team_ids.insert(team_id) {
+                return Err(err_text(
+                    400,
+                    "Ein Team darf im gleichen aktiven Abfragezeitraum nur in einem Match stecken.",
+                ));
+            }
+        }
+        let slots = match obj.get("slots").or_else(|| obj.get("slotOptions")) {
+            Some(raw) => parse_match_request_slots(raw)?,
+            None => common_slots
+                .clone()
+                .ok_or_else(|| err_text(400, "Each match needs two to five slots"))?,
+        };
+        matches.push(MatchRequestInput {
+            team_a_id,
+            team_b_id,
+            slots,
+        });
+    }
+
+    Ok(MatchRequestBatchInput {
+        template,
+        deadline_at,
+        matches,
+    })
+}
+
+fn parse_match_request_slots(raw: &Value) -> Result<Vec<Value>, Response> {
+    let Some(items) = raw.as_array() else {
+        return Err(err_text(400, "slots must be an array"));
+    };
+    if !(MATCH_REQUEST_MIN_SLOTS..=MATCH_REQUEST_MAX_SLOTS).contains(&items.len()) {
+        return Err(err_text(400, "Each match needs two to five slots"));
+    }
+    items
+        .iter()
+        .map(|item| {
+            let Some(obj) = item.as_object() else {
+                return Err(err_text(400, "slot entries must be objects"));
+            };
+            let day = match obj.get("day") {
+                Some(Value::String(day)) => day.trim().to_ascii_lowercase(),
+                _ => return Err(err_text(400, "slot day must be string")),
+            };
+            if !matches!(
+                day.as_str(),
+                "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun"
+            ) {
+                return Err(err_text(400, "slot day is invalid"));
+            }
+            let from = parse_i32(obj.get("from"), "from")?;
+            let to = parse_i32(obj.get("to"), "to")?;
+            if !(0 <= from && from < to && to <= 1440) {
+                return Err(err_text(400, "slot time window is invalid"));
+            }
+            Ok(json!({ "day": day, "from": from, "to": to }))
+        })
+        .collect()
 }
 
 fn get2<'a>(obj: &'a Value, k1: &str, k2: &str) -> Option<&'a Value> {
@@ -239,6 +457,15 @@ fn parse_optional_i64(raw: Option<&Value>, field: &str) -> Result<Option<i64>, R
         Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
         Some(_) => parse_i64(raw, field).map(Some),
     }
+}
+
+fn parse_optional_i32(raw: Option<&Value>, field: &'static str) -> Result<Option<i32>, Response> {
+    parse_optional_i64(raw, field).and_then(|value| match value {
+        Some(value) => i64_to_i32(value, field)
+            .map(Some)
+            .map_err(|_| err_text(400, &format!("{field} must fit integer"))),
+        None => Ok(None),
+    })
 }
 
 fn parse_path_i32(raw: &str, field: &'static str) -> Result<i32, Response> {
@@ -493,6 +720,132 @@ async fn create_match_record(pool: &PgPool, input: CreateMatchInput) -> Dashboar
         .ok_or(sqlx::Error::RowNotFound.into())
 }
 
+async fn create_match_request_batch_record(
+    pool: &PgPool,
+    created_by_user_id: &str,
+    created_by_display_name: &str,
+    input: MatchRequestBatchInput,
+) -> Result<Value, MatchRequestCreateError> {
+    let team_ids = input
+        .matches
+        .iter()
+        .flat_map(|request| [Some(request.team_a_id), request.team_b_id])
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut tx = pool.begin().await?;
+    advisory_lock(&mut tx, MATCHES_LOCK).await?;
+
+    let existing_team_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scrim.teams WHERE id = ANY($1)")
+            .bind(&team_ids)
+            .fetch_one(&mut *tx)
+            .await?;
+    if existing_team_count != team_ids.len() as i64 {
+        return Err(MatchRequestCreateError::BadRequest(
+            "At least one team was not found",
+        ));
+    }
+
+    let active_conflict: Option<i32> = sqlx::query_scalar(
+        r#"
+        SELECT active.team_id
+          FROM (
+                SELECT mr.team_a_id AS team_id
+                  FROM scrim.match_requests mr
+                  JOIN scrim.match_request_batches b ON b.id = mr.batch_id
+                 WHERE b.status IN ('draft', 'open')
+                   AND b.deadline_at > now()
+                UNION ALL
+                SELECT mr.team_b_id AS team_id
+                  FROM scrim.match_requests mr
+                  JOIN scrim.match_request_batches b ON b.id = mr.batch_id
+                 WHERE mr.team_b_id IS NOT NULL
+                   AND b.status IN ('draft', 'open')
+                   AND b.deadline_at > now()
+          ) active
+         WHERE active.team_id = ANY($1)
+         LIMIT 1
+        "#,
+    )
+    .bind(&team_ids)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if active_conflict.is_some() {
+        return Err(MatchRequestCreateError::BadRequest(
+            "Ein Team darf im gleichen aktiven Abfragezeitraum nur in einem Match stecken.",
+        ));
+    }
+
+    let batch_id = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT (COALESCE(MAX(id), 0) + 1)::int4
+          FROM scrim.match_request_batches
+        "#,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.match_request_batches(
+            id, template, deadline_at, status, created_by_user_id,
+            created_by_display_name, created_at, updated_at
+        )
+        VALUES($1, $2, $3, 'draft', $4, $5, now(), now())
+        "#,
+    )
+    .bind(batch_id)
+    .bind(&input.template)
+    .bind(input.deadline_at)
+    .bind(created_by_user_id)
+    .bind(created_by_display_name)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut matches = Vec::with_capacity(input.matches.len());
+    for request in input.matches {
+        let request_id = sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT (COALESCE(MAX(id), 0) + 1)::int4
+              FROM scrim.match_requests
+            "#,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let slot_options = Value::Array(request.slots.clone());
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_requests(
+                id, batch_id, team_a_id, team_b_id, status, slot_options, created_at, updated_at
+            )
+            VALUES($1, $2, $3, $4, 'draft', $5::jsonb, now(), now())
+            "#,
+        )
+        .bind(request_id)
+        .bind(batch_id)
+        .bind(request.team_a_id)
+        .bind(request.team_b_id)
+        .bind(&slot_options)
+        .execute(&mut *tx)
+        .await?;
+        matches.push(json!({
+            "id": request_id,
+            "team_a_id": request.team_a_id,
+            "team_b_id": request.team_b_id,
+            "status": "draft",
+            "slots": slot_options,
+        }));
+    }
+    tx.commit().await?;
+
+    Ok(json!({
+        "id": batch_id,
+        "status": "draft",
+        "template": input.template,
+        "deadline_at": utc_to_json_unix(Some(input.deadline_at)),
+        "matches": matches,
+    }))
+}
+
 async fn load_match(pool: &PgPool, id: i32) -> DashboardDbResult<Option<Value>> {
     let row = sqlx::query(
         r#"
@@ -695,6 +1048,14 @@ mod tests {
             .body(Body::from(body.to_string()))
     }
 
+    fn auth_get(uri: &str, session_id: &str) -> Result<Request<Body>, axum::http::Error> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={session_id}"))
+            .body(Body::empty())
+    }
+
     async fn insert_team(pool: &PgPool, id: i32, name: &str) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
@@ -772,6 +1133,96 @@ mod tests {
             row.try_get::<Option<i64>, _>("coach_spectator_discord_id")?,
             Some(123456789)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_defaults_route_liefert_zielsystem_defaults(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, session_id, _csrf) = app_with_session().await?;
+
+        let response = app
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/defaults",
+                &session_id,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["default_deadline_hours"], 48);
+        assert_eq!(data["min_slots"], 2);
+        assert_eq!(data["max_slots"], 5);
+        assert_eq!(data["templates"][0]["key"], "regular_scrim");
+        assert_eq!(data["templates"][1]["key"], "testmatch");
+        assert_eq!(data["templates"][2]["key"], "training");
+        assert_eq!(data["presets"][0]["slots"][0]["day"], "sat");
+        assert_eq!(data["presets"][0]["slots"][1]["day"], "sun");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_match_request_batch_speichert_slots_frist_template_und_blockiert_team_doppelplanung(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team(db.pool(), 3, "C").await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrims/match-requests",
+                &session_id,
+                &csrf,
+                json!({
+                    "template": "regular_scrim",
+                    "slots": [
+                        { "day": "sat", "from": 20 * 60, "to": 22 * 60 },
+                        { "day": "sun", "from": 20 * 60, "to": 22 * 60 }
+                    ],
+                    "matches": [
+                        { "team_a_id": 1, "team_b_id": 2 },
+                        { "team_a_id": 3, "team_b_id": null }
+                    ]
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["batch"]["status"], "draft");
+        assert_eq!(data["batch"]["template"], "regular_scrim");
+        assert_eq!(
+            data["batch"]["matches"].as_array().ok_or("matches")?.len(),
+            2
+        );
+        assert_eq!(data["batch"]["matches"][0]["slots"][0]["day"], "sat");
+        assert_eq!(data["batch"]["matches"][1]["team_b_id"], Value::Null);
+
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrim.match_requests")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(stored, 2);
+
+        let duplicate = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests",
+                &session_id,
+                &csrf,
+                json!({
+                    "template": "regular_scrim",
+                    "slots": [
+                        { "day": "sat", "from": 20 * 60, "to": 22 * 60 },
+                        { "day": "sun", "from": 20 * 60, "to": 22 * 60 }
+                    ],
+                    "matches": [{ "team_a_id": 2, "team_b_id": null }]
+                }),
+            )?)
+            .await?;
+        assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 
