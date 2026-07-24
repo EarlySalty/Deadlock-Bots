@@ -27,12 +27,18 @@ const MATCH_REQUEST_STATUS_DRAFT: &str = "draft";
 const MATCH_REQUEST_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_STATUS_OPEN: &str = "open";
 const MATCH_REQUEST_STATUS_POST_FAILED: &str = "post_failed";
+const MATCH_REQUEST_STATUS_CLOSED: &str = "closed";
 const MATCH_REQUEST_REMINDER_STATUS_APPROVED: &str = "approved";
 const MATCH_REQUEST_REMINDER_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_REMINDER_STATUS_POSTED: &str = "posted";
 const MATCH_REQUEST_REMINDER_STATUS_FAILED: &str = "failed";
+const MATCH_STATUS_MESSAGE_STATE_PENDING: &str = "pending";
+const MATCH_STATUS_MESSAGE_STATE_POSTING: &str = "posting";
+const MATCH_STATUS_MESSAGE_STATE_POSTED: &str = "posted";
+const MATCH_STATUS_MESSAGE_STATE_POST_FAILED: &str = "post_failed";
 const MATCH_REQUEST_RESPONSE_PREFIX: &str = "scrimreq:v1:";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
+const MAIN_GUILD_ID: u64 = 1289721245281292288;
 const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +139,67 @@ struct MatchRequestPost {
 
 struct MatchRequestSendResult {
     posts: Vec<MatchRequestPost>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchStatusNeed {
+    display_name: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchStatusTeam {
+    team_id: i64,
+    team_name: String,
+    confirmed: Vec<String>,
+    needs: Vec<MatchStatusNeed>,
+    no_slot_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchStatusMember {
+    participant_id: i64,
+    display_name: String,
+    is_bench: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchStatusResponse {
+    participant_id: i64,
+    slot_index: i32,
+    response: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchStatusTarget {
+    team_id: i64,
+    team_name: String,
+    channel_id: u64,
+    query_channel_id: u64,
+    query_message_id: u64,
+    status_message_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ClaimedMatchStatus {
+    request_id: i64,
+    team_a_name: String,
+    team_b_name: Option<String>,
+    released_slot: Value,
+    teams: Vec<MatchStatusTeam>,
+    targets: Vec<MatchStatusTarget>,
+    missing_targets: Vec<String>,
+}
+
+struct MatchStatusPost {
+    team_id: i64,
+    channel_id: u64,
+    message_id: u64,
+}
+
+struct MatchStatusSyncResult {
+    posts: Vec<MatchStatusPost>,
     errors: Vec<String>,
 }
 
@@ -256,6 +323,11 @@ async fn process_one_pending(
 
     if let Some(reminder) = claim_next_pending_match_request_reminder(pool).await? {
         handle_match_request_reminder(pool, adapter, reminder).await?;
+        return Ok(());
+    }
+
+    if let Some(status) = claim_next_pending_match_status(pool).await? {
+        handle_match_status(pool, adapter, status).await?;
         return Ok(());
     }
 
@@ -648,6 +720,379 @@ async fn handle_match_request_reminder(
             .await;
         }
     }
+    Ok(())
+}
+
+async fn claim_next_pending_match_status(
+    pool: &PgPool,
+) -> anyhow::Result<Option<ClaimedMatchStatus>> {
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT mr.id,
+                   mr.team_a_id,
+                   ta.name AS team_a_name,
+                   ta.discord_channel_id AS team_a_channel_id,
+                   mr.team_b_id,
+                   tb.name AS team_b_name,
+                   tb.discord_channel_id AS team_b_channel_id,
+                   mr.slot_options,
+                   mr.released_slot_index,
+                   mr.released_slot,
+                   mr.team_query_message_ids,
+                   mr.team_status_message_ids
+              FROM scrim.match_requests mr
+              JOIN scrim.teams ta ON ta.id = mr.team_a_id
+              LEFT JOIN scrim.teams tb ON tb.id = mr.team_b_id
+             WHERE mr.status = $3
+               AND mr.released_at IS NOT NULL
+               AND mr.released_slot_index IS NOT NULL
+               AND mr.status_message_state = $1
+             ORDER BY mr.released_at, mr.id
+             LIMIT 1
+             FOR UPDATE OF mr SKIP LOCKED
+        )
+        UPDATE scrim.match_requests mr
+           SET status_message_state = $2,
+               status_message_last_error = NULL,
+               updated_at = now()
+         FROM candidate
+         WHERE mr.id = candidate.id
+        RETURNING mr.id::bigint AS request_id,
+                  candidate.team_a_id::bigint AS team_a_id,
+                  candidate.team_a_name,
+                  candidate.team_a_channel_id,
+                  candidate.team_b_id::bigint AS team_b_id,
+                  candidate.team_b_name,
+                  candidate.team_b_channel_id,
+                  candidate.slot_options,
+                  candidate.released_slot_index,
+                  candidate.released_slot,
+                  candidate.team_query_message_ids,
+                  candidate.team_status_message_ids
+        "#,
+    )
+    .bind(MATCH_STATUS_MESSAGE_STATE_PENDING)
+    .bind(MATCH_STATUS_MESSAGE_STATE_POSTING)
+    .bind(MATCH_REQUEST_STATUS_CLOSED)
+    .fetch_optional(pool)
+    .await
+    .context("Scrim-Match-Status-Claim fehlgeschlagen")?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let request_id: i64 = row.get("request_id");
+    let team_a_id: i64 = row.get("team_a_id");
+    let team_a_name: String = row.get("team_a_name");
+    let team_a_channel_id: Option<i64> = row.get("team_a_channel_id");
+    let team_b_id: Option<i64> = row.get("team_b_id");
+    let team_b_name: Option<String> = row.get("team_b_name");
+    let team_b_channel_id: Option<i64> = row.get("team_b_channel_id");
+    let released_slot_index: i32 = row
+        .get::<Option<i32>, _>("released_slot_index")
+        .ok_or_else(|| anyhow!("freigegebener Slot fehlt fuer Request {request_id}"))?;
+    let slot_options: Value = row.get("slot_options");
+    let released_slot: Value = row
+        .get::<Option<Value>, _>("released_slot")
+        .or_else(|| {
+            usize::try_from(released_slot_index)
+                .ok()
+                .and_then(|index| slot_options.as_array()?.get(index).cloned())
+        })
+        .ok_or_else(|| anyhow!("freigegebener Slot ungueltig fuer Request {request_id}"))?;
+    let query_message_ids: Value = row.get("team_query_message_ids");
+    let status_message_ids: Value = row.get("team_status_message_ids");
+
+    let mut team_infos = vec![(team_a_id, team_a_name.clone(), team_a_channel_id)];
+    if let (Some(team_id), Some(team_name)) = (team_b_id, team_b_name.clone()) {
+        team_infos.push((team_id, team_name, team_b_channel_id));
+    }
+    let team_ids = team_infos
+        .iter()
+        .map(|(team_id, _, _)| i32::try_from(*team_id))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let member_rows = sqlx::query(
+        r#"
+        SELECT tm.team_id,
+               p.id AS participant_id,
+               p.display_name,
+               tm.is_bench
+          FROM scrim.team_members tm
+          JOIN scrim.participants p ON p.id = tm.participant_id
+         WHERE tm.team_id = ANY($1)
+         ORDER BY tm.team_id ASC, tm.is_bench ASC, p.display_name ASC, p.id ASC
+        "#,
+    )
+    .bind(&team_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut members = BTreeMap::<i64, Vec<MatchStatusMember>>::new();
+    for member in member_rows {
+        members
+            .entry(i64::from(member.get::<i32, _>("team_id")))
+            .or_default()
+            .push(MatchStatusMember {
+                participant_id: i64::from(member.get::<i32, _>("participant_id")),
+                display_name: member.get("display_name"),
+                is_bench: member.get("is_bench"),
+            });
+    }
+
+    let response_rows = sqlx::query(
+        r#"
+        SELECT team_id, participant_id, slot_index, response
+          FROM scrim.match_request_responses
+         WHERE request_id = $1
+           AND team_id = ANY($2)
+        "#,
+    )
+    .bind(i32::try_from(request_id)?)
+    .bind(&team_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut responses = BTreeMap::<i64, Vec<MatchStatusResponse>>::new();
+    for response in response_rows {
+        responses
+            .entry(i64::from(response.get::<i32, _>("team_id")))
+            .or_default()
+            .push(MatchStatusResponse {
+                participant_id: i64::from(response.get::<i32, _>("participant_id")),
+                slot_index: response.get("slot_index"),
+                response: response.get("response"),
+            });
+    }
+
+    let mut targets = Vec::new();
+    let mut missing_targets = Vec::new();
+    for (team_id, team_name, channel_id) in &team_infos {
+        let Some(channel_id) = valid_channel_id(*channel_id) else {
+            missing_targets.push(format!("{team_name}: Teamkanal fehlt"));
+            continue;
+        };
+        let Some((query_channel_id, query_message_id)) =
+            message_ids_for_team(&query_message_ids, *team_id)
+        else {
+            missing_targets.push(format!("{team_name}: Terminabfrage fehlt"));
+            continue;
+        };
+        let status_message_id = message_ids_for_team(&status_message_ids, *team_id).and_then(
+            |(stored_channel_id, message_id)| {
+                (stored_channel_id == channel_id).then_some(message_id)
+            },
+        );
+        targets.push(MatchStatusTarget {
+            team_id: *team_id,
+            team_name: team_name.clone(),
+            channel_id,
+            query_channel_id,
+            query_message_id,
+            status_message_id,
+        });
+    }
+
+    let teams = team_infos
+        .iter()
+        .map(|(team_id, team_name, _)| {
+            match_status_team(
+                *team_id,
+                team_name,
+                members.get(team_id).map(Vec::as_slice).unwrap_or(&[]),
+                responses.get(team_id).map(Vec::as_slice).unwrap_or(&[]),
+                released_slot_index,
+            )
+        })
+        .collect();
+
+    Ok(Some(ClaimedMatchStatus {
+        request_id,
+        team_a_name,
+        team_b_name,
+        released_slot,
+        teams,
+        targets,
+        missing_targets,
+    }))
+}
+
+fn match_status_team(
+    team_id: i64,
+    team_name: &str,
+    members: &[MatchStatusMember],
+    responses: &[MatchStatusResponse],
+    released_slot_index: i32,
+) -> MatchStatusTeam {
+    let mut confirmed = Vec::new();
+    let mut needs = Vec::new();
+    let mut no_slot_count = 0usize;
+    for member in members.iter().filter(|member| !member.is_bench) {
+        let member_responses = responses
+            .iter()
+            .filter(|response| response.participant_id == member.participant_id)
+            .collect::<Vec<_>>();
+        if member_responses.iter().any(|response| {
+            response.response == "available" && response.slot_index == released_slot_index
+        }) {
+            confirmed.push(member.display_name.clone());
+            continue;
+        }
+        let reason = if member_responses
+            .iter()
+            .any(|response| response.response == "unavailable" && response.slot_index == -1)
+        {
+            no_slot_count += 1;
+            "Kein Slot passt"
+        } else if member_responses.is_empty() {
+            "Antwort fehlt"
+        } else {
+            "Für finalen Slot nicht zugesagt"
+        };
+        needs.push(MatchStatusNeed {
+            display_name: member.display_name.clone(),
+            reason: reason.to_string(),
+        });
+    }
+    MatchStatusTeam {
+        team_id,
+        team_name: team_name.to_string(),
+        confirmed,
+        needs,
+        no_slot_count,
+    }
+}
+
+async fn handle_match_status(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    status: ClaimedMatchStatus,
+) -> anyhow::Result<()> {
+    let result = sync_match_status_messages(adapter, &status).await;
+    let mut errors = status.missing_targets.clone();
+    errors.extend(result.errors);
+    let error = (!errors.is_empty()).then(|| errors.join("; "));
+    save_match_status_messages(pool, status.request_id, &result.posts, error.as_deref()).await?;
+
+    if let Some(reason) = error {
+        post_log(
+            adapter,
+            match_status_failure_log_message(status.request_id, &reason, line!()),
+            status.request_id,
+        )
+        .await;
+    } else {
+        post_log(
+            adapter,
+            match_status_success_log_message(status.request_id, result.posts.len(), line!()),
+            status.request_id,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn sync_match_status_messages(
+    adapter: &dl_discord::DiscordAdapter,
+    status: &ClaimedMatchStatus,
+) -> MatchStatusSyncResult {
+    let mut posts = Vec::new();
+    let mut errors = Vec::new();
+    if status.targets.is_empty() {
+        errors.push("kein Teamkanal mit Terminabfrage".to_string());
+    }
+    for target in &status.targets {
+        let content = match match_status_message(status, target) {
+            Ok(content) => content,
+            Err(err) => {
+                errors.push(format!("request {}: {err}", status.request_id));
+                continue;
+            }
+        };
+        let body = message_body(&content);
+        if let Some(message_id) = target.status_message_id {
+            match adapter
+                .edit_raw_public(target.channel_id, message_id, &body)
+                .await
+            {
+                Ok(()) => posts.push(MatchStatusPost {
+                    team_id: target.team_id,
+                    channel_id: target.channel_id,
+                    message_id,
+                }),
+                Err(err) => errors.push(format!(
+                    "edit {}/{}: {}",
+                    target.channel_id, message_id, err
+                )),
+            }
+        } else {
+            match adapter.send_raw_public(target.channel_id, &body).await {
+                Ok(message_id) => posts.push(MatchStatusPost {
+                    team_id: target.team_id,
+                    channel_id: target.channel_id,
+                    message_id,
+                }),
+                Err(err) => errors.push(format!("post {}: {err}", target.channel_id)),
+            }
+        }
+    }
+    MatchStatusSyncResult { posts, errors }
+}
+
+async fn save_match_status_messages(
+    pool: &PgPool,
+    request_id: i64,
+    posts: &[MatchStatusPost],
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let raw = sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT team_status_message_ids
+          FROM scrim.match_requests
+         WHERE id = $1
+         FOR UPDATE
+        "#,
+    )
+    .bind(i32::try_from(request_id)?)
+    .fetch_one(&mut *tx)
+    .await?;
+    let mut value = raw.as_object().cloned().unwrap_or_default();
+    for post in posts {
+        value.insert(
+            post.team_id.to_string(),
+            json!({
+                "channel_id": post.channel_id,
+                "message_id": post.message_id,
+            }),
+        );
+    }
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_requests
+           SET team_status_message_ids = $2::jsonb,
+               status_message_state = $3,
+               status_message_last_error = $4,
+               status_message_posted_at = CASE
+                   WHEN $5 THEN COALESCE(status_message_posted_at, now())
+                   ELSE status_message_posted_at
+               END,
+               status_message_updated_at = now(),
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(i32::try_from(request_id)?)
+    .bind(Value::Object(value))
+    .bind(if error.is_some() {
+        MATCH_STATUS_MESSAGE_STATE_POST_FAILED
+    } else {
+        MATCH_STATUS_MESSAGE_STATE_POSTED
+    })
+    .bind(error)
+    .bind(!posts.is_empty())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1536,6 +1981,100 @@ fn match_request_message(
     Ok(lines.join("\n"))
 }
 
+fn match_status_message(
+    status: &ClaimedMatchStatus,
+    target: &MatchStatusTarget,
+) -> anyhow::Result<String> {
+    let target_team = status
+        .teams
+        .iter()
+        .find(|team| team.team_id == target.team_id)
+        .ok_or_else(|| anyhow!("Statusziel ohne Teamdaten: {}", target.team_id))?;
+    let match_label = status.team_b_name.as_ref().map_or_else(
+        || format!("{} vs Gegner offen", status.team_a_name),
+        |team_b_name| format!("{} vs {}", status.team_a_name, team_b_name),
+    );
+    let vote_summary = status
+        .teams
+        .iter()
+        .map(match_status_vote_summary)
+        .collect::<Vec<_>>()
+        .join(". ");
+    let mut lines = vec![
+        format!("Scrim-Status #{}", status.request_id),
+        format!("Match: {match_label}"),
+        format!(
+            "Finaler Termin: {}",
+            format_match_request_slot(&status.released_slot)?
+        ),
+        format!("Abstimmung: {vote_summary}."),
+        format!(
+            "Zusagen {}: {}",
+            target.team_name,
+            format_name_list(&target_team.confirmed)
+        ),
+        format!(
+            "Fehlt/unsicher {}: {}",
+            target.team_name,
+            format_need_list(&target_team.needs)
+        ),
+    ];
+    if target_team.needs.is_empty() {
+        lines.push("Ersatzbedarf: keiner sichtbar.".to_string());
+        lines.push("Nächste Aktion: Lineup bestätigen und Lobby vorbereiten.".to_string());
+    } else {
+        lines.push(format!(
+            "Ersatzbedarf: {} Spieler klären: {}",
+            target_team.needs.len(),
+            format_need_list(&target_team.needs)
+        ));
+        lines.push("Nächste Aktion: Ersatz klären, dann Lineup bestätigen.".to_string());
+    }
+    lines.push(format!(
+        "Terminabfrage: {}",
+        discord_message_url(target.query_channel_id, target.query_message_id)
+    ));
+    Ok(lines.join("\n"))
+}
+
+fn match_status_vote_summary(team: &MatchStatusTeam) -> String {
+    format!(
+        "{}: {} {}, {} offen/unsicher, {} Kein Slot passt",
+        team.team_name,
+        team.confirmed.len(),
+        if team.confirmed.len() == 1 {
+            "Zusage"
+        } else {
+            "Zusagen"
+        },
+        team.needs.len(),
+        team.no_slot_count
+    )
+}
+
+fn format_name_list(names: &[String]) -> String {
+    if names.is_empty() {
+        "keine".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn format_need_list(needs: &[MatchStatusNeed]) -> String {
+    if needs.is_empty() {
+        return "keine".to_string();
+    }
+    needs
+        .iter()
+        .map(|need| format!("{} ({})", need.display_name, need.reason))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn discord_message_url(channel_id: u64, message_id: u64) -> String {
+    format!("https://discord.com/channels/{MAIN_GUILD_ID}/{channel_id}/{message_id}")
+}
+
 fn match_request_reminder_message(team_name: &str, target_user_ids: &[u64]) -> String {
     let target = if target_user_ids.is_empty() {
         "euch".to_string()
@@ -1789,6 +2328,19 @@ fn posted_message_matches(
         && entry.get("message_id").and_then(Value::as_i64) == message_id
 }
 
+fn message_ids_for_team(message_ids: &Value, team_id: i64) -> Option<(u64, u64)> {
+    let entry = message_ids.get(team_id.to_string())?;
+    let channel_id = entry
+        .get("channel_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)?;
+    let message_id = entry
+        .get("message_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)?;
+    Some((channel_id, message_id))
+}
+
 fn match_request_response_reply(outcome: MatchRequestResponseOutcome) -> dl_discord::BridgeReply {
     let text = match outcome {
         MatchRequestResponseOutcome::SavedSlot(slot) => {
@@ -1889,6 +2441,18 @@ fn match_request_success_log_message(
 
 fn match_request_failure_message(batch_id: i64, reason: &str, _source_line: u32) -> String {
     format!("⚠️ Scrim-Terminabfragen konnten nicht gepostet werden (Batch {batch_id}): {reason}.")
+}
+
+fn match_status_success_log_message(
+    request_id: i64,
+    target_count: usize,
+    _source_line: u32,
+) -> String {
+    format!("Scrim-Match-Status gepostet (Abfrage {request_id}, Ziele: {target_count}).")
+}
+
+fn match_status_failure_log_message(request_id: i64, reason: &str, _source_line: u32) -> String {
+    format!("⚠️ Scrim-Match-Status konnte nicht gepostet werden (Abfrage {request_id}): {reason}.")
 }
 
 fn match_request_reminder_success_log_message(
@@ -2124,6 +2688,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn match_status_message_enthaelt_freigabe_ergebnis_ersatzbedarf_link_und_bleibt_pingfrei(
+    ) -> TestResult {
+        let content = match_status_message(
+            &ClaimedMatchStatus {
+                request_id: 31,
+                team_a_name: "team-1".to_string(),
+                team_b_name: Some("team-2".to_string()),
+                released_slot: json!({ "day": "sat", "from": 1200, "to": 1320 }),
+                teams: vec![
+                    MatchStatusTeam {
+                        team_id: 1,
+                        team_name: "team-1".to_string(),
+                        confirmed: vec!["Alice".to_string(), "Bob".to_string()],
+                        needs: vec![MatchStatusNeed {
+                            display_name: "Cara".to_string(),
+                            reason: "Antwort fehlt".to_string(),
+                        }],
+                        no_slot_count: 0,
+                    },
+                    MatchStatusTeam {
+                        team_id: 2,
+                        team_name: "team-2".to_string(),
+                        confirmed: vec!["Dino".to_string()],
+                        needs: Vec::new(),
+                        no_slot_count: 0,
+                    },
+                ],
+                targets: Vec::new(),
+                missing_targets: Vec::new(),
+            },
+            &MatchStatusTarget {
+                team_id: 1,
+                team_name: "team-1".to_string(),
+                channel_id: 100,
+                query_channel_id: 100,
+                query_message_id: 9001,
+                status_message_id: None,
+            },
+        )?;
+
+        assert!(content.contains("Scrim-Status #31"));
+        assert!(content.contains("Match: team-1 vs team-2"));
+        assert!(content.contains("Finaler Termin: Samstag 20:00-22:00"));
+        assert!(content.contains("team-1: 2 Zusagen, 1 offen/unsicher"));
+        assert!(content.contains("Zusagen team-1: Alice, Bob"));
+        assert!(content.contains("Fehlt/unsicher team-1: Cara (Antwort fehlt)"));
+        assert!(content.contains("Ersatzbedarf: 1 Spieler klären"));
+        assert!(content
+            .contains("Terminabfrage: https://discord.com/channels/1289721245281292288/100/9001"));
+        assert!(!content.contains("<@"));
+        assert_eq!(
+            message_body(&content)["allowed_mentions"],
+            json!({ "parse": [] })
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn match_request_reminder_claim_und_result_speichern_ziel_zeitpunkt_und_fehler(
     ) -> TestResult {
@@ -2338,6 +2960,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn match_status_claim_speichert_ids_und_liefert_edit_ziel() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_team_member(pool, 1, 502, 666).await?;
+        insert_team_member(pool, 2, 601, 777).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 1,
+                    channel_id: 100,
+                    message_id: 9001,
+                },
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 2,
+                    channel_id: 200,
+                    message_id: 9002,
+                },
+            ],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, Some(9001), Some(100)).await?;
+        insert_match_request_response(pool, 31, 2, 601, 777, 0, Some(9002), Some(200)).await?;
+        release_match_request_for_test(pool, 31).await?;
+
+        let claim = claim_next_pending_match_status(pool).await?.expect("claim");
+        assert_eq!(claim.request_id, 31);
+        assert_eq!(claim.targets.len(), 2);
+        assert_eq!(claim.targets[0].query_message_id, 9001);
+        assert_eq!(claim.targets[0].status_message_id, None);
+        assert_eq!(
+            match_request_status_message_state(pool, 31).await?,
+            MATCH_STATUS_MESSAGE_STATE_POSTING
+        );
+
+        save_match_status_messages(
+            pool,
+            31,
+            &[
+                MatchStatusPost {
+                    team_id: 1,
+                    channel_id: 100,
+                    message_id: 9101,
+                },
+                MatchStatusPost {
+                    team_id: 2,
+                    channel_id: 200,
+                    message_id: 9102,
+                },
+            ],
+            None,
+        )
+        .await?;
+        assert_eq!(
+            match_request_status_message_state(pool, 31).await?,
+            MATCH_STATUS_MESSAGE_STATE_POSTED
+        );
+        let ids = sqlx::query_scalar::<_, Value>(
+            "SELECT team_status_message_ids FROM scrim.match_requests WHERE id = 31",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            ids,
+            json!({
+                "1": { "channel_id": 100, "message_id": 9101 },
+                "2": { "channel_id": 200, "message_id": 9102 }
+            })
+        );
+
+        sqlx::query("UPDATE scrim.match_requests SET status_message_state = $2 WHERE id = $1")
+            .bind(31)
+            .bind(MATCH_STATUS_MESSAGE_STATE_PENDING)
+            .execute(pool)
+            .await?;
+        let edit_claim = claim_next_pending_match_status(pool)
+            .await?
+            .expect("edit claim");
+        assert_eq!(edit_claim.targets[0].status_message_id, Some(9101));
+        assert_eq!(edit_claim.targets[1].status_message_id, Some(9102));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn claim_next_pending_match_request_batch_markiert_batch_als_posting() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
@@ -2467,6 +3181,39 @@ mod tests {
             MATCH_REQUEST_STATUS_POST_FAILED
         );
         Ok(())
+    }
+
+    async fn release_match_request_for_test(pool: &PgPool, request_id: i32) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE scrim.match_requests
+               SET status = 'closed',
+                   released_slot_index = 0,
+                   released_slot = '{"day":"sat","from":1200,"to":1320}'::jsonb,
+                   released_at = now(),
+                   released_by_user_id = '42',
+                   released_by_display_name = 'Coach',
+                   status_message_state = 'pending',
+                   updated_at = now()
+             WHERE id = $1
+            "#,
+        )
+        .bind(request_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn match_request_status_message_state(
+        pool: &PgPool,
+        request_id: i32,
+    ) -> anyhow::Result<String> {
+        Ok(sqlx::query_scalar(
+            "SELECT status_message_state FROM scrim.match_requests WHERE id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(pool)
+        .await?)
     }
 
     async fn insert_team(

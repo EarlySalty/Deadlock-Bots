@@ -1331,6 +1331,8 @@ async fn release_match_request_slot(
                released_by_user_id = $4,
                released_by_display_name = $5,
                override_reason = $6,
+               status_message_state = 'pending',
+               status_message_last_error = NULL,
                status = 'closed',
                updated_at = now()
          WHERE id = $1
