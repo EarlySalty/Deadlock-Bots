@@ -870,11 +870,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     coaching_requests.ensure_panel().await;
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq = dl_community::faq::FaqChat::new(
+    let faq = dl_community::faq::FaqChat::new_with_ticket_generator(
         central_pool.clone(),
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
     );
     dl_community::faq::register(&mut router, faq.clone());
 

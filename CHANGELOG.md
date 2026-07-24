@@ -1,3 +1,9 @@
+## #292 – Ticket-Shadow zeigt Urteil und Antwortkandidat
+
+- **Problem:** Bei nicht sicher beantwortbaren Tickets zeigte der Shadow-Test nur einen festen Ausweichtext. Damit war nicht sichtbar, welche erste Antwort der Bot tatsächlich formulieren würde.
+- **Änderung:** Knowledge-Urteil und Antwortformulierung laufen jetzt getrennt. Auch bei `no` oder `uncertain` wird ein kurzer, natürlicher deutscher Kandidat versucht.
+- **Aktuelles Verhalten:** Urteil und Kandidat erscheinen ausschließlich im internen Shadow-Kanal. Der Bot antwortet weiterhin niemals automatisch im Ticket; technische Generatorausfälle werden intern knapp angezeigt.
+
 ## #291 — Frische Arbeitskopien bauen wieder
 
 Problem: Frische Arbeitskopien konnten den Rust-Arbeitsbereich nicht vollständig auflösen, weil ein eingetragener Helfer durch die Ignorierregeln nicht mitversioniert wurde.
