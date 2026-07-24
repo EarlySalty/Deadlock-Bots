@@ -1,3 +1,11 @@
+## #286 — Scrim-Match-IDs holen Ergebnisse ins Dashboard
+
+Problem: Coaches konnten gespielte Scrim-Matches noch nicht einfach mit Deadlock-Match-IDs verknüpfen; Ergebnisabrufe waren dadurch nicht sauber nachvollziehbar.
+
+Änderung: Das Dashboard speichert Match-IDs direkt am Scrim-Match, verhindert doppelte IDs und übergibt sie an den bestehenden Ergebnisabruf. Abrufstatus, Fehler, Rohdaten und normalisierte Ergebnisdaten bleiben sichtbar gespeichert.
+
+Aktuelles Verhalten: Coaches tragen eine Match-ID ein, sie wird automatisch gespeichert und das nächste leere Feld ist bereit. Abgerufene Ergebnisse erscheinen in der Match-History; pending/failed bleibt sichtbar statt still zu verschwinden.
+
 ## #285 — Scrim-Match-Status im Teamkanal
 
 Problem: Nach einer Slot-Freigabe gab es im Teamkanal noch keinen verbindlichen Match-Stand, und erneute Updates hätten leicht doppelte Nachrichten erzeugt.

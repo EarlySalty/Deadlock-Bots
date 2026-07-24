@@ -58,6 +58,7 @@ struct Inner {
     sessions: SessionStore,
     lookup: Arc<dyn MemberLookup>,
     names: Arc<dyn NameResolver>,
+    ai: Option<Arc<dyn dl_ai::ChatProvider>>,
     /// In-Memory-States des Admin-Logins (≠ DB-gestützte delegierte States).
     login_states: Mutex<HashMap<String, LoginState>>,
     /// Per-IP-Zeitstempel für die Callback-Ratenbegrenzung.
@@ -72,6 +73,25 @@ struct LoginState {
     created_at: f64,
 }
 
+fn build_scrim_lagebild_ai() -> Option<Arc<dyn dl_ai::ChatProvider>> {
+    let cfg = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok()) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Dashboard ungueltig");
+            return None;
+        }
+    };
+    match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
+        std::env::var(key).ok()
+    }) {
+        Ok(provider) => Some(provider),
+        Err(err) => {
+            tracing::warn!(%err, "Scrim-Lagebild-AI im Dashboard inaktiv");
+            None
+        }
+    }
+}
+
 impl DashboardApp {
     /// Baut die App mit explizitem Mitglieds-Lookup und Namens-Resolver
     /// (für Tests).
@@ -80,6 +100,16 @@ impl DashboardApp {
         pool: PgPool,
         lookup: Arc<dyn MemberLookup>,
         names: Arc<dyn NameResolver>,
+    ) -> Result<Self, DashboardDbError> {
+        Self::new_with_ai(cfg, pool, lookup, names, None).await
+    }
+
+    pub async fn new_with_ai(
+        cfg: DashboardConfig,
+        pool: PgPool,
+        lookup: Arc<dyn MemberLookup>,
+        names: Arc<dyn NameResolver>,
+        ai: Option<Arc<dyn dl_ai::ChatProvider>>,
     ) -> Result<Self, DashboardDbError> {
         let oauth = OAuthClient::new(
             cfg.discord_client_id.clone(),
@@ -100,6 +130,7 @@ impl DashboardApp {
                 sessions,
                 lookup,
                 names,
+                ai,
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
                 guild_stats_cache: Mutex::new(None),
@@ -112,7 +143,8 @@ impl DashboardApp {
     pub async fn from_config(cfg: DashboardConfig, pool: PgPool) -> Result<Self, DashboardDbError> {
         let lookup = Arc::new(BrokerMemberLookup::new(cfg.broker_base.clone()));
         let names = Arc::new(BrokerNameResolver::new(cfg.broker_base.clone()));
-        Self::new(cfg, pool, lookup, names).await
+        let ai = build_scrim_lagebild_ai();
+        Self::new_with_ai(cfg, pool, lookup, names, ai).await
     }
 
     fn cfg(&self) -> &DashboardConfig {
@@ -133,6 +165,10 @@ impl DashboardApp {
 
     pub(crate) fn names(&self) -> &Arc<dyn NameResolver> {
         &self.inner.names
+    }
+
+    pub(crate) fn ai_provider(&self) -> Option<Arc<dyn dl_ai::ChatProvider>> {
+        self.inner.ai.clone()
     }
 
     pub(crate) fn audit_bot_user_id(&self) -> u64 {
@@ -430,8 +466,16 @@ pub fn router(app: DashboardApp) -> Router {
             post(crate::scrims::scrims_set_lobby_code),
         )
         .route(
+            "/api/scrims/matches/{match_id}/match-ids",
+            post(crate::scrims::scrims_add_match_id),
+        )
+        .route(
             "/api/scrims/matches/{match_id}/result",
             post(crate::scrims::scrims_request_result),
+        )
+        .route(
+            "/api/scrims/teams/{team_id}/lagebild/corrections",
+            post(crate::scrims::scrims_create_lagebild_correction),
         )
         .route(
             "/api/scrims/participants/{participant_id}/notes",

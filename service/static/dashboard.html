@@ -1746,6 +1746,15 @@
             text-transform: uppercase;
             letter-spacing: 0;
         }
+        .scrim-match-id-input {
+            width: 9.5rem;
+        }
+        .scrim-result-list {
+            display: grid;
+            gap: 0.2rem;
+            color: #adb5bd;
+            font-size: 0.86rem;
+        }
         .scrim-message {
             min-height: 1.2rem;
             font-size: 0.9rem;
@@ -2298,6 +2307,7 @@
                                     <th>Status</th>
                                     <th>Lobby</th>
                                     <th>Lobbycode</th>
+                                    <th>Match-IDs</th>
                                     <th>Sieger</th>
                                     <th>Aktionen</th>
                                 </tr>
@@ -2331,6 +2341,23 @@
                 <div class="card">
                     <h3>Terminabfragen</h3>
                     <div id="scrim-request-summaries" class="scrim-request-list"></div>
+                </div>
+                <div class="card">
+                    <h3>Match-History</h3>
+                    <div class="dev-table-wrap">
+                        <table class="dev-table">
+                            <thead>
+                                <tr>
+                                    <th>Match</th>
+                                    <th>Teams</th>
+                                    <th>Match-IDs</th>
+                                    <th>Sieger</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scrim-history-rows"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </section>
@@ -2814,6 +2841,7 @@
     const scrimScheduledAtInput = document.getElementById('scrim-scheduled-at');
     const scrimCoachSpectatorInput = document.getElementById('scrim-coach-spectator');
     const scrimMatchRows = document.getElementById('scrim-match-rows');
+    const scrimHistoryRows = document.getElementById('scrim-history-rows');
     const scrimRequestSummaries = document.getElementById('scrim-request-summaries');
     const scrimTeamsContainer = document.getElementById('scrim-teams');
     const scrimParticipantRows = document.getElementById('scrim-participant-rows');
@@ -3942,6 +3970,29 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         });
     }
 
+    function scrimResultRefs(match) {
+        return Array.isArray(match && match.match_result_refs) ? match.match_result_refs : [];
+    }
+
+    function scrimResultRefLabel(ref) {
+        const status = ref.fetch_status || 'pending';
+        const error = ref.last_error ? ` · ${ref.last_error}` : '';
+        return `#${ref.steam_match_id || '-'} · ${status}${error}`;
+    }
+
+    function appendScrimResultRefs(container, refs) {
+        container.className = 'scrim-result-list';
+        if (!refs.length) {
+            container.textContent = '-';
+            return;
+        }
+        refs.forEach((ref) => {
+            const line = document.createElement('div');
+            line.textContent = scrimResultRefLabel(ref);
+            container.appendChild(line);
+        });
+    }
+
     function renderScrimMatches() {
         if (!scrimMatchRows) return;
         scrimMatchRows.innerHTML = '';
@@ -3949,29 +4000,36 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         if (!rows.length) {
             const tr = document.createElement('tr');
             const td = document.createElement('td');
-            td.colSpan = 7;
+            td.colSpan = 8;
             td.textContent = 'Noch keine Matches angelegt.';
             td.style.color = '#9aa0a6';
             tr.appendChild(td);
             scrimMatchRows.appendChild(tr);
             return;
         }
-        const botStates = new Set(['start_requested', 'lobby_open', 'lobby_posting', 'starting', 'start_failed', 'in_progress', 'finished', 'result_requested', 'result_fetching', 'result_failed']);
+        const botStates = new Set(['start_requested', 'lobby_open', 'lobby_posting', 'starting', 'start_failed', 'in_progress', 'result_requested', 'result_fetching']);
         rows.forEach((match) => {
             const tr = document.createElement('tr');
+            const refs = scrimResultRefs(match);
             const values = [
                 `#${match.id} · ${scrimDate(match.scheduled_at)}`,
                 `${scrimMatchTeamLabel(match, 'team_a')} vs ${scrimMatchTeamLabel(match, 'team_b')}`,
                 match.status,
                 match.lobby_state,
                 match.join_code,
-                match.winner_team_id,
             ];
             values.forEach((value) => {
                 const td = document.createElement('td');
                 td.textContent = scrimCell(value);
                 tr.appendChild(td);
             });
+            const idsTd = document.createElement('td');
+            appendScrimResultRefs(idsTd, refs);
+            tr.appendChild(idsTd);
+            const winnerTd = document.createElement('td');
+            const winnerRef = refs.find((ref) => ref.winner_team_id);
+            winnerTd.textContent = scrimCell(match.winner_team_id || (winnerRef && winnerRef.winner_team_id));
+            tr.appendChild(winnerTd);
             const actionTd = document.createElement('td');
             const state = String(match.lobby_state || '');
             const actions = document.createElement('div');
@@ -3992,18 +4050,79 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             lobbyBtn.textContent = 'Lobby ist offen';
             lobbyBtn.disabled = botStates.has(state);
             lobbyBtn.addEventListener('click', () => setScrimLobbyCode(match.id, codeInput.value));
+            const matchIdInput = document.createElement('input');
+            matchIdInput.type = 'text';
+            matchIdInput.className = 'scrim-match-id-input';
+            matchIdInput.inputMode = 'numeric';
+            matchIdInput.placeholder = 'Match-ID';
+            matchIdInput.setAttribute('aria-label', `Match-ID für Match ${match.id}`);
+            matchIdInput.addEventListener('input', () => {
+                matchIdInput.value = matchIdInput.value.replace(/\D/g, '').slice(0, 20);
+            });
+            matchIdInput.addEventListener('change', () => saveScrimMatchId(match.id, matchIdInput));
+            matchIdInput.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    matchIdInput.blur();
+                }
+            });
             const resultBtn = document.createElement('button');
             resultBtn.type = 'button';
             resultBtn.className = 'namespace';
             resultBtn.textContent = 'Ergebnis holen';
-            resultBtn.disabled = botStates.has(state) || state === 'result_requested';
+            resultBtn.disabled = botStates.has(state);
             resultBtn.addEventListener('click', () => requestScrimState(match.id, 'result'));
             actions.appendChild(codeInput);
             actions.appendChild(lobbyBtn);
+            actions.appendChild(matchIdInput);
             actions.appendChild(resultBtn);
             actionTd.appendChild(actions);
             tr.appendChild(actionTd);
             scrimMatchRows.appendChild(tr);
+        });
+    }
+
+    function renderScrimHistory() {
+        if (!scrimHistoryRows) return;
+        scrimHistoryRows.innerHTML = '';
+        const rows = (scrimData.matches || []).filter((match) => {
+            const refs = scrimResultRefs(match);
+            return match.lobby_state === 'finished' || refs.some((ref) => ref.fetch_status === 'fetched');
+        });
+        if (!rows.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 5;
+            td.textContent = 'Noch keine abgeschlossenen Matches.';
+            td.style.color = '#9aa0a6';
+            tr.appendChild(td);
+            scrimHistoryRows.appendChild(tr);
+            return;
+        }
+        rows.forEach((match) => {
+            const tr = document.createElement('tr');
+            const refs = scrimResultRefs(match);
+            [
+                `#${match.id} · ${scrimDate(match.scheduled_at)}`,
+                `${scrimMatchTeamLabel(match, 'team_a')} vs ${scrimMatchTeamLabel(match, 'team_b')}`,
+            ].forEach((value) => {
+                const td = document.createElement('td');
+                td.textContent = value;
+                tr.appendChild(td);
+            });
+            const idsTd = document.createElement('td');
+            appendScrimResultRefs(idsTd, refs);
+            tr.appendChild(idsTd);
+            const winnerRef = refs.find((ref) => ref.winner_team_id);
+            const winnerTd = document.createElement('td');
+            winnerTd.textContent = scrimCell(match.winner_team_id || (winnerRef && winnerRef.winner_team_id));
+            tr.appendChild(winnerTd);
+            const statusTd = document.createElement('td');
+            statusTd.textContent = refs.some((ref) => ref.fetch_status === 'failed')
+                ? 'failed'
+                : (match.lobby_state || 'fetched');
+            tr.appendChild(statusTd);
+            scrimHistoryRows.appendChild(tr);
         });
     }
 
@@ -4274,6 +4393,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         renderScrimBlockForm();
         renderScrimTeamOptions();
         renderScrimMatches();
+        renderScrimHistory();
         renderScrimRequestSummaries();
         renderScrimTeams();
         renderScrimParticipants();
@@ -4368,6 +4488,26 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             await loadScrims();
         } catch (err) {
             setScrimMessage(`Lobbycode konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+        }
+    }
+
+    async function saveScrimMatchId(matchId, input) {
+        const value = String(input && input.value || '').trim();
+        if (!value) return;
+        if (!/^\d+$/.test(value)) {
+            setScrimMessage('Match-ID darf nur Zahlen enthalten.', 'error');
+            return;
+        }
+        try {
+            await fetchJSON(`/api/scrims/matches/${matchId}/match-ids`, {
+                method: 'POST',
+                body: JSON.stringify({ match_id: value }),
+            });
+            setScrimMessage('Match-ID gespeichert; Ergebnisabruf ist angestoßen.', 'success');
+            if (input) input.value = '';
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Match-ID konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
         }
     }
 

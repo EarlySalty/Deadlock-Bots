@@ -229,11 +229,29 @@ pub async fn fetch_scrim_match_result(
     pool: &PgPool,
     match_id: i64,
 ) -> Result<ScrimMatchResultOutcome, ScrimMatchErr> {
+    fetch_scrim_match_result_with_lookup(pool, match_id, None).await
+}
+
+pub async fn fetch_scrim_match_result_by_steam_match_id(
+    pool: &PgPool,
+    match_id: i64,
+    steam_match_id: i64,
+) -> Result<ScrimMatchResultOutcome, ScrimMatchErr> {
+    fetch_scrim_match_result_with_lookup(pool, match_id, Some(steam_match_id)).await
+}
+
+async fn fetch_scrim_match_result_with_lookup(
+    pool: &PgPool,
+    match_id: i64,
+    lookup_steam_match_id: Option<i64>,
+) -> Result<ScrimMatchResultOutcome, ScrimMatchErr> {
     let scrim_match = load_scrim_match(pool, match_id).await?;
     let team_a_id = required_team_id(&scrim_match, match_id, "team_a_id")?;
     let team_b_id = required_team_id(&scrim_match, match_id, "team_b_id")?;
-    let payload =
-        build_match_result_payload(scrim_match.steam_match_id, scrim_match.party_id.as_deref());
+    let payload = build_match_result_payload(
+        lookup_steam_match_id.or(scrim_match.steam_match_id),
+        scrim_match.party_id.as_deref(),
+    );
     if payload.as_object().is_none_or(serde_json::Map::is_empty) {
         return Err(ScrimMatchErr::MissingResultLookup);
     }

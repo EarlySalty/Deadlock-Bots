@@ -1,3 +1,4 @@
+pub mod lagebild;
 pub mod model;
 pub mod scrim_match;
 pub mod seed;
