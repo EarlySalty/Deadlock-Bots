@@ -1155,9 +1155,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tracing::info!(addr = %mcp_addr, "MCP-Connector gebunden");
     let mcp_server = axum::serve(mcp_listener, mcp::router(mcp_state));
 
-    let scrim_announcement_channel_id =
-        NonZeroU64::new(env_u64_default("DL_SCRIM_ANNOUNCEMENT_CHANNEL_ID", 0))
-            .map(NonZeroU64::get);
     let scrim_voice_config = scrimglue::ScrimVoiceConfig {
         enabled: env_bool_default("DL_SCRIM_VISIBLE_VCS_ENABLED", false),
         category_id: NonZeroU64::new(env_u64_default("DL_SCRIM_VISIBLE_VCS_CATEGORY_ID", 0))
@@ -1182,7 +1179,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mut scrim_match_driver = scrimglue::spawn(
         central_pool.clone(),
         adapter.clone(),
-        scrim_announcement_channel_id,
         tempvoice.clone(),
         scrim_voice_config,
         scrim_lagebild_ai,

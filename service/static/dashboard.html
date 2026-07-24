@@ -2349,6 +2349,7 @@
                 </div>
                 <div class="card">
                     <h3>Matches</h3>
+                    <p class="scrim-message">Match-IDs vor der Eingabe genau prüfen. Die Team- und Spielerzuordnung wird noch nicht zuverlässig geklärt; falsch eingetragene IDs lassen sich hier noch nicht löschen.</p>
                     <div class="dev-table-wrap">
                         <table class="dev-table">
                             <thead>
@@ -3656,9 +3657,65 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             : 'scrim-message';
     }
 
+    function scrimErrorMessage(error, fallback) {
+        const raw = String(error && error.message || '').trim();
+        const known = [
+            ['Match ID already exists', 'Diese Match-ID ist bereits gespeichert.'],
+            ['Deadline has not passed', 'Die Antwortfrist ist noch nicht abgelaufen.'],
+            ['Match request is not open', 'Diese Terminabfrage ist nicht mehr offen.'],
+            ['No recommended slot available', 'Es gibt keinen empfohlenen Slot. Wähle einen Slot manuell aus.'],
+            ['Lobby state is controlled by bot', 'Der Bot verarbeitet dieses Match gerade. Bitte warte kurz.'],
+            ['No missing responses', 'Für dieses Team fehlen keine Antworten mehr.'],
+            ['Team role missing for ambiguous reminder', 'Für dieses Team ist keine pingbare Teamrolle hinterlegt. Ergänze die Rolle oder kläre die fehlenden Discord-Konten.'],
+            ['Original team query missing', 'Die ursprüngliche Terminabfrage wurde nicht gefunden.'],
+            ['Original team query channel mismatch', 'Die Terminabfrage liegt nicht mehr im aktuell hinterlegten Teamkanal. Prüfe die Kanalzuordnung, bevor du erinnerst.'],
+            ['Team channel missing', 'Für dieses Team ist kein Teamkanal hinterlegt.'],
+        ].find(([needle]) => raw.includes(needle));
+        if (known) return known[1];
+        return raw ? `${fallback}: ${raw}` : fallback;
+    }
+
     function scrimCell(value) {
         if (value === null || value === undefined || value === '') return '-';
         return String(value);
+    }
+
+    const SCRIM_STATUS_LABELS = {
+        draft: 'Entwurf',
+        scheduled: 'Geplant',
+        pending: 'Ausstehend',
+        posting: 'Wird gepostet',
+        posted: 'Gepostet',
+        post_failed: 'Post fehlgeschlagen',
+        open: 'Offen',
+        closed: 'Abgeschlossen',
+        cancelled: 'Abgebrochen',
+        lobby_open: 'Lobbycode wird gepostet',
+        lobby_posting: 'Lobbycode wird gepostet',
+        lobby_posted: 'Lobbycode gepostet',
+        lobby_post_failed: 'Lobbycode fehlgeschlagen',
+        start_requested: 'Start angefordert',
+        starting: 'Start läuft',
+        start_failed: 'Start fehlgeschlagen',
+        in_progress: 'Läuft',
+        result_requested: 'Ergebnis angefordert',
+        result_fetching: 'Ergebnis wird geladen',
+        result_failed: 'Ergebnisabruf fehlgeschlagen',
+        fetched: 'Abgerufen',
+        failed: 'Fehlgeschlagen',
+        finished: 'Abgeschlossen',
+        completed: 'Abgeschlossen',
+        ok: 'Aktuell',
+        error: 'Fehler',
+        ai: 'AI',
+        match: 'Nach Match',
+        correction: 'Korrigiert',
+    };
+
+    function scrimStatusLabel(value) {
+        if (value === null || value === undefined || value === '') return '-';
+        const raw = String(value);
+        return SCRIM_STATUS_LABELS[raw] || raw;
     }
 
     function scrimTeamLabel(team) {
@@ -3776,6 +3833,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             row.className = 'scrim-slot-row';
 
             const day = document.createElement('select');
+            day.setAttribute('aria-label', `Wochentag für Slot ${index + 1}`);
             Object.entries(SCRIM_DAY_LABELS).forEach(([value, label]) => {
                 const option = document.createElement('option');
                 option.value = value;
@@ -3790,6 +3848,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
 
             const from = document.createElement('input');
             from.type = 'time';
+            from.setAttribute('aria-label', `Startzeit für Slot ${index + 1}`);
             from.value = scrimMinutesToInput(slot.from);
             from.addEventListener('change', () => {
                 slot.from = scrimInputToMinutes(from.value);
@@ -3798,6 +3857,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
 
             const to = document.createElement('input');
             to.type = 'time';
+            to.setAttribute('aria-label', `Endzeit für Slot ${index + 1}`);
             to.value = scrimMinutesToInput(slot.to);
             to.addEventListener('change', () => {
                 slot.to = scrimInputToMinutes(to.value);
@@ -3807,7 +3867,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'namespace scrim-small-button';
-            remove.textContent = 'X';
+            remove.textContent = 'Slot entfernen';
             remove.disabled = slots.length <= 2;
             remove.addEventListener('click', () => {
                 slots.splice(index, 1);
@@ -3852,12 +3912,14 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
 
             const teamA = document.createElement('select');
             fillScrimTeamSelect(teamA, match.team_a_id, 'Team A');
+            teamA.setAttribute('aria-label', `Team A für Paarung ${index + 1}`);
             teamA.addEventListener('change', () => {
                 match.team_a_id = teamA.value;
             });
 
             const teamB = document.createElement('select');
             fillScrimTeamSelect(teamB, match.team_b_id, 'Gegner offen');
+            teamB.setAttribute('aria-label', `Team B für Paarung ${index + 1}`);
             teamB.addEventListener('change', () => {
                 match.team_b_id = teamB.value;
             });
@@ -3875,7 +3937,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'namespace scrim-small-button';
-            remove.textContent = 'X';
+            remove.textContent = 'Paarung entfernen';
             remove.disabled = scrimBlockMatchDrafts.length <= 1;
             remove.addEventListener('click', () => {
                 scrimBlockMatchDrafts.splice(index, 1);
@@ -3997,6 +4059,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage(err.message || 'Scrim-Block ist unvollständig.', 'error');
             return;
         }
+        const submit = ev && ev.submitter;
+        const wasDisabled = Boolean(submit && submit.disabled);
+        if (submit) submit.disabled = true;
         try {
             await fetchJSON('/api/scrims/match-requests', {
                 method: 'POST',
@@ -4006,7 +4071,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             scrimBlockInitialized = false;
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Terminabfragen konnten nicht angelegt werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Terminabfragen konnten nicht angelegt werden.'), 'error');
+        } finally {
+            if (submit) submit.disabled = wasDisabled;
         }
     }
 
@@ -4030,13 +4097,23 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
 
     function scrimResultRefs(match) {
-        return Array.isArray(match && match.match_result_refs) ? match.match_result_refs : [];
+        const refs = Array.isArray(match && match.match_result_refs) ? match.match_result_refs : [];
+        if (refs.length || !match || !match.steam_match_id) return refs;
+        const completed = ['completed', 'finished'].includes(String(match.status || ''))
+            || match.lobby_state === 'finished'
+            || Boolean(match.winner_team_id);
+        return [{
+            steam_match_id: match.steam_match_id,
+            fetch_status: completed ? 'fetched' : 'pending',
+            winner_team_id: match.winner_team_id || null,
+            legacy: true,
+        }];
     }
 
     function scrimResultRefLabel(ref) {
         const status = ref.fetch_status || 'pending';
         const error = ref.last_error ? ` · ${ref.last_error}` : '';
-        return `#${ref.steam_match_id || '-'} · ${status}${error}`;
+        return `#${ref.steam_match_id || '-'} · ${scrimStatusLabel(status)}${error}`;
     }
 
     function appendScrimResultRefs(container, refs) {
@@ -4067,14 +4144,15 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             return;
         }
         const botStates = new Set(['start_requested', 'lobby_open', 'lobby_posting', 'starting', 'start_failed', 'in_progress', 'result_requested', 'result_fetching']);
+        const resultBusyStates = new Set(['start_requested', 'lobby_open', 'lobby_posting', 'starting', 'start_failed', 'result_requested', 'result_fetching']);
         rows.forEach((match) => {
             const tr = document.createElement('tr');
             const refs = scrimResultRefs(match);
             const values = [
                 `#${match.id} · ${scrimDate(match.scheduled_at)}`,
                 `${scrimMatchTeamLabel(match, 'team_a')} vs ${scrimMatchTeamLabel(match, 'team_b')}`,
-                match.status,
-                match.lobby_state,
+                scrimStatusLabel(match.status),
+                scrimStatusLabel(match.lobby_state),
                 match.join_code,
             ];
             values.forEach((value) => {
@@ -4106,15 +4184,16 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             const lobbyBtn = document.createElement('button');
             lobbyBtn.type = 'button';
             lobbyBtn.className = 'load';
-            lobbyBtn.textContent = 'Lobby ist offen';
+            lobbyBtn.textContent = match.join_code ? 'Lobbycode aktualisieren' : 'Lobby ist offen';
             lobbyBtn.disabled = botStates.has(state);
-            lobbyBtn.addEventListener('click', () => setScrimLobbyCode(match.id, codeInput.value));
+            lobbyBtn.addEventListener('click', () => setScrimLobbyCode(match.id, codeInput.value, lobbyBtn));
             const matchIdInput = document.createElement('input');
             matchIdInput.type = 'text';
             matchIdInput.className = 'scrim-match-id-input';
             matchIdInput.inputMode = 'numeric';
-            matchIdInput.placeholder = 'Match-ID';
-            matchIdInput.setAttribute('aria-label', `Match-ID für Match ${match.id}`);
+            matchIdInput.placeholder = '+ Match-ID';
+            matchIdInput.setAttribute('aria-label', `Weitere Match-ID für Match ${match.id}`);
+            matchIdInput.title = 'Match-ID vor dem Eintragen prüfen; Löschen ist hier noch nicht möglich.';
             matchIdInput.addEventListener('input', () => {
                 matchIdInput.value = matchIdInput.value.replace(/\D/g, '').slice(0, 20);
             });
@@ -4129,8 +4208,8 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             resultBtn.type = 'button';
             resultBtn.className = 'namespace';
             resultBtn.textContent = 'Ergebnis holen';
-            resultBtn.disabled = botStates.has(state);
-            resultBtn.addEventListener('click', () => requestScrimState(match.id, 'result'));
+            resultBtn.disabled = resultBusyStates.has(state);
+            resultBtn.addEventListener('click', () => requestScrimState(match.id, 'result', resultBtn));
             actions.appendChild(codeInput);
             actions.appendChild(lobbyBtn);
             actions.appendChild(matchIdInput);
@@ -4146,7 +4225,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         scrimHistoryRows.innerHTML = '';
         const rows = (scrimData.matches || []).filter((match) => {
             const refs = scrimResultRefs(match);
-            return match.lobby_state === 'finished' || refs.some((ref) => ref.fetch_status === 'fetched');
+            return ['completed', 'finished'].includes(String(match.status || ''))
+                || match.lobby_state === 'finished'
+                || refs.some((ref) => ref.fetch_status === 'fetched');
         });
         if (!rows.length) {
             const tr = document.createElement('tr');
@@ -4177,9 +4258,12 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             winnerTd.textContent = scrimCell(match.winner_team_id || (winnerRef && winnerRef.winner_team_id));
             tr.appendChild(winnerTd);
             const statusTd = document.createElement('td');
-            statusTd.textContent = refs.some((ref) => ref.fetch_status === 'failed')
-                ? 'failed'
-                : (match.lobby_state || 'fetched');
+            const unresolvedRefs = refs.some((ref) => ['pending', 'fetching', 'failed'].includes(ref.fetch_status));
+            statusTd.textContent = unresolvedRefs
+                ? 'Ergebnis teilweise abgerufen'
+                : (match.lobby_state === 'finished' || ['completed', 'finished'].includes(String(match.status || ''))
+                    ? 'Abgeschlossen'
+                    : 'Ergebnis abgerufen');
             tr.appendChild(statusTd);
             scrimHistoryRows.appendChild(tr);
         });
@@ -4250,7 +4334,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
 
                 const reason = document.createElement('div');
                 reason.className = 'scrim-request-meta';
-                reason.textContent = `Override-Grund: ${match.override_reason || '-'}`;
+                reason.textContent = `Grund für abweichenden Slot: ${match.override_reason || '-'}`;
                 item.appendChild(reason);
 
                 if (summary.deadline_passed && selectedSlot) {
@@ -4269,7 +4353,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 });
                 item.appendChild(slots);
 
-                if (summary.deadline_passed) {
+                if (summary.deadline_passed && ['open', 'post_failed'].includes(match.status)) {
                     const controls = document.createElement('div');
                     controls.className = 'scrim-release-controls';
                     const row = document.createElement('div');
@@ -4293,9 +4377,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                     button.textContent = 'Slot freigeben';
                     const reasonInput = document.createElement('textarea');
                     reasonInput.className = 'scrim-note';
-                    reasonInput.placeholder = 'Override-Grund optional';
+                    reasonInput.placeholder = 'Grund für abweichenden Slot (optional)';
                     reasonInput.value = match.override_reason || '';
-                    button.addEventListener('click', () => releaseScrimRequest(match.request_id, select.value, reasonInput.value));
+                    button.addEventListener('click', () => releaseScrimRequest(match.request_id, select.value, reasonInput.value, button));
                     row.appendChild(select);
                     row.appendChild(button);
                     controls.appendChild(row);
@@ -4347,7 +4431,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                     remind.className = 'namespace';
                     remind.textContent = 'Jetzt erinnern';
                     remind.disabled = !(match.status === 'open' || match.status === 'post_failed');
-                    remind.addEventListener('click', () => approveScrimReminder(match.request_id, team.team_id));
+                    remind.addEventListener('click', () => approveScrimReminder(match.request_id, team.team_id, remind));
                     row.appendChild(label);
                     row.appendChild(remind);
                     item.appendChild(row);
@@ -4461,9 +4545,16 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             const meta = document.createElement('div');
             meta.className = 'scrim-lagebild-meta';
             meta.textContent = current
-                ? `${scrimDate(current.generated_at)} · ${current.source || '-'} · ${current.status || '-'}`
+                ? `${scrimDate(current.generated_at)} · ${scrimStatusLabel(current.source)} · ${scrimStatusLabel(current.status)}`
                 : 'Noch kein Lagebild gespeichert.';
             card.appendChild(meta);
+
+            if (current && current.error) {
+                const error = document.createElement('div');
+                error.className = 'scrim-message error';
+                error.textContent = `Lagebild konnte nicht vollständig erzeugt werden: ${current.error}`;
+                card.appendChild(error);
+            }
 
             appendScrimLagebildText(
                 card,
@@ -4500,7 +4591,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                     row.className = 'scrim-lagebild-timeline-item';
                     if (snapshot.id === (current && current.id)) row.open = true;
                     const summary = document.createElement('summary');
-                    summary.textContent = `${scrimDate(snapshot.generated_at)} · ${snapshot.source || '-'} · ${snapshot.generated_for || '-'}`;
+                    summary.textContent = `${scrimDate(snapshot.generated_at)} · ${scrimStatusLabel(snapshot.source)} · ${snapshot.generated_for || '-'}`;
                     row.appendChild(summary);
                     appendScrimLagebildText(row, snapshot.text, '-');
                     appendScrimLagebildEvidences(row, snapshot.evidences);
@@ -4530,7 +4621,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                     line.className = 'scrim-correction-message';
                     const who = document.createElement('div');
                     who.className = 'scrim-correction-meta';
-                    who.textContent = `${entry.role || '-'} · ${scrimDate(entry.created_at)}`;
+                    who.textContent = `${entry.author_display_name || scrimStatusLabel(entry.role)} · ${scrimDate(entry.created_at)}`;
                     const text = document.createElement('div');
                     text.textContent = entry.message || '';
                     line.appendChild(who);
@@ -4544,11 +4635,11 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             form.className = 'scrim-correction-form';
             const textarea = document.createElement('textarea');
             textarea.className = 'scrim-note';
-            textarea.placeholder = 'Korrektur zum Lagebild';
+            textarea.placeholder = current ? 'Korrektur zum Lagebild' : 'Kontext für das erste Lagebild';
             const button = document.createElement('button');
             button.type = 'submit';
             button.className = 'load';
-            button.textContent = 'Korrektur senden';
+            button.textContent = current ? 'Korrektur senden' : 'Kontext senden';
             form.addEventListener('submit', (ev) => {
                 ev.preventDefault();
                 submitScrimLagebildCorrection(item.team_id, textarea, button);
@@ -4601,7 +4692,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             save.type = 'button';
             save.className = 'load';
             save.textContent = 'Speichern';
-            save.addEventListener('click', () => saveScrimNotes(participant.id, note.value));
+            save.addEventListener('click', () => saveScrimNotes(participant.id, note.value, save));
             actionTd.appendChild(save);
             tr.appendChild(actionTd);
             scrimParticipantRows.appendChild(tr);
@@ -4662,6 +4753,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             scheduledAt = parsed.toISOString();
         }
         const coach = scrimCoachSpectatorInput ? scrimCoachSpectatorInput.value.trim() : '';
+        const submit = ev && ev.submitter;
+        const wasDisabled = Boolean(submit && submit.disabled);
+        if (submit) submit.disabled = true;
         try {
             await fetchJSON('/api/scrims/matches', {
                 method: 'POST',
@@ -4677,29 +4771,37 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             if (scrimCoachSpectatorInput) scrimCoachSpectatorInput.value = '';
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Match konnte nicht angelegt werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Match konnte nicht angelegt werden.'), 'error');
+        } finally {
+            if (submit) submit.disabled = wasDisabled;
         }
     }
 
-    async function requestScrimState(matchId, action) {
+    async function requestScrimState(matchId, action, button) {
+        const wasDisabled = Boolean(button && button.disabled);
+        if (button) button.disabled = true;
         try {
             await fetchJSON(`/api/scrims/matches/${matchId}/${action}`, {
                 method: 'POST',
                 body: JSON.stringify({}),
             });
-            setScrimMessage('Aktion ausgelöst — der Bot übernimmt.', 'success');
+            setScrimMessage('Aktion ausgelöst. Der Bot übernimmt.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Aktion fehlgeschlagen (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Aktion fehlgeschlagen.'), 'error');
+        } finally {
+            if (button) button.disabled = wasDisabled;
         }
     }
 
-    async function setScrimLobbyCode(matchId, rawCode) {
+    async function setScrimLobbyCode(matchId, rawCode, button) {
         const code = String(rawCode || '').trim().toUpperCase();
         if (!/^[A-Z0-9]{5}$/.test(code)) {
             setScrimMessage('Lobbycode braucht genau 5 Buchstaben oder Zahlen.', 'error');
             return;
         }
+        const wasDisabled = Boolean(button && button.disabled);
+        if (button) button.disabled = true;
         try {
             await fetchJSON(`/api/scrims/matches/${matchId}/lobby-code`, {
                 method: 'POST',
@@ -4708,7 +4810,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage('Lobbycode gespeichert.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Lobbycode konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Lobbycode konnte nicht gespeichert werden.'), 'error');
+        } finally {
+            if (button) button.disabled = wasDisabled;
         }
     }
 
@@ -4719,6 +4823,8 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage('Match-ID darf nur Zahlen enthalten.', 'error');
             return;
         }
+        const wasDisabled = Boolean(input && input.disabled);
+        if (input) input.disabled = true;
         try {
             await fetchJSON(`/api/scrims/matches/${matchId}/match-ids`, {
                 method: 'POST',
@@ -4728,17 +4834,21 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             if (input) input.value = '';
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Match-ID konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Match-ID konnte nicht gespeichert werden.'), 'error');
+        } finally {
+            if (input) input.disabled = wasDisabled;
         }
     }
 
-    async function releaseScrimRequest(requestId, rawSlotIndex, rawReason) {
+    async function releaseScrimRequest(requestId, rawSlotIndex, rawReason, button) {
         const slotIndex = Number(rawSlotIndex);
         if (!Number.isInteger(slotIndex) || slotIndex < 0) {
             setScrimMessage('Bitte einen Slot auswählen.', 'error');
             return;
         }
         const reason = String(rawReason || '').trim();
+        const wasDisabled = Boolean(button && button.disabled);
+        if (button) button.disabled = true;
         try {
             await fetchJSON(`/api/scrims/match-requests/${requestId}/release`, {
                 method: 'POST',
@@ -4750,11 +4860,15 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage('Slot freigegeben.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Slot konnte nicht freigegeben werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Slot konnte nicht freigegeben werden.'), 'error');
+        } finally {
+            if (button) button.disabled = wasDisabled;
         }
     }
 
-    async function approveScrimReminder(requestId, teamId) {
+    async function approveScrimReminder(requestId, teamId, button) {
+        const wasDisabled = Boolean(button && button.disabled);
+        if (button) button.disabled = true;
         try {
             await fetchJSON(`/api/scrims/match-requests/${requestId}/reminders`, {
                 method: 'POST',
@@ -4763,11 +4877,15 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage('Reminder freigegeben. Der Bot postet im Teamkanal.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Reminder konnte nicht freigegeben werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Reminder konnte nicht freigegeben werden.'), 'error');
+        } finally {
+            if (button) button.disabled = wasDisabled;
         }
     }
 
-    async function saveScrimNotes(participantId, notes) {
+    async function saveScrimNotes(participantId, notes, button) {
+        const wasDisabled = Boolean(button && button.disabled);
+        if (button) button.disabled = true;
         try {
             await fetchJSON(`/api/scrims/participants/${participantId}/notes`, {
                 method: 'POST',
@@ -4776,7 +4894,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage('Notiz gespeichert.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Notiz konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Notiz konnte nicht gespeichert werden.'), 'error');
+        } finally {
+            if (button) button.disabled = wasDisabled;
         }
     }
 
@@ -4796,7 +4916,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             setScrimMessage('Korrektur gespeichert.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage(`Korrektur konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+            setScrimMessage(scrimErrorMessage(err, 'Korrektur konnte nicht gespeichert werden.'), 'error');
         } finally {
             if (button) button.disabled = false;
         }

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use dl_ai::{ChatMessage, ChatParams, ChatProvider, ChatProviderError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
 const SNAPSHOT_SOURCE_AI: &str = "ai";
@@ -247,18 +247,25 @@ pub async fn generate_due_lagebilder(
 ) -> Result<usize, LagebildError> {
     let teams = sqlx::query(
         r#"
-        SELECT t.id::bigint AS id
+         SELECT t.id::bigint AS id
           FROM scrim.teams t
           LEFT JOIN LATERAL (
-              SELECT generated_at
+              SELECT generated_at, status
                 FROM scrim.lagebild_snapshots s
                WHERE s.team_id = t.id
                  AND s.source IN ('ai', 'match', 'correction')
                ORDER BY s.generated_at DESC, s.id DESC
                LIMIT 1
           ) last_snapshot ON TRUE
-         WHERE last_snapshot.generated_at IS NULL
-            OR last_snapshot.generated_at < now() - interval '7 days'
+          WHERE last_snapshot.generated_at IS NULL
+             OR (
+                 last_snapshot.status = 'ok'
+                 AND last_snapshot.generated_at < now() - interval '7 days'
+             )
+             OR (
+                 last_snapshot.status = 'error'
+                 AND last_snapshot.generated_at < now() - interval '15 minutes'
+             )
          ORDER BY COALESCE(last_snapshot.generated_at, '-infinity'::timestamptz), t.id
          LIMIT $1
         "#,
@@ -324,7 +331,7 @@ async fn generate_lagebilder_for_teams(
     for team_id in team_ids {
         let input = load_lagebild_input(pool, *team_id, generated_for).await?;
         let input_summary = input_summary(&input);
-        let (text, status, model, decision, reason, action) = match provider {
+        let (text, status, model, decision, reason, action, snapshot_error) = match provider {
             Some(provider) => match generate_lagebild(provider, &input).await {
                 Ok((text, model)) => (
                     text,
@@ -333,16 +340,20 @@ async fn generate_lagebilder_for_teams(
                     "yes",
                     "lagebild_generiert",
                     "snapshot_created",
+                    None,
                 ),
                 Err(err) => {
                     tracing::error!(%err, team_id = input.team_id, generated_for, "Scrim-Lagebild-AI fehlgeschlagen");
+                    let error = err.to_string();
+                    let (decision, reason) = lagebild_failure_decision(&err);
                     (
                         fallback_lagebild(&input),
                         STATUS_ERROR,
                         None,
-                        "error",
-                        "ai_generation_failed",
+                        decision,
+                        reason,
                         "fallback_snapshot_created",
+                        Some(error),
                     )
                 }
             },
@@ -353,30 +364,52 @@ async fn generate_lagebilder_for_teams(
                 "error",
                 "ai_provider_missing",
                 "fallback_snapshot_created",
+                Some("AI-Provider fehlt".to_string()),
             ),
         };
-        let snapshot_id = insert_snapshot(pool, &input, source, status, &text, model).await?;
-        insert_evidences(pool, snapshot_id, &input.evidences).await?;
-        log_ai_decision(
-            pool,
-            "scrim.lagebild.generate",
-            None,
-            &input_summary,
-            decision,
-            None,
-            reason,
-            action,
-            json!({
-                "team_id": input.team_id,
-                "generated_for": generated_for,
-                "snapshot_id": snapshot_id,
-                "data_limited": input.data_limited,
-            }),
+        let mut tx = pool.begin().await?;
+        let snapshot_id = insert_snapshot(
+            &mut tx,
+            &input,
+            source,
+            status,
+            &text,
+            model,
+            snapshot_error.as_deref(),
         )
         .await?;
+        insert_evidences(&mut tx, snapshot_id, &input.evidences).await?;
+        log_ai_decision(
+            &mut tx,
+            AiDecisionLog {
+                source: "scrim.lagebild.generate",
+                subject_user_id: None,
+                input_summary: &input_summary,
+                decision,
+                confidence: None,
+                reason,
+                action_taken: action,
+                payload: json!({
+                    "team_id": input.team_id,
+                    "generated_for": generated_for,
+                    "snapshot_id": snapshot_id,
+                    "data_limited": input.data_limited,
+                }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
         generated += 1;
     }
     Ok(generated)
+}
+
+fn lagebild_failure_decision(error: &LagebildError) -> (&'static str, &'static str) {
+    match error {
+        LagebildError::Provider(ChatProviderError::Timeout) => ("timeout", "ai_timeout"),
+        LagebildError::InvalidAi(_) => ("unsure", "ai_response_invalid"),
+        _ => ("error", "ai_generation_failed"),
+    }
 }
 
 async fn load_lagebild_input(
@@ -577,7 +610,24 @@ async fn load_match_facts(
           FROM scrim.matches m
           LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
           LEFT JOIN scrim.teams tb ON tb.id = m.team_b_id
-         WHERE m.team_a_id = $1 OR m.team_b_id = $1
+         WHERE (m.team_a_id = $1 OR m.team_b_id = $1)
+           AND (
+                lower(COALESCE(m.lobby_state, '')) = 'finished'
+                OR lower(COALESCE(m.status, '')) IN ('finished', 'completed')
+                OR m.result_json IS NOT NULL
+                OR EXISTS (
+                    SELECT 1
+                      FROM scrim.match_result_refs result_ref
+                     WHERE result_ref.match_id = m.id
+                       AND result_ref.fetch_status = 'fetched'
+                )
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM scrim.match_result_refs pending_ref
+                 WHERE pending_ref.match_id = m.id
+                   AND pending_ref.fetch_status IN ('pending', 'fetching')
+           )
          ORDER BY COALESCE(m.scheduled_at, m.created_at) DESC, m.id DESC
         "#,
     )
@@ -648,20 +698,21 @@ async fn load_corrections(pool: &PgPool, team_id_i32: i32) -> Result<Vec<String>
 }
 
 async fn insert_snapshot(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     input: &ScrimLagebildInput,
     source: &str,
     status: &str,
     text: &str,
     model: Option<String>,
+    error: Option<&str>,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         r#"
         INSERT INTO scrim.lagebild_snapshots(
             team_id, generated_for, source, status, lagebild_text, data_summary, model,
-            generated_at, created_at
+            error, generated_at, created_at
         )
-        VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, now(), now())
+        VALUES($1, $2, $3, $4, $5, $6::jsonb, $7, $8, now(), now())
         RETURNING id
         "#,
     )
@@ -680,12 +731,13 @@ async fn insert_snapshot(
         "evidence_count": input.evidences.len(),
     }))
     .bind(model)
-    .fetch_one(pool)
+    .bind(error)
+    .fetch_one(&mut *connection)
     .await
 }
 
 async fn insert_evidences(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     snapshot_id: i64,
     evidences: &[ScrimLagebildEvidence],
 ) -> Result<(), sqlx::Error> {
@@ -711,22 +763,26 @@ async fn insert_evidences(
                 .map(|value| value.with_timezone(&Utc)),
         )
         .bind(&evidence.payload)
-        .execute(pool)
+        .execute(&mut *connection)
         .await?;
     }
     Ok(())
 }
 
-async fn log_ai_decision(
-    pool: &PgPool,
-    source: &str,
+struct AiDecisionLog<'a> {
+    source: &'a str,
     subject_user_id: Option<i64>,
-    input_summary: &str,
-    decision: &str,
+    input_summary: &'a str,
+    decision: &'a str,
     confidence: Option<f32>,
-    reason: &str,
-    action_taken: &str,
+    reason: &'a str,
+    action_taken: &'a str,
     payload: Value,
+}
+
+async fn log_ai_decision(
+    connection: &mut PgConnection,
+    entry: AiDecisionLog<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -737,16 +793,16 @@ async fn log_ai_decision(
         VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
         "#,
     )
-    .bind(source)
-    .bind(subject_user_id)
+    .bind(entry.source)
+    .bind(entry.subject_user_id)
     .bind(i64::try_from(MAIN_GUILD_ID).ok())
-    .bind(input_summary)
-    .bind(decision)
-    .bind(confidence)
-    .bind(reason)
-    .bind(action_taken)
-    .bind(payload)
-    .execute(pool)
+    .bind(entry.input_summary)
+    .bind(entry.decision)
+    .bind(entry.confidence)
+    .bind(entry.reason)
+    .bind(entry.action_taken)
+    .bind(entry.payload)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }

@@ -7,11 +7,12 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
+use dl_ai::ChatProviderError;
 use dl_squads::lagebild::{
-    revise_lagebild, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
+    revise_lagebild, LagebildError, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
 };
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 
 use crate::db::{
     advisory_lock, i64_to_i32, unix_to_utc, utc_to_json_unix, DashboardDbError, DashboardDbResult,
@@ -286,10 +287,12 @@ pub async fn scrims_create_match_request_reminder(
 
 pub async fn scrims_start_match(
     State(app): State<DashboardApp>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     Path(_match_id): Path<String>,
 ) -> Response {
-    let _ = app;
+    if let Err(resp) = app.guard_mutate(&headers, true).await {
+        return resp;
+    }
     err_text(
         409,
         "Automatische Lobby-Erstellung ist deaktiviert; Lobbycode im Dashboard setzen.",
@@ -528,8 +531,15 @@ pub async fn scrims_create_lagebild_correction(
     };
 
     let Some(provider) = app.ai_provider() else {
+        let mut tx = match app.pool().begin().await {
+            Ok(tx) => tx,
+            Err(err) => {
+                tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Fehlertransaktion konnte nicht gestartet werden");
+                return err_text(500, "Save correction failed");
+            }
+        };
         let assistant_message = match insert_lagebild_correction(
-            app.pool(),
+            &mut *tx,
             team_id,
             current_snapshot_id,
             "assistant",
@@ -546,7 +556,7 @@ pub async fn scrims_create_lagebild_correction(
             }
         };
         if let Err(err) = log_scrim_lagebild_decision(
-            app.pool(),
+            &mut *tx,
             "scrim.lagebild.correction",
             &format!(
                 "team={team_id} current_snapshot={:?} message_chars={}",
@@ -566,6 +576,10 @@ pub async fn scrims_create_lagebild_correction(
         {
             tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Entscheidung konnte nicht geloggt werden");
             return err_text(500, "AI decision log failed");
+        }
+        if let Err(err) = tx.commit().await {
+            tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Fehlertransaktion konnte nicht gespeichert werden");
+            return err_text(500, "Save correction failed");
         }
         return load_lagebild_correction_response(
             app.pool(),
@@ -587,8 +601,15 @@ pub async fn scrims_create_lagebild_correction(
     .await
     {
         Ok(result) => {
+            let mut tx = match app.pool().begin().await {
+                Ok(tx) => tx,
+                Err(err) => {
+                    tracing::error!(%err, team_id, "Scrim-Lagebild-Korrekturtransaktion konnte nicht gestartet werden");
+                    return err_text(500, "Save correction failed");
+                }
+            };
             let assistant_message = match insert_lagebild_correction(
-                app.pool(),
+                &mut *tx,
                 team_id,
                 current_snapshot_id,
                 "assistant",
@@ -610,7 +631,7 @@ pub async fn scrims_create_lagebild_correction(
             let action;
             if let Some(lagebild) = result.lagebild.as_deref() {
                 match insert_corrected_lagebild_snapshot(
-                    app.pool(),
+                    &mut tx,
                     team_id,
                     current_snapshot_id,
                     lagebild,
@@ -636,7 +657,7 @@ pub async fn scrims_create_lagebild_correction(
                 action = "correction_saved";
             }
             if let Err(err) = log_scrim_lagebild_decision(
-                app.pool(),
+                &mut *tx,
                 "scrim.lagebild.correction",
                 &format!(
                     "team={team_id} current_snapshot={:?} message_chars={}",
@@ -660,13 +681,25 @@ pub async fn scrims_create_lagebild_correction(
                 tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Entscheidung konnte nicht geloggt werden");
                 return err_text(500, "AI decision log failed");
             }
+            if let Err(err) = tx.commit().await {
+                tracing::error!(%err, team_id, "Scrim-Lagebild-Korrekturtransaktion konnte nicht gespeichert werden");
+                return err_text(500, "Save correction failed");
+            }
             load_lagebild_correction_response(app.pool(), team_id, user_message, assistant_message)
                 .await
         }
         Err(err) => {
             tracing::error!(%err, team_id, "Scrim-Lagebild-Korrektur-AI fehlgeschlagen");
+            let (decision, reason) = lagebild_correction_failure_decision(&err);
+            let mut tx = match app.pool().begin().await {
+                Ok(tx) => tx,
+                Err(db_err) => {
+                    tracing::error!(%db_err, team_id, "Scrim-Lagebild-AI-Fehlertransaktion konnte nicht gestartet werden");
+                    return err_text(500, "Save correction failed");
+                }
+            };
             let assistant_message = match insert_lagebild_correction(
-                app.pool(),
+                &mut *tx,
                 team_id,
                 current_snapshot_id,
                 "assistant",
@@ -683,15 +716,15 @@ pub async fn scrims_create_lagebild_correction(
                 }
             };
             if let Err(db_err) = log_scrim_lagebild_decision(
-                app.pool(),
+                &mut *tx,
                 "scrim.lagebild.correction",
                 &format!(
                     "team={team_id} current_snapshot={:?} message_chars={}",
                     current_snapshot_id,
                     message.chars().count()
                 ),
-                "error",
-                "ai_revision_failed",
+                decision,
+                reason,
                 "correction_saved",
                 json!({
                     "team_id": team_id,
@@ -706,9 +739,21 @@ pub async fn scrims_create_lagebild_correction(
                 tracing::error!(%db_err, team_id, "Scrim-Lagebild-AI-Entscheidung konnte nicht geloggt werden");
                 return err_text(500, "AI decision log failed");
             }
+            if let Err(db_err) = tx.commit().await {
+                tracing::error!(%db_err, team_id, "Scrim-Lagebild-AI-Fehlertransaktion konnte nicht gespeichert werden");
+                return err_text(500, "Save correction failed");
+            }
             load_lagebild_correction_response(app.pool(), team_id, user_message, assistant_message)
                 .await
         }
+    }
+}
+
+fn lagebild_correction_failure_decision(error: &LagebildError) -> (&'static str, &'static str) {
+    match error {
+        LagebildError::Provider(ChatProviderError::Timeout) => ("timeout", "ai_timeout"),
+        LagebildError::InvalidAi(_) => ("unsure", "ai_response_invalid"),
+        _ => ("error", "ai_revision_failed"),
     }
 }
 
@@ -1364,16 +1409,44 @@ async fn load_lagebild_evidences(
 }
 
 fn lagebild_evidence_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
+    let url = row
+        .try_get::<Option<String>, _>("url")?
+        .filter(|value| is_allowed_lagebild_evidence_url(value));
     Ok(json!({
         "id": row.try_get::<i64, _>("id")?,
         "snapshot_id": row.try_get::<i64, _>("snapshot_id")?,
         "type": row.try_get::<String, _>("evidence_type")?,
         "label": row.try_get::<String, _>("label")?,
-        "url": row.try_get::<Option<String>, _>("url")?,
+        "url": url,
         "reference_id": row.try_get::<Option<String>, _>("reference_id")?,
         "occurred_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("occurred_at")?),
         "payload": row.try_get::<Value, _>("payload")?,
     }))
+}
+
+fn is_allowed_lagebild_evidence_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("discord.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Some(segments) = url.path_segments() else {
+        return false;
+    };
+    let segments = segments.collect::<Vec<_>>();
+    segments.len() == 4
+        && segments[0] == "channels"
+        && segments[1] == SCRIM_MAIN_GUILD_ID.to_string()
+        && segments[2].parse::<u64>().is_ok_and(|id| id > 0)
+        && segments[3].parse::<u64>().is_ok_and(|id| id > 0)
 }
 
 async fn load_lagebild_corrections(
@@ -1461,7 +1534,7 @@ fn suggested_pairings(teams: &[Value], rotation_seed: usize) -> Vec<Value> {
         .collect::<Vec<_>>();
     teams.sort_by_key(|team| team.id);
 
-    let half = (teams.len() + 1) / 2;
+    let half = teams.len().div_ceil(2);
     let (left, right) = teams.split_at(half);
     let mut right = right.to_vec();
     if !right.is_empty() {
@@ -1750,15 +1823,18 @@ async fn team_exists(pool: &PgPool, team_id: i32) -> DashboardDbResult<bool> {
     Ok(exists)
 }
 
-async fn insert_lagebild_correction(
-    pool: &PgPool,
+async fn insert_lagebild_correction<'e, E>(
+    executor: E,
     team_id: i32,
     snapshot_id: Option<i64>,
     role: &str,
     author_user_id: Option<&str>,
     author_display_name: Option<&str>,
     message: &str,
-) -> DashboardDbResult<Value> {
+) -> DashboardDbResult<Value>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let row = sqlx::query(
         r#"
         INSERT INTO scrim.lagebild_corrections(
@@ -1775,20 +1851,19 @@ async fn insert_lagebild_correction(
     .bind(author_user_id)
     .bind(author_display_name)
     .bind(message)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     lagebild_correction_json(row)
 }
 
 async fn insert_corrected_lagebild_snapshot(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     team_id: i32,
     previous_snapshot_id: Option<i64>,
     text: &str,
     model: Option<String>,
     correction_id: Option<i64>,
 ) -> DashboardDbResult<i64> {
-    let mut tx = pool.begin().await?;
     let generated_for = correction_id
         .map(|id| format!("correction:{id}"))
         .unwrap_or_else(|| "correction".to_string());
@@ -1810,7 +1885,7 @@ async fn insert_corrected_lagebild_snapshot(
         "correction_id": correction_id,
     }))
     .bind(model)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *connection)
     .await?;
     if let Some(previous_snapshot_id) = previous_snapshot_id {
         sqlx::query(
@@ -1826,22 +1901,24 @@ async fn insert_corrected_lagebild_snapshot(
         )
         .bind(snapshot_id)
         .bind(previous_snapshot_id)
-        .execute(&mut *tx)
+        .execute(&mut *connection)
         .await?;
     }
-    tx.commit().await?;
     Ok(snapshot_id)
 }
 
-async fn log_scrim_lagebild_decision(
-    pool: &PgPool,
+async fn log_scrim_lagebild_decision<'e, E>(
+    executor: E,
     source: &str,
     input_summary: &str,
     decision: &str,
     reason: &str,
     action_taken: &str,
     payload: Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         r#"
         INSERT INTO bot.ai_decision_ledger(
@@ -1858,7 +1935,7 @@ async fn log_scrim_lagebild_decision(
     .bind(reason)
     .bind(action_taken)
     .bind(payload)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -2115,20 +2192,29 @@ async fn release_match_request_slot(
     released_by_user_id: &str,
     released_by_display_name: &str,
 ) -> Result<Value, MatchRequestReleaseError> {
+    let mut tx = pool.begin().await?;
     let Some(row) = sqlx::query(
         r#"
-        SELECT mr.batch_id, mr.slot_options, b.deadline_at
+        SELECT mr.batch_id, mr.slot_options, mr.status, b.deadline_at
           FROM scrim.match_requests mr
           JOIN scrim.match_request_batches b ON b.id = mr.batch_id
          WHERE mr.id = $1
+         FOR UPDATE OF mr
         "#,
     )
     .bind(request_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     else {
         return Err(MatchRequestReleaseError::NotFound);
     };
+
+    let status = row.try_get::<String, _>("status")?;
+    if !matches!(status.as_str(), "open" | "post_failed") {
+        return Err(MatchRequestReleaseError::Conflict(
+            "Match request is not open",
+        ));
+    }
 
     let batch_id = row.try_get::<i32, _>("batch_id")?;
     let deadline_at = row.try_get::<DateTime<Utc>, _>("deadline_at")?;
@@ -2175,12 +2261,6 @@ async fn release_match_request_slot(
             None
         };
 
-    let mut tx = pool.begin().await?;
-    sqlx::query("SELECT id FROM scrim.match_requests WHERE id = $1 FOR UPDATE")
-        .bind(request_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(MatchRequestReleaseError::NotFound)?;
     sqlx::query(
         r#"
         UPDATE scrim.match_requests
@@ -2346,6 +2426,11 @@ async fn create_match_request_reminder_record(
     } else {
         None
     };
+    if target_kind == "team" && target_role_id.is_none() {
+        return Err(MatchRequestReminderCreateError::BadRequest(
+            "Team role missing for ambiguous reminder",
+        ));
+    }
     let missing_count = i32::try_from(target_participant_ids.len())
         .map_err(|_| MatchRequestReminderCreateError::BadRequest("Too many missing responses"))?;
 
@@ -2784,7 +2869,12 @@ fn match_request_replacement_needs(
             .get(&(request.request_id, team_id))
             .cloned()
             .unwrap_or_default();
-        for member in members.get(&team_id).into_iter().flatten() {
+        for member in members
+            .get(&team_id)
+            .into_iter()
+            .flatten()
+            .filter(|member| !member.is_bench)
+        {
             let member_responses = team_responses
                 .iter()
                 .filter(|response| response.participant_id == member.participant_id)
@@ -3017,14 +3107,12 @@ async fn add_match_result_ref(
     sqlx::query(
         r#"
         UPDATE scrim.matches
-           SET steam_match_id = $2,
-               lobby_state = $3,
+           SET lobby_state = $2,
                updated_at = now()
          WHERE id = $1
         "#,
     )
     .bind(match_id)
-    .bind(steam_match_id)
     .bind(STATE_RESULT_REQUESTED)
     .execute(&mut *tx)
     .await?;
@@ -3081,7 +3169,8 @@ async fn set_lobby_request(
 }
 
 fn state_blocks_lobby_request(current: &str, requested_state: &str) -> bool {
-    !(requested_state == STATE_RESULT_REQUESTED && matches!(current, "result_failed" | "finished"))
+    !(requested_state == STATE_RESULT_REQUESTED
+        && matches!(current, "in_progress" | "result_failed" | "finished"))
         && is_bot_owned_lobby_state(current)
 }
 
@@ -3128,7 +3217,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
-    use dl_ai::{ChatResponse, MockChatProvider};
+    use dl_ai::{ChatProviderError, ChatResponse, MockChatProvider};
     use tower::ServiceExt;
 
     use super::*;
@@ -3588,6 +3677,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scrims_overview_gibt_nur_discord_evidenzlinks_aus(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(db.pool()).await?;
+        sqlx::query(
+            "UPDATE scrim.lagebild_evidences SET url = 'javascript:alert(1)' WHERE snapshot_id = 7001",
+        )
+        .execute(db.pool())
+        .await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            data["lagebilder"][0]["current"]["evidences"][0]["url"],
+            Value::Null
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn lagebild_korrektur_route_speichert_chat_und_aktualisiert_letzten_stand(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
@@ -3632,6 +3744,97 @@ mod tests {
         .fetch_one(db.pool())
         .await?;
         assert_eq!(ledger_decision, "yes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lagebild_korrektur_rollt_ai_daten_ohne_entscheidungslog_zurueck(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
+            r#"{"reply":"Überarbeitet.","lagebild":"Korrigierte Lage."}"#,
+        ))]);
+        let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(db.pool()).await?;
+        sqlx::query(
+            "ALTER TABLE bot.ai_decision_ledger ADD CONSTRAINT reject_scrim_correction_test CHECK (source <> 'scrim.lagebild.correction')",
+        )
+        .execute(db.pool())
+        .await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/teams/1/lagebild/corrections",
+                &session_id,
+                &csrf,
+                json!({ "message": "A2 hat inzwischen zugesagt." }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let correction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.lagebild_corrections")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(correction_count, 1, "nur die menschliche Eingabe bleibt");
+        let corrected_snapshot_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scrim.lagebild_snapshots WHERE team_id = 1 AND source = 'correction'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(corrected_snapshot_count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lagebild_korrektur_loggt_timeout_als_timeout() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let provider = MockChatProvider::new(vec![Err(ChatProviderError::Timeout)]);
+        let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(db.pool()).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/teams/1/lagebild/corrections",
+                &session_id,
+                &csrf,
+                json!({ "message": "Bitte erneut prüfen." }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let decision: String = sqlx::query_scalar(
+            "SELECT decision FROM bot.ai_decision_ledger WHERE source = 'scrim.lagebild.correction' ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(decision, "timeout");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lagebild_korrektur_loggt_unklare_ai_antwort_als_unsicher(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let provider = MockChatProvider::new(vec![Ok(ChatResponse::text("kein JSON"))]);
+        let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(db.pool()).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/teams/1/lagebild/corrections",
+                &session_id,
+                &csrf,
+                json!({ "message": "Das ist unklar." }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let decision: String = sqlx::query_scalar(
+            "SELECT decision FROM bot.ai_decision_ledger WHERE source = 'scrim.lagebild.correction' ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(decision, "unsure");
         Ok(())
     }
 
@@ -3797,6 +4000,12 @@ mod tests {
         insert_team_member(db.pool(), 1, 101, "A1").await?;
         insert_team_member(db.pool(), 1, 102, "A2").await?;
         insert_team_member(db.pool(), 1, 103, "A3").await?;
+        insert_team_member(db.pool(), 1, 104, "A4 Bench").await?;
+        sqlx::query(
+            "UPDATE scrim.team_members SET is_bench = true WHERE team_id = 1 AND participant_id = 104",
+        )
+        .execute(db.pool())
+        .await?;
         insert_team_member(db.pool(), 2, 201, "B1").await?;
         insert_team_member(db.pool(), 2, 202, "B2").await?;
         insert_expired_match_request(db.pool()).await?;
@@ -3823,7 +4032,10 @@ mod tests {
             "Rollen/Lineup-Daten fehlen; angezeigt werden nur konkrete Personen aus Teammitgliedern und Antworten."
         );
         assert_eq!(
-            first_match["replacement_needs"].as_array().unwrap().len(),
+            first_match["replacement_needs"]
+                .as_array()
+                .expect("replacement_needs array")
+                .len(),
             3
         );
         assert_eq!(first_match["replacement_needs"][0]["display_name"], "A2");
@@ -4072,6 +4284,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn match_request_reminder_route_blockiert_teamziel_ohne_rolle(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_expired_match_request(db.pool()).await?;
+        sqlx::query("UPDATE scrim.teams SET discord_channel_id = 100 WHERE id = 1")
+            .execute(db.pool())
+            .await?;
+        sqlx::query(
+            "UPDATE scrim.match_requests SET team_query_message_ids = '{\"1\":{\"channel_id\":100,\"message_id\":9001}}'::jsonb WHERE id = 91",
+        )
+        .execute(db.pool())
+        .await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests/91/reminders",
+                &session_id,
+                &csrf,
+                json!({ "team_id": 1 }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn start_route_startet_keine_alte_vollautomatik() -> Result<(), Box<dyn std::error::Error>>
     {
         let (db, app, session_id, csrf) = app_with_session().await?;
@@ -4097,6 +4340,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_route_prueft_auth_bevor_deaktiviert_antwortet(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, _session_id, _csrf) = app_with_session().await?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scrims/matches/10/start")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn result_route_ueberschreibt_lobby_open_nicht() -> Result<(), Box<dyn std::error::Error>>
     {
         let (db, app, session_id, csrf) = app_with_session().await?;
@@ -4118,6 +4378,32 @@ mod tests {
                 .fetch_one(db.pool())
                 .await?;
         assert_eq!(state, "lobby_open");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn result_route_erlaubt_manuellen_fallback_fuer_laufendes_match(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 14, "in_progress").await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/matches/14/result",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let state =
+            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 14")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(state, "result_requested");
         Ok(())
     }
 
@@ -4251,7 +4537,7 @@ mod tests {
         let data: Value = serde_json::from_slice(&body)?;
         assert_eq!(data["match"]["id"], 20);
         assert_eq!(data["match"]["lobby_state"], "result_requested");
-        assert_eq!(data["match"]["steam_match_id"], 987654321);
+        assert_eq!(data["match"]["steam_match_id"], Value::Null);
         assert_eq!(
             data["match"]["match_result_refs"][0]["steam_match_id"],
             987654321
@@ -4279,10 +4565,7 @@ mod tests {
         )
         .fetch_one(db.pool())
         .await?;
-        assert_eq!(
-            row.try_get::<Option<i64>, _>("steam_match_id")?,
-            Some(987654321)
-        );
+        assert_eq!(row.try_get::<Option<i64>, _>("steam_match_id")?, None);
         assert_eq!(
             row.try_get::<Option<String>, _>("lobby_state")?,
             Some("result_requested".to_string())
@@ -4306,6 +4589,48 @@ mod tests {
         .fetch_one(db.pool())
         .await?;
         assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn neue_match_id_ueberschreibt_erfolgreiche_primaere_id_nicht(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 22, "finished").await?;
+        sqlx::query(
+            "UPDATE scrim.matches SET steam_match_id = 111, result_json = '{}'::jsonb WHERE id = 22",
+        )
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_result_refs(
+                match_id, steam_match_id, source_user_id, source_display_name,
+                fetch_status, entered_at, fetched_at, updated_at
+            )
+            VALUES(22, 111, '42', 'Coach', 'fetched', now(), now(), now())
+            "#,
+        )
+        .execute(db.pool())
+        .await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/matches/22/match-ids",
+                &session_id,
+                &csrf,
+                json!({ "match_id": 222 }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let primary_id: Option<i64> =
+            sqlx::query_scalar("SELECT steam_match_id FROM scrim.matches WHERE id = 22")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(primary_id, Some(111));
         Ok(())
     }
 }

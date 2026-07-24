@@ -257,24 +257,30 @@ async fn fetch_scrim_match_result_with_lookup(
     }
 
     let result = run_steam_task(pool, GC_GET_MATCH_RESULT, payload, RESULT_TIMEOUT).await?;
-    let steam_match_id = first_match_id(&result)?.or(scrim_match.steam_match_id);
+    let steam_match_id = first_match_id(&result)?
+        .or(lookup_steam_match_id)
+        .or(scrim_match.steam_match_id);
     let winner_team_id = winner_team_id(result.get("winning_team"), team_a_id, team_b_id)?;
+
+    update_match_finished(pool, match_id, steam_match_id, winner_team_id, &result).await?;
 
     if let Some(party_id) = scrim_match
         .party_id
         .as_deref()
         .filter(|p| !p.trim().is_empty())
     {
-        run_steam_task(
+        if let Err(err) = run_steam_task(
             pool,
             GC_LOBBY_LEAVE,
             build_leave_payload(party_id),
             LEAVE_TIMEOUT,
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(%err, match_id, "Scrim-Ergebnis gespeichert, Lobby-Leave fehlgeschlagen");
+        }
     }
 
-    update_match_finished(pool, match_id, steam_match_id, winner_team_id, &result).await?;
     Ok(ScrimMatchResultOutcome {
         steam_match_id,
         winner_team_id,
@@ -569,7 +575,7 @@ async fn update_match_finished(
     sqlx::query(
         r#"
         UPDATE scrim.matches
-           SET steam_match_id = COALESCE($2, steam_match_id),
+           SET steam_match_id = COALESCE(steam_match_id, $2),
                winner_team_id = $3,
                result_json = $4,
                lobby_state = $5,

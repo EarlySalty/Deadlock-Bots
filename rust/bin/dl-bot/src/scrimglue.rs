@@ -24,6 +24,7 @@ const STATE_START_FAILED: &str = "start_failed";
 const STATE_RESULT_REQUESTED: &str = "result_requested";
 const STATE_RESULT_FETCHING: &str = "result_fetching";
 const STATE_RESULT_FAILED: &str = "result_failed";
+const STATE_FINISHED: &str = "finished";
 const MATCH_RESULT_REF_STATUS_PENDING: &str = "pending";
 const MATCH_RESULT_REF_STATUS_FETCHING: &str = "fetching";
 const MATCH_RESULT_REF_STATUS_FETCHED: &str = "fetched";
@@ -37,6 +38,7 @@ const MATCH_REQUEST_REMINDER_STATUS_APPROVED: &str = "approved";
 const MATCH_REQUEST_REMINDER_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_REMINDER_STATUS_POSTED: &str = "posted";
 const MATCH_REQUEST_REMINDER_STATUS_FAILED: &str = "failed";
+const MATCH_REQUEST_REMINDER_STATUS_CANCELLED: &str = "cancelled";
 const MATCH_STATUS_MESSAGE_STATE_PENDING: &str = "pending";
 const MATCH_STATUS_MESSAGE_STATE_POSTING: &str = "posting";
 const MATCH_STATUS_MESSAGE_STATE_POSTED: &str = "posted";
@@ -44,7 +46,7 @@ const MATCH_STATUS_MESSAGE_STATE_POST_FAILED: &str = "post_failed";
 const MATCH_REQUEST_RESPONSE_PREFIX: &str = "scrimreq:v1:";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
 const MAIN_GUILD_ID: u64 = 1289721245281292288;
-const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
+const SCRIM_VOICE_CHANNEL_NAME: &str = "Scrim Team";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScrimVoiceConfig {
@@ -93,12 +95,20 @@ enum ScrimDriverAction {
     FetchResult,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultQueueState {
+    Pending,
+    Fetching,
+    Finished,
+    Failed,
+}
+
 impl ScrimDriverAction {
     fn from_requested_state(state: &str) -> Option<Self> {
         match state {
             STATE_LOBBY_OPEN => Some(Self::PostLobbyCode),
             STATE_START_REQUESTED => Some(Self::Start),
-            STATE_RESULT_REQUESTED => Some(Self::FetchResult),
+            STATE_RESULT_REQUESTED | STATE_RESULT_FAILED => Some(Self::FetchResult),
             _ => None,
         }
     }
@@ -144,6 +154,11 @@ struct MatchRequestPost {
 
 struct MatchRequestSendResult {
     posts: Vec<MatchRequestPost>,
+    errors: Vec<String>,
+}
+
+struct LobbyCodeSyncResult {
+    message_ids: BTreeMap<u64, u64>,
     errors: Vec<String>,
 }
 
@@ -289,7 +304,6 @@ impl dl_discord::InteractionHandler for MatchRequestResponseHandler {
 pub fn spawn(
     pool: PgPool,
     adapter: Arc<dl_discord::DiscordAdapter>,
-    announcement_channel_id: Option<u64>,
     tempvoice: Arc<dl_voice::tempvoice::TempVoiceEngine>,
     voice_config: ScrimVoiceConfig,
     lagebild_ai: Option<Arc<dyn dl_ai::ChatProvider>>,
@@ -302,7 +316,6 @@ pub fn spawn(
             if let Err(err) = process_one_pending(
                 &pool,
                 adapter.as_ref(),
-                announcement_channel_id,
                 tempvoice.as_ref(),
                 voice_config,
                 lagebild_ai.as_deref(),
@@ -318,38 +331,22 @@ pub fn spawn(
 async fn process_one_pending(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
-    announcement_channel_id: Option<u64>,
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     voice_config: ScrimVoiceConfig,
     lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
 ) -> anyhow::Result<()> {
     cleanup_terminal_scrim_voice_channels(pool, tempvoice).await?;
-    if let Some(claim) = claim_next_pending_match(pool, announcement_channel_id).await? {
-        match claim.action {
-            ScrimDriverAction::PostLobbyCode => handle_lobby_code(pool, adapter, &claim).await,
-            ScrimDriverAction::Start => {
-                handle_start(pool, adapter, tempvoice, voice_config, &claim).await
-            }
-            ScrimDriverAction::FetchResult => {
-                handle_result(pool, adapter, tempvoice, &claim, lagebild_ai).await
-            }
-        }?;
-        return Ok(());
+    if let Some(claim) = claim_next_pending_match(pool).await? {
+        handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild_ai, &claim).await?;
     }
-
     if let Some(reminder) = claim_next_pending_match_request_reminder(pool).await? {
         handle_match_request_reminder(pool, adapter, reminder).await?;
-        return Ok(());
-    }
-
-    if let Some(status) = claim_next_pending_match_status(pool).await? {
+    } else if let Some(status) = claim_next_pending_match_status(pool).await? {
         handle_match_status(pool, adapter, status).await?;
-        return Ok(());
-    }
-
-    if let Some(batch) = claim_next_pending_match_request_batch(pool).await? {
+    } else if let Some(batch) = claim_next_pending_match_request_batch(pool).await? {
         handle_match_request_batch(pool, adapter, batch).await?;
-        return Ok(());
+    } else if let Some(claim) = claim_next_pending_match_or_result_retry(pool).await? {
+        handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild_ai, &claim).await?;
     }
 
     match dl_squads::lagebild::generate_due_lagebilder(pool, lagebild_ai, 1).await {
@@ -364,22 +361,50 @@ async fn process_one_pending(
     Ok(())
 }
 
-async fn claim_next_pending_match(
+async fn claim_next_pending_match(pool: &PgPool) -> anyhow::Result<Option<ClaimedMatch>> {
+    claim_next_match(pool, false).await
+}
+
+async fn claim_next_pending_match_or_result_retry(
     pool: &PgPool,
-    announcement_channel_id: Option<u64>,
+) -> anyhow::Result<Option<ClaimedMatch>> {
+    claim_next_match(pool, true).await
+}
+
+async fn claim_next_match(
+    pool: &PgPool,
+    include_result_retries: bool,
 ) -> anyhow::Result<Option<ClaimedMatch>> {
     let row = sqlx::query(
         r#"
         WITH candidate AS (
             SELECT m.id,
-                   m.lobby_state AS requested_state,
+                   CASE
+                       WHEN m.lobby_state IN ($1, $2, $3) THEN m.lobby_state
+                       ELSE $7
+                   END AS requested_state,
                    ta.discord_channel_id AS team_a_channel_id,
                    tb.discord_channel_id AS team_b_channel_id
               FROM scrim.matches m
               LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
               LEFT JOIN scrim.teams tb ON tb.id = m.team_b_id
-	             WHERE m.lobby_state IN ($1, $2, $3)
-             ORDER BY COALESCE(m.updated_at, m.created_at), m.id
+             WHERE m.lobby_state IN ($1, $2, $3)
+                OR ($8::boolean AND (
+                    (
+                        m.lobby_state IN ($5, $7)
+                        AND m.updated_at <= now() - interval '15 minutes'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM scrim.match_result_refs result_ref
+                         WHERE result_ref.match_id = m.id
+                           AND result_ref.fetch_status IN ($9, $10)
+                           AND result_ref.updated_at <= now() - interval '15 minutes'
+                    )
+                ))
+             ORDER BY CASE WHEN m.lobby_state IN ($1, $2, $3) THEN 0 ELSE 1 END,
+                      COALESCE(m.updated_at, m.created_at),
+                      m.id
              LIMIT 1
              FOR UPDATE OF m SKIP LOCKED
         )
@@ -388,6 +413,7 @@ async fn claim_next_pending_match(
 	                    WHEN $1 THEN $4
 	                    WHEN $2 THEN $5
 	                    WHEN $3 THEN $6
+	                    WHEN $7 THEN $5
 	                    ELSE m.lobby_state
 	               END,
                updated_at = now()
@@ -405,6 +431,10 @@ async fn claim_next_pending_match(
     .bind(STATE_STARTING)
     .bind(STATE_RESULT_FETCHING)
     .bind(STATE_LOBBY_POSTING)
+    .bind(STATE_RESULT_FAILED)
+    .bind(include_result_retries)
+    .bind(MATCH_RESULT_REF_STATUS_FAILED)
+    .bind(MATCH_RESULT_REF_STATUS_FETCHING)
     .fetch_optional(pool)
     .await
     .context("Scrim-Match-Claim fehlgeschlagen")?;
@@ -418,12 +448,27 @@ async fn claim_next_pending_match(
     Ok(Some(ClaimedMatch {
         match_id: row.get("match_id"),
         action,
-        team_channels: target_channels(
-            announcement_channel_id,
-            row.get("team_a_channel_id"),
-            row.get("team_b_channel_id"),
-        ),
+        team_channels: target_channels(row.get("team_a_channel_id"), row.get("team_b_channel_id")),
     }))
+}
+
+async fn handle_claimed_match(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+    voice_config: ScrimVoiceConfig,
+    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+    claim: &ClaimedMatch,
+) -> anyhow::Result<()> {
+    match claim.action {
+        ScrimDriverAction::PostLobbyCode => handle_lobby_code(pool, adapter, claim).await,
+        ScrimDriverAction::Start => {
+            handle_start(pool, adapter, tempvoice, voice_config, claim).await
+        }
+        ScrimDriverAction::FetchResult => {
+            handle_result(pool, adapter, tempvoice, claim, lagebild_ai).await
+        }
+    }
 }
 
 async fn handle_lobby_code(
@@ -454,15 +499,33 @@ async fn handle_lobby_code(
 
     match sync_lobby_code_messages(pool, adapter, claim.match_id, &claim.team_channels, &code).await
     {
-        Ok(message_ids) => {
-            save_lobby_code_message_ids(pool, claim.match_id, &message_ids, STATE_LOBBY_POSTED)
-                .await?;
-            post_log(
-                adapter,
-                lobby_code_success_log_message(claim.match_id, &code, message_ids.len(), line!()),
-                claim.match_id,
-            )
-            .await;
+        Ok(result) => {
+            let state = if result.errors.is_empty() {
+                STATE_LOBBY_POSTED
+            } else {
+                STATE_LOBBY_POST_FAILED
+            };
+            save_lobby_code_message_ids(pool, claim.match_id, &result.message_ids, state).await?;
+            if result.errors.is_empty() {
+                post_log(
+                    adapter,
+                    lobby_code_success_log_message(
+                        claim.match_id,
+                        &code,
+                        result.message_ids.len(),
+                        line!(),
+                    ),
+                    claim.match_id,
+                )
+                .await;
+            } else {
+                post_log(
+                    adapter,
+                    lobby_code_failure_message(claim.match_id, &result.errors.join("; "), line!()),
+                    claim.match_id,
+                )
+                .await;
+            }
         }
         Err(err) => {
             set_lobby_state(pool, claim.match_id, STATE_LOBBY_POST_FAILED).await?;
@@ -628,71 +691,209 @@ async fn handle_match_request_batch(
 async fn claim_next_pending_match_request_reminder(
     pool: &PgPool,
 ) -> anyhow::Result<Option<ClaimedMatchRequestReminder>> {
+    let mut tx = pool.begin().await?;
     let row = sqlx::query(
         r#"
-        WITH candidate AS (
-            SELECT r.id,
-                   r.request_id,
-                   r.team_id,
-                   r.target_kind,
-                   r.target_discord_user_ids,
-                   r.target_role_id,
-                   r.discord_channel_id,
-                   r.source_message_id,
-                   t.name AS team_name
-              FROM scrim.match_request_reminders r
-              JOIN scrim.teams t ON t.id = r.team_id
-             WHERE r.status = $1
-               AND r.scheduled_for <= now()
-             ORDER BY r.scheduled_for, r.id
-             LIMIT 1
-             FOR UPDATE OF r SKIP LOCKED
-        )
-        UPDATE scrim.match_request_reminders r
-           SET status = $2,
-               updated_at = now()
-          FROM candidate
-         WHERE r.id = candidate.id
-        RETURNING r.id::bigint AS reminder_id,
-                  candidate.request_id::bigint AS request_id,
-                  candidate.team_id::bigint AS team_id,
-                  candidate.team_name,
-                  candidate.target_kind,
-                  candidate.target_discord_user_ids,
-                  candidate.target_role_id,
-                  candidate.discord_channel_id,
-                  candidate.source_message_id
+        SELECT r.id::bigint AS reminder_id,
+               r.request_id::bigint AS request_id,
+               r.team_id::bigint AS team_id,
+               r.target_participant_ids,
+               r.target_role_id,
+               r.discord_channel_id,
+               r.source_message_id,
+               mr.status AS request_status,
+               t.name AS team_name
+          FROM scrim.match_request_reminders r
+          JOIN scrim.match_requests mr ON mr.id = r.request_id
+          JOIN scrim.teams t ON t.id = r.team_id
+         WHERE r.status = $1
+           AND r.scheduled_for <= now()
+         ORDER BY r.scheduled_for, r.id
+         LIMIT 1
+         FOR UPDATE OF r, mr SKIP LOCKED
         "#,
     )
     .bind(MATCH_REQUEST_REMINDER_STATUS_APPROVED)
-    .bind(MATCH_REQUEST_REMINDER_STATUS_POSTING)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Scrim-Reminder-Claim fehlgeschlagen")?;
 
     let Some(row) = row else {
+        tx.commit().await?;
         return Ok(None);
     };
-    let target_user_ids = row
-        .get::<Vec<i64>, _>("target_discord_user_ids")
+    let reminder_id = row.get::<i64, _>("reminder_id");
+    let request_id = row.get::<i64, _>("request_id");
+    let team_id = row.get::<i64, _>("team_id");
+    let request_status = row.get::<String, _>("request_status");
+    if !matches!(
+        request_status.as_str(),
+        MATCH_REQUEST_STATUS_OPEN | MATCH_REQUEST_STATUS_POST_FAILED
+    ) {
+        cancel_match_request_reminder(&mut tx, reminder_id, "Terminabfrage geschlossen").await?;
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let approved_participant_ids = row.get::<Vec<i32>, _>("target_participant_ids");
+    let missing_rows = sqlx::query(
+        r#"
+        SELECT p.id, p.discord_id
+          FROM scrim.participants p
+         WHERE p.id = ANY($1)
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM scrim.match_request_responses response
+                 WHERE response.request_id = $2
+                   AND response.team_id = $3
+                   AND response.participant_id = p.id
+           )
+         ORDER BY array_position($1, p.id), p.id
+        "#,
+    )
+    .bind(&approved_participant_ids)
+    .bind(i32::try_from(request_id)?)
+    .bind(i32::try_from(team_id)?)
+    .fetch_all(&mut *tx)
+    .await?;
+    if missing_rows.is_empty() {
+        cancel_match_request_reminder(&mut tx, reminder_id, "Keine offenen Antworten mehr").await?;
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let target_participant_ids = missing_rows
+        .iter()
+        .map(|missing| missing.get::<i32, _>("id"))
+        .collect::<Vec<_>>();
+    let target_discord_user_ids = missing_rows
+        .iter()
+        .filter_map(|missing| missing.get::<Option<i64>, _>("discord_id"))
+        .filter(|id| *id > 0)
+        .collect::<Vec<_>>();
+    let target_kind = if target_discord_user_ids.len() == target_participant_ids.len() {
+        "members"
+    } else {
+        "team"
+    };
+    let target_role_id = row
+        .get::<Option<i64>, _>("target_role_id")
+        .and_then(|id| u64::try_from(id).ok().filter(|id| *id > 0));
+    let stored_target_user_ids = if target_kind == "members" {
+        target_discord_user_ids
+    } else {
+        Vec::new()
+    };
+    if target_kind == "team" && target_role_id.is_none() {
+        fail_unaddressable_match_request_reminder(
+            &mut tx,
+            reminder_id,
+            &target_participant_ids,
+            "Keine pingbare Teamrolle hinterlegt",
+        )
+        .await?;
+        tx.commit().await?;
+        tracing::warn!(
+            reminder_id,
+            request_id,
+            team_id,
+            target_kind = "team",
+            action = "failed",
+            "Scrim-Reminder ohne pingbares Ziel nicht gepostet"
+        );
+        return Ok(None);
+    }
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_reminders
+           SET status = $2,
+               target_kind = $3,
+               target_participant_ids = $4,
+               target_discord_user_ids = $5,
+               missing_count = $6,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(reminder_id)
+    .bind(MATCH_REQUEST_REMINDER_STATUS_POSTING)
+    .bind(target_kind)
+    .bind(&target_participant_ids)
+    .bind(&stored_target_user_ids)
+    .bind(i32::try_from(target_participant_ids.len())?)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let target_user_ids = stored_target_user_ids
         .into_iter()
         .filter_map(|id| u64::try_from(id).ok().filter(|id| *id > 0))
         .collect();
     Ok(Some(ClaimedMatchRequestReminder {
-        reminder_id: row.get("reminder_id"),
-        request_id: row.get("request_id"),
-        team_id: row.get("team_id"),
+        reminder_id,
+        request_id,
+        team_id,
         team_name: row.get("team_name"),
         channel_id: u64::try_from(row.get::<i64, _>("discord_channel_id"))
             .context("Scrim-Reminder-Channel-ID ungültig")?,
         source_message_id: u64::try_from(row.get::<i64, _>("source_message_id"))
             .context("Scrim-Reminder-Source-Message-ID ungültig")?,
-        target_kind: row.get("target_kind"),
+        target_kind: target_kind.to_string(),
         target_user_ids,
-        target_role_id: row
-            .get::<Option<i64>, _>("target_role_id")
-            .and_then(|id| u64::try_from(id).ok().filter(|id| *id > 0)),
+        target_role_id,
     }))
+}
+
+async fn fail_unaddressable_match_request_reminder(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    reminder_id: i64,
+    target_participant_ids: &[i32],
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_reminders
+           SET status = $2,
+               target_kind = 'team',
+               target_participant_ids = $3,
+               target_discord_user_ids = '{}',
+               missing_count = $4,
+               last_error = $5,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(reminder_id)
+    .bind(MATCH_REQUEST_REMINDER_STATUS_FAILED)
+    .bind(target_participant_ids)
+    .bind(i32::try_from(target_participant_ids.len())?)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn cancel_match_request_reminder(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    reminder_id: i64,
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_reminders
+           SET status = $2,
+               missing_count = 0,
+               target_discord_user_ids = '{}',
+               last_error = $3,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(reminder_id)
+    .bind(MATCH_REQUEST_REMINDER_STATUS_CANCELLED)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn handle_match_request_reminder(
@@ -700,7 +901,11 @@ async fn handle_match_request_reminder(
     adapter: &dl_discord::DiscordAdapter,
     reminder: ClaimedMatchRequestReminder,
 ) -> anyhow::Result<()> {
-    let content = match_request_reminder_message(&reminder.team_name, &reminder.target_user_ids);
+    let content = match_request_reminder_message(
+        &reminder.team_name,
+        &reminder.target_user_ids,
+        reminder.target_role_id,
+    );
     let mut body = match_request_reminder_body(
         &content,
         reminder.source_message_id,
@@ -1353,6 +1558,12 @@ async fn handle_start(
                 claim.match_id,
             )
             .await;
+            post_log(
+                adapter,
+                start_success_log_message(claim.match_id, &outcome.join_code, line!()),
+                claim.match_id,
+            )
+            .await;
         }
         Err(err) => {
             tracing::warn!(%err, match_id = claim.match_id, "Scrim-Match-Start fehlgeschlagen");
@@ -1378,10 +1589,17 @@ async fn claim_next_pending_match_result_ref(
             SELECT id, steam_match_id
               FROM scrim.match_result_refs
              WHERE match_id = $1
-               AND fetch_status IN ($2, $3)
-             ORDER BY CASE WHEN fetch_status = $2 THEN 0 ELSE 1 END,
-                      entered_at ASC,
-                      id ASC
+               AND (
+                    fetch_status IN ($2, $3)
+                    OR (fetch_status = $4 AND updated_at <= now() - interval '15 minutes')
+               )
+              ORDER BY CASE
+                           WHEN fetch_status = $2 THEN 0
+                           WHEN fetch_status = $3 THEN 1
+                           ELSE 2
+                       END,
+                       CASE WHEN fetch_status = $2 THEN entered_at ELSE updated_at END ASC,
+                       id ASC
              LIMIT 1
              FOR UPDATE SKIP LOCKED
         )
@@ -1460,24 +1678,6 @@ async fn save_match_result_ref_failure(
     .await
     .with_context(|| format!("Scrim-Match-ID-Fehler-Speicherung fehlgeschlagen: {ref_id}"))?;
     Ok(())
-}
-
-async fn has_pending_match_result_refs(pool: &PgPool, match_id: i64) -> anyhow::Result<bool> {
-    let pending = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS(
-            SELECT 1
-              FROM scrim.match_result_refs
-             WHERE match_id = $1
-               AND fetch_status = $2
-        )
-        "#,
-    )
-    .bind(i32::try_from(match_id)?)
-    .bind(MATCH_RESULT_REF_STATUS_PENDING)
-    .fetch_one(pool)
-    .await?;
-    Ok(pending)
 }
 
 fn normalize_match_result_payload(outcome: &ScrimMatchResultOutcome) -> Value {
@@ -1559,32 +1759,16 @@ async fn handle_result(
                 claim.match_id,
             )
             .await;
-            if has_pending_match_result_refs(pool, claim.match_id).await? {
-                set_lobby_state(pool, claim.match_id, STATE_RESULT_REQUESTED).await?;
-            } else {
-                match dl_squads::lagebild::generate_match_lagebilder(
-                    pool,
-                    lagebild_ai,
-                    claim.match_id,
-                )
-                .await
-                {
-                    Ok(generated) if generated > 0 => {
-                        tracing::info!(
-                            match_id = claim.match_id,
-                            generated,
-                            "Scrim-Lagebilder nach Match erzeugt"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        tracing::error!(
-                            %err,
-                            match_id = claim.match_id,
-                            "Scrim-Lagebilder nach Match fehlgeschlagen"
-                        );
-                    }
-                }
+            post_log(
+                adapter,
+                result_success_log_message(claim.match_id, &outcome, line!()),
+                claim.match_id,
+            )
+            .await;
+            if set_result_state_after_attempt(pool, claim.match_id, false).await?
+                == ResultQueueState::Finished
+            {
+                generate_lagebilder_after_result(pool, lagebild_ai, claim.match_id).await;
             }
         }
         Err(err) => {
@@ -1592,12 +1776,12 @@ async fn handle_result(
             if let Some(result_ref) = claimed_ref.as_ref() {
                 save_match_result_ref_failure(pool, result_ref.ref_id, &err.to_string()).await?;
             }
-            let next_state = if has_pending_match_result_refs(pool, claim.match_id).await? {
-                STATE_RESULT_REQUESTED
-            } else {
-                STATE_RESULT_FAILED
-            };
-            set_lobby_state(pool, claim.match_id, next_state).await?;
+            let queue_state = set_result_state_after_attempt(pool, claim.match_id, true).await?;
+            if queue_state == ResultQueueState::Finished
+                && !has_match_lagebild_snapshot(pool, claim.match_id).await?
+            {
+                generate_lagebilder_after_result(pool, lagebild_ai, claim.match_id).await;
+            }
             post_log(
                 adapter,
                 result_failure_message(claim.match_id, &err.to_string(), line!()),
@@ -1607,6 +1791,110 @@ async fn handle_result(
         }
     }
     Ok(())
+}
+
+async fn generate_lagebilder_after_result(
+    pool: &PgPool,
+    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+    match_id: i64,
+) {
+    match dl_squads::lagebild::generate_match_lagebilder(pool, lagebild_ai, match_id).await {
+        Ok(generated) if generated > 0 => {
+            tracing::info!(match_id, generated, "Scrim-Lagebilder nach Match erzeugt");
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::error!(%err, match_id, "Scrim-Lagebilder nach Match fehlgeschlagen");
+        }
+    }
+}
+
+async fn has_match_lagebild_snapshot(pool: &PgPool, match_id: i64) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM scrim.lagebild_snapshots WHERE generated_for = $1 AND source = 'match')",
+    )
+    .bind(format!("match:{match_id}"))
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn set_result_state_after_attempt(
+    pool: &PgPool,
+    match_id: i64,
+    failed: bool,
+) -> anyhow::Result<ResultQueueState> {
+    let match_id_i32 = i32::try_from(match_id)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT id FROM scrim.matches WHERE id = $1 FOR UPDATE")
+        .bind(match_id_i32)
+        .fetch_one(&mut *tx)
+        .await?;
+    let has_pending = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+              FROM scrim.match_result_refs
+             WHERE match_id = $1
+               AND fetch_status = $2
+        )
+        "#,
+    )
+    .bind(match_id_i32)
+    .bind(MATCH_RESULT_REF_STATUS_PENDING)
+    .fetch_one(&mut *tx)
+    .await?;
+    let has_fetching = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+              FROM scrim.match_result_refs
+             WHERE match_id = $1
+               AND fetch_status = $2
+        )
+        "#,
+    )
+    .bind(match_id_i32)
+    .bind(MATCH_RESULT_REF_STATUS_FETCHING)
+    .fetch_one(&mut *tx)
+    .await?;
+    let has_success = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT result_json IS NOT NULL OR EXISTS(
+                   SELECT 1
+                     FROM scrim.match_result_refs
+                    WHERE match_id = $1
+                      AND fetch_status = $2
+               )
+          FROM scrim.matches
+         WHERE id = $1
+        "#,
+    )
+    .bind(match_id_i32)
+    .bind(MATCH_RESULT_REF_STATUS_FETCHED)
+    .fetch_one(&mut *tx)
+    .await?;
+    let queue_state = if has_pending {
+        ResultQueueState::Pending
+    } else if has_fetching {
+        ResultQueueState::Fetching
+    } else if has_success || !failed {
+        ResultQueueState::Finished
+    } else {
+        ResultQueueState::Failed
+    };
+    let next_state = match queue_state {
+        ResultQueueState::Pending => STATE_RESULT_REQUESTED,
+        ResultQueueState::Fetching => STATE_RESULT_FETCHING,
+        ResultQueueState::Finished => STATE_FINISHED,
+        ResultQueueState::Failed => STATE_RESULT_FAILED,
+    };
+    sqlx::query("UPDATE scrim.matches SET lobby_state = $2, updated_at = now() WHERE id = $1")
+        .bind(match_id_i32)
+        .bind(next_state)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(queue_state)
 }
 
 async fn set_lobby_state(pool: &PgPool, match_id: i64, lobby_state: &str) -> anyhow::Result<()> {
@@ -1678,7 +1966,7 @@ async fn sync_lobby_code_messages(
     match_id: i64,
     team_channels: &[u64],
     code: &str,
-) -> Result<BTreeMap<u64, u64>, String> {
+) -> Result<LobbyCodeSyncResult, String> {
     let mut stored = load_lobby_code_message_ids(pool, match_id)
         .await
         .map_err(|err| err.to_string())?;
@@ -1701,11 +1989,10 @@ async fn sync_lobby_code_messages(
         }
     }
 
-    if errors.is_empty() {
-        Ok(stored)
-    } else {
-        Err(errors.join("; "))
-    }
+    Ok(LobbyCodeSyncResult {
+        message_ids: stored,
+        errors,
+    })
 }
 
 async fn save_lobby_code_message_ids(
@@ -2081,15 +2368,7 @@ fn channel_already_missing(err: &str) -> bool {
     err.contains("Unknown Channel") || err.contains("10003") || err.contains("404")
 }
 
-fn target_channels(
-    announcement_channel_id: Option<u64>,
-    team_a_channel_id: Option<i64>,
-    team_b_channel_id: Option<i64>,
-) -> Vec<u64> {
-    if let Some(channel_id) = announcement_channel_id.filter(|id| *id > 0) {
-        return vec![channel_id];
-    }
-
+fn target_channels(team_a_channel_id: Option<i64>, team_b_channel_id: Option<i64>) -> Vec<u64> {
     [team_a_channel_id, team_b_channel_id]
         .into_iter()
         .filter_map(valid_channel_id)
@@ -2122,6 +2401,12 @@ async fn post_to_targets_or_log(
     for channel_id in channel_ids {
         if let Err(err) = send_content(adapter, *channel_id, &content).await {
             tracing::warn!(%err, match_id, channel_id, "Scrim-Match-Discord-Post fehlgeschlagen");
+            post_log(
+                adapter,
+                target_post_failure_message(match_id, message_kind, *channel_id, &err, line!()),
+                match_id,
+            )
+            .await;
         }
     }
 }
@@ -2302,9 +2587,13 @@ fn discord_message_url(channel_id: u64, message_id: u64) -> String {
     format!("https://discord.com/channels/{MAIN_GUILD_ID}/{channel_id}/{message_id}")
 }
 
-fn match_request_reminder_message(team_name: &str, target_user_ids: &[u64]) -> String {
+fn match_request_reminder_message(
+    team_name: &str,
+    target_user_ids: &[u64],
+    target_role_id: Option<u64>,
+) -> String {
     let target = if target_user_ids.is_empty() {
-        "euch".to_string()
+        target_role_id.map_or_else(|| "euch".to_string(), |id| format!("<@&{id}>"))
     } else {
         target_user_ids
             .iter()
@@ -2471,6 +2760,19 @@ async fn record_match_request_response(
         .bind(lock_b)
         .execute(&mut *tx)
         .await?;
+    let current_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM scrim.match_requests WHERE id = $1 FOR UPDATE",
+    )
+    .bind(i32::try_from(parsed.request_id)?)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !matches!(
+        current_status.as_str(),
+        MATCH_REQUEST_STATUS_OPEN | MATCH_REQUEST_STATUS_POST_FAILED
+    ) {
+        tx.rollback().await?;
+        return Ok(MatchRequestResponseOutcome::NotOpen);
+    }
     if parsed.slot_index == -1 {
         sqlx::query(
             r#"
@@ -2594,7 +2896,7 @@ fn match_request_response_reply(outcome: MatchRequestResponseOutcome) -> dl_disc
 
 fn template_label(template: &str) -> &str {
     match template {
-        "regular_scrim" => "Regulaerer Scrim",
+        "regular_scrim" => "Regulärer Scrim",
         "testmatch" => "Testmatch",
         "training" => "Training/Teamspiel",
         value => value,
@@ -2654,8 +2956,39 @@ fn lobby_code_success_log_message(
     )
 }
 
+fn start_success_log_message(match_id: i64, code: &str, _source_line: u32) -> String {
+    format!(
+        "Scrim-Lobby gestartet (Match {match_id}, Code: {}).",
+        code.trim().to_ascii_uppercase()
+    )
+}
+
+fn result_success_log_message(
+    match_id: i64,
+    outcome: &ScrimMatchResultOutcome,
+    _source_line: u32,
+) -> String {
+    outcome.winner_team_id.map_or_else(
+        || format!("Scrim-Ergebnis gespeichert (Match {match_id})."),
+        |team_id| format!("Scrim-Ergebnis gespeichert (Match {match_id}, Sieger: Team {team_id})."),
+    )
+}
+
+fn target_post_failure_message(
+    match_id: i64,
+    message_kind: &str,
+    channel_id: u64,
+    reason: &str,
+    _source_line: u32,
+) -> String {
+    format!(
+        "Scrim-Meldung konnte nicht gepostet werden (Match {match_id}, Typ {message_kind}, Kanal {channel_id}): {}.",
+        short_error(reason)
+    )
+}
+
 fn lobby_code_failure_message(match_id: i64, reason: &str, _source_line: u32) -> String {
-    format!("⚠️ Scrim-Lobbycode konnte nicht gepostet werden (Match {match_id}): {reason}.")
+    format!("Scrim-Lobbycode konnte nicht gepostet werden (Match {match_id}): {reason}.")
 }
 
 fn match_request_success_log_message(
@@ -2667,7 +3000,7 @@ fn match_request_success_log_message(
 }
 
 fn match_request_failure_message(batch_id: i64, reason: &str, _source_line: u32) -> String {
-    format!("⚠️ Scrim-Terminabfragen konnten nicht gepostet werden (Batch {batch_id}): {reason}.")
+    format!("Scrim-Terminabfragen konnten nicht gepostet werden (Batch {batch_id}): {reason}.")
 }
 
 fn match_status_success_log_message(
@@ -2679,7 +3012,7 @@ fn match_status_success_log_message(
 }
 
 fn match_status_failure_log_message(request_id: i64, reason: &str, _source_line: u32) -> String {
-    format!("⚠️ Scrim-Match-Status konnte nicht gepostet werden (Abfrage {request_id}): {reason}.")
+    format!("Scrim-Match-Status konnte nicht gepostet werden (Abfrage {request_id}): {reason}.")
 }
 
 fn match_request_reminder_success_log_message(
@@ -2701,13 +3034,13 @@ fn match_request_reminder_failure_log_message(
     _source_line: u32,
 ) -> String {
     format!(
-        "⚠️ Scrim-Reminder konnte nicht gepostet werden (Reminder {reminder_id}, Abfrage {request_id}): {reason}."
+        "Scrim-Reminder konnte nicht gepostet werden (Reminder {reminder_id}, Abfrage {request_id}): {reason}."
     )
 }
 
 fn start_failure_message(match_id: i64, _source_line: u32) -> String {
     format!(
-        "⚠️ Scrim-Lobby ließ sich nicht starten (Match {match_id}). Der Steam-GC war nicht erreichbar oder die Lobby-Erstellung schlug fehl — Details im Bot-Log. Der Start lässt sich erneut anstoßen."
+        "Scrim-Lobby ließ sich nicht starten (Match {match_id}). Der Steam-GC war nicht erreichbar oder die Lobby-Erstellung schlug fehl. Details stehen im Bot-Log. Der Start lässt sich erneut anstoßen."
     )
 }
 
@@ -2719,19 +3052,17 @@ fn result_success_message(
 ) -> String {
     match outcome.winner_team_id {
         Some(team_id) => {
-            format!(
-                "🏁 **Scrim beendet!** Ergebnis ist eingetragen — Sieger: Team {team_id}. GG! 🤝"
-            )
+            format!("Scrim beendet. Das Ergebnis ist eingetragen. Sieger: Team {team_id}.")
         }
         None => {
-            format!("🏁 **Scrim beendet!** Ergebnis ist eingetragen (Match {match_id}). GG! 🤝")
+            format!("Scrim beendet. Das Ergebnis ist eingetragen (Match {match_id}).")
         }
     }
 }
 
 fn result_failure_message(match_id: i64, error: &str, _source_line: u32) -> String {
     format!(
-        "⚠️ Scrim-Ergebnis konnte noch nicht abgerufen werden (Match {match_id}). Fehler: {}. Der Abruf lässt sich später erneut anstoßen.",
+        "Scrim-Ergebnis konnte noch nicht abgerufen werden (Match {match_id}). Fehler: {}. Der Abruf wird später erneut versucht und kann auch manuell angestoßen werden.",
         short_error(error)
     )
 }
@@ -2750,7 +3081,7 @@ fn short_error(error: &str) -> String {
 
 fn missing_target_message(match_id: i64, message_kind: &str, _source_line: u32) -> String {
     format!(
-        "⚠️ Scrim-Meldung ohne Zielkanal (Match {match_id}, Typ {message_kind}): weder ein Team-Channel noch DL_SCRIM_ANNOUNCEMENT_CHANNEL_ID ist gesetzt — bitte Channel-Zuordnung prüfen."
+        "Scrim-Meldung ohne Zielkanal (Match {match_id}, Typ {message_kind}). Bitte die Teamkanäle prüfen."
     )
 }
 
@@ -2799,7 +3130,7 @@ mod tests {
         insert_match(pool, 11, STATE_RESULT_REQUESTED).await?;
         insert_match(pool, 13, "lobby_open").await?;
 
-        let first = claim_next_pending_match(pool, None).await?;
+        let first = claim_next_pending_match(pool).await?;
         assert_eq!(
             first,
             Some(ClaimedMatch {
@@ -2810,7 +3141,7 @@ mod tests {
         );
         assert_eq!(lobby_state(pool, 10).await?, STATE_STARTING);
 
-        let second = claim_next_pending_match(pool, None).await?;
+        let second = claim_next_pending_match(pool).await?;
         assert_eq!(
             second,
             Some(ClaimedMatch {
@@ -2821,7 +3152,7 @@ mod tests {
         );
         assert_eq!(lobby_state(pool, 11).await?, STATE_RESULT_FETCHING);
         assert_eq!(lobby_state(pool, 12).await?, STATE_STARTING);
-        let third = claim_next_pending_match(pool, None).await?;
+        let third = claim_next_pending_match(pool).await?;
         assert_eq!(
             third,
             Some(ClaimedMatch {
@@ -2831,7 +3162,7 @@ mod tests {
             })
         );
         assert_eq!(lobby_state(pool, 13).await?, "lobby_posting");
-        assert_eq!(claim_next_pending_match(pool, None).await?, None);
+        assert_eq!(claim_next_pending_match(pool).await?, None);
         Ok(())
     }
 
@@ -2875,6 +3206,11 @@ mod tests {
             .await?
             .expect("failed refs are retryable");
         assert_eq!(retry.ref_id, 70);
+        save_match_result_ref_failure(pool, 70, "still not ready").await?;
+        let next_retry = claim_next_pending_match_result_ref(pool, 30)
+            .await?
+            .expect("failed refs rotate by last attempt");
+        assert_eq!(next_retry.ref_id, 71);
 
         let raw = json!({
             "match_id": 987654321,
@@ -2927,6 +3263,205 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn result_state_bleibt_bei_neuer_pending_id_angefordert() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_FETCHING).await?;
+
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT id FROM scrim.matches WHERE id = 30 FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let pool_for_state = pool.clone();
+        let mut update =
+            tokio::spawn(
+                async move { set_result_state_after_attempt(&pool_for_state, 30, true).await },
+            );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut update)
+                .await
+                .is_err()
+        );
+
+        insert_match_result_ref_tx(&mut tx, 70, 30, 987_654_321).await?;
+        sqlx::query("UPDATE scrim.matches SET lobby_state = $2 WHERE id = $1")
+            .bind(30)
+            .bind(STATE_RESULT_REQUESTED)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        assert_eq!(update.await??, ResultQueueState::Pending);
+        assert_eq!(lobby_state(pool, 30).await?, STATE_RESULT_REQUESTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn alter_result_fehler_wird_nach_backoff_neu_geclaimt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_FAILED).await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+        sqlx::query("UPDATE scrim.match_result_refs SET fetch_status = 'failed' WHERE id = 70")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "UPDATE scrim.matches SET updated_at = now() - interval '16 minutes' WHERE id = 30",
+        )
+        .execute(pool)
+        .await?;
+
+        let claim = claim_next_pending_match_or_result_retry(pool)
+            .await?
+            .expect("stale result failure must be retried");
+        assert_eq!(claim.match_id, 30);
+        assert_eq!(claim.action, ScrimDriverAction::FetchResult);
+        assert_eq!(lobby_state(pool, 30).await?, STATE_RESULT_FETCHING);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn frische_lobby_aktion_hat_vorrang_vor_altem_result_retry() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_FAILED).await?;
+        sqlx::query(
+            "UPDATE scrim.matches SET updated_at = now() - interval '16 minutes' WHERE id = 30",
+        )
+        .execute(pool)
+        .await?;
+        insert_match(pool, 31, STATE_LOBBY_OPEN).await?;
+
+        let claim = claim_next_pending_match_or_result_retry(pool)
+            .await?
+            .expect("active lobby claim");
+        assert_eq!(claim.match_id, 31);
+        assert_eq!(claim.action, ScrimDriverAction::PostLobbyCode);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn erfolgreiches_result_bleibt_finished_wenn_weitere_id_fehlschlaegt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_FETCHING).await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+        insert_match_result_ref(pool, 71, 30, 987_654_322).await?;
+        sqlx::query(
+            "UPDATE scrim.match_result_refs SET fetch_status = CASE id WHEN 70 THEN 'fetched' ELSE 'failed' END WHERE match_id = 30",
+        )
+        .execute(pool)
+        .await?;
+
+        assert_eq!(
+            set_result_state_after_attempt(pool, 30, true).await?,
+            ResultQueueState::Finished
+        );
+
+        assert_eq!(lobby_state(pool, 30).await?, "finished");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn result_queue_bleibt_offen_solange_eine_weitere_id_fetching_ist() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_FETCHING).await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+        insert_match_result_ref(pool, 71, 30, 987_654_322).await?;
+        sqlx::query(
+            "UPDATE scrim.match_result_refs SET fetch_status = CASE id WHEN 70 THEN 'fetched' ELSE 'fetching' END WHERE match_id = 30",
+        )
+        .execute(pool)
+        .await?;
+
+        assert_eq!(
+            set_result_state_after_attempt(pool, 30, false).await?,
+            ResultQueueState::Fetching
+        );
+        assert_eq!(lobby_state(pool, 30).await?, STATE_RESULT_FETCHING);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fehlgeschlagene_id_wird_trotz_finished_match_neu_geclaimt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, "finished").await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+        sqlx::query(
+            "UPDATE scrim.match_result_refs SET fetch_status = 'failed', updated_at = now() - interval '16 minutes' WHERE id = 70",
+        )
+        .execute(pool)
+        .await?;
+
+        let claim = claim_next_pending_match_or_result_retry(pool)
+            .await?
+            .expect("stale failed ref on finished match");
+        assert_eq!(claim.match_id, 30);
+        assert_eq!(claim.action, ScrimDriverAction::FetchResult);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn haengender_result_abruf_wird_nach_backoff_neu_geclaimt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_FETCHING).await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+        sqlx::query(
+            "UPDATE scrim.matches SET updated_at = now() - interval '16 minutes' WHERE id = 30",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE scrim.match_result_refs SET fetch_status = 'fetching', updated_at = now() - interval '16 minutes' WHERE id = 70",
+        )
+        .execute(pool)
+        .await?;
+
+        let claim = claim_next_pending_match_or_result_retry(pool)
+            .await?
+            .expect("stale fetching claim");
+        assert_eq!(claim.match_id, 30);
+        let result_ref = claim_next_pending_match_result_ref(pool, 30)
+            .await?
+            .expect("stale fetching ref");
+        assert_eq!(result_ref.ref_id, 70);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operative_scrim_posts_bleiben_in_den_teamkanaelen() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_LOBBY_OPEN).await?;
+
+        let claim = claim_next_pending_match(pool)
+            .await?
+            .expect("lobby post claim");
+        assert_eq!(claim.team_channels, vec![100, 200]);
+        Ok(())
+    }
+
     #[test]
     fn lobby_code_message_ist_schlicht_und_pingfrei() {
         assert_eq!(lobby_code_message("ABC12"), "Lobby Code: ABC12");
@@ -2950,6 +3485,8 @@ mod tests {
         assert!(content.contains("Team Alpha"));
         assert!(content.contains("Team Beta"));
         assert!(content.contains("Samstag 20:00-22:00"));
+        assert!(content.contains("Regulärer Scrim"));
+        assert!(!content.contains("Regulaerer"));
         assert!(content.contains("<t:1783354800:f>"));
         assert!(!content.contains("<@"));
         assert_eq!(
@@ -3003,7 +3540,7 @@ mod tests {
 
     #[test]
     fn match_request_reminder_body_verlinkt_abfrage_und_pinged_nur_fehlende() {
-        let content = match_request_reminder_message("Team Alpha", &[555, 666]);
+        let content = match_request_reminder_message("Team Alpha", &[555, 666], None);
         assert!(content.contains("Team Alpha"));
         assert!(content.contains("<@555>"));
         assert!(content.contains("<@666>"));
@@ -3018,6 +3555,28 @@ mod tests {
             body["allowed_mentions"],
             json!({ "parse": [], "users": ["555", "666"], "replied_user": false })
         );
+    }
+
+    #[test]
+    fn match_request_reminder_nennt_teamrolle_wenn_einzelziele_fehlen() {
+        let content = match_request_reminder_message("Team Alpha", &[], Some(888));
+        assert!(content.contains("<@&888>"));
+        assert!(!content.contains("von euch"));
+    }
+
+    #[test]
+    fn sichtbare_scrim_ergebnistexte_sind_klar_und_ohne_standard_emojis() {
+        let outcome = ScrimMatchResultOutcome {
+            steam_match_id: Some(123),
+            winner_team_id: Some(1),
+            result_json: json!({}),
+        };
+        let success = result_success_message(30, &outcome, line!());
+        let failure = result_failure_message(30, "noch nicht verfügbar", line!());
+
+        for text in [success, failure] {
+            assert!(!text.contains(['⚠', '🏁', '🤝', '—', '–']));
+        }
     }
 
     #[test]
@@ -3101,7 +3660,7 @@ mod tests {
             MATCH_REQUEST_STATUS_OPEN,
         )
         .await?;
-        insert_match_request_response(pool, 31, 1, 501, 555, 0, Some(9001), Some(100)).await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
         insert_match_request_reminder(pool, 80, 31, 1, &[502], &[666]).await?;
 
         let claim = claim_next_pending_match_request_reminder(pool)
@@ -3135,6 +3694,126 @@ mod tests {
             .get::<Option<chrono::DateTime<Utc>>, _>("posted_at")
             .is_none());
         assert!(row.get::<Option<i64>, _>("discord_message_id").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reminder_claim_entfernt_inzwischen_beantwortete_personen() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_team_member(pool, 1, 502, 666).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_reminder(pool, 80, 31, 1, &[501, 502], &[555, 666]).await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
+
+        let claim = claim_next_pending_match_request_reminder(pool)
+            .await?
+            .expect("one missing participant remains");
+        assert_eq!(claim.target_user_ids, vec![666]);
+        assert_eq!(claim.target_kind, "members");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reminder_claim_storniert_wenn_niemand_mehr_fehlt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_reminder(pool, 80, 31, 1, &[501], &[555]).await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
+
+        assert_eq!(claim_next_pending_match_request_reminder(pool).await?, None);
+        assert_eq!(match_request_reminder_status(pool, 80).await?, "cancelled");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reminder_claim_storniert_nach_freigabe_des_slots() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_reminder(pool, 80, 31, 1, &[501], &[555]).await?;
+        sqlx::query("UPDATE scrim.match_requests SET status = 'closed' WHERE id = 31")
+            .execute(pool)
+            .await?;
+
+        assert_eq!(claim_next_pending_match_request_reminder(pool).await?, None);
+        assert_eq!(match_request_reminder_status(pool, 80).await?, "cancelled");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reminder_ohne_pingbares_ziel_wird_nicht_gepostet() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        sqlx::query("UPDATE scrim.participants SET discord_id = NULL WHERE id = 501")
+            .execute(pool)
+            .await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_reminder(pool, 80, 31, 1, &[501], &[]).await?;
+
+        assert_eq!(claim_next_pending_match_request_reminder(pool).await?, None);
+        assert_eq!(match_request_reminder_status(pool, 80).await?, "failed");
         Ok(())
     }
 
@@ -3256,6 +3935,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn match_request_buttonantwort_schreibt_nicht_nach_schliessung() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+
+        let (lock_a, lock_b) = match_request_response_lock_keys(31, 501)?;
+        let mut lock_tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+            .bind(lock_a)
+            .bind(lock_b)
+            .execute(&mut *lock_tx)
+            .await?;
+
+        let pool_for_click = pool.clone();
+        let mut click = tokio::spawn(async move {
+            record_match_request_response(
+                &pool_for_click,
+                MatchRequestResponseInput {
+                    custom_id: "scrimreq:v1:slot:31:1:0".to_string(),
+                    user_id: 555,
+                    channel_id: 100,
+                    message_id: Some(9001),
+                },
+            )
+            .await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut click)
+            .await
+            .is_err());
+
+        sqlx::query("UPDATE scrim.match_requests SET status = 'closed' WHERE id = 31")
+            .execute(pool)
+            .await?;
+        lock_tx.commit().await?;
+
+        assert_eq!(click.await??, MatchRequestResponseOutcome::NotOpen);
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scrim.match_request_responses WHERE request_id = 31",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(stored, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn match_request_buttonantwort_akzeptiert_sichtbare_teilfehler_posts() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
@@ -3321,8 +4061,8 @@ mod tests {
             MATCH_REQUEST_STATUS_OPEN,
         )
         .await?;
-        insert_match_request_response(pool, 31, 1, 501, 555, 0, Some(9001), Some(100)).await?;
-        insert_match_request_response(pool, 31, 2, 601, 777, 0, Some(9002), Some(200)).await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
+        insert_match_request_response(pool, 31, 2, 601, 777, 0, (Some(9002), Some(200))).await?;
         release_match_request_for_test(pool, 31).await?;
 
         let claim = claim_next_pending_match_status(pool).await?.expect("claim");
@@ -3638,6 +4378,29 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_match_result_ref_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ref_id: i64,
+        match_id: i32,
+        steam_match_id: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_result_refs(
+                id, match_id, steam_match_id, source_user_id, source_display_name,
+                fetch_status, entered_at, updated_at
+            )
+            VALUES($1, $2, $3, '42', 'Coach', 'pending', now(), now())
+            "#,
+        )
+        .bind(ref_id)
+        .bind(match_id)
+        .bind(steam_match_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     async fn match_result_ref_status(
         pool: &PgPool,
         ref_id: i64,
@@ -3703,9 +4466,9 @@ mod tests {
         participant_id: i32,
         discord_user_id: i64,
         slot_index: i32,
-        message_id: Option<i64>,
-        channel_id: Option<i64>,
+        source_message: (Option<i64>, Option<i64>),
     ) -> anyhow::Result<()> {
+        let (message_id, channel_id) = source_message;
         sqlx::query(
             r#"
             INSERT INTO scrim.match_request_responses(
