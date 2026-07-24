@@ -1,3 +1,11 @@
+## #284 — Scrim-Block-Flow im Dashboard
+
+Problem: Scrim-Match-Abfragen konnten mehrere Matches speichern, aber im Dashboard fehlte ein Arbeitsweg, um einen ganzen Block in einem Schritt anzulegen.
+
+Änderung: Der Scrim-Tab bündelt Blockanlage mit Zwei-Wochen-Vorlage, Paarungen, gemeinsamen Slots und optionalen eigenen Slots pro Match.
+
+Aktuelles Verhalten: Leo kann mehrere Terminabfragen als einen Scrim-Block vorbereiten und gemeinsam anlegen. Reminder, Statusnachrichten und AI bleiben getrennte Schritte.
+
 ## #283 — Scrim-Slot kann nach Frist freigegeben werden
 
 Problem: Das Dashboard konnte nach Fristende einen Slot empfehlen, aber Leo brauchte eine verbindliche Freigabe und eine nachvollziehbare manuelle Überschreibung.
