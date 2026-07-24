@@ -1,3 +1,11 @@
+## #283 — Scrim-Slot kann nach Frist freigegeben werden
+
+Problem: Das Dashboard konnte nach Fristende einen Slot empfehlen, aber Leo brauchte eine verbindliche Freigabe und eine nachvollziehbare manuelle Überschreibung.
+
+Änderung: Terminabfragen speichern den freigegebenen Slot mit Zeitpunkt und Dashboard-Nutzer. Wenn Leo einen anderen Slot wählt, bleibt der optionale Override-Grund getrennt von der Empfehlung sichtbar.
+
+Aktuelles Verhalten: Der Scrim-Tab zeigt empfohlenen Slot, freigegebenen Slot und Override-Grund getrennt; es wird dabei noch keine Discord-Statusnachricht gepostet.
+
 ## #282 — Scrim-Dashboard zeigt konkreten Ersatzbedarf
 
 Problem: Nach Fristende war sichtbar, welcher Slot vorne liegt, aber nicht konkret, wer für diesen Slot fehlt oder warum Ersatz nötig ist.
