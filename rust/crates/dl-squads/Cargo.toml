@@ -21,5 +21,8 @@ tracing.workspace = true
 [features]
 testing = ["dl-central-db/testing"]
 
+[dev-dependencies]
+dl-central-db = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

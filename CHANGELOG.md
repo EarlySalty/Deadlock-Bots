@@ -1,3 +1,11 @@
+## #289 — Scrim-Orga bleibt auch bei späten Antworten eindeutig
+
+Problem: Späte Button-Antworten, unklare Reminder-Ziele sowie mehrere oder hängen gebliebene Ergebnisabrufe konnten den sichtbaren Planungsstand verfälschen oder blockieren.
+
+Änderung: Freigabe und Antworten sind gegeneinander abgesichert, Reminder prüfen direkt vor dem Post ein wirklich pingbares Ziel, und Ergebnisabrufe behalten erfolgreiche Teilstände bei weiteren Fehlern. Lagebild und sichtbares AI-Entscheidungsprotokoll werden gemeinsam gespeichert.
+
+Aktuelles Verhalten: Operative Scrim-Posts bleiben in den Teamkanälen; hängende Abrufe heilen sich später selbst, ein laufendes Match kann manuell beendet werden, und Teilstände sowie alte Match-IDs bleiben nachvollziehbar sichtbar.
+
 ## #288 — Scrim-Lagebild-AI nutzt den vorhandenen OpenAI-Pfad
 
 Problem: Der neue Scrim-Lagebild-Use-Case defaultete auf Mistral, während live nur der bestehende OpenAI-Key gesetzt ist. Dadurch waren Lagebild-Überarbeitung und Bot-Generierung nach dem Neustart inaktiv.
