@@ -389,10 +389,10 @@ impl LlmProviderConfig {
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
     match use_case {
         LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-        LlmUseCase::CockpitVorschlag
-        | LlmUseCase::Faq
-        | LlmUseCase::LfgFreitext
-        | LlmUseCase::ScrimLagebild => LlmProviderKind::Mistral,
+        LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
+            LlmProviderKind::Mistral
+        }
+        LlmUseCase::ScrimLagebild => LlmProviderKind::OpenAi,
     }
 }
 
@@ -1223,10 +1223,10 @@ mod tests {
         for use_case in LlmUseCase::all() {
             let expected = match use_case {
                 LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-                LlmUseCase::CockpitVorschlag
-                | LlmUseCase::Faq
-                | LlmUseCase::LfgFreitext
-                | LlmUseCase::ScrimLagebild => LlmProviderKind::Mistral,
+                LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
+                    LlmProviderKind::Mistral
+                }
+                LlmUseCase::ScrimLagebild => LlmProviderKind::OpenAi,
             };
             assert_eq!(
                 defaults

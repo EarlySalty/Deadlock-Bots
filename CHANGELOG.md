@@ -1,3 +1,11 @@
+## #288 — Scrim-Lagebild-AI nutzt den vorhandenen OpenAI-Pfad
+
+Problem: Der neue Scrim-Lagebild-Use-Case defaultete auf Mistral, während live nur der bestehende OpenAI-Key gesetzt ist. Dadurch waren Lagebild-Überarbeitung und Bot-Generierung nach dem Neustart inaktiv.
+
+Änderung: `ScrimLagebild` nutzt ohne expliziten Override jetzt den bestehenden OpenAI-Provider. Der Provider-Default ist im vorhandenen `dl-ai`-Config-Test abgesichert.
+
+Aktuelles Verhalten: Web und Bot können die Scrim-Lagebild-AI mit der vorhandenen OpenAI-Konfiguration starten. Ein expliziter `DL_LLM_PROVIDER_SCRIM_LAGEBILD`-Override bleibt weiter möglich.
+
 ## #287 — Scrim-Lagebilder im Dashboard korrigieren
 
 Problem: Das Lagebild-Backend konnte Scrim-Teams bereits auswerten, aber Coaches hatten noch keine nutzbare Dashboard-Ansicht für aktuellen Stand, Timeline, Evidenzen und Korrekturdialog.
