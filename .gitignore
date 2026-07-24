@@ -35,6 +35,16 @@ install_windows_service.py
 !rust/crates/dl-community/src/onboarding_steps.json
 # Rust-Quelldatei, faelschlich von *env* (Z.26) gefangen — muss versioniert sein
 !rust/crates/dl-webcore/src/envelope.rs
+# Rust-Crate, faelschlich von *env* (Z.26) gefangen — Workspace-Member muss versioniert sein
+!rust/bin/dl-infisical-env/
+rust/bin/dl-infisical-env/**/*
+!rust/bin/dl-infisical-env/
+!rust/bin/dl-infisical-env/Cargo.toml
+!rust/bin/dl-infisical-env/src/
+rust/bin/dl-infisical-env/src/**/*
+!rust/bin/dl-infisical-env/src/
+!rust/bin/dl-infisical-env/src/lib.rs
+!rust/bin/dl-infisical-env/src/main.rs
 !cogs/steam/steam_presence/README.md
 !cogs/steam/steam_presence/deadlock_presence_logger.js
 !cogs/steam/steam_presence/statusanzeige.js
