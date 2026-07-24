@@ -1,3 +1,11 @@
+## #290 — Scrim-Lagebilder erreichen OpenAI wieder
+
+Problem: Der Live-Provider lehnte neue Scrim-Lagebild-Anfragen wegen nicht mehr passender Anfrageparameter ab; im Dashboard blieb dadurch nur der vorsichtige Fehlerstand.
+
+Änderung: Moderne OpenAI-Modelle erhalten das kompatible Ausgabelimit und keine von ihnen abgelehnte Sampling-Angabe. Andere angebundene Chatmodelle behalten ihr bisheriges Anfrageformat.
+
+Aktuelles Verhalten: Wochenlauf und Korrekturdialog können wieder echte Scrim-Lagebilder erzeugen; Fehler bleiben weiterhin sichtbar und werden später erneut versucht.
+
 ## #289 — Scrim-Orga bleibt auch bei späten Antworten eindeutig
 
 Problem: Späte Button-Antworten, unklare Reminder-Ziele sowie mehrere oder hängen gebliebene Ergebnisabrufe konnten den sichtbaren Planungsstand verfälschen oder blockieren.

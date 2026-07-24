@@ -513,15 +513,23 @@ impl ChatProvider for OpenAiChatProvider {
             .model
             .clone()
             .unwrap_or_else(|| self.default_model.clone());
+        let uses_reasoning_parameters = openai_uses_reasoning_parameters(&model);
         let wire_messages = openai_messages(messages, params.system_prompt.as_deref())?;
         let mut payload = json!({
             "model": model,
             "messages": wire_messages,
-            "temperature": params.temperature,
         });
+        if !uses_reasoning_parameters {
+            payload["temperature"] = json!(params.temperature);
+        }
         // max_tokens: None = Feld weglassen, das Modell-Maximum gilt (uncapped)
         if let Some(max_tokens) = params.max_tokens {
-            payload["max_tokens"] = json!(max_tokens);
+            let field = if uses_reasoning_parameters {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            payload[field] = json!(max_tokens);
         }
         if params.json_mode {
             payload["response_format"] = json!({ "type": "json_object" });
@@ -539,6 +547,14 @@ impl ChatProvider for OpenAiChatProvider {
         log_chat_success("openai", result.status, result.elapsed, &response.usage);
         Ok(response)
     }
+}
+
+fn openai_uses_reasoning_parameters(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
 }
 
 impl MistralChatProvider {
@@ -1412,6 +1428,48 @@ mod tests {
             captured[1].get("max_tokens").is_none(),
             "max_tokens: None muss das Feld komplett weglassen (uncapped)"
         );
+    }
+
+    #[tokio::test]
+    async fn openai_gpt5_nutzt_kompatible_tokenparameter_ohne_temperature() {
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().expect("lock").push(body);
+                    Json(json!({
+                        "model": "gpt-5.4-mini",
+                        "choices": [{ "message": { "content": "{}" } }]
+                    }))
+                }
+            }),
+        );
+        let base = spawn_json_server(app).await;
+        let provider =
+            OpenAiChatProvider::new_with_retry(base, "openai-key", "gpt-5.4-mini", fast_retry(0));
+
+        provider
+            .chat(
+                &[ChatMessage::user("Antworte als JSON")],
+                ChatParams {
+                    max_tokens: Some(900),
+                    json_mode: true,
+                    temperature: 0.2,
+                    ..ChatParams::default()
+                },
+            )
+            .await
+            .expect("chat response");
+
+        let captured = captured.lock().expect("lock");
+        assert_eq!(captured[0]["max_completion_tokens"], 900);
+        assert!(captured[0].get("max_tokens").is_none());
+        assert!(captured[0].get("temperature").is_none());
+        assert_eq!(captured[0]["response_format"]["type"], "json_object");
     }
 
     #[tokio::test]
