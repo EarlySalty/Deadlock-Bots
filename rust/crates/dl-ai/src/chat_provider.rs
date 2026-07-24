@@ -149,6 +149,7 @@ pub enum LlmUseCase {
     CockpitVorschlag,
     Faq,
     LfgFreitext,
+    ScrimLagebild,
 }
 
 impl LlmUseCase {
@@ -158,6 +159,7 @@ impl LlmUseCase {
             Self::CockpitVorschlag,
             Self::Faq,
             Self::LfgFreitext,
+            Self::ScrimLagebild,
         ]
     }
 
@@ -167,6 +169,7 @@ impl LlmUseCase {
             Self::CockpitVorschlag => "COCKPIT_VORSCHLAG",
             Self::Faq => "FAQ",
             Self::LfgFreitext => "LFG_FREITEXT",
+            Self::ScrimLagebild => "SCRIM_LAGEBILD",
         }
     }
 
@@ -176,6 +179,7 @@ impl LlmUseCase {
             Self::CockpitVorschlag => "cockpit_vorschlag",
             Self::Faq => "faq",
             Self::LfgFreitext => "lfg_freitext",
+            Self::ScrimLagebild => "scrim_lagebild",
         }
     }
 }
@@ -385,9 +389,10 @@ impl LlmProviderConfig {
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
     match use_case {
         LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-        LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
-            LlmProviderKind::Mistral
-        }
+        LlmUseCase::CockpitVorschlag
+        | LlmUseCase::Faq
+        | LlmUseCase::LfgFreitext
+        | LlmUseCase::ScrimLagebild => LlmProviderKind::Mistral,
     }
 }
 
@@ -1218,9 +1223,10 @@ mod tests {
         for use_case in LlmUseCase::all() {
             let expected = match use_case {
                 LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-                LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
-                    LlmProviderKind::Mistral
-                }
+                LlmUseCase::CockpitVorschlag
+                | LlmUseCase::Faq
+                | LlmUseCase::LfgFreitext
+                | LlmUseCase::ScrimLagebild => LlmProviderKind::Mistral,
             };
             assert_eq!(
                 defaults

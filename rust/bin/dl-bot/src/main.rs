@@ -1163,12 +1163,29 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         category_id: NonZeroU64::new(env_u64_default("DL_SCRIM_VISIBLE_VCS_CATEGORY_ID", 0))
             .map(NonZeroU64::get),
     };
+    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())
+    {
+        Ok(cfg) => match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
+            std::env::var(key).ok()
+        }) {
+            Ok(provider) => Some(provider),
+            Err(err) => {
+                tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Bot ungueltig");
+            None
+        }
+    };
     let mut scrim_match_driver = scrimglue::spawn(
         central_pool.clone(),
         adapter.clone(),
         scrim_announcement_channel_id,
         tempvoice.clone(),
         scrim_voice_config,
+        scrim_lagebild_ai,
     );
 
     // Gateway: user-gated — Python hält die Session bis zum Cutover

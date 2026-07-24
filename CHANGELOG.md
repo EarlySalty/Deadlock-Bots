@@ -1,3 +1,19 @@
+## #287 — Scrim-Lagebilder bekommen eine Korrekturspur
+
+Problem: Interne Scrim-Lagebilder waren noch nicht als nachvollziehbare Timeline mit Evidenzen und Korrekturen im Dashboard greifbar.
+
+Änderung: Das Dashboard zeigt Lagebilder samt Evidenzen und speichert Korrekturen als Chatspur. Der Bot kann Lagebilder im Wochenlauf oder nach einem Match erzeugen, und AI-Entscheidungen werden sichtbar geloggt.
+
+Aktuelles Verhalten: Leo sieht die interne Lage pro Scrim-Team mit Quellen und kann Korrekturen erfassen. Fehlt die AI-Anbindung oder schlägt sie fehl, bleibt die Korrektur gespeichert und der Fehler nachvollziehbar.
+
+## #286 — Scrim-Match-IDs holen Ergebnisse ins Dashboard
+
+Problem: Coaches konnten gespielte Scrim-Matches noch nicht einfach mit Deadlock-Match-IDs verknüpfen; Ergebnisabrufe waren dadurch nicht sauber nachvollziehbar.
+
+Änderung: Das Dashboard speichert Match-IDs direkt am Scrim-Match, verhindert doppelte IDs und übergibt sie an den bestehenden Ergebnisabruf. Abrufstatus, Fehler, Rohdaten und normalisierte Ergebnisdaten bleiben sichtbar gespeichert.
+
+Aktuelles Verhalten: Coaches tragen eine Match-ID ein, sie wird automatisch gespeichert und das nächste leere Feld ist bereit. Abgerufene Ergebnisse erscheinen in der Match-History; pending/failed bleibt sichtbar statt still zu verschwinden.
+
 ## #285 — Scrim-Match-Status im Teamkanal
 
 Problem: Nach einer Slot-Freigabe gab es im Teamkanal noch keinen verbindlichen Match-Stand, und erneute Updates hätten leicht doppelte Nachrichten erzeugt.

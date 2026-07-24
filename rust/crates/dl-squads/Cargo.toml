@@ -10,11 +10,13 @@ version = "0.1.0"
 [dependencies]
 chrono.workspace = true
 dl-central-db.workspace = true
+dl-ai.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [features]
 testing = ["dl-central-db/testing"]

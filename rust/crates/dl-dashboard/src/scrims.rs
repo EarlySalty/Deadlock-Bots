@@ -7,6 +7,9 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
+use dl_squads::lagebild::{
+    revise_lagebild, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
+};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
@@ -352,6 +355,60 @@ pub async fn scrims_set_lobby_code(
     }
 }
 
+pub async fn scrims_add_match_id(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(match_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let match_id = match parse_path_i32(&match_id, "match_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let steam_match_id = match parse_match_result_id(&payload) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    match add_match_result_ref(
+        app.pool(),
+        match_id,
+        steam_match_id,
+        &session.user_id.to_string(),
+        &session.display_name,
+    )
+    .await
+    {
+        Ok(MatchResultRefUpdate::Updated(scrim_match)) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match.match_id",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                match_id,
+                steam_match_id,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "match": scrim_match }))
+        }
+        Ok(MatchResultRefUpdate::Duplicate) => err_text(409, "Match ID already exists"),
+        Ok(MatchResultRefUpdate::NotFound) => err_text(404, "Match not found"),
+        Err(err) => {
+            tracing::error!(%err, match_id, steam_match_id, "Scrim-Match-ID-Speicherung fehlgeschlagen");
+            err_text(500, "Save match id failed")
+        }
+    }
+}
+
 pub async fn scrims_request_result(
     State(app): State<DashboardApp>,
     headers: HeaderMap,
@@ -399,6 +456,258 @@ pub async fn scrims_update_participant_notes(
         Err(err) => {
             tracing::error!(%err, participant_id, "Scrim-Participant-Notiz fehlgeschlagen");
             err_text(500, "Save notes failed")
+        }
+    }
+}
+
+pub async fn scrims_create_lagebild_correction(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(team_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let team_id = match parse_path_i32(&team_id, "team_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let message =
+        match parse_required_text(get2(&payload, "message", "correction"), "message", 4000) {
+            Ok(message) => message,
+            Err(resp) => return resp,
+        };
+
+    let detail = match load_lagebild_detail(app.pool(), team_id).await {
+        Ok(Some(detail)) => detail,
+        Ok(None) => return err_text(404, "Scrim team not found"),
+        Err(err) => {
+            tracing::error!(%err, team_id, "Scrim-Lagebild konnte nicht geladen werden");
+            return err_text(500, "Lagebild unavailable");
+        }
+    };
+    let current_snapshot_id = detail
+        .get("current")
+        .and_then(|current| current.get("id"))
+        .and_then(Value::as_i64);
+    let current_text = detail
+        .get("current")
+        .and_then(|current| current.get("text"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let team_name = detail
+        .get("team_name")
+        .and_then(Value::as_str)
+        .unwrap_or("Scrim-Team")
+        .to_string();
+    let evidences = evidences_from_current(&detail);
+    let previous_corrections = correction_context_from_detail(&detail);
+
+    let user_message = match insert_lagebild_correction(
+        app.pool(),
+        team_id,
+        current_snapshot_id,
+        "user",
+        Some(&session.user_id.to_string()),
+        Some(&session.display_name),
+        &message,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::error!(%err, team_id, "Scrim-Lagebild-Korrektur konnte nicht gespeichert werden");
+            return err_text(500, "Save correction failed");
+        }
+    };
+
+    let Some(provider) = app.ai_provider() else {
+        let assistant_message = match insert_lagebild_correction(
+            app.pool(),
+            team_id,
+            current_snapshot_id,
+            "assistant",
+            None,
+            Some("AI"),
+            "Korrektur ist gespeichert. Eine automatische Überarbeitung ist gerade nicht möglich.",
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Fehlerhinweis konnte nicht gespeichert werden");
+                return err_text(500, "Save correction failed");
+            }
+        };
+        if let Err(err) = log_scrim_lagebild_decision(
+            app.pool(),
+            "scrim.lagebild.correction",
+            &format!(
+                "team={team_id} current_snapshot={:?} message_chars={}",
+                current_snapshot_id,
+                message.chars().count()
+            ),
+            "error",
+            "ai_provider_missing",
+            "correction_saved",
+            json!({
+                "team_id": team_id,
+                "current_snapshot_id": current_snapshot_id,
+                "user_correction_id": user_message["id"],
+            }),
+        )
+        .await
+        {
+            tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Entscheidung konnte nicht geloggt werden");
+            return err_text(500, "AI decision log failed");
+        }
+        return load_lagebild_correction_response(
+            app.pool(),
+            team_id,
+            user_message,
+            assistant_message,
+        )
+        .await;
+    };
+
+    match revise_lagebild(
+        provider.as_ref(),
+        &team_name,
+        current_text.as_deref(),
+        &message,
+        &previous_corrections,
+        &evidences,
+    )
+    .await
+    {
+        Ok(result) => {
+            let assistant_message = match insert_lagebild_correction(
+                app.pool(),
+                team_id,
+                current_snapshot_id,
+                "assistant",
+                None,
+                Some("AI"),
+                &result.reply,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Antwort konnte nicht gespeichert werden");
+                    return err_text(500, "Save correction failed");
+                }
+            };
+            let mut snapshot_id = None;
+            let decision;
+            let reason;
+            let action;
+            if let Some(lagebild) = result.lagebild.as_deref() {
+                match insert_corrected_lagebild_snapshot(
+                    app.pool(),
+                    team_id,
+                    current_snapshot_id,
+                    lagebild,
+                    result.model.clone(),
+                    assistant_message["id"].as_i64(),
+                )
+                .await
+                {
+                    Ok(id) => {
+                        snapshot_id = Some(id);
+                        decision = "yes";
+                        reason = "lagebild_korrigiert";
+                        action = "snapshot_created";
+                    }
+                    Err(err) => {
+                        tracing::error!(%err, team_id, "Korrigiertes Scrim-Lagebild konnte nicht gespeichert werden");
+                        return err_text(500, "Save lagebild failed");
+                    }
+                }
+            } else {
+                decision = "no";
+                reason = "erklaerung_ohne_lagebild";
+                action = "correction_saved";
+            }
+            if let Err(err) = log_scrim_lagebild_decision(
+                app.pool(),
+                "scrim.lagebild.correction",
+                &format!(
+                    "team={team_id} current_snapshot={:?} message_chars={}",
+                    current_snapshot_id,
+                    message.chars().count()
+                ),
+                decision,
+                reason,
+                action,
+                json!({
+                    "team_id": team_id,
+                    "current_snapshot_id": current_snapshot_id,
+                    "new_snapshot_id": snapshot_id,
+                    "user_correction_id": user_message["id"],
+                    "assistant_correction_id": assistant_message["id"],
+                    "model": result.model,
+                }),
+            )
+            .await
+            {
+                tracing::error!(%err, team_id, "Scrim-Lagebild-AI-Entscheidung konnte nicht geloggt werden");
+                return err_text(500, "AI decision log failed");
+            }
+            load_lagebild_correction_response(app.pool(), team_id, user_message, assistant_message)
+                .await
+        }
+        Err(err) => {
+            tracing::error!(%err, team_id, "Scrim-Lagebild-Korrektur-AI fehlgeschlagen");
+            let assistant_message = match insert_lagebild_correction(
+                app.pool(),
+                team_id,
+                current_snapshot_id,
+                "assistant",
+                None,
+                Some("AI"),
+                "Korrektur ist gespeichert. Die automatische Überarbeitung ist fehlgeschlagen.",
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(db_err) => {
+                    tracing::error!(%db_err, team_id, "Scrim-Lagebild-AI-Fehlerantwort konnte nicht gespeichert werden");
+                    return err_text(500, "Save correction failed");
+                }
+            };
+            if let Err(db_err) = log_scrim_lagebild_decision(
+                app.pool(),
+                "scrim.lagebild.correction",
+                &format!(
+                    "team={team_id} current_snapshot={:?} message_chars={}",
+                    current_snapshot_id,
+                    message.chars().count()
+                ),
+                "error",
+                "ai_revision_failed",
+                "correction_saved",
+                json!({
+                    "team_id": team_id,
+                    "current_snapshot_id": current_snapshot_id,
+                    "user_correction_id": user_message["id"],
+                    "assistant_correction_id": assistant_message["id"],
+                    "error": err.to_string(),
+                }),
+            )
+            .await
+            {
+                tracing::error!(%db_err, team_id, "Scrim-Lagebild-AI-Entscheidung konnte nicht geloggt werden");
+                return err_text(500, "AI decision log failed");
+            }
+            load_lagebild_correction_response(app.pool(), team_id, user_message, assistant_message)
+                .await
         }
     }
 }
@@ -814,6 +1123,17 @@ fn parse_optional_text(
     }
 }
 
+fn parse_required_text(
+    raw: Option<&Value>,
+    field: &str,
+    max_chars: usize,
+) -> Result<String, Response> {
+    match parse_optional_text(raw, field, max_chars)? {
+        Some(value) => Ok(value),
+        None => Err(err_text(400, &format!("{field} must be string"))),
+    }
+}
+
 fn parse_lobby_code(payload: &Value) -> Result<String, Response> {
     let raw = match get2(payload, "code", "lobbyCode") {
         Some(Value::String(value)) => value.trim(),
@@ -825,18 +1145,280 @@ fn parse_lobby_code(payload: &Value) -> Result<String, Response> {
     Ok(raw.to_ascii_uppercase())
 }
 
+fn parse_match_result_id(payload: &Value) -> Result<i64, Response> {
+    let raw = get2(payload, "match_id", "matchId")
+        .or_else(|| get2(payload, "steam_match_id", "steamMatchId"))
+        .or_else(|| get2(payload, "deadlock_match_id", "deadlockMatchId"));
+    let value = match raw {
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .ok_or_else(|| err_text(400, "match_id must be a positive integer"))?,
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| err_text(400, "match_id must be a positive integer"))?,
+        _ => return Err(err_text(400, "match_id must be a positive integer")),
+    };
+    if value <= 0 {
+        return Err(err_text(400, "match_id must be a positive integer"));
+    }
+    Ok(value)
+}
+
 async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
     let participants = load_participants(pool).await?;
     let teams = load_teams(pool).await?;
     let matches = load_matches(pool).await?;
     let match_request_summaries = load_recent_match_request_summaries(pool).await?;
     let suggested_block = load_suggested_block(pool, &teams).await?;
+    let lagebilder = load_lagebilder(pool).await?;
     Ok(json!({
         "teams": teams,
         "participants": participants,
         "matches": matches,
         "match_request_summaries": match_request_summaries,
         "suggested_block": suggested_block,
+        "lagebilder": lagebilder,
+    }))
+}
+
+async fn load_lagebilder(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id::bigint AS team_id, name AS team_name
+          FROM scrim.teams
+         ORDER BY name ASC, id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(json!({
+                "team_id": row.try_get::<i64, _>("team_id")?,
+                "team_name": row.try_get::<String, _>("team_name")?,
+            }))
+        })
+        .collect::<DashboardDbResult<Vec<_>>>()?;
+    attach_lagebild_data(pool, &mut items).await?;
+    Ok(items)
+}
+
+async fn load_lagebild_detail(pool: &PgPool, team_id: i32) -> DashboardDbResult<Option<Value>> {
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT id::bigint AS team_id, name AS team_name
+          FROM scrim.teams
+         WHERE id = $1
+        "#,
+    )
+    .bind(team_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let mut items = vec![json!({
+        "team_id": row.try_get::<i64, _>("team_id")?,
+        "team_name": row.try_get::<String, _>("team_name")?,
+    })];
+    attach_lagebild_data(pool, &mut items).await?;
+    Ok(items.pop())
+}
+
+async fn attach_lagebild_data(pool: &PgPool, items: &mut [Value]) -> DashboardDbResult<()> {
+    let team_ids = items
+        .iter()
+        .filter_map(|item| item.get("team_id").and_then(Value::as_i64))
+        .map(|id| i64_to_i32(id, "team_id"))
+        .collect::<DashboardDbResult<Vec<_>>>()?;
+    if team_ids.is_empty() {
+        return Ok(());
+    }
+    let mut snapshots_by_team = load_lagebild_snapshots(pool, &team_ids).await?;
+    let mut corrections_by_team = load_lagebild_corrections(pool, &team_ids).await?;
+
+    for item in items {
+        let Some(team_id) = item.get("team_id").and_then(Value::as_i64) else {
+            continue;
+        };
+        let timeline = snapshots_by_team.remove(&team_id).unwrap_or_default();
+        let current = timeline.first().cloned().unwrap_or(Value::Null);
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert("current".to_string(), current);
+            obj.insert("timeline".to_string(), Value::Array(timeline));
+            obj.insert(
+                "corrections".to_string(),
+                Value::Array(corrections_by_team.remove(&team_id).unwrap_or_default()),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn load_lagebild_snapshots(
+    pool: &PgPool,
+    team_ids: &[i32],
+) -> DashboardDbResult<HashMap<i64, Vec<Value>>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id,
+               team_id::bigint AS team_id,
+               generated_at,
+               generated_for,
+               source,
+               status,
+               lagebild_text,
+               data_summary,
+               model,
+               error,
+               created_at
+          FROM scrim.lagebild_snapshots
+         WHERE team_id = ANY($1)
+         ORDER BY team_id ASC, generated_at DESC, id DESC
+        "#,
+    )
+    .bind(team_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut snapshots = Vec::with_capacity(rows.len());
+    let mut snapshot_ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row.try_get::<i64, _>("id")?;
+        snapshot_ids.push(id);
+        snapshots.push(json!({
+            "id": id,
+            "team_id": row.try_get::<i64, _>("team_id")?,
+            "generated_at": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("generated_at")?)),
+            "generated_for": row.try_get::<String, _>("generated_for")?,
+            "source": row.try_get::<String, _>("source")?,
+            "status": row.try_get::<String, _>("status")?,
+            "text": row.try_get::<String, _>("lagebild_text")?,
+            "data_summary": row.try_get::<Value, _>("data_summary")?,
+            "model": row.try_get::<Option<String>, _>("model")?,
+            "error": row.try_get::<Option<String>, _>("error")?,
+            "created_at": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("created_at")?)),
+        }));
+    }
+    let mut evidences_by_snapshot = load_lagebild_evidences(pool, &snapshot_ids).await?;
+    let mut by_team: HashMap<i64, Vec<Value>> = HashMap::new();
+    for mut snapshot in snapshots {
+        let snapshot_id = snapshot
+            .get("id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let team_id = snapshot
+            .get("team_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        if let Some(obj) = snapshot.as_object_mut() {
+            obj.insert(
+                "evidences".to_string(),
+                Value::Array(
+                    evidences_by_snapshot
+                        .remove(&snapshot_id)
+                        .unwrap_or_default(),
+                ),
+            );
+        }
+        by_team.entry(team_id).or_default().push(snapshot);
+    }
+    Ok(by_team)
+}
+
+async fn load_lagebild_evidences(
+    pool: &PgPool,
+    snapshot_ids: &[i64],
+) -> DashboardDbResult<HashMap<i64, Vec<Value>>> {
+    if snapshot_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT id,
+               snapshot_id,
+               evidence_type,
+               label,
+               url,
+               reference_id,
+               occurred_at,
+               payload
+          FROM scrim.lagebild_evidences
+         WHERE snapshot_id = ANY($1)
+         ORDER BY snapshot_id ASC, occurred_at DESC NULLS LAST, id ASC
+        "#,
+    )
+    .bind(snapshot_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut by_snapshot: HashMap<i64, Vec<Value>> = HashMap::new();
+    for row in rows {
+        let snapshot_id = row.try_get::<i64, _>("snapshot_id")?;
+        by_snapshot
+            .entry(snapshot_id)
+            .or_default()
+            .push(lagebild_evidence_json(row)?);
+    }
+    Ok(by_snapshot)
+}
+
+fn lagebild_evidence_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
+    Ok(json!({
+        "id": row.try_get::<i64, _>("id")?,
+        "snapshot_id": row.try_get::<i64, _>("snapshot_id")?,
+        "type": row.try_get::<String, _>("evidence_type")?,
+        "label": row.try_get::<String, _>("label")?,
+        "url": row.try_get::<Option<String>, _>("url")?,
+        "reference_id": row.try_get::<Option<String>, _>("reference_id")?,
+        "occurred_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("occurred_at")?),
+        "payload": row.try_get::<Value, _>("payload")?,
+    }))
+}
+
+async fn load_lagebild_corrections(
+    pool: &PgPool,
+    team_ids: &[i32],
+) -> DashboardDbResult<HashMap<i64, Vec<Value>>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id,
+               team_id::bigint AS team_id,
+               snapshot_id,
+               role,
+               author_user_id,
+               author_display_name,
+               message,
+               created_at
+          FROM scrim.lagebild_corrections
+         WHERE team_id = ANY($1)
+         ORDER BY team_id ASC, created_at ASC, id ASC
+        "#,
+    )
+    .bind(team_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut by_team: HashMap<i64, Vec<Value>> = HashMap::new();
+    for row in rows {
+        let team_id = row.try_get::<i64, _>("team_id")?;
+        by_team
+            .entry(team_id)
+            .or_default()
+            .push(lagebild_correction_json(row)?);
+    }
+    Ok(by_team)
+}
+
+fn lagebild_correction_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
+    Ok(json!({
+        "id": row.try_get::<i64, _>("id")?,
+        "team_id": row.try_get::<i64, _>("team_id")?,
+        "snapshot_id": row.try_get::<Option<i64>, _>("snapshot_id")?,
+        "role": row.try_get::<String, _>("role")?,
+        "author_user_id": row.try_get::<Option<String>, _>("author_user_id")?,
+        "author_display_name": row.try_get::<Option<String>, _>("author_display_name")?,
+        "message": row.try_get::<String, _>("message")?,
+        "created_at": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("created_at")?)),
     }))
 }
 
@@ -1048,7 +1630,12 @@ async fn load_matches(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
     )
     .fetch_all(pool)
     .await?;
-    rows.into_iter().map(match_json).collect()
+    let mut matches = rows
+        .into_iter()
+        .map(match_json)
+        .collect::<DashboardDbResult<Vec<_>>>()?;
+    attach_match_result_refs(pool, &mut matches).await?;
+    Ok(matches)
 }
 
 fn match_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
@@ -1076,6 +1663,81 @@ fn match_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
     }))
 }
 
+async fn attach_match_result_refs(pool: &PgPool, matches: &mut [Value]) -> DashboardDbResult<()> {
+    let ids = matches
+        .iter()
+        .filter_map(|scrim_match| scrim_match.get("id").and_then(Value::as_i64))
+        .map(|id| i64_to_i32(id, "match_id"))
+        .collect::<DashboardDbResult<Vec<_>>>()?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id::bigint AS id,
+               match_id::bigint AS match_id,
+               steam_match_id,
+               source_user_id,
+               source_display_name,
+               entered_at,
+               fetch_status,
+               fetched_at,
+               last_error,
+               winner_team_id::bigint AS winner_team_id,
+               raw_result_json,
+               normalized_result_json,
+               updated_at
+          FROM scrim.match_result_refs
+         WHERE match_id = ANY($1)
+         ORDER BY entered_at ASC, id ASC
+        "#,
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut refs_by_match: HashMap<i64, Vec<Value>> = HashMap::new();
+    for row in rows {
+        let match_id = row.try_get::<i64, _>("match_id")?;
+        refs_by_match
+            .entry(match_id)
+            .or_default()
+            .push(match_result_ref_json(row)?);
+    }
+
+    for scrim_match in matches {
+        let Some(match_id) = scrim_match.get("id").and_then(Value::as_i64) else {
+            continue;
+        };
+        if let Some(obj) = scrim_match.as_object_mut() {
+            obj.insert(
+                "match_result_refs".to_string(),
+                Value::Array(refs_by_match.remove(&match_id).unwrap_or_default()),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn match_result_ref_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
+    Ok(json!({
+        "id": row.try_get::<i64, _>("id")?,
+        "match_id": row.try_get::<i64, _>("match_id")?,
+        "steam_match_id": row.try_get::<i64, _>("steam_match_id")?,
+        "source_user_id": row.try_get::<String, _>("source_user_id")?,
+        "source_display_name": row.try_get::<String, _>("source_display_name")?,
+        "entered_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("entered_at")?),
+        "fetch_status": row.try_get::<String, _>("fetch_status")?,
+        "fetched_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("fetched_at")?),
+        "last_error": row.try_get::<Option<String>, _>("last_error")?,
+        "winner_team_id": row.try_get::<Option<i64>, _>("winner_team_id")?,
+        "raw_result_json": row.try_get::<Option<Value>, _>("raw_result_json")?,
+        "normalized_result_json": row.try_get::<Option<Value>, _>("normalized_result_json")?.unwrap_or_else(|| json!({})),
+        "updated_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("updated_at")?),
+    }))
+}
+
 async fn team_exists(pool: &PgPool, team_id: i32) -> DashboardDbResult<bool> {
     let exists = sqlx::query_scalar::<_, bool>(
         r#"
@@ -1086,6 +1748,203 @@ async fn team_exists(pool: &PgPool, team_id: i32) -> DashboardDbResult<bool> {
     .fetch_one(pool)
     .await?;
     Ok(exists)
+}
+
+async fn insert_lagebild_correction(
+    pool: &PgPool,
+    team_id: i32,
+    snapshot_id: Option<i64>,
+    role: &str,
+    author_user_id: Option<&str>,
+    author_display_name: Option<&str>,
+    message: &str,
+) -> DashboardDbResult<Value> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO scrim.lagebild_corrections(
+            team_id, snapshot_id, role, author_user_id, author_display_name, message, created_at
+        )
+        VALUES($1, $2, $3, $4, $5, $6, now())
+        RETURNING id, team_id::bigint AS team_id, snapshot_id, role,
+                  author_user_id, author_display_name, message, created_at
+        "#,
+    )
+    .bind(team_id)
+    .bind(snapshot_id)
+    .bind(role)
+    .bind(author_user_id)
+    .bind(author_display_name)
+    .bind(message)
+    .fetch_one(pool)
+    .await?;
+    lagebild_correction_json(row)
+}
+
+async fn insert_corrected_lagebild_snapshot(
+    pool: &PgPool,
+    team_id: i32,
+    previous_snapshot_id: Option<i64>,
+    text: &str,
+    model: Option<String>,
+    correction_id: Option<i64>,
+) -> DashboardDbResult<i64> {
+    let mut tx = pool.begin().await?;
+    let generated_for = correction_id
+        .map(|id| format!("correction:{id}"))
+        .unwrap_or_else(|| "correction".to_string());
+    let snapshot_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO scrim.lagebild_snapshots(
+            team_id, generated_for, source, status, lagebild_text, data_summary, model,
+            generated_at, created_at
+        )
+        VALUES($1, $2, 'correction', 'ok', $3, $4::jsonb, $5, now(), now())
+        RETURNING id
+        "#,
+    )
+    .bind(team_id)
+    .bind(&generated_for)
+    .bind(text)
+    .bind(json!({
+        "previous_snapshot_id": previous_snapshot_id,
+        "correction_id": correction_id,
+    }))
+    .bind(model)
+    .fetch_one(&mut *tx)
+    .await?;
+    if let Some(previous_snapshot_id) = previous_snapshot_id {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.lagebild_evidences(
+                snapshot_id, evidence_type, label, url, reference_id, occurred_at, payload
+            )
+            SELECT $1, evidence_type, label, url, reference_id, occurred_at, payload
+              FROM scrim.lagebild_evidences
+             WHERE snapshot_id = $2
+             ORDER BY id ASC
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(previous_snapshot_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(snapshot_id)
+}
+
+async fn log_scrim_lagebild_decision(
+    pool: &PgPool,
+    source: &str,
+    input_summary: &str,
+    decision: &str,
+    reason: &str,
+    action_taken: &str,
+    payload: Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO bot.ai_decision_ledger(
+            source, subject_user_id, guild_id, input_summary, decision,
+            confidence, reason, action_taken, payload
+        )
+        VALUES($1, NULL, $2, $3, $4, NULL, $5, $6, $7::jsonb)
+        "#,
+    )
+    .bind(source)
+    .bind(i64::try_from(SCRIM_MAIN_GUILD_ID).ok())
+    .bind(input_summary)
+    .bind(decision)
+    .bind(reason)
+    .bind(action_taken)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn load_lagebild_correction_response(
+    pool: &PgPool,
+    team_id: i32,
+    user_message: Value,
+    assistant_message: Value,
+) -> Response {
+    match load_lagebild_detail(pool, team_id).await {
+        Ok(Some(detail)) => {
+            let current = detail.get("current").cloned().unwrap_or(Value::Null);
+            let timeline = detail.get("timeline").cloned().unwrap_or_else(|| json!([]));
+            let corrections = detail
+                .get("corrections")
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            ok_json(json!({
+                "team": detail,
+                "current": current,
+                "timeline": timeline,
+                "corrections": corrections,
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+            }))
+        }
+        Ok(None) => err_text(404, "Scrim team not found"),
+        Err(err) => {
+            tracing::error!(%err, team_id, "Scrim-Lagebild nach Korrektur konnte nicht geladen werden");
+            err_text(500, "Lagebild unavailable")
+        }
+    }
+}
+
+fn evidences_from_current(detail: &Value) -> Vec<ScrimLagebildEvidence> {
+    detail
+        .get("current")
+        .and_then(|current| current.get("evidences"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|evidence| {
+            let label = evidence.get("label")?.as_str()?.to_string();
+            let occurred_at = evidence
+                .get("occurred_at")
+                .and_then(Value::as_i64)
+                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+                .map(|dt| dt.to_rfc3339());
+            Some(ScrimLagebildEvidence {
+                evidence_type: evidence
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reference")
+                    .to_string(),
+                label,
+                url: evidence
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                reference_id: evidence
+                    .get("reference_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                occurred_at,
+                payload: evidence
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            })
+        })
+        .collect()
+}
+
+fn correction_context_from_detail(detail: &Value) -> Vec<String> {
+    detail
+        .get("corrections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|correction| {
+            let role = correction.get("role")?.as_str()?;
+            let message = correction.get("message")?.as_str()?;
+            Some(format!("{role}: {message}"))
+        })
+        .collect()
 }
 
 async fn create_match_record(pool: &PgPool, input: CreateMatchInput) -> DashboardDbResult<Value> {
@@ -2013,7 +2872,12 @@ async fn load_match(pool: &PgPool, id: i32) -> DashboardDbResult<Option<Value>> 
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    row.map(match_json).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mut scrim_match = match_json(row)?;
+    attach_match_result_refs(pool, std::slice::from_mut(&mut scrim_match)).await?;
+    Ok(Some(scrim_match))
 }
 
 enum LobbyRequest {
@@ -2026,6 +2890,12 @@ enum LobbyCodeUpdate {
     Updated(Value),
     NotFound,
     BotOwned(Option<String>),
+}
+
+enum MatchResultRefUpdate {
+    Updated(Value),
+    Duplicate,
+    NotFound,
 }
 
 async fn set_lobby_code(
@@ -2100,6 +2970,73 @@ async fn set_lobby_code(
     ))
 }
 
+async fn add_match_result_ref(
+    pool: &PgPool,
+    match_id: i32,
+    steam_match_id: i64,
+    source_user_id: &str,
+    source_display_name: &str,
+) -> DashboardDbResult<MatchResultRefUpdate> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT id
+          FROM scrim.matches
+         WHERE id = $1
+         FOR UPDATE
+        "#,
+    )
+    .bind(match_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.is_none() {
+        return Ok(MatchResultRefUpdate::NotFound);
+    }
+
+    let inserted = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO scrim.match_result_refs(
+            match_id, steam_match_id, source_user_id, source_display_name,
+            fetch_status, entered_at, updated_at
+        )
+        VALUES($1, $2, $3, $4, 'pending', now(), now())
+        ON CONFLICT (steam_match_id) DO NOTHING
+        RETURNING id::bigint
+        "#,
+    )
+    .bind(match_id)
+    .bind(steam_match_id)
+    .bind(source_user_id)
+    .bind(source_display_name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if inserted.is_none() {
+        return Ok(MatchResultRefUpdate::Duplicate);
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE scrim.matches
+           SET steam_match_id = $2,
+               lobby_state = $3,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(match_id)
+    .bind(steam_match_id)
+    .bind(STATE_RESULT_REQUESTED)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(MatchResultRefUpdate::Updated(
+        load_match(pool, match_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?,
+    ))
+}
+
 async fn set_lobby_request(
     pool: &PgPool,
     match_id: i32,
@@ -2121,7 +3058,10 @@ async fn set_lobby_request(
         return Ok(LobbyRequest::NotFound);
     };
     let lobby_state = row.try_get::<Option<String>, _>("lobby_state")?;
-    if lobby_state.as_deref().is_some_and(is_bot_owned_lobby_state) {
+    if lobby_state
+        .as_deref()
+        .is_some_and(|state| state_blocks_lobby_request(state, requested_state))
+    {
         return Ok(LobbyRequest::BotOwned(lobby_state));
     }
     sqlx::query(
@@ -2138,6 +3078,11 @@ async fn set_lobby_request(
     .await?;
     tx.commit().await?;
     Ok(LobbyRequest::Updated(requested_state))
+}
+
+fn state_blocks_lobby_request(current: &str, requested_state: &str) -> bool {
+    !(requested_state == STATE_RESULT_REQUESTED && matches!(current, "result_failed" | "finished"))
+        && is_bot_owned_lobby_state(current)
 }
 
 fn is_bot_owned_lobby_state(state: &str) -> bool {
@@ -2183,6 +3128,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
+    use dl_ai::{ChatResponse, MockChatProvider};
     use tower::ServiceExt;
 
     use super::*;
@@ -2249,6 +3195,48 @@ mod tests {
             db.pool().clone(),
             Arc::new(NoMemberLookup),
             Arc::new(NoNameResolver),
+        )
+        .await?;
+        Ok((db, router(app), session_id, csrf))
+    }
+
+    async fn app_with_session_and_ai(
+        ai: Arc<MockChatProvider>,
+    ) -> Result<(dl_central_db::TestDb, axum::Router, String, String), Box<dyn std::error::Error>>
+    {
+        let db = dl_central_db::testing::test_pool().await?;
+        let session_id = "scrim-test-session".to_string();
+        let csrf = "scrim-test-csrf".to_string();
+        let now = now_unix_f64();
+        dl_central_db::kv::set(
+            db.pool(),
+            "dl_dashboard_admin_session",
+            &session_id,
+            &json!({
+                "user_id": 42,
+                "username": "coach",
+                "display_name": "Coach",
+                "reason": "test",
+                "access_level": AccessLevel::Full.as_str(),
+                "csrf_token": csrf,
+                "created_at": now,
+                "last_seen_at": now,
+                "expires_at": now + 3600.0,
+            })
+            .to_string(),
+        )
+        .await?;
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let app = DashboardApp::new_with_ai(
+            cfg,
+            db.pool().clone(),
+            Arc::new(NoMemberLookup),
+            Arc::new(NoNameResolver),
+            Some(ai),
         )
         .await?;
         Ok((db, router(app), session_id, csrf))
@@ -2433,6 +3421,40 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_lagebild_seed(pool: &PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.lagebild_snapshots(
+                id, team_id, generated_for, source, status, lagebild_text, data_summary,
+                model, generated_at, created_at
+            )
+            OVERRIDING SYSTEM VALUE
+            VALUES(
+                7001, 1, 'weekly', 'ai', 'ok',
+                'Die Lage wirkt aktuell okay.\n\nEvidenzen:\n- [Terminabfrage](https://discord.com/channels/1289721245281292288/100/9001)',
+                '{"data_limited":true}'::jsonb, 'mock', now() - INTERVAL '1 hour', now() - INTERVAL '1 hour'
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.lagebild_evidences(
+                snapshot_id, evidence_type, label, url, occurred_at, payload
+            )
+            VALUES(
+                7001, 'match_request', 'Terminabfrage',
+                'https://discord.com/channels/1289721245281292288/100/9001',
+                now(), '{"request_id":91}'::jsonb
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn create_match_route_insertet_scheduled_draft() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -2532,6 +3554,84 @@ mod tests {
         assert_eq!(block["matches"][0]["team_b_id"], 3);
         assert_eq!(block["matches"][1]["team_a_id"], 2);
         assert_eq!(block["matches"][1]["team_b_id"], 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrims_overview_liefert_lagebild_timeline_mit_evidenzen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(db.pool()).await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let first = &data["lagebilder"][0];
+        assert_eq!(first["team_id"], 1);
+        assert_eq!(first["team_name"], "A");
+        assert!(first["current"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Die Lage wirkt aktuell okay."));
+        assert_eq!(
+            first["timeline"][0]["evidences"][0]["label"],
+            "Terminabfrage"
+        );
+        assert_eq!(
+            first["timeline"][0]["evidences"][0]["url"],
+            "https://discord.com/channels/1289721245281292288/100/9001"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lagebild_korrektur_route_speichert_chat_und_aktualisiert_letzten_stand(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
+            r#"{"reply":"Überarbeitet.","lagebild":"Korrigierte Lage.\n\nEvidenzen:\n- [Terminabfrage](https://discord.com/channels/1289721245281292288/100/9001)"}"#,
+        ))]);
+        let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(db.pool()).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/teams/1/lagebild/corrections",
+                &session_id,
+                &csrf,
+                json!({ "message": "A2 hat inzwischen zugesagt." }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["assistant_message"]["message"], "Überarbeitet.");
+        assert!(data["current"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Korrigierte Lage"));
+
+        let correction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.lagebild_corrections")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(correction_count, 2);
+        let snapshot_source: String = sqlx::query_scalar(
+            "SELECT source FROM scrim.lagebild_snapshots WHERE team_id = 1 ORDER BY generated_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(snapshot_source, "correction");
+        let ledger_decision: String = sqlx::query_scalar(
+            "SELECT decision FROM bot.ai_decision_ledger WHERE source = 'scrim.lagebild.correction' ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(ledger_decision, "yes");
         Ok(())
     }
 
@@ -3125,6 +4225,87 @@ mod tests {
                 .fetch_one(db.pool())
                 .await?;
         assert_eq!(state, "result_requested");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_id_route_speichert_eingabe_und_blockiert_duplikate(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 20, "draft").await?;
+        insert_match(db.pool(), 21, "draft").await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrims/matches/20/match-ids",
+                &session_id,
+                &csrf,
+                json!({ "match_id": "987654321" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["match"]["id"], 20);
+        assert_eq!(data["match"]["lobby_state"], "result_requested");
+        assert_eq!(data["match"]["steam_match_id"], 987654321);
+        assert_eq!(
+            data["match"]["match_result_refs"][0]["steam_match_id"],
+            987654321
+        );
+        assert_eq!(
+            data["match"]["match_result_refs"][0]["fetch_status"],
+            "pending"
+        );
+        assert_eq!(
+            data["match"]["match_result_refs"][0]["source_display_name"],
+            "Coach"
+        );
+
+        let row = sqlx::query(
+            r#"
+            SELECT m.steam_match_id,
+                   m.lobby_state,
+                   r.fetch_status,
+                   r.source_user_id,
+                   r.source_display_name
+              FROM scrim.matches m
+              JOIN scrim.match_result_refs r ON r.match_id = m.id
+             WHERE m.id = 20
+            "#,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("steam_match_id")?,
+            Some(987654321)
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("lobby_state")?,
+            Some("result_requested".to_string())
+        );
+        assert_eq!(row.try_get::<String, _>("fetch_status")?, "pending");
+        assert_eq!(row.try_get::<String, _>("source_user_id")?, "42");
+        assert_eq!(row.try_get::<String, _>("source_display_name")?, "Coach");
+
+        let duplicate = app
+            .oneshot(auth_post(
+                "/api/scrims/matches/21/match-ids",
+                &session_id,
+                &csrf,
+                json!({ "match_id": 987654321 }),
+            )?)
+            .await?;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scrim.match_result_refs WHERE steam_match_id = 987654321",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(count, 1);
         Ok(())
     }
 }

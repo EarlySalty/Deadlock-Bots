@@ -5,7 +5,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
 use dl_squads::scrim_match::{
-    fetch_scrim_match_result, start_scrim_match, ScrimMatchResultOutcome, StartScrimMatchOutcome,
+    fetch_scrim_match_result, fetch_scrim_match_result_by_steam_match_id, start_scrim_match,
+    ScrimMatchResultOutcome, StartScrimMatchOutcome,
 };
 use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Row};
@@ -23,6 +24,10 @@ const STATE_START_FAILED: &str = "start_failed";
 const STATE_RESULT_REQUESTED: &str = "result_requested";
 const STATE_RESULT_FETCHING: &str = "result_fetching";
 const STATE_RESULT_FAILED: &str = "result_failed";
+const MATCH_RESULT_REF_STATUS_PENDING: &str = "pending";
+const MATCH_RESULT_REF_STATUS_FETCHING: &str = "fetching";
+const MATCH_RESULT_REF_STATUS_FETCHED: &str = "fetched";
+const MATCH_RESULT_REF_STATUS_FAILED: &str = "failed";
 const MATCH_REQUEST_STATUS_DRAFT: &str = "draft";
 const MATCH_REQUEST_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_STATUS_OPEN: &str = "open";
@@ -140,6 +145,12 @@ struct MatchRequestPost {
 struct MatchRequestSendResult {
     posts: Vec<MatchRequestPost>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaimedMatchResultRef {
+    ref_id: i64,
+    steam_match_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +292,7 @@ pub fn spawn(
     announcement_channel_id: Option<u64>,
     tempvoice: Arc<dl_voice::tempvoice::TempVoiceEngine>,
     voice_config: ScrimVoiceConfig,
+    lagebild_ai: Option<Arc<dyn dl_ai::ChatProvider>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = time::interval(POLL_INTERVAL);
@@ -293,6 +305,7 @@ pub fn spawn(
                 announcement_channel_id,
                 tempvoice.as_ref(),
                 voice_config,
+                lagebild_ai.as_deref(),
             )
             .await
             {
@@ -308,6 +321,7 @@ async fn process_one_pending(
     announcement_channel_id: Option<u64>,
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     voice_config: ScrimVoiceConfig,
+    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
 ) -> anyhow::Result<()> {
     cleanup_terminal_scrim_voice_channels(pool, tempvoice).await?;
     if let Some(claim) = claim_next_pending_match(pool, announcement_channel_id).await? {
@@ -316,7 +330,9 @@ async fn process_one_pending(
             ScrimDriverAction::Start => {
                 handle_start(pool, adapter, tempvoice, voice_config, &claim).await
             }
-            ScrimDriverAction::FetchResult => handle_result(pool, adapter, tempvoice, &claim).await,
+            ScrimDriverAction::FetchResult => {
+                handle_result(pool, adapter, tempvoice, &claim, lagebild_ai).await
+            }
         }?;
         return Ok(());
     }
@@ -333,6 +349,17 @@ async fn process_one_pending(
 
     if let Some(batch) = claim_next_pending_match_request_batch(pool).await? {
         handle_match_request_batch(pool, adapter, batch).await?;
+        return Ok(());
+    }
+
+    match dl_squads::lagebild::generate_due_lagebilder(pool, lagebild_ai, 1).await {
+        Ok(generated) if generated > 0 => {
+            tracing::info!(generated, "Scrim-Lagebilder im Wochenlauf erzeugt");
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::error!(%err, "Scrim-Lagebild-Wochenlauf fehlgeschlagen");
+        }
     }
     Ok(())
 }
@@ -1341,14 +1368,177 @@ async fn handle_start(
     Ok(())
 }
 
+async fn claim_next_pending_match_result_ref(
+    pool: &PgPool,
+    match_id: i64,
+) -> anyhow::Result<Option<ClaimedMatchResultRef>> {
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT id, steam_match_id
+              FROM scrim.match_result_refs
+             WHERE match_id = $1
+               AND fetch_status IN ($2, $3)
+             ORDER BY entered_at ASC, id ASC
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE scrim.match_result_refs r
+           SET fetch_status = $4,
+               last_error = NULL,
+               updated_at = now()
+          FROM candidate
+         WHERE r.id = candidate.id
+        RETURNING r.id::bigint AS ref_id,
+                  r.steam_match_id
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .bind(MATCH_RESULT_REF_STATUS_PENDING)
+    .bind(MATCH_RESULT_REF_STATUS_FAILED)
+    .bind(MATCH_RESULT_REF_STATUS_FETCHING)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("Scrim-Match-ID-Claim fehlgeschlagen: {match_id}"))?;
+
+    Ok(row.map(|row| ClaimedMatchResultRef {
+        ref_id: row.get("ref_id"),
+        steam_match_id: row.get("steam_match_id"),
+    }))
+}
+
+async fn save_match_result_ref_success(
+    pool: &PgPool,
+    ref_id: i64,
+    outcome: &ScrimMatchResultOutcome,
+) -> anyhow::Result<()> {
+    let normalized = normalize_match_result_payload(outcome);
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_result_refs
+           SET fetch_status = $2,
+               fetched_at = now(),
+               last_error = NULL,
+               winner_team_id = $3,
+               raw_result_json = $4,
+               normalized_result_json = $5,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(ref_id)
+    .bind(MATCH_RESULT_REF_STATUS_FETCHED)
+    .bind(outcome.winner_team_id.map(i32::try_from).transpose()?)
+    .bind(&outcome.result_json)
+    .bind(&normalized)
+    .execute(pool)
+    .await
+    .with_context(|| format!("Scrim-Match-ID-Ergebnis-Speicherung fehlgeschlagen: {ref_id}"))?;
+    Ok(())
+}
+
+async fn save_match_result_ref_failure(
+    pool: &PgPool,
+    ref_id: i64,
+    error: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_result_refs
+           SET fetch_status = $2,
+               last_error = $3,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(ref_id)
+    .bind(MATCH_RESULT_REF_STATUS_FAILED)
+    .bind(error)
+    .execute(pool)
+    .await
+    .with_context(|| format!("Scrim-Match-ID-Fehler-Speicherung fehlgeschlagen: {ref_id}"))?;
+    Ok(())
+}
+
+async fn has_pending_match_result_refs(pool: &PgPool, match_id: i64) -> anyhow::Result<bool> {
+    let pending = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+              FROM scrim.match_result_refs
+             WHERE match_id = $1
+               AND fetch_status = $2
+        )
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .bind(MATCH_RESULT_REF_STATUS_PENDING)
+    .fetch_one(pool)
+    .await?;
+    Ok(pending)
+}
+
+fn normalize_match_result_payload(outcome: &ScrimMatchResultOutcome) -> Value {
+    let raw = &outcome.result_json;
+    let mut obj = Map::new();
+    if let Some(steam_match_id) = outcome.steam_match_id {
+        obj.insert("steam_match_id".to_string(), json!(steam_match_id));
+    }
+    if let Some(winner_team_id) = outcome.winner_team_id {
+        obj.insert("winner_team_id".to_string(), json!(winner_team_id));
+    }
+    copy_first(raw, &mut obj, "winner", &["winner", "winning_team"]);
+    copy_first(
+        raw,
+        &mut obj,
+        "match_time",
+        &["match_time", "match_started_at", "start_time", "started_at"],
+    );
+    copy_first(
+        raw,
+        &mut obj,
+        "duration",
+        &["duration", "duration_s", "duration_seconds"],
+    );
+    copy_first(raw, &mut obj, "teams", &["teams", "team_results"]);
+    copy_first(raw, &mut obj, "players", &["players", "player_results"]);
+    copy_first(raw, &mut obj, "lineups", &["lineups", "lineup"]);
+    copy_first(raw, &mut obj, "substitutes", &["substitutes", "standins"]);
+    copy_first(
+        raw,
+        &mut obj,
+        "stats",
+        &["stats", "statistics", "performance"],
+    );
+    Value::Object(obj)
+}
+
+fn copy_first(raw: &Value, obj: &mut Map<String, Value>, target: &str, keys: &[&str]) {
+    if let Some(value) = keys.iter().find_map(|key| raw.get(*key)) {
+        obj.insert(target.to_string(), value.clone());
+    }
+}
+
 async fn handle_result(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     claim: &ClaimedMatch,
+    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
 ) -> anyhow::Result<()> {
-    match fetch_scrim_match_result(pool, claim.match_id).await {
+    let claimed_ref = claim_next_pending_match_result_ref(pool, claim.match_id).await?;
+    let result = if let Some(result_ref) = claimed_ref.as_ref() {
+        fetch_scrim_match_result_by_steam_match_id(pool, claim.match_id, result_ref.steam_match_id)
+            .await
+    } else {
+        fetch_scrim_match_result(pool, claim.match_id).await
+    };
+
+    match result {
         Ok(outcome) => {
+            if let Some(result_ref) = claimed_ref.as_ref() {
+                save_match_result_ref_success(pool, result_ref.ref_id, &outcome).await?;
+            }
             if let Err(err) = cleanup_scrim_voice_channels_for_match(
                 pool,
                 tempvoice,
@@ -1367,13 +1557,48 @@ async fn handle_result(
                 claim.match_id,
             )
             .await;
+            if has_pending_match_result_refs(pool, claim.match_id).await? {
+                set_lobby_state(pool, claim.match_id, STATE_RESULT_REQUESTED).await?;
+            } else {
+                match dl_squads::lagebild::generate_match_lagebilder(
+                    pool,
+                    lagebild_ai,
+                    claim.match_id,
+                )
+                .await
+                {
+                    Ok(generated) if generated > 0 => {
+                        tracing::info!(
+                            match_id = claim.match_id,
+                            generated,
+                            "Scrim-Lagebilder nach Match erzeugt"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(
+                            %err,
+                            match_id = claim.match_id,
+                            "Scrim-Lagebilder nach Match fehlgeschlagen"
+                        );
+                    }
+                }
+            }
         }
         Err(err) => {
             tracing::warn!(%err, match_id = claim.match_id, "Scrim-Match-Ergebnis fehlgeschlagen");
-            set_lobby_state(pool, claim.match_id, STATE_RESULT_FAILED).await?;
+            if let Some(result_ref) = claimed_ref.as_ref() {
+                save_match_result_ref_failure(pool, result_ref.ref_id, &err.to_string()).await?;
+            }
+            let next_state = if has_pending_match_result_refs(pool, claim.match_id).await? {
+                STATE_RESULT_REQUESTED
+            } else {
+                STATE_RESULT_FAILED
+            };
+            set_lobby_state(pool, claim.match_id, next_state).await?;
             post_log(
                 adapter,
-                result_failure_message(claim.match_id, line!()),
+                result_failure_message(claim.match_id, &err.to_string(), line!()),
                 claim.match_id,
             )
             .await;
@@ -2502,10 +2727,23 @@ fn result_success_message(
     }
 }
 
-fn result_failure_message(match_id: i64, _source_line: u32) -> String {
+fn result_failure_message(match_id: i64, error: &str, _source_line: u32) -> String {
     format!(
-        "⚠️ Scrim-Ergebnis konnte noch nicht abgerufen werden (Match {match_id}). Vielleicht läuft das Match noch — der Abruf lässt sich später erneut anstoßen. Details im Bot-Log."
+        "⚠️ Scrim-Ergebnis konnte noch nicht abgerufen werden (Match {match_id}). Fehler: {}. Der Abruf lässt sich später erneut anstoßen.",
+        short_error(error)
     )
+}
+
+fn short_error(error: &str) -> String {
+    let mut out = error.trim().chars().take(220).collect::<String>();
+    if error.trim().chars().count() > 220 {
+        out.push_str("...");
+    }
+    if out.is_empty() {
+        "unbekannt".to_string()
+    } else {
+        out
+    }
 }
 
 fn missing_target_message(match_id: i64, message_kind: &str, _source_line: u32) -> String {
@@ -2592,6 +2830,90 @@ mod tests {
         );
         assert_eq!(lobby_state(pool, 13).await?, "lobby_posting");
         assert_eq!(claim_next_pending_match(pool, None).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_result_ref_status_speichert_fehler_raw_und_normaldaten() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_RESULT_REQUESTED).await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+
+        let claim = claim_next_pending_match_result_ref(pool, 30)
+            .await?
+            .expect("result ref claim");
+        assert_eq!(claim.ref_id, 70);
+        assert_eq!(claim.steam_match_id, 987_654_321);
+        assert_eq!(
+            match_result_ref_status(pool, 70).await?,
+            ("fetching".to_string(), None)
+        );
+
+        save_match_result_ref_failure(pool, 70, "match data not ready").await?;
+        assert_eq!(
+            match_result_ref_status(pool, 70).await?,
+            (
+                "failed".to_string(),
+                Some("match data not ready".to_string())
+            )
+        );
+
+        let retry = claim_next_pending_match_result_ref(pool, 30)
+            .await?
+            .expect("failed refs are retryable");
+        assert_eq!(retry.ref_id, 70);
+
+        let raw = json!({
+            "match_id": 987654321,
+            "winning_team": 0,
+            "teams": [{"team": 0, "players": ["76561197960265729"]}],
+            "players": [{"steam_id": "76561197960265729", "kills": 12, "deaths": 4}],
+            "lineups": {"0": ["76561197960265729"]},
+            "substitutes": [{"steam_id": "76561197960265730", "reason": "standin"}],
+            "start_time": 1_785_000_000,
+            "duration_s": 1810,
+            "stats": {"team_damage": [12345, 11000]}
+        });
+        let outcome = ScrimMatchResultOutcome {
+            steam_match_id: Some(987_654_321),
+            winner_team_id: Some(1),
+            result_json: raw.clone(),
+        };
+        save_match_result_ref_success(pool, 70, &outcome).await?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT fetch_status,
+                   last_error,
+                   raw_result_json,
+                   normalized_result_json,
+                   winner_team_id,
+                   fetched_at
+              FROM scrim.match_result_refs
+             WHERE id = 70
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("fetch_status"), "fetched");
+        assert_eq!(row.get::<Option<String>, _>("last_error"), None);
+        assert_eq!(row.get::<Option<Value>, _>("raw_result_json"), Some(raw));
+        let normalized = row
+            .get::<Option<Value>, _>("normalized_result_json")
+            .expect("normalized");
+        assert_eq!(normalized["steam_match_id"], 987_654_321);
+        assert_eq!(normalized["winner_team_id"], 1);
+        assert_eq!(normalized["teams"][0]["team"], 0);
+        assert_eq!(normalized["players"][0]["steam_id"], "76561197960265729");
+        assert_eq!(normalized["lineups"]["0"][0], "76561197960265729");
+        assert_eq!(normalized["substitutes"][0]["reason"], "standin");
+        assert_eq!(normalized["match_time"], 1_785_000_000);
+        assert_eq!(normalized["stats"]["team_damage"][0], 12345);
+        assert_eq!(row.get::<Option<i32>, _>("winner_team_id"), Some(1));
+        assert!(row.get::<Option<DateTime<Utc>>, _>("fetched_at").is_some());
         Ok(())
     }
 
@@ -3281,6 +3603,46 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    async fn insert_match_result_ref(
+        pool: &PgPool,
+        ref_id: i64,
+        match_id: i32,
+        steam_match_id: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_result_refs(
+                id, match_id, steam_match_id, source_user_id, source_display_name,
+                fetch_status, entered_at, updated_at
+            )
+            VALUES($1, $2, $3, '42', 'Coach', 'pending', now(), now())
+            "#,
+        )
+        .bind(ref_id)
+        .bind(match_id)
+        .bind(steam_match_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn match_result_ref_status(
+        pool: &PgPool,
+        ref_id: i64,
+    ) -> anyhow::Result<(String, Option<String>)> {
+        let row = sqlx::query(
+            r#"
+            SELECT fetch_status, last_error
+              FROM scrim.match_result_refs
+             WHERE id = $1
+            "#,
+        )
+        .bind(ref_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((row.get("fetch_status"), row.get("last_error")))
     }
 
     async fn insert_match_request_batch(pool: &PgPool, batch_id: i32) -> anyhow::Result<()> {
