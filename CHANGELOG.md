@@ -1,3 +1,11 @@
+## #284 — Scrim-Match-Status im Teamkanal
+
+Problem: Nach einer Slot-Freigabe gab es im Teamkanal noch keinen verbindlichen Match-Stand, und erneute Updates hätten leicht doppelte Nachrichten erzeugt.
+
+Änderung: Der Bot erstellt nach Freigabe pro Teamkanal eine pingfreie Statusnachricht, speichert die Discord-Message-IDs und nutzt vorhandene Nachrichten für spätere Edits.
+
+Aktuelles Verhalten: Teams sehen Match, finalen Termin, Abstimmung, Zusagen, offene oder unsichere Spieler, Ersatzbedarf, nächste Aktion und den Link zur Terminabfrage direkt im Teamkanal.
+
 ## #283 — Scrim-Slot kann nach Frist freigegeben werden
 
 Problem: Das Dashboard konnte nach Fristende einen Slot empfehlen, aber Leo brauchte eine verbindliche Freigabe und eine nachvollziehbare manuelle Überschreibung.
