@@ -1695,6 +1695,41 @@
             color: inherit;
             padding: 0.45rem 0.6rem;
         }
+        .scrim-form-label {
+            color: #ced4da;
+            font-size: 0.9rem;
+        }
+        .scrim-slot-list,
+        .scrim-block-match-list {
+            display: grid;
+            gap: 0.5rem;
+        }
+        .scrim-slot-row,
+        .scrim-block-match-row {
+            display: grid;
+            gap: 0.4rem;
+            align-items: center;
+        }
+        .scrim-slot-row {
+            grid-template-columns: minmax(5.5rem, 1fr) minmax(5.5rem, 0.8fr) minmax(5.5rem, 0.8fr) auto;
+        }
+        .scrim-block-match-row {
+            grid-template-columns: minmax(7rem, 1fr) minmax(7rem, 1fr) auto;
+            padding: 0.5rem;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.025);
+        }
+        .scrim-match-specific-slots {
+            grid-column: 1 / -1;
+            display: grid;
+            gap: 0.5rem;
+            padding-top: 0.35rem;
+        }
+        .scrim-small-button {
+            min-height: 2.1rem;
+            padding: 0.35rem 0.55rem;
+        }
         .scrim-note {
             min-height: 58px;
             resize: vertical;
@@ -1755,6 +1790,10 @@
         }
         @media (max-width: 900px) {
             .scrim-grid {
+                grid-template-columns: 1fr;
+            }
+            .scrim-slot-row,
+            .scrim-block-match-row {
                 grid-template-columns: 1fr;
             }
         }
@@ -2202,26 +2241,31 @@
             </div>
             <div class="scrim-grid" style="margin-top:1rem;">
                 <div class="card">
-                    <h3>Match anlegen</h3>
+                    <h3>Scrim-Block anlegen</h3>
                     <div class="scrim-message" id="scrim-message"></div>
-                    <form class="scrim-form" id="scrim-create-form">
+                    <form class="scrim-form" id="scrim-block-form">
                         <label>
-                            Team A
-                            <select id="scrim-team-a"></select>
+                            Vorlage
+                            <select id="scrim-block-template">
+                                <option value="regular_scrim">Regulärer Scrim</option>
+                                <option value="testmatch">Testmatch</option>
+                                <option value="training">Training/Teamspiel</option>
+                            </select>
                         </label>
                         <label>
-                            Team B
-                            <select id="scrim-team-b"></select>
+                            Antwortfrist
+                            <input type="datetime-local" id="scrim-block-deadline">
                         </label>
-                        <label>
-                            Termin (optional)
-                            <input type="datetime-local" id="scrim-scheduled-at">
-                        </label>
-                        <label>
-                            Coach als Zuschauer (optional)
-                            <input type="text" id="scrim-coach-spectator" placeholder="Discord-ID">
-                        </label>
-                        <button class="load" type="submit">Match anlegen</button>
+                        <div class="scrim-form-label">Gemeinsame Slots</div>
+                        <div id="scrim-block-slots" class="scrim-slot-list"></div>
+                        <button class="namespace scrim-small-button" type="button" id="scrim-block-add-slot">Slot hinzufügen</button>
+                        <div class="scrim-form-label">Matches</div>
+                        <div id="scrim-block-matches" class="scrim-block-match-list"></div>
+                        <div class="scrim-actions">
+                            <button class="namespace scrim-small-button" type="button" id="scrim-block-template-btn">Zwei-Wochen-Vorlage</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-block-add-match">Paarung hinzufügen</button>
+                        </div>
+                        <button class="load" type="submit">Terminabfragen anlegen</button>
                     </form>
                 </div>
                 <div class="card">
@@ -2242,6 +2286,28 @@
                             <tbody id="scrim-match-rows"></tbody>
                         </table>
                     </div>
+                </div>
+                <div class="card">
+                    <h3>Match manuell anlegen</h3>
+                    <form class="scrim-form" id="scrim-create-form">
+                        <label>
+                            Team A
+                            <select id="scrim-team-a"></select>
+                        </label>
+                        <label>
+                            Team B
+                            <select id="scrim-team-b"></select>
+                        </label>
+                        <label>
+                            Termin (optional)
+                            <input type="datetime-local" id="scrim-scheduled-at">
+                        </label>
+                        <label>
+                            Coach als Zuschauer (optional)
+                            <input type="text" id="scrim-coach-spectator" placeholder="Discord-ID">
+                        </label>
+                        <button class="load" type="submit">Match anlegen</button>
+                    </form>
                 </div>
                 <div class="card">
                     <h3>Terminabfragen</h3>
@@ -2715,6 +2781,14 @@
     const scrimRefreshBtn = document.getElementById('scrim-refresh');
     const scrimUpdated = document.getElementById('scrim-updated');
     const scrimMessage = document.getElementById('scrim-message');
+    const scrimBlockForm = document.getElementById('scrim-block-form');
+    const scrimBlockTemplateSelect = document.getElementById('scrim-block-template');
+    const scrimBlockDeadlineInput = document.getElementById('scrim-block-deadline');
+    const scrimBlockSlots = document.getElementById('scrim-block-slots');
+    const scrimBlockMatches = document.getElementById('scrim-block-matches');
+    const scrimBlockTemplateBtn = document.getElementById('scrim-block-template-btn');
+    const scrimBlockAddSlotBtn = document.getElementById('scrim-block-add-slot');
+    const scrimBlockAddMatchBtn = document.getElementById('scrim-block-add-match');
     const scrimCreateForm = document.getElementById('scrim-create-form');
     const scrimTeamASelect = document.getElementById('scrim-team-a');
     const scrimTeamBSelect = document.getElementById('scrim-team-b');
@@ -2807,7 +2881,10 @@
     let selectedHeroId = null;
     let heroesLoading = false;
     let heroBuildDraftRows = [];
-    let scrimData = { teams: [], participants: [], matches: [] };
+    let scrimData = { teams: [], participants: [], matches: [], match_request_summaries: [], suggested_block: null };
+    let scrimBlockInitialized = false;
+    let scrimBlockCommonSlots = [];
+    let scrimBlockMatchDrafts = [];
     const REACTION_ROLE_DEFAULT_DM_TEXT = `Hey! 👋 Schön, dass du beim Scrim-Coaching dabei bist.
 
 Kurz worum's geht: Wir (Leo & deniz) stellen feste Teams mit einem festen Coach zusammen, spielen regelmäßig Showmatches gegeneinander und setzen uns zwischendurch zusammen, um an euren Punkten zu arbeiten — Schritt für Schritt besser werden, als Team.
@@ -3519,6 +3596,309 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         return `${day} ${scrimTimeLabel(slot.from)}-${scrimTimeLabel(slot.to)}`;
     }
 
+    function scrimMinutesToInput(minutes) {
+        const value = Number(minutes);
+        if (!Number.isFinite(value)) return '';
+        return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+    }
+
+    function scrimInputToMinutes(value) {
+        const parts = String(value || '').split(':');
+        if (parts.length !== 2) return NaN;
+        const hours = Number(parts[0]);
+        const minutes = Number(parts[1]);
+        return Number.isInteger(hours) && Number.isInteger(minutes) ? hours * 60 + minutes : NaN;
+    }
+
+    function scrimDateTimeInputValue(ts) {
+        if (!ts) return '';
+        const date = new Date(Number(ts) * 1000);
+        if (Number.isNaN(date.getTime())) return '';
+        const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+        return local.toISOString().slice(0, 16);
+    }
+
+    function scrimCloneSlot(slot) {
+        return {
+            day: String(slot && slot.day || 'sat'),
+            from: Number(slot && slot.from) || 20 * 60,
+            to: Number(slot && slot.to) || 22 * 60,
+        };
+    }
+
+    function scrimDefaultSlots() {
+        const slots = scrimData.suggested_block && Array.isArray(scrimData.suggested_block.slots)
+            ? scrimData.suggested_block.slots
+            : [
+                { day: 'sat', from: 20 * 60, to: 22 * 60 },
+                { day: 'sun', from: 20 * 60, to: 22 * 60 },
+            ];
+        return slots.map(scrimCloneSlot);
+    }
+
+    function scrimTeamById(id) {
+        const wanted = Number(id);
+        return (scrimData.teams || []).find((team) => Number(team.id) === wanted) || null;
+    }
+
+    function fillScrimTeamSelect(select, selected, emptyLabel) {
+        select.innerHTML = '';
+        const empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = emptyLabel;
+        select.appendChild(empty);
+        (scrimData.teams || []).forEach((team) => {
+            const option = document.createElement('option');
+            option.value = String(team.id);
+            option.textContent = scrimTeamLabel(team);
+            select.appendChild(option);
+        });
+        select.value = selected ? String(selected) : '';
+    }
+
+    function appendScrimSlotEditor(container, slots, onChange) {
+        container.innerHTML = '';
+        slots.forEach((slot, index) => {
+            const row = document.createElement('div');
+            row.className = 'scrim-slot-row';
+
+            const day = document.createElement('select');
+            Object.entries(SCRIM_DAY_LABELS).forEach(([value, label]) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = label;
+                day.appendChild(option);
+            });
+            day.value = slot.day || 'sat';
+            day.addEventListener('change', () => {
+                slot.day = day.value;
+                onChange();
+            });
+
+            const from = document.createElement('input');
+            from.type = 'time';
+            from.value = scrimMinutesToInput(slot.from);
+            from.addEventListener('change', () => {
+                slot.from = scrimInputToMinutes(from.value);
+                onChange();
+            });
+
+            const to = document.createElement('input');
+            to.type = 'time';
+            to.value = scrimMinutesToInput(slot.to);
+            to.addEventListener('change', () => {
+                slot.to = scrimInputToMinutes(to.value);
+                onChange();
+            });
+
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'namespace scrim-small-button';
+            remove.textContent = 'X';
+            remove.setAttribute('aria-label', 'Slot entfernen');
+            remove.disabled = slots.length <= 2;
+            remove.addEventListener('click', () => {
+                slots.splice(index, 1);
+                onChange();
+            });
+
+            row.appendChild(day);
+            row.appendChild(from);
+            row.appendChild(to);
+            row.appendChild(remove);
+            container.appendChild(row);
+        });
+    }
+
+    function applyScrimBlockSuggestion() {
+        const block = scrimData.suggested_block || {};
+        if (scrimBlockTemplateSelect) scrimBlockTemplateSelect.value = block.template || 'regular_scrim';
+        if (scrimBlockDeadlineInput) scrimBlockDeadlineInput.value = scrimDateTimeInputValue(block.deadline_at);
+        scrimBlockCommonSlots = scrimDefaultSlots();
+        scrimBlockMatchDrafts = Array.isArray(block.matches) && block.matches.length
+            ? block.matches.map((match) => ({
+                team_a_id: match.team_a_id ? String(match.team_a_id) : '',
+                team_b_id: match.team_b_id ? String(match.team_b_id) : '',
+                slots: [],
+            }))
+            : [{ team_a_id: '', team_b_id: '', slots: [] }];
+        scrimBlockInitialized = true;
+        renderScrimBlockForm();
+    }
+
+    function renderScrimBlockForm() {
+        if (!scrimBlockForm) return;
+        if (!scrimBlockInitialized) applyScrimBlockSuggestion();
+        if (scrimBlockSlots) {
+            appendScrimSlotEditor(scrimBlockSlots, scrimBlockCommonSlots, renderScrimBlockForm);
+        }
+        if (!scrimBlockMatches) return;
+        scrimBlockMatches.innerHTML = '';
+        scrimBlockMatchDrafts.forEach((match, index) => {
+            const row = document.createElement('div');
+            row.className = 'scrim-block-match-row';
+
+            const teamA = document.createElement('select');
+            fillScrimTeamSelect(teamA, match.team_a_id, 'Team A');
+            teamA.addEventListener('change', () => {
+                match.team_a_id = teamA.value;
+            });
+
+            const teamB = document.createElement('select');
+            fillScrimTeamSelect(teamB, match.team_b_id, 'Gegner offen');
+            teamB.addEventListener('change', () => {
+                match.team_b_id = teamB.value;
+            });
+
+            const actions = document.createElement('div');
+            actions.className = 'scrim-actions';
+            const ownSlots = document.createElement('button');
+            ownSlots.type = 'button';
+            ownSlots.className = 'namespace scrim-small-button';
+            ownSlots.textContent = match.slots.length ? 'Gemeinsame Slots' : 'Eigene Slots';
+            ownSlots.addEventListener('click', () => {
+                match.slots = match.slots.length ? [] : scrimBlockCommonSlots.map(scrimCloneSlot);
+                renderScrimBlockForm();
+            });
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'namespace scrim-small-button';
+            remove.textContent = 'X';
+            remove.setAttribute('aria-label', 'Paarung entfernen');
+            remove.disabled = scrimBlockMatchDrafts.length <= 1;
+            remove.addEventListener('click', () => {
+                scrimBlockMatchDrafts.splice(index, 1);
+                renderScrimBlockForm();
+            });
+            actions.appendChild(ownSlots);
+            actions.appendChild(remove);
+
+            row.appendChild(teamA);
+            row.appendChild(teamB);
+            row.appendChild(actions);
+
+            if (match.slots.length) {
+                const slotWrap = document.createElement('div');
+                slotWrap.className = 'scrim-match-specific-slots';
+                const label = document.createElement('div');
+                label.className = 'scrim-form-label';
+                label.textContent = 'Eigene Slots für dieses Match';
+                const slotList = document.createElement('div');
+                slotList.className = 'scrim-slot-list';
+                appendScrimSlotEditor(slotList, match.slots, renderScrimBlockForm);
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'namespace scrim-small-button';
+                add.textContent = 'Slot hinzufügen';
+                add.disabled = match.slots.length >= 5;
+                add.addEventListener('click', () => {
+                    match.slots.push(scrimCloneSlot(match.slots[match.slots.length - 1]));
+                    renderScrimBlockForm();
+                });
+                slotWrap.appendChild(label);
+                slotWrap.appendChild(slotList);
+                slotWrap.appendChild(add);
+                row.appendChild(slotWrap);
+            }
+
+            scrimBlockMatches.appendChild(row);
+        });
+    }
+
+    function addScrimBlockSlot() {
+        if (scrimBlockCommonSlots.length >= 5) {
+            setScrimMessage('Maximal fünf gemeinsame Slots.', 'error');
+            return;
+        }
+        scrimBlockCommonSlots.push(scrimCloneSlot(scrimBlockCommonSlots[scrimBlockCommonSlots.length - 1]));
+        renderScrimBlockForm();
+    }
+
+    function addScrimBlockMatch() {
+        scrimBlockMatchDrafts.push({ team_a_id: '', team_b_id: '', slots: [] });
+        renderScrimBlockForm();
+    }
+
+    function checkedScrimSlots(slots) {
+        if (slots.length < 2 || slots.length > 5) {
+            throw new Error('Jede Abfrage braucht zwei bis fünf Slots.');
+        }
+        return slots.map((slot) => {
+            const day = String(slot.day || '').toLowerCase();
+            const from = Number(slot.from);
+            const to = Number(slot.to);
+            if (!SCRIM_DAY_LABELS[day] || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || from >= to || to > 1440) {
+                throw new Error('Bitte Slot-Zeiten prüfen.');
+            }
+            return { day, from, to };
+        });
+    }
+
+    function buildScrimBlockPayload() {
+        const seenTeams = new Set();
+        const matches = scrimBlockMatchDrafts.map((match) => {
+            const teamA = Number(match.team_a_id);
+            const teamB = match.team_b_id ? Number(match.team_b_id) : null;
+            if (!Number.isFinite(teamA) || teamA <= 0) {
+                throw new Error('Bitte Team A für jedes Match wählen.');
+            }
+            if (teamB !== null && teamA === teamB) {
+                throw new Error('Team A und B müssen verschieden sein.');
+            }
+            [teamA, teamB].filter(Boolean).forEach((teamId) => {
+                if (seenTeams.has(teamId)) {
+                    const team = scrimTeamById(teamId);
+                    throw new Error(`${team ? team.name : `Team ${teamId}`} ist in diesem Block doppelt verplant.`);
+                }
+                seenTeams.add(teamId);
+            });
+            const item = { team_a_id: teamA, team_b_id: teamB };
+            if (match.slots.length) item.slots = checkedScrimSlots(match.slots);
+            return item;
+        });
+        if (!matches.length) {
+            throw new Error('Bitte mindestens ein Match anlegen.');
+        }
+
+        let deadline = null;
+        if (scrimBlockDeadlineInput && scrimBlockDeadlineInput.value) {
+            const parsed = new Date(scrimBlockDeadlineInput.value);
+            if (Number.isNaN(parsed.getTime())) {
+                throw new Error('Antwortfrist ist ungültig.');
+            }
+            deadline = parsed.toISOString();
+        }
+
+        return {
+            template: scrimBlockTemplateSelect ? scrimBlockTemplateSelect.value : 'regular_scrim',
+            deadline_at: deadline,
+            slots: checkedScrimSlots(scrimBlockCommonSlots),
+            matches,
+        };
+    }
+
+    async function createScrimBlock(ev) {
+        if (ev) ev.preventDefault();
+        let payload;
+        try {
+            payload = buildScrimBlockPayload();
+        } catch (err) {
+            setScrimMessage(err.message || 'Scrim-Block ist unvollständig.', 'error');
+            return;
+        }
+        try {
+            await fetchJSON('/api/scrims/match-requests', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            setScrimMessage('Terminabfragen angelegt.', 'success');
+            scrimBlockInitialized = false;
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Terminabfragen konnten nicht angelegt werden (${err.message || '-'})`, 'error');
+        }
+    }
+
     function renderScrimTeamOptions() {
         [scrimTeamASelect, scrimTeamBSelect].forEach((select) => {
             if (!select) return;
@@ -3749,6 +4129,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
 
     function renderScrims() {
+        renderScrimBlockForm();
         renderScrimTeamOptions();
         renderScrimMatches();
         renderScrimRequestSummaries();
@@ -3765,7 +4146,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 participants: Array.isArray(data.participants) ? data.participants : [],
                 matches: Array.isArray(data.matches) ? data.matches : [],
                 match_request_summaries: Array.isArray(data.match_request_summaries) ? data.match_request_summaries : [],
+                suggested_block: data.suggested_block || null,
             };
+            if (!scrimBlockInitialized) applyScrimBlockSuggestion();
             renderScrims();
             if (scrimUpdated) scrimUpdated.textContent = 'Liste aktualisiert';
         } catch (err) {
@@ -4133,6 +4516,18 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
     if (scrimRefreshBtn) {
         scrimRefreshBtn.addEventListener('click', () => loadScrims());
+    }
+    if (scrimBlockForm) {
+        scrimBlockForm.addEventListener('submit', createScrimBlock);
+    }
+    if (scrimBlockTemplateBtn) {
+        scrimBlockTemplateBtn.addEventListener('click', applyScrimBlockSuggestion);
+    }
+    if (scrimBlockAddSlotBtn) {
+        scrimBlockAddSlotBtn.addEventListener('click', addScrimBlockSlot);
+    }
+    if (scrimBlockAddMatchBtn) {
+        scrimBlockAddMatchBtn.addEventListener('click', addScrimBlockMatch);
     }
     if (scrimCreateForm) {
         scrimCreateForm.addEventListener('submit', createScrimMatch);

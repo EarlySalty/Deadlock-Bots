@@ -1,3 +1,11 @@
+## #281 — Scrim-Block-Flow im Dashboard
+
+Problem: Scrim-Match-Abfragen konnten mehrere Matches speichern, aber im Dashboard fehlte noch ein Arbeitsweg, um einen ganzen Block in einem Schritt anzulegen.
+
+Änderung: Der Scrim-Tab hat jetzt einen Block-Flow mit Zwei-Wochen-Vorlage, Paarungsvorschlag aus vorhandenen Teams, gemeinsamen Slots und optionalen eigenen Slots je Match. Der Flow prüft doppelt verplante Teams lokal und nutzt den bestehenden Batch-Endpunkt.
+
+Aktuelles Verhalten: Leo kann mehrere Terminabfragen als einen Scrim-Block vorbereiten, Slots anpassen und gemeinsam anlegen. Reminder, Statusnachrichten und AI bleiben außen vor.
+
 ## #280 — Infisical-Exporter wiederhergestellt
 
 Problem: Patchnotes-Bot und Website-Backend konnten nach einem Restart ihre Secrets nicht mehr laden, weil der gemeinsame Infisical-Exporter beim Python-Aufräumen entfernt wurde.

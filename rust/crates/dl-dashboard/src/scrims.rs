@@ -372,6 +372,12 @@ struct MatchRequestInput {
     slots: Vec<Value>,
 }
 
+#[derive(Clone)]
+struct ScrimTeamOption {
+    id: i64,
+    name: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum MatchRequestCreateError {
     #[error("{0}")]
@@ -424,12 +430,16 @@ fn match_request_defaults_json() -> Value {
         "presets": [{
             "key": "weekend_evening",
             "name": "Wochenende abends",
-            "slots": [
-                { "day": "sat", "from": 20 * 60, "to": 22 * 60 },
-                { "day": "sun", "from": 20 * 60, "to": 22 * 60 }
-            ]
+            "slots": default_match_request_slots()
         }]
     })
+}
+
+fn default_match_request_slots() -> Vec<Value> {
+    vec![
+        json!({ "day": "sat", "from": 20 * 60, "to": 22 * 60 }),
+        json!({ "day": "sun", "from": 20 * 60, "to": 22 * 60 }),
+    ]
 }
 
 fn parse_match_request_batch(
@@ -644,12 +654,74 @@ async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
     let teams = load_teams(pool).await?;
     let matches = load_matches(pool).await?;
     let match_request_summaries = load_recent_match_request_summaries(pool).await?;
+    let suggested_block = load_suggested_block(pool, &teams).await?;
     Ok(json!({
         "teams": teams,
         "participants": participants,
         "matches": matches,
         "match_request_summaries": match_request_summaries,
+        "suggested_block": suggested_block,
     }))
+}
+
+async fn load_suggested_block(pool: &PgPool, teams: &[Value]) -> DashboardDbResult<Value> {
+    let batch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrim.match_request_batches")
+        .fetch_one(pool)
+        .await?;
+    Ok(suggested_block_json(
+        teams,
+        batch_count.max(0) as usize,
+        Utc::now(),
+    ))
+}
+
+fn suggested_block_json(teams: &[Value], rotation_seed: usize, now: DateTime<Utc>) -> Value {
+    json!({
+        "key": "two_week_scrim_block",
+        "name": "Zwei-Wochen-Scrim-Block",
+        "rhythm_days": 14,
+        "template": "regular_scrim",
+        "deadline_at": utc_to_json_unix(Some(now + ChronoDuration::hours(MATCH_REQUEST_DEFAULT_DEADLINE_HOURS))),
+        "slots": default_match_request_slots(),
+        "matches": suggested_pairings(teams, rotation_seed),
+    })
+}
+
+fn suggested_pairings(teams: &[Value], rotation_seed: usize) -> Vec<Value> {
+    let mut teams = teams
+        .iter()
+        .filter_map(|team| {
+            Some(ScrimTeamOption {
+                id: team.get("id")?.as_i64()?,
+                name: team
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    teams.sort_by_key(|team| team.id);
+
+    let half = (teams.len() + 1) / 2;
+    let (left, right) = teams.split_at(half);
+    let mut right = right.to_vec();
+    if !right.is_empty() {
+        let shift = rotation_seed % right.len();
+        right.rotate_left(shift);
+    }
+
+    left.iter()
+        .zip(right.iter())
+        .map(|(team_a, team_b)| {
+            json!({
+                "team_a_id": team_a.id,
+                "team_a_name": team_a.name,
+                "team_b_id": team_b.id,
+                "team_b_name": team_b.name,
+            })
+        })
+        .collect()
 }
 
 async fn load_recent_match_request_summaries(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
@@ -1816,6 +1888,32 @@ mod tests {
         assert_eq!(data["templates"][2]["key"], "training");
         assert_eq!(data["presets"][0]["slots"][0]["day"], "sat");
         assert_eq!(data["presets"][0]["slots"][1]["day"], "sun");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrims_overview_liefert_zwei_wochen_blockvorschlag_mit_rotation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team(db.pool(), 3, "C").await?;
+        insert_team(db.pool(), 4, "D").await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let block = &data["suggested_block"];
+        assert_eq!(block["key"], "two_week_scrim_block");
+        assert_eq!(block["rhythm_days"], 14);
+        assert_eq!(block["template"], "regular_scrim");
+        assert_eq!(block["slots"][0]["day"], "sat");
+        assert_eq!(block["matches"][0]["team_a_id"], 1);
+        assert_eq!(block["matches"][0]["team_b_id"], 3);
+        assert_eq!(block["matches"][1]["team_a_id"], 2);
+        assert_eq!(block["matches"][1]["team_b_id"], 4);
         Ok(())
     }
 
