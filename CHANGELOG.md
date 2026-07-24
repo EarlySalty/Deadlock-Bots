@@ -1,3 +1,11 @@
+## #287 — Scrim-Lagebilder im Dashboard korrigieren
+
+Problem: Das Lagebild-Backend konnte Scrim-Teams bereits auswerten, aber Coaches hatten noch keine nutzbare Dashboard-Ansicht für aktuellen Stand, Timeline, Evidenzen und Korrekturdialog.
+
+Änderung: Der Scrim-Tab zeigt pro Team das aktuelle Lagebild, die Snapshot-Timeline, gespeicherte Evidenzen und den dauerhaften Korrektur-Chat. Korrekturen laufen über die bestehende Dashboard-API und bleiben Dashboard-only.
+
+Aktuelles Verhalten: Coaches korrigieren Lagebilder direkt im Dashboard per Freitext. Die letzte Fassung bleibt sichtbar, Evidenzen bleiben nachvollziehbar verlinkt, und aus dem Lagebild heraus wird nichts öffentlich in Discord gepostet.
+
 ## #286 — Scrim-Match-IDs holen Ergebnisse ins Dashboard
 
 Problem: Coaches konnten gespielte Scrim-Matches noch nicht einfach mit Deadlock-Match-IDs verknüpfen; Ergebnisabrufe waren dadurch nicht sauber nachvollziehbar.

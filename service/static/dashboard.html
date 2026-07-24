@@ -1816,6 +1816,57 @@
             color: #ced4da;
             font-size: 0.9rem;
         }
+        .scrim-lagebild-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        .scrim-lagebild-card {
+            display: grid;
+            gap: 0.75rem;
+        }
+        .scrim-lagebild-meta,
+        .scrim-lagebild-evidence,
+        .scrim-correction-meta {
+            color: #adb5bd;
+            font-size: 0.86rem;
+        }
+        .scrim-lagebild-text {
+            margin: 0;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            color: #f1f3f5;
+            line-height: 1.45;
+            font: inherit;
+        }
+        .scrim-lagebild-section {
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding-top: 0.65rem;
+        }
+        .scrim-lagebild-evidences,
+        .scrim-lagebild-timeline,
+        .scrim-correction-chat {
+            display: grid;
+            gap: 0.4rem;
+        }
+        .scrim-lagebild-evidences a {
+            color: #74c0fc;
+            overflow-wrap: anywhere;
+        }
+        .scrim-lagebild-timeline-item,
+        .scrim-correction-message {
+            display: grid;
+            gap: 0.2rem;
+        }
+        .scrim-correction-form {
+            display: grid;
+            gap: 0.5rem;
+        }
+        .scrim-correction-form textarea {
+            min-height: 78px;
+            resize: vertical;
+        }
         @media (max-width: 900px) {
             .scrim-grid {
                 grid-template-columns: 1fr;
@@ -2371,6 +2422,13 @@
 
         <section>
             <div class="section-header">
+                <h2>AI-Lagebilder</h2>
+            </div>
+            <div id="scrim-lagebilder" class="scrim-lagebild-list"></div>
+        </section>
+
+        <section>
+            <div class="section-header">
                 <h2>Teilnehmer-Pool</h2>
             </div>
             <div class="dev-table-wrap" style="margin-top:1rem;">
@@ -2844,6 +2902,7 @@
     const scrimHistoryRows = document.getElementById('scrim-history-rows');
     const scrimRequestSummaries = document.getElementById('scrim-request-summaries');
     const scrimTeamsContainer = document.getElementById('scrim-teams');
+    const scrimLagebilderContainer = document.getElementById('scrim-lagebilder');
     const scrimParticipantRows = document.getElementById('scrim-participant-rows');
     const voiceHistoryUser = document.getElementById('voice-history-user');
     const voiceUserApply = document.getElementById('voice-user-apply');
@@ -2928,7 +2987,7 @@
     let selectedHeroId = null;
     let heroesLoading = false;
     let heroBuildDraftRows = [];
-    let scrimData = { teams: [], participants: [], matches: [], match_request_summaries: [], suggested_block: null };
+    let scrimData = { teams: [], participants: [], matches: [], match_request_summaries: [], suggested_block: null, lagebilder: [] };
     let scrimBlockInitialized = false;
     let scrimBlockCommonSlots = [];
     let scrimBlockMatchDrafts = [];
@@ -4343,6 +4402,166 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         });
     }
 
+    function appendScrimLagebildText(container, text, emptyText) {
+        const block = document.createElement('pre');
+        block.className = 'scrim-lagebild-text';
+        block.textContent = text || emptyText;
+        container.appendChild(block);
+    }
+
+    function appendScrimLagebildEvidences(container, evidences) {
+        const list = document.createElement('div');
+        list.className = 'scrim-lagebild-evidences';
+        const rows = Array.isArray(evidences) ? evidences : [];
+        if (!rows.length) {
+            const empty = document.createElement('div');
+            empty.className = 'scrim-lagebild-evidence';
+            empty.textContent = 'Keine Evidenzen gespeichert.';
+            list.appendChild(empty);
+        } else {
+            rows.forEach((evidence) => {
+                const line = document.createElement('div');
+                line.className = 'scrim-lagebild-evidence';
+                if (evidence.url) {
+                    const link = document.createElement('a');
+                    link.href = String(evidence.url);
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = evidence.label || evidence.url;
+                    line.appendChild(link);
+                } else {
+                    line.textContent = evidence.label || evidence.reference_id || '-';
+                }
+                list.appendChild(line);
+            });
+        }
+        container.appendChild(list);
+    }
+
+    function renderScrimLagebilder() {
+        if (!scrimLagebilderContainer) return;
+        scrimLagebilderContainer.innerHTML = '';
+        const items = scrimData.lagebilder || [];
+        if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'card';
+            empty.textContent = 'Noch keine Scrim-Teams für Lagebilder vorhanden.';
+            scrimLagebilderContainer.appendChild(empty);
+            return;
+        }
+        items.forEach((item) => {
+            const card = document.createElement('div');
+            card.className = 'card scrim-lagebild-card';
+
+            const title = document.createElement('h3');
+            title.textContent = item.team_name || `Team #${item.team_id}`;
+            card.appendChild(title);
+
+            const current = item.current && typeof item.current === 'object' ? item.current : null;
+            const meta = document.createElement('div');
+            meta.className = 'scrim-lagebild-meta';
+            meta.textContent = current
+                ? `${scrimDate(current.generated_at)} · ${current.source || '-'} · ${current.status || '-'}`
+                : 'Noch kein Lagebild gespeichert.';
+            card.appendChild(meta);
+
+            appendScrimLagebildText(
+                card,
+                current && current.text,
+                'Für dieses Team liegt noch kein Lagebild vor.'
+            );
+
+            const evidenceSection = document.createElement('div');
+            evidenceSection.className = 'scrim-lagebild-section';
+            const evidenceTitle = document.createElement('div');
+            evidenceTitle.className = 'scrim-request-title';
+            evidenceTitle.textContent = 'Evidenzen';
+            evidenceSection.appendChild(evidenceTitle);
+            appendScrimLagebildEvidences(evidenceSection, current && current.evidences);
+            card.appendChild(evidenceSection);
+
+            const timelineSection = document.createElement('div');
+            timelineSection.className = 'scrim-lagebild-section';
+            const timelineTitle = document.createElement('div');
+            timelineTitle.className = 'scrim-request-title';
+            timelineTitle.textContent = 'Timeline';
+            timelineSection.appendChild(timelineTitle);
+            const timeline = document.createElement('div');
+            timeline.className = 'scrim-lagebild-timeline';
+            const snapshots = Array.isArray(item.timeline) ? item.timeline : [];
+            if (!snapshots.length) {
+                const empty = document.createElement('div');
+                empty.className = 'scrim-lagebild-meta';
+                empty.textContent = 'Keine Snapshots.';
+                timeline.appendChild(empty);
+            } else {
+                snapshots.forEach((snapshot) => {
+                    const row = document.createElement('details');
+                    row.className = 'scrim-lagebild-timeline-item';
+                    if (snapshot.id === (current && current.id)) row.open = true;
+                    const summary = document.createElement('summary');
+                    summary.textContent = `${scrimDate(snapshot.generated_at)} · ${snapshot.source || '-'} · ${snapshot.generated_for || '-'}`;
+                    row.appendChild(summary);
+                    appendScrimLagebildText(row, snapshot.text, '-');
+                    appendScrimLagebildEvidences(row, snapshot.evidences);
+                    timeline.appendChild(row);
+                });
+            }
+            timelineSection.appendChild(timeline);
+            card.appendChild(timelineSection);
+
+            const chatSection = document.createElement('div');
+            chatSection.className = 'scrim-lagebild-section';
+            const chatTitle = document.createElement('div');
+            chatTitle.className = 'scrim-request-title';
+            chatTitle.textContent = 'Korrekturdialog';
+            chatSection.appendChild(chatTitle);
+            const chat = document.createElement('div');
+            chat.className = 'scrim-correction-chat';
+            const corrections = Array.isArray(item.corrections) ? item.corrections : [];
+            if (!corrections.length) {
+                const empty = document.createElement('div');
+                empty.className = 'scrim-correction-meta';
+                empty.textContent = 'Noch keine Korrekturen.';
+                chat.appendChild(empty);
+            } else {
+                corrections.forEach((entry) => {
+                    const line = document.createElement('div');
+                    line.className = 'scrim-correction-message';
+                    const who = document.createElement('div');
+                    who.className = 'scrim-correction-meta';
+                    who.textContent = `${entry.role || '-'} · ${scrimDate(entry.created_at)}`;
+                    const text = document.createElement('div');
+                    text.textContent = entry.message || '';
+                    line.appendChild(who);
+                    line.appendChild(text);
+                    chat.appendChild(line);
+                });
+            }
+            chatSection.appendChild(chat);
+
+            const form = document.createElement('form');
+            form.className = 'scrim-correction-form';
+            const textarea = document.createElement('textarea');
+            textarea.className = 'scrim-note';
+            textarea.placeholder = 'Korrektur zum Lagebild';
+            const button = document.createElement('button');
+            button.type = 'submit';
+            button.className = 'load';
+            button.textContent = 'Korrektur senden';
+            form.addEventListener('submit', (ev) => {
+                ev.preventDefault();
+                submitScrimLagebildCorrection(item.team_id, textarea, button);
+            });
+            form.appendChild(textarea);
+            form.appendChild(button);
+            chatSection.appendChild(form);
+            card.appendChild(chatSection);
+
+            scrimLagebilderContainer.appendChild(card);
+        });
+    }
+
     function renderScrimParticipants() {
         if (!scrimParticipantRows) return;
         scrimParticipantRows.innerHTML = '';
@@ -4396,6 +4615,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         renderScrimHistory();
         renderScrimRequestSummaries();
         renderScrimTeams();
+        renderScrimLagebilder();
         renderScrimParticipants();
     }
 
@@ -4409,6 +4629,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 matches: Array.isArray(data.matches) ? data.matches : [],
                 match_request_summaries: Array.isArray(data.match_request_summaries) ? data.match_request_summaries : [],
                 suggested_block: data.suggested_block || null,
+                lagebilder: Array.isArray(data.lagebilder) ? data.lagebilder : [],
             };
             if (!scrimBlockInitialized) applyScrimBlockSuggestion();
             renderScrims();
@@ -4556,6 +4777,28 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             await loadScrims();
         } catch (err) {
             setScrimMessage(`Notiz konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+        }
+    }
+
+    async function submitScrimLagebildCorrection(teamId, textarea, button) {
+        const message = String(textarea && textarea.value || '').trim();
+        if (!message) {
+            setScrimMessage('Bitte eine Korrektur eingeben.', 'error');
+            return;
+        }
+        if (button) button.disabled = true;
+        try {
+            await fetchJSON(`/api/scrims/teams/${teamId}/lagebild/corrections`, {
+                method: 'POST',
+                body: JSON.stringify({ message }),
+            });
+            if (textarea) textarea.value = '';
+            setScrimMessage('Korrektur gespeichert.', 'success');
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Korrektur konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+        } finally {
+            if (button) button.disabled = false;
         }
     }
 
