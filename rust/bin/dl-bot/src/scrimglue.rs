@@ -27,6 +27,10 @@ const MATCH_REQUEST_STATUS_DRAFT: &str = "draft";
 const MATCH_REQUEST_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_STATUS_OPEN: &str = "open";
 const MATCH_REQUEST_STATUS_POST_FAILED: &str = "post_failed";
+const MATCH_REQUEST_REMINDER_STATUS_APPROVED: &str = "approved";
+const MATCH_REQUEST_REMINDER_STATUS_POSTING: &str = "posting";
+const MATCH_REQUEST_REMINDER_STATUS_POSTED: &str = "posted";
+const MATCH_REQUEST_REMINDER_STATUS_FAILED: &str = "failed";
 const MATCH_REQUEST_RESPONSE_PREFIX: &str = "scrimreq:v1:";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
 const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
@@ -133,6 +137,19 @@ struct MatchRequestSendResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaimedMatchRequestReminder {
+    reminder_id: i64,
+    request_id: i64,
+    team_id: i64,
+    team_name: String,
+    channel_id: u64,
+    source_message_id: u64,
+    target_kind: String,
+    target_user_ids: Vec<u64>,
+    target_role_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MatchRequestResponseInput {
     custom_id: String,
     user_id: u64,
@@ -234,6 +251,11 @@ async fn process_one_pending(
             }
             ScrimDriverAction::FetchResult => handle_result(pool, adapter, tempvoice, &claim).await,
         }?;
+        return Ok(());
+    }
+
+    if let Some(reminder) = claim_next_pending_match_request_reminder(pool).await? {
+        handle_match_request_reminder(pool, adapter, reminder).await?;
         return Ok(());
     }
 
@@ -504,6 +526,131 @@ async fn handle_match_request_batch(
     Ok(())
 }
 
+async fn claim_next_pending_match_request_reminder(
+    pool: &PgPool,
+) -> anyhow::Result<Option<ClaimedMatchRequestReminder>> {
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT r.id,
+                   r.request_id,
+                   r.team_id,
+                   r.target_kind,
+                   r.target_discord_user_ids,
+                   r.target_role_id,
+                   r.discord_channel_id,
+                   r.source_message_id,
+                   t.name AS team_name
+              FROM scrim.match_request_reminders r
+              JOIN scrim.teams t ON t.id = r.team_id
+             WHERE r.status = $1
+               AND r.scheduled_for <= now()
+             ORDER BY r.scheduled_for, r.id
+             LIMIT 1
+             FOR UPDATE OF r SKIP LOCKED
+        )
+        UPDATE scrim.match_request_reminders r
+           SET status = $2,
+               updated_at = now()
+          FROM candidate
+         WHERE r.id = candidate.id
+        RETURNING r.id::bigint AS reminder_id,
+                  candidate.request_id::bigint AS request_id,
+                  candidate.team_id::bigint AS team_id,
+                  candidate.team_name,
+                  candidate.target_kind,
+                  candidate.target_discord_user_ids,
+                  candidate.target_role_id,
+                  candidate.discord_channel_id,
+                  candidate.source_message_id
+        "#,
+    )
+    .bind(MATCH_REQUEST_REMINDER_STATUS_APPROVED)
+    .bind(MATCH_REQUEST_REMINDER_STATUS_POSTING)
+    .fetch_optional(pool)
+    .await
+    .context("Scrim-Reminder-Claim fehlgeschlagen")?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let target_user_ids = row
+        .get::<Vec<i64>, _>("target_discord_user_ids")
+        .into_iter()
+        .filter_map(|id| u64::try_from(id).ok().filter(|id| *id > 0))
+        .collect();
+    Ok(Some(ClaimedMatchRequestReminder {
+        reminder_id: row.get("reminder_id"),
+        request_id: row.get("request_id"),
+        team_id: row.get("team_id"),
+        team_name: row.get("team_name"),
+        channel_id: u64::try_from(row.get::<i64, _>("discord_channel_id"))
+            .context("Scrim-Reminder-Channel-ID ungültig")?,
+        source_message_id: u64::try_from(row.get::<i64, _>("source_message_id"))
+            .context("Scrim-Reminder-Source-Message-ID ungültig")?,
+        target_kind: row.get("target_kind"),
+        target_user_ids,
+        target_role_id: row
+            .get::<Option<i64>, _>("target_role_id")
+            .and_then(|id| u64::try_from(id).ok().filter(|id| *id > 0)),
+    }))
+}
+
+async fn handle_match_request_reminder(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    reminder: ClaimedMatchRequestReminder,
+) -> anyhow::Result<()> {
+    let content = match_request_reminder_message(&reminder.team_name, &reminder.target_user_ids);
+    let mut body = match_request_reminder_body(
+        &content,
+        reminder.source_message_id,
+        &reminder.target_user_ids,
+    );
+    if reminder.target_user_ids.is_empty() {
+        body.insert(
+            "allowed_mentions".to_string(),
+            reminder.target_role_id.map_or_else(
+                || json!({ "parse": [], "replied_user": false }),
+                |role_id| json!({ "parse": [], "roles": [role_id.to_string()], "replied_user": false }),
+            ),
+        );
+    }
+
+    match adapter.send_raw_public(reminder.channel_id, &body).await {
+        Ok(message_id) => {
+            save_match_request_reminder_success(pool, reminder.reminder_id, message_id).await?;
+            post_log(
+                adapter,
+                match_request_reminder_success_log_message(
+                    reminder.reminder_id,
+                    reminder.request_id,
+                    reminder.team_id,
+                    &reminder.target_kind,
+                    line!(),
+                ),
+                reminder.request_id,
+            )
+            .await;
+        }
+        Err(err) => {
+            save_match_request_reminder_failure(pool, reminder.reminder_id, &err).await?;
+            post_log(
+                adapter,
+                match_request_reminder_failure_log_message(
+                    reminder.reminder_id,
+                    reminder.request_id,
+                    &err,
+                    line!(),
+                ),
+                reminder.request_id,
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
 async fn send_match_request_batch(
     adapter: &dl_discord::DiscordAdapter,
     batch: &ClaimedMatchRequestBatch,
@@ -663,6 +810,52 @@ async fn set_match_request_batch_status(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn save_match_request_reminder_success(
+    pool: &PgPool,
+    reminder_id: i64,
+    message_id: u64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_reminders
+           SET status = $2,
+               discord_message_id = $3,
+               last_error = NULL,
+               posted_at = now(),
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(reminder_id)
+    .bind(MATCH_REQUEST_REMINDER_STATUS_POSTED)
+    .bind(i64::try_from(message_id)?)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn save_match_request_reminder_failure(
+    pool: &PgPool,
+    reminder_id: i64,
+    error: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_reminders
+           SET status = $2,
+               last_error = $3,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(reminder_id)
+    .bind(MATCH_REQUEST_REMINDER_STATUS_FAILED)
+    .bind(error)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1343,6 +1536,42 @@ fn match_request_message(
     Ok(lines.join("\n"))
 }
 
+fn match_request_reminder_message(team_name: &str, target_user_ids: &[u64]) -> String {
+    let target = if target_user_ids.is_empty() {
+        "euch".to_string()
+    } else {
+        target_user_ids
+            .iter()
+            .map(|id| format!("<@{id}>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Erinnerung für {team_name}: Es fehlen noch Antworten von {target}.\nBitte stimmt in der Terminabfrage oben ab."
+    )
+}
+
+fn match_request_reminder_body(
+    content: &str,
+    source_message_id: u64,
+    target_user_ids: &[u64],
+) -> Map<String, Value> {
+    let mut body = message_body(content);
+    body.insert(
+        "message_reference".to_string(),
+        json!({ "message_id": source_message_id.to_string(), "fail_if_not_exists": false }),
+    );
+    body.insert(
+        "allowed_mentions".to_string(),
+        json!({
+            "parse": [],
+            "users": target_user_ids.iter().map(u64::to_string).collect::<Vec<_>>(),
+            "replied_user": false,
+        }),
+    );
+    body
+}
+
 fn match_request_components(
     request_id: i64,
     team_id: i64,
@@ -1662,6 +1891,29 @@ fn match_request_failure_message(batch_id: i64, reason: &str, _source_line: u32)
     format!("⚠️ Scrim-Terminabfragen konnten nicht gepostet werden (Batch {batch_id}): {reason}.")
 }
 
+fn match_request_reminder_success_log_message(
+    reminder_id: i64,
+    request_id: i64,
+    team_id: i64,
+    target_kind: &str,
+    _source_line: u32,
+) -> String {
+    format!(
+        "Scrim-Reminder gepostet (Reminder {reminder_id}, Abfrage {request_id}, Team {team_id}, Ziel: {target_kind})."
+    )
+}
+
+fn match_request_reminder_failure_log_message(
+    reminder_id: i64,
+    request_id: i64,
+    reason: &str,
+    _source_line: u32,
+) -> String {
+    format!(
+        "⚠️ Scrim-Reminder konnte nicht gepostet werden (Reminder {reminder_id}, Abfrage {request_id}): {reason}."
+    )
+}
+
 fn start_failure_message(match_id: i64, _source_line: u32) -> String {
     format!(
         "⚠️ Scrim-Lobby ließ sich nicht starten (Match {match_id}). Der Steam-GC war nicht erreichbar oder die Lobby-Erstellung schlug fehl — Details im Bot-Log. Der Start lässt sich erneut anstoßen."
@@ -1850,6 +2102,85 @@ mod tests {
                 }
             ])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn match_request_reminder_body_verlinkt_abfrage_und_pinged_nur_fehlende() {
+        let content = match_request_reminder_message("Team Alpha", &[555, 666]);
+        assert!(content.contains("Team Alpha"));
+        assert!(content.contains("<@555>"));
+        assert!(content.contains("<@666>"));
+        assert!(!content.contains("<@777>"));
+
+        let body = match_request_reminder_body(&content, 9001, &[555, 666]);
+        assert_eq!(
+            body["message_reference"],
+            json!({ "message_id": "9001", "fail_if_not_exists": false })
+        );
+        assert_eq!(
+            body["allowed_mentions"],
+            json!({ "parse": [], "users": ["555", "666"], "replied_user": false })
+        );
+    }
+
+    #[tokio::test]
+    async fn match_request_reminder_claim_und_result_speichern_ziel_zeitpunkt_und_fehler(
+    ) -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_team_member(pool, 1, 502, 666).await?;
+        insert_team_member(pool, 2, 601, 777).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[MatchRequestPost {
+                request_id: 31,
+                team_id: 1,
+                channel_id: 100,
+                message_id: 9001,
+            }],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, Some(9001), Some(100)).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, &[502], &[666]).await?;
+
+        let claim = claim_next_pending_match_request_reminder(pool)
+            .await?
+            .expect("reminder claim");
+        assert_eq!(claim.reminder_id, 80);
+        assert_eq!(claim.request_id, 31);
+        assert_eq!(claim.team_id, 1);
+        assert_eq!(claim.channel_id, 100);
+        assert_eq!(claim.source_message_id, 9001);
+        assert_eq!(claim.target_user_ids, vec![666]);
+        assert_eq!(claim.target_kind, "members");
+        assert_eq!(match_request_reminder_status(pool, 80).await?, "posting");
+
+        save_match_request_reminder_failure(pool, 80, "discord down").await?;
+        let row = sqlx::query(
+            r#"
+            SELECT status, last_error, posted_at, discord_message_id
+              FROM scrim.match_request_reminders
+             WHERE id = 80
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error"),
+            Some("discord down".to_string())
+        );
+        assert!(row
+            .get::<Option<chrono::DateTime<Utc>>, _>("posted_at")
+            .is_none());
+        assert!(row.get::<Option<i64>, _>("discord_message_id").is_none());
         Ok(())
     }
 
@@ -2244,6 +2575,86 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    async fn insert_match_request_response(
+        pool: &PgPool,
+        request_id: i32,
+        team_id: i32,
+        participant_id: i32,
+        discord_user_id: i64,
+        slot_index: i32,
+        message_id: Option<i64>,
+        channel_id: Option<i64>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_request_responses(
+                request_id, team_id, participant_id, discord_user_id, slot_index,
+                response, source, message_id, channel_id, responded_at, updated_at
+            )
+            VALUES($1, $2, $3, $4, $5, $6, 'button', $7, $8, now(), now())
+            "#,
+        )
+        .bind(request_id)
+        .bind(team_id)
+        .bind(participant_id)
+        .bind(discord_user_id)
+        .bind(slot_index)
+        .bind(if slot_index == -1 {
+            "unavailable"
+        } else {
+            "available"
+        })
+        .bind(message_id)
+        .bind(channel_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_match_request_reminder(
+        pool: &PgPool,
+        reminder_id: i32,
+        request_id: i32,
+        team_id: i32,
+        target_participant_ids: &[i32],
+        target_user_ids: &[i64],
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_request_reminders(
+                id, request_id, team_id, template, target_kind, target_participant_ids,
+                target_discord_user_ids, missing_count, approved_by_user_id,
+                approved_by_display_name, approved_at, scheduled_for, status, discord_channel_id,
+                source_message_id, created_at, updated_at
+            )
+            VALUES(
+                $1, $2, $3, 'antwort_fehlt', 'members', $4, $5, 1, '42',
+                'Coach', now(), now(), 'approved', 100, 9001, now(), now()
+            )
+            "#,
+        )
+        .bind(reminder_id)
+        .bind(request_id)
+        .bind(team_id)
+        .bind(target_participant_ids)
+        .bind(target_user_ids)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn match_request_reminder_status(
+        pool: &PgPool,
+        reminder_id: i32,
+    ) -> anyhow::Result<String> {
+        Ok(
+            sqlx::query_scalar("SELECT status FROM scrim.match_request_reminders WHERE id = $1")
+                .bind(reminder_id)
+                .fetch_one(pool)
+                .await?,
+        )
     }
 
     async fn match_request_batch_status(pool: &PgPool, batch_id: i32) -> anyhow::Result<String> {

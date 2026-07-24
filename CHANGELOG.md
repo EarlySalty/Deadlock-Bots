@@ -1,3 +1,19 @@
+## #282 — Scrim-Dashboard zeigt konkreten Ersatzbedarf
+
+Problem: Nach Fristende war sichtbar, welcher Slot vorne liegt, aber nicht konkret, wer für diesen Slot fehlt oder warum Ersatz nötig ist.
+
+Änderung: Das Dashboard zeigt nach Fristende pro Match, Team und Slot die betroffene Person mit Grund. Berücksichtigt werden Teammitglieder, Slot-Antworten und `Kein Slot passt`; fehlende Rollen-/Lineup-Daten werden als begrenzte Datenlage markiert.
+
+Aktuelles Verhalten: Vor Fristende bleibt Ersatzbedarf leer. Es startet keine automatische Ersatzsuche.
+
+## #281 — Fehlende Scrim-Stimmen können gezielt erinnert werden
+
+Problem: Leo sah offene Stimmen in Terminabfragen, konnte daraus aber noch keinen freigegebenen Reminder auslösen.
+
+Änderung: Das Dashboard bietet bei fehlenden Antworten jetzt eine Reminder-Freigabe pro betroffenem Team. Der Bot postet erst nach dieser Freigabe im Teamkanal, bezieht sich auf die ursprüngliche Terminabfrage und erwähnt nur eindeutig fehlende Mitglieder.
+
+Aktuelles Verhalten: Es gibt keine automatischen Reminder. Jede Reminder-Aktion speichert Ziel, Zeitpunkt, Status, Discord-Nachricht und Fehler für die Orga-Spur.
+
 ## #280 — Infisical-Exporter wiederhergestellt
 
 Problem: Patchnotes-Bot und Website-Backend konnten nach einem Restart ihre Secrets nicht mehr laden, weil der gemeinsame Infisical-Exporter beim Python-Aufräumen entfernt wurde.

@@ -10,7 +10,9 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
-use crate::db::{advisory_lock, i64_to_i32, unix_to_utc, utc_to_json_unix, DashboardDbResult};
+use crate::db::{
+    advisory_lock, i64_to_i32, unix_to_utc, utc_to_json_unix, DashboardDbError, DashboardDbResult,
+};
 use crate::web::{err_text, ok_json, DashboardApp};
 
 const MATCHES_LOCK: i64 = 42_060_004_003;
@@ -22,6 +24,8 @@ const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
 const MATCH_REQUEST_MAX_SLOTS: usize = 5;
 const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
+const MATCH_REQUEST_REPLACEMENT_DATA_NOTE: &str =
+    "Rollen/Lineup-Daten fehlen; angezeigt werden nur konkrete Personen aus Teammitgliedern und Antworten.";
 
 pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
     if let Err(resp) = app.guard_full(&headers).await {
@@ -160,6 +164,119 @@ pub async fn scrims_match_request_summary(
         Err(err) => {
             tracing::error!(%err, batch_id, "Scrim-Match-Abfrage-Auswertung fehlgeschlagen");
             err_text(500, "Match request summary failed")
+        }
+    }
+}
+
+pub async fn scrims_release_match_request(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let request_id = match parse_path_i32(&request_id, "request_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let input = match parse_match_request_release(&payload) {
+        Ok(input) => input,
+        Err(resp) => return resp,
+    };
+
+    match release_match_request_slot(
+        app.pool(),
+        request_id,
+        input,
+        &session.user_id.to_string(),
+        &session.display_name,
+    )
+    .await
+    {
+        Ok(request) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match_request.release",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                request_id,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "request": request }))
+        }
+        Err(MatchRequestReleaseError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestReleaseError::Conflict(message)) => err_text(409, message),
+        Err(MatchRequestReleaseError::NotFound) => err_text(404, "Match request not found"),
+        Err(MatchRequestReleaseError::Dashboard(err)) => {
+            tracing::error!(%err, request_id, "Scrim-Match-Abfrage-Freigabe-Auswertung fehlgeschlagen");
+            err_text(500, "Release match request failed")
+        }
+        Err(MatchRequestReleaseError::Db(err)) => {
+            tracing::error!(%err, request_id, "Scrim-Match-Abfrage-Freigabe fehlgeschlagen");
+            err_text(500, "Release match request failed")
+        }
+    }
+}
+
+pub async fn scrims_create_match_request_reminder(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let request_id = match parse_path_i32(&request_id, "request_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let team_id = match parse_i32(get2(&payload, "team_id", "teamId"), "team_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    match create_match_request_reminder_record(
+        app.pool(),
+        request_id,
+        team_id,
+        &session.user_id.to_string(),
+        &session.display_name,
+    )
+    .await
+    {
+        Ok(Some(reminder)) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match_request.reminder.approve",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                request_id,
+                team_id,
+                reminder_id = reminder["id"].as_i64().unwrap_or_default(),
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "reminder": reminder }))
+        }
+        Ok(None) => err_text(404, "Match request team not found"),
+        Err(MatchRequestReminderCreateError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestReminderCreateError::Db(err)) => {
+            tracing::error!(%err, request_id, team_id, "Scrim-Reminder-Freigabe fehlgeschlagen");
+            err_text(500, "Create reminder failed")
         }
     }
 }
@@ -350,6 +467,12 @@ struct MatchRequestSummarySeed {
     team_b_name: Option<String>,
     status: String,
     slot_options: Value,
+    released_slot_index: Option<i32>,
+    released_slot: Option<Value>,
+    released_at: Option<DateTime<Utc>>,
+    released_by_user_id: Option<String>,
+    released_by_display_name: Option<String>,
+    override_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -372,8 +495,41 @@ struct MatchRequestInput {
     slots: Vec<Value>,
 }
 
+struct MatchRequestReleaseInput {
+    slot_index: Option<i32>,
+    reason: Option<String>,
+}
+
+#[derive(Clone)]
+struct ScrimTeamOption {
+    id: i64,
+    name: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum MatchRequestCreateError {
+    #[error("{0}")]
+    BadRequest(&'static str),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MatchRequestReleaseError {
+    #[error("{0}")]
+    BadRequest(&'static str),
+    #[error("{0}")]
+    Conflict(&'static str),
+    #[error("not found")]
+    NotFound,
+    #[error(transparent)]
+    Dashboard(#[from] DashboardDbError),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MatchRequestReminderCreateError {
     #[error("{0}")]
     BadRequest(&'static str),
     #[error(transparent)]
@@ -424,12 +580,16 @@ fn match_request_defaults_json() -> Value {
         "presets": [{
             "key": "weekend_evening",
             "name": "Wochenende abends",
-            "slots": [
-                { "day": "sat", "from": 20 * 60, "to": 22 * 60 },
-                { "day": "sun", "from": 20 * 60, "to": 22 * 60 }
-            ]
+            "slots": default_match_request_slots()
         }]
     })
+}
+
+fn default_match_request_slots() -> Vec<Value> {
+    vec![
+        json!({ "day": "sat", "from": 20 * 60, "to": 22 * 60 }),
+        json!({ "day": "sun", "from": 20 * 60, "to": 22 * 60 }),
+    ]
 }
 
 fn parse_match_request_batch(
@@ -503,6 +663,17 @@ fn parse_match_request_batch(
         template,
         deadline_at,
         matches,
+    })
+}
+
+fn parse_match_request_release(payload: &Value) -> Result<MatchRequestReleaseInput, Response> {
+    let slot_index = parse_optional_i32(get2(payload, "slot_index", "slotIndex"), "slot_index")?;
+    if slot_index.is_some_and(|index| index < 0) {
+        return Err(err_text(400, "slot_index must be non-negative"));
+    }
+    Ok(MatchRequestReleaseInput {
+        slot_index,
+        reason: parse_optional_text(get2(payload, "reason", "overrideReason"), "reason", 1000)?,
     })
 }
 
@@ -615,16 +786,31 @@ fn parse_optional_datetime(
 }
 
 fn parse_notes(payload: &Value) -> Result<Option<String>, Response> {
-    match payload.get("notes").or_else(|| payload.get("note")) {
+    parse_optional_text(
+        payload.get("notes").or_else(|| payload.get("note")),
+        "notes",
+        4000,
+    )
+}
+
+fn parse_optional_text(
+    raw: Option<&Value>,
+    field: &str,
+    max_chars: usize,
+) -> Result<Option<String>, Response> {
+    match raw {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
         Some(Value::String(s)) => {
-            if s.chars().count() > 4000 {
-                return Err(err_text(400, "notes must be at most 4000 characters"));
+            if s.chars().count() > max_chars {
+                return Err(err_text(
+                    400,
+                    &format!("{field} must be at most {max_chars} characters"),
+                ));
             }
-            Ok(Some(s.to_string()))
+            Ok(Some(s.trim().to_string()))
         }
-        Some(_) => Err(err_text(400, "notes must be string")),
+        Some(_) => Err(err_text(400, &format!("{field} must be string"))),
     }
 }
 
@@ -644,12 +830,74 @@ async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
     let teams = load_teams(pool).await?;
     let matches = load_matches(pool).await?;
     let match_request_summaries = load_recent_match_request_summaries(pool).await?;
+    let suggested_block = load_suggested_block(pool, &teams).await?;
     Ok(json!({
         "teams": teams,
         "participants": participants,
         "matches": matches,
         "match_request_summaries": match_request_summaries,
+        "suggested_block": suggested_block,
     }))
+}
+
+async fn load_suggested_block(pool: &PgPool, teams: &[Value]) -> DashboardDbResult<Value> {
+    let batch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrim.match_request_batches")
+        .fetch_one(pool)
+        .await?;
+    Ok(suggested_block_json(
+        teams,
+        batch_count.max(0) as usize,
+        Utc::now(),
+    ))
+}
+
+fn suggested_block_json(teams: &[Value], rotation_seed: usize, now: DateTime<Utc>) -> Value {
+    json!({
+        "key": "two_week_scrim_block",
+        "name": "Zwei-Wochen-Scrim-Block",
+        "rhythm_days": 14,
+        "template": "regular_scrim",
+        "deadline_at": utc_to_json_unix(Some(now + ChronoDuration::hours(MATCH_REQUEST_DEFAULT_DEADLINE_HOURS))),
+        "slots": default_match_request_slots(),
+        "matches": suggested_pairings(teams, rotation_seed),
+    })
+}
+
+fn suggested_pairings(teams: &[Value], rotation_seed: usize) -> Vec<Value> {
+    let mut teams = teams
+        .iter()
+        .filter_map(|team| {
+            Some(ScrimTeamOption {
+                id: team.get("id")?.as_i64()?,
+                name: team
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    teams.sort_by_key(|team| team.id);
+
+    let half = (teams.len() + 1) / 2;
+    let (left, right) = teams.split_at(half);
+    let mut right = right.to_vec();
+    if !right.is_empty() {
+        let shift = rotation_seed % right.len();
+        right.rotate_left(shift);
+    }
+
+    left.iter()
+        .zip(right.iter())
+        .map(|(team_a, team_b)| {
+            json!({
+                "team_a_id": team_a.id,
+                "team_a_name": team_a.name,
+                "team_b_id": team_b.id,
+                "team_b_name": team_b.name,
+            })
+        })
+        .collect()
 }
 
 async fn load_recent_match_request_summaries(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
@@ -1001,6 +1249,289 @@ async fn create_match_request_batch_record(
     }))
 }
 
+async fn release_match_request_slot(
+    pool: &PgPool,
+    request_id: i32,
+    input: MatchRequestReleaseInput,
+    released_by_user_id: &str,
+    released_by_display_name: &str,
+) -> Result<Value, MatchRequestReleaseError> {
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT mr.batch_id, mr.slot_options, b.deadline_at
+          FROM scrim.match_requests mr
+          JOIN scrim.match_request_batches b ON b.id = mr.batch_id
+         WHERE mr.id = $1
+        "#,
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Err(MatchRequestReleaseError::NotFound);
+    };
+
+    let batch_id = row.try_get::<i32, _>("batch_id")?;
+    let deadline_at = row.try_get::<DateTime<Utc>, _>("deadline_at")?;
+    if deadline_at > Utc::now() {
+        return Err(MatchRequestReleaseError::Conflict(
+            "Deadline has not passed",
+        ));
+    }
+
+    let slot_options = row.try_get::<Value, _>("slot_options")?;
+    let slots = slot_options
+        .as_array()
+        .ok_or(MatchRequestReleaseError::BadRequest(
+            "Stored slots are invalid",
+        ))?;
+    let summary = load_match_request_summary(pool, batch_id)
+        .await?
+        .ok_or(MatchRequestReleaseError::NotFound)?;
+    let request_summary = match_request_from_summary(&summary, request_id)
+        .ok_or(MatchRequestReleaseError::NotFound)?;
+    let recommended_slot_index = request_summary["recommended_slot_index"]
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok());
+    let released_slot_index =
+        input
+            .slot_index
+            .or(recommended_slot_index)
+            .ok_or(MatchRequestReleaseError::Conflict(
+                "No recommended slot available",
+            ))?;
+    let released_slot = slots
+        .get(
+            usize::try_from(released_slot_index)
+                .map_err(|_| MatchRequestReleaseError::BadRequest("slot_index is out of range"))?,
+        )
+        .cloned()
+        .ok_or(MatchRequestReleaseError::BadRequest(
+            "slot_index is out of range",
+        ))?;
+    let override_reason =
+        if input.slot_index.is_some() && Some(released_slot_index) != recommended_slot_index {
+            input.reason
+        } else {
+            None
+        };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT id FROM scrim.match_requests WHERE id = $1 FOR UPDATE")
+        .bind(request_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(MatchRequestReleaseError::NotFound)?;
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_requests
+           SET released_slot_index = $2,
+               released_slot = $3::jsonb,
+               released_at = now(),
+               released_by_user_id = $4,
+               released_by_display_name = $5,
+               override_reason = $6,
+               status = 'closed',
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(request_id)
+    .bind(released_slot_index)
+    .bind(&released_slot)
+    .bind(released_by_user_id)
+    .bind(released_by_display_name)
+    .bind(&override_reason)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_batches b
+           SET status = 'closed',
+               updated_at = now()
+         WHERE b.id = $1
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM scrim.match_requests mr
+                 WHERE mr.batch_id = b.id
+                   AND mr.status NOT IN ('closed', 'cancelled')
+           )
+        "#,
+    )
+    .bind(batch_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let summary = load_match_request_summary(pool, batch_id)
+        .await?
+        .ok_or(MatchRequestReleaseError::NotFound)?;
+    match_request_from_summary(&summary, request_id).ok_or(MatchRequestReleaseError::NotFound)
+}
+
+async fn create_match_request_reminder_record(
+    pool: &PgPool,
+    request_id: i32,
+    team_id: i32,
+    approved_by_user_id: &str,
+    approved_by_display_name: &str,
+) -> Result<Option<Value>, MatchRequestReminderCreateError> {
+    let Some(request) = sqlx::query(
+        r#"
+        SELECT mr.status,
+               mr.team_query_message_ids,
+               t.name AS team_name,
+               t.discord_channel_id,
+               t.discord_role_id
+          FROM scrim.match_requests mr
+          JOIN scrim.teams t ON t.id = $2
+         WHERE mr.id = $1
+           AND (mr.team_a_id = $2 OR mr.team_b_id = $2)
+        "#,
+    )
+    .bind(request_id)
+    .bind(team_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let status = request.try_get::<String, _>("status")?;
+    if status != "open" && status != "post_failed" {
+        return Err(MatchRequestReminderCreateError::BadRequest(
+            "Match request is not open",
+        ));
+    }
+    let channel_id = request
+        .try_get::<Option<i64>, _>("discord_channel_id")?
+        .filter(|id| *id > 0)
+        .ok_or(MatchRequestReminderCreateError::BadRequest(
+            "Team channel missing",
+        ))?;
+    let message_ids = request.try_get::<Value, _>("team_query_message_ids")?;
+    let source =
+        message_ids
+            .get(team_id.to_string())
+            .ok_or(MatchRequestReminderCreateError::BadRequest(
+                "Original team query missing",
+            ))?;
+    let source_channel_id = source
+        .get("channel_id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+        .ok_or(MatchRequestReminderCreateError::BadRequest(
+            "Original team query missing",
+        ))?;
+    if source_channel_id != channel_id {
+        return Err(MatchRequestReminderCreateError::BadRequest(
+            "Original team query channel mismatch",
+        ));
+    }
+    let source_message_id = source
+        .get("message_id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+        .ok_or(MatchRequestReminderCreateError::BadRequest(
+            "Original team query missing",
+        ))?;
+
+    let missing_rows = sqlx::query(
+        r#"
+        SELECT p.id, p.discord_id
+          FROM scrim.team_members tm
+          JOIN scrim.participants p ON p.id = tm.participant_id
+         WHERE tm.team_id = $1
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM scrim.match_request_responses r
+                 WHERE r.request_id = $2
+                   AND r.team_id = $1
+                   AND r.participant_id = p.id
+           )
+         ORDER BY tm.is_bench ASC, p.display_name ASC, p.id ASC
+        "#,
+    )
+    .bind(team_id)
+    .bind(request_id)
+    .fetch_all(pool)
+    .await?;
+    if missing_rows.is_empty() {
+        return Err(MatchRequestReminderCreateError::BadRequest(
+            "No missing responses",
+        ));
+    }
+
+    let mut target_participant_ids = Vec::with_capacity(missing_rows.len());
+    let mut target_discord_user_ids = Vec::new();
+    for row in missing_rows {
+        target_participant_ids.push(row.try_get::<i32, _>("id")?);
+        if let Some(discord_id) = row.try_get::<Option<i64>, _>("discord_id")? {
+            if discord_id > 0 {
+                target_discord_user_ids.push(discord_id);
+            }
+        }
+    }
+    let target_kind = if target_discord_user_ids.len() == target_participant_ids.len() {
+        "members"
+    } else {
+        "team"
+    };
+    if target_kind == "team" {
+        target_discord_user_ids.clear();
+    }
+    let target_role_id = if target_kind == "team" {
+        request.try_get::<Option<i64>, _>("discord_role_id")?
+    } else {
+        None
+    };
+    let missing_count = i32::try_from(target_participant_ids.len())
+        .map_err(|_| MatchRequestReminderCreateError::BadRequest("Too many missing responses"))?;
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO scrim.match_request_reminders(
+            action, request_id, team_id, template, target_kind, target_participant_ids,
+            target_discord_user_ids, target_role_id, missing_count, approved_by_user_id,
+            approved_by_display_name, approved_at, scheduled_for, status, discord_channel_id,
+            source_message_id, created_at, updated_at
+        )
+        VALUES(
+            'missing_response_reminder', $1, $2, 'antwort_fehlt', $3, $4, $5, $6, $7, $8,
+            $9, now(), now(), 'approved', $10, $11, now(), now()
+        )
+        RETURNING id::bigint AS id, request_id, team_id, action, template, target_kind,
+                  missing_count, approved_at, scheduled_for, status
+        "#,
+    )
+    .bind(request_id)
+    .bind(team_id)
+    .bind(target_kind)
+    .bind(&target_participant_ids)
+    .bind(&target_discord_user_ids)
+    .bind(target_role_id)
+    .bind(missing_count)
+    .bind(approved_by_user_id)
+    .bind(approved_by_display_name)
+    .bind(channel_id)
+    .bind(source_message_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(Some(json!({
+        "id": row.try_get::<i64, _>("id")?,
+        "request_id": row.try_get::<i32, _>("request_id")?,
+        "team_id": row.try_get::<i32, _>("team_id")?,
+        "action": row.try_get::<String, _>("action")?,
+        "template": row.try_get::<String, _>("template")?,
+        "target_kind": row.try_get::<String, _>("target_kind")?,
+        "missing_count": row.try_get::<i32, _>("missing_count")?,
+        "approved_at": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("approved_at")?)),
+        "scheduled_for": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("scheduled_for")?)),
+        "status": row.try_get::<String, _>("status")?,
+    })))
+}
+
 async fn load_match_request_summary(
     pool: &PgPool,
     batch_id: i32,
@@ -1028,7 +1559,13 @@ async fn load_match_request_summary(
                mr.team_b_id,
                tb.name AS team_b_name,
                mr.status,
-               mr.slot_options
+               mr.slot_options,
+               mr.released_slot_index,
+               mr.released_slot,
+               mr.released_at,
+               mr.released_by_user_id,
+               mr.released_by_display_name,
+               mr.override_reason
           FROM scrim.match_requests mr
           JOIN scrim.teams ta ON ta.id = mr.team_a_id
           LEFT JOIN scrim.teams tb ON tb.id = mr.team_b_id
@@ -1051,6 +1588,12 @@ async fn load_match_request_summary(
                 team_b_name: row.try_get("team_b_name")?,
                 status: row.try_get("status")?,
                 slot_options: row.try_get("slot_options")?,
+                released_slot_index: row.try_get("released_slot_index")?,
+                released_slot: row.try_get("released_slot")?,
+                released_at: row.try_get("released_at")?,
+                released_by_user_id: row.try_get("released_by_user_id")?,
+                released_by_display_name: row.try_get("released_by_display_name")?,
+                override_reason: row.try_get("override_reason")?,
             })
         })
         .collect::<DashboardDbResult<Vec<_>>>()?;
@@ -1090,6 +1633,12 @@ async fn load_match_request_summary(
         "deadline_passed": deadline_passed,
         "matches": matches,
     })))
+}
+
+fn match_request_from_summary(summary: &Value, request_id: i32) -> Option<Value> {
+    summary["matches"].as_array()?.iter().find_map(|request| {
+        (request["request_id"].as_i64() == Some(i64::from(request_id))).then(|| request.clone())
+    })
 }
 
 async fn load_match_request_members(
@@ -1283,6 +1832,29 @@ fn match_request_summary_json(
     } else {
         None
     };
+    let released_slot_index = request.released_slot_index.filter(|index| *index >= 0);
+    let released_slot_index_usize =
+        released_slot_index.and_then(|index| usize::try_from(index).ok());
+    let released_slot = request
+        .released_slot
+        .clone()
+        .or_else(|| released_slot_index_usize.and_then(|index| slot_values.get(index).cloned()));
+    let is_override =
+        released_slot_index_usize.is_some_and(|index| recommended_slot_index != Some(index));
+    let selected_slot_index = if deadline_passed {
+        released_slot_index_usize.or(recommended_slot_index)
+    } else {
+        None
+    };
+    let replacement_needs = match_request_replacement_needs(
+        request,
+        &slot_values,
+        members,
+        responses,
+        selected_slot_index,
+        deadline_passed,
+    );
+    let replacement_data_limited = deadline_passed && selected_slot_index.is_some();
 
     json!({
         "request_id": request.request_id,
@@ -1300,7 +1872,93 @@ fn match_request_summary_json(
         "missing_response_count": missing_response_count,
         "no_slot_count": no_slot_count,
         "recommended_slot_index": recommended_slot_index,
+        "selected_slot_index": selected_slot_index,
+        "released_slot_index": released_slot_index,
+        "released_slot": released_slot,
+        "released_at": utc_to_json_unix(request.released_at),
+        "released_by_user_id": request.released_by_user_id,
+        "released_by_display_name": request.released_by_display_name,
+        "override_reason": request.override_reason,
+        "is_override": is_override,
+        "replacement_needs": replacement_needs,
+        "replacement_data_limited": replacement_data_limited,
+        "replacement_data_note": if replacement_data_limited {
+            Value::String(MATCH_REQUEST_REPLACEMENT_DATA_NOTE.to_string())
+        } else {
+            Value::Null
+        },
     })
+}
+
+fn match_request_replacement_needs(
+    request: &MatchRequestSummarySeed,
+    slot_values: &[Value],
+    members: &HashMap<i32, Vec<MatchRequestMember>>,
+    responses: &HashMap<(i32, i32), Vec<MatchRequestResponse>>,
+    selected_slot_index: Option<usize>,
+    deadline_passed: bool,
+) -> Vec<Value> {
+    if !deadline_passed {
+        return Vec::new();
+    }
+    let Some(slot_index) = selected_slot_index else {
+        return Vec::new();
+    };
+    let Some(slot) = slot_values.get(slot_index) else {
+        return Vec::new();
+    };
+
+    let mut needs = Vec::new();
+    for (team_id, team_name) in [
+        (request.team_a_id, Some(request.team_a_name.as_str())),
+        (
+            request.team_b_id.unwrap_or_default(),
+            request.team_b_name.as_deref(),
+        ),
+    ] {
+        if team_id == 0 {
+            continue;
+        }
+        let team_responses = responses
+            .get(&(request.request_id, team_id))
+            .cloned()
+            .unwrap_or_default();
+        for member in members.get(&team_id).into_iter().flatten() {
+            let member_responses = team_responses
+                .iter()
+                .filter(|response| response.participant_id == member.participant_id)
+                .collect::<Vec<_>>();
+            if member_responses.iter().any(|response| {
+                response.response == "available" && response.slot_index == slot_index as i32
+            }) {
+                continue;
+            }
+            let reason = if member_responses
+                .iter()
+                .any(|response| response.response == "unavailable" && response.slot_index == -1)
+            {
+                "Kein Slot passt"
+            } else if member_responses.is_empty() {
+                "Antwort fehlt"
+            } else {
+                "Für ausgewählten Slot nicht zugesagt"
+            };
+            needs.push(json!({
+                "match_request_id": request.request_id,
+                "team_id": team_id,
+                "team_name": team_name.unwrap_or("-"),
+                "slot_index": slot_index,
+                "slot": slot,
+                "participant_id": member.participant_id,
+                "display_name": member.display_name,
+                "missing_person": member.display_name,
+                "role": null,
+                "reason": reason,
+                "data_limited": true,
+            }));
+        }
+    }
+    needs
 }
 
 fn best_match_request_slot_index(slots: &[Value], required_team_count: usize) -> Option<usize> {
@@ -1743,6 +2401,36 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_future_match_request(pool: &PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_request_batches(
+                id, template, deadline_at, status, created_by_user_id,
+                created_by_display_name, created_at, updated_at
+            )
+            VALUES(90, 'regular_scrim', now() + interval '1 hour', 'open', '42', 'Coach', now(), now())
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_requests(
+                id, batch_id, team_a_id, team_b_id, status, slot_options,
+                created_at, updated_at
+            )
+            VALUES(
+                91, 90, 1, 2, 'open',
+                '[{"day":"sat","from":1200,"to":1320},{"day":"sun","from":1200,"to":1320}]'::jsonb,
+                now(), now()
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn create_match_route_insertet_scheduled_draft() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1816,6 +2504,32 @@ mod tests {
         assert_eq!(data["templates"][2]["key"], "training");
         assert_eq!(data["presets"][0]["slots"][0]["day"], "sat");
         assert_eq!(data["presets"][0]["slots"][1]["day"], "sun");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrims_overview_liefert_zwei_wochen_blockvorschlag_mit_rotation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team(db.pool(), 3, "C").await?;
+        insert_team(db.pool(), 4, "D").await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let block = &data["suggested_block"];
+        assert_eq!(block["key"], "two_week_scrim_block");
+        assert_eq!(block["rhythm_days"], 14);
+        assert_eq!(block["template"], "regular_scrim");
+        assert_eq!(block["slots"][0]["day"], "sat");
+        assert_eq!(block["matches"][0]["team_a_id"], 1);
+        assert_eq!(block["matches"][0]["team_b_id"], 3);
+        assert_eq!(block["matches"][1]["team_a_id"], 2);
+        assert_eq!(block["matches"][1]["team_b_id"], 4);
         Ok(())
     }
 
@@ -1969,6 +2683,289 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 8192).await?;
         let data: Value = serde_json::from_slice(&body)?;
         assert_eq!(data["matches"][0]["recommended_slot_index"], Value::Null);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_summary_zeigt_ersatzbedarf_nur_nach_frist_fuer_gewaehlten_slot(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 1, 102, "A2").await?;
+        insert_team_member(db.pool(), 1, 103, "A3").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_team_member(db.pool(), 2, 202, "B2").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        insert_match_request_response(db.pool(), 91, 1, 102, -1).await?;
+        insert_match_request_response(db.pool(), 91, 2, 201, 0).await?;
+        insert_match_request_response(db.pool(), 91, 2, 202, 1).await?;
+
+        let response = app
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/90/summary",
+                &session_id,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let first_match = &data["matches"][0];
+        assert_eq!(first_match["selected_slot_index"], 0);
+        assert_eq!(first_match["replacement_data_limited"], true);
+        assert_eq!(
+            first_match["replacement_data_note"],
+            "Rollen/Lineup-Daten fehlen; angezeigt werden nur konkrete Personen aus Teammitgliedern und Antworten."
+        );
+        assert_eq!(
+            first_match["replacement_needs"].as_array().unwrap().len(),
+            3
+        );
+        assert_eq!(first_match["replacement_needs"][0]["display_name"], "A2");
+        assert_eq!(
+            first_match["replacement_needs"][0]["reason"],
+            "Kein Slot passt"
+        );
+        assert_eq!(first_match["replacement_needs"][1]["display_name"], "A3");
+        assert_eq!(
+            first_match["replacement_needs"][1]["reason"],
+            "Antwort fehlt"
+        );
+        assert_eq!(first_match["replacement_needs"][2]["display_name"], "B2");
+        assert_eq!(
+            first_match["replacement_needs"][2]["reason"],
+            "Für ausgewählten Slot nicht zugesagt"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_summary_zeigt_vor_frist_keinen_ersatzbedarf(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_future_match_request(db.pool()).await?;
+
+        let response = app
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/90/summary",
+                &session_id,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let first_match = &data["matches"][0];
+        assert_eq!(data["deadline_passed"], false);
+        assert_eq!(first_match["selected_slot_index"], Value::Null);
+        assert_eq!(first_match["replacement_needs"], json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_release_route_gibt_empfohlenen_slot_frei(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        insert_match_request_response(db.pool(), 91, 2, 201, 0).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests/91/release",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["request"]["recommended_slot_index"], 0);
+        assert_eq!(data["request"]["released_slot_index"], 0);
+        assert_eq!(data["request"]["override_reason"], Value::Null);
+
+        let row = sqlx::query(
+            r#"
+            SELECT released_slot_index, override_reason, released_by_display_name
+              FROM scrim.match_requests
+             WHERE id = 91
+            "#,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("released_slot_index")?,
+            Some(0)
+        );
+        assert_eq!(row.try_get::<Option<String>, _>("override_reason")?, None);
+        assert_eq!(
+            row.try_get::<Option<String>, _>("released_by_display_name")?,
+            Some("Coach".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_release_route_speichert_override_slot_und_grund(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        insert_match_request_response(db.pool(), 91, 2, 201, 0).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests/91/release",
+                &session_id,
+                &csrf,
+                json!({
+                    "slot_index": 1,
+                    "reason": "Team B kann Sonntag leichter vollzaehlig."
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["request"]["recommended_slot_index"], 0);
+        assert_eq!(data["request"]["released_slot_index"], 1);
+        assert_eq!(
+            data["request"]["override_reason"],
+            "Team B kann Sonntag leichter vollzaehlig."
+        );
+        assert_eq!(data["request"]["released_by_display_name"], "Coach");
+
+        let row = sqlx::query(
+            r#"
+            SELECT released_slot_index, override_reason, released_by_user_id, released_by_display_name
+              FROM scrim.match_requests
+             WHERE id = 91
+            "#,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(
+            row.try_get::<Option<i32>, _>("released_slot_index")?,
+            Some(1)
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("override_reason")?,
+            Some("Team B kann Sonntag leichter vollzaehlig.".to_string())
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("released_by_user_id")?,
+            Some("42".to_string())
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("released_by_display_name")?,
+            Some("Coach".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_reminder_route_speichert_freigabe_fuer_fehlende_stimmen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_team_member(db.pool(), 1, 101, "A1").await?;
+        insert_team_member(db.pool(), 1, 102, "A2").await?;
+        insert_team_member(db.pool(), 2, 201, "B1").await?;
+        insert_expired_match_request(db.pool()).await?;
+        insert_match_request_response(db.pool(), 91, 1, 101, 0).await?;
+        sqlx::query(
+            r#"
+            UPDATE scrim.teams
+               SET discord_channel_id = CASE id WHEN 1 THEN 100 WHEN 2 THEN 200 END
+             WHERE id IN (1, 2)
+            "#,
+        )
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE scrim.participants
+               SET discord_id = CASE id WHEN 101 THEN 555 WHEN 102 THEN 666 WHEN 201 THEN 777 END
+             WHERE id IN (101, 102, 201)
+            "#,
+        )
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE scrim.match_requests
+               SET team_query_message_ids = '{"1":{"channel_id":100,"message_id":9001},"2":{"channel_id":200,"message_id":9002}}'::jsonb
+             WHERE id = 91
+            "#,
+        )
+        .execute(db.pool())
+        .await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests/91/reminders",
+                &session_id,
+                &csrf,
+                json!({ "team_id": 1 }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["reminder"]["request_id"], 91);
+        assert_eq!(data["reminder"]["team_id"], 1);
+        assert_eq!(data["reminder"]["target_kind"], "members");
+        assert_eq!(data["reminder"]["missing_count"], 1);
+
+        let row = sqlx::query(
+            r#"
+            SELECT request_id, team_id, target_kind, target_participant_ids,
+                   approved_by_user_id, approved_by_display_name, status
+              FROM scrim.match_request_reminders
+             WHERE id = $1
+            "#,
+        )
+        .bind(i64_to_i32(
+            data["reminder"]["id"]
+                .as_i64()
+                .ok_or("missing reminder id")?,
+            "id",
+        )?)
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(row.try_get::<i32, _>("request_id")?, 91);
+        assert_eq!(row.try_get::<i32, _>("team_id")?, 1);
+        assert_eq!(row.try_get::<String, _>("target_kind")?, "members");
+        assert_eq!(
+            row.try_get::<Vec<i32>, _>("target_participant_ids")?,
+            vec![102]
+        );
+        assert_eq!(row.try_get::<String, _>("approved_by_user_id")?, "42");
+        assert_eq!(
+            row.try_get::<String, _>("approved_by_display_name")?,
+            "Coach"
+        );
+        assert_eq!(row.try_get::<String, _>("status")?, "approved");
         Ok(())
     }
 

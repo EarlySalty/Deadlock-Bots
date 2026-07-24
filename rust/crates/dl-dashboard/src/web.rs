@@ -414,6 +414,14 @@ pub fn router(app: DashboardApp) -> Router {
             get(crate::scrims::scrims_match_request_summary),
         )
         .route(
+            "/api/scrims/match-requests/{request_id}/release",
+            post(crate::scrims::scrims_release_match_request),
+        )
+        .route(
+            "/api/scrims/match-requests/{request_id}/reminders",
+            post(crate::scrims::scrims_create_match_request_reminder),
+        )
+        .route(
             "/api/scrims/matches/{match_id}/start",
             post(crate::scrims::scrims_start_match),
         )
