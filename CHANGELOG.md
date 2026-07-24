@@ -1,3 +1,11 @@
+## #291 — Frische Arbeitskopien bauen wieder
+
+Problem: Frische Arbeitskopien konnten den Rust-Arbeitsbereich nicht vollständig auflösen, weil ein eingetragener Helfer durch die Ignorierregeln nicht mitversioniert wurde.
+
+Änderung: Der fehlende Helfer wird vollständig versioniert, während die Ignorierregeln nur die nötigen Quellen freigeben und private Artefakte weiter ausschließen.
+
+Aktuelles Verhalten: Ein frischer Checkout kann den Arbeitsbereich wieder prüfen und bauen; Schlüssel, Notizen und Build-Ausgaben bleiben weiterhin außen vor.
+
 ## #290 — Scrim-Lagebilder erreichen OpenAI wieder
 
 Problem: Der Live-Provider lehnte neue Scrim-Lagebild-Anfragen wegen nicht mehr passender Anfrageparameter ab; im Dashboard blieb dadurch nur der vorsichtige Fehlerstand.
