@@ -1,10 +1,18 @@
-## #284 — Scrim-Match-Status im Teamkanal
+## #285 — Scrim-Match-Status im Teamkanal
 
 Problem: Nach einer Slot-Freigabe gab es im Teamkanal noch keinen verbindlichen Match-Stand, und erneute Updates hätten leicht doppelte Nachrichten erzeugt.
 
 Änderung: Der Bot erstellt nach Freigabe pro Teamkanal eine pingfreie Statusnachricht, speichert die Discord-Message-IDs und nutzt vorhandene Nachrichten für spätere Edits.
 
 Aktuelles Verhalten: Teams sehen Match, finalen Termin, Abstimmung, Zusagen, offene oder unsichere Spieler, Ersatzbedarf, nächste Aktion und den Link zur Terminabfrage direkt im Teamkanal.
+
+## #284 — Scrim-Block-Flow im Dashboard
+
+Problem: Scrim-Match-Abfragen konnten mehrere Matches speichern, aber im Dashboard fehlte ein Arbeitsweg, um einen ganzen Block in einem Schritt anzulegen.
+
+Änderung: Der Scrim-Tab bündelt Blockanlage mit Zwei-Wochen-Vorlage, Paarungen, gemeinsamen Slots und optionalen eigenen Slots pro Match.
+
+Aktuelles Verhalten: Leo kann mehrere Terminabfragen als einen Scrim-Block vorbereiten und gemeinsam anlegen. Reminder, Statusnachrichten und AI bleiben getrennte Schritte.
 
 ## #283 — Scrim-Slot kann nach Frist freigegeben werden
 
