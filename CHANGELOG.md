@@ -1,3 +1,11 @@
+## #280 — Infisical-Exporter wiederhergestellt
+
+Problem: Patchnotes-Bot und Website-Backend konnten nach einem Restart ihre Secrets nicht mehr laden, weil der gemeinsame Infisical-Exporter beim Python-Aufräumen entfernt wurde.
+
+Änderung: Der gemeinsame Exporter ist wieder Teil des Bot-Repos und sein Startvertrag ist mit einem kleinen Test abgesichert.
+
+Aktuelles Verhalten: Beide Dienste kommen nach einem Restart wieder aus dem Secret-Bootstrap heraus und starten ihren eigentlichen Prozess.
+
 ## #279 — Scrim-Dashboard zeigt Terminabfragen mit Slot-Empfehlung
 
 Problem: Scrim-Teams konnten bereits per Button antworten, aber das Dashboard zeigte daraus noch keine zusammengefasste Planungsbasis nach Fristende.
