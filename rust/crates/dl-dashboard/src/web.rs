@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{ConnectInfo, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{ConnectInfo, MatchedPath, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -432,6 +432,35 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/reaction-roles/{id}",
             axum::routing::delete(crate::reaction_roles::reaction_role_delete),
         )
+        .merge(scrim_router(app.clone()))
+        // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
+        // POST nimmt bis zu 5 Bilder (5 MiB) → Body-Limit hochsetzen.
+        .route(
+            "/api/leave-survey/{token}",
+            get(crate::survey::leave_survey_get)
+                .post(crate::survey::leave_survey_post)
+                .layer(axum::extract::DefaultBodyLimit::max(30 * 1024 * 1024)),
+        )
+        // Admin-geschützter Abruf hochgeladener Umfrage-Bilder.
+        .route(
+            "/api/leave-surveys/image/{token}/{filename}",
+            get(crate::survey::leave_survey_image),
+        )
+        // Öffentliche Endpunkte (Phase 9e) — kein Auth, CORS für die Website.
+        .route(
+            "/api/public/patch-notes",
+            get(crate::public::patch_notes).options(crate::public::public_cors),
+        )
+        .route(
+            "/api/public/guild-stats",
+            get(crate::public::guild_stats).options(crate::public::public_cors),
+        )
+        .layer(axum::middleware::from_fn(security_headers))
+        .with_state(app)
+}
+
+fn scrim_router(app: DashboardApp) -> Router<DashboardApp> {
+    Router::new()
         .route("/api/scrims", get(crate::scrims::scrims_overview))
         .route(
             "/api/scrims/matches",
@@ -490,30 +519,37 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/scrims/participants/{participant_id}/notes",
             post(crate::scrims::scrims_update_participant_notes),
         )
-        // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
-        // POST nimmt bis zu 5 Bilder (5 MiB) → Body-Limit hochsetzen.
-        .route(
-            "/api/leave-survey/{token}",
-            get(crate::survey::leave_survey_get)
-                .post(crate::survey::leave_survey_post)
-                .layer(axum::extract::DefaultBodyLimit::max(30 * 1024 * 1024)),
-        )
-        // Admin-geschützter Abruf hochgeladener Umfrage-Bilder.
-        .route(
-            "/api/leave-surveys/image/{token}/{filename}",
-            get(crate::survey::leave_survey_image),
-        )
-        // Öffentliche Endpunkte (Phase 9e) — kein Auth, CORS für die Website.
-        .route(
-            "/api/public/patch-notes",
-            get(crate::public::patch_notes).options(crate::public::public_cors),
-        )
-        .route(
-            "/api/public/guild-stats",
-            get(crate::public::guild_stats).options(crate::public::public_cors),
-        )
-        .layer(axum::middleware::from_fn(security_headers))
-        .with_state(app)
+        .layer(axum::middleware::from_fn_with_state(
+            app,
+            gate_scrim_mutation,
+        ))
+}
+
+async fn gate_scrim_mutation(
+    State(app): State<DashboardApp>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = request.method().clone();
+    if ![Method::POST, Method::PUT, Method::PATCH, Method::DELETE].contains(&method) {
+        return next.run(request).await;
+    }
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or_else(|| request.uri().path())
+        .to_string();
+    if route == "/api/scrims/teams/{team_id}/lagebild/corrections" {
+        return next.run(request).await;
+    }
+    if dl_central_db::scrim_runtime::require_local_scrim_write(app.pool(), &route, method.as_str())
+        .await
+        .is_err()
+    {
+        return err_text(503, crate::scrims::SCRIM_RUNTIME_DENIED_MESSAGE);
+    }
+    next.run(request).await
 }
 
 async fn security_headers(

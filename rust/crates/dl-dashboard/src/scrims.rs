@@ -8,7 +8,6 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use dl_ai::ChatProviderError;
-use dl_central_db::scrim_runtime::require_local_scrim_write;
 use dl_squads::lagebild::{
     revise_lagebild, LagebildError, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
 };
@@ -28,7 +27,7 @@ const STATE_RESULT_REQUESTED: &str = "result_requested";
 const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
 const MATCH_REQUEST_MAX_SLOTS: usize = 5;
-const SCRIM_RUNTIME_DENIED_MESSAGE: &str =
+pub(crate) const SCRIM_RUNTIME_DENIED_MESSAGE: &str =
     "Die Scrim-Verwaltung wird gerade umgestellt. Änderungen am Roster sind über dieses Dashboard vorübergehend nicht möglich.";
 const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
 const MATCH_REQUEST_REMINDER_DEFAULT_TEMPLATE: &str = "antwort_fehlt";
@@ -568,16 +567,6 @@ pub async fn scrims_update_participant_notes(
         Ok(notes) => notes,
         Err(resp) => return resp,
     };
-    if require_local_scrim_write(
-        app.pool(),
-        "dl-dashboard::scrims",
-        "scrim.participants notes update",
-    )
-    .await
-    .is_err()
-    {
-        return err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE);
-    }
     match update_participant_notes(app.pool(), participant_id, notes.clone()).await {
         Ok(true) => {
             tracing::info!(
@@ -3896,6 +3885,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scrim_mutation_gate_blockiert_turniere_und_fehlende_runtime_control(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for missing_runtime_control in [false, true] {
+            let (db, app, session_id, csrf) = app_with_session().await?;
+            insert_team(db.pool(), 1, "A").await?;
+            insert_team(db.pool(), 2, "B").await?;
+            if missing_runtime_control {
+                dl_central_db::testing::set_scrim_runtime_missing(db.pool()).await?;
+            } else {
+                dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+            }
+
+            let response = app
+                .oneshot(auth_post(
+                    "/api/scrims/matches",
+                    &session_id,
+                    &csrf,
+                    json!({
+                        "team_a_id": 1,
+                        "team_b_id": 2,
+                        "coach_spectator_discord_id": "123456789",
+                        "scheduled_at": "2026-07-06T19:00:00Z",
+                    }),
+                )?)
+                .await?;
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+            assert_eq!(body.as_ref(), SCRIM_RUNTIME_DENIED_MESSAGE.as_bytes());
+            let match_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrim.matches")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(match_count, 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrim_get_bleibt_im_turniere_runtime_erlaubt() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn create_match_route_insertet_scheduled_draft() -> Result<(), Box<dyn std::error::Error>>
     {
         let (db, app, session_id, csrf) = app_with_session().await?;
@@ -4231,6 +4270,39 @@ mod tests {
         .fetch_one(db.pool())
         .await?;
         assert_eq!(ledger_decision, "yes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lagebild_korrektur_bleibt_im_turniere_runtime_erlaubt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
+            r#"{"reply":"Überarbeitet.","lagebild":"Korrigierte Lage."}"#,
+        ))]);
+        let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/teams/1/lagebild/corrections",
+                &session_id,
+                &csrf,
+                json!({ "message": "A2 hat inzwischen zugesagt." }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let correction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.lagebild_corrections")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(correction_count, 2);
         Ok(())
     }
 

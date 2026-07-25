@@ -46,8 +46,8 @@ pub async fn load_scrim_runtime_state(
 
 pub async fn require_local_scrim_write(
     pool: &PgPool,
-    path: &'static str,
-    action: &'static str,
+    path: &str,
+    action: &str,
 ) -> Result<ScrimRuntimeState, ScrimRuntimeGateError> {
     match load_scrim_runtime_state(pool).await {
         Ok(state) if local_scrim_writes_allowed(&state.mode, &state.operational_writer) => {
@@ -56,9 +56,11 @@ pub async fn require_local_scrim_write(
         Ok(state) => {
             tracing::warn!(
                 path,
+                route = path,
                 mode = %state.mode,
                 operational_writer = %state.operational_writer,
                 action,
+                method = action,
                 "lokaler Scrim-Schreibzugriff abgelehnt"
             );
             Err(ScrimRuntimeGateError::Denied {
@@ -77,9 +79,11 @@ pub async fn require_local_scrim_write(
             };
             tracing::warn!(
                 path,
+                route = path,
                 mode,
                 operational_writer,
                 action,
+                method = action,
                 %error,
                 "lokaler Scrim-Schreibzugriff abgelehnt"
             );
