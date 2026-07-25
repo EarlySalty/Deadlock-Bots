@@ -2331,21 +2331,21 @@
                             Antwortfrist
                             <input type="datetime-local" id="scrim-block-deadline">
                         </label>
-                        <div class="scrim-form-label">PLATZHALTER</div>
-                        <select id="scrim-preset-select" aria-label="PLATZHALTER"></select>
+                        <div class="scrim-form-label">Slot-Presets</div>
+                        <select id="scrim-preset-select" aria-label="Slot-Preset auswählen"></select>
                         <div class="scrim-actions">
-                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-apply">PLATZHALTER</button>
-                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-new">PLATZHALTER</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-apply">Slots übernehmen</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-new">Neues Preset</button>
                         </div>
                         <label>
-                            PLATZHALTER
+                            Name des Presets
                             <input type="text" id="scrim-preset-name" maxlength="100">
                         </label>
                         <div id="scrim-preset-slots" class="scrim-slot-list"></div>
                         <div class="scrim-actions">
-                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-add-slot">PLATZHALTER</button>
-                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-save">PLATZHALTER</button>
-                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-delete">PLATZHALTER</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-add-slot">Slot hinzufügen</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-save">Preset speichern</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-delete">Preset löschen</button>
                         </div>
                         <div class="scrim-form-label">Gemeinsame Slots</div>
                         <div id="scrim-block-slots" class="scrim-slot-list"></div>
@@ -3933,7 +3933,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         if (scrimSelectedPresetId === null) {
             const option = document.createElement('option');
             option.value = '';
-            option.textContent = 'PLATZHALTER';
+            option.textContent = 'Neues Preset';
             scrimPresetSelect.appendChild(option);
         }
         (scrimDefaults.presets || []).forEach((preset) => {
@@ -3956,9 +3956,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         try {
             scrimBlockCommonSlots = checkedScrimSlots(scrimPresetDraftSlots).map(scrimCloneSlot);
             renderScrimBlockForm();
-            setScrimMessage('PLATZHALTER', 'success');
+            setScrimMessage('Slots aus dem Preset übernommen.', 'success');
         } catch (err) {
-            setScrimMessage('PLATZHALTER', 'error');
+            setScrimMessage(err.message || 'Bitte Slot-Zeiten prüfen.', 'error');
         }
     }
 
@@ -3967,8 +3967,8 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
 
     function addScrimPresetSlot() {
-        if (scrimPresetDraftSlots.length >= 5 || !scrimPresetDraftSlots.length) {
-            setScrimMessage('PLATZHALTER', 'error');
+        if (scrimPresetDraftSlots.length >= 5) {
+            setScrimMessage('Maximal fünf Slots pro Preset.', 'error');
             return;
         }
         scrimPresetDraftSlots.push(scrimCloneSlot(scrimPresetDraftSlots[scrimPresetDraftSlots.length - 1]));
@@ -3980,7 +3980,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         try {
             slots = checkedScrimSlots(scrimPresetDraftSlots);
         } catch (err) {
-            setScrimMessage('PLATZHALTER', 'error');
+            setScrimMessage(err.message || 'Bitte Slot-Zeiten prüfen.', 'error');
             return;
         }
         const uri = scrimSelectedPresetId === null
@@ -3992,24 +3992,24 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 body: JSON.stringify({ name: scrimPresetDraftName, slots }),
             });
             scrimSelectedPresetId = Number(result.preset.id);
-            setScrimMessage('PLATZHALTER', 'success');
+            setScrimMessage('Preset gespeichert.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage('PLATZHALTER', 'error');
+            setScrimMessage(err.message || 'Preset konnte nicht gespeichert werden.', 'error');
         }
     }
 
     async function deleteScrimPreset() {
-        if (scrimSelectedPresetId === null || !confirm('PLATZHALTER')) return;
+        if (scrimSelectedPresetId === null || !confirm('Preset wirklich löschen?')) return;
         try {
             await fetchJSON(`/api/scrims/slot-presets/${scrimSelectedPresetId}`, {
                 method: 'DELETE',
             });
             scrimSelectedPresetId = null;
-            setScrimMessage('PLATZHALTER', 'success');
+            setScrimMessage('Preset gelöscht.', 'success');
             await loadScrims();
         } catch (err) {
-            setScrimMessage('PLATZHALTER', 'error');
+            setScrimMessage(err.message || 'Preset konnte nicht gelöscht werden.', 'error');
         }
     }
 

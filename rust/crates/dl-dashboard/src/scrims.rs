@@ -1377,6 +1377,8 @@ fn slot_preset_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
     let id = row.try_get::<i64, _>("id")?;
     Ok(json!({
         "id": id,
+        // ponytail: "key" liest niemand mehr, das Frontend adressiert Presets über "id".
+        // Bleibt nur, weil der Defaults-Vertrag es bisher zusagt; beim naechsten Anfassen loeschen.
         "key": if id == 1 { "weekend_evening".to_string() } else { format!("slot_preset_{id}") },
         "name": row.try_get::<String, _>("name")?,
         "slots": row.try_get::<Value, _>("slots")?,
