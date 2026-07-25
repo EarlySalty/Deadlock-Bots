@@ -6,7 +6,7 @@ use dl_central_db::{connect_pool, testing::test_pool};
 use sqlx::{migrate::Migrator, PgPool};
 
 const PRE_FOUNDATION_VERSION: i64 = 2026072407;
-const FOUNDATION_END_VERSION: i64 = 2026072416;
+const FOUNDATION_END_VERSION: i64 = 2026072417;
 
 type ExistingResultRefRow = (i64, String, bool, String, bool, i32, bool, bool);
 
@@ -361,6 +361,7 @@ async fn scrim_db_foundation_contract_tables_constraints_and_legacy_id_safety() 
     assert_replacement_request_candidate_need_consistency(pool).await;
     assert_steam_v1_idempotency_leases_and_result_guards(pool).await;
     assert_privacy_redaction_requires_deleted_marker_and_exact_target(pool).await;
+    assert_lagebild_privacy_redaction_guards(pool).await;
     assert_privacy_registry_covers_new_user_id_display_name_and_json_fields(pool).await;
     assert_foundation_privacy_inventory_is_classified(pool).await;
 }
@@ -1332,6 +1333,178 @@ async fn assert_privacy_redaction_requires_deleted_marker_and_exact_target(pool:
         lineup_payload.contains("Foreign"),
         "foreign player evidence must remain after target redaction: {lineup_payload}"
     );
+}
+
+async fn assert_lagebild_privacy_redaction_guards(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, created_at) VALUES(880011, 'Privacy Team', now())",
+    )
+    .execute(pool)
+    .await
+    .expect("insert lagebild privacy team");
+    let snapshot_id: i64 = sqlx::query_scalar(
+        r#"INSERT INTO scrim.lagebild_snapshots(
+              team_id, generated_for, source, status, lagebild_text, data_summary, error
+           ) VALUES (
+              880011,
+              'privacy-test',
+              'ai',
+              'error',
+              'Spieler 4242 braucht Review',
+              '{"actor":"4242","display_name":"Target"}'::jsonb,
+              'Fehler fuer 4242'
+           )
+           RETURNING id"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("insert lagebild privacy snapshot");
+    sqlx::query(
+        r#"INSERT INTO scrim.lagebild_evidences(
+              snapshot_id, evidence_type, label, reference_id, payload
+           ) VALUES (
+              $1,
+              'discord_message',
+              'Evidence 4242',
+              '4242',
+              '{"actor":"4242","display_name":"Target"}'::jsonb
+           )"#,
+    )
+    .bind(snapshot_id)
+    .execute(pool)
+    .await
+    .expect("insert lagebild privacy evidence");
+    let correction_id: i64 = sqlx::query_scalar(
+        r#"INSERT INTO scrim.lagebild_corrections(
+              team_id, snapshot_id, role, author_user_id, author_display_name, message
+           ) VALUES (
+              880011,
+              $1,
+              'user',
+              '4242',
+              'Target',
+              'Korrektur fuer 4242'
+           )
+           RETURNING id"#,
+    )
+    .bind(snapshot_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert lagebild privacy correction");
+
+    let mut unauthorized = pool
+        .begin()
+        .await
+        .expect("unauthorized lagebild privacy tx");
+    sqlx::query(
+        "SELECT
+             set_config('scrim.privacy_erasure_user_id', '4242', true),
+             set_config('scrim.privacy_erasure_target_ref', '4242', true)",
+    )
+    .execute(&mut *unauthorized)
+    .await
+    .expect("set unauthorized lagebild privacy context");
+    let blocked = sqlx::query(
+        "UPDATE scrim.lagebild_corrections
+            SET message = replace(message, '4242', 'redacted')
+          WHERE id = $1",
+    )
+    .bind(correction_id)
+    .execute(&mut *unauthorized)
+    .await;
+    assert_eq!(
+        database_error_code(&blocked).as_deref(),
+        Some("55000"),
+        "Lagebild redaction requires a deleted privacy marker"
+    );
+    unauthorized
+        .rollback()
+        .await
+        .expect("rollback unauthorized lagebild privacy tx");
+
+    sqlx::query(
+        "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
+         VALUES (4242, true, now(), 'test', now())
+         ON CONFLICT(user_id) DO UPDATE SET
+             opted_out = true,
+             deleted_at = excluded.deleted_at,
+             reason = excluded.reason,
+             updated_at = excluded.updated_at",
+    )
+    .execute(pool)
+    .await
+    .expect("insert lagebild privacy marker");
+
+    let mut authorized = pool.begin().await.expect("authorized lagebild privacy tx");
+    sqlx::query(
+        "SELECT
+             set_config('scrim.privacy_erasure_user_id', '4242', true),
+             set_config('scrim.privacy_erasure_target_ref', '4242', true)",
+    )
+    .execute(&mut *authorized)
+    .await
+    .expect("set authorized lagebild privacy context");
+    sqlx::query(
+        "UPDATE scrim.lagebild_snapshots
+            SET lagebild_text = replace(lagebild_text, '4242', 'redacted'),
+                data_summary = scrim.jsonb_redact_user_ref(data_summary, '4242'),
+                error = replace(error, '4242', 'redacted')
+          WHERE id = $1",
+    )
+    .bind(snapshot_id)
+    .execute(&mut *authorized)
+    .await
+    .expect("authorized lagebild snapshot redaction");
+    sqlx::query(
+        "UPDATE scrim.lagebild_evidences
+            SET label = replace(label, '4242', 'redacted'),
+                reference_id = replace(reference_id, '4242', 'redacted'),
+                payload = scrim.jsonb_redact_user_ref(payload, '4242')
+          WHERE snapshot_id = $1",
+    )
+    .bind(snapshot_id)
+    .execute(&mut *authorized)
+    .await
+    .expect("authorized lagebild evidence redaction");
+    sqlx::query(
+        "UPDATE scrim.lagebild_corrections
+            SET author_user_id = 'redacted',
+                author_display_name = 'redacted',
+                message = replace(message, '4242', 'redacted')
+          WHERE id = $1",
+    )
+    .bind(correction_id)
+    .execute(&mut *authorized)
+    .await
+    .expect("authorized lagebild correction redaction");
+    authorized
+        .commit()
+        .await
+        .expect("commit authorized lagebild privacy tx");
+
+    let remaining_refs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+           FROM (
+                 SELECT lagebild_text || ' ' || COALESCE(error, '') || ' ' || data_summary::text AS text
+                   FROM scrim.lagebild_snapshots
+                  WHERE id = $1
+                 UNION ALL
+                 SELECT label || ' ' || COALESCE(reference_id, '') || ' ' || payload::text
+                   FROM scrim.lagebild_evidences
+                  WHERE snapshot_id = $1
+                 UNION ALL
+                 SELECT COALESCE(author_user_id, '') || ' ' || COALESCE(author_display_name, '') || ' ' || message
+                   FROM scrim.lagebild_corrections
+                  WHERE id = $2
+                ) AS projected
+          WHERE text LIKE '%4242%' OR text LIKE '%Target%'",
+    )
+    .bind(snapshot_id)
+    .bind(correction_id)
+    .fetch_one(pool)
+    .await
+    .expect("count remaining lagebild private refs");
+    assert_eq!(remaining_refs, 0);
 }
 
 async fn assert_idempotency_terminal_replay_and_lease_invariants(pool: &PgPool) {
@@ -4554,6 +4727,9 @@ async fn foundation_privacy_inventory_columns(pool: &PgPool) -> Vec<(String, Str
                 ('scrim', 'replacement_candidates'),
                 ('scrim', 'replacement_requests'),
                 ('scrim', 'match_lineup_snapshots'),
+                ('scrim', 'lagebild_snapshots'),
+                ('scrim', 'lagebild_evidences'),
+                ('scrim', 'lagebild_corrections'),
                 ('scrim', 'ai_runs'),
                 ('scrim', 'ai_decision_refs'),
                 ('scrim', 'match_result_selections'),
@@ -4750,6 +4926,60 @@ fn expected_automated_erasure_actions(
         ),
         (
             "scrim",
+            "lagebild_snapshots",
+            "lagebild_text",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_snapshots",
+            "data_summary",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_snapshots",
+            "error",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_evidences",
+            "label",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_evidences",
+            "reference_id",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_evidences",
+            "payload",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_corrections",
+            "author_user_id",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_corrections",
+            "author_display_name",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
+            "lagebild_corrections",
+            "message",
+            "redact_on_user_delete",
+        ),
+        (
+            "scrim",
             "matches",
             "lobby_code_source_user_id",
             "redact_on_user_delete",
@@ -4906,6 +5136,21 @@ fn expected_privacy_registry_fields() -> &'static [(&'static str, &'static str, 
         ("scrim", "replacement_requests", "discord_user_id"),
         ("scrim", "replacement_requests", "request_payload"),
         ("scrim", "match_lineup_snapshots", "lineup_payload"),
+        ("scrim", "lagebild_snapshots", "generated_for"),
+        ("scrim", "lagebild_snapshots", "source"),
+        ("scrim", "lagebild_snapshots", "status"),
+        ("scrim", "lagebild_snapshots", "lagebild_text"),
+        ("scrim", "lagebild_snapshots", "data_summary"),
+        ("scrim", "lagebild_snapshots", "model"),
+        ("scrim", "lagebild_snapshots", "error"),
+        ("scrim", "lagebild_evidences", "evidence_type"),
+        ("scrim", "lagebild_evidences", "label"),
+        ("scrim", "lagebild_evidences", "url"),
+        ("scrim", "lagebild_evidences", "reference_id"),
+        ("scrim", "lagebild_evidences", "payload"),
+        ("scrim", "lagebild_corrections", "author_user_id"),
+        ("scrim", "lagebild_corrections", "author_display_name"),
+        ("scrim", "lagebild_corrections", "message"),
         ("scrim", "ai_runs", "subject_id"),
         ("scrim", "ai_runs", "decision_ref_kind"),
         ("scrim", "ai_runs", "decision_ref_id"),

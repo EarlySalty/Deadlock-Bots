@@ -1,8 +1,9 @@
 use dl_ai::ChatProviderError;
 use dl_squads::lagebild::{
-    finalize_lagebild_text, generate_due_lagebilder, lagebild_messages, ScrimLagebildEvidence,
-    ScrimLagebildInput,
+    correct_team_lagebild, finalize_lagebild_text, generate_due_lagebilder, lagebild_messages,
+    refresh_team_lagebild, CorrectionActor, ScrimLagebildEvidence, ScrimLagebildInput,
 };
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 #[test]
@@ -56,9 +57,21 @@ async fn fehler_lagebild_wird_nach_kurzem_backoff_erneut_versucht(
         .await?;
 
     assert_eq!(generate_due_lagebilder(db.pool(), None, 1).await?, 1);
+    assert_eq!(
+        latest_scrim_ai_verdict(db.pool(), "lagebild_generate").await?,
+        "error"
+    );
     assert_eq!(generate_due_lagebilder(db.pool(), None, 1).await?, 0);
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(2, 'B', now())")
+        .execute(db.pool())
+        .await?;
     sqlx::query(
-        "UPDATE scrim.lagebild_snapshots SET generated_at = now() - interval '16 minutes' WHERE team_id = 1",
+        r#"
+        INSERT INTO scrim.lagebild_snapshots(
+            team_id, generated_at, generated_for, source, status, lagebild_text, data_summary, error
+        )
+        VALUES(2, now() - interval '16 minutes', 'weekly', 'ai', 'error', 'Alter Fehler', '{}'::jsonb, 'AI-Provider fehlt')
+        "#,
     )
     .execute(db.pool())
     .await?;
@@ -67,7 +80,7 @@ async fn fehler_lagebild_wird_nach_kurzem_backoff_erneut_versucht(
 }
 
 #[tokio::test]
-async fn lagebild_match_history_enthaelt_nur_abgeschlossene_oder_abgerufene_matches(
+async fn lagebild_match_history_nutzt_nur_final_ausgewaehlte_result_refs(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
     for (id, name) in [(1, "A"), (2, "B")] {
@@ -88,16 +101,32 @@ async fn lagebild_match_history_enthaelt_nur_abgeschlossene_oder_abgerufene_matc
     )
     .execute(db.pool())
     .await?;
-    sqlx::query("UPDATE scrim.matches SET result_json = '{}'::jsonb WHERE id = 12")
-        .execute(db.pool())
-        .await?;
+    sqlx::query(
+        "UPDATE scrim.matches SET result_json = '{\"legacy_raw\":true}'::jsonb WHERE id = 12",
+    )
+    .execute(db.pool())
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO scrim.match_result_refs(
             match_id, steam_match_id, source_user_id, source_display_name,
-            fetch_status, entered_at, updated_at
+            fetch_status, winner_team_id, normalized_result_json, validation_status, entered_at, updated_at
         )
-        VALUES(12, 222, '42', 'Coach', 'pending', now(), now())
+        VALUES
+            (11, 111, '42', 'Coach', 'fetched', 1, '{"selected":true}'::jsonb, 'valid', now(), now()),
+            (12, 222, '42', 'Coach', 'pending', NULL, '{}'::jsonb, 'unvalidated', now(), now())
+        "#,
+    )
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.match_result_selections(
+            match_id, result_ref_id, selected_by_user_id, selected_by_display_name, selection_reason
+        )
+        SELECT 11, id, '42', 'Coach', 'contract_test'
+          FROM scrim.match_result_refs
+         WHERE match_id = 11
         "#,
     )
     .execute(db.pool())
@@ -116,8 +145,11 @@ async fn lagebild_match_history_enthaelt_nur_abgeschlossene_oder_abgerufene_matc
         .collect::<Vec<_>>()
         .join("\n");
     assert!(prompt.contains("Match 11:"));
+    assert!(prompt.contains("Steam-Match 111"));
     assert!(!prompt.contains("Match 10:"));
     assert!(!prompt.contains("Match 12:"));
+    assert!(!prompt.contains("legacy_raw"));
+    assert!(!prompt.contains("selected"));
 
     let snapshot = sqlx::query(
         "SELECT status, error FROM scrim.lagebild_snapshots WHERE team_id = 1 ORDER BY id DESC LIMIT 1",
@@ -126,6 +158,16 @@ async fn lagebild_match_history_enthaelt_nur_abgeschlossene_oder_abgerufene_matc
     .await?;
     assert_eq!(snapshot.get::<String, _>("status"), "ok");
     assert_eq!(snapshot.get::<Option<String>, _>("error"), None);
+    assert_eq!(
+        latest_scrim_ai_verdict(db.pool(), "lagebild_generate").await?,
+        "yes"
+    );
+    let run_state: String = sqlx::query_scalar(
+        "SELECT state FROM scrim.ai_runs WHERE run_kind = 'lagebild_generate' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(run_state, "succeeded");
     Ok(())
 }
 
@@ -154,6 +196,218 @@ async fn lagebild_timeout_bleibt_im_ledger_und_snapshot_sichtbar(
     .fetch_one(db.pool())
     .await?;
     assert!(error.is_some());
+    assert_eq!(
+        latest_scrim_ai_verdict(db.pool(), "lagebild_generate").await?,
+        "timeout"
+    );
+    let run = sqlx::query(
+        "SELECT state, last_error_code FROM scrim.ai_runs WHERE run_kind = 'lagebild_generate' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(run.get::<String, _>("state"), "failed");
+    assert_eq!(
+        run.get::<Option<String>, _>("last_error_code"),
+        Some("err_ai_timeout".to_string())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn lagebild_korrektur_persistiert_no_unsure_timeout_und_fehlerstatus(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
+        .execute(db.pool())
+        .await?;
+
+    let no_provider = dl_ai::MockChatProvider::single(r#"{"reply":"Passt so","lagebild":null}"#);
+    let no_receipt = correct_team_lagebild(
+        db.pool(),
+        Some(no_provider.as_ref()),
+        1,
+        "Passt so?",
+        correction_actor(),
+    )
+    .await?;
+    assert_eq!(no_receipt.verdict, "no");
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
+    assert_eq!(
+        latest_scrim_ai_verdict(db.pool(), "lagebild_correction").await?,
+        "no"
+    );
+
+    let invalid_provider = dl_ai::MockChatProvider::single("kein json");
+    let unsure_receipt = correct_team_lagebild(
+        db.pool(),
+        Some(invalid_provider.as_ref()),
+        1,
+        "Bitte korrigieren",
+        correction_actor(),
+    )
+    .await?;
+    assert_eq!(unsure_receipt.verdict, "unsure");
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    assert_eq!(
+        latest_scrim_ai_verdict(db.pool(), "lagebild_correction").await?,
+        "unsure"
+    );
+    let unsure_state: String = sqlx::query_scalar(
+        "SELECT state FROM scrim.ai_runs WHERE run_kind = 'lagebild_correction' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(unsure_state, "uncertain");
+
+    let timeout_provider = dl_ai::MockChatProvider::new(vec![Err(ChatProviderError::Timeout)]);
+    let timeout_receipt = correct_team_lagebild(
+        db.pool(),
+        Some(timeout_provider.as_ref()),
+        1,
+        "Bitte nochmal",
+        correction_actor(),
+    )
+    .await?;
+    assert_eq!(timeout_receipt.verdict, "timeout");
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    assert_eq!(
+        latest_scrim_ai_verdict(db.pool(), "lagebild_correction").await?,
+        "timeout"
+    );
+    let timeout_error: Option<String> = sqlx::query_scalar(
+        "SELECT last_error_code FROM scrim.ai_runs WHERE run_kind = 'lagebild_correction' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(timeout_error, Some("err_ai_timeout".to_string()));
+    let correction_actor: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT author_user_id, author_display_name
+           FROM scrim.lagebild_corrections
+          WHERE role = 'user'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(
+        correction_actor,
+        (Some("42".to_string()), Some("Coach".to_string()))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn lagebild_ai_ledger_schreibt_actor_nur_pseudonymisiert(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
+        .execute(db.pool())
+        .await?;
+
+    let actor = correction_actor();
+    refresh_team_lagebild(db.pool(), None, 1, actor.clone()).await?;
+    assert_ledger_actor_private(db.pool(), "scrim.lagebild.refresh").await?;
+
+    let provider = dl_ai::MockChatProvider::single(r#"{"reply":"Erledigt","lagebild":null}"#);
+    correct_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        1,
+        "Bitte korrigieren",
+        actor,
+    )
+    .await?;
+    assert_ledger_actor_private(db.pool(), "scrim.lagebild.correction").await?;
+
+    let correction_actor: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT author_user_id, author_display_name
+           FROM scrim.lagebild_corrections
+          WHERE role = 'user'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(
+        correction_actor,
+        (Some("42".to_string()), Some("Coach".to_string()))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn lagebild_correction_rohtext_bleibt_aus_append_only_decision_logs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
+        .execute(db.pool())
+        .await?;
+    let sensitive_marker = "DL_PRIVACY_MARKER_20260725_GEHEIM";
+    let message = format!("Bitte intern korrigieren: {sensitive_marker}");
+    let provider = dl_ai::MockChatProvider::single(r#"{"reply":"Gespeichert","lagebild":null}"#);
+
+    correct_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        1,
+        &message,
+        correction_actor(),
+    )
+    .await?;
+
+    let correction = sqlx::query(
+        "SELECT id::bigint AS id, message
+           FROM scrim.lagebild_corrections
+          WHERE role = 'user'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    let user_correction_id = correction.get::<i64, _>("id");
+    assert_eq!(correction.get::<String, _>("message"), message);
+
+    let expected_summary = format!(
+        "team=1 correction_ref=scrim.lagebild_corrections:{user_correction_id} chars={} hash={}",
+        message.chars().count(),
+        test_stable_short_hash(&message)
+    );
+    let ledger = sqlx::query(
+        "SELECT input_summary, payload
+           FROM bot.ai_decision_ledger
+          WHERE source = 'scrim.lagebild.correction'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    let ledger_summary = ledger.get::<String, _>("input_summary");
+    let ledger_payload = ledger.get::<serde_json::Value, _>("payload");
+    assert_eq!(ledger_summary, expected_summary);
+    assert!(ledger_summary.contains(&format!(
+        "correction_ref=scrim.lagebild_corrections:{user_correction_id}"
+    )));
+    assert!(ledger_summary.contains(&format!("hash={}", test_stable_short_hash(&message))));
+    assert!(!ledger_summary.contains(sensitive_marker));
+    assert!(!json_contains_substring(&ledger_payload, sensitive_marker));
+
+    let decision_data: serde_json::Value = sqlx::query_scalar(
+        "SELECT decision.decision_data
+           FROM scrim.ai_decision_refs decision
+           JOIN scrim.ai_runs run ON run.id = decision.run_id
+          WHERE run.run_kind = 'lagebild_correction'
+          ORDER BY decision.id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(
+        decision_data
+            .get("input_summary")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_summary.as_str())
+    );
+    assert!(!json_contains_substring(&decision_data, sensitive_marker));
     Ok(())
 }
 
@@ -182,4 +436,108 @@ async fn lagebild_snapshot_wird_ohne_entscheidungslog_zurueckgerollt(
             .await?;
     assert_eq!(snapshot_count, 0);
     Ok(())
+}
+
+async fn latest_scrim_ai_verdict(
+    pool: &sqlx::PgPool,
+    run_kind: &str,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT decision_data ->> 'verdict'
+          FROM scrim.ai_decision_refs decision
+          JOIN scrim.ai_runs run ON run.id = decision.run_id
+         WHERE run.run_kind = $1
+         ORDER BY decision.id DESC
+         LIMIT 1
+        "#,
+    )
+    .bind(run_kind)
+    .fetch_one(pool)
+    .await
+}
+
+async fn latest_snapshot_status(pool: &sqlx::PgPool) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT status FROM scrim.lagebild_snapshots ORDER BY id DESC LIMIT 1")
+        .fetch_one(pool)
+        .await
+}
+
+async fn assert_ledger_actor_private(
+    pool: &sqlx::PgPool,
+    source: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let row = sqlx::query(
+        "SELECT input_summary, payload
+           FROM bot.ai_decision_ledger
+          WHERE source = $1
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .bind(source)
+    .fetch_one(pool)
+    .await?;
+    let input_summary = row.get::<String, _>("input_summary");
+    let payload = row.get::<serde_json::Value, _>("payload");
+    assert!(!input_summary.contains("42"));
+    assert!(!input_summary.contains("Coach"));
+    assert!(payload.get("actor_discord_id").is_none());
+    assert!(payload.get("actor_display_name").is_none());
+    assert!(!json_contains_string(&payload, "42"));
+    assert!(!json_contains_string(&payload, "Coach"));
+    let actor_pseudonym = payload
+        .get("actor_pseudonym")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("actor_pseudonym fehlt")?;
+    assert!(actor_pseudonym.starts_with("act_"));
+    let expected_pseudonym: String = sqlx::query_scalar(
+        "SELECT actor_pseudonym
+           FROM scrim.audit_actor_pseudonyms
+          WHERE actor_type = 'user'
+            AND actor_ref = '42'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(actor_pseudonym, expected_pseudonym);
+    Ok(())
+}
+
+fn json_contains_string(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value == needle,
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_string(value, needle)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_string(value, needle)),
+        _ => false,
+    }
+}
+
+fn json_contains_substring(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(needle),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_substring(value, needle)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_substring(value, needle)),
+        _ => false,
+    }
+}
+
+fn test_stable_short_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex::encode(&digest[..8])
+}
+
+fn correction_actor() -> CorrectionActor {
+    CorrectionActor {
+        author_user_id: "42".to_string(),
+        author_display_name: "Coach".to_string(),
+        request_id: "bff:lagebild-test".to_string(),
+        idempotency_key: "bff:lagebild-test-idem".to_string(),
+    }
 }

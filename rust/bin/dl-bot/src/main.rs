@@ -14,6 +14,7 @@ mod modglue;
 mod onboardglue;
 mod onboardingbridgeglue;
 mod onboardingtourglue;
+mod scrim_adapter;
 mod scrimglue;
 mod serversync;
 mod turnierglue;
@@ -444,7 +445,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
     dl_community::scrim_signup::register(&mut router, scrim_signup);
-    scrimglue::register(&mut router, central_pool.clone());
+    let scrim_runtime_gate =
+        scrim_adapter::ScrimRuntimeGate::with_default_ttl(central_pool.clone());
+    let scrim_relay_handler = scrim_adapter::relay_handler(central_pool.clone(), env);
+    tracing::info!("Scrim-Ownership wird ueber scrim.runtime_control entschieden");
+    scrimglue::register(
+        &mut router,
+        central_pool.clone(),
+        scrim_runtime_gate.clone(),
+        scrim_relay_handler,
+    );
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
     let matcher = match &twitch_client {
@@ -1080,6 +1090,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
     );
 
+    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())
+    {
+        Ok(cfg) => match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
+            std::env::var(key).ok()
+        }) {
+            Ok(provider) => Some(provider),
+            Err(err) => {
+                tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Bot ungueltig");
+            None
+        }
+    };
+
     // Master-Broker :8770 — Token-Kette wie das Original
     let broker_token = env("MASTER_BROKER_TOKEN")
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
@@ -1106,6 +1133,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .merge(turnierglue::publisher_router(
                 turnier_proposals,
                 broker_token,
+            ))
+            .merge(scrim_adapter::lagebild_router(
+                scrim_adapter::LagebildApiState {
+                    provider: scrim_lagebild_ai.clone(),
+                    token: env("DL_SCRIM_LAGEBILD_INTERNAL_TOKEN").unwrap_or_default(),
+                    pool: central_pool.clone(),
+                },
             ))
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
@@ -1162,27 +1196,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         category_id: NonZeroU64::new(env_u64_default("DL_SCRIM_VISIBLE_VCS_CATEGORY_ID", 0))
             .map(NonZeroU64::get),
     };
-    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())
-    {
-        Ok(cfg) => match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
-            std::env::var(key).ok()
-        }) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
-                None
-            }
-        },
-        Err(err) => {
-            tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Bot ungueltig");
-            None
-        }
-    };
     let mut scrim_match_driver = scrimglue::spawn(
         central_pool.clone(),
         adapter.clone(),
         tempvoice.clone(),
         scrim_voice_config,
+        scrim_runtime_gate,
         scrim_lagebild_ai,
     );
 

@@ -1,0 +1,17 @@
+{
+  "schema_version": "turnier-scrim-match-request-response:v1",
+  "event": "scrimreq:v1:interaction:44",
+  "idempotency": "scrimreq:v1:interaction:44",
+  "action": "slot",
+  "request": "31",
+  "team": "2",
+  "slot": 0,
+  "interaction": "900719925474099344",
+  "guild": "1289721245281292288",
+  "channel": "900719925474099366",
+  "message": "900719925474099377",
+  "actor": "900719925474099388",
+  "actor_role_ids": [
+    "900719925474099399"
+  ]
+}
