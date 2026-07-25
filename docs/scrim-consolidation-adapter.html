@@ -42,10 +42,13 @@
       <h2>Interaction Relay</h2>
       <ul>
         <li>Canonical Route: <code>POST /internal/turnier/v1/scrims/interactions/match-request-response</code>.</li>
-        <li>Header: <code>X-Request-Id</code> und <code>Idempotency-Key</code> sind identisch: <code>scrimreq:v1:interaction:{interaction_id}</code>.</li>
+        <li>Ersatz-Buttons nutzen exakt <code>scrimrepl:v1:{replacement_request_id}:accept</code> oder <code>scrimrepl:v1:{replacement_request_id}:decline</code> und relayern per <code>PATCH /internal/turnier/v1/scrims/replacement-requests/{id}</code>.</li>
+        <li>Header: <code>X-Request-Id</code> und <code>Idempotency-Key</code> sind identisch: <code>scrimreq:v1:interaction:{interaction_id}</code> fuer Terminantworten oder <code>scrimrepl:v1:interaction:{interaction_id}</code> fuer Ersatzantworten.</li>
+        <li>Beim Ersatz-Relay werden <code>X-Request-Id</code>, <code>Idempotency-Key</code>, <code>X-Actor-Discord-Id</code> und <code>X-Actor-Display-Name</code> aus der Interaction gesetzt; der Body enthaelt nur <code>{"action":"accept|decline"}</code>.</li>
         <li>Der HTTP-Client nutzt 3 Sekunden Timeout, keine Redirects und keinen Proxy.</li>
         <li>Alle Wire-IDs im DTO sind Strings. Der Actor darf nur die Terminabfrage seines eigenen Teams beantworten.</li>
-        <li>Ingress und Replay laufen ueber <code>scrim.inbox_events</code> und <code>scrim.command_receipts</code>. Ein Replay liefert das gespeicherte Ergebnis.</li>
+        <li>Ingress und Replay laufen ueber <code>scrim.inbox_events</code> und <code>scrim.command_receipts</code>. Gleicher Key mit gleicher Payload replayt, gleicher Key mit anderer Payload blockt ohne erneute Zustellung.</li>
+        <li>Im Legacy-Modus wird kein lokaler Ersatz-Fallback erfunden; Replacement-Buttons fail-closed.</li>
         <li>Discord-Antworten fuer Buttons bleiben ephemeral.</li>
       </ul>
     </section>
@@ -55,8 +58,12 @@
       <ul>
         <li>Der bestehende Match-Statuspfad claimt nur noch, wenn <code>scrim.status_publication_approvals</code> eine passende <code>approved</code>-Freigabe enthaelt.</li>
         <li>Unapproved Drafts werden nicht gepostet und nicht editiert.</li>
-        <li>Freigegebene Statusmeldungen werden als <code>scrim.outbox_effects</code> mit Components V2, leerem <code>allowed_mentions.parse</code> und deterministischem Payload persistiert.</li>
-        <li>Discord-Zustellung schreibt <code>scrim.effect_receipts</code>; Fehler markieren den Outbox-Effekt als <code>uncertain</code>.</li>
+        <li>Freigegebene Statusmeldungen, Reminder-Effekte und Ersatz-DMs verwenden <code>discord-scrim-effect:v1</code> mit Components V2, Gold-Container und ping-sicherem <code>allowed_mentions</code>.</li>
+        <li>Status-Outbox-Links nutzen kanonisch <code>status_publication_approval_id</code>; Ersatzbedarf ist je Match-Request nur eindeutig, wenn <code>match_request_id</code>, <code>team_id</code>, <code>participant_id</code> und <code>slot_index</code> alle gesetzt sind.</li>
+        <li>Outbox-Linktabellen fuer Reminder, Status-Publikation und Ersatz-DMs haben <code>reconciled_at</code> als nicht-personalen Reconciliation-Marker; offene Zeilen bleiben ueber <code>outbox_effect_id</code> partiell indexiert.</li>
+        <li>Channel-Ziele setzen eine positive String-<code>channel_id</code>; Ersatz-DMs setzen <code>channel_id:null</code> und eine positive String-<code>recipient_user_id</code>. Beides zusammen oder keins ist ungueltig.</li>
+        <li>Discord-Zustellung schreibt <code>scrim.effect_receipts</code>; Timeouts bleiben <code>uncertain</code> und werden nicht blind erneut gepostet.</li>
+        <li>DM-Receipts nutzen <code>discorddm:{dm_channel_id}:{message_id}</code>, damit der Remote-Key domain-ref-konform bleibt und keine User-ID dupliziert.</li>
       </ul>
     </section>
 
@@ -83,9 +90,11 @@
     <section class="card">
       <h2>Verifikation</h2>
       <p>Relevant gruener Lauf in dieser Phase:</p>
-      <p><code>./scripts/central_test_db.sh cargo test -p dl-bot -p dl-squads -p dl-bridges</code></p>
-      <p><code>cargo check -p dl-bot -p dl-squads -p dl-bridges</code></p>
-      <p><code>cargo clippy -p dl-bot -p dl-squads -p dl-bridges --all-targets -- -D warnings</code></p>
+      <p><code>cargo check --workspace</code></p>
+      <p><code>cargo clippy --workspace --all-targets -- -D warnings</code></p>
+      <p><code>./scripts/central_test_db.sh cargo test -p dl-bot scrim_adapter::tests::</code></p>
+      <p><code>./scripts/central_test_db.sh cargo test -p dl-bot scrimglue::tests::</code></p>
+      <p><code>./scripts/central_fresh_schema.sh</code></p>
     </section>
   </main>
 </body>

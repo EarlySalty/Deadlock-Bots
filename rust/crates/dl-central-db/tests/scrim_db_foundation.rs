@@ -6,7 +6,7 @@ use dl_central_db::{connect_pool, testing::test_pool};
 use sqlx::{migrate::Migrator, PgPool};
 
 const PRE_FOUNDATION_VERSION: i64 = 2026072407;
-const FOUNDATION_END_VERSION: i64 = 2026072417;
+const FOUNDATION_END_VERSION: i64 = 2026072418;
 
 type ExistingResultRefRow = (i64, String, bool, String, bool, i32, bool, bool);
 
@@ -359,6 +359,7 @@ async fn scrim_db_foundation_contract_tables_constraints_and_legacy_id_safety() 
     assert_result_refs_selection_supersede_and_delete_guards(pool).await;
     assert_match_result_ref_constraints_are_validated(pool).await;
     assert_replacement_request_candidate_need_consistency(pool).await;
+    assert_scrim_request_workflow_constraints_and_links(pool).await;
     assert_steam_v1_idempotency_leases_and_result_guards(pool).await;
     assert_privacy_redaction_requires_deleted_marker_and_exact_target(pool).await;
     assert_lagebild_privacy_redaction_guards(pool).await;
@@ -4056,6 +4057,491 @@ async fn assert_replacement_request_candidate_need_consistency(pool: &PgPool) {
     .expect("matching replacement request is allowed");
 }
 
+async fn assert_scrim_request_workflow_constraints_and_links(pool: &PgPool) {
+    assert!(table_columns(pool, "scrim", "replacement_needs")
+        .await
+        .contains(&"match_request_id".to_string()));
+    assert_eq!(
+        table_columns(pool, "scrim", "match_request_reminder_effects").await,
+        vec![
+            "reminder_id",
+            "outbox_effect_id",
+            "created_at",
+            "reconciled_at"
+        ]
+    );
+    assert_eq!(
+        table_columns(pool, "scrim", "status_publication_effects").await,
+        vec![
+            "status_publication_approval_id",
+            "outbox_effect_id",
+            "created_at",
+            "reconciled_at"
+        ]
+    );
+    assert_eq!(
+        table_columns(pool, "scrim", "replacement_request_effects").await,
+        vec![
+            "replacement_request_id",
+            "outbox_effect_id",
+            "created_at",
+            "reconciled_at"
+        ]
+    );
+    let unreconciled_indexes: Vec<(String, String, Vec<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT source_table.relname::TEXT,
+               index_class.relname::TEXT,
+               array_agg(att.attname::TEXT ORDER BY key_columns.ord),
+               pg_get_expr(idx.indpred, idx.indrelid)
+          FROM pg_index idx
+          JOIN pg_class index_class ON index_class.oid = idx.indexrelid
+          JOIN pg_class source_table ON source_table.oid = idx.indrelid
+          JOIN pg_namespace source_ns ON source_ns.oid = source_table.relnamespace
+          JOIN unnest(idx.indkey) WITH ORDINALITY AS key_columns(attnum, ord) ON true
+          JOIN pg_attribute att ON att.attrelid = source_table.oid
+                               AND att.attnum = key_columns.attnum
+         WHERE source_ns.nspname = 'scrim'
+           AND index_class.relname IN (
+               'match_request_reminder_effects_unreconciled_outbox_idx',
+               'status_publication_effects_unreconciled_outbox_idx',
+               'replacement_request_effects_unreconciled_outbox_idx'
+           )
+         GROUP BY source_table.relname, index_class.relname, idx.indpred, idx.indrelid
+         ORDER BY source_table.relname, index_class.relname
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("unreconciled outbox index contracts");
+    assert_eq!(
+        unreconciled_indexes,
+        vec![
+            (
+                "match_request_reminder_effects".to_string(),
+                "match_request_reminder_effects_unreconciled_outbox_idx".to_string(),
+                vec!["outbox_effect_id".to_string()],
+                Some("(reconciled_at IS NULL)".to_string()),
+            ),
+            (
+                "replacement_request_effects".to_string(),
+                "replacement_request_effects_unreconciled_outbox_idx".to_string(),
+                vec!["outbox_effect_id".to_string()],
+                Some("(reconciled_at IS NULL)".to_string()),
+            ),
+            (
+                "status_publication_effects".to_string(),
+                "status_publication_effects_unreconciled_outbox_idx".to_string(),
+                vec!["outbox_effect_id".to_string()],
+                Some("(reconciled_at IS NULL)".to_string()),
+            ),
+        ]
+    );
+    let replacement_need_predicate: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT pg_get_expr(idx.indpred, idx.indrelid)
+          FROM pg_index idx
+          JOIN pg_class index_class ON index_class.oid = idx.indexrelid
+          JOIN pg_namespace ns ON ns.oid = index_class.relnamespace
+         WHERE ns.nspname = 'scrim'
+           AND index_class.relname = 'replacement_needs_match_request_slot_uidx'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("replacement need partial unique predicate");
+    assert_eq!(
+        replacement_need_predicate.as_deref(),
+        Some("((match_request_id IS NOT NULL) AND (team_id IS NOT NULL) AND (participant_id IS NOT NULL) AND (slot_index IS NOT NULL))")
+    );
+    let link_table_fks: Vec<(String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT source_table.relname::TEXT,
+               source_column.attname::TEXT,
+               referenced_table.relname::TEXT
+          FROM pg_constraint con
+          JOIN pg_class source_table ON source_table.oid = con.conrelid
+          JOIN pg_namespace source_ns ON source_ns.oid = source_table.relnamespace
+          JOIN pg_class referenced_table ON referenced_table.oid = con.confrelid
+          JOIN pg_attribute source_column ON source_column.attrelid = con.conrelid
+                                         AND source_column.attnum = con.conkey[1]
+         WHERE source_ns.nspname = 'scrim'
+           AND source_table.relname IN (
+               'match_request_reminder_effects',
+               'status_publication_effects',
+               'replacement_request_effects'
+           )
+           AND con.contype = 'f'
+           AND array_length(con.conkey, 1) = 1
+         ORDER BY source_table.relname, source_column.attname
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("outbox link table fks");
+    assert_eq!(
+        link_table_fks,
+        vec![
+            (
+                "match_request_reminder_effects".to_string(),
+                "outbox_effect_id".to_string(),
+                "outbox_effects".to_string(),
+            ),
+            (
+                "match_request_reminder_effects".to_string(),
+                "reminder_id".to_string(),
+                "match_request_reminders".to_string(),
+            ),
+            (
+                "replacement_request_effects".to_string(),
+                "outbox_effect_id".to_string(),
+                "outbox_effects".to_string(),
+            ),
+            (
+                "replacement_request_effects".to_string(),
+                "replacement_request_id".to_string(),
+                "replacement_requests".to_string(),
+            ),
+            (
+                "status_publication_effects".to_string(),
+                "outbox_effect_id".to_string(),
+                "outbox_effects".to_string(),
+            ),
+            (
+                "status_publication_effects".to_string(),
+                "status_publication_approval_id".to_string(),
+                "status_publication_approvals".to_string(),
+            ),
+        ]
+    );
+
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES (930001, 'Workflow A', now()), (930002, 'Workflow B', now())")
+        .execute(pool)
+        .await
+        .expect("insert workflow teams");
+    sqlx::query(
+        "INSERT INTO scrim.participants(id, discord_id, display_name, rank_source, status, source, created_at, updated_at)
+         VALUES (930101, 930101, 'Workflow User', 'manual', 'assigned', 'test', now(), now()),
+                (930102, 930102, 'Workflow Other', 'manual', 'assigned', 'test', now(), now())",
+    )
+    .execute(pool)
+    .await
+    .expect("insert workflow participants");
+    sqlx::query(
+        "INSERT INTO scrim.match_request_batches(id, template, deadline_at, status, created_by_user_id, created_by_display_name)
+         VALUES (930010, 'regular_scrim', now() + interval '1 day', 'open', '424242', 'Tester')",
+    )
+    .execute(pool)
+    .await
+    .expect("insert workflow batch");
+    sqlx::query(
+        r#"INSERT INTO scrim.match_requests(id, batch_id, team_a_id, team_b_id, status, slot_options)
+         VALUES (930011, 930010, 930001, 930002, 'open', '[{"day":"sat","from":1200,"to":1320}]'::jsonb)"#,
+    )
+    .execute(pool)
+    .await
+    .expect("insert workflow request");
+
+    let missing_slot = sqlx::query(
+        "INSERT INTO scrim.replacement_needs(
+             match_request_id, team_id, participant_id, reason, created_by_user_id, created_by_display_name
+         )
+         VALUES (930011, 930001, 930101, 'contract_test', '424242', 'Tester')",
+    )
+    .execute(pool)
+    .await;
+    assert_eq!(database_error_code(&missing_slot).as_deref(), Some("23514"));
+
+    let need_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.replacement_needs(
+             match_request_id, slot_index, team_id, participant_id, reason, created_by_user_id, created_by_display_name
+         )
+          VALUES (930011, 0, 930001, 930101, 'contract_test', '424242', 'Tester')
+         RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("insert workflow replacement need");
+    let duplicate_need = sqlx::query(
+        "INSERT INTO scrim.replacement_needs(
+             match_request_id, slot_index, team_id, participant_id, reason, created_by_user_id, created_by_display_name
+         )
+          VALUES (930011, 0, 930001, 930101, 'contract_test', '424242', 'Tester')",
+    )
+    .execute(pool)
+    .await;
+    assert_eq!(
+        database_error_code(&duplicate_need).as_deref(),
+        Some("23505")
+    );
+
+    sqlx::query(
+        "INSERT INTO scrim.replacement_candidates(need_id, participant_id, candidate_data, score_data, status)
+         VALUES ($1, 930101, '{}'::jsonb, '{}'::jsonb, 'selected')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await
+    .expect("first selected candidate");
+    let second_selected = sqlx::query(
+        "INSERT INTO scrim.replacement_candidates(need_id, participant_id, candidate_data, score_data, status)
+         VALUES ($1, 930102, '{}'::jsonb, '{}'::jsonb, 'selected')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await;
+    assert_eq!(
+        database_error_code(&second_selected).as_deref(),
+        Some("23505")
+    );
+    sqlx::query(
+        "INSERT INTO scrim.replacement_candidates(need_id, discord_user_id, candidate_data, score_data, status)
+         VALUES ($1, 930201, '{}'::jsonb, '{}'::jsonb, 'accepted'),
+                ($1, 930202, '{}'::jsonb, '{}'::jsonb, 'accepted')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await
+    .expect("multiple accepted candidates stay allowed");
+
+    sqlx::query(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930301, 'uncertain', '424242', 'Tester')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await
+    .expect("uncertain request without response time");
+    sqlx::query(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930304, 'cancelled', '424242', 'Tester')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await
+    .expect("cancelled request without response time");
+    sqlx::query(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, responded_at, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930305, 'cancelled', now(), '424242', 'Tester')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await
+    .expect("cancelled request after response remains legal");
+    sqlx::query(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, responded_at, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930306, 'accepted', now(), '424242', 'Tester'),
+                ($1, 930307, 'accepted', now(), '424242', 'Tester')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await
+    .expect("multiple accepted replacement requests stay legal before coach selection");
+    let accepted_without_response_time = sqlx::query(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930308, 'accepted', '424242', 'Tester')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await;
+    assert_eq!(
+        database_error_code(&accepted_without_response_time).as_deref(),
+        Some("23514")
+    );
+    let selected_without_response_time = sqlx::query(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930302, 'selected', '424242', 'Tester')",
+    )
+    .bind(need_id)
+    .execute(pool)
+    .await;
+    assert_eq!(
+        database_error_code(&selected_without_response_time).as_deref(),
+        Some("23514")
+    );
+    let replacement_request_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.replacement_requests(need_id, discord_user_id, status, responded_at, requested_by_user_id, requested_by_display_name)
+         VALUES ($1, 930303, 'selected', now(), '424242', 'Tester')
+         RETURNING id",
+    )
+    .bind(need_id)
+    .fetch_one(pool)
+    .await
+    .expect("selected request with response time");
+
+    sqlx::query(
+        "INSERT INTO scrim.match_request_reminders(
+             id, request_id, team_id, target_kind, missing_count, approved_by_user_id,
+             approved_by_display_name, discord_channel_id, source_message_id, status
+         )
+          VALUES (930080, 930011, 930001, 'team', 1, '424242', 'Tester', 930400, 930401, 'queued'),
+                 (930081, 930011, 930001, 'team', 1, '424242', 'Tester', 930400, 930401, 'uncertain')",
+    )
+    .execute(pool)
+    .await
+    .expect("queued and uncertain reminder states");
+    sqlx::query(
+        "UPDATE scrim.match_requests
+            SET status_message_state = 'failed'
+          WHERE id = 930011",
+    )
+    .execute(pool)
+    .await
+    .expect("failed status message state");
+    sqlx::query(
+        "UPDATE scrim.match_requests
+            SET status_message_state = 'uncertain'
+          WHERE id = 930011",
+    )
+    .execute(pool)
+    .await
+    .expect("uncertain status message state");
+
+    let hash = vec![7_u8; 32];
+    let reminder_effect_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.outbox_effects(effect_type, idempotency_key, payload_hash, payload)
+         VALUES ('discord_scrim_effect', 'effect:reminder', $1, '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(&hash)
+    .fetch_one(pool)
+    .await
+    .expect("insert reminder effect");
+    sqlx::query(
+        "INSERT INTO scrim.match_request_reminder_effects(reminder_id, outbox_effect_id)
+         VALUES (930080, $1)",
+    )
+    .bind(reminder_effect_id)
+    .execute(pool)
+    .await
+    .expect("link reminder effect");
+    let reminder_reconciled_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT reconciled_at
+           FROM scrim.match_request_reminder_effects
+          WHERE reminder_id = 930080
+            AND outbox_effect_id = $1",
+    )
+    .bind(reminder_effect_id)
+    .fetch_one(pool)
+    .await
+    .expect("reminder effect reconciled_at default");
+    assert_eq!(reminder_reconciled_at, None);
+    let duplicate_reminder_link = sqlx::query(
+        "INSERT INTO scrim.match_request_reminder_effects(reminder_id, outbox_effect_id)
+         VALUES (930080, $1)",
+    )
+    .bind(reminder_effect_id)
+    .execute(pool)
+    .await;
+    assert_eq!(
+        database_error_code(&duplicate_reminder_link).as_deref(),
+        Some("23505")
+    );
+
+    let status_publication_approval_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.status_publication_approvals(
+             target_kind, target_id, status_kind, payload, payload_hash,
+             decision, decided_by_user_id, decided_by_display_name, decided_at
+         )
+         VALUES (
+             'match_request', '930011', 'match_status', '{}'::jsonb,
+             scrim.status_publication_effect_hash('match_request', '930011', 'match_status', '{}'::jsonb),
+             'approved', '424242', 'Tester', now()
+         )
+         RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("insert status publication approval");
+    sqlx::query(
+        "UPDATE scrim.status_publication_approvals
+            SET decision = 'uncertain', decided_at = now()
+          WHERE id = $1",
+    )
+    .bind(status_publication_approval_id)
+    .execute(pool)
+    .await
+    .expect("status publication approval can become uncertain");
+    let failed_status_publication_approval_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.status_publication_approvals(
+             target_kind, target_id, status_kind, payload, payload_hash,
+             decision, decided_by_user_id, decided_by_display_name, decided_at
+         )
+         VALUES (
+             'match_request', '930011', 'match_status_retry', '{}'::jsonb,
+             scrim.status_publication_effect_hash('match_request', '930011', 'match_status_retry', '{}'::jsonb),
+             'failed', '424242', 'Tester', now()
+         )
+         RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("status publication approval can represent failed delivery");
+    assert!(failed_status_publication_approval_id > 0);
+    let status_effect_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.outbox_effects(effect_type, idempotency_key, payload_hash, payload)
+         VALUES ('discord_scrim_effect', 'effect:status', $1, '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(&hash)
+    .fetch_one(pool)
+    .await
+    .expect("insert status effect");
+    sqlx::query(
+        "INSERT INTO scrim.status_publication_effects(status_publication_approval_id, outbox_effect_id)
+         VALUES ($1, $2)",
+    )
+    .bind(status_publication_approval_id)
+    .bind(status_effect_id)
+    .execute(pool)
+    .await
+    .expect("link status publication effect");
+    let status_reconciled_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT reconciled_at
+           FROM scrim.status_publication_effects
+          WHERE status_publication_approval_id = $1
+            AND outbox_effect_id = $2",
+    )
+    .bind(status_publication_approval_id)
+    .bind(status_effect_id)
+    .fetch_one(pool)
+    .await
+    .expect("status publication effect reconciled_at default");
+    assert_eq!(status_reconciled_at, None);
+
+    let replacement_effect_id: i64 = sqlx::query_scalar(
+        "INSERT INTO scrim.outbox_effects(effect_type, idempotency_key, payload_hash, payload)
+         VALUES ('discord_scrim_effect', 'effect:replacement', $1, '{}'::jsonb)
+         RETURNING id",
+    )
+    .bind(&hash)
+    .fetch_one(pool)
+    .await
+    .expect("insert replacement effect");
+    sqlx::query(
+        "INSERT INTO scrim.replacement_request_effects(replacement_request_id, outbox_effect_id)
+         VALUES ($1, $2)",
+    )
+    .bind(replacement_request_id)
+    .bind(replacement_effect_id)
+    .execute(pool)
+    .await
+    .expect("link replacement effect");
+    let replacement_reconciled_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "UPDATE scrim.replacement_request_effects
+            SET reconciled_at = now()
+          WHERE replacement_request_id = $1
+            AND outbox_effect_id = $2
+      RETURNING reconciled_at",
+    )
+    .bind(replacement_request_id)
+    .bind(replacement_effect_id)
+    .fetch_one(pool)
+    .await
+    .expect("replacement request effect reconciled_at can be set");
+    assert!(replacement_reconciled_at.is_some());
+}
+
 async fn assert_steam_v1_idempotency_leases_and_result_guards(pool: &PgPool) {
     let hash = vec![2_u8; 32];
     assert_eq!(
@@ -4590,6 +5076,46 @@ async fn assert_privacy_registry_covers_new_user_id_display_name_and_json_fields
         ],
         "result reason fields must be bounded machine codes, not free text"
     );
+
+    let reconciliation_timestamp_classifications: Vec<(String, String, String, String)> =
+        sqlx::query_as(
+            "SELECT table_name, data_category, retention_action, erasure_action
+               FROM core.privacy_field_registry
+              WHERE schema_name = 'scrim'
+                AND (table_name, column_name) IN (
+                    ('match_request_reminder_effects', 'reconciled_at'),
+                    ('status_publication_effects', 'reconciled_at'),
+                    ('replacement_request_effects', 'reconciled_at')
+                )
+              ORDER BY table_name",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("reconciliation timestamp privacy classifications");
+    assert_eq!(
+        reconciliation_timestamp_classifications,
+        vec![
+            (
+                "match_request_reminder_effects".to_string(),
+                "machine_timestamp".to_string(),
+                "retain_operational".to_string(),
+                "retain_non_personal".to_string(),
+            ),
+            (
+                "replacement_request_effects".to_string(),
+                "machine_timestamp".to_string(),
+                "retain_operational".to_string(),
+                "retain_non_personal".to_string(),
+            ),
+            (
+                "status_publication_effects".to_string(),
+                "machine_timestamp".to_string(),
+                "retain_operational".to_string(),
+                "retain_non_personal".to_string(),
+            ),
+        ],
+        "reconciliation markers are non-personal machine timestamps"
+    );
 }
 
 async fn assert_foundation_privacy_inventory_is_classified(pool: &PgPool) {
@@ -4726,6 +5252,9 @@ async fn foundation_privacy_inventory_columns(pool: &PgPool) -> Vec<(String, Str
                 ('scrim', 'replacement_needs'),
                 ('scrim', 'replacement_candidates'),
                 ('scrim', 'replacement_requests'),
+                ('scrim', 'match_request_reminder_effects'),
+                ('scrim', 'status_publication_effects'),
+                ('scrim', 'replacement_request_effects'),
                 ('scrim', 'match_lineup_snapshots'),
                 ('scrim', 'lagebild_snapshots'),
                 ('scrim', 'lagebild_evidences'),
@@ -4766,7 +5295,18 @@ async fn foundation_privacy_inventory_columns(pool: &PgPool) -> Vec<(String, Str
                 ('scrim', 'match_requests', 'released_by_display_name'),
                 ('scrim', 'match_requests', 'override_reason'),
                 ('scrim', 'match_requests', 'team_status_message_ids'),
-                ('scrim', 'match_requests', 'status_message_last_error')
+                ('scrim', 'match_requests', 'status_message_last_error'),
+                ('scrim', 'replacement_needs', 'match_request_id'),
+                ('scrim', 'replacement_needs', 'slot_index'),
+                ('scrim', 'match_request_reminder_effects', 'reminder_id'),
+                ('scrim', 'match_request_reminder_effects', 'outbox_effect_id'),
+                ('scrim', 'match_request_reminder_effects', 'reconciled_at'),
+                ('scrim', 'status_publication_effects', 'status_publication_approval_id'),
+                ('scrim', 'status_publication_effects', 'outbox_effect_id'),
+                ('scrim', 'status_publication_effects', 'reconciled_at'),
+                ('scrim', 'replacement_request_effects', 'replacement_request_id'),
+                ('scrim', 'replacement_request_effects', 'outbox_effect_id'),
+                ('scrim', 'replacement_request_effects', 'reconciled_at')
         ),
         scoped_columns AS (
             SELECT c.table_schema::TEXT AS schema_name,
@@ -5135,6 +5675,29 @@ fn expected_privacy_registry_fields() -> &'static [(&'static str, &'static str, 
         ("scrim", "replacement_candidates", "score_data"),
         ("scrim", "replacement_requests", "discord_user_id"),
         ("scrim", "replacement_requests", "request_payload"),
+        ("scrim", "replacement_needs", "match_request_id"),
+        ("scrim", "replacement_needs", "slot_index"),
+        ("scrim", "match_request_reminder_effects", "reminder_id"),
+        (
+            "scrim",
+            "match_request_reminder_effects",
+            "outbox_effect_id",
+        ),
+        ("scrim", "match_request_reminder_effects", "reconciled_at"),
+        (
+            "scrim",
+            "status_publication_effects",
+            "status_publication_approval_id",
+        ),
+        ("scrim", "status_publication_effects", "outbox_effect_id"),
+        ("scrim", "status_publication_effects", "reconciled_at"),
+        (
+            "scrim",
+            "replacement_request_effects",
+            "replacement_request_id",
+        ),
+        ("scrim", "replacement_request_effects", "outbox_effect_id"),
+        ("scrim", "replacement_request_effects", "reconciled_at"),
         ("scrim", "match_lineup_snapshots", "lineup_payload"),
         ("scrim", "lagebild_snapshots", "generated_for"),
         ("scrim", "lagebild_snapshots", "source"),

@@ -25,11 +25,13 @@ use tokio::sync::RwLock;
 pub const COMPONENTS_V2: u64 = 32_768;
 const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
 const SCRIMREQ_PREFIX: &str = "scrimreq:v1:";
+pub const SCRIMREPL_PREFIX: &str = "scrimrepl:v1:";
 const RUNTIME_CACHE_TTL: Duration = Duration::from_secs(2);
 const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
 const RELAY_LEASE_OWNER: &str = "dlbots:scrim_adapter";
 const RELAY_EVENT_SOURCE: &str = "dl_bots";
 const RELAY_COMMAND_SCOPE: &str = "scrim_relay";
+const REPLACEMENT_RELAY_COMMAND_SCOPE: &str = "scrim_replacement_relay";
 const RELAY_LEASE_SECONDS: i64 = 30;
 const LAGEBILD_LEASE_OWNER: &str = "dlbots:lagebild_api";
 const LAGEBILD_REFRESH_SCOPE: &str = "lagebild_refresh";
@@ -77,6 +79,10 @@ impl ScrimRuntimeGate {
 
     pub async fn interaction_route(&self) -> Result<InteractionRoute, String> {
         Ok(self.load_fail_safe().await?.route)
+    }
+
+    pub async fn interaction_route_fresh(&self) -> Result<InteractionRoute, String> {
+        Ok(self.load_fresh().await?.route)
     }
 
     async fn load_fail_safe(&self) -> Result<CachedRuntimeRoute, String> {
@@ -169,6 +175,34 @@ pub struct MatchRequestResponseRequest {
     pub message: Option<String>,
     pub actor: String,
     pub actor_role_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplacementRequestAction {
+    Accept,
+    Decline,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReplacementRequestRelayRequest {
+    pub schema_version: String,
+    pub event: String,
+    pub idempotency: String,
+    pub replacement_request: String,
+    pub action: ReplacementRequestAction,
+    pub interaction: String,
+    pub guild: String,
+    pub channel: String,
+    pub message: Option<String>,
+    pub actor: String,
+    pub actor_display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ReplacementRequestPatchBody {
+    action: ReplacementRequestAction,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -353,6 +387,74 @@ fn match_request_response_request(
     })
 }
 
+pub fn replacement_request_button_parts(
+    custom_id: &str,
+) -> Result<(String, ReplacementRequestAction), String> {
+    let rest = custom_id
+        .strip_prefix(SCRIMREPL_PREFIX)
+        .ok_or_else(|| "Unbekannte Scrim-Ersatzaktion".to_string())?;
+    let mut parts = rest.split(':');
+    let request_id = parts
+        .next()
+        .filter(|value| value.parse::<u64>().ok().is_some_and(|id| id > 0))
+        .ok_or_else(|| "Scrim-Ersatzanfrage-ID ungueltig".to_string())?;
+    let action = match parts.next() {
+        Some("accept") => ReplacementRequestAction::Accept,
+        Some("decline") => ReplacementRequestAction::Decline,
+        _ => return Err("Unbekannte Scrim-Ersatzaktion".to_string()),
+    };
+    if parts.next().is_some() {
+        return Err("Scrim-Ersatzaktion ist unvollstaendig".to_string());
+    }
+    Ok((request_id.to_string(), action))
+}
+
+fn replacement_request_relay_request(
+    interaction: BridgeInteraction,
+) -> Result<ReplacementRequestRelayRequest, String> {
+    let (replacement_request, action) = replacement_request_button_parts(&interaction.custom_id)?;
+    if interaction.interaction_id == 0 || interaction.user_id == 0 {
+        return Err("Scrim-Ersatzaktion ist unvollstaendig".to_string());
+    }
+    let actor_display_name = actor_display_header_value(&interaction.author_display_name)?;
+    let event_id = format!("scrimrepl:v1:interaction:{}", interaction.interaction_id);
+    Ok(ReplacementRequestRelayRequest {
+        schema_version: "turnier-scrim-replacement-request-response:v1".to_string(),
+        event: event_id.clone(),
+        idempotency: event_id,
+        replacement_request,
+        action,
+        interaction: interaction.interaction_id.to_string(),
+        guild: interaction.guild_id.to_string(),
+        channel: interaction.channel_id.to_string(),
+        message: interaction.message_id.map(|value| value.to_string()),
+        actor: interaction.user_id.to_string(),
+        actor_display_name,
+    })
+}
+
+fn actor_display_header_value(value: &str) -> Result<String, String> {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_graphic() || ch == ' ' {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let truncated = cleaned.chars().take(128).collect::<String>();
+    if truncated.is_empty() {
+        Err("Scrim-Ersatzaktion braucht einen Discord-Displaynamen.".to_string())
+    } else {
+        Ok(truncated)
+    }
+}
+
 #[derive(Clone)]
 pub struct TurnierScrimClient {
     http: reqwest::Client,
@@ -423,6 +525,57 @@ impl TurnierScrimClient {
         }
         Ok(receipt)
     }
+
+    async fn relay_replacement_request(
+        &self,
+        request: &ReplacementRequestRelayRequest,
+    ) -> Result<ActionReceipt, RelayClientError> {
+        if self.token.trim().is_empty() {
+            return Err(RelayClientError::MissingToken);
+        }
+        let response = self
+            .http
+            .patch(format!(
+                "{}/internal/turnier/v1/scrims/replacement-requests/{}",
+                self.base_url, request.replacement_request
+            ))
+            .header(INTERNAL_TOKEN_HEADER, &self.token)
+            .header("X-Request-Id", &request.event)
+            .header("Idempotency-Key", &request.idempotency)
+            .header("X-Actor-Discord-Id", &request.actor)
+            .header("X-Actor-Display-Name", &request.actor_display_name)
+            .json(&ReplacementRequestPatchBody {
+                action: request.action,
+            })
+            .send()
+            .await
+            .map_err(|error| RelayClientError::Transport(error.to_string()))?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            if status.is_success() {
+                RelayClientError::MalformedSuccess(format!("Antwortkoerper unlesbar: {error}"))
+            } else {
+                RelayClientError::Http {
+                    status,
+                    message: format!("Antwortkoerper unlesbar: {error}"),
+                }
+            }
+        })?;
+        if !status.is_success() {
+            return Err(RelayClientError::Http {
+                status,
+                message: relay_error_message(&body),
+            });
+        }
+        let receipt = serde_json::from_str::<ActionReceipt>(&body)
+            .map_err(|error| RelayClientError::MalformedSuccess(error.to_string()))?;
+        if receipt.message.trim().is_empty() {
+            return Err(RelayClientError::MalformedSuccess(
+                "Nachricht fehlt".to_string(),
+            ));
+        }
+        Ok(receipt)
+    }
 }
 
 pub struct RelayInteractionHandler {
@@ -439,6 +592,9 @@ impl RelayInteractionHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for RelayInteractionHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if interaction.custom_id.starts_with(SCRIMREPL_PREFIX) {
+            return self.handle_replacement_request(interaction).await;
+        }
         let request = match match_request_response_request(interaction) {
             Ok(request) => request,
             Err(error) => return BridgeReply::ephemeral_text(error),
@@ -449,6 +605,24 @@ impl InteractionHandler for RelayInteractionHandler {
                 tracing::warn!(event_id = %request.event, actor_id = %request.actor, %error, "Scrim-Interaction an Turnier nicht weitergeleitet");
                 BridgeReply::ephemeral_text(
                     "Terminantwort konnte nicht an die Turnierplanung weitergeleitet werden.",
+                )
+            }
+        }
+    }
+}
+
+impl RelayInteractionHandler {
+    async fn handle_replacement_request(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let request = match replacement_request_relay_request(interaction) {
+            Ok(request) => request,
+            Err(error) => return BridgeReply::ephemeral_text(error),
+        };
+        match relay_replacement_request_response(&self.pool, &self.client, &request).await {
+            Ok(receipt) => BridgeReply::ephemeral_text(receipt.message),
+            Err(error) => {
+                tracing::warn!(event_id = %request.event, actor_id = %request.actor, replacement_request_id = %request.replacement_request, action = ?request.action, %error, "Scrim-Ersatz-Interaction an Turnier nicht weitergeleitet");
+                BridgeReply::ephemeral_text(
+                    "Ersatzantwort konnte nicht an die Turnierplanung weitergeleitet werden.",
                 )
             }
         }
@@ -477,7 +651,17 @@ async fn relay_match_request_response(
     client: &TurnierScrimClient,
     request: &MatchRequestResponseRequest,
 ) -> Result<ActionReceipt, String> {
-    match begin_relay_command(pool, request).await? {
+    let payload = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    match begin_relay_command(
+        pool,
+        RELAY_COMMAND_SCOPE,
+        &request.event,
+        &request.idempotency,
+        &payload,
+        relay_payload_conflict_receipt(),
+    )
+    .await?
+    {
         RelayCommandState::Replay(receipt) => return Ok(receipt),
         RelayCommandState::PayloadConflict(receipt) => return Ok(receipt),
         RelayCommandState::Processing => {
@@ -494,24 +678,55 @@ async fn relay_match_request_response(
             accepted: false,
             message: error,
         };
-        finish_relay_command(pool, request, &receipt, Some("err_validation_failed")).await?;
+        finish_relay_command(
+            pool,
+            RELAY_COMMAND_SCOPE,
+            &request.event,
+            &request.idempotency,
+            &receipt,
+            Some("err_validation_failed"),
+        )
+        .await?;
         return Ok(receipt);
     }
 
     match client.relay(request).await {
         Ok(receipt) => {
-            finish_relay_command(pool, request, &receipt, None).await?;
+            finish_relay_command(
+                pool,
+                RELAY_COMMAND_SCOPE,
+                &request.event,
+                &request.idempotency,
+                &receipt,
+                None,
+            )
+            .await?;
             Ok(receipt)
         }
         Err(error) => match error.classification() {
             RelayErrorClass::Retryable => {
-                mark_relay_command_retry(pool, request, error.error_code(), &error.to_string())
-                    .await?;
+                mark_relay_command_retry(
+                    pool,
+                    RELAY_COMMAND_SCOPE,
+                    &request.event,
+                    &request.idempotency,
+                    error.error_code(),
+                    &error.to_string(),
+                )
+                .await?;
                 Err(error.to_string())
             }
             RelayErrorClass::Terminal => {
                 let receipt = error.user_receipt();
-                finish_relay_command(pool, request, &receipt, Some(error.error_code())).await?;
+                finish_relay_command(
+                    pool,
+                    RELAY_COMMAND_SCOPE,
+                    &request.event,
+                    &request.idempotency,
+                    &receipt,
+                    Some(error.error_code()),
+                )
+                .await?;
                 tracing::warn!(
                     event_id = %request.event,
                     error_class = ?error.classification(),
@@ -525,11 +740,15 @@ async fn relay_match_request_response(
                 let receipt = error.user_receipt();
                 finish_relay_command_state(
                     pool,
-                    request,
+                    RELAY_COMMAND_SCOPE,
+                    &request.event,
+                    &request.idempotency,
                     &receipt,
-                    "uncertain",
-                    "uncertain",
-                    Some(error.error_code()),
+                    RelayFinishState {
+                        command_state: "uncertain",
+                        inbox_state: "uncertain",
+                        error_code: Some(error.error_code()),
+                    },
                 )
                 .await?;
                 tracing::warn!(
@@ -544,12 +763,106 @@ async fn relay_match_request_response(
     }
 }
 
+async fn relay_replacement_request_response(
+    pool: &PgPool,
+    client: &TurnierScrimClient,
+    request: &ReplacementRequestRelayRequest,
+) -> Result<ActionReceipt, String> {
+    let payload = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    match begin_relay_command(
+        pool,
+        REPLACEMENT_RELAY_COMMAND_SCOPE,
+        &request.event,
+        &request.idempotency,
+        &payload,
+        replacement_payload_conflict_receipt(),
+    )
+    .await?
+    {
+        RelayCommandState::Replay(receipt) => return Ok(receipt),
+        RelayCommandState::PayloadConflict(receipt) => return Ok(receipt),
+        RelayCommandState::Processing => {
+            return Ok(ActionReceipt {
+                accepted: false,
+                message: "Ersatzantwort wird bereits verarbeitet.".to_string(),
+            })
+        }
+        RelayCommandState::New => {}
+    }
+
+    match client.relay_replacement_request(request).await {
+        Ok(receipt) => {
+            finish_relay_command(
+                pool,
+                REPLACEMENT_RELAY_COMMAND_SCOPE,
+                &request.event,
+                &request.idempotency,
+                &receipt,
+                None,
+            )
+            .await?;
+            tracing::info!(event_id = %request.event, replacement_request_id = %request.replacement_request, action = ?request.action, "Scrim-Ersatz-Relay abgeschlossen");
+            Ok(receipt)
+        }
+        Err(error) => match error.classification() {
+            RelayErrorClass::Retryable => {
+                mark_relay_command_retry(
+                    pool,
+                    REPLACEMENT_RELAY_COMMAND_SCOPE,
+                    &request.event,
+                    &request.idempotency,
+                    error.error_code(),
+                    &error.to_string(),
+                )
+                .await?;
+                tracing::warn!(event_id = %request.event, replacement_request_id = %request.replacement_request, action = ?request.action, error_code = error.error_code(), error = %error, "Scrim-Ersatz-Relay retryable fehlgeschlagen");
+                Err(error.to_string())
+            }
+            RelayErrorClass::Terminal => {
+                let receipt = error.user_receipt();
+                finish_relay_command(
+                    pool,
+                    REPLACEMENT_RELAY_COMMAND_SCOPE,
+                    &request.event,
+                    &request.idempotency,
+                    &receipt,
+                    Some(error.error_code()),
+                )
+                .await?;
+                tracing::warn!(event_id = %request.event, replacement_request_id = %request.replacement_request, action = ?request.action, error_code = error.error_code(), error = %error, "Scrim-Ersatz-Relay terminal fehlgeschlagen");
+                Ok(receipt)
+            }
+            RelayErrorClass::Uncertain => {
+                let receipt = error.user_receipt();
+                finish_relay_command_state(
+                    pool,
+                    REPLACEMENT_RELAY_COMMAND_SCOPE,
+                    &request.event,
+                    &request.idempotency,
+                    &receipt,
+                    RelayFinishState {
+                        command_state: "uncertain",
+                        inbox_state: "uncertain",
+                        error_code: Some(error.error_code()),
+                    },
+                )
+                .await?;
+                tracing::warn!(event_id = %request.event, replacement_request_id = %request.replacement_request, action = ?request.action, error_code = error.error_code(), error = %error, "Scrim-Ersatz-Relay-Antwort bleibt ohne erneute Zustellung unklar");
+                Ok(receipt)
+            }
+        },
+    }
+}
+
 async fn begin_relay_command(
     pool: &PgPool,
-    request: &MatchRequestResponseRequest,
+    command_scope: &'static str,
+    event: &str,
+    idempotency: &str,
+    payload: &Value,
+    payload_conflict_receipt: ActionReceipt,
 ) -> Result<RelayCommandState, String> {
-    let payload = serde_json::to_value(request).map_err(|error| error.to_string())?;
-    let payload_hash = sha256_json(&payload);
+    let payload_hash = sha256_json(payload);
     let mut tx = pool
         .begin()
         .await
@@ -566,10 +879,10 @@ async fn begin_relay_command(
         "#,
     )
     .bind(RELAY_EVENT_SOURCE)
-    .bind(&request.event)
-    .bind(&request.idempotency)
+    .bind(event)
+    .bind(idempotency)
     .bind(&payload_hash)
-    .bind(&payload)
+    .bind(payload)
     .bind(RELAY_LEASE_OWNER)
     .bind(RELAY_LEASE_SECONDS)
     .execute(&mut *tx)
@@ -587,10 +900,10 @@ async fn begin_relay_command(
         RETURNING id
         "#,
     )
-    .bind(RELAY_COMMAND_SCOPE)
-    .bind(&request.idempotency)
+    .bind(command_scope)
+    .bind(idempotency)
     .bind(&payload_hash)
-    .bind(&payload)
+    .bind(payload)
     .bind(RELAY_LEASE_OWNER)
     .bind(RELAY_LEASE_SECONDS)
     .fetch_optional(&mut *tx)
@@ -609,10 +922,10 @@ async fn begin_relay_command(
              ORDER BY idempotency_generation DESC
              LIMIT 1
              FOR UPDATE
-            "#,
+        "#,
         )
-        .bind(RELAY_COMMAND_SCOPE)
-        .bind(&request.idempotency)
+        .bind(command_scope)
+        .bind(idempotency)
         .fetch_one(&mut *tx)
         .await
         .map_err(|error| format!("Scrim-Relay-Receipt konnte nicht gelesen werden: {error}"))?;
@@ -622,15 +935,14 @@ async fn begin_relay_command(
                 format!("Scrim-Relay-Receipt-Konflikt konnte nicht zurueckgerollt werden: {error}")
             })?;
             tracing::warn!(
-                event_id = %request.event,
-                idempotency_key = %request.idempotency,
+                event_id = %event,
+                idempotency_key = %idempotency,
+                command_scope,
                 existing_payload_hash = %hex::encode(&existing_payload_hash),
                 new_payload_hash = %hex::encode(&payload_hash),
                 "Scrim-Relay-Idempotency-Konflikt ohne erneute Zustellung"
             );
-            return Ok(RelayCommandState::PayloadConflict(
-                relay_payload_conflict_receipt(),
-            ));
+            return Ok(RelayCommandState::PayloadConflict(payload_conflict_receipt));
         }
         let state = row.get::<String, _>("state");
         if let Some(payload) = row.get::<Option<Value>, _>("result_payload") {
@@ -655,6 +967,14 @@ fn relay_payload_conflict_receipt() -> ActionReceipt {
     ActionReceipt {
         accepted: false,
         message: "Diese Terminantwort passt nicht zur bereits gespeicherten Anfrage. Bitte die urspruengliche Nachricht erneut verwenden."
+            .to_string(),
+    }
+}
+
+fn replacement_payload_conflict_receipt() -> ActionReceipt {
+    ActionReceipt {
+        accepted: false,
+        message: "Diese Ersatzantwort passt nicht zur bereits gespeicherten Anfrage. Bitte die urspruengliche Nachricht erneut verwenden."
             .to_string(),
     }
 }
@@ -724,7 +1044,9 @@ async fn reclaim_or_wait_relay_command(
 
 async fn finish_relay_command(
     pool: &PgPool,
-    request: &MatchRequestResponseRequest,
+    command_scope: &'static str,
+    event: &str,
+    idempotency: &str,
     receipt: &ActionReceipt,
     error_code: Option<&'static str>,
 ) -> Result<(), String> {
@@ -741,25 +1063,38 @@ async fn finish_relay_command(
     };
     finish_relay_command_state(
         pool,
-        request,
+        command_scope,
+        event,
+        idempotency,
         receipt,
-        command_state,
-        inbox_state,
-        error_code,
+        RelayFinishState {
+            command_state,
+            inbox_state,
+            error_code,
+        },
     )
     .await
 }
 
-async fn finish_relay_command_state(
-    pool: &PgPool,
-    request: &MatchRequestResponseRequest,
-    receipt: &ActionReceipt,
+#[derive(Clone, Copy)]
+struct RelayFinishState {
     command_state: &'static str,
     inbox_state: &'static str,
     error_code: Option<&'static str>,
+}
+
+async fn finish_relay_command_state(
+    pool: &PgPool,
+    command_scope: &'static str,
+    event: &str,
+    idempotency: &str,
+    receipt: &ActionReceipt,
+    finish: RelayFinishState,
 ) -> Result<(), String> {
     let result_payload = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
-    let error_hash = error_code.map(|value| sha256_bytes(value.as_bytes()));
+    let error_hash = finish
+        .error_code
+        .map(|value| sha256_bytes(value.as_bytes()));
     let mut tx = pool
         .begin()
         .await
@@ -780,11 +1115,11 @@ async fn finish_relay_command_state(
            AND state = 'processing'
         "#,
     )
-    .bind(RELAY_COMMAND_SCOPE)
-    .bind(&request.idempotency)
-    .bind(command_state)
+    .bind(command_scope)
+    .bind(idempotency)
+    .bind(finish.command_state)
     .bind(&result_payload)
-    .bind(error_code)
+    .bind(finish.error_code)
     .bind(error_hash.as_deref())
     .execute(&mut *tx)
     .await
@@ -805,9 +1140,9 @@ async fn finish_relay_command_state(
         "#,
     )
     .bind(RELAY_EVENT_SOURCE)
-    .bind(&request.idempotency)
-    .bind(inbox_state)
-    .bind(error_code)
+    .bind(idempotency)
+    .bind(finish.inbox_state)
+    .bind(finish.error_code)
     .bind(error_hash.as_deref())
     .execute(&mut *tx)
     .await
@@ -815,12 +1150,15 @@ async fn finish_relay_command_state(
     tx.commit()
         .await
         .map_err(|error| format!("Scrim-Relay-Finish konnte nicht bestaetigt werden: {error}"))?;
+    tracing::debug!(event_id = %event, command_scope, command_state = finish.command_state, inbox_state = finish.inbox_state, "Scrim-Relay-Receipt abgeschlossen");
     Ok(())
 }
 
 async fn mark_relay_command_retry(
     pool: &PgPool,
-    request: &MatchRequestResponseRequest,
+    command_scope: &'static str,
+    event: &str,
+    idempotency: &str,
     error_code: &'static str,
     error: &str,
 ) -> Result<(), String> {
@@ -844,8 +1182,8 @@ async fn mark_relay_command_retry(
            AND state = 'processing'
         "#,
     )
-    .bind(RELAY_COMMAND_SCOPE)
-    .bind(&request.idempotency)
+    .bind(command_scope)
+    .bind(idempotency)
     .bind(error_code)
     .bind(&error_hash)
     .execute(&mut *tx)
@@ -869,7 +1207,7 @@ async fn mark_relay_command_retry(
         "#,
     )
     .bind(RELAY_EVENT_SOURCE)
-    .bind(&request.idempotency)
+    .bind(idempotency)
     .bind(error_code)
     .bind(&error_hash)
     .execute(&mut *tx)
@@ -880,6 +1218,7 @@ async fn mark_relay_command_retry(
     tx.commit()
         .await
         .map_err(|error| format!("Scrim-Relay-Retry konnte nicht bestaetigt werden: {error}"))?;
+    tracing::warn!(event_id = %event, command_scope, error_code, "Scrim-Relay auf retry gesetzt");
     Ok(())
 }
 
@@ -1568,6 +1907,95 @@ mod tests {
     }
 
     #[test]
+    fn replacement_relay_dto_uses_exact_button_ids_and_interaction_domain_refs() {
+        let request = replacement_request_relay_request(BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:accept".to_string(),
+            interaction_id: 44,
+            guild_id: 55,
+            channel_id: 66,
+            message_id: Some(88),
+            user_id: 99,
+            author_display_name: "  Coach\nName\t  ".to_string(),
+            ..BridgeInteraction::default()
+        })
+        .expect("replacement accept is relayable");
+        assert_eq!(request.event, "scrimrepl:v1:interaction:44");
+        assert_eq!(request.idempotency, request.event);
+        assert_eq!(request.replacement_request, "77");
+        assert_eq!(request.action, ReplacementRequestAction::Accept);
+        assert_eq!(request.actor, "99");
+        assert_eq!(request.actor_display_name, "Coach Name");
+        assert_eq!(request.message.as_deref(), Some("88"));
+        assert!(replacement_request_relay_request(BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:maybe".to_string(),
+            interaction_id: 44,
+            user_id: 99,
+            author_display_name: "Coach".to_string(),
+            ..BridgeInteraction::default()
+        })
+        .is_err());
+        assert!(replacement_request_relay_request(BridgeInteraction {
+            custom_id: "scrimrepl:v1:0:accept".to_string(),
+            interaction_id: 44,
+            user_id: 99,
+            author_display_name: "Coach".to_string(),
+            ..BridgeInteraction::default()
+        })
+        .is_err());
+        assert!(replacement_request_relay_request(BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:accept".to_string(),
+            interaction_id: 44,
+            user_id: 99,
+            author_display_name: "\n\t".to_string(),
+            ..BridgeInteraction::default()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn replacement_relay_fixture_matches_turnier_headers_and_internal_payload_shape() {
+        const TURNIER_FIXTURE_BYTES: &[u8] = br#"{
+  "schema_version": "turnier-scrim-replacement-request-response:v1",
+  "event": "scrimrepl:v1:interaction:44",
+  "idempotency": "scrimrepl:v1:interaction:44",
+  "replacement_request": "77",
+  "action": "decline",
+  "interaction": "900719925474099344",
+  "guild": "1289721245281292288",
+  "channel": "900719925474099366",
+  "message": "900719925474099377",
+  "actor": "900719925474099388",
+  "actor_display_name": "Coach Name"
+}
+"#;
+        let fixture_bytes = include_bytes!("fixtures/replacement_request_response.json.fixture");
+        assert_eq!(fixture_bytes, TURNIER_FIXTURE_BYTES);
+        let fixture: Value = serde_json::from_slice(fixture_bytes).expect("fixture json");
+        let decoded: ReplacementRequestRelayRequest =
+            serde_json::from_value(fixture.clone()).expect("fixture uses replacement DTO shape");
+        assert_eq!(decoded.action, ReplacementRequestAction::Decline);
+        assert_eq!(decoded.actor_display_name, "Coach Name");
+        let request = ReplacementRequestRelayRequest {
+            schema_version: "turnier-scrim-replacement-request-response:v1".to_string(),
+            event: "scrimrepl:v1:interaction:44".to_string(),
+            idempotency: "scrimrepl:v1:interaction:44".to_string(),
+            replacement_request: "77".to_string(),
+            action: ReplacementRequestAction::Decline,
+            interaction: "900719925474099344".to_string(),
+            guild: "1289721245281292288".to_string(),
+            channel: "900719925474099366".to_string(),
+            message: Some("900719925474099377".to_string()),
+            actor: "900719925474099388".to_string(),
+            actor_display_name: "Coach Name".to_string(),
+        };
+
+        let encoded = serde_json::to_value(request).expect("serialize replacement fixture request");
+        assert_eq!(encoded, fixture);
+        assert!(encoded["actor"].is_string());
+        assert!(encoded["actor_display_name"].is_string());
+    }
+
+    #[test]
     fn relay_dto_fixture_matches_turnier_shape_and_keeps_slot_numeric() {
         const TURNIER_FIXTURE_BYTES: &[u8] = br#"{
   "schema_version": "turnier-scrim-match-request-response:v1",
@@ -2064,9 +2492,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_relay_http_contract_uses_patch_path_actor_and_idempotency_headers() {
+        use axum::extract::OriginalUri;
+        use tokio::sync::{oneshot, Mutex};
+
+        type RelayCapture = Arc<Mutex<Option<oneshot::Sender<(String, HeaderMap, Value)>>>>;
+        let (tx, rx) = oneshot::channel();
+        let capture: RelayCapture = Arc::new(Mutex::new(Some(tx)));
+        let app = Router::new()
+            .route(
+                "/internal/turnier/v1/scrims/replacement-requests/77",
+                axum::routing::patch(
+                    |State(capture): State<RelayCapture>,
+                     OriginalUri(uri): OriginalUri,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        if let Some(tx) = capture.lock().await.take() {
+                            let _ = tx.send((uri.to_string(), headers, body));
+                        }
+                        Json(json!({"accepted": true, "message": "ersatz gespeichert"}))
+                    },
+                ),
+            )
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = TurnierScrimClient {
+            http: reqwest::Client::builder()
+                .timeout(RELAY_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .expect("client"),
+            base_url: format!("http://{address}"),
+            token: "relay-token".to_string(),
+        };
+        let request = replacement_request_relay_request(BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:decline".to_string(),
+            interaction_id: 44,
+            guild_id: 55,
+            channel_id: 66,
+            message_id: Some(77),
+            user_id: 88,
+            author_display_name: "Coach Name".to_string(),
+            ..BridgeInteraction::default()
+        })
+        .expect("request");
+        let receipt = client
+            .relay_replacement_request(&request)
+            .await
+            .expect("receipt");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.message, "ersatz gespeichert");
+        let (path, headers, body) = rx.await.expect("capture");
+        assert_eq!(path, "/internal/turnier/v1/scrims/replacement-requests/77");
+        assert_eq!(headers[INTERNAL_TOKEN_HEADER], "relay-token");
+        assert_eq!(headers["x-request-id"], request.event);
+        assert_eq!(headers["idempotency-key"], request.idempotency);
+        assert_eq!(headers["x-actor-discord-id"], request.actor);
+        assert_eq!(headers["x-actor-display-name"], "Coach Name");
+        assert_eq!(body, json!({"action": "decline"}));
+    }
+
+    #[tokio::test]
     async fn runtime_gate_never_serves_cached_legacy_but_caches_relay_fail_safe() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
-        let gate = ScrimRuntimeGate::new(db.pool().clone(), Duration::from_millis(50));
+        let gate = ScrimRuntimeGate::new(db.pool().clone(), Duration::from_secs(60));
 
         assert_eq!(
             gate.interaction_route().await?,
@@ -2092,9 +2588,9 @@ mod tests {
             InteractionRoute::RelayToTurnier,
             "cached relay is fail-safe because it cannot write locally"
         );
-        tokio::time::sleep(Duration::from_millis(70)).await;
+        let fresh_gate = ScrimRuntimeGate::new(db.pool().clone(), Duration::ZERO);
         assert_eq!(
-            gate.interaction_route().await?,
+            fresh_gate.interaction_route().await?,
             InteractionRoute::LegacyMutation
         );
         Ok(())
@@ -2155,6 +2651,128 @@ mod tests {
             row.get::<Option<Value>, _>("result_payload"),
             Some(json!({"accepted": true, "message": "gespeichert"}))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_relay_persists_idempotency_and_replays_without_second_patch() -> TestResult
+    {
+        use tokio::sync::Mutex;
+
+        let db = dl_central_db::testing::test_pool().await?;
+        let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app =
+            Router::new()
+                .route(
+                    "/internal/turnier/v1/scrims/replacement-requests/77",
+                    axum::routing::patch(
+                        |State(received): State<Arc<Mutex<Vec<Value>>>>,
+                         Json(body): Json<Value>| async move {
+                            received.lock().await.push(body);
+                            Json(json!({"accepted": true, "message": "ersatz gespeichert"}))
+                        },
+                    ),
+                )
+                .with_state(received.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let handler = RelayInteractionHandler::new(
+            test_relay_client(address, RELAY_TIMEOUT)?,
+            db.pool().clone(),
+        );
+        let interaction = BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:accept".to_string(),
+            interaction_id: 144,
+            guild_id: 55,
+            channel_id: 66,
+            message_id: Some(77),
+            user_id: 88,
+            author_display_name: "Coach Name".to_string(),
+            ..BridgeInteraction::default()
+        };
+
+        let first = handler.handle(interaction.clone()).await;
+        let second = handler.handle(interaction).await;
+
+        assert_eq!(first.content.as_deref(), Some("ersatz gespeichert"));
+        assert_eq!(second.content.as_deref(), Some("ersatz gespeichert"));
+        assert_eq!(received.lock().await.len(), 1);
+        let row = sqlx::query(
+            "SELECT state, result_payload FROM scrim.command_receipts WHERE command_scope = 'scrim_replacement_relay'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(row.get::<String, _>("state"), "completed");
+        assert_eq!(
+            row.get::<Option<Value>, _>("result_payload"),
+            Some(json!({"accepted": true, "message": "ersatz gespeichert"}))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_relay_payload_conflict_blocks_second_patch() -> TestResult {
+        use tokio::sync::Mutex;
+
+        let db = dl_central_db::testing::test_pool().await?;
+        let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app =
+            Router::new()
+                .route(
+                    "/internal/turnier/v1/scrims/replacement-requests/77",
+                    axum::routing::patch(
+                        |State(received): State<Arc<Mutex<Vec<Value>>>>,
+                         Json(body): Json<Value>| async move {
+                            received.lock().await.push(body);
+                            Json(json!({"accepted": true, "message": "ersatz gespeichert"}))
+                        },
+                    ),
+                )
+                .with_state(received.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let handler = RelayInteractionHandler::new(
+            test_relay_client(address, RELAY_TIMEOUT)?,
+            db.pool().clone(),
+        );
+        let first = BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:accept".to_string(),
+            interaction_id: 244,
+            guild_id: 55,
+            channel_id: 66,
+            message_id: Some(77),
+            user_id: 88,
+            author_display_name: "Coach Name".to_string(),
+            ..BridgeInteraction::default()
+        };
+        let second = BridgeInteraction {
+            custom_id: "scrimrepl:v1:77:decline".to_string(),
+            ..first.clone()
+        };
+
+        let first_reply = handler.handle(first).await;
+        let second_reply = handler.handle(second).await;
+
+        assert_eq!(first_reply.content.as_deref(), Some("ersatz gespeichert"));
+        assert_eq!(
+            second_reply.content.as_deref(),
+            Some(
+                "Diese Ersatzantwort passt nicht zur bereits gespeicherten Anfrage. Bitte die urspruengliche Nachricht erneut verwenden."
+            )
+        );
+        assert_eq!(received.lock().await.len(), 1);
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM scrim.command_receipts WHERE command_scope = 'scrim_replacement_relay'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(state, "completed");
         Ok(())
     }
 
@@ -2504,7 +3122,16 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let request = match_request_response_request(relay_interaction(47, 555, 1))?;
-        begin_relay_command(db.pool(), &request).await?;
+        let payload = serde_json::to_value(&request)?;
+        begin_relay_command(
+            db.pool(),
+            RELAY_COMMAND_SCOPE,
+            &request.event,
+            &request.idempotency,
+            &payload,
+            relay_payload_conflict_receipt(),
+        )
+        .await?;
         sqlx::query(
             "UPDATE scrim.command_receipts
                 SET lease_until = now() - interval '1 second'

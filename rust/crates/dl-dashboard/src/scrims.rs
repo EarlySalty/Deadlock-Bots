@@ -3776,7 +3776,7 @@ mod tests {
         Ok(())
     }
 
-    async fn insert_lagebild_seed(pool: &PgPool) -> Result<(), sqlx::Error> {
+    async fn insert_lagebild_seed(pool: &PgPool, evidence_url: &str) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             INSERT INTO scrim.lagebild_snapshots(
@@ -3800,11 +3800,12 @@ mod tests {
             )
             VALUES(
                 7001, 'match_request', 'Terminabfrage',
-                'https://discord.com/channels/1289721245281292288/100/9001',
+                $1,
                 now(), '{"request_id":91}'::jsonb
             )
             "#,
         )
+        .bind(evidence_url)
         .execute(pool)
         .await?;
         Ok(())
@@ -4050,7 +4051,11 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, app, session_id, _csrf) = app_with_session().await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
 
@@ -4080,12 +4085,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, app, session_id, _csrf) = app_with_session().await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
-        sqlx::query(
-            "UPDATE scrim.lagebild_evidences SET url = 'javascript:alert(1)' WHERE snapshot_id = 7001",
-        )
-        .execute(db.pool())
-        .await?;
+        insert_lagebild_seed(db.pool(), "javascript:alert(1)").await?;
 
         let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
         assert_eq!(response.status(), StatusCode::OK);
@@ -4106,7 +4106,11 @@ mod tests {
         ))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app
             .oneshot(auth_post(
@@ -4154,7 +4158,11 @@ mod tests {
         ))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
         sqlx::query(
             "ALTER TABLE bot.ai_decision_ledger ADD CONSTRAINT reject_scrim_correction_test CHECK (source <> 'scrim.lagebild.correction')",
         )
@@ -4191,7 +4199,11 @@ mod tests {
         let provider = MockChatProvider::new(vec![Err(ChatProviderError::Timeout)]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app
             .oneshot(auth_post(
@@ -4217,7 +4229,11 @@ mod tests {
         let provider = MockChatProvider::new(vec![Ok(ChatResponse::text("kein JSON"))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app
             .oneshot(auth_post(
