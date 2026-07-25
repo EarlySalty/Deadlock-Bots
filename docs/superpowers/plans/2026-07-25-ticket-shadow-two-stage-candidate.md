@@ -247,7 +247,7 @@ git push
 Den vorhandenen Test `produktionskonfiguration_nutzt_fest_den_log_kanal` erweitern, sodass der Konstruktor mit Generator weiterhin genau `Some(LOG_CHANNEL_ID)` setzt. Der Test stellt sicher, dass die Generatorinjektion keinen konfigurierbaren Live-Pfad öffnet.
 
 ```bash
-cargo test --manifest-path rust/Cargo.toml -p dl-community produktionskonfiguration_nutzt_fest_den_log_kanal -- --exact
+cargo test --manifest-path rust/Cargo.toml -p dl-community faq::tests::produktionskonfiguration_nutzt_fest_den_log_kanal -- --exact
 ```
 
 Erwartung vor der neuen Konstruktorverdrahtung: Rot beziehungsweise noch nicht kompilierbar.

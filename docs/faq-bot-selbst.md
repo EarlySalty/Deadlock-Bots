@@ -8,7 +8,7 @@ Es gibt zwei sichtbare Zugänge, die beide dasselbe machen: Im FAQ-Panel klickst
 
 Der Bot merkt sich den bisherigen Verlauf innerhalb derselben Session (die letzten Nachrichten). Das heißt: Du musst nicht jede Anschlussfrage komplett neu formulieren, solange du im gleichen FAQ-Chat bleibst. Wenn du fertig bist, beendest du die Session über den `Chat beenden`-Button — einen Schließen-Befehl gibt es nicht.
 
-Für neue Tickets in der vorgesehenen Kategorie läuft eine interne Shadow-Auswertung: Stufe 1 bewertet die erste Nachricht mit `yes`, `no` oder `uncertain`. Stufe 2 erzeugt unabhängig vom Urteil immer einen kurzen deutschen Antwortkandidaten. Urteil und Kandidat erscheinen ausschließlich im internen Shadow-Kanal; der Bot schreibt niemals automatisch ins Ticket. Technische Generatorfehler bleiben dort knapp sichtbar.
+Für neue Tickets in der vorgesehenen Kategorie läuft eine interne Shadow-Auswertung: Stufe 1 bewertet die erste Nachricht mit `yes`, `no` oder `uncertain`. Stufe 2 versucht unabhängig vom Urteil immer, einen kurzen deutschen Antwortkandidaten zu erzeugen. Urteil und Kandidat erscheinen ausschließlich im internen Shadow-Kanal; der Bot schreibt niemals automatisch ins Ticket. Technische Generatorfehler bleiben dort knapp sichtbar.
 
 Die Shadow-Auswertung ist nur eine Entscheidungshilfe für das Team. Sie führt keine Aktion im Ticket aus und fordert nicht dazu auf, ein weiteres Ticket zu öffnen.
 
