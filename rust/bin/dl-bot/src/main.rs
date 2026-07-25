@@ -870,11 +870,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     coaching_requests.ensure_panel().await;
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq = dl_community::faq::FaqChat::new(
+    let faq = dl_community::faq::FaqChat::new_with_ticket_generator(
         central_pool.clone(),
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
     );
     dl_community::faq::register(&mut router, faq.clone());
 
@@ -1746,6 +1748,88 @@ mod tests {
 
     fn lookup<'a>(vars: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
         |key| vars.get(key).map(|value| (*value).to_string())
+    }
+
+    fn faq_constructor_uses_minimax_as_third_argument(source: &str) -> bool {
+        let constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
+        let minimax_client = ["MiniMaxClient::", "from_env("].concat();
+        let Some((_, arguments)) = source.split_once(&constructor) else {
+            return false;
+        };
+        let mut depth = 0;
+        let mut separators = 0;
+        let mut third_start = None;
+        for (index, character) in arguments.char_indices() {
+            match character {
+                '(' | '[' | '{' => depth += 1,
+                ')' if depth == 0 => {
+                    return third_start
+                        .map(|start| arguments[start..index].contains(&minimax_client))
+                        .unwrap_or(false);
+                }
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    separators += 1;
+                    if separators == 2 {
+                        third_start = Some(index + 1);
+                    } else if separators == 3 {
+                        return third_start
+                            .map(|start| arguments[start..index].contains(&minimax_client))
+                            .unwrap_or(false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn faq_produktionsblock_injiziert_minimax_generator() {
+        let source = include_str!("main.rs");
+        let start = ["// FAQ-", "Chat (6)"].concat();
+        let end = ["// Concierge-", "Onboarding Slice A"].concat();
+        let block = source
+            .split_once(start.as_str())
+            .and_then(|(_, rest)| {
+                rest.split_once(end.as_str())
+                    .map(|(faq_block, _)| faq_block)
+            })
+            .expect("FAQ-Produktionsblock");
+        let generator_constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
+        let old_constructor = ["FaqChat::", "new("].concat();
+        let minimax_client = ["MiniMaxClient::", "from_env("].concat();
+
+        assert_eq!(
+            block.matches(generator_constructor.as_str()).count(),
+            1,
+            "FAQ-Produktionsblock muss genau den Generator-Konstruktor verwenden"
+        );
+        assert_eq!(
+            block.matches(minimax_client.as_str()).count(),
+            1,
+            "FAQ-Produktionsblock muss genau einen MiniMax-Client injizieren"
+        );
+        assert!(
+            faq_constructor_uses_minimax_as_third_argument(block),
+            "MiniMax muss im tatsächlichen dritten Konstruktorargument stecken"
+        );
+        let synthetic_none = r#"
+            let generator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
+            let faq = dl_community::faq::FaqChat::new_with_ticket_generator(
+                central_pool.clone(),
+                port,
+                None,
+            );
+        "#;
+        assert!(
+            !faq_constructor_uses_minimax_as_third_argument(synthetic_none),
+            "separates MiniMax bei drittem Argument None muss abgelehnt werden"
+        );
+        assert!(
+            !block.contains(old_constructor.as_str()),
+            "FAQ-Produktionsblock darf den alten Konstruktor nicht verwenden"
+        );
     }
 
     #[test]
