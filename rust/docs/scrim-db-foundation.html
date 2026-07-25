@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scrim-DB-Foundation 2026072408..2416</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f8fafc;
+      --fg: #172033;
+      --muted: #526174;
+      --card: #ffffff;
+      --border: #d7dee8;
+      --accent: #255c99;
+      --accent-soft: #e9f2ff;
+      --code: #101827;
+      --code-bg: #eef2f7;
+      --warn-bg: #fff7e6;
+      --warn-border: #e6b85c;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1724;
+        --fg: #e5edf7;
+        --muted: #aab7c8;
+        --card: #172033;
+        --border: #34445b;
+        --accent: #8ab4f8;
+        --accent-soft: #18365c;
+        --code: #f4f7fb;
+        --code-bg: #253249;
+        --warn-bg: #33260d;
+        --warn-border: #b8892c;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+      background: var(--bg);
+      color: var(--fg);
+    }
+
+    header, main, footer {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    header {
+      padding: 32px 0 16px;
+    }
+
+    main {
+      padding-bottom: 48px;
+    }
+
+    footer {
+      padding: 24px 0 48px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+
+    h1, h2, h3 {
+      line-height: 1.2;
+      margin: 0 0 12px;
+    }
+
+    h1 { font-size: clamp(2rem, 4vw, 3.25rem); }
+    h2 { font-size: clamp(1.35rem, 2.4vw, 2rem); margin-top: 34px; }
+    h3 { font-size: 1.12rem; margin-top: 24px; }
+
+    p { margin: 0 0 12px; }
+
+    a { color: var(--accent); }
+
+    code, kbd {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      color: var(--code);
+      background: var(--code-bg);
+      border-radius: 4px;
+      padding: 0.1em 0.35em;
+      font-size: 0.94em;
+    }
+
+    pre {
+      overflow-x: auto;
+      background: var(--code-bg);
+      padding: 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+    }
+
+    .skip-link {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      transform: translateY(-160%);
+      background: var(--accent);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      z-index: 20;
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    .lead {
+      max-width: 900px;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      margin: 18px 0;
+      box-shadow: 0 1px 2px rgb(15 23 36 / 0.05);
+    }
+
+    .notice {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 16px 0;
+    }
+
+    nav.card ul, .compact-list {
+      columns: 2 280px;
+      padding-left: 20px;
+      margin: 8px 0 0;
+    }
+
+    li { margin: 4px 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 24px;
+      background: var(--card);
+      border: 1px solid var(--border);
+    }
+
+    caption {
+      text-align: left;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 9px 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: var(--accent-soft);
+    }
+
+    .nowrap { white-space: nowrap; }
+    .muted { color: var(--muted); }
+    .small { font-size: 0.94rem; }
+  </style>
+</head>
+<body>
+<a class="skip-link" href="#inhalt">Direkt zum Inhalt</a>
+
+<header>
+  <h1>Scrim-DB-Foundation 2026072408..2416</h1>
+  <p class="lead">Versionierter technischer Foundation-Vertrag für die Datenbank-Migrationen <code>2026072408</code> bis <code>2026072416</code>. Die Dokumentation fasst die Schema-, Runtime-, Queue-, Result-, Steam-V1- und Privacy-Verträge zusammen.</p>
+  <p class="muted">Das Anwenden dieser Migrationen allein aktiviert keine Consumer, keinen Writer-Cutover und keinen Identity-Cutover.</p>
+</header>
+
+<main id="inhalt">
+  <nav class="card" aria-labelledby="toc-heading">
+    <h2 id="toc-heading">Inhalt</h2>
+    <ul>
+      <li><a href="#scope">Scope und Nicht-Scope</a></li>
+      <li><a href="#migrationen">Migrationen und Reihenfolge</a></li>
+      <li><a href="#runtime">Runtime-Control, CAS, Historie und Audit</a></li>
+      <li><a href="#queues">Queues, Idempotenz und terminale Regeln</a></li>
+      <li><a href="#publication">Publikation, Ersatzspieler und KI-Ledger</a></li>
+      <li><a href="#result-selection">Result-Selection-Vertrag</a></li>
+      <li><a href="#steam-v1">Steam V1 Persistenz</a></li>
+      <li><a href="#privacy">Privacy, DSAR und Erasure</a></li>
+      <li><a href="#rollout">Rollout, Preflight, Verifikation und Rollback</a></li>
+      <li><a href="#non-goals">Explizite Nicht-Ziele</a></li>
+    </ul>
+  </nav>
+
+  <section id="scope" class="card">
+    <h2>Scope und Nicht-Scope</h2>
+    <p>Die Foundation ist eine additive Datenbankbasis für Scrim-Runtime-Steuerung, idempotente Workflows, Result-Auswahl, Steam-V1-Persistenz und Privacy-Klassifikation. Die bestehenden Writer werden dadurch nicht ersetzt.</p>
+    <p>Der aktuelle Runtime-Seed bleibt <code>legacy</code> mit <code>operational_writer = 'dl-bots'</code>. Die Migrationen legen Umschalt- und Audit-Verträge an, schalten aber keinen Turniere-Writer produktiv und aktivieren keinen Steam-V1-Consumer.</p>
+    <p>Die Identity-Cutover der bestehenden Scrim-Tabellen ist ausdrücklich nicht enthalten. Die Tests sichern ab, dass <code>scrim.participants.id</code>, <code>scrim.teams.id</code>, <code>scrim.matches.id</code>, <code>scrim.match_request_batches.id</code> und <code>scrim.match_requests.id</code> keine Identity-Defaults erhalten.</p>
+  </section>
+
+  <section id="migrationen">
+    <h2>Migrationen und Reihenfolge</h2>
+    <table>
+      <caption>Auszuführende Reihenfolge</caption>
+      <thead>
+        <tr>
+          <th scope="col">Version</th>
+          <th scope="col">Datei</th>
+          <th scope="col">Vertrag</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">2026072408</th>
+          <td><code>scrim_runtime_control_audit.sql</code></td>
+          <td>Audit-Pseudonyme, append-only Audit-Events, append-only Runtime-Control-Historie, aktuelle Runtime-View und CAS-Transition-Funktion.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072409</th>
+          <td><code>scrim_idempotent_queues.sql</code></td>
+          <td>Generische Command-, Inbox-, Outbox- und Effect-Receipt-Journale mit Idempotenz, Leasing, terminalen Zuständen und Privacy-Redaction-Hilfsfunktionen.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072410</th>
+          <td><code>scrim_publication_replacements_ai.sql</code></td>
+          <td>Announcement- und Status-Publication-Verträge, Replacement-Tabellen, Lineup-Snapshots, AI-Runs und AI-Decision-Refs.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072411</th>
+          <td><code>scrim_result_refs_contract.sql</code></td>
+          <td>Erweiterung von <code>scrim.match_result_refs</code>, canonical Result-Selection-Tabellen, Auswahl-Events, Clarifications und Guards gegen harte Löschung oder Invalidierung.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072412</th>
+          <td><code>scrim_result_refs_indexes.sql</code></td>
+          <td>Nur Clarification-Index. Neue nichtkonkurrente Indizes auf <code>scrim.match_result_refs</code> werden absichtlich nicht erzeugt.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072413</th>
+          <td><code>scrim_result_refs_backfill_view.sql</code></td>
+          <td>Konflikt-Preflight, Backfill aus Legacy-Match-Ergebnisfeldern, deterministische Auswahl und View <code>scrim.selected_match_results</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072414</th>
+          <td><code>scrim_result_refs_validate.sql</code></td>
+          <td>Validiert die zuvor <code>NOT VALID</code> angelegten Result-Ref-Constraints und bricht ab, wenn eine erwartete Constraint unvalidiert bleibt.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072415</th>
+          <td><code>steam_v1_runtime.sql</code></td>
+          <td>Persistenzschema für Steam-V1-Workflows, Operations, Results, Events und Deliveries. Keine Consumer-Aktivierung.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072416</th>
+          <td><code>privacy_field_registry.sql</code></td>
+          <td>AI-Decision-Ref-Existenzcheck und zentrales Privacy-Feldregister für die Foundation-Spalten.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Alle neun Migrationen setzen <code>lock_timeout</code> auf <code>2s</code> und resetten ihn am Ende. Die Reihenfolge ist bindend, weil spätere Migrationen Funktionen, Tabellen oder Constraints aus früheren Migrationen referenzieren.</p>
+  </section>
+
+  <section id="runtime">
+    <h2>Runtime-Control, CAS, Historie und Audit</h2>
+    <div class="card">
+      <h3>Runtime-Modell</h3>
+      <p><code>scrim.runtime_control_history</code> ist die einzige persistente Runtime-State-Quelle. <code>scrim.runtime_control</code> ist eine nicht aktualisierbare View auf die neueste Historienzeile je <code>control_key</code>.</p>
+      <ul>
+        <li><code>control_key</code> ist immer <code>scrim_runtime</code>.</li>
+        <li><code>mode</code> ist genau <code>legacy</code>, <code>draining</code> oder <code>turniere</code>.</li>
+        <li><code>operational_writer</code> ist genau <code>dl-bots</code> oder <code>turniere</code>.</li>
+        <li>Erlaubte Kombinationen: <code>legacy/dl-bots</code>, <code>draining/turniere</code>, <code>turniere/turniere</code>.</li>
+        <li>Erlaubte Übergänge: <code>legacy -&gt; draining</code>, <code>draining -&gt; legacy</code>, <code>draining -&gt; turniere</code>, <code>turniere -&gt; draining</code>.</li>
+        <li>Epochs sind fortlaufend. Seed ist <code>epoch = 0</code>, <code>mode = legacy</code>, <code>operational_writer = dl-bots</code>.</li>
+      </ul>
+      <p>Updates, Deletes und Truncates auf der Historie werden mit SQLSTATE <code>55000</code> verhindert. Inserts werden per Advisory-Transaction-Lock <code>(724060001, 724060002)</code> serialisiert.</p>
+    </div>
+
+    <table>
+      <caption>Runtime- und Audit-Objekte</caption>
+      <thead>
+        <tr>
+          <th scope="col">Objekt</th>
+          <th scope="col">Spalten oder Signatur</th>
+          <th scope="col">Kontrakt</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>scrim.audit_actor_pseudonyms</code></th>
+          <td><code>actor_type TEXT</code>, <code>actor_ref TEXT</code>, <code>actor_pseudonym TEXT</code>, <code>created_at TIMESTAMPTZ</code></td>
+          <td>Primärschlüssel <code>(actor_type, actor_ref)</code>. <code>actor_type</code> ist <code>system</code>, <code>user</code> oder <code>service</code>. Bei <code>user</code> muss <code>actor_ref</code> eine positive numerische Discord-ID sein; Usernames, Display-Namen, <code>NULL</code> und Blank sind verboten. <code>system</code> und <code>service</code> dürfen nur bounded Machine-Codes oder Domain-Refs nutzen. <code>actor_pseudonym</code> ist eindeutig und muss <code>^act_[0-9a-f]{32}$</code> erfüllen.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.audit_events</code></th>
+          <td><code>id BIGINT IDENTITY</code>, <code>event_type TEXT</code>, <code>entity_type TEXT</code>, <code>entity_id TEXT</code>, <code>actor_type TEXT</code>, <code>actor_pseudonym TEXT</code>, <code>actor_source TEXT</code>, <code>request_id TEXT</code>, <code>correlation_id TEXT</code>, <code>before_data JSONB</code>, <code>after_data JSONB</code>, <code>decision_data JSONB</code>, <code>metadata JSONB</code>, <code>created_at TIMESTAMPTZ</code></td>
+          <td>Append-only. <code>entity_type</code> ist auf Runtime-, Scrim-, AI-, Discord- und Steam-Kinds begrenzt. Für <code>discord_user</code> und <code>steam_user</code> darf <code>entity_id</code> nur ein <code>act_...</code>-Pseudonym sein, keine rohe User-ID.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.runtime_control_history</code></th>
+          <td><code>id BIGINT IDENTITY</code>, <code>control_key TEXT</code>, <code>mode TEXT</code>, <code>epoch BIGINT</code>, <code>operational_writer TEXT</code>, <code>actor_type TEXT</code>, <code>actor_pseudonym TEXT</code>, <code>actor_source TEXT</code>, <code>request_id TEXT</code>, <code>correlation_id TEXT</code>, <code>decision_data JSONB</code>, <code>created_at TIMESTAMPTZ</code></td>
+          <td>Append-only, eindeutiges <code>(control_key, epoch)</code>, contiguous Epochs, erlaubte Runtime-Übergänge. Inserts nach <code>epoch = 0</code> erzeugen Audit-Events ohne raw <code>actor_pseudonym</code> in <code>before_data</code> oder <code>after_data</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.runtime_control</code></th>
+          <td>View-Spalten: <code>control_key</code>, <code>mode</code>, <code>epoch</code>, <code>operational_writer</code>, <code>actor_type</code>, <code>actor_pseudonym</code>, <code>actor_source</code>, <code>request_id</code>, <code>correlation_id</code>, <code>decision_data</code>, <code>created_at</code>, <code>updated_at</code></td>
+          <td>Aktueller Runtime-Zustand aus der höchsten Historien-Epoch. <code>updated_at</code> ist identisch zu <code>created_at</code> der aktuellen Historienzeile.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.transition_runtime_control(...)</code></th>
+          <td><code>expected_epoch BIGINT</code>, <code>new_mode TEXT</code>, <code>new_operational_writer TEXT</code>, <code>changed_by_user_id TEXT</code>, <code>changed_by_display_name TEXT</code>, <code>request_id TEXT DEFAULT NULL</code>, <code>correlation_id TEXT DEFAULT NULL</code>, <code>decision_data JSONB DEFAULT '{}'</code></td>
+          <td>Gibt <code>(applied BOOLEAN, current_epoch BIGINT)</code> zurück. Bei passender Epoch wird genau eine neue Historienzeile mit <code>epoch + 1</code> geschrieben. Bei stale <code>expected_epoch</code> kommt <code>applied = false</code> mit aktueller Epoch zurück. Ungültige Übergänge oder Mode/Writer-Kombinationen werfen <code>23514</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="queues">
+    <h2>Queues, Idempotenz und terminale Regeln</h2>
+    <p>Die Queue-Tabellen sind Journale. Identitätsfelder sind nach Insert unveränderlich, außer explizit erlaubte Privacy-Redactions. Deletes und Truncates sind blockiert. Payload- und Fehler-Hashes sind immer 32 Byte. Technische Textfelder sind entweder bounded Machine-Codes oder Domain-Refs im Schema <code>namespace:wert</code>; nackte User-IDs und Display-Namen werden dort per Constraint abgewiesen.</p>
+
+    <table>
+      <caption>Idempotente Queue- und Receipt-Tabellen</caption>
+      <thead>
+        <tr>
+          <th scope="col">Tabelle</th>
+          <th scope="col">Zustände</th>
+          <th scope="col">Idempotenz</th>
+          <th scope="col">Lease- und Zeitregeln</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>scrim.command_receipts</code></th>
+          <td><code>received</code>, <code>processing</code>, <code>completed</code>, <code>failed</code>, <code>retry</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>. Terminal: <code>completed</code>, <code>failed</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>.</td>
+          <td>Eindeutig <code>(command_scope, idempotency_key, idempotency_generation)</code>. Nur eine aktive Generation je <code>(command_scope, idempotency_key)</code> für <code>received</code>, <code>processing</code>, <code>retry</code>.</td>
+          <td><code>processing</code> genau dann, wenn <code>lease_owner</code> und <code>lease_until</code> gesetzt sind. <code>retry</code> braucht <code>next_attempt_at</code>. Terminale States brauchen <code>completed_at</code> und dürfen nicht wieder geöffnet werden.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.inbox_events</code></th>
+          <td><code>received</code>, <code>processing</code>, <code>processed</code>, <code>retry</code>, <code>uncertain</code>, <code>dead</code>, <code>ignored</code>. Terminal: <code>processed</code>, <code>uncertain</code>, <code>dead</code>, <code>ignored</code>.</td>
+          <td>Eindeutig <code>(event_source, source_event_id)</code> wenn <code>source_event_id</code> gesetzt ist. Zusätzlich eindeutig <code>(event_source, idempotency_key, idempotency_generation)</code>. Nur eine aktive Generation für <code>received</code>, <code>processing</code>, <code>retry</code>.</td>
+          <td><code>processing</code> genau dann, wenn Lease-Paar gesetzt ist. <code>retry</code> braucht <code>next_attempt_at</code>. Terminale States brauchen <code>processed_at</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.outbox_effects</code></th>
+          <td><code>pending</code>, <code>leased</code>, <code>delivered</code>, <code>retry</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>. Terminal: <code>delivered</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>.</td>
+          <td>Eindeutig <code>(effect_type, idempotency_key, idempotency_generation)</code>. Nur eine aktive Generation für <code>pending</code>, <code>leased</code>, <code>retry</code>. Optionaler Bezug auf <code>command_receipt_id</code> und <code>inbox_event_id</code> per <code>ON DELETE SET NULL</code>.</td>
+          <td><code>leased</code> genau dann, wenn Lease-Paar gesetzt ist. <code>retry</code> braucht <code>next_attempt_at</code>. <code>delivered</code> braucht <code>delivered_at</code>. Remote-Task-Index auf <code>(remote_system, remote_task_id)</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.effect_receipts</code></th>
+          <td><code>observed</code>, <code>confirmed</code>, <code>failed</code>, <code>uncertain</code>.</td>
+          <td>Eindeutig <code>(remote_system, remote_message_id)</code> wenn Message-ID gesetzt ist und eindeutig <code>(remote_system, remote_task_id)</code> wenn Task-ID gesetzt ist.</td>
+          <td>Mindestens eine Remote-Referenz muss gesetzt sein. Updates sind nur für autorisierte Redaction von <code>receipt_payload</code> erlaubt; Delete und Truncate sind blockiert.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="card">
+      <h3>Gemeinsame Idempotenzregeln</h3>
+      <ul>
+        <li>Dieselbe Generation eines Idempotenzschlüssels ist dauerhaft eindeutig, auch nach terminalem Abschluss.</li>
+        <li>Nach terminalem Abschluss darf eine höhere Generation angelegt werden, solange keine andere aktive Generation existiert.</li>
+        <li>Identity-Felder wie Scope, Key, Generation, Payload-Hash und Payload können nicht nachträglich umgeschrieben werden.</li>
+        <li>Terminale Zustände sind final. Reopen-Versuche werfen <code>55000</code>.</li>
+        <li><code>last_error_code</code> ist nur <code>err_[a-z0-9_]{2,64}</code>; roher Fehlertext oder User-ID-ähnliche Fehlerwerte werden nicht gespeichert.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="publication">
+    <h2>Publikation, Ersatzspieler und KI-Ledger</h2>
+    <table>
+      <caption>Publikations- und Replacement-Verträge</caption>
+      <thead>
+        <tr>
+          <th scope="col">Objekt</th>
+          <th scope="col">Spalten und erlaubte Werte</th>
+          <th scope="col">Regeln</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>scrim.announcement_drafts</code></th>
+          <td><code>scope</code>: <code>block</code> oder <code>global</code>. <code>status</code>: <code>draft</code>, <code>pending_approval</code>, <code>approved</code>, <code>publishing</code>, <code>published</code>, <code>rejected</code>, <code>cancelled</code>, <code>failed</code>. Enthält Titel, Body, JSON-Payload, 32-Byte-Hash, Actor-Felder, Remote-Referenz und Zeitspalten.</td>
+          <td><code>scope = block</code> verlangt <code>block_key</code>. <code>payload_hash</code> muss <code>scrim.announcement_effect_hash(scope, block_key, title, body, payload)</code> entsprechen. Inhalt ist ab Approval/Publication-Lock unveränderlich. Terminal: <code>published</code>, <code>rejected</code>, <code>cancelled</code>, <code>failed</code>. Delete und Truncate sind blockiert.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.announcement_approvals</code></th>
+          <td><code>decision</code>: <code>approved</code>, <code>rejected</code>, <code>cancelled</code>. Actor-Felder und <code>decision_data JSONB</code>.</td>
+          <td>Append-only. Updates sind nur als autorisierte Redaction von <code>decided_by_user_id</code> und <code>decided_by_display_name</code> erlaubt.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.status_publication_approvals</code></th>
+          <td><code>target_kind</code>: <code>match</code>, <code>match_request</code>, <code>team</code>, <code>replacement</code>. <code>decision</code>: <code>pending</code>, <code>approved</code>, <code>rejected</code>, <code>cancelled</code>, <code>published</code>.</td>
+          <td><code>payload_hash</code> muss <code>scrim.status_publication_effect_hash(target_kind, target_id, status_kind, payload)</code> entsprechen. Nur eine offene oder approved Publication je <code>(target_kind, target_id, status_kind)</code>. Inhalt ist ab Approval unveränderlich. Terminal: <code>published</code>, <code>rejected</code>, <code>cancelled</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.replacement_needs</code></th>
+          <td>Status: <code>open</code>, <code>contacting</code>, <code>filled</code>, <code>cancelled</code>, <code>expired</code>. Optionaler Bezug auf Match, Team und Participant. <code>needed_role</code> und <code>reason</code> sind Machine-Codes, keine Freitexte.</td>
+          <td><code>closed_at</code> ist nur bei <code>filled</code>, <code>cancelled</code> oder <code>expired</code> gesetzt. Offene Suche ist über <code>(status, created_at, id)</code> indexiert. Menschliche Details gehören in kontrollierte Payloads, nicht in <code>reason</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.replacement_candidates</code></th>
+          <td>Status: <code>candidate</code>, <code>shortlisted</code>, <code>requested</code>, <code>accepted</code>, <code>declined</code>, <code>expired</code>, <code>rejected</code>. Identität über <code>participant_id</code> oder <code>discord_user_id</code>. <code>candidate_data</code> und <code>score_data</code> können personenbezogene JSON-Refs enthalten.</td>
+          <td>Mindestens eine Identität ist Pflicht. Je <code>need_id</code> ist <code>participant_id</code> beziehungsweise <code>discord_user_id</code> eindeutig. Zusätzlich existiert ein eindeutiges <code>(need_id, id)</code> für Request-FKs. JSON-Payloads werden automatisiert für Discord- und verlinkte Steam-Refs geschrubbt; DSAR gibt dafür Hashes aus.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.replacement_requests</code></th>
+          <td>Status: <code>pending</code>, <code>sent</code>, <code>accepted</code>, <code>declined</code>, <code>expired</code>, <code>cancelled</code>, <code>failed</code>. Identität über Candidate, Participant oder Discord-User. <code>request_payload</code> kann personenbezogene JSON-Refs enthalten.</td>
+          <td>Candidate-Referenz muss zur gleichen Need gehören. <code>responded_at</code> ist nur bei <code>accepted</code>, <code>declined</code> oder <code>expired</code> gesetzt. Remote-Message-ID ist je Remote-System eindeutig. Wenn nur der Requester gelöscht wird, bleibt die fremde Request-Zeile erhalten, aber Requester-Felder und Payload-Refs werden geschrubbt.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.match_lineup_snapshots</code></th>
+          <td><code>snapshot_kind</code>: <code>planned</code>, <code>confirmed</code>, <code>actual</code>, <code>replacement</code>. <code>source</code>: <code>legacy</code>, <code>turniere</code>, <code>dl-bots</code>, <code>steam-core</code>.</td>
+          <td>Append-only Snapshot-Tabelle. Updates nur als autorisierte Redaction von <code>lineup_payload</code>, <code>created_by_user_id</code> und <code>created_by_display_name</code>. Delete und Truncate sind blockiert.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table>
+      <caption>KI-Ledger</caption>
+      <thead>
+        <tr>
+          <th scope="col">Objekt</th>
+          <th scope="col">Spalten und Werte</th>
+          <th scope="col">Regeln</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>scrim.ai_runs</code></th>
+          <td><code>subject_kind</code>: <code>match</code>, <code>match_request</code>, <code>team</code>, <code>discord_user</code>, <code>steam_user</code>. <code>state</code>: <code>queued</code>, <code>running</code>, <code>succeeded</code>, <code>failed</code>, <code>retry</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>. Optionaler <code>decision_ref_kind</code>.</td>
+          <td>Idempotent je <code>(run_kind, idempotency_key, idempotency_generation)</code>; nur eine aktive Generation für <code>queued</code>, <code>running</code>, <code>retry</code>. <code>running</code> genau dann, wenn Lease-Paar gesetzt ist. Terminale States brauchen <code>finished_at</code>. Subject-Identity ist unveränderlich, außer kind-aware Privacy-Redaction bei <code>discord_user</code> oder <code>steam_user</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.enforce_ai_run_decision_ref()</code></th>
+          <td>Trigger auf <code>decision_ref_kind</code> und <code>decision_ref_id</code>.</td>
+          <td>Kind und ID müssen gemeinsam gesetzt sein. ID muss positiv numerisch sein. Erlaubte Kinds: <code>runtime_control_history</code>, <code>announcement_approval</code>, <code>status_publication_approval</code>, <code>match_lineup_snapshot</code>, <code>match_result_ref</code>, <code>match_result_clarification</code>. Der Ziel-Datensatz muss existieren; sonst <code>23503</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.ai_decision_refs</code></th>
+          <td><code>target_kind</code>: <code>match</code>, <code>match_request</code>, <code>team</code>, <code>ai_run</code>. <code>target_id</code> ist positive numerische Text-ID. <code>confidence NUMERIC(5,4)</code> zwischen 0 und 1.</td>
+          <td>Append-only. Roh personalisierte Target-Kinds wie Discord- oder Steam-User sind strukturell nicht erlaubt.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="result-selection">
+    <h2>Result-Selection-Vertrag</h2>
+    <div class="card">
+      <h3>Erweiterung von <code>scrim.match_result_refs</code></h3>
+      <p>Die Migration erweitert die bestehende Tabelle additiv um:</p>
+      <ul class="compact-list">
+        <li><code>external_result_ref TEXT</code></li>
+        <li><code>validation_status TEXT NOT NULL DEFAULT 'unvalidated'</code></li>
+        <li><code>clarification_state TEXT NOT NULL DEFAULT 'none'</code></li>
+        <li><code>clarification_payload JSONB NOT NULL DEFAULT '{}'</code></li>
+        <li><code>is_selected BOOLEAN NOT NULL DEFAULT false</code></li>
+        <li><code>selected_at TIMESTAMPTZ</code></li>
+        <li><code>selected_by_user_id TEXT</code></li>
+        <li><code>selection_reason TEXT</code> als Machine-Code</li>
+        <li><code>voided_at TIMESTAMPTZ</code></li>
+        <li><code>void_reason TEXT</code> als Machine-Code</li>
+        <li><code>superseded_by_ref_id BIGINT</code></li>
+      </ul>
+      <p><code>validation_status</code> ist genau <code>unvalidated</code>, <code>valid</code>, <code>ambiguous</code>, <code>rejected</code>, <code>void</code> oder <code>superseded</code>. <code>clarification_state</code> ist genau <code>none</code>, <code>needed</code>, <code>requested</code>, <code>resolved</code> oder <code>cancelled</code>.</p>
+      <p>Reason-Felder sind keine Freitexte. <code>match_result_refs.selection_reason</code>, <code>match_result_refs.void_reason</code> und <code>match_result_selections.selection_reason</code> muessen bounded Machine-Codes im Format <code>^[a-z][a-z0-9_]{2,63}$</code> sein. Menschliche Details, Namen oder freie Begruendungen gehoeren in Clarification-Payloads.</p>
+      <p><code>match_id</code> verweist per <code>ON DELETE RESTRICT</code> auf <code>scrim.matches(id)</code>. <code>superseded_by_ref_id</code> verweist per <code>ON DELETE RESTRICT</code> auf <code>scrim.match_result_refs(id)</code>, darf nicht auf sich selbst zeigen, wird per Trigger auf denselben Match beschränkt und darf keine direkten oder indirekten Supersession-Zyklen bilden. Lock-Reihenfolge fuer Graph-Mutationen: zuerst transaction advisory lock im festen Namespace <code>2026072411</code> mit <code>match_id</code>, danach Ziel-Ref-Lookup und rekursive Zykluspruefung.</p>
+    </div>
+
+    <table>
+      <caption>Canonical Selection</caption>
+      <thead>
+        <tr>
+          <th scope="col">Objekt</th>
+          <th scope="col">Kontrakt</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>scrim.match_result_selections</code></th>
+          <td><code>match_id</code> ist Primärschlüssel und <code>ON DELETE RESTRICT</code>. <code>result_ref_id</code> ist <code>UNIQUE</code> und <code>ON DELETE RESTRICT</code>. Actor-Felder: <code>selected_by_user_id</code>, <code>selected_by_display_name</code>. <code>selection_reason</code> ist ein nicht-personaler Machine-Code. Genau eine aktuelle Auswahl je Match wird gehalten. Updates sind nur als autorisierte Redaction dieser Actor-Felder oder als kontrollierte Reselection auf einen anderen gültigen Result-Ref erlaubt.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.match_result_selection_events</code></th>
+          <td>Append-only Historie mit <code>event_type</code> <code>selected</code>, <code>reselected</code> oder <code>redacted</code>. Actor wird als <code>act_...</code>-Pseudonym gespeichert. <code>old_result_ref_id</code> und <code>new_result_ref_id</code> halten die Ref-Bewegung fest. <code>before_data</code> und <code>after_data</code> enthalten keine rohen <code>selected_by_user_id</code> oder <code>selected_by_display_name</code>; Reason-Werte darin sind nur bounded Machine-Codes.</td>
+        </tr>
+        <tr>
+          <th scope="row">Auswahlbedingung</th>
+          <td>Ein Result-Ref darf nur canonical ausgewählt werden, wenn es zum Match gehört, <code>validation_status = 'valid'</code>, <code>fetch_status = 'fetched'</code>, <code>steam_match_id IS NOT NULL</code>, <code>winner_team_id IS NOT NULL</code>, <code>voided_at IS NULL</code> und <code>superseded_by_ref_id IS NULL</code> gilt.</td>
+        </tr>
+        <tr>
+          <th scope="row">Invalidierungsblockade</th>
+          <td>Ist ein Ref in <code>scrim.match_result_selections</code> ausgewählt, blockiert ein Trigger spätere Änderungen, die es nicht mehr fetched, valid, unvoided, current oder winner-vollständig machen würden. Eine Reselection muss einen anderen Ref setzen, Actor und Grund neu angeben und ein neueres <code>selected_at</code> nutzen. Der neue Ref wird beim Schreiben gesperrt, damit parallele Invalidierung erst nach Commit erneut gegen die aktuelle Auswahl geprüft wird.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.selected_match_results</code></th>
+          <td>View über <code>scrim.matches</code>, <code>scrim.match_result_selections</code> und gültige Result-Refs. Ergebnis-Spalten: <code>match_id</code>, <code>result_ref_id</code>, <code>steam_match_id</code>, <code>winner_team_id</code>, <code>result_json</code>, <code>source</code>, <code>selected_at</code>, <code>selected_by_user_id</code>. <code>source</code> ist <code>result_ref</code>, wenn ein gültiger selected Ref existiert, sonst <code>NULL</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="notice">
+      <p><strong>Legacy-Flag ist nicht canonical.</strong> Das alte <code>is_selected</code> an <code>scrim.match_result_refs</code> reicht nicht für <code>scrim.selected_match_results</code>. Canonical ist ausschließlich ein Eintrag in <code>scrim.match_result_selections</code>. Die nicht notwendige Live-Indexierung auf <code>match_result_refs</code> wird in dieser Foundation bewusst zurückgestellt.</p>
+    </div>
+
+    <h3>Backfill</h3>
+    <p>Vor dem Backfill prüft <code>2026072413</code>, ob ein Legacy-<code>steam_match_id</code> aus <code>scrim.matches</code> bereits als Result-Ref eines anderen Matches existiert. Bei Konflikt bricht die Migration mit <code>23505</code> ab.</p>
+    <p>Backfill-fähig sind Matches mit <code>steam_match_id</code>, <code>winner_team_id</code>, <code>result_json</code> und Status <code>finished</code> oder <code>completed</code> beziehungsweise <code>lobby_state = 'finished'</code>. Bestehende passende Result-Refs werden vervollständigt, fehlende passende Refs werden als <code>valid</code> und <code>fetched</code> angelegt. Die canonical Auswahl wird deterministisch nach <code>fetched_at</code>, <code>updated_at</code>, <code>entered_at</code>, <code>steam_match_id</code> und <code>id</code> absteigend bestimmt, je Match aber nur wenn noch keine Auswahl existiert. Der Migration-Actor nutzt eine synthetische numerische ID, damit Audit-Pseudonyme nie aus Freitext-User-Refs entstehen.</p>
+
+    <h3>Clarifications</h3>
+    <p><code>scrim.match_result_clarifications</code> speichert Klärungen mit <code>clarification_kind</code> <code>missing_result</code>, <code>ambiguous_winner</code>, <code>conflicting_ref</code> oder <code>manual_review</code>. <code>status</code> ist <code>open</code>, <code>requested</code>, <code>resolved</code> oder <code>cancelled</code>. <code>resolved_at</code> ist nur bei <code>resolved</code> oder <code>cancelled</code> gesetzt.</p>
+  </section>
+
+  <section id="steam-v1">
+    <h2>Steam V1 Persistenz</h2>
+    <p><code>2026072415</code> legt persistente Steam-V1-Tabellen und Guards an. Die Migration erzeugt keine Consumer, schreibt keine Jobs in diese Tabellen und aktiviert keine Capability-Flags. Der bestehende Legacy-Task-Vertrag <code>steam.steam_tasks</code> bleibt kompatibel; <code>steam.v1_operations.legacy_task_id</code> verweist optional per <code>ON DELETE SET NULL</code> auf ihn.</p>
+
+    <table>
+      <caption>Steam-V1-Tabellen</caption>
+      <thead>
+        <tr>
+          <th scope="col">Tabelle</th>
+          <th scope="col">Spalten und Werte</th>
+          <th scope="col">Persistenzregeln</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>steam.v1_workflows</code></th>
+          <td><code>contract_version INTEGER &gt;= 1</code>, <code>workflow_key TEXT</code>, <code>workflow_type TEXT</code>, <code>workflow_generation BIGINT &gt;= 0</code>, optional <code>aggregate_kind</code>/<code>aggregate_id</code>, <code>state</code>, optional <code>subject_kind</code>/<code>subject_id</code>, <code>payload JSONB</code>, Zeitspalten. <code>aggregate_kind</code>: <code>match</code>, <code>match_request</code>, <code>team</code>, <code>player</code>, <code>lobby</code>, <code>party</code>. <code>subject_kind</code>: <code>discord_user</code>, <code>steam_user</code>.</td>
+          <td>Eindeutig <code>(workflow_key, workflow_generation)</code>. Nur eine aktive Generation je <code>workflow_key</code> für <code>open</code>, <code>running</code>, <code>retry</code>. Terminal: <code>succeeded</code>, <code>failed</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>; terminale States brauchen <code>finished_at</code>. Identity-Felder sind unveränderlich außer autorisierte kind-aware Redaction.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>steam.v1_operations</code></th>
+          <td><code>operation_id TEXT UNIQUE DEFAULT steam.random_v1_operation_id()</code>, <code>operation_type TEXT</code>, optional Workflow- und Aggregate-Bezug, optional Subject-Bezug, <code>idempotency_key TEXT</code>, <code>idempotency_generation BIGINT</code>, <code>payload_hash BYTEA</code>, <code>payload JSONB</code>, <code>state</code>, Lease-Felder, <code>legacy_task_id</code>, <code>result_payload</code>, Fehlercode/-hash und Zeitspalten.</td>
+          <td><code>operation_id</code> wird als <code>op:</code> plus 32 Hex-Zeichen generiert, wenn nicht explizit gesetzt. Eindeutig <code>(operation_id, idempotency_generation)</code> und <code>(operation_type, idempotency_key, idempotency_generation)</code>. Nur eine aktive Generation je <code>(operation_type, idempotency_key)</code> für <code>pending</code>, <code>leased</code>, <code>running</code>, <code>retry</code>. <code>leased</code> oder <code>running</code> genau dann, wenn Lease-Paar gesetzt ist. <code>retry</code> braucht <code>next_attempt_at</code>; terminale States brauchen <code>finished_at</code>.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>steam.v1_operation_results</code></th>
+          <td><code>operation_id TEXT</code>, <code>operation_generation BIGINT</code>, optionaler <code>result_hash BYTEA</code>, <code>result_payload JSONB</code>, <code>status</code> <code>succeeded</code>, <code>failed</code> oder <code>uncertain</code>, <code>created_at</code>.</td>
+          <td>Foreign-Key <code>(operation_id, operation_generation)</code> auf <code>steam.v1_operations(operation_id, idempotency_generation)</code> mit <code>ON DELETE RESTRICT</code>. Update nur als autorisierte Redaction von <code>result_payload</code>. Delete und Truncate sind blockiert.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>steam.v1_operation_events</code></th>
+          <td>Optionaler Operation-Bezug, <code>operation_generation BIGINT</code>, <code>event_type TEXT</code>, optionaler <code>payload_hash BYTEA</code>, <code>payload JSONB</code>, <code>created_at</code>.</td>
+          <td>Wenn <code>operation_id</code> gesetzt ist, referenziert <code>(operation_id, operation_generation)</code> die Operation-Generation mit <code>ON DELETE RESTRICT</code>. Update nur als autorisierte Redaction von <code>payload</code>. Delete und Truncate sind blockiert.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>steam.v1_deliveries</code></th>
+          <td>Optionaler Operation-Bezug, <code>delivery_type TEXT</code>, <code>idempotency_key TEXT</code>, <code>idempotency_generation BIGINT</code>, <code>remote_system TEXT</code>, optional <code>remote_message_id</code>/<code>remote_task_id</code>, <code>payload_hash BYTEA</code>, <code>payload JSONB</code>, <code>state</code>, Lease- und Zeitspalten.</td>
+          <td>Eindeutig <code>(delivery_type, idempotency_key, idempotency_generation)</code>. Nur eine aktive Generation für <code>pending</code>, <code>leased</code>, <code>retry</code>. Remote-Message-ID und Remote-Task-ID sind je Remote-System eindeutig, wenn gesetzt. <code>leased</code> genau dann, wenn Lease-Paar gesetzt ist. <code>delivered</code> braucht <code>delivered_at</code>. Terminal: <code>delivered</code>, <code>failed</code>, <code>uncertain</code>, <code>dead</code>, <code>cancelled</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Kind-aware Privacy-Redaction ist nur für <code>aggregate_kind = 'player'</code> als Steam-Personenbezug und für <code>subject_kind</code> <code>discord_user</code> oder <code>steam_user</code> erlaubt. Ein numerischer <code>aggregate_id</code> mit <code>aggregate_kind = 'match'</code> wird nicht als User-ID behandelt.</p>
+  </section>
+
+  <section id="privacy">
+    <h2>Privacy, DSAR und Erasure</h2>
+    <div class="card">
+      <h3>SQL-Erasure-Gate</h3>
+      <p>Die SQL-Funktionen aus <code>2026072409</code> erlauben Privacy-Redaction nur in einer gesetzten Privacy-Transaktion:</p>
+      <ul>
+        <li><code>scrim.privacy_erasure_user_id</code> muss eine numerische User-ID enthalten.</li>
+        <li><code>core.user_privacy</code> muss für diese User-ID <code>opted_out = true</code> und <code>deleted_at IS NOT NULL</code> enthalten.</li>
+        <li><code>scrim.privacy_erasure_target_ref</code> ist entweder dieselbe Discord-ID, eine über <code>core.steam_links</code> verbundene <code>steam_id</code>/<code>steam_id64</code> oder eine daraus sicher abgeleitete Steam-Account-ID.</li>
+        <li>Ohne exakten Target-Bezug bleibt Redaction verboten und die Append-only-Guards werfen <code>55000</code>.</li>
+      </ul>
+      <p><code>scrim.jsonb_contains_user_ref</code> findet Target-Refs rekursiv in JSON-Objektkeys, Arrays, Strings und Zahlen. <code>scrim.jsonb_redact_user_ref</code> entfernt Objektkeys, die exakt dem Target entsprechen, und ersetzt passende String- oder Zahlenwerte durch <code>"redacted"</code>.</p>
+    </div>
+
+    <table>
+      <caption>Automatisierte Erasure-Regeln der Foundation</caption>
+      <thead>
+        <tr>
+          <th scope="col">Bereich</th>
+          <th scope="col">Regel</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Audit-Pseudonyme</th>
+          <td><code>scrim.audit_actor_pseudonyms</code> wird für <code>actor_type = 'user'</code> und die gelöschte User-ID gelöscht. Bestehende Audit-Zeilen bleiben mit altem <code>act_...</code>-Pseudonym erhalten. Nach gelöschtem Privacy-Marker erzeugt <code>scrim.audit_actor_pseudonym('user', ...)</code> für diese User-ID nur ein nicht persistiertes Zufallspseudonym.</td>
+        </tr>
+        <tr>
+          <th scope="row">JSON-Payloads</th>
+          <td>Automatische Redaction läuft für <code>scrim.command_receipts.payload</code>, <code>scrim.command_receipts.result_payload</code>, <code>scrim.inbox_events.payload</code>, <code>scrim.outbox_effects.payload</code>, <code>scrim.effect_receipts.receipt_payload</code>, <code>scrim.replacement_candidates.candidate_data</code>, <code>scrim.replacement_candidates.score_data</code>, <code>scrim.replacement_requests.request_payload</code>, <code>scrim.matches.result_json</code>, <code>scrim.matches.lobby_code_corrections</code>, <code>scrim.match_lineup_snapshots.lineup_payload</code>, <code>scrim.match_result_refs.clarification_payload</code>, <code>scrim.match_result_refs.raw_result_json</code>, <code>scrim.match_result_refs.normalized_result_json</code>, <code>scrim.match_result_clarifications.request_payload</code>, <code>scrim.match_result_clarifications.response_payload</code>, <code>steam.v1_workflows.payload</code>, <code>steam.v1_operations.payload</code>, <code>steam.v1_operations.result_payload</code>, <code>steam.v1_operation_results.result_payload</code>, <code>steam.v1_operation_events.payload</code> und <code>steam.v1_deliveries.payload</code>. Ziel-Refs umfassen Discord-ID, Steam64-Text/Zahl und aus Steam64 abgeleitete Account-ID; Namen im betroffenen Player-Objekt werden beim Löschen ebenfalls redigiert, fremde Player-Evidence bleibt erhalten.</td>
+        </tr>
+        <tr>
+          <th scope="row">Text-Actor-Felder</th>
+          <td>Actor-IDs und Display-Namen werden auf <code>redacted</code> gesetzt, unter anderem in Announcement-Drafts, Announcement-Approvals, Status-Publication-Approvals, Matches, Match-Requests, Replacement-Needs, Replacement-Requests, Lineup-Snapshots, Match-Result-Refs, Match-Result-Selections und Match-Result-Clarifications. Display-Namen dürfen nur zusammen mit dem passenden User-ID-Feld redigiert werden.</td>
+        </tr>
+        <tr>
+          <th scope="row">Kind-aware Text-Refs</th>
+          <td><code>scrim.ai_runs.subject_id</code> wird nur bei <code>subject_kind</code> <code>discord_user</code> oder <code>steam_user</code> redigiert. <code>steam.v1_workflows.aggregate_id</code> und <code>steam.v1_operations.aggregate_id</code> werden nur bei <code>aggregate_kind = 'player'</code> redigiert. <code>subject_id</code> in Steam-V1 wird nur bei <code>discord_user</code> oder <code>steam_user</code> redigiert. Numerische Account-ID-Refs zählen nur dann als <code>steam_user</code>, wenn sie aus einer verlinkten <code>steam_id64</code> innerhalb der <code>u32</code>-Grenzen abgeleitet sind; falsche, nicht verlinkte oder kind-kollidierende IDs bleiben unverändert.</td>
+        </tr>
+        <tr>
+          <th scope="row">Replacement-Ketten</th>
+          <td>Replacement-Requests, -Candidates und -Needs werden gelöscht, wenn sie den Ziel-Participant, die Ziel-Discord-ID oder eine daraus abgeleitete Need/Candidate-Kette betreffen. Fremde Zeilen, in denen der gelöschte User nur Requester ist, bleiben als Nachweis erhalten; Requester-Felder und <code>request_payload</code> werden redigiert.</td>
+        </tr>
+        <tr>
+          <th scope="row">Steam-Verknüpfungen</th>
+          <td>Die bestehende Erasure sammelt verbundene Steam-IDs aus <code>core.steam_links</code>. Foundation-JSON- und Steam-V1-Redaction berücksichtigt Text-IDs, numerische Steam64-Refs und nur bei gültiger <code>u32</code>-Ableitung die Steam-Account-ID (<code>SteamID64 - 76561197960265728</code>). Der bestehende Pfad löscht die <code>core.steam_links</code>-Zeilen des Users.</td>
+        </tr>
+        <tr>
+          <th scope="row">Legacy-Fehlertext</th>
+          <td><code>scrim.match_result_refs.last_error</code>, <code>scrim.match_requests.override_reason</code> und <code>scrim.match_requests.status_message_last_error</code> bleiben aus Kompatibilitätsgründen Text. DSAR exportiert sie nur als Hash oder Redaction; Erasure ersetzt exakte Discord-, Steam64- und Account-ID-Targets durch <code>redacted</code>, ohne die Writer-Schnittstellen zu ändern. Teiltreffer wie <code>4242</code> oder <code>user42</code> werden nicht angefasst.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>DSAR-Export</h3>
+    <p>Der Privacy-Vertrag erweitert den DSAR-Export um Foundation-Tabellen. Exportierte JSON-Zeilen werden subjektbezogen projiziert: Ziel-Refs bleiben sichtbar, fremde User-/Steam-Refs, fremde Display-Namen und fremde Payload-Anteile werden redigiert oder als <code>md5</code>-Digest ausgegeben. Der generische JSON-DSAR exportiert nie ganze Tabellenzeilen, sondern nur stabile Row-ID plus genau die angefragte JSON-Spalte; benachbarte Freitexte, manuelle Review-Payloads, Message-ID-Maps oder Lobby-Secrets bleiben dadurch unsichtbar. Result-Payloads aus Legacy-Matches und Result-Refs laufen durch denselben Projektor: Ziel-Spielerdaten bleiben sichtbar, fremde Player-Objekte, fremde Account-IDs und fremde Namen nicht. Lobby-Code-Korrekturen, Replacement- und Clarification-Payloads bleiben in der automatischen JSON-Erasure, nutzen im DSAR aber explizit <code>HashOnly</code>: pro betroffener JSON-Spalte wird nur <code>id</code> plus Payload-Digest ausgegeben, nie Rohdaten, Lobby-Codes, Notizen oder Projektionen. Die Actor-Exports behalten ihre fachlichen Hash-Nachweise. Selection-Historie wird über das Actor-Pseudonym exportiert; Ref-Wechsel bleiben über <code>old_result_ref_id</code> und <code>new_result_ref_id</code> sichtbar, während Snapshot-JSON nur als Hash erscheint. Dadurch bleiben Nachweiszeilen sichtbar, ohne fremde personenbezogene Inhalte offenzulegen.</p>
+    <p>Für Actor-getriebene Tabellen werden fachliche Inhalte wie Announcement-Text, freie Gründe, Lobby-Codes, Join-/Party-Secrets oder fremde JSON-Kontexte nicht ungeprüft offengelegt, sondern ausgelassen, redigiert oder gehasht. <code>scrim.matches</code> und <code>scrim.match_requests</code> haben explizite sichere Actor-Projektionen: Actor-, Domain-, Status- und Zeit-Metadaten bleiben sichtbar, Result-/Correction-/Slot-Payloads, Message-ID-Maps, Override-Gründe und Fehlertexte nur als Hash oder Redaction. AI- und Steam-V1-Exports folgen derselben kind-aware Logik wie die Erasure.</p>
+
+    <h3>Privacy-Feldregister</h3>
+    <p><code>core.privacy_field_registry</code> ist Primärschlüssel <code>(schema_name, table_name, column_name)</code>. Die erlaubten Kategorien sind exakt:</p>
+    <ul class="compact-list">
+      <li><code>data_category</code>: <code>user_id</code>, <code>display_name</code>, <code>json_payload</code>, <code>free_text</code>, <code>domain_id</code>, <code>machine_code</code>, <code>content_hash</code>, <code>pseudonym</code></li>
+      <li><code>retention_action</code>: <code>retain_operational</code>, <code>retain_audit</code>, <code>expire_with_domain</code>, <code>manual_review</code></li>
+      <li><code>erasure_action</code>: <code>redact_on_user_delete</code>, <code>delete_row_on_user_delete</code>, <code>retain_hash_only</code>, <code>retain_non_personal</code>, <code>manual_review</code></li>
+    </ul>
+    <p>Das Register klassifiziert Foundation-Felder per <code>owner_service</code> und <code>reason</code>. Tests prüfen, dass Registry-Zeilen nicht auf fehlende Spalten zeigen, direkte IDs/Pseudonyme nicht als <code>manual_review</code> versteckt sind und Audit-JSON mit <code>manual_review</code> einen Grund zur Raw-Actor-Trennung oder typed-column-Separation dokumentiert. <code>machine_code</code>- und <code>domain_id</code>-Labels brauchen zusätzlich echte CHECK- oder FK-Struktur; ein Registry-Claim allein reicht nicht.</p>
+  </section>
+
+  <section id="rollout">
+    <h2>Rollout, Preflight, Verifikation und Rollback</h2>
+    <table>
+      <caption>Betriebshaltung der Foundation</caption>
+      <thead>
+        <tr>
+          <th scope="col">Phase</th>
+          <th scope="col">Faktischer Stand</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Additiver Rollout</th>
+          <td>Neue Tabellen, Views, Funktionen, Trigger, Constraints und Registry-Zeilen werden additiv angelegt. Bestehende Writer bleiben auf Legacy-Pfaden. <code>scrim.match_result_refs</code> wird erweitert, aber nicht durch neue nichtkonkurrente Live-Indizes belastet. Die dynamischen SQL-Helper <code>scrim.ensure_check_constraint</code> und <code>scrim.validate_constraints</code> sind nur migrationsintern und werden am Ende von <code>2026072416</code> wieder entfernt.</td>
+        </tr>
+        <tr>
+          <th scope="row">Preflight</th>
+          <td>Vor dem Backfill bricht <code>2026072413</code> ab, wenn ein Legacy-<code>steam_match_id</code> bereits einem Result-Ref eines anderen Matches zugeordnet ist. <code>lock_timeout = 2s</code> verhindert langes Warten auf blockierte DDL. Neue technische CHECKs werden in den jeweiligen Migrationen validiert; <code>2026072414</code> validiert zusätzlich Result-Ref-, Selection- und Clarification-Constraints und bricht ab, wenn eine erwartete Constraint unvalidiert bleibt.</td>
+        </tr>
+        <tr>
+          <th scope="row">Verifikation</th>
+          <td>Die Foundation-Tests <code>scrim_db_foundation.rs</code> prüfen Tabellen/Spalten, Runtime-CAS und Serialisierung, Audit-Immutability, Idempotenz, terminale Guards, Result-Selection, Backfill aus 2407, Constraint-Validierung, Steam-V1-Generation/Leases, Privacy-Redaction und Registry-Abdeckung. <code>rust/scripts/central_fresh_schema.sh</code> bindet den Foundation-Testlauf in den frischen Schema-Drift-Check ein.</td>
+        </tr>
+        <tr>
+          <th scope="row">Rollback</th>
+          <td>Die Migrationen enthalten keine Down-Migrationen. Vor Anwendung ist Rollback trivial: Migrationen nicht ausführen. Während einer fehlgeschlagenen Migration wird die jeweilige Migration transaktional abgebrochen. Nach erfolgreicher Anwendung ist der sichere Rollback-Pfad ein Datenbank-Snapshot oder ein explizit reviewed DB-Rollback, weil mehrere Tabellen append-only oder delete-geschützt sind und Backfill-Daten bewusst nicht hart gelöscht werden.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="non-goals" class="card">
+    <h2>Explizite Nicht-Ziele</h2>
+    <ul>
+      <li>Kein Writer-Cutover von <code>dl-bots</code> auf <code>turniere</code>. Der Runtime-Seed bleibt <code>legacy/dl-bots</code>.</li>
+      <li>Kein Identity-Cutover der bestehenden Scrim-Tabellen und keine neuen Identity-Defaults auf Legacy-ID-Spalten.</li>
+      <li>Kein Steam-V1-Consumer, keine Aktivierung von Capability-Flags und kein automatischer Start von Steam-V1-Workflows.</li>
+      <li>Keine neue HTTP-, Discord- oder Bot-API. Die Migrationen definieren Datenbankverträge.</li>
+      <li>Kein Versand von Announcements, Status-Publications oder Replacement-Requests; es werden nur Persistenz- und Approval-Objekte angelegt.</li>
+      <li>Keine harte Löschung von Result-Refs als Fachoperation. Result-Refs werden soft-voided, superseded oder canonical ausgewählt.</li>
+      <li>Kein neuer nichtkonkurrenter Index auf der Live-Tabelle <code>scrim.match_result_refs</code>; diese Review ist ausdrücklich nach Cutover vertagt.</li>
+      <li>Kein Ersetzen von <code>steam.steam_tasks</code>. Steam-V1 kann optional auf Legacy-Tasks referenzieren, aber der Legacy-Vertrag bleibt bestehen.</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <p>Quellen: Datenbank-Migrationen <code>2026072408</code> bis <code>2026072416</code>, Foundation-Tests und Privacy-Vertrag. Keine Secrets, keine externen Ressourcen.</p>
+</footer>
+</body>
+</html>

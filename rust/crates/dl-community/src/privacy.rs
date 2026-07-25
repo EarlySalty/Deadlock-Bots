@@ -29,6 +29,23 @@ struct TableSpec {
     col_type: ColumnType,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TargetRefSet {
+    Discord,
+    Steam,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextUserRefColumnSpec {
+    key_table: &'static str,
+    key_col: &'static str,
+    relation: &'static str,
+    col: &'static str,
+    kind_col: &'static str,
+    kind_value: &'static str,
+    target_ref_set: TargetRefSet,
+}
+
 impl TableSpec {
     const fn new(
         key_table: &'static str,
@@ -49,6 +66,140 @@ impl TableSpec {
     fn count_key(self) -> String {
         format!("{}.{}", self.key_table, self.key_col)
     }
+}
+
+impl TextUserRefColumnSpec {
+    const fn new(
+        key_table: &'static str,
+        key_col: &'static str,
+        relation: &'static str,
+        col: &'static str,
+        kind_col: &'static str,
+        kind_value: &'static str,
+        target_ref_set: TargetRefSet,
+    ) -> Self {
+        Self {
+            key_table,
+            key_col,
+            relation,
+            col,
+            kind_col,
+            kind_value,
+            target_ref_set,
+        }
+    }
+
+    fn count_key(self) -> String {
+        format!("{}.{}", self.key_table, self.key_col)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RedactionSpec {
+    key_table: &'static str,
+    key_col: &'static str,
+    relation: &'static str,
+    col: &'static str,
+    display_col: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JsonUserColumnSpec {
+    key_table: &'static str,
+    key_col: &'static str,
+    relation: &'static str,
+    col: &'static str,
+    export_mode: JsonUserColumnExport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonUserColumnExport {
+    GenericProjected,
+    HashOnly,
+}
+
+impl JsonUserColumnSpec {
+    const fn new(
+        key_table: &'static str,
+        key_col: &'static str,
+        relation: &'static str,
+        col: &'static str,
+    ) -> Self {
+        Self {
+            key_table,
+            key_col,
+            relation,
+            col,
+            export_mode: JsonUserColumnExport::GenericProjected,
+        }
+    }
+
+    const fn hash_only(
+        key_table: &'static str,
+        key_col: &'static str,
+        relation: &'static str,
+        col: &'static str,
+    ) -> Self {
+        Self {
+            key_table,
+            key_col,
+            relation,
+            col,
+            export_mode: JsonUserColumnExport::HashOnly,
+        }
+    }
+
+    fn count_key(self) -> String {
+        format!("{}.{}", self.key_table, self.key_col)
+    }
+}
+
+impl RedactionSpec {
+    const fn new(
+        key_table: &'static str,
+        key_col: &'static str,
+        relation: &'static str,
+        col: &'static str,
+        display_col: Option<&'static str>,
+    ) -> Self {
+        Self {
+            key_table,
+            key_col,
+            relation,
+            col,
+            display_col,
+        }
+    }
+
+    fn count_key(self) -> String {
+        format!("{}.{}.redacted", self.key_table, self.key_col)
+    }
+
+    fn table_spec(self) -> TableSpec {
+        TableSpec::new(
+            self.key_table,
+            self.key_col,
+            self.relation,
+            self.col,
+            ColumnType::Text,
+        )
+    }
+}
+
+fn uses_subject_projected_export(spec: RedactionSpec) -> bool {
+    matches!(
+        spec.relation,
+        "scrim.announcement_drafts"
+            | "scrim.announcement_approvals"
+            | "scrim.status_publication_approvals"
+            | "scrim.matches"
+            | "scrim.match_requests"
+            | "scrim.replacement_needs"
+            | "scrim.replacement_requests"
+            | "scrim.match_lineup_snapshots"
+            | "scrim.match_result_refs"
+            | "scrim.match_result_clarifications"
+    )
 }
 
 /// Nutzerbezogene Tabellen aus dem alten Python-Vertrag, auf zentrale Schemas
@@ -703,6 +854,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "scrim_match_request_responses",
+        "discord_user_id",
+        "scrim.match_request_responses",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "scrim_participants",
         "discord_id",
         "scrim.participants",
@@ -949,6 +1107,121 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
     ),
 ];
 
+const REDACTED_TEXT_USER_COLUMNS: &[RedactionSpec] = &[
+    RedactionSpec::new(
+        "scrim_match_request_batches",
+        "created_by_user_id",
+        "scrim.match_request_batches",
+        "created_by_user_id",
+        Some("created_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_matches",
+        "lobby_code_source_user_id",
+        "scrim.matches",
+        "lobby_code_source_user_id",
+        Some("lobby_code_source_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_match_requests",
+        "released_by_user_id",
+        "scrim.match_requests",
+        "released_by_user_id",
+        Some("released_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_match_request_reminders",
+        "approved_by_user_id",
+        "scrim.match_request_reminders",
+        "approved_by_user_id",
+        Some("approved_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_lagebild_corrections",
+        "author_user_id",
+        "scrim.lagebild_corrections",
+        "author_user_id",
+        Some("author_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_announcement_drafts",
+        "created_by_user_id",
+        "scrim.announcement_drafts",
+        "created_by_user_id",
+        Some("created_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_announcement_drafts",
+        "approved_by_user_id",
+        "scrim.announcement_drafts",
+        "approved_by_user_id",
+        Some("approved_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_announcement_approvals",
+        "decided_by_user_id",
+        "scrim.announcement_approvals",
+        "decided_by_user_id",
+        Some("decided_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_status_publication_approvals",
+        "decided_by_user_id",
+        "scrim.status_publication_approvals",
+        "decided_by_user_id",
+        Some("decided_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_replacement_needs",
+        "created_by_user_id",
+        "scrim.replacement_needs",
+        "created_by_user_id",
+        Some("created_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_replacement_requests",
+        "requested_by_user_id",
+        "scrim.replacement_requests",
+        "requested_by_user_id",
+        Some("requested_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_match_lineup_snapshots",
+        "created_by_user_id",
+        "scrim.match_lineup_snapshots",
+        "created_by_user_id",
+        Some("created_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_match_result_refs",
+        "source_user_id",
+        "scrim.match_result_refs",
+        "source_user_id",
+        Some("source_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_match_result_refs",
+        "selected_by_user_id",
+        "scrim.match_result_refs",
+        "selected_by_user_id",
+        None,
+    ),
+    RedactionSpec::new(
+        "scrim_match_result_selections",
+        "selected_by_user_id",
+        "scrim.match_result_selections",
+        "selected_by_user_id",
+        Some("selected_by_display_name"),
+    ),
+    RedactionSpec::new(
+        "scrim_match_result_clarifications",
+        "requested_by_user_id",
+        "scrim.match_result_clarifications",
+        "requested_by_user_id",
+        Some("requested_by_display_name"),
+    ),
+];
+
 const USER_CO_PLAYERS_REL: &str = "activity.user_co_players";
 const KV_REL: &str = "bot.kv_store";
 const KV_NATIVE_ONBOARDING_COMPLETED_NS: &str = "native_onboarding:completed";
@@ -957,6 +1230,217 @@ const KV_CONCIERGE_FALLBACK_NS: &str = "concierge:fallback_channel";
 const KV_CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
 const KV_CONCIERGE_STECKBRIEF_REVOKED_NS: &str = "concierge:steckbrief_revoked";
 const USER_PRIVACY_REL: &str = "core.user_privacy";
+const SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL: &str = "scrim.audit_actor_pseudonyms";
+
+const JSON_USER_COLUMNS: &[JsonUserColumnSpec] = &[
+    JsonUserColumnSpec::new(
+        "scrim_command_receipts",
+        "payload",
+        "scrim.command_receipts",
+        "payload",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_command_receipts",
+        "result_payload",
+        "scrim.command_receipts",
+        "result_payload",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_inbox_events",
+        "payload",
+        "scrim.inbox_events",
+        "payload",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_outbox_effects",
+        "payload",
+        "scrim.outbox_effects",
+        "payload",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_effect_receipts",
+        "receipt_payload",
+        "scrim.effect_receipts",
+        "receipt_payload",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_replacement_candidates",
+        "candidate_data",
+        "scrim.replacement_candidates",
+        "candidate_data",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_replacement_candidates",
+        "score_data",
+        "scrim.replacement_candidates",
+        "score_data",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_replacement_requests",
+        "request_payload",
+        "scrim.replacement_requests",
+        "request_payload",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_matches",
+        "result_json",
+        "scrim.matches",
+        "result_json",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_matches",
+        "lobby_code_corrections",
+        "scrim.matches",
+        "lobby_code_corrections",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_match_lineup_snapshots",
+        "lineup_payload",
+        "scrim.match_lineup_snapshots",
+        "lineup_payload",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_match_result_refs",
+        "clarification_payload",
+        "scrim.match_result_refs",
+        "clarification_payload",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_match_result_refs",
+        "raw_result_json",
+        "scrim.match_result_refs",
+        "raw_result_json",
+    ),
+    JsonUserColumnSpec::new(
+        "scrim_match_result_refs",
+        "normalized_result_json",
+        "scrim.match_result_refs",
+        "normalized_result_json",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_match_result_clarifications",
+        "request_payload",
+        "scrim.match_result_clarifications",
+        "request_payload",
+    ),
+    JsonUserColumnSpec::hash_only(
+        "scrim_match_result_clarifications",
+        "response_payload",
+        "scrim.match_result_clarifications",
+        "response_payload",
+    ),
+    JsonUserColumnSpec::new(
+        "steam_v1_workflows",
+        "payload",
+        "steam.v1_workflows",
+        "payload",
+    ),
+    JsonUserColumnSpec::new(
+        "steam_v1_operations",
+        "payload",
+        "steam.v1_operations",
+        "payload",
+    ),
+    JsonUserColumnSpec::new(
+        "steam_v1_operations",
+        "result_payload",
+        "steam.v1_operations",
+        "result_payload",
+    ),
+    JsonUserColumnSpec::new(
+        "steam_v1_operation_results",
+        "result_payload",
+        "steam.v1_operation_results",
+        "result_payload",
+    ),
+    JsonUserColumnSpec::new(
+        "steam_v1_operation_events",
+        "payload",
+        "steam.v1_operation_events",
+        "payload",
+    ),
+    JsonUserColumnSpec::new(
+        "steam_v1_deliveries",
+        "payload",
+        "steam.v1_deliveries",
+        "payload",
+    ),
+];
+
+const TEXT_USER_REF_COLUMNS: &[TextUserRefColumnSpec] = &[
+    TextUserRefColumnSpec::new(
+        "scrim_ai_runs",
+        "subject_id",
+        "scrim.ai_runs",
+        "subject_id",
+        "subject_kind",
+        "discord_user",
+        TargetRefSet::Discord,
+    ),
+    TextUserRefColumnSpec::new(
+        "scrim_ai_runs",
+        "subject_id",
+        "scrim.ai_runs",
+        "subject_id",
+        "subject_kind",
+        "steam_user",
+        TargetRefSet::Steam,
+    ),
+    TextUserRefColumnSpec::new(
+        "steam_v1_workflows",
+        "aggregate_id",
+        "steam.v1_workflows",
+        "aggregate_id",
+        "aggregate_kind",
+        "player",
+        TargetRefSet::Steam,
+    ),
+    TextUserRefColumnSpec::new(
+        "steam_v1_workflows",
+        "subject_id",
+        "steam.v1_workflows",
+        "subject_id",
+        "subject_kind",
+        "discord_user",
+        TargetRefSet::Discord,
+    ),
+    TextUserRefColumnSpec::new(
+        "steam_v1_workflows",
+        "subject_id",
+        "steam.v1_workflows",
+        "subject_id",
+        "subject_kind",
+        "steam_user",
+        TargetRefSet::Steam,
+    ),
+    TextUserRefColumnSpec::new(
+        "steam_v1_operations",
+        "aggregate_id",
+        "steam.v1_operations",
+        "aggregate_id",
+        "aggregate_kind",
+        "player",
+        TargetRefSet::Steam,
+    ),
+    TextUserRefColumnSpec::new(
+        "steam_v1_operations",
+        "subject_id",
+        "steam.v1_operations",
+        "subject_id",
+        "subject_kind",
+        "discord_user",
+        TargetRefSet::Discord,
+    ),
+    TextUserRefColumnSpec::new(
+        "steam_v1_operations",
+        "subject_id",
+        "steam.v1_operations",
+        "subject_id",
+        "subject_kind",
+        "steam_user",
+        TargetRefSet::Steam,
+    ),
+];
 const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
 const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
 
@@ -976,6 +1460,14 @@ impl DeleteSummary {
 struct SteamId {
     text: String,
     numeric: Option<i64>,
+    account_id: Option<u32>,
+}
+
+const STEAM_ID64_ACCOUNT_ID_OFFSET: i64 = 76_561_197_960_265_728;
+
+fn steam_account_id_from_steam64(steam_id64: i64) -> Option<u32> {
+    let account_id = steam_id64.checked_sub(STEAM_ID64_ACCOUNT_ID_OFFSET)?;
+    u32::try_from(account_id).ok()
 }
 
 enum LookupValue<'a> {
@@ -1107,7 +1599,21 @@ async fn existing_relations(pool: &PgPool) -> Result<HashSet<&'static str>, sqlx
         .chain(NULLABLE_USER_COLUMNS.iter())
         .chain(STEAM_SIDE_TABLES.iter())
         .map(|spec| spec.relation)
-        .chain([USER_CO_PLAYERS_REL, KV_REL, USER_PRIVACY_REL])
+        .chain(REDACTED_TEXT_USER_COLUMNS.iter().map(|spec| spec.relation))
+        .chain(TEXT_USER_REF_COLUMNS.iter().map(|spec| spec.relation))
+        .chain(JSON_USER_COLUMNS.iter().map(|spec| spec.relation))
+        .chain([
+            "scrim.replacement_needs",
+            "scrim.replacement_candidates",
+            "scrim.replacement_requests",
+        ])
+        .chain([
+            USER_CO_PLAYERS_REL,
+            KV_REL,
+            USER_PRIVACY_REL,
+            SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL,
+            "scrim.match_result_selection_events",
+        ])
     {
         if relation_exists(pool, relation).await? {
             set.insert(relation);
@@ -1135,9 +1641,14 @@ async fn steam_ids_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<SteamId>,
 
     Ok(rows
         .into_iter()
-        .map(|row| SteamId {
-            numeric: row.steam_id64.or_else(|| row.steam_id.trim().parse().ok()),
-            text: row.steam_id.trim().to_string(),
+        .map(|row| {
+            let text = row.steam_id.trim().to_string();
+            let numeric = row.steam_id64.or_else(|| text.parse().ok());
+            SteamId {
+                text,
+                numeric,
+                account_id: numeric.and_then(steam_account_id_from_steam64),
+            }
         })
         .filter(|sid| !sid.text.is_empty())
         .collect())
@@ -1158,9 +1669,12 @@ async fn steam_ids_for_user_tx(
         .filter_map(|row| {
             let text: String = row.try_get("steam_id").ok()?;
             let numeric: Option<i64> = row.try_get("steam_id64").ok()?;
+            let text = text.trim().to_string();
+            let numeric = numeric.or_else(|| text.parse().ok());
             Some(SteamId {
-                numeric: numeric.or_else(|| text.trim().parse().ok()),
-                text: text.trim().to_string(),
+                text,
+                numeric,
+                account_id: numeric.and_then(steam_account_id_from_steam64),
             })
         })
         .filter(|sid| !sid.text.is_empty())
@@ -1171,6 +1685,51 @@ fn steam_lookup<'a>(sid: &'a SteamId, col_type: ColumnType) -> Option<LookupValu
     match col_type {
         ColumnType::I64 => sid.numeric.map(LookupValue::I64),
         ColumnType::Text => Some(LookupValue::Text(&sid.text)),
+    }
+}
+
+fn privacy_target_refs(user_key: &str, steam_ids: &[SteamId]) -> Vec<String> {
+    let mut refs = vec![user_key.to_string()];
+    for sid in steam_ids {
+        push_unique_ref(&mut refs, sid.text.clone());
+        if let Some(numeric) = sid.numeric {
+            push_unique_ref(&mut refs, numeric.to_string());
+        }
+        if let Some(account_id) = sid.account_id {
+            push_unique_ref(&mut refs, account_id.to_string());
+        }
+    }
+    refs
+}
+
+fn steam_target_refs(steam_ids: &[SteamId]) -> Vec<String> {
+    let mut refs = Vec::new();
+    for sid in steam_ids {
+        push_unique_ref(&mut refs, sid.text.clone());
+        if let Some(numeric) = sid.numeric {
+            push_unique_ref(&mut refs, numeric.to_string());
+        }
+        if let Some(account_id) = sid.account_id {
+            push_unique_ref(&mut refs, account_id.to_string());
+        }
+    }
+    refs
+}
+
+fn push_unique_ref(refs: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !refs.iter().any(|existing| existing == &value) {
+        refs.push(value);
+    }
+}
+
+fn text_ref_targets(
+    spec: TextUserRefColumnSpec,
+    user_key: &str,
+    steam_ids: &[SteamId],
+) -> Vec<String> {
+    match spec.target_ref_set {
+        TargetRefSet::Discord => vec![user_key.to_string()],
+        TargetRefSet::Steam => steam_target_refs(steam_ids),
     }
 }
 
@@ -1231,6 +1790,1423 @@ async fn null_user_column(
         ColumnType::I64 => null_user_column_lookup(tx, spec, LookupValue::I64(user_id)).await,
         ColumnType::Text => null_user_column_lookup(tx, spec, LookupValue::Text(user_key)).await,
     }
+}
+
+async fn redact_text_user_column(
+    tx: &mut Transaction<'_, Postgres>,
+    spec: RedactionSpec,
+    user_key: &str,
+) -> Result<i64, sqlx::Error> {
+    let sql = match spec.display_col {
+        Some(display_col) => format!(
+            "UPDATE {} SET {} = 'redacted', {} = 'redacted' WHERE {} = $1",
+            spec.relation, spec.col, display_col, spec.col
+        ),
+        None => format!(
+            "UPDATE {} SET {} = 'redacted' WHERE {} = $1",
+            spec.relation, spec.col, spec.col
+        ),
+    };
+    let result = sqlx::query(&sql).bind(user_key).execute(&mut **tx).await?;
+    Ok(rows_to_i64(result.rows_affected()))
+}
+
+async fn delete_scrim_replacement_rows_for_user(
+    tx: &mut Transaction<'_, Postgres>,
+    relations: &HashSet<&'static str>,
+    user_id: i64,
+) -> Result<BTreeMap<String, i64>, sqlx::Error> {
+    let mut counts = BTreeMap::new();
+    if !(relations.contains("scrim.replacement_requests")
+        && relations.contains("scrim.replacement_candidates")
+        && relations.contains("scrim.replacement_needs")
+        && relations.contains("scrim.participants"))
+    {
+        return Ok(counts);
+    }
+
+    let requests = sqlx::query(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        target_needs AS (
+            SELECT id
+              FROM scrim.replacement_needs
+             WHERE participant_id IN (SELECT id FROM target_participants)
+        ),
+        target_candidates AS (
+            SELECT id
+              FROM scrim.replacement_candidates
+             WHERE discord_user_id = $1
+                OR participant_id IN (SELECT id FROM target_participants)
+                OR need_id IN (SELECT id FROM target_needs)
+        )
+        DELETE FROM scrim.replacement_requests
+         WHERE discord_user_id = $1
+            OR participant_id IN (SELECT id FROM target_participants)
+            OR candidate_id IN (SELECT id FROM target_candidates)
+            OR need_id IN (SELECT id FROM target_needs)
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    counts.insert(
+        "scrim_replacement_requests.user_identity".to_string(),
+        rows_to_i64(requests.rows_affected()),
+    );
+
+    let candidates = sqlx::query(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        target_needs AS (
+            SELECT id
+              FROM scrim.replacement_needs
+             WHERE participant_id IN (SELECT id FROM target_participants)
+        )
+        DELETE FROM scrim.replacement_candidates
+         WHERE discord_user_id = $1
+            OR participant_id IN (SELECT id FROM target_participants)
+            OR need_id IN (SELECT id FROM target_needs)
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    counts.insert(
+        "scrim_replacement_candidates.user_identity".to_string(),
+        rows_to_i64(candidates.rows_affected()),
+    );
+
+    let needs = sqlx::query(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        )
+        DELETE FROM scrim.replacement_needs
+         WHERE participant_id IN (SELECT id FROM target_participants)
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    counts.insert(
+        "scrim_replacement_needs.participant_id".to_string(),
+        rows_to_i64(needs.rows_affected()),
+    );
+
+    Ok(counts)
+}
+
+async fn delete_scrim_audit_actor_mapping_for_user(
+    tx: &mut Transaction<'_, Postgres>,
+    user_key: &str,
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM scrim.audit_actor_pseudonyms WHERE actor_type = 'user' AND actor_ref = $1",
+    )
+    .bind(user_key)
+    .execute(&mut **tx)
+    .await?;
+    Ok(rows_to_i64(result.rows_affected()))
+}
+
+async fn select_scrim_audit_actor_mapping_for_user(
+    pool: &PgPool,
+    user_key: &str,
+) -> CommunityDbResult<Value> {
+    let rows = select_rows_lookup(
+        pool,
+        TableSpec::new(
+            "scrim_audit_actor_pseudonyms",
+            "actor_ref",
+            SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL,
+            "actor_ref",
+            ColumnType::Text,
+        ),
+        LookupValue::Text(user_key),
+    )
+    .await?;
+    Ok(Value::Array(rows))
+}
+
+async fn set_privacy_erasure_context(
+    tx: &mut Transaction<'_, Postgres>,
+    user_key: &str,
+    target_ref: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT
+             set_config('scrim.privacy_erasure_user_id', $1, true),
+             set_config('scrim.privacy_erasure_target_ref', $2, true)",
+    )
+    .bind(user_key)
+    .bind(target_ref)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn redact_json_user_columns(
+    tx: &mut Transaction<'_, Postgres>,
+    relations: &HashSet<&'static str>,
+    user_key: &str,
+    target_refs: &[String],
+) -> Result<BTreeMap<String, i64>, sqlx::Error> {
+    let mut counts = BTreeMap::new();
+    for &spec in JSON_USER_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        let sql = format!(
+            "UPDATE {} SET {} = scrim.jsonb_redact_user_ref({}, $1) WHERE scrim.jsonb_contains_user_ref({}, $1)",
+            spec.relation, spec.col, spec.col, spec.col
+        );
+        for target_ref in target_refs {
+            set_privacy_erasure_context(tx, user_key, target_ref).await?;
+            let result = sqlx::query(&sql)
+                .bind(target_ref)
+                .execute(&mut **tx)
+                .await?;
+            *counts.entry(spec.count_key()).or_insert(0) += rows_to_i64(result.rows_affected());
+        }
+    }
+    Ok(counts)
+}
+
+async fn redact_text_user_ref_columns(
+    tx: &mut Transaction<'_, Postgres>,
+    relations: &HashSet<&'static str>,
+    user_key: &str,
+    steam_ids: &[SteamId],
+) -> Result<BTreeMap<String, i64>, sqlx::Error> {
+    let mut counts = BTreeMap::new();
+    for &spec in TEXT_USER_REF_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        let sql = format!(
+            "UPDATE {} SET {} = 'redacted' WHERE {} = $1 AND {} = $2",
+            spec.relation, spec.col, spec.col, spec.kind_col
+        );
+        let target_refs = text_ref_targets(spec, user_key, steam_ids);
+        for target_ref in target_refs {
+            set_privacy_erasure_context(tx, user_key, target_ref.as_str()).await?;
+            let result = sqlx::query(&sql)
+                .bind(target_ref)
+                .bind(spec.kind_value)
+                .execute(&mut **tx)
+                .await?;
+            *counts.entry(spec.count_key()).or_insert(0) += rows_to_i64(result.rows_affected());
+        }
+    }
+    Ok(counts)
+}
+
+fn is_ref_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn has_ref_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before_ok = text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_ref_token_char(ch));
+    let after_ok = text[end..]
+        .chars()
+        .next()
+        .is_none_or(|ch| !is_ref_token_char(ch));
+    before_ok && after_ok
+}
+
+fn scrub_exact_target_ref(text: &str, target_ref: &str) -> String {
+    if target_ref.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while let Some(relative_start) = text[cursor..].find(target_ref) {
+        let start = cursor + relative_start;
+        let end = start + target_ref.len();
+        if has_ref_boundary(text, start, end) {
+            out.push_str(&text[cursor..start]);
+            out.push_str("redacted");
+            cursor = end;
+        } else {
+            out.push_str(&text[cursor..end]);
+            cursor = end;
+        }
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn scrub_text_target_refs(text: &str, target_refs: &[String]) -> String {
+    let mut scrubbed = text.to_string();
+    let mut refs = target_refs
+        .iter()
+        .filter(|target| !target.is_empty())
+        .collect::<Vec<_>>();
+    refs.sort_by_key(|target| std::cmp::Reverse(target.len()));
+    refs.dedup();
+    for target_ref in refs {
+        scrubbed = scrub_exact_target_ref(&scrubbed, target_ref);
+    }
+    scrubbed
+}
+
+async fn redact_match_result_ref_last_errors(
+    tx: &mut Transaction<'_, Postgres>,
+    relations: &HashSet<&'static str>,
+    user_key: &str,
+    target_refs: &[String],
+) -> Result<i64, sqlx::Error> {
+    if !relations.contains("scrim.match_result_refs") || target_refs.is_empty() {
+        return Ok(0);
+    }
+
+    let rows = sqlx::query(
+        "SELECT id, last_error
+           FROM scrim.match_result_refs
+          WHERE last_error IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                 FROM unnest($1::TEXT[]) AS target(target_ref)
+                WHERE target.target_ref <> ''
+                  AND strpos(last_error, target.target_ref) > 0
+            )
+          FOR UPDATE",
+    )
+    .bind(target_refs)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut updated = 0i64;
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        let last_error: String = row.try_get("last_error")?;
+        let scrubbed = scrub_text_target_refs(&last_error, target_refs);
+        if scrubbed == last_error {
+            continue;
+        }
+        set_privacy_erasure_context(tx, user_key, user_key).await?;
+        let result =
+            sqlx::query("UPDATE scrim.match_result_refs SET last_error = $1 WHERE id = $2")
+                .bind(scrubbed)
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        updated += rows_to_i64(result.rows_affected());
+    }
+    Ok(updated)
+}
+
+async fn redact_match_request_free_text_refs(
+    tx: &mut Transaction<'_, Postgres>,
+    relations: &HashSet<&'static str>,
+    user_key: &str,
+    target_refs: &[String],
+) -> Result<BTreeMap<String, i64>, sqlx::Error> {
+    let mut counts = BTreeMap::new();
+    if !relations.contains("scrim.match_requests") || target_refs.is_empty() {
+        return Ok(counts);
+    }
+
+    for column in ["override_reason", "status_message_last_error"] {
+        let select_sql = format!(
+            "SELECT id, {column} AS value
+               FROM scrim.match_requests
+              WHERE {column} IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                      FROM unnest($1::TEXT[]) AS target(target_ref)
+                     WHERE target.target_ref <> ''
+                       AND strpos({column}, target.target_ref) > 0
+                )
+              FOR UPDATE"
+        );
+        let rows = sqlx::query(&select_sql)
+            .bind(target_refs)
+            .fetch_all(&mut **tx)
+            .await?;
+
+        let mut updated = 0i64;
+        for row in rows {
+            let id: i32 = row.try_get("id")?;
+            let value: String = row.try_get("value")?;
+            let scrubbed = scrub_text_target_refs(&value, target_refs);
+            if scrubbed == value {
+                continue;
+            }
+            set_privacy_erasure_context(tx, user_key, user_key).await?;
+            let update_sql = format!("UPDATE scrim.match_requests SET {column} = $1 WHERE id = $2");
+            let result = sqlx::query(&update_sql)
+                .bind(scrubbed)
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+            updated += rows_to_i64(result.rows_affected());
+        }
+        counts.insert(format!("scrim_match_requests.{column}"), updated);
+    }
+
+    Ok(counts)
+}
+
+async fn select_scrim_replacement_rows_for_user(
+    pool: &PgPool,
+    relations: &HashSet<&'static str>,
+    user_id: i64,
+    user_key: &str,
+) -> CommunityDbResult<BTreeMap<String, Value>> {
+    let mut rows = BTreeMap::new();
+    if !(relations.contains("scrim.replacement_requests")
+        && relations.contains("scrim.replacement_candidates")
+        && relations.contains("scrim.replacement_needs")
+        && relations.contains("scrim.participants"))
+    {
+        return Ok(rows);
+    }
+
+    let needs: Value = sqlx::query_scalar(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        target_needs AS (
+            SELECT *
+              FROM scrim.replacement_needs
+             WHERE participant_id IN (SELECT id FROM target_participants)
+        )
+        SELECT COALESCE(
+            jsonb_agg(
+                jsonb_set(
+                    jsonb_set(
+                        to_jsonb(n),
+                        '{created_by_user_id}',
+                        CASE WHEN n.created_by_user_id = $2 THEN to_jsonb(n.created_by_user_id) ELSE '"redacted"'::jsonb END
+                    ),
+                    '{created_by_display_name}',
+                    CASE WHEN n.created_by_user_id = $2 THEN to_jsonb(n.created_by_display_name) ELSE '"redacted"'::jsonb END
+                )
+                ORDER BY n.id
+            ),
+            '[]'::jsonb
+        )
+        FROM target_needs AS n
+        "#,
+    )
+    .bind(user_id)
+    .bind(user_key)
+    .fetch_one(pool)
+    .await?;
+    rows.insert("scrim_replacement_needs.participant_id".to_string(), needs);
+
+    let candidates: Value = sqlx::query_scalar(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        target_needs AS (
+            SELECT id
+              FROM scrim.replacement_needs
+             WHERE participant_id IN (SELECT id FROM target_participants)
+        ),
+        target_candidates AS (
+            SELECT *
+              FROM scrim.replacement_candidates
+             WHERE discord_user_id = $1
+                OR participant_id IN (SELECT id FROM target_participants)
+                OR need_id IN (SELECT id FROM target_needs)
+        )
+        SELECT COALESCE(
+            jsonb_agg(
+                to_jsonb(c) || jsonb_build_object(
+                    'discord_user_id',
+                    CASE
+                        WHEN c.discord_user_id IS NULL THEN 'null'::jsonb
+                        WHEN c.discord_user_id = $1 THEN to_jsonb(c.discord_user_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'participant_id',
+                    CASE
+                        WHEN c.participant_id IS NULL THEN 'null'::jsonb
+                        WHEN c.participant_id IN (SELECT id FROM target_participants) THEN to_jsonb(c.participant_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'candidate_data', jsonb_build_object('md5', md5(COALESCE(c.candidate_data, 'null'::jsonb)::text)),
+                    'score_data', jsonb_build_object('md5', md5(COALESCE(c.score_data, 'null'::jsonb)::text))
+                )
+                ORDER BY c.id
+            ),
+            '[]'::jsonb
+        )
+        FROM target_candidates AS c
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    rows.insert(
+        "scrim_replacement_candidates.user_identity".to_string(),
+        candidates,
+    );
+
+    let requests: Value = sqlx::query_scalar(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        target_needs AS (
+            SELECT id
+              FROM scrim.replacement_needs
+             WHERE participant_id IN (SELECT id FROM target_participants)
+        ),
+        target_candidates AS (
+            SELECT id
+              FROM scrim.replacement_candidates
+             WHERE discord_user_id = $1
+                OR participant_id IN (SELECT id FROM target_participants)
+                OR need_id IN (SELECT id FROM target_needs)
+        ),
+        subject_candidates AS (
+            SELECT id
+              FROM scrim.replacement_candidates
+             WHERE discord_user_id = $1
+                OR participant_id IN (SELECT id FROM target_participants)
+        ),
+        target_requests AS (
+            SELECT *
+              FROM scrim.replacement_requests
+             WHERE discord_user_id = $1
+                OR participant_id IN (SELECT id FROM target_participants)
+                OR candidate_id IN (SELECT id FROM target_candidates)
+                OR need_id IN (SELECT id FROM target_needs)
+        )
+        SELECT COALESCE(
+            jsonb_agg(
+                to_jsonb(r) || jsonb_build_object(
+                    'discord_user_id',
+                    CASE
+                        WHEN r.discord_user_id IS NULL THEN 'null'::jsonb
+                        WHEN r.discord_user_id = $1 THEN to_jsonb(r.discord_user_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'participant_id',
+                    CASE
+                        WHEN r.participant_id IS NULL THEN 'null'::jsonb
+                        WHEN r.participant_id IN (SELECT id FROM target_participants) THEN to_jsonb(r.participant_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'requested_by_user_id',
+                    CASE WHEN r.requested_by_user_id = $2 THEN to_jsonb(r.requested_by_user_id) ELSE '"redacted"'::jsonb END,
+                    'requested_by_display_name',
+                    CASE WHEN r.requested_by_user_id = $2 THEN to_jsonb(r.requested_by_display_name) ELSE '"redacted"'::jsonb END,
+                    'request_payload', jsonb_build_object('md5', md5(COALESCE(r.request_payload, 'null'::jsonb)::text))
+                )
+                ORDER BY r.id
+            ),
+            '[]'::jsonb
+        )
+        FROM target_requests AS r
+        "#,
+    )
+    .bind(user_id)
+    .bind(user_key)
+    .fetch_one(pool)
+    .await?;
+    rows.insert(
+        "scrim_replacement_requests.user_identity".to_string(),
+        requests,
+    );
+
+    let created_needs: Value = sqlx::query_scalar(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        actor_needs AS (
+            SELECT *
+              FROM scrim.replacement_needs
+             WHERE created_by_user_id = $2
+        )
+        SELECT COALESCE(
+            jsonb_agg(
+                to_jsonb(n) || jsonb_build_object(
+                    'participant_id',
+                    CASE
+                        WHEN n.participant_id IS NULL THEN 'null'::jsonb
+                        WHEN n.participant_id IN (SELECT id FROM target_participants) THEN to_jsonb(n.participant_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'created_by_user_id', to_jsonb(n.created_by_user_id),
+                    'created_by_display_name', to_jsonb(n.created_by_display_name)
+                )
+                ORDER BY n.id
+            ),
+            '[]'::jsonb
+        )
+        FROM actor_needs AS n
+        "#,
+    )
+    .bind(user_id)
+    .bind(user_key)
+    .fetch_one(pool)
+    .await?;
+    rows.insert(
+        "scrim_replacement_needs.created_by_user_id.redacted".to_string(),
+        created_needs,
+    );
+
+    let requested_requests: Value = sqlx::query_scalar(
+        r#"
+        WITH target_participants AS (
+            SELECT id FROM scrim.participants WHERE discord_id = $1
+        ),
+        actor_requests AS (
+            SELECT *
+              FROM scrim.replacement_requests
+             WHERE requested_by_user_id = $2
+        )
+        SELECT COALESCE(
+            jsonb_agg(
+                to_jsonb(r) || jsonb_build_object(
+                    'discord_user_id',
+                    CASE
+                        WHEN r.discord_user_id IS NULL THEN 'null'::jsonb
+                        WHEN r.discord_user_id = $1 THEN to_jsonb(r.discord_user_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'participant_id',
+                    CASE
+                        WHEN r.participant_id IS NULL THEN 'null'::jsonb
+                        WHEN r.participant_id IN (SELECT id FROM target_participants) THEN to_jsonb(r.participant_id)
+                        ELSE '"redacted"'::jsonb
+                    END,
+                    'requested_by_user_id', to_jsonb(r.requested_by_user_id),
+                    'requested_by_display_name', to_jsonb(r.requested_by_display_name),
+                    'request_payload', jsonb_build_object('md5', md5(COALESCE(r.request_payload, 'null'::jsonb)::text))
+                )
+                ORDER BY r.id
+            ),
+            '[]'::jsonb
+        )
+        FROM actor_requests AS r
+        "#,
+    )
+    .bind(user_id)
+    .bind(user_key)
+    .fetch_one(pool)
+    .await?;
+    rows.insert(
+        "scrim_replacement_requests.requested_by_user_id.redacted".to_string(),
+        requested_requests,
+    );
+
+    Ok(rows)
+}
+
+async fn select_projected_rows_by_text_user(
+    pool: &PgPool,
+    sql: &str,
+    user_key: &str,
+) -> CommunityDbResult<Value> {
+    Ok(sqlx::query_scalar(sql)
+        .bind(user_key)
+        .fetch_one(pool)
+        .await?)
+}
+
+fn is_user_id_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key == "user_id"
+        || key == "id"
+        || key == "steam_id"
+        || key == "steam_id64"
+        || key.ends_with("_user_id")
+        || key == "discord_id"
+        || key == "discord_user_id"
+        || key == "target_id"
+        || key == "subject_id"
+        || key == "aggregate_id"
+        || key.ends_with("_discord_id")
+        || key.ends_with("_id")
+        || key.ends_with("_ids")
+}
+
+fn is_label_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("display")
+        || key.ends_with("_name")
+        || key == "name"
+        || key.contains("nickname")
+        || key.contains("tag")
+}
+
+fn is_raw_error_text_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("last_error")
+}
+
+fn is_foreign_context_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("foreign") || key.starts_with("other_") || key.ends_with("_other")
+}
+
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.trim().to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn scalar_matches_any_target(value: &Value, target_refs: &[String]) -> bool {
+    scalar_text(value).is_some_and(|value| target_refs.iter().any(|target| target == &value))
+}
+
+fn key_matches_any_target(key: &str, target_refs: &[String]) -> bool {
+    let key = key.trim();
+    target_refs.iter().any(|target| target == key)
+}
+
+fn object_key_is_ref_like(key: &str) -> bool {
+    let key = key.trim();
+    let lower = key.to_ascii_lowercase();
+    let has_digit = key.chars().any(|ch| ch.is_ascii_digit());
+    !key.is_empty()
+        && (key.chars().all(|ch| ch.is_ascii_digit())
+            || (has_digit
+                && (key.contains('_')
+                    || key.contains('-')
+                    || key.contains(':')
+                    || lower.contains("user")
+                    || lower.contains("steam")
+                    || lower.contains("discord"))))
+}
+
+fn scalar_is_ref_like(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::String(value) => {
+            let value = value.trim();
+            value.len() >= 2 && value.chars().any(|ch| ch.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn user_ref_state(value: &Value, target_refs: &[String], key: Option<&str>) -> (bool, bool) {
+    let key_has_target = key.is_some_and(|key| key_matches_any_target(key, target_refs));
+    let key_has_foreign = key.is_some_and(|key| !key_has_target && object_key_is_ref_like(key));
+    match value {
+        Value::Object(map) => map.iter().fold(
+            (key_has_target, key_has_foreign),
+            |state, (child_key, child)| {
+                let child_state = user_ref_state(child, target_refs, Some(child_key));
+                (state.0 || child_state.0, state.1 || child_state.1)
+            },
+        ),
+        Value::Array(items) => {
+            items
+                .iter()
+                .fold((key_has_target, key_has_foreign), |state, child| {
+                    let child_state = user_ref_state(child, target_refs, key);
+                    (state.0 || child_state.0, state.1 || child_state.1)
+                })
+        }
+        _ => {
+            if key_has_target || scalar_matches_any_target(value, target_refs) {
+                (true, key_has_foreign)
+            } else if matches!(value, Value::String(_) | Value::Number(_))
+                && (key.is_some_and(|key| is_user_id_key(key) || is_foreign_context_key(key))
+                    || scalar_is_ref_like(value))
+            {
+                (false, true)
+            } else {
+                (false, key_has_foreign)
+            }
+        }
+    }
+}
+
+fn projected_object_key(
+    key: &str,
+    target_refs: &[String],
+    fallback_index: usize,
+    used_keys: &mut HashSet<String>,
+) -> String {
+    let base = if key_matches_any_target(key, target_refs) || !object_key_is_ref_like(key) {
+        key.to_string()
+    } else {
+        format!("redacted_key_{fallback_index}")
+    };
+    let mut candidate = base.clone();
+    let mut suffix = 1usize;
+    while used_keys.contains(&candidate) {
+        candidate = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    used_keys.insert(candidate.clone());
+    candidate
+}
+
+fn redact_non_target_subtree(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut redacted = serde_json::Map::new();
+            let mut used_keys = HashSet::new();
+            for (index, (key, value)) in map.iter().enumerate() {
+                let key = projected_object_key(key, &[], index, &mut used_keys);
+                redacted.insert(key, redact_non_target_subtree(value));
+            }
+            Value::Object(redacted)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_non_target_subtree).collect()),
+        Value::String(_) | Value::Number(_) | Value::Bool(_) => {
+            Value::String("redacted".to_string())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn redact_foreign_user_ids(value: &Value, target_refs: &[String]) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_foreign_user_ids(item, target_refs))
+                .collect(),
+        ),
+        _ if scalar_matches_any_target(value, target_refs) => value.clone(),
+        Value::String(_) | Value::Number(_) => Value::String("redacted".to_string()),
+        _ => value.clone(),
+    }
+}
+
+fn project_json_for_targets(value: &Value, target_refs: &[String], key: Option<&str>) -> Value {
+    match value {
+        Value::Object(map) => {
+            let (has_target, has_foreign) = user_ref_state(value, target_refs, key);
+            if !has_target {
+                return redact_non_target_subtree(value);
+            }
+            let mut projected = serde_json::Map::new();
+            let mut used_keys = HashSet::new();
+            for (index, (child_key, child)) in map.iter().enumerate() {
+                let child_key_has_target = key_matches_any_target(child_key, target_refs);
+                let child_key_has_foreign =
+                    !child_key_has_target && object_key_is_ref_like(child_key);
+                let (child_value_has_target, child_value_has_foreign) =
+                    user_ref_state(child, target_refs, Some(child_key));
+                let child_has_target = child_key_has_target || child_value_has_target;
+                let child_has_foreign = child_key_has_foreign || child_value_has_foreign;
+                let child_value = if child_has_target {
+                    project_json_for_targets(child, target_refs, Some(child_key))
+                } else if child_has_foreign
+                    || (has_foreign
+                        && (is_user_id_key(child_key)
+                            || is_label_key(child_key)
+                            || is_foreign_context_key(child_key)))
+                {
+                    redact_non_target_subtree(child)
+                } else {
+                    child.clone()
+                };
+                let projected_key =
+                    projected_object_key(child_key, target_refs, index, &mut used_keys);
+                projected.insert(projected_key, child_value);
+            }
+            Value::Object(projected)
+        }
+        Value::Array(items) => {
+            let array_has_target = items
+                .iter()
+                .any(|item| user_ref_state(item, target_refs, key).0);
+            Value::Array(
+                items
+                    .iter()
+                    .map(|item| {
+                        if array_has_target && !user_ref_state(item, target_refs, key).0 {
+                            redact_non_target_subtree(item)
+                        } else {
+                            project_json_for_targets(item, target_refs, key)
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        _ if key.is_some_and(is_user_id_key) => redact_foreign_user_ids(value, target_refs),
+        _ => value.clone(),
+    }
+}
+
+fn json_columns_for_relation(relation: &str) -> Vec<&'static str> {
+    JSON_USER_COLUMNS
+        .iter()
+        .filter_map(|spec| (spec.relation == relation).then_some(spec.col))
+        .collect()
+}
+
+fn project_privacy_row_for_targets(
+    mut row: Value,
+    target_refs: &[String],
+    json_columns: &[&str],
+) -> Value {
+    let Value::Object(ref mut obj) = row else {
+        return row;
+    };
+    let (_row_has_target, row_has_foreign) =
+        user_ref_state(&Value::Object(obj.clone()), target_refs, None);
+    for (key, value) in obj.iter_mut() {
+        if key == "id" {
+            continue;
+        } else if json_columns.contains(&key.as_str()) {
+            *value = project_json_for_targets(value, target_refs, Some(key));
+        } else if is_raw_error_text_key(key) && !value.is_null() {
+            *value = Value::String("redacted".to_string());
+        } else if is_user_id_key(key) {
+            *value = redact_foreign_user_ids(value, target_refs);
+        } else if row_has_foreign && (is_label_key(key) || is_foreign_context_key(key)) {
+            *value = redact_non_target_subtree(value);
+        }
+    }
+    row
+}
+
+async fn select_json_user_rows_for_user(
+    pool: &PgPool,
+    relations: &HashSet<&'static str>,
+    target_refs: &[String],
+) -> CommunityDbResult<BTreeMap<String, Value>> {
+    let mut out = BTreeMap::new();
+    if target_refs.is_empty() {
+        return Ok(out);
+    }
+    for &spec in JSON_USER_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        let rows = match spec.export_mode {
+            JsonUserColumnExport::GenericProjected => {
+                let sql = format!(
+                    "SELECT row_to_json(t)::text AS row_json FROM (SELECT id, {} FROM {} WHERE EXISTS (SELECT 1 FROM unnest($1::TEXT[]) AS target(target_ref) WHERE scrim.jsonb_contains_user_ref({}, target.target_ref)) ORDER BY id) t",
+                    spec.col,
+                    spec.relation, spec.col
+                );
+                sqlx::query(&sql)
+                    .bind(target_refs)
+                    .fetch_all(pool)
+                    .await?
+                    .into_iter()
+                    .map(|row| {
+                        let raw: String = row.try_get("row_json")?;
+                        let value = serde_json::from_str::<Value>(&raw)?;
+                        Ok(project_privacy_row_for_targets(
+                            value,
+                            target_refs,
+                            &[spec.col],
+                        ))
+                    })
+                    .collect::<CommunityDbResult<Vec<_>>>()?
+            }
+            JsonUserColumnExport::HashOnly => {
+                let sql = format!(
+                    "SELECT row_to_json(t)::text AS row_json FROM (SELECT id, jsonb_build_object('md5', md5(COALESCE({}, 'null'::jsonb)::text)) AS {} FROM {} WHERE EXISTS (SELECT 1 FROM unnest($1::TEXT[]) AS target(target_ref) WHERE scrim.jsonb_contains_user_ref({}, target.target_ref)) ORDER BY id) t",
+                    spec.col,
+                    spec.col,
+                    spec.relation,
+                    spec.col
+                );
+                sqlx::query(&sql)
+                    .bind(target_refs)
+                    .fetch_all(pool)
+                    .await?
+                    .into_iter()
+                    .map(|row| {
+                        let raw: String = row.try_get("row_json")?;
+                        serde_json::from_str::<Value>(&raw).map_err(CommunityDbError::from)
+                    })
+                    .collect::<CommunityDbResult<Vec<_>>>()?
+            }
+        };
+        out.insert(spec.count_key(), Value::Array(rows));
+    }
+    Ok(out)
+}
+
+async fn select_text_user_ref_rows_for_user(
+    pool: &PgPool,
+    relations: &HashSet<&'static str>,
+    user_key: &str,
+    steam_ids: &[SteamId],
+) -> CommunityDbResult<BTreeMap<String, Value>> {
+    let mut out = BTreeMap::new();
+    for &spec in TEXT_USER_REF_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        let target_refs = text_ref_targets(spec, user_key, steam_ids);
+        if target_refs.is_empty() {
+            continue;
+        }
+        let sql = format!(
+            "SELECT row_to_json(t)::text AS row_json FROM (SELECT * FROM {} WHERE {} = ANY($1::TEXT[]) AND {} = $2 ORDER BY id) t",
+            spec.relation, spec.col, spec.kind_col
+        );
+        let json_columns = json_columns_for_relation(spec.relation);
+        let rows = sqlx::query(&sql)
+            .bind(target_refs.clone())
+            .bind(spec.kind_value)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let raw: String = row.try_get("row_json")?;
+                let value = serde_json::from_str::<Value>(&raw)?;
+                Ok(project_privacy_row_for_targets(
+                    value,
+                    &target_refs,
+                    &json_columns,
+                ))
+            })
+            .collect::<CommunityDbResult<Vec<_>>>()?;
+        let entry = out
+            .entry(spec.count_key())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Value::Array(existing) = entry {
+            existing.extend(rows);
+        }
+    }
+    Ok(out)
+}
+
+async fn select_scrim_projected_actor_rows_for_user(
+    pool: &PgPool,
+    relations: &HashSet<&'static str>,
+    user_key: &str,
+) -> CommunityDbResult<BTreeMap<String, Value>> {
+    let mut rows = BTreeMap::new();
+
+    if relations.contains("scrim.announcement_drafts") {
+        let created: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT d.id,
+                       to_jsonb(d) || jsonb_build_object(
+                           'created_by_user_id', to_jsonb(d.created_by_user_id),
+                           'created_by_display_name', to_jsonb(d.created_by_display_name),
+                           'approved_by_user_id',
+                           CASE
+                               WHEN d.approved_by_user_id IS NULL THEN 'null'::jsonb
+                               WHEN d.approved_by_user_id = $1 THEN to_jsonb(d.approved_by_user_id)
+                               ELSE '"redacted"'::jsonb
+                           END,
+                           'approved_by_display_name',
+                           CASE
+                               WHEN d.approved_by_user_id IS NULL THEN 'null'::jsonb
+                               WHEN d.approved_by_user_id = $1 THEN COALESCE(to_jsonb(d.approved_by_display_name), 'null'::jsonb)
+                               ELSE '"redacted"'::jsonb
+                           END,
+                           'title', '"redacted"'::jsonb,
+                           'body', '"redacted"'::jsonb,
+                           'payload', jsonb_build_object('md5', md5(COALESCE(d.payload, 'null'::jsonb)::text))
+                       ) AS row_json
+                  FROM scrim.announcement_drafts AS d
+                 WHERE d.created_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_announcement_drafts.created_by_user_id.redacted".to_string(),
+            created,
+        );
+
+        let approved: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT d.id,
+                       to_jsonb(d) || jsonb_build_object(
+                           'created_by_user_id',
+                           CASE
+                               WHEN d.created_by_user_id = $1 THEN to_jsonb(d.created_by_user_id)
+                               ELSE '"redacted"'::jsonb
+                           END,
+                           'created_by_display_name',
+                           CASE
+                               WHEN d.created_by_user_id = $1 THEN to_jsonb(d.created_by_display_name)
+                               ELSE '"redacted"'::jsonb
+                           END,
+                           'approved_by_user_id', to_jsonb(d.approved_by_user_id),
+                           'approved_by_display_name', COALESCE(to_jsonb(d.approved_by_display_name), 'null'::jsonb),
+                           'title', '"redacted"'::jsonb,
+                           'body', '"redacted"'::jsonb,
+                           'payload', jsonb_build_object('md5', md5(COALESCE(d.payload, 'null'::jsonb)::text))
+                       ) AS row_json
+                  FROM scrim.announcement_drafts AS d
+                 WHERE d.approved_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_announcement_drafts.approved_by_user_id.redacted".to_string(),
+            approved,
+        );
+    }
+
+    if relations.contains("scrim.announcement_approvals") {
+        let approvals: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT a.id,
+                       to_jsonb(a) || jsonb_build_object(
+                           'decided_by_user_id', to_jsonb(a.decided_by_user_id),
+                           'decided_by_display_name', to_jsonb(a.decided_by_display_name),
+                           'decision_data', jsonb_build_object('md5', md5(COALESCE(a.decision_data, 'null'::jsonb)::text))
+                       ) AS row_json
+                  FROM scrim.announcement_approvals AS a
+                 WHERE a.decided_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_announcement_approvals.decided_by_user_id.redacted".to_string(),
+            approvals,
+        );
+    }
+
+    if relations.contains("scrim.status_publication_approvals") {
+        let approvals: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT a.id,
+                       to_jsonb(a) || jsonb_build_object(
+                           'target_id',
+                           CASE WHEN a.target_id = $1 THEN to_jsonb(a.target_id) ELSE '"redacted"'::jsonb END,
+                           'decided_by_user_id', COALESCE(to_jsonb(a.decided_by_user_id), 'null'::jsonb),
+                           'decided_by_display_name', COALESCE(to_jsonb(a.decided_by_display_name), 'null'::jsonb),
+                           'payload', jsonb_build_object('md5', md5(COALESCE(a.payload, 'null'::jsonb)::text)),
+                           'decision_data', jsonb_build_object('md5', md5(COALESCE(a.decision_data, 'null'::jsonb)::text))
+                       ) AS row_json
+                  FROM scrim.status_publication_approvals AS a
+                 WHERE a.decided_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_status_publication_approvals.decided_by_user_id.redacted".to_string(),
+            approvals,
+        );
+    }
+
+    if relations.contains("scrim.matches") {
+        let matches: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT m.id,
+                       jsonb_build_object(
+                           'id', m.id,
+                           'team_a_id', m.team_a_id,
+                           'team_b_id', COALESCE(to_jsonb(m.team_b_id), 'null'::jsonb),
+                           'status', m.status,
+                           'scheduled_at', COALESCE(to_jsonb(m.scheduled_at), 'null'::jsonb),
+                           'created_at', m.created_at,
+                           'updated_at', COALESCE(to_jsonb(m.updated_at), 'null'::jsonb),
+                           'steam_match_id', COALESCE(to_jsonb(m.steam_match_id), 'null'::jsonb),
+                           'winner_team_id', COALESCE(to_jsonb(m.winner_team_id), 'null'::jsonb),
+                           'lobby_state', COALESCE(to_jsonb(m.lobby_state), 'null'::jsonb),
+                           'lobby_code_source_user_id', to_jsonb(m.lobby_code_source_user_id),
+                           'lobby_code_source_display_name', COALESCE(to_jsonb(m.lobby_code_source_display_name), 'null'::jsonb),
+                           'lobby_code_updated_at', COALESCE(to_jsonb(m.lobby_code_updated_at), 'null'::jsonb),
+                           'lobby_code_message_ids', jsonb_build_object('md5', md5(COALESCE(m.lobby_code_message_ids, '{}'::jsonb)::text)),
+                           'lobby_code_corrections', jsonb_build_object('md5', md5(COALESCE(m.lobby_code_corrections, '[]'::jsonb)::text)),
+                           'result_json',
+                           CASE
+                               WHEN m.result_json IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(m.result_json::text))
+                           END,
+                           'when_text',
+                           CASE
+                               WHEN m.when_text IS NULL THEN 'null'::jsonb
+                               ELSE '"redacted"'::jsonb
+                           END
+                       ) AS row_json
+                  FROM scrim.matches AS m
+                 WHERE m.lobby_code_source_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_matches.lobby_code_source_user_id.redacted".to_string(),
+            matches,
+        );
+    }
+
+    if relations.contains("scrim.match_requests") {
+        let requests: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT r.id,
+                       jsonb_build_object(
+                           'id', r.id,
+                           'batch_id', r.batch_id,
+                           'team_a_id', r.team_a_id,
+                           'team_b_id', COALESCE(to_jsonb(r.team_b_id), 'null'::jsonb),
+                           'status', r.status,
+                           'created_at', r.created_at,
+                           'updated_at', r.updated_at,
+                           'posted_at', COALESCE(to_jsonb(r.posted_at), 'null'::jsonb),
+                           'released_slot_index', COALESCE(to_jsonb(r.released_slot_index), 'null'::jsonb),
+                           'released_at', COALESCE(to_jsonb(r.released_at), 'null'::jsonb),
+                           'released_by_user_id', to_jsonb(r.released_by_user_id),
+                           'released_by_display_name', COALESCE(to_jsonb(r.released_by_display_name), 'null'::jsonb),
+                           'status_message_state', r.status_message_state,
+                           'status_message_posted_at', COALESCE(to_jsonb(r.status_message_posted_at), 'null'::jsonb),
+                           'status_message_updated_at', COALESCE(to_jsonb(r.status_message_updated_at), 'null'::jsonb),
+                           'slot_options', jsonb_build_object('md5', md5(COALESCE(r.slot_options, 'null'::jsonb)::text)),
+                           'released_slot',
+                           CASE
+                               WHEN r.released_slot IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(r.released_slot::text))
+                           END,
+                           'team_query_message_ids', jsonb_build_object('md5', md5(COALESCE(r.team_query_message_ids, '{}'::jsonb)::text)),
+                           'team_status_message_ids', jsonb_build_object('md5', md5(COALESCE(r.team_status_message_ids, '{}'::jsonb)::text)),
+                           'override_reason',
+                           CASE
+                               WHEN r.override_reason IS NULL THEN 'null'::jsonb
+                               ELSE '"redacted"'::jsonb
+                           END,
+                           'status_message_last_error',
+                           CASE
+                               WHEN r.status_message_last_error IS NULL THEN 'null'::jsonb
+                               ELSE '"redacted"'::jsonb
+                           END
+                       ) AS row_json
+                  FROM scrim.match_requests AS r
+                 WHERE r.released_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_match_requests.released_by_user_id.redacted".to_string(),
+            requests,
+        );
+    }
+
+    if relations.contains("scrim.match_lineup_snapshots") {
+        let target_refs = vec![user_key.to_string()];
+        let lineup_rows = sqlx::query(
+            "SELECT row_to_json(t)::text AS row_json
+               FROM (
+                    SELECT *
+                      FROM scrim.match_lineup_snapshots
+                     WHERE created_by_user_id = $1
+                     ORDER BY id
+               ) t",
+        )
+        .bind(user_key)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let raw: String = row.try_get("row_json")?;
+            let value = serde_json::from_str::<Value>(&raw)?;
+            Ok(project_privacy_row_for_targets(
+                value,
+                &target_refs,
+                &["lineup_payload"],
+            ))
+        })
+        .collect::<CommunityDbResult<Vec<_>>>()?;
+        rows.insert(
+            "scrim_match_lineup_snapshots.created_by_user_id.redacted".to_string(),
+            Value::Array(lineup_rows),
+        );
+    }
+
+    if relations.contains("scrim.match_result_refs") {
+        let source_refs: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT r.id,
+                       to_jsonb(r) || jsonb_build_object(
+                           'source_user_id', to_jsonb(r.source_user_id),
+                           'source_display_name', to_jsonb(r.source_display_name),
+                           'selected_by_user_id',
+                           CASE
+                               WHEN r.selected_by_user_id IS NULL THEN 'null'::jsonb
+                               WHEN r.selected_by_user_id = $1 THEN to_jsonb(r.selected_by_user_id)
+                               ELSE '"redacted"'::jsonb
+                           END,
+                            'clarification_payload', jsonb_build_object('md5', md5(COALESCE(r.clarification_payload, 'null'::jsonb)::text)),
+                            'last_error',
+                            CASE
+                                WHEN r.last_error IS NULL THEN 'null'::jsonb
+                                ELSE jsonb_build_object('md5', md5(r.last_error))
+                            END,
+                            'raw_result_json',
+                            CASE
+                                WHEN r.raw_result_json IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(r.raw_result_json::text))
+                           END,
+                           'normalized_result_json',
+                           CASE
+                               WHEN r.normalized_result_json IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(r.normalized_result_json::text))
+                           END
+                       ) AS row_json
+                  FROM scrim.match_result_refs AS r
+                 WHERE r.source_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_match_result_refs.source_user_id.redacted".to_string(),
+            source_refs,
+        );
+
+        let selected_refs: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT r.id,
+                       to_jsonb(r) || jsonb_build_object(
+                           'source_user_id',
+                           CASE WHEN r.source_user_id = $1 THEN to_jsonb(r.source_user_id) ELSE '"redacted"'::jsonb END,
+                           'source_display_name',
+                            CASE WHEN r.source_user_id = $1 THEN to_jsonb(r.source_display_name) ELSE '"redacted"'::jsonb END,
+                            'selected_by_user_id', to_jsonb(r.selected_by_user_id),
+                            'clarification_payload', jsonb_build_object('md5', md5(COALESCE(r.clarification_payload, 'null'::jsonb)::text)),
+                            'last_error',
+                            CASE
+                                WHEN r.last_error IS NULL THEN 'null'::jsonb
+                                ELSE jsonb_build_object('md5', md5(r.last_error))
+                            END,
+                            'raw_result_json',
+                            CASE
+                                WHEN r.raw_result_json IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(r.raw_result_json::text))
+                           END,
+                           'normalized_result_json',
+                           CASE
+                               WHEN r.normalized_result_json IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(r.normalized_result_json::text))
+                           END
+                       ) AS row_json
+                  FROM scrim.match_result_refs AS r
+                 WHERE r.selected_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_match_result_refs.selected_by_user_id.redacted".to_string(),
+            selected_refs,
+        );
+    }
+
+    if relations.contains("scrim.match_result_clarifications") {
+        let clarifications: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT c.id,
+                       to_jsonb(c) || jsonb_build_object(
+                           'requested_by_user_id', to_jsonb(c.requested_by_user_id),
+                           'requested_by_display_name', to_jsonb(c.requested_by_display_name),
+                           'request_payload', jsonb_build_object('md5', md5(COALESCE(c.request_payload, 'null'::jsonb)::text)),
+                           'response_payload',
+                           CASE
+                               WHEN c.response_payload IS NULL THEN 'null'::jsonb
+                               ELSE jsonb_build_object('md5', md5(c.response_payload::text))
+                           END
+                       ) AS row_json
+                  FROM scrim.match_result_clarifications AS c
+                 WHERE c.requested_by_user_id = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_match_result_clarifications.requested_by_user_id.redacted".to_string(),
+            clarifications,
+        );
+    }
+
+    if relations.contains("scrim.match_result_selection_events")
+        && relations.contains(SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL)
+    {
+        let selection_events: Value = select_projected_rows_by_text_user(
+            pool,
+            r#"
+            WITH projected AS (
+                SELECT e.id,
+                       to_jsonb(e) || jsonb_build_object(
+                           'before_data', jsonb_build_object('md5', md5(COALESCE(e.before_data, 'null'::jsonb)::text)),
+                           'after_data', jsonb_build_object('md5', md5(COALESCE(e.after_data, 'null'::jsonb)::text))
+                       ) AS row_json
+                  FROM scrim.match_result_selection_events AS e
+                  JOIN scrim.audit_actor_pseudonyms AS p
+                    ON p.actor_pseudonym = e.actor_pseudonym
+                 WHERE p.actor_type = 'user'
+                   AND p.actor_ref = $1
+            )
+            SELECT COALESCE(jsonb_agg(row_json ORDER BY id), '[]'::jsonb)
+              FROM projected
+            "#,
+            user_key,
+        )
+        .await?;
+        rows.insert(
+            "scrim_match_result_selection_events.actor_pseudonym".to_string(),
+            selection_events,
+        );
+    }
+
+    Ok(rows)
 }
 
 async fn select_rows_i64(
@@ -1336,6 +3312,17 @@ pub async fn purge_expired_server_sync_rollback_exports(
     let result = sqlx::query("DELETE FROM server_config.rollback_exports WHERE expires_at <= $1")
         .bind(now)
         .execute(pool)
+        .await?;
+    Ok(rows_to_i64(result.rows_affected()))
+}
+
+async fn purge_expired_server_sync_rollback_exports_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CommunityDbResult<i64> {
+    let result = sqlx::query("DELETE FROM server_config.rollback_exports WHERE expires_at <= $1")
+        .bind(now)
+        .execute(&mut **tx)
         .await?;
     Ok(rows_to_i64(result.rows_affected()))
 }
@@ -1573,23 +3560,91 @@ pub async fn delete_user_data(
     now: i64,
 ) -> CommunityDbResult<DeleteSummary> {
     let now = utc_from_unix(now)?;
-    let expired_rollback_exports = purge_expired_server_sync_rollback_exports(pool, now).await?;
     let relations = existing_relations(pool).await?;
     let user_key = user_id.to_string();
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
-    counts.insert(
-        "server_config.rollback_exports.expired".to_string(),
-        expired_rollback_exports,
-    );
 
     let mut tx = pool.begin().await?;
     dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
     lock_user_privacy(&mut tx, user_id).await?;
+    let expired_rollback_exports = if relations.contains(SERVER_SYNC_ROLLBACK_EXPORTS_REL) {
+        purge_expired_server_sync_rollback_exports_tx(&mut tx, now).await?
+    } else {
+        0
+    };
+    counts.insert(
+        "server_config.rollback_exports.expired".to_string(),
+        expired_rollback_exports,
+    );
     let steam_ids = if relations.contains("core.steam_links") {
         steam_ids_for_user_tx(&mut tx, user_id).await?
     } else {
         Vec::new()
     };
+    let target_refs = privacy_target_refs(&user_key, &steam_ids);
+
+    if relations.contains(USER_PRIVACY_REL) {
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
+            VALUES ($1, TRUE, $2, $3, $2)
+            ON CONFLICT(user_id) DO UPDATE SET
+              opted_out = TRUE,
+              deleted_at = excluded.deleted_at,
+              reason = excluded.reason,
+              updated_at = excluded.updated_at
+            "#,
+            user_id,
+            now,
+            reason,
+        )
+        .execute(&mut *tx)
+        .await?;
+        counts.insert("user_privacy_updated".to_string(), 1);
+    }
+
+    for (key, value) in
+        redact_json_user_columns(&mut tx, &relations, &user_key, &target_refs).await?
+    {
+        counts.insert(key, value);
+    }
+
+    let redacted_result_errors =
+        redact_match_result_ref_last_errors(&mut tx, &relations, &user_key, &target_refs).await?;
+    counts.insert(
+        "scrim_match_result_refs.last_error".to_string(),
+        redacted_result_errors,
+    );
+    for (key, value) in
+        redact_match_request_free_text_refs(&mut tx, &relations, &user_key, &target_refs).await?
+    {
+        counts.insert(key, value);
+    }
+
+    for (key, value) in
+        redact_text_user_ref_columns(&mut tx, &relations, &user_key, &steam_ids).await?
+    {
+        counts.insert(key, value);
+    }
+
+    set_privacy_erasure_context(&mut tx, &user_key, &user_key).await?;
+    for &spec in REDACTED_TEXT_USER_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        let n = redact_text_user_column(&mut tx, spec, &user_key).await?;
+        counts.insert(spec.count_key(), n);
+    }
+
+    for (key, value) in delete_scrim_replacement_rows_for_user(&mut tx, &relations, user_id).await?
+    {
+        counts.insert(key, value);
+    }
+
+    if relations.contains(SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL) {
+        let n = delete_scrim_audit_actor_mapping_for_user(&mut tx, &user_key).await?;
+        counts.insert("scrim_audit_actor_pseudonyms.actor_ref".to_string(), n);
+    }
 
     for &spec in USER_TABLES {
         if spec.relation == "activity.message_metadata_events" {
@@ -1739,26 +3794,6 @@ pub async fn delete_user_data(
         counts.insert("kv_concierge_claims".to_string(), deleted_claims);
     }
 
-    if relations.contains(USER_PRIVACY_REL) {
-        sqlx::query!(
-            r#"
-            INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
-            VALUES ($1, TRUE, $2, $3, $2)
-            ON CONFLICT(user_id) DO UPDATE SET
-              opted_out = TRUE,
-              deleted_at = excluded.deleted_at,
-              reason = excluded.reason,
-              updated_at = excluded.updated_at
-            "#,
-            user_id,
-            now,
-            reason,
-        )
-        .execute(&mut *tx)
-        .await?;
-        counts.insert("user_privacy_updated".to_string(), 1);
-    }
-
     tx.commit().await?;
 
     Ok(DeleteSummary {
@@ -1770,6 +3805,8 @@ pub async fn delete_user_data(
 pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<Value> {
     let relations = existing_relations(pool).await?;
     let user_key = user_id.to_string();
+    let steam_ids = steam_ids_for_user(pool, user_id).await?;
+    let target_refs = privacy_target_refs(&user_key, &steam_ids);
     let mut tbl = serde_json::Map::new();
 
     for &spec in USER_TABLES {
@@ -1782,6 +3819,18 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         );
     }
 
+    for &spec in REDACTED_TEXT_USER_COLUMNS {
+        if !relations.contains(spec.relation) || uses_subject_projected_export(spec) {
+            continue;
+        }
+        tbl.insert(
+            spec.count_key(),
+            Value::Array(
+                select_rows_lookup(pool, spec.table_spec(), LookupValue::Text(&user_key)).await?,
+            ),
+        );
+    }
+
     for &spec in NULLABLE_USER_COLUMNS {
         if !relations.contains(spec.relation) {
             continue;
@@ -1790,6 +3839,31 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
             spec.count_key(),
             Value::Array(select_rows_user(pool, spec, user_id, &user_key).await?),
         );
+    }
+
+    for (key, value) in
+        select_scrim_replacement_rows_for_user(pool, &relations, user_id, &user_key).await?
+    {
+        tbl.insert(key, value);
+    }
+    if relations.contains(SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL) {
+        tbl.insert(
+            "scrim_audit_actor_pseudonyms.actor_ref".to_string(),
+            select_scrim_audit_actor_mapping_for_user(pool, &user_key).await?,
+        );
+    }
+    for (key, value) in select_json_user_rows_for_user(pool, &relations, &target_refs).await? {
+        tbl.insert(key, value);
+    }
+    for (key, value) in
+        select_text_user_ref_rows_for_user(pool, &relations, &user_key, &steam_ids).await?
+    {
+        tbl.insert(key, value);
+    }
+    for (key, value) in
+        select_scrim_projected_actor_rows_for_user(pool, &relations, &user_key).await?
+    {
+        tbl.insert(key, value);
     }
 
     if relations.contains("bot.action_outbox") {
@@ -1856,7 +3930,6 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         );
     }
 
-    let steam_ids = steam_ids_for_user(pool, user_id).await?;
     for sid in &steam_ids {
         for &spec in STEAM_SIDE_TABLES {
             if !relations.contains(spec.relation) {
@@ -2025,6 +4098,45 @@ mod privacy_contract_tests {
             .chain(NULLABLE_USER_COLUMNS.iter())
             .map(|spec| (spec.relation.to_string(), spec.col.to_string()))
             .collect::<BTreeSet<_>>();
+        out.extend(
+            REDACTED_TEXT_USER_COLUMNS
+                .iter()
+                .map(|spec| (spec.relation.to_string(), spec.col.to_string())),
+        );
+        out.extend(
+            TEXT_USER_REF_COLUMNS
+                .iter()
+                .map(|spec| (spec.relation.to_string(), spec.col.to_string())),
+        );
+        out.extend(
+            JSON_USER_COLUMNS
+                .iter()
+                .map(|spec| (spec.relation.to_string(), spec.col.to_string())),
+        );
+        out.insert((
+            "scrim.replacement_needs".to_string(),
+            "participant_id".to_string(),
+        ));
+        out.insert((
+            "scrim.replacement_candidates".to_string(),
+            "participant_id".to_string(),
+        ));
+        out.insert((
+            "scrim.replacement_candidates".to_string(),
+            "discord_user_id".to_string(),
+        ));
+        out.insert((
+            "scrim.replacement_requests".to_string(),
+            "participant_id".to_string(),
+        ));
+        out.insert((
+            "scrim.replacement_requests".to_string(),
+            "discord_user_id".to_string(),
+        ));
+        out.insert((
+            SCRIM_AUDIT_ACTOR_PSEUDONYMS_REL.to_string(),
+            "actor_ref".to_string(),
+        ));
         out.insert((USER_CO_PLAYERS_REL.to_string(), "user_id".to_string()));
         out
     }
@@ -2378,6 +4490,43 @@ mod privacy_contract_tests {
         );
     }
 
+    #[test]
+    fn steam64_account_id_ist_zusaetzlicher_privacy_target_ref() {
+        let steam_ids = vec![SteamId {
+            text: "76561198000000420".to_string(),
+            numeric: Some(76_561_198_000_000_420),
+            account_id: steam_account_id_from_steam64(76_561_198_000_000_420),
+        }];
+
+        assert_eq!(
+            privacy_target_refs("42", &steam_ids),
+            vec![
+                "42".to_string(),
+                "76561198000000420".to_string(),
+                "39734692".to_string(),
+            ]
+        );
+        assert!(steam_account_id_from_steam64(42).is_none());
+        assert!(steam_account_id_from_steam64(80_856_166_756_561_024).is_none());
+    }
+
+    #[test]
+    fn result_last_error_scrubbt_nur_exakte_target_refs() {
+        let refs = vec![
+            "42".to_string(),
+            "76561198000000420".to_string(),
+            "39734692".to_string(),
+        ];
+
+        assert_eq!(
+            scrub_text_target_refs(
+                "discord 42 steam 76561198000000420 account 39734692 foreign 99 keep 4242 user42",
+                &refs,
+            ),
+            "discord redacted steam redacted account redacted foreign 99 keep 4242 user42"
+        );
+    }
+
     #[tokio::test]
     async fn is_opted_out_sperrt_bei_nicht_erreichbarem_privacy_status() {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -2397,8 +4546,33 @@ mod tests {
     use dl_central_db::testing::{test_pool, TestDb};
     use std::collections::BTreeSet;
 
+    type SteamAccountRefRow = (String, Option<String>, Option<String>, Value, Option<Value>);
+
     async fn mk_db() -> TestDb {
         test_pool().await.expect("test_pool")
+    }
+
+    fn scrim_json_contains(value: &Value, target_ref: &str) -> bool {
+        match value {
+            Value::Object(map) => map
+                .iter()
+                .any(|(key, child)| key == target_ref || scrim_json_contains(child, target_ref)),
+            Value::Array(items) => items
+                .iter()
+                .any(|child| scrim_json_contains(child, target_ref)),
+            Value::String(value) => value == target_ref,
+            Value::Number(value) => value.to_string() == target_ref,
+            _ => false,
+        }
+    }
+
+    fn database_error_code<T>(result: &Result<T, sqlx::Error>) -> Option<String> {
+        result
+            .as_ref()
+            .err()
+            .and_then(sqlx::Error::as_database_error)
+            .and_then(|err| err.code())
+            .map(|code| code.to_string())
     }
 
     async fn wait_for_db_lock(pool: &PgPool, query_fragment: &str, wait_event: Option<&str>) {
@@ -2634,6 +4808,2623 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scrim_foundation_privacy_redigiert_actoren_und_loescht_replacement_ketten() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (99)")
+            .execute(pool)
+            .await
+            .expect("core user");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES
+                (42, '7656119800000042', 7656119800000042),
+                (99, '7656119800000099', 7656119800000099)",
+        )
+        .execute(pool)
+        .await
+        .expect("steam links");
+        sqlx::query(
+            "INSERT INTO scrim.participants(
+                 id, discord_id, display_name, rank_source, status, source, created_at, updated_at
+              ) VALUES
+                (424200, 42, 'DeleteMe', 'manual', 'active', 'test', now(), now()),
+                (424299, 99, 'OtherUser', 'manual', 'active', 'test', now(), now())",
+        )
+        .execute(pool)
+        .await
+        .expect("scrim participant");
+        sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES (424201, 'A', now()), (424202, 'B', now())")
+            .execute(pool)
+            .await
+            .expect("scrim teams");
+        sqlx::query(
+            "INSERT INTO scrim.matches(id, team_a_id, team_b_id, status, created_at)
+             VALUES (424203, 424201, 424202, 'scheduled', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("scrim match");
+
+        let audit_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.audit_events(event_type, entity_type, actor_type, actor_pseudonym, actor_source)
+             VALUES ('privacy_test', 'match', 'user', scrim.audit_actor_pseudonym('user', '42'), 'user')
+              RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("audit event");
+        sqlx::query(
+            "SELECT applied, current_epoch
+               FROM scrim.transition_runtime_control(
+                    0, 'draining', 'turniere', '42', 'DeleteMe', 'privacy:test', 'privacy:test', '{}'::jsonb
+               )",
+        )
+        .execute(pool)
+        .await
+        .expect("runtime actor");
+        let announcement_draft_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.announcement_drafts(
+                 scope, title, body, payload, payload_hash, idempotency_key,
+                 created_by_user_id, created_by_display_name,
+                 approved_by_user_id, approved_by_display_name
+             ) VALUES (
+                 'global',
+                 'T OtherUser',
+                 'B 99',
+                 '{\"other_user\":\"99\",\"display\":\"OtherUser\"}'::jsonb,
+                 scrim.announcement_effect_hash(
+                     'global',
+                     NULL,
+                     'T OtherUser',
+                     'B 99',
+                     '{\"other_user\":\"99\",\"display\":\"OtherUser\"}'::jsonb
+                 ),
+                  'privacy:announcement',
+                 '42',
+                 'DeleteMe',
+                 '99',
+                 'OtherUser'
+             )
+             RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("announcement draft");
+        let approved_announcement_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.announcement_drafts(
+                 scope, title, body, payload, payload_hash, idempotency_key,
+                 created_by_user_id, created_by_display_name,
+                 approved_by_user_id, approved_by_display_name
+             ) VALUES (
+                 'global',
+                 'Other created',
+                 'Approved by 42',
+                 '{}'::jsonb,
+                 scrim.announcement_effect_hash('global', NULL, 'Other created', 'Approved by 42', '{}'::jsonb),
+                  'privacy:announcement_approved_by',
+                 '99',
+                 'OtherUser',
+                 '42',
+                 'DeleteMe'
+             )
+             RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("approved announcement draft");
+        sqlx::query(
+            "INSERT INTO scrim.announcement_approvals(
+                 draft_id, decision, decided_by_user_id, decided_by_display_name, decision_data
+             ) VALUES ($1, 'approved', '42', 'DeleteMe', '{\"other_user\":\"99\"}'::jsonb)",
+        )
+        .bind(announcement_draft_id)
+        .execute(pool)
+        .await
+        .expect("announcement approval");
+        sqlx::query(
+            "INSERT INTO scrim.status_publication_approvals(
+                 target_kind, target_id, status_kind, payload, payload_hash,
+                 decision, decided_by_user_id, decided_by_display_name, decision_data, decided_at
+             ) VALUES (
+                 'match',
+                 '99',
+                 'status',
+                 '{\"other_user\":\"99\",\"display\":\"OtherUser\"}'::jsonb,
+                 scrim.status_publication_effect_hash(
+                     'match',
+                     '99',
+                     'status',
+                     '{\"other_user\":\"99\",\"display\":\"OtherUser\"}'::jsonb
+                 ),
+                 'approved',
+                 '42',
+                 'DeleteMe',
+                 '{\"approved_for\":\"99\"}'::jsonb,
+                 now()
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("status publication approval");
+        let need_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_needs(
+                 participant_id, reason, created_by_user_id, created_by_display_name
+             ) VALUES (424200, 'privacy', '42', 'DeleteMe')
+             RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("replacement need");
+        let candidate_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_candidates(need_id, participant_id)
+             VALUES ($1, 424200)
+             RETURNING id",
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await
+        .expect("replacement candidate");
+        let foreign_candidate_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_candidates(need_id, participant_id, candidate_data, score_data)
+             VALUES (
+                 $1,
+                 424299,
+                  '{\"foreign_marker\":\"FOREIGN_CANDIDATE_MARKER\",\"note\":\"RAW_REPLACEMENT_NOTE\"}'::jsonb,
+                  '{\"foreign_marker\":\"FOREIGN_SCORE_MARKER\",\"note\":\"RAW_REPLACEMENT_NOTE\"}'::jsonb
+             )
+             RETURNING id",
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await
+        .expect("foreign replacement candidate");
+        let _direct_discord_candidate_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_candidates(need_id, discord_user_id)
+             VALUES ($1, 42)
+             RETURNING id",
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await
+        .expect("direct discord replacement candidate");
+        sqlx::query(
+            "INSERT INTO scrim.replacement_requests(
+                  need_id, candidate_id, requested_by_user_id, requested_by_display_name
+              ) VALUES ($1, $2, '42', 'DeleteMe')",
+        )
+        .bind(need_id)
+        .bind(candidate_id)
+        .execute(pool)
+        .await
+        .expect("replacement request");
+        sqlx::query(
+            "INSERT INTO scrim.replacement_requests(
+                  need_id, candidate_id, requested_by_user_id, requested_by_display_name, request_payload
+              ) VALUES (
+                  $1,
+                  $2,
+                  '99',
+                  'OtherUser',
+                  '{\"foreign_marker\":\"FOREIGN_REQUEST_MARKER\",\"note\":\"RAW_REPLACEMENT_NOTE\"}'::jsonb
+              )",
+        )
+        .bind(need_id)
+        .bind(foreign_candidate_id)
+        .execute(pool)
+        .await
+        .expect("foreign replacement request");
+        sqlx::query(
+            "INSERT INTO scrim.replacement_requests(
+                  need_id, discord_user_id, requested_by_user_id, requested_by_display_name
+              ) VALUES ($1, 42, '42', 'DeleteMe')",
+        )
+        .bind(need_id)
+        .execute(pool)
+        .await
+        .expect("direct discord replacement request");
+        let result_ref_id: i64 = sqlx::query_scalar(
+             "INSERT INTO scrim.match_result_refs(
+                  match_id, steam_match_id, source_user_id, source_display_name,
+                  selected_by_user_id, clarification_payload, last_error, raw_result_json, normalized_result_json,
+                  fetch_status, winner_team_id, validation_status
+                ) VALUES (
+                  424203,
+                 424204,
+                  '42',
+                  'DeleteMe',
+                  '99',
+                  '{\"target_user_id\":\"42\",\"other_user\":\"99\"}'::jsonb,
+                  'source actor 42 should not leak; foreign 99 may remain',
+                  '{\"display\":\"OtherUser\"}'::jsonb,
+                  '{\"winner\":\"99\"}'::jsonb,
+                 'fetched',
+                 424201,
+                 'valid'
+               )
+               RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("result ref");
+        let selected_result_ref_id: i64 = sqlx::query_scalar(
+             "INSERT INTO scrim.match_result_refs(
+                  match_id, steam_match_id, source_user_id, source_display_name,
+                  selected_by_user_id, clarification_payload,
+                  last_error, fetch_status, winner_team_id, normalized_result_json, validation_status
+                ) VALUES (
+                  424203,
+                  424205,
+                 '99',
+                  'OtherUser',
+                  '42',
+                  '{\"target_user_id\":\"42\",\"other_user\":\"99\"}'::jsonb,
+                  'selected actor 42 should not leak; foreign 99 may remain',
+                  'fetched',
+                  424202,
+                 '{\"winner\":\"42\"}'::jsonb,
+                 'valid'
+               )
+               RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("selected result ref");
+        sqlx::query(
+            "INSERT INTO scrim.match_result_selections(
+                 match_id, result_ref_id, selected_by_user_id, selected_by_display_name, selection_reason
+             ) VALUES (424203, $1, '42', 'DeleteMe', 'privacy_initial_selection')",
+        )
+        .bind(result_ref_id)
+        .execute(pool)
+        .await
+        .expect("canonical result selection");
+        sqlx::query(
+            "UPDATE scrim.match_result_selections
+                SET result_ref_id = $1,
+                    selected_by_user_id = '42',
+                    selected_by_display_name = 'DeleteMe',
+                    selection_reason = 'privacy_reselection',
+                    selected_at = selected_at + interval '1 second'
+              WHERE match_id = 424203",
+        )
+        .bind(selected_result_ref_id)
+        .execute(pool)
+        .await
+        .expect("canonical result reselection");
+        sqlx::query(
+            "INSERT INTO scrim.match_result_clarifications(
+                 result_ref_id, clarification_kind, requested_by_user_id, requested_by_display_name,
+                 request_payload, response_payload
+              ) VALUES (
+                 $1,
+                 'manual_review',
+                 '42',
+                 'DeleteMe',
+                  '{\"target_user_id\":\"42\",\"other_user\":\"99\"}'::jsonb,
+                  '{\"steam_id\":\"7656119800000042\",\"display\":\"OtherUser\"}'::jsonb
+              )",
+        )
+        .bind(result_ref_id)
+        .execute(pool)
+        .await
+        .expect("result clarification");
+
+        let json_hash = vec![6_u8; 32];
+        sqlx::query(
+            r#"INSERT INTO scrim.command_receipts(
+                 command_scope, idempotency_key, payload_hash, payload, result_payload,
+                 state, completed_at
+             ) VALUES (
+                  'privacy_json',
+                  'command:json',
+                 $1,
+                 '{"target_user_id":"42","members":{"42":{"display_name":"TargetKey","note":"TARGET_KEY_MARKER"},"990099":{"display_name":"ForeignKey","note":"FOREIGN_KEY_MARKER"}},"participants":[{"discord_id":"42","display_name":"DeleteMe","note":"TARGET_QUEUE_MARKER"},{"discord_id":"990099","display_name":"OtherUser","note":"FOREIGN_QUEUE_MARKER"}]}'::jsonb,
+                 '{"reviewer_user_id":"42","other_user_id":"990099","foreign_marker":"FOREIGN_RESULT_MARKER"}'::jsonb,
+                 'completed',
+                 now()
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("command receipt json payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.inbox_events(event_source, source_event_id, idempotency_key, payload_hash, payload)
+             VALUES (
+                 'privacy',
+                  'inbox:json',
+                  'inbox:json',
+                 $1,
+                 '{"event_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_INBOX_MARKER"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("inbox json payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.outbox_effects(effect_type, idempotency_key, payload_hash, payload)
+             VALUES (
+                  'privacy_json',
+                  'outbox:json',
+                 $1,
+                 '{"recipient_user_id":"42","cc_user_id":"990099","foreign_marker":"FOREIGN_OUTBOX_MARKER"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("outbox json payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.effect_receipts(
+                 remote_system, remote_message_id, payload_hash, receipt_payload, status
+             ) VALUES (
+                 'privacy',
+                  'receipt:json',
+                 $1,
+                 '{"observer_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_RECEIPT_MARKER"}'::jsonb,
+                 'observed'
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("effect receipt json payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.command_receipts(
+                 command_scope, idempotency_key, payload_hash, payload, state, completed_at
+             ) VALUES (
+                  'privacy_steam',
+                  'command:steam',
+                 $1,
+                 '{"players":[{"id":"7656119800000042","display_name":"TargetSteam","role":"carry"},{"id":"7656119800000099","display_name":"ForeignSteam","shadowHandle":"unknown-99"}],"by_steam_id":{"7656119800000042":{"display_name":"TargetSteamKey","note":"TARGET_STEAM_KEY_MARKER"},"7656119800000099":{"display_name":"ForeignSteamKey","note":"FOREIGN_STEAM_KEY_MARKER"}},"metadata":{"unknown_member_ref":"7656119800000099","label":"ForeignSteam"}}'::jsonb,
+                 'completed',
+                 now()
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("command receipt steam-only payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.inbox_events(event_source, source_event_id, idempotency_key, payload_hash, payload)
+             VALUES (
+                 'privacy',
+                  'inbox:steam',
+                  'inbox:steam',
+                 $1,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("inbox steam-only payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.outbox_effects(effect_type, idempotency_key, payload_hash, payload)
+             VALUES (
+                  'privacy_steam',
+                  'outbox:steam',
+                 $1,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("outbox steam-only payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.effect_receipts(
+                 remote_system, remote_message_id, payload_hash, receipt_payload, status
+             ) VALUES (
+                 'privacy',
+                  'receipt:steam',
+                 $1,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb,
+                 'observed'
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("effect receipt steam-only payload");
+        sqlx::query(
+            r#"INSERT INTO scrim.match_lineup_snapshots(
+                 match_id, snapshot_kind, lineup_payload, source, created_by_user_id, created_by_display_name
+             ) VALUES (
+                 424203,
+                 'planned',
+                 '{"players":[{"id":"42","display_name":"Target","role":"carry"},{"id":"43","display_name":"Foreign","mysteryProfile":"opaque-43","role":"FOREIGN_LINEUP_MARKER"}]}'::jsonb,
+                 'turniere',
+                 '99',
+                 'OtherUser'
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("lineup json payload");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_workflows(
+                  workflow_key, workflow_type, aggregate_kind, aggregate_id, subject_kind, subject_id, payload
+              ) VALUES (
+                  'privacy:workflow',
+                  'friend_request',
+                  'match',
+                  '424203',
+                  'discord_user',
+                  '42',
+                  '{"target_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_WORKFLOW_MARKER"}'::jsonb
+              )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam workflow privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operations(
+                 operation_id, operation_type, aggregate_kind, aggregate_id, subject_kind, subject_id,
+                 idempotency_key, payload_hash, payload, result_payload
+             ) VALUES (
+                  'op:privacy_json',
+                  'friend_request',
+                  'match',
+                  '424203',
+                  'discord_user',
+                  '42',
+                 'operation:json',
+                 $1,
+                 '{"target_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_OPERATION_MARKER"}'::jsonb,
+                 '{"target_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_OPERATION_RESULT_MARKER"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("steam operation privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operation_results(operation_id, operation_generation, result_payload, status)
+             VALUES (
+                 'op:privacy_json',
+                 0,
+                 '{"target_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_STEAM_RESULT_MARKER"}'::jsonb,
+                 'succeeded'
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam operation result privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operation_events(operation_id, operation_generation, event_type, payload)
+             VALUES (
+                 'op:privacy_json',
+                 0,
+                 'privacy_event',
+                 '{"target_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_STEAM_EVENT_MARKER"}'::jsonb
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam operation event privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_deliveries(
+                 operation_id, operation_generation, delivery_type, idempotency_key,
+                 remote_system, payload_hash, payload
+             ) VALUES (
+                 'op:privacy_json',
+                 0,
+                 'privacy_delivery',
+                 'delivery:json',
+                 'steam',
+                 $1,
+                 '{"target_user_id":"42","foreign_user_id":"990099","foreign_marker":"FOREIGN_STEAM_DELIVERY_MARKER"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("steam delivery privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_workflows(
+                  workflow_key, workflow_type, aggregate_kind, aggregate_id, subject_kind, subject_id, payload
+              ) VALUES (
+                  'privacy:workflow_steam',
+                  'friend_request',
+                  'player',
+                  '7656119800000042',
+                  'steam_user',
+                 '7656119800000099',
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam workflow steam-only privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operations(
+                 operation_id, operation_type, aggregate_kind, aggregate_id, subject_kind, subject_id,
+                 idempotency_key, payload_hash, payload, result_payload
+             ) VALUES (
+                  'op:privacy_steam',
+                  'friend_request',
+                  'player',
+                  '7656119800000042',
+                 'steam_user',
+                 '7656119800000042',
+                 'operation:steam',
+                 $1,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("steam operation steam-only privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operation_results(operation_id, operation_generation, result_payload, status)
+             VALUES (
+                 'op:privacy_steam',
+                 0,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb,
+                 'succeeded'
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam operation result steam-only privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operation_events(operation_id, operation_generation, event_type, payload)
+             VALUES (
+                 'op:privacy_steam',
+                 0,
+                 'privacy_event',
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam operation event steam-only privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_deliveries(
+                 operation_id, operation_generation, delivery_type, idempotency_key,
+                 remote_system, payload_hash, payload
+             ) VALUES (
+                 'op:privacy_steam',
+                 0,
+                 'privacy_delivery',
+                 'delivery:steam',
+                 'steam',
+                 $1,
+                 '{"steam_id":"7656119800000042","foreign_steam_id":"7656119800000099","foreign_label":"ForeignSteam"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("steam delivery steam-only privacy row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_workflows(
+                 workflow_key, workflow_type, aggregate_kind, aggregate_id, payload
+             ) VALUES (
+                 'privacy:workflow_kind_collision',
+                 'friend_request',
+                 'match',
+                 '42',
+                 '{"domain":"match-only"}'::jsonb
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam workflow aggregate kind collision row");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operations(
+                 operation_id, operation_type, aggregate_kind, aggregate_id,
+                 idempotency_key, payload_hash, payload
+             ) VALUES (
+                 'op:privacy_kind_collision',
+                 'friend_request',
+                 'match',
+                 '42',
+                 'operation:kind_collision',
+                 $1,
+                 '{"domain":"match-only"}'::jsonb
+             )"#,
+        )
+        .bind(&json_hash)
+        .execute(pool)
+        .await
+        .expect("steam operation aggregate kind collision row");
+        let ai_discord_run_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.ai_runs(run_kind, subject_kind, subject_id, idempotency_key, input_hash)
+             VALUES ('lagebild', 'discord_user', '42', 'privacy:ai_discord_target', $1)
+             RETURNING id"#,
+        )
+        .bind(&json_hash)
+        .fetch_one(pool)
+        .await
+        .expect("ai run discord target row");
+        let ai_steam_run_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.ai_runs(run_kind, subject_kind, subject_id, idempotency_key, input_hash)
+             VALUES ('lagebild', 'steam_user', '7656119800000042', 'privacy:ai_steam_target', $1)
+             RETURNING id"#,
+        )
+        .bind(&json_hash)
+        .fetch_one(pool)
+        .await
+        .expect("ai run steam target row");
+        let ai_team_collision_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.ai_runs(run_kind, subject_kind, subject_id, idempotency_key, input_hash)
+             VALUES ('lagebild', 'team', '42', 'privacy:ai_team_collision', $1)
+             RETURNING id"#,
+        )
+        .bind(&json_hash)
+        .fetch_one(pool)
+        .await
+        .expect("ai run team kind collision row");
+        let ai_match_collision_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.ai_runs(run_kind, subject_kind, subject_id, idempotency_key, input_hash)
+             VALUES ('lagebild', 'match', '42', 'privacy:ai_match_collision', $1)
+             RETURNING id"#,
+        )
+        .bind(&json_hash)
+        .fetch_one(pool)
+        .await
+        .expect("ai run match kind collision row");
+        let ai_foreign_run_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.ai_runs(run_kind, subject_kind, subject_id, idempotency_key, input_hash)
+             VALUES ('lagebild', 'discord_user', '99', 'privacy:ai_foreign_user', $1)
+             RETURNING id"#,
+        )
+        .bind(&json_hash)
+        .fetch_one(pool)
+        .await
+        .expect("ai run foreign user row");
+
+        let export = export_user_data(pool, 42, 1_000)
+            .await
+            .expect("privacy export");
+        let exported_needs = export["tables"]["scrim_replacement_needs.participant_id"]
+            .as_array()
+            .expect("replacement needs export");
+        let exported_candidates = export["tables"]["scrim_replacement_candidates.user_identity"]
+            .as_array()
+            .expect("replacement candidates export");
+        let exported_requests = export["tables"]["scrim_replacement_requests.user_identity"]
+            .as_array()
+            .expect("replacement requests export");
+        let exported_tables = export["tables"].as_object().expect("export tables object");
+        for (hash_only_payload_key, column) in [
+            (
+                "scrim_replacement_candidates.candidate_data",
+                "candidate_data",
+            ),
+            ("scrim_replacement_candidates.score_data", "score_data"),
+            (
+                "scrim_replacement_requests.request_payload",
+                "request_payload",
+            ),
+            (
+                "scrim_match_result_refs.clarification_payload",
+                "clarification_payload",
+            ),
+            (
+                "scrim_match_result_clarifications.request_payload",
+                "request_payload",
+            ),
+            (
+                "scrim_match_result_clarifications.response_payload",
+                "response_payload",
+            ),
+        ] {
+            let rows = exported_tables[hash_only_payload_key]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!("hash-only payload key missing: {hash_only_payload_key}")
+                });
+            for row in rows {
+                let row = row.as_object().expect("hash-only row object");
+                assert_eq!(
+                    row.len(),
+                    2,
+                    "hash-only payload export exposed extra fields: {hash_only_payload_key}: {row:?}"
+                );
+                assert!(row["id"].is_number());
+                assert!(row[column]["md5"].is_string());
+            }
+        }
+        let full_export = serde_json::to_string(&export).expect("serialize full export");
+        assert!(
+            !full_export.contains("RAW_REPLACEMENT_NOTE"),
+            "raw replacement payload note leaked in DSAR export: {full_export}"
+        );
+        assert_eq!(exported_needs.len(), 1);
+        assert_eq!(exported_candidates.len(), 3);
+        assert_eq!(exported_requests.len(), 3);
+
+        let audit_mapping_export = export["tables"]["scrim_audit_actor_pseudonyms.actor_ref"]
+            .as_array()
+            .expect("audit actor mapping export");
+        assert_eq!(audit_mapping_export.len(), 1);
+        assert_eq!(
+            audit_mapping_export[0]["actor_ref"],
+            serde_json::json!("42")
+        );
+        let command_payload_export = export["tables"]["scrim_command_receipts.payload"]
+            .as_array()
+            .expect("command payload export");
+        let command_result_export = export["tables"]["scrim_command_receipts.result_payload"]
+            .as_array()
+            .expect("command result payload export");
+        let inbox_payload_export = export["tables"]["scrim_inbox_events.payload"]
+            .as_array()
+            .expect("inbox payload export");
+        let outbox_payload_export = export["tables"]["scrim_outbox_effects.payload"]
+            .as_array()
+            .expect("outbox payload export");
+        let effect_receipt_export = export["tables"]["scrim_effect_receipts.receipt_payload"]
+            .as_array()
+            .expect("effect receipt payload export");
+        let lineup_payload_export = export["tables"]["scrim_match_lineup_snapshots.lineup_payload"]
+            .as_array()
+            .expect("lineup payload export");
+        let ai_run_subject_export = export["tables"]["scrim_ai_runs.subject_id"]
+            .as_array()
+            .expect("ai run subject export");
+        let workflow_ref_export = export["tables"]["steam_v1_workflows.aggregate_id"]
+            .as_array()
+            .expect("steam workflow aggregate export");
+        let workflow_subject_export = export["tables"]["steam_v1_workflows.subject_id"]
+            .as_array()
+            .expect("steam workflow subject export");
+        let operation_subject_export = export["tables"]["steam_v1_operations.subject_id"]
+            .as_array()
+            .expect("steam operation subject export");
+        assert!(!command_payload_export.is_empty());
+        assert!(!command_result_export.is_empty());
+        assert!(!inbox_payload_export.is_empty());
+        assert!(!outbox_payload_export.is_empty());
+        assert!(!effect_receipt_export.is_empty());
+        assert!(!lineup_payload_export.is_empty());
+        assert_eq!(ai_run_subject_export.len(), 2);
+        assert!(ai_run_subject_export.iter().any(|row| {
+            row["idempotency_key"] == serde_json::json!("privacy:ai_discord_target")
+                && row["subject_kind"] == serde_json::json!("discord_user")
+                && row["subject_id"] == serde_json::json!("42")
+        }));
+        assert!(ai_run_subject_export.iter().any(|row| {
+            row["idempotency_key"] == serde_json::json!("privacy:ai_steam_target")
+                && row["subject_kind"] == serde_json::json!("steam_user")
+                && row["subject_id"] == serde_json::json!("7656119800000042")
+        }));
+        assert!(!ai_run_subject_export.iter().any(|row| {
+            matches!(
+                row["idempotency_key"].as_str(),
+                Some(
+                    "privacy:ai_team_collision"
+                        | "privacy:ai_match_collision"
+                        | "privacy:ai_foreign_user"
+                )
+            )
+        }));
+        assert!(!workflow_ref_export.is_empty());
+        assert!(!workflow_subject_export.is_empty());
+        assert!(operation_subject_export.len() >= 2);
+        assert!(!workflow_ref_export.iter().any(|row| {
+            row["workflow_key"] == serde_json::json!("privacy:workflow_kind_collision")
+        }));
+        let projected_payloads = serde_json::to_string(&serde_json::json!({
+            "command": command_payload_export,
+            "command_result": command_result_export,
+            "inbox": inbox_payload_export,
+            "outbox": outbox_payload_export,
+            "receipt": effect_receipt_export,
+            "lineup": lineup_payload_export,
+            "ai_runs": ai_run_subject_export,
+            "workflow": workflow_ref_export,
+            "workflow_subject": workflow_subject_export,
+            "operation": operation_subject_export,
+        }))
+        .expect("serialize projected json exports");
+        assert!(projected_payloads.contains("42"));
+        assert!(projected_payloads.contains("Target"));
+        assert!(projected_payloads.contains("TARGET_KEY_MARKER"));
+        assert!(projected_payloads.contains("7656119800000042"));
+        assert!(projected_payloads.contains("TARGET_STEAM_KEY_MARKER"));
+        for marker in [
+            "990099",
+            "OtherUser",
+            "ForeignKey",
+            "ForeignSteam",
+            "ForeignSteamKey",
+            "7656119800000099",
+            "unknown-99",
+            "FOREIGN_KEY_MARKER",
+            "FOREIGN_STEAM_KEY_MARKER",
+            "FOREIGN_QUEUE_MARKER",
+            "FOREIGN_RESULT_MARKER",
+            "FOREIGN_LINEUP_MARKER",
+            "FOREIGN_WORKFLOW_MARKER",
+            "FOREIGN_OPERATION_MARKER",
+        ] {
+            assert!(
+                !projected_payloads.contains(marker),
+                "foreign JSON/Steam marker leaked: {marker}: {projected_payloads}"
+            );
+        }
+        assert!(
+            !projected_payloads.contains("\\\"43\\\""),
+            "foreign nested id leaked: {projected_payloads}"
+        );
+        assert!(exported_candidates
+            .iter()
+            .any(|row| row["discord_user_id"] == serde_json::json!(42)));
+        assert!(exported_candidates
+            .iter()
+            .any(|row| row["participant_id"] == serde_json::json!("redacted")));
+        assert!(exported_requests
+            .iter()
+            .any(|row| row["discord_user_id"] == serde_json::json!(42)));
+        assert!(exported_requests
+            .iter()
+            .any(|row| row["requested_by_user_id"] == serde_json::json!("redacted")));
+
+        let foreign_candidate_export = exported_candidates
+            .iter()
+            .find(|row| row["participant_id"] == serde_json::json!("redacted"))
+            .expect("foreign replacement candidate export");
+        assert!(foreign_candidate_export["candidate_data"]["md5"].is_string());
+        assert!(foreign_candidate_export["score_data"]["md5"].is_string());
+        let foreign_request_export = exported_requests
+            .iter()
+            .find(|row| row["requested_by_user_id"] == serde_json::json!("redacted"))
+            .expect("foreign replacement request export");
+        assert!(foreign_request_export["request_payload"]["md5"].is_string());
+        let replacement_export = serde_json::to_string(&serde_json::json!({
+            "candidates": exported_candidates,
+            "requests": exported_requests,
+        }))
+        .expect("serialize replacement export rows");
+        for marker in [
+            "FOREIGN_CANDIDATE_MARKER",
+            "FOREIGN_SCORE_MARKER",
+            "FOREIGN_REQUEST_MARKER",
+        ] {
+            assert!(
+                !replacement_export.contains(marker),
+                "foreign replacement marker leaked: {marker}: {replacement_export}"
+            );
+        }
+
+        let created_announcements = export["tables"]
+            ["scrim_announcement_drafts.created_by_user_id.redacted"]
+            .as_array()
+            .expect("created announcement export");
+        let created_announcement = created_announcements
+            .iter()
+            .find(|row| row["id"] == serde_json::json!(announcement_draft_id))
+            .expect("created announcement row");
+        assert_eq!(
+            created_announcement["created_by_user_id"],
+            serde_json::json!("42")
+        );
+        assert_eq!(
+            created_announcement["approved_by_user_id"],
+            serde_json::json!("redacted")
+        );
+        assert_eq!(created_announcement["title"], serde_json::json!("redacted"));
+        assert!(created_announcement["payload"]["md5"].is_string());
+
+        let approved_announcements = export["tables"]
+            ["scrim_announcement_drafts.approved_by_user_id.redacted"]
+            .as_array()
+            .expect("approved announcement export");
+        let approved_announcement = approved_announcements
+            .iter()
+            .find(|row| row["id"] == serde_json::json!(approved_announcement_id))
+            .expect("approved announcement row");
+        assert_eq!(
+            approved_announcement["created_by_user_id"],
+            serde_json::json!("redacted")
+        );
+        assert_eq!(
+            approved_announcement["approved_by_user_id"],
+            serde_json::json!("42")
+        );
+
+        let announcement_approvals = export["tables"]
+            ["scrim_announcement_approvals.decided_by_user_id.redacted"]
+            .as_array()
+            .expect("announcement approval export");
+        assert_eq!(announcement_approvals.len(), 1);
+        assert_eq!(
+            announcement_approvals[0]["decided_by_user_id"],
+            serde_json::json!("42")
+        );
+        assert!(announcement_approvals[0]["decision_data"]["md5"].is_string());
+
+        let status_approvals = export["tables"]
+            ["scrim_status_publication_approvals.decided_by_user_id.redacted"]
+            .as_array()
+            .expect("status publication export");
+        assert_eq!(status_approvals.len(), 1);
+        assert_eq!(
+            status_approvals[0]["target_id"],
+            serde_json::json!("redacted")
+        );
+        assert!(status_approvals[0]["payload"]["md5"].is_string());
+        assert!(status_approvals[0]["decision_data"]["md5"].is_string());
+
+        let source_refs = export["tables"]["scrim_match_result_refs.source_user_id.redacted"]
+            .as_array()
+            .expect("source result refs export");
+        let source_ref = source_refs
+            .iter()
+            .find(|row| row["id"] == serde_json::json!(result_ref_id))
+            .expect("source result ref row");
+        assert_eq!(source_ref["source_user_id"], serde_json::json!("42"));
+        assert_eq!(
+            source_ref["selected_by_user_id"],
+            serde_json::json!("redacted")
+        );
+        assert!(source_ref["clarification_payload"]["md5"].is_string());
+        assert!(source_ref["last_error"]["md5"].is_string());
+        assert!(source_ref["raw_result_json"]["md5"].is_string());
+        assert!(source_ref["normalized_result_json"]["md5"].is_string());
+
+        let selected_refs = export["tables"]
+            ["scrim_match_result_refs.selected_by_user_id.redacted"]
+            .as_array()
+            .expect("selected result refs export");
+        let selected_ref = selected_refs
+            .iter()
+            .find(|row| row["id"] == serde_json::json!(selected_result_ref_id))
+            .expect("selected result ref row");
+        assert_eq!(selected_ref["selected_by_user_id"], serde_json::json!("42"));
+        assert_eq!(
+            selected_ref["source_user_id"],
+            serde_json::json!("redacted")
+        );
+        assert_eq!(
+            selected_ref["source_display_name"],
+            serde_json::json!("redacted")
+        );
+        assert!(selected_ref["last_error"]["md5"].is_string());
+
+        let canonical_selections = export["tables"]
+            ["scrim_match_result_selections.selected_by_user_id.redacted"]
+            .as_array()
+            .expect("canonical selection export");
+        assert_eq!(canonical_selections.len(), 1);
+        assert_eq!(
+            canonical_selections[0]["selected_by_user_id"],
+            serde_json::json!("42")
+        );
+        assert_eq!(
+            canonical_selections[0]["result_ref_id"],
+            serde_json::json!(selected_result_ref_id)
+        );
+        assert_eq!(
+            canonical_selections[0]["selection_reason"],
+            serde_json::json!("privacy_reselection")
+        );
+
+        let selection_events = export["tables"]
+            ["scrim_match_result_selection_events.actor_pseudonym"]
+            .as_array()
+            .expect("selection history export");
+        assert_eq!(selection_events.len(), 2);
+        assert_eq!(
+            selection_events[0]["event_type"],
+            serde_json::json!("selected")
+        );
+        assert_eq!(
+            selection_events[0]["old_result_ref_id"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            selection_events[0]["new_result_ref_id"],
+            serde_json::json!(result_ref_id)
+        );
+        assert_eq!(
+            selection_events[1]["event_type"],
+            serde_json::json!("reselected")
+        );
+        assert_eq!(
+            selection_events[1]["old_result_ref_id"],
+            serde_json::json!(result_ref_id)
+        );
+        assert_eq!(
+            selection_events[1]["new_result_ref_id"],
+            serde_json::json!(selected_result_ref_id)
+        );
+        assert!(selection_events[1]["before_data"]["md5"].is_string());
+        assert!(selection_events[1]["after_data"]["md5"].is_string());
+        let selection_events_serialized =
+            serde_json::to_string(selection_events).expect("serialize selection history export");
+        assert!(!selection_events_serialized.contains("DeleteMe"));
+
+        let clarifications = export["tables"]
+            ["scrim_match_result_clarifications.requested_by_user_id.redacted"]
+            .as_array()
+            .expect("result clarification export");
+        assert_eq!(clarifications.len(), 1);
+        assert_eq!(
+            clarifications[0]["requested_by_user_id"],
+            serde_json::json!("42")
+        );
+        assert!(clarifications[0]["request_payload"]["md5"].is_string());
+        assert!(clarifications[0]["response_payload"]["md5"].is_string());
+
+        for rows in [
+            created_announcements,
+            approved_announcements,
+            announcement_approvals,
+            status_approvals,
+            source_refs,
+            selected_refs,
+            canonical_selections,
+            selection_events,
+            clarifications,
+        ] {
+            let serialized = serde_json::to_string(rows).expect("serialize projected export rows");
+            assert!(
+                !serialized.contains("OtherUser"),
+                "foreign display name leaked: {serialized}"
+            );
+        }
+
+        let audit_pseudonym_before_delete: String =
+            sqlx::query_scalar("SELECT actor_pseudonym FROM scrim.audit_events WHERE id = $1")
+                .bind(audit_id)
+                .fetch_one(pool)
+                .await
+                .expect("audit pseudonym before delete");
+        let mapping_before_delete: String = sqlx::query_scalar(
+            "SELECT actor_pseudonym
+               FROM scrim.audit_actor_pseudonyms
+              WHERE actor_type = 'user'
+                AND actor_ref = '42'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("audit mapping before delete");
+        assert_eq!(mapping_before_delete, audit_pseudonym_before_delete);
+
+        let summary = delete_user_data(pool, 42, "privacy-test".into(), 2_000)
+            .await
+            .expect("delete user data");
+
+        assert_eq!(
+            summary.counts.get("scrim_audit_actor_pseudonyms.actor_ref"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_requests.user_identity"),
+            Some(&3)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_candidates.user_identity"),
+            Some(&3)
+        );
+        assert_eq!(
+            summary.counts.get("scrim_replacement_needs.participant_id"),
+            Some(&1)
+        );
+        assert!(summary.counts.get("scrim_command_receipts.payload") >= Some(&2));
+        assert_eq!(
+            summary.counts.get("scrim_command_receipts.result_payload"),
+            Some(&1)
+        );
+        assert!(summary.counts.get("scrim_inbox_events.payload") >= Some(&2));
+        assert!(summary.counts.get("scrim_outbox_effects.payload") >= Some(&2));
+        assert!(summary.counts.get("scrim_effect_receipts.receipt_payload") >= Some(&2));
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_match_lineup_snapshots.lineup_payload"),
+            Some(&1)
+        );
+        assert!(
+            summary
+                .counts
+                .get("scrim_match_result_refs.clarification_payload")
+                >= Some(&1)
+        );
+        assert!(
+            summary
+                .counts
+                .get("scrim_match_result_clarifications.request_payload")
+                >= Some(&1)
+        );
+        assert!(
+            summary
+                .counts
+                .get("scrim_match_result_clarifications.response_payload")
+                >= Some(&1)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_match_result_selections.selected_by_user_id.redacted"),
+            Some(&1)
+        );
+        assert_eq!(summary.counts.get("scrim_ai_runs.subject_id"), Some(&2));
+        assert!(summary.counts.get("steam_v1_workflows.aggregate_id") >= Some(&1));
+        assert!(summary.counts.get("steam_v1_workflows.subject_id") >= Some(&1));
+        assert!(summary.counts.get("steam_v1_operations.aggregate_id") >= Some(&1));
+        assert!(summary.counts.get("steam_v1_workflows.payload") >= Some(&2));
+        assert!(summary.counts.get("steam_v1_operations.subject_id") >= Some(&2));
+        assert!(summary.counts.get("steam_v1_operations.payload") >= Some(&2));
+        assert!(
+            summary
+                .counts
+                .get("steam_v1_operation_results.result_payload")
+                >= Some(&2)
+        );
+        assert!(summary.counts.get("steam_v1_operation_events.payload") >= Some(&2));
+        assert!(summary.counts.get("steam_v1_deliveries.payload") >= Some(&2));
+        let mapping_after_delete: Option<String> = sqlx::query_scalar(
+            "SELECT actor_pseudonym
+               FROM scrim.audit_actor_pseudonyms
+              WHERE actor_type = 'user'
+                AND actor_ref = '42'",
+        )
+        .fetch_optional(pool)
+        .await
+        .expect("audit mapping after delete");
+        assert_eq!(mapping_after_delete, None);
+        let evidence_rows: i64 = sqlx::query_scalar(
+            "SELECT
+                 (SELECT count(*) FROM scrim.command_receipts WHERE command_scope LIKE 'privacy_%')
+               + (SELECT count(*) FROM scrim.inbox_events WHERE event_source = 'privacy')
+               + (SELECT count(*) FROM scrim.outbox_effects WHERE effect_type LIKE 'privacy_%')
+               + (SELECT count(*) FROM scrim.effect_receipts WHERE remote_system = 'privacy')
+               + (SELECT count(*) FROM scrim.match_lineup_snapshots WHERE match_id = 424203)
+               + (SELECT count(*) FROM scrim.ai_runs WHERE idempotency_key LIKE 'privacy:ai_%')
+               + (SELECT count(*) FROM steam.v1_workflows WHERE workflow_key LIKE 'privacy:workflow%')
+               + (SELECT count(*) FROM steam.v1_operations WHERE operation_id LIKE 'op:privacy_%')
+               + (SELECT count(*) FROM steam.v1_operation_results WHERE operation_id LIKE 'op:privacy_%')
+               + (SELECT count(*) FROM steam.v1_operation_events WHERE operation_id LIKE 'op:privacy_%')
+               + (SELECT count(*) FROM steam.v1_deliveries WHERE operation_id LIKE 'op:privacy_%')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("privacy evidence rows remain");
+        assert_eq!(evidence_rows, 26);
+        let target_json_refs_remaining: bool = sqlx::query_scalar(
+            "SELECT
+                 EXISTS (SELECT 1 FROM scrim.command_receipts WHERE scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042') OR scrim.jsonb_contains_user_ref(COALESCE(result_payload, '{}'::jsonb), '42') OR scrim.jsonb_contains_user_ref(COALESCE(result_payload, '{}'::jsonb), '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM scrim.inbox_events WHERE scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM scrim.outbox_effects WHERE scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM scrim.effect_receipts WHERE scrim.jsonb_contains_user_ref(receipt_payload, '42') OR scrim.jsonb_contains_user_ref(receipt_payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM scrim.match_lineup_snapshots WHERE scrim.jsonb_contains_user_ref(lineup_payload, '42') OR scrim.jsonb_contains_user_ref(lineup_payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM scrim.ai_runs WHERE (subject_kind = 'discord_user' AND subject_id = '42') OR (subject_kind = 'steam_user' AND subject_id = '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM steam.v1_workflows WHERE (aggregate_kind = 'player' AND aggregate_id = '7656119800000042') OR (subject_kind = 'discord_user' AND subject_id = '42') OR (subject_kind = 'steam_user' AND subject_id = '7656119800000042') OR scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM steam.v1_operations WHERE (aggregate_kind = 'player' AND aggregate_id = '7656119800000042') OR (subject_kind = 'discord_user' AND subject_id = '42') OR (subject_kind = 'steam_user' AND subject_id = '7656119800000042') OR scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042') OR scrim.jsonb_contains_user_ref(COALESCE(result_payload, '{}'::jsonb), '42') OR scrim.jsonb_contains_user_ref(COALESCE(result_payload, '{}'::jsonb), '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM steam.v1_operation_results WHERE scrim.jsonb_contains_user_ref(result_payload, '42') OR scrim.jsonb_contains_user_ref(result_payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM steam.v1_operation_events WHERE scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042'))
+              OR EXISTS (SELECT 1 FROM steam.v1_deliveries WHERE scrim.jsonb_contains_user_ref(payload, '42') OR scrim.jsonb_contains_user_ref(payload, '7656119800000042'))",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("target json refs remaining");
+        assert!(!target_json_refs_remaining);
+        let ai_subject_rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT idempotency_key, subject_kind, subject_id
+               FROM scrim.ai_runs
+              WHERE id = ANY($1)
+              ORDER BY idempotency_key",
+        )
+        .bind([
+            ai_discord_run_id,
+            ai_steam_run_id,
+            ai_team_collision_id,
+            ai_match_collision_id,
+            ai_foreign_run_id,
+        ])
+        .fetch_all(pool)
+        .await
+        .expect("ai run subjects after delete");
+        assert_eq!(
+            ai_subject_rows,
+            vec![
+                (
+                    "privacy:ai_discord_target".to_string(),
+                    "discord_user".to_string(),
+                    "redacted".to_string(),
+                ),
+                (
+                    "privacy:ai_foreign_user".to_string(),
+                    "discord_user".to_string(),
+                    "99".to_string(),
+                ),
+                (
+                    "privacy:ai_match_collision".to_string(),
+                    "match".to_string(),
+                    "42".to_string(),
+                ),
+                (
+                    "privacy:ai_steam_target".to_string(),
+                    "steam_user".to_string(),
+                    "redacted".to_string(),
+                ),
+                (
+                    "privacy:ai_team_collision".to_string(),
+                    "team".to_string(),
+                    "42".to_string(),
+                ),
+            ]
+        );
+        let kind_collision_refs: (String, String) = sqlx::query_as(
+            "SELECT
+                 (SELECT aggregate_id FROM steam.v1_workflows WHERE workflow_key = 'privacy:workflow_kind_collision'),
+                 (SELECT aggregate_id FROM steam.v1_operations WHERE operation_id = 'op:privacy_kind_collision')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("kind collision aggregate refs after delete");
+        assert_eq!(kind_collision_refs, ("42".to_string(), "42".to_string()));
+        let steam_links_remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM core.steam_links WHERE discord_id = 42")
+                .fetch_one(pool)
+                .await
+                .expect("steam links after delete");
+        assert_eq!(steam_links_remaining, 0);
+        let audit_actor: (String, String) = sqlx::query_as(
+            "SELECT actor_pseudonym, actor_source FROM scrim.audit_events WHERE id = $1",
+        )
+        .bind(audit_id)
+        .fetch_one(pool)
+        .await
+        .expect("audit actor pseudonymous");
+        assert_eq!(
+            audit_actor,
+            (audit_pseudonym_before_delete.clone(), "user".to_string())
+        );
+        assert_ne!(audit_actor.0, "42");
+        let regenerated_pseudonym: String =
+            sqlx::query_scalar("SELECT scrim.audit_actor_pseudonym('user', '42')")
+                .fetch_one(pool)
+                .await
+                .expect("regenerated audit pseudonym");
+        assert_ne!(regenerated_pseudonym, audit_pseudonym_before_delete);
+        let mapping_after_regeneration: Option<String> = sqlx::query_scalar(
+            "SELECT actor_pseudonym
+               FROM scrim.audit_actor_pseudonyms
+              WHERE actor_type = 'user'
+                AND actor_ref = '42'",
+        )
+        .fetch_optional(pool)
+        .await
+        .expect("audit mapping after one-off pseudonym");
+        assert_eq!(mapping_after_regeneration, None);
+
+        let runtime_actor: (String, String) =
+            sqlx::query_as("SELECT actor_pseudonym, actor_source FROM scrim.runtime_control")
+                .fetch_one(pool)
+                .await
+                .expect("runtime actor pseudonymous");
+        assert!(runtime_actor.0.starts_with("act_"));
+        assert_eq!(runtime_actor.1, "user");
+        let announcement_actor: (String, String) = sqlx::query_as(
+            "SELECT created_by_user_id, created_by_display_name
+               FROM scrim.announcement_drafts
+              WHERE id = $1",
+        )
+        .bind(announcement_draft_id)
+        .fetch_one(pool)
+        .await
+        .expect("announcement actor redacted");
+        assert_eq!(
+            announcement_actor,
+            ("redacted".to_string(), "redacted".to_string())
+        );
+        let approved_announcement_actor: (String, String, String, String) = sqlx::query_as(
+            "SELECT created_by_user_id,
+                    created_by_display_name,
+                    approved_by_user_id,
+                    approved_by_display_name
+               FROM scrim.announcement_drafts
+              WHERE id = $1",
+        )
+        .bind(approved_announcement_id)
+        .fetch_one(pool)
+        .await
+        .expect("approved announcement actor redacted");
+        assert_eq!(
+            approved_announcement_actor,
+            (
+                "99".to_string(),
+                "OtherUser".to_string(),
+                "redacted".to_string(),
+                "redacted".to_string(),
+            )
+        );
+        let replacement_rows: i64 = sqlx::query_scalar(
+            "SELECT
+                (SELECT count(*) FROM scrim.replacement_requests)
+              + (SELECT count(*) FROM scrim.replacement_candidates)
+              + (SELECT count(*) FROM scrim.replacement_needs)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("replacement row count");
+        assert_eq!(replacement_rows, 0);
+        let participant_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM scrim.participants WHERE discord_id = 42")
+                .fetch_one(pool)
+                .await
+                .expect("participant row count");
+        assert_eq!(participant_rows, 0);
+        let result_ref_actor: (String, String) = sqlx::query_as(
+            "SELECT source_user_id, source_display_name FROM scrim.match_result_refs WHERE id = $1",
+        )
+        .bind(result_ref_id)
+        .fetch_one(pool)
+        .await
+        .expect("result ref actor redacted");
+        assert_eq!(
+            result_ref_actor,
+            ("redacted".to_string(), "redacted".to_string())
+        );
+        let selected_ref_actor: (String, String, String) = sqlx::query_as(
+            "SELECT source_user_id, source_display_name, selected_by_user_id
+               FROM scrim.match_result_refs
+              WHERE id = $1",
+        )
+        .bind(selected_result_ref_id)
+        .fetch_one(pool)
+        .await
+        .expect("selected result ref actor redacted");
+        assert_eq!(
+            selected_ref_actor,
+            (
+                "99".to_string(),
+                "OtherUser".to_string(),
+                "redacted".to_string(),
+            )
+        );
+        let clarification_actor: (String, String) = sqlx::query_as(
+            "SELECT requested_by_user_id, requested_by_display_name FROM scrim.match_result_clarifications",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("clarification actor redacted");
+        assert_eq!(
+            clarification_actor,
+            ("redacted".to_string(), "redacted".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn scrim_replacement_requester_erasure_schrubbt_payload_ohne_fremde_zeile_zu_loeschen() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (99)")
+            .execute(pool)
+            .await
+            .expect("core users");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES (42, '7656119800000042', 7656119800000042)",
+        )
+        .execute(pool)
+        .await
+        .expect("linked steam target");
+        sqlx::query(
+            "INSERT INTO scrim.participants(
+                 id, discord_id, display_name, rank_source, status, source, created_at, updated_at
+              ) VALUES (925099, 99, 'OtherUser', 'manual', 'active', 'test', now(), now())",
+        )
+        .execute(pool)
+        .await
+        .expect("foreign participant");
+        sqlx::query(
+            "INSERT INTO scrim.teams(id, name, created_at) VALUES (925001, 'Replacement', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("replacement team");
+        let creator_need_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_needs(
+                 team_id, reason, created_by_user_id, created_by_display_name
+              ) VALUES (925001, 'creator_only', '42', 'DeleteMe')
+              RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("creator-only replacement need");
+        let need_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_needs(
+                 team_id, reason, created_by_user_id, created_by_display_name
+              ) VALUES (925001, 'requester_only', '99', 'OtherUser')
+              RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("foreign replacement need");
+        let candidate_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_candidates(
+                 need_id, participant_id, candidate_data, score_data
+              ) VALUES (
+                 $1,
+                 925099,
+                 '{\"candidate\":\"99\"}'::jsonb,
+                 '{\"score\":\"safe\"}'::jsonb
+              ) RETURNING id",
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await
+        .expect("foreign replacement candidate");
+        let request_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_requests(
+                 need_id, candidate_id, requested_by_user_id, requested_by_display_name,
+                 request_payload, remote_system, remote_message_id
+              ) VALUES (
+                 $1,
+                 $2,
+                 '42',
+                 'DeleteMe',
+                 '{\"requester_id\":\"42\",\"steam_id\":\"7656119800000042\",\"foreign_id\":\"99\"}'::jsonb,
+                 'discord',
+                 'msg:replacement_requester_only'
+              ) RETURNING id",
+        )
+        .bind(need_id)
+        .bind(candidate_id)
+        .fetch_one(pool)
+        .await
+        .expect("requester-only replacement request");
+
+        let summary = delete_user_data(pool, 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy delete");
+
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_needs.created_by_user_id.redacted"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_requests.request_payload"),
+            Some(&2)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_requests.requested_by_user_id.redacted"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_requests.user_identity"),
+            Some(&0)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_replacement_candidates.user_identity"),
+            Some(&0)
+        );
+        let row: (String, String, Value, bool, bool, bool) = sqlx::query_as(
+            "SELECT requested_by_user_id,
+                    requested_by_display_name,
+                    request_payload,
+                    scrim.jsonb_contains_user_ref(request_payload, '42'),
+                    scrim.jsonb_contains_user_ref(request_payload, '7656119800000042'),
+                    scrim.jsonb_contains_user_ref(request_payload, '99')
+               FROM scrim.replacement_requests
+              WHERE id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(pool)
+        .await
+        .expect("requester-only row survived");
+        assert_eq!(row.0, "redacted");
+        assert_eq!(row.1, "redacted");
+        assert!(!row.3);
+        assert!(!row.4);
+        assert!(row.5);
+        assert_eq!(row.2["foreign_id"], serde_json::json!("99"));
+        let creator_row: (String, String) = sqlx::query_as(
+            "SELECT created_by_user_id, created_by_display_name
+               FROM scrim.replacement_needs
+              WHERE id = $1",
+        )
+        .bind(creator_need_id)
+        .fetch_one(pool)
+        .await
+        .expect("creator-only row survived");
+        assert_eq!(
+            creator_row,
+            ("redacted".to_string(), "redacted".to_string())
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM scrim.replacement_candidates")
+                .fetch_one(pool)
+                .await
+                .expect("candidate count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scrim_hashonly_dsar_deckt_payload_only_treffer_ohne_rohdaten() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (77), (99)")
+            .execute(pool)
+            .await
+            .expect("core users");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES
+                (42, '76561198000000420', 76561198000000420),
+                (77, '76561197960265805', 76561197960265805)",
+        )
+        .execute(pool)
+        .await
+        .expect("target steam link");
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
+             VALUES
+                (42, true, now(), 'namespace-test', now()),
+                (77, true, now(), 'namespace-collision-test', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("privacy namespace tombstones");
+        let linked_account_namespace: (bool, Option<String>) = sqlx::query_as(
+            "WITH privacy AS (
+                 SELECT set_config('scrim.privacy_erasure_user_id', '42', true),
+                        set_config('scrim.privacy_erasure_target_ref', '39734692', true)
+             )
+             SELECT scrim.privacy_erasure_authorized('39734692'),
+                    scrim.privacy_erasure_target_namespace('39734692')
+               FROM privacy",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("linked account namespace");
+        assert_eq!(
+            linked_account_namespace,
+            (true, Some("steam_user".to_string()))
+        );
+        let wrong_account_namespace: (bool, Option<String>) = sqlx::query_as(
+            "WITH privacy AS (
+                 SELECT set_config('scrim.privacy_erasure_user_id', '42', true),
+                        set_config('scrim.privacy_erasure_target_ref', '39734693', true)
+             )
+             SELECT scrim.privacy_erasure_authorized('39734693'),
+                    scrim.privacy_erasure_target_namespace('39734693')
+               FROM privacy",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("wrong account namespace");
+        assert_eq!(wrong_account_namespace, (false, None));
+        let collision_namespace: (bool, Option<String>) = sqlx::query_as(
+            "WITH privacy AS (
+                 SELECT set_config('scrim.privacy_erasure_user_id', '77', true),
+                        set_config('scrim.privacy_erasure_target_ref', '77', true)
+             )
+             SELECT scrim.privacy_erasure_authorized('77'),
+                    scrim.privacy_erasure_target_namespace('77')
+               FROM privacy",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("colliding account namespace");
+        assert_eq!(
+            collision_namespace,
+            (true, Some("discord_user".to_string()))
+        );
+        sqlx::query(
+            "INSERT INTO scrim.participants(
+                 id, discord_id, display_name, rank_source, status, source, created_at, updated_at
+              ) VALUES (945099, 99, 'OtherUser', 'manual', 'active', 'test', now(), now())",
+        )
+        .execute(pool)
+        .await
+        .expect("foreign participant");
+        sqlx::query(
+            "INSERT INTO scrim.teams(id, name, created_at)
+             VALUES (945001, 'Hash A', now()), (945002, 'Hash B', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("hash teams");
+        sqlx::query(
+            "INSERT INTO scrim.matches(id, team_a_id, team_b_id, status, created_at)
+             VALUES (945003, 945001, 945002, 'scheduled', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("hash match");
+        let need_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_needs(
+                 team_id, reason, created_by_user_id, created_by_display_name
+              ) VALUES (945001, 'privacy_hashonly', '99', 'OtherUser')
+              RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("foreign replacement need");
+        let candidate_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.replacement_candidates(
+                 need_id, participant_id, candidate_data, score_data
+              ) VALUES (
+                 $1,
+                 945099,
+                 '{"target_user_id":"42","note":"RAW_HASHONLY_CANDIDATE","foreign":"FOREIGN_HASHONLY_CANDIDATE"}'::jsonb,
+                 '{"target_account_id":"39734692","note":"RAW_HASHONLY_SCORE","foreign":"FOREIGN_HASHONLY_SCORE"}'::jsonb
+              ) RETURNING id"#,
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await
+        .expect("payload-only replacement candidate");
+        sqlx::query(
+            r#"INSERT INTO scrim.replacement_candidates(
+                 need_id, discord_user_id, candidate_data, score_data
+              ) VALUES (
+                 $1,
+                 99,
+                 '{"target_user_id":"99","note":"UNRELATED_CANDIDATE"}'::jsonb,
+                 '{"target_account_id":"39734693","note":"UNRELATED_SCORE"}'::jsonb
+              )"#,
+        )
+        .bind(need_id)
+        .execute(pool)
+        .await
+        .expect("unrelated replacement candidate");
+        let request_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.replacement_requests(
+                 need_id, candidate_id, requested_by_user_id, requested_by_display_name,
+                 request_payload
+              ) VALUES (
+                 $1,
+                 $2,
+                 '99',
+                 'OtherUser',
+                 '{"steam_id":"76561198000000420","note":"RAW_HASHONLY_REQUEST","foreign":"FOREIGN_HASHONLY_REQUEST"}'::jsonb
+              ) RETURNING id"#,
+        )
+        .bind(need_id)
+        .bind(candidate_id)
+        .fetch_one(pool)
+        .await
+        .expect("payload-only replacement request");
+        sqlx::query(
+            r#"INSERT INTO scrim.replacement_requests(
+                 need_id, discord_user_id, requested_by_user_id, requested_by_display_name,
+                 request_payload
+              ) VALUES (
+                 $1,
+                 99,
+                 '99',
+                 'OtherUser',
+                 '{"target_user_id":"99","note":"UNRELATED_REQUEST"}'::jsonb
+              )"#,
+        )
+        .bind(need_id)
+        .execute(pool)
+        .await
+        .expect("unrelated replacement request");
+        let result_ref_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.match_result_refs(
+                 match_id, steam_match_id, source_user_id, source_display_name,
+                 fetch_status, winner_team_id, clarification_payload, validation_status
+              ) VALUES (
+                 945003,
+                 945301,
+                 '99',
+                 'OtherUser',
+                 'fetched',
+                 945001,
+                 '{"target_user_id":"42","note":"RAW_HASHONLY_RESULT_REF","foreign":"FOREIGN_HASHONLY_RESULT_REF"}'::jsonb,
+                 'valid'
+              ) RETURNING id"#,
+        )
+        .fetch_one(pool)
+        .await
+        .expect("payload-only result ref");
+        sqlx::query(
+            r#"INSERT INTO scrim.match_result_refs(
+                 match_id, steam_match_id, source_user_id, source_display_name,
+                 fetch_status, winner_team_id, clarification_payload, validation_status
+              ) VALUES (
+                 945003,
+                 945302,
+                 '99',
+                 'OtherUser',
+                 'fetched',
+                 945002,
+                 '{"target_user_id":"99","note":"UNRELATED_RESULT_REF"}'::jsonb,
+                 'valid'
+              )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("unrelated result ref");
+        let clarification_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.match_result_clarifications(
+                 result_ref_id, clarification_kind, requested_by_user_id, requested_by_display_name,
+                 request_payload, response_payload
+              ) VALUES (
+                 $1,
+                 'manual_review',
+                 '99',
+                 'OtherUser',
+                 '{"target_user_id":"42","note":"RAW_HASHONLY_CLARIFICATION_REQUEST","foreign":"FOREIGN_HASHONLY_CLARIFICATION_REQUEST"}'::jsonb,
+                 '{"steam_id":"76561198000000420","note":"RAW_HASHONLY_CLARIFICATION_RESPONSE","foreign":"FOREIGN_HASHONLY_CLARIFICATION_RESPONSE"}'::jsonb
+              ) RETURNING id"#,
+        )
+        .bind(result_ref_id)
+        .fetch_one(pool)
+        .await
+        .expect("payload-only clarification");
+
+        let export = export_user_data(pool, 42, 1_000)
+            .await
+            .expect("hash-only privacy export");
+        let tables = export["tables"].as_object().expect("tables object");
+        for (key, id, column) in [
+            (
+                "scrim_replacement_candidates.candidate_data",
+                candidate_id,
+                "candidate_data",
+            ),
+            (
+                "scrim_replacement_candidates.score_data",
+                candidate_id,
+                "score_data",
+            ),
+            (
+                "scrim_replacement_requests.request_payload",
+                request_id,
+                "request_payload",
+            ),
+            (
+                "scrim_match_result_refs.clarification_payload",
+                result_ref_id,
+                "clarification_payload",
+            ),
+            (
+                "scrim_match_result_clarifications.request_payload",
+                clarification_id,
+                "request_payload",
+            ),
+            (
+                "scrim_match_result_clarifications.response_payload",
+                clarification_id,
+                "response_payload",
+            ),
+        ] {
+            let rows = tables[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("hash-only rows missing for {key}"));
+            assert_eq!(rows.len(), 1, "unrelated rows leaked for {key}: {rows:?}");
+            let row = rows[0].as_object().expect("hash-only row object");
+            assert_eq!(
+                row.len(),
+                2,
+                "hash-only DSAR exposed extra columns: {row:?}"
+            );
+            assert_eq!(row["id"], serde_json::json!(id));
+            assert!(
+                row[column]["md5"].is_string(),
+                "missing payload hash for {key}: {row:?}"
+            );
+        }
+        let serialized = serde_json::to_string(&export).expect("serialize hash-only export");
+        for marker in [
+            "RAW_HASHONLY_CANDIDATE",
+            "RAW_HASHONLY_SCORE",
+            "RAW_HASHONLY_REQUEST",
+            "RAW_HASHONLY_RESULT_REF",
+            "RAW_HASHONLY_CLARIFICATION_REQUEST",
+            "RAW_HASHONLY_CLARIFICATION_RESPONSE",
+            "FOREIGN_HASHONLY_CANDIDATE",
+            "FOREIGN_HASHONLY_SCORE",
+            "FOREIGN_HASHONLY_REQUEST",
+            "FOREIGN_HASHONLY_RESULT_REF",
+            "FOREIGN_HASHONLY_CLARIFICATION_REQUEST",
+            "FOREIGN_HASHONLY_CLARIFICATION_RESPONSE",
+            "UNRELATED_CANDIDATE",
+            "UNRELATED_SCORE",
+            "UNRELATED_REQUEST",
+            "UNRELATED_RESULT_REF",
+        ] {
+            assert!(
+                !serialized.contains(marker),
+                "hash-only DSAR leaked raw marker {marker}: {serialized}"
+            );
+        }
+
+        let summary = delete_user_data(pool, 42, "hash-only-test".to_string(), 2_000)
+            .await
+            .expect("hash-only privacy delete");
+        for key in [
+            "scrim_replacement_candidates.candidate_data",
+            "scrim_replacement_candidates.score_data",
+            "scrim_replacement_requests.request_payload",
+            "scrim_match_result_refs.clarification_payload",
+            "scrim_match_result_clarifications.request_payload",
+            "scrim_match_result_clarifications.response_payload",
+        ] {
+            assert!(
+                summary.counts.get(key) >= Some(&1),
+                "{key} was not scrubbed"
+            );
+        }
+        let target_refs_remaining: bool = sqlx::query_scalar(
+            "SELECT
+                 EXISTS (SELECT 1 FROM scrim.replacement_candidates WHERE id = $1 AND (scrim.jsonb_contains_user_ref(candidate_data, '42') OR scrim.jsonb_contains_user_ref(score_data, '39734692')))
+              OR EXISTS (SELECT 1 FROM scrim.replacement_requests WHERE id = $2 AND scrim.jsonb_contains_user_ref(request_payload, '76561198000000420'))
+              OR EXISTS (SELECT 1 FROM scrim.match_result_refs WHERE id = $3 AND scrim.jsonb_contains_user_ref(clarification_payload, '42'))
+              OR EXISTS (SELECT 1 FROM scrim.match_result_clarifications WHERE id = $4 AND (scrim.jsonb_contains_user_ref(request_payload, '42') OR scrim.jsonb_contains_user_ref(COALESCE(response_payload, '{}'::jsonb), '76561198000000420')))"
+        )
+        .bind(candidate_id)
+        .bind(request_id)
+        .bind(result_ref_id)
+        .bind(clarification_id)
+        .fetch_one(pool)
+        .await
+        .expect("target refs after hash-only delete");
+        assert!(!target_refs_remaining);
+    }
+
+    #[tokio::test]
+    async fn scrim_account_id_erasure_autorisiert_nur_verlinkte_steam_account_targets() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        let target_account_id = "39734692";
+        let wrong_account_id = "39734693";
+        let hash = vec![9_u8; 32];
+
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (99)")
+            .execute(pool)
+            .await
+            .expect("core users");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES (42, '76561198000000420', 76561198000000420)",
+        )
+        .execute(pool)
+        .await
+        .expect("target steam link");
+        sqlx::query(
+            r#"INSERT INTO scrim.command_receipts(
+                 command_scope, idempotency_key, payload_hash, payload, state, completed_at
+              ) VALUES
+                ('privacy_account', 'account:target_queue', $1, '{"account_id":"39734692","note":"TARGET_ACCOUNT_QUEUE"}'::jsonb, 'completed', now()),
+                ('privacy_account', 'account:wrong_queue', $1, '{"account_id":"39734693","note":"WRONG_ACCOUNT_QUEUE"}'::jsonb, 'completed', now())"#,
+        )
+        .bind(&hash)
+        .execute(pool)
+        .await
+        .expect("protected queue account payloads");
+        let delete_queue = sqlx::query(
+            "DELETE FROM scrim.command_receipts WHERE idempotency_key = 'account:target_queue'",
+        )
+        .execute(pool)
+        .await;
+        assert_eq!(database_error_code(&delete_queue).as_deref(), Some("55000"));
+        sqlx::query(
+            r#"INSERT INTO scrim.ai_runs(run_kind, subject_kind, subject_id, idempotency_key, input_hash)
+             VALUES
+                ('lagebild', 'steam_user', '39734692', 'privacy:ai_account_target', $1),
+                ('lagebild', 'steam_user', '39734693', 'privacy:ai_account_wrong', $1),
+                ('lagebild', 'team', '39734692', 'privacy:ai_account_kind_collision', $1)"#,
+        )
+        .bind(&hash)
+        .execute(pool)
+        .await
+        .expect("ai account targets");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_workflows(
+                 workflow_key, workflow_type, aggregate_kind, aggregate_id, subject_kind, subject_id, payload
+              ) VALUES
+                ('privacy:workflow_account_target', 'friend_request', 'player', '39734692', 'steam_user', '39734692', '{"account_id":"39734692","note":"TARGET_ACCOUNT_WORKFLOW"}'::jsonb),
+                ('privacy:workflow_account_wrong', 'friend_request', 'player', '39734693', 'steam_user', '39734693', '{"account_id":"39734693","note":"WRONG_ACCOUNT_WORKFLOW"}'::jsonb),
+                ('privacy:workflow_account_kind_collision', 'friend_request', 'match', '39734692', NULL, NULL, '{"domain":"match"}'::jsonb)"#,
+        )
+        .execute(pool)
+        .await
+        .expect("steam workflow account targets");
+        sqlx::query(
+            r#"INSERT INTO steam.v1_operations(
+                 operation_id, operation_type, aggregate_kind, aggregate_id, subject_kind, subject_id,
+                 idempotency_key, payload_hash, payload, result_payload
+              ) VALUES
+                ('op:privacy_account_target', 'friend_request', 'player', '39734692', 'steam_user', '39734692', 'operation:account_target', $1, '{"account_id":"39734692","note":"TARGET_ACCOUNT_OPERATION"}'::jsonb, '{"account_id":"39734692","note":"TARGET_ACCOUNT_OPERATION_RESULT"}'::jsonb),
+                ('op:privacy_account_wrong', 'friend_request', 'player', '39734693', 'steam_user', '39734693', 'operation:account_wrong', $1, '{"account_id":"39734693","note":"WRONG_ACCOUNT_OPERATION"}'::jsonb, '{"account_id":"39734693","note":"WRONG_ACCOUNT_OPERATION_RESULT"}'::jsonb),
+                ('op:privacy_account_kind_collision', 'friend_request', 'match', '39734692', NULL, NULL, 'operation:account_kind_collision', $1, '{"domain":"match"}'::jsonb, NULL)"#,
+        )
+        .bind(&hash)
+        .execute(pool)
+        .await
+        .expect("steam operation account targets");
+
+        let summary = delete_user_data(pool, 42, "account-id-test".to_string(), 2_000)
+            .await
+            .expect("account id privacy delete");
+        assert_eq!(
+            summary.counts.get("scrim_command_receipts.payload"),
+            Some(&1)
+        );
+        assert_eq!(summary.counts.get("scrim_ai_runs.subject_id"), Some(&1));
+        assert_eq!(
+            summary.counts.get("steam_v1_workflows.aggregate_id"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.counts.get("steam_v1_workflows.subject_id"),
+            Some(&1)
+        );
+        assert_eq!(summary.counts.get("steam_v1_workflows.payload"), Some(&1));
+        assert_eq!(
+            summary.counts.get("steam_v1_operations.aggregate_id"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.counts.get("steam_v1_operations.subject_id"),
+            Some(&1)
+        );
+        assert_eq!(summary.counts.get("steam_v1_operations.payload"), Some(&1));
+        assert_eq!(
+            summary.counts.get("steam_v1_operations.result_payload"),
+            Some(&1)
+        );
+
+        let queue_payloads: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT idempotency_key, payload
+               FROM scrim.command_receipts
+              WHERE command_scope = 'privacy_account'
+              ORDER BY idempotency_key",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("queue payloads after account delete");
+        assert_eq!(queue_payloads.len(), 2);
+        assert!(!scrim_json_contains(
+            &queue_payloads[0].1,
+            target_account_id
+        ));
+        assert!(scrim_json_contains(&queue_payloads[1].1, wrong_account_id));
+
+        let ai_subjects: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT idempotency_key, subject_kind, subject_id
+               FROM scrim.ai_runs
+              WHERE idempotency_key LIKE 'privacy:ai_account%'
+              ORDER BY idempotency_key",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("ai account subjects after delete");
+        assert_eq!(
+            ai_subjects,
+            vec![
+                (
+                    "privacy:ai_account_kind_collision".to_string(),
+                    "team".to_string(),
+                    target_account_id.to_string(),
+                ),
+                (
+                    "privacy:ai_account_target".to_string(),
+                    "steam_user".to_string(),
+                    "redacted".to_string(),
+                ),
+                (
+                    "privacy:ai_account_wrong".to_string(),
+                    "steam_user".to_string(),
+                    wrong_account_id.to_string(),
+                ),
+            ]
+        );
+        let steam_refs: Vec<SteamAccountRefRow> = sqlx::query_as(
+            "SELECT workflow_key, aggregate_id, subject_id, payload, NULL::jsonb AS result_payload
+                   FROM steam.v1_workflows
+                  WHERE workflow_key LIKE 'privacy:workflow_account%'
+                 UNION ALL
+                 SELECT operation_id, aggregate_id, subject_id, payload, result_payload
+                   FROM steam.v1_operations
+                  WHERE operation_id LIKE 'op:privacy_account%'
+                  ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("steam account refs after delete");
+        for (key, aggregate_id, subject_id, payload, result_payload) in steam_refs {
+            match key.as_str() {
+                "op:privacy_account_target" | "privacy:workflow_account_target" => {
+                    assert_eq!(aggregate_id.as_deref(), Some("redacted"));
+                    assert_eq!(subject_id.as_deref(), Some("redacted"));
+                    assert!(!scrim_json_contains(&payload, target_account_id));
+                    if let Some(result_payload) = result_payload {
+                        assert!(!scrim_json_contains(&result_payload, target_account_id));
+                    }
+                }
+                "op:privacy_account_wrong" | "privacy:workflow_account_wrong" => {
+                    assert_eq!(aggregate_id.as_deref(), Some(wrong_account_id));
+                    assert_eq!(subject_id.as_deref(), Some(wrong_account_id));
+                    assert!(scrim_json_contains(&payload, wrong_account_id));
+                }
+                "op:privacy_account_kind_collision" | "privacy:workflow_account_kind_collision" => {
+                    assert_eq!(aggregate_id.as_deref(), Some(target_account_id));
+                    assert!(subject_id.is_none());
+                }
+                other => panic!("unexpected steam account row: {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scrim_result_json_privacy_export_und_erasure_deckt_account_id_und_last_error() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        let target_steam_id64 = "76561198000000420";
+        let target_account_id = "39734692";
+
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (99)")
+            .execute(pool)
+            .await
+            .expect("core users");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES (42, $1, 76561198000000420)",
+        )
+        .bind(target_steam_id64)
+        .execute(pool)
+        .await
+        .expect("target steam link");
+        sqlx::query(
+            "INSERT INTO scrim.teams(id, name, created_at)
+             VALUES (935001, 'Result A', now()), (935002, 'Result B', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("result teams");
+        sqlx::query(
+            r#"INSERT INTO scrim.matches(
+                 id, team_a_id, team_b_id, status, join_code, steam_match_id, winner_team_id,
+                 result_json, lobby_code_corrections, created_at, updated_at
+             ) VALUES (
+                 935003,
+                 935001,
+                 935002,
+                 'completed',
+                 'SECRET_LOBBY_CODE_ADJACENT',
+                 935301,
+                 935001,
+                 '{
+                    "legacy": true,
+                    "players": [
+                      {"account_id":39734692,"steam_id":"76561198000000420","display_name":"Target Legacy","note":"TARGET_LEGACY_RESULT"},
+                      {"account_id":123456,"steam_id":"76561198000000999","display_name":"Foreign Legacy","note":"FOREIGN_LEGACY_RESULT"}
+                     ]
+                   }'::jsonb,
+                 '[{"actor_user_id":"42","actor_display_name":"ADJACENT_LOBBY_CORRECTION_PII"}]'::jsonb,
+                 now(),
+                 now()
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("legacy result match");
+        sqlx::query(
+            "INSERT INTO scrim.matches(id, team_a_id, team_b_id, status, created_at)
+             VALUES (935006, 935001, 935002, 'scheduled', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("result-ref match");
+        let result_ref_id: i64 = sqlx::query_scalar(
+            r#"INSERT INTO scrim.match_result_refs(
+                 match_id, steam_match_id, source_user_id, source_display_name,
+                 fetch_status, winner_team_id, clarification_payload, raw_result_json,
+                 normalized_result_json, validation_status, last_error
+             ) VALUES (
+                 935006,
+                 935302,
+                 '99',
+                 'Foreign Actor',
+                 'fetched',
+                 935001,
+                 '{"manual_review":"ADJACENT_CLARIFICATION_PII_42","target_user_id":"42"}'::jsonb,
+                 '{
+                    "raw_players": [
+                      {"account_id":"39734692","steam_id":"76561198000000420","name":"Target Raw","score":7},
+                      {"account_id":"123456","steam_id":"76561198000000999","name":"Foreign Raw","note":"FOREIGN_RAW_RESULT"}
+                    ]
+                  }'::jsonb,
+                 '{
+                    "players_by_account": {
+                      "39734692": {"display_name":"Target Selected","kills":7,"note":"TARGET_SELECTED_RESULT"},
+                      "123456": {"display_name":"Foreign Selected","kills":3,"note":"FOREIGN_SELECTED_RESULT"}
+                    },
+                    "players": [
+                      {"account_id":39734692,"steam_id":"76561198000000420","display_name":"Target Selected Array","kills":7},
+                      {"account_id":123456,"steam_id":"76561198000000999","display_name":"Foreign Selected Array","note":"FOREIGN_SELECTED_ARRAY"}
+                    ]
+                  }'::jsonb,
+                 'valid',
+                 'failed discord 42 steam 76561198000000420 account 39734692 foreign 99 keep 4242 user42'
+             )
+             RETURNING id"#,
+        )
+        .fetch_one(pool)
+        .await
+        .expect("result ref with result json");
+        sqlx::query(
+            "INSERT INTO scrim.match_result_selections(
+                 match_id, result_ref_id, selected_by_user_id, selected_by_display_name, selection_reason
+             ) VALUES (935006, $1, '99', 'Foreign Actor', 'privacy_result_json')",
+        )
+        .bind(result_ref_id)
+        .execute(pool)
+        .await
+        .expect("selected result ref");
+
+        let export = export_user_data(pool, 42, 1_000)
+            .await
+            .expect("result privacy export");
+        let legacy_rows = export["tables"]["scrim_matches.result_json"]
+            .as_array()
+            .expect("legacy result_json export");
+        let raw_rows = export["tables"]["scrim_match_result_refs.raw_result_json"]
+            .as_array()
+            .expect("raw result_json export");
+        let normalized_rows = export["tables"]["scrim_match_result_refs.normalized_result_json"]
+            .as_array()
+            .expect("normalized result_json export");
+        assert_eq!(legacy_rows.len(), 1);
+        assert_eq!(raw_rows.len(), 1);
+        assert_eq!(normalized_rows.len(), 1);
+        for (row, column) in [
+            (&legacy_rows[0], "result_json"),
+            (&raw_rows[0], "raw_result_json"),
+            (&normalized_rows[0], "normalized_result_json"),
+        ] {
+            let object = row.as_object().expect("generic JSON DSAR row object");
+            assert_eq!(
+                object.len(),
+                2,
+                "generic JSON DSAR exposes adjacent fields: {object:?}"
+            );
+            assert!(object.contains_key("id"));
+            assert!(object.contains_key(column));
+        }
+        let result_export = serde_json::to_string(&serde_json::json!({
+            "legacy": legacy_rows,
+            "raw": raw_rows,
+            "normalized": normalized_rows,
+        }))
+        .expect("serialize result export");
+        assert!(result_export.contains(target_account_id));
+        assert!(result_export.contains(target_steam_id64));
+        assert!(result_export.contains("TARGET_LEGACY_RESULT"));
+        assert!(result_export.contains("TARGET_SELECTED_RESULT"));
+        for marker in [
+            "Foreign Legacy",
+            "Foreign Raw",
+            "Foreign Selected",
+            "FOREIGN_LEGACY_RESULT",
+            "FOREIGN_RAW_RESULT",
+            "FOREIGN_SELECTED_RESULT",
+            "FOREIGN_SELECTED_ARRAY",
+            "76561198000000999",
+            "123456",
+            "SECRET_LOBBY_CODE_ADJACENT",
+            "ADJACENT_LOBBY_CORRECTION_PII",
+            "ADJACENT_CLARIFICATION_PII_42",
+            "failed discord 42",
+        ] {
+            assert!(
+                !result_export.contains(marker),
+                "foreign result data leaked in DSAR export: {marker}: {result_export}"
+            );
+        }
+
+        let summary = delete_user_data(pool, 42, "result-json-test".to_string(), 2_000)
+            .await
+            .expect("result privacy delete");
+        assert!(summary.counts.get("scrim_matches.result_json") >= Some(&1));
+        assert!(
+            summary
+                .counts
+                .get("scrim_match_result_refs.raw_result_json")
+                >= Some(&1)
+        );
+        assert!(
+            summary
+                .counts
+                .get("scrim_match_result_refs.normalized_result_json")
+                >= Some(&1)
+        );
+        assert!(
+            summary
+                .counts
+                .get("scrim_match_result_refs.clarification_payload")
+                >= Some(&1)
+        );
+        assert_eq!(
+            summary.counts.get("scrim_match_result_refs.last_error"),
+            Some(&1)
+        );
+
+        let target_result_refs_remaining: bool = sqlx::query_scalar(
+            "SELECT
+                 EXISTS (
+                     SELECT 1 FROM scrim.matches
+                      WHERE id = 935003
+                        AND (
+                            scrim.jsonb_contains_user_ref(result_json, '42')
+                            OR scrim.jsonb_contains_user_ref(result_json, '76561198000000420')
+                            OR scrim.jsonb_contains_user_ref(result_json, '39734692')
+                        )
+                 )
+              OR EXISTS (
+                     SELECT 1 FROM scrim.match_result_refs
+                      WHERE id = $1
+                        AND (
+                            scrim.jsonb_contains_user_ref(COALESCE(raw_result_json, '{}'::jsonb), '42')
+                            OR scrim.jsonb_contains_user_ref(COALESCE(raw_result_json, '{}'::jsonb), '76561198000000420')
+                            OR scrim.jsonb_contains_user_ref(COALESCE(raw_result_json, '{}'::jsonb), '39734692')
+                            OR scrim.jsonb_contains_user_ref(clarification_payload, '42')
+                            OR scrim.jsonb_contains_user_ref(normalized_result_json, '42')
+                            OR scrim.jsonb_contains_user_ref(normalized_result_json, '76561198000000420')
+                            OR scrim.jsonb_contains_user_ref(normalized_result_json, '39734692')
+                        )
+                 )",
+        )
+        .bind(result_ref_id)
+        .fetch_one(pool)
+        .await
+        .expect("target result refs remaining");
+        assert!(!target_result_refs_remaining);
+
+        let stored_last_error: String =
+            sqlx::query_scalar("SELECT last_error FROM scrim.match_result_refs WHERE id = $1")
+                .bind(result_ref_id)
+                .fetch_one(pool)
+                .await
+                .expect("stored last_error after delete");
+        for target in [" 42 ", target_steam_id64, target_account_id] {
+            assert!(
+                !stored_last_error.contains(target),
+                "target ref survived in last_error: {stored_last_error}"
+            );
+        }
+        assert!(stored_last_error.contains("foreign 99"));
+        assert!(stored_last_error.contains("4242"));
+        assert!(stored_last_error.contains("user42"));
+
+        let selected: (Option<i64>, Option<Value>) = sqlx::query_as(
+            "SELECT result_ref_id, result_json
+               FROM scrim.selected_match_results
+              WHERE match_id = 935006",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("selected result after erasure");
+        assert_eq!(selected.0, Some(result_ref_id));
+        let selected_json = selected.1.expect("selected result json");
+        let selected_serialized = serde_json::to_string(&selected_json).expect("selected json");
+        assert!(!selected_serialized.contains(target_steam_id64));
+        assert!(!selected_serialized.contains(target_account_id));
+        assert!(!selected_serialized.contains("Target Selected"));
+        assert!(selected_serialized.contains("Foreign Selected"));
+        assert!(selected_serialized.contains("FOREIGN_SELECTED_RESULT"));
+    }
+
+    #[tokio::test]
+    async fn scrim_match_und_request_actor_dsar_ist_sicher_und_lobby_corrections_werden_redigiert()
+    {
+        let db = mk_db().await;
+        let pool = db.pool();
+        let target_steam_id64 = "76561198000000420";
+        let target_account_id = "39734692";
+
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (99)")
+            .execute(pool)
+            .await
+            .expect("core users");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES (42, $1, 76561198000000420)",
+        )
+        .bind(target_steam_id64)
+        .execute(pool)
+        .await
+        .expect("target steam link");
+        sqlx::query(
+            "INSERT INTO scrim.teams(id, name, created_at)
+             VALUES (936001, 'Actor A', now()), (936002, 'Actor B', now())",
+        )
+        .execute(pool)
+        .await
+        .expect("actor teams");
+        sqlx::query(
+            r#"INSERT INTO scrim.matches(
+                 id, team_a_id, team_b_id, when_text, scheduled_at, status,
+                 party_id, join_code, result_json, lobby_state,
+                 lobby_code_source_user_id, lobby_code_source_display_name,
+                 lobby_code_updated_at, lobby_code_message_ids, lobby_code_corrections,
+                 created_at, updated_at
+             ) VALUES (
+                 936003,
+                 936001,
+                 936002,
+                 'private schedule SECRET_WHEN_TEXT',
+                 now(),
+                 'scheduled',
+                 'SECRET_PARTY_ID',
+                 'SECRET_LOBBY_CODE',
+                 '{"target_user_id":"42","secret":"RAW_MATCH_RESULT_SECRET"}'::jsonb,
+                 'waiting',
+                 '42',
+                 'DeleteMe',
+                  now(),
+                  '{"team_a":"QUERY_MESSAGE_ID_LEAK"}'::jsonb,
+                  '[
+                    {"actor_user_id":"42","actor_display_name":"DeleteMe","from":"DL-8Q4K","to":"DL-7N2P","note":"TARGET_CORRECTION_NOTE"},
+                    {"actor_user_id":"99","actor_display_name":"OtherUser","from":"DL-5J1L","to":"DL-2X9R","note":"FOREIGN_CORRECTION_NOTE"}
+                  ]'::jsonb,
+                  now(),
+                  now()
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("actor match");
+        sqlx::query(
+            "INSERT INTO scrim.match_request_batches(
+                 id, template, deadline_at, status, created_by_user_id, created_by_display_name
+             ) VALUES (936009, 'regular_scrim', now() + interval '1 day', 'open', '99', 'OtherUser')",
+        )
+        .execute(pool)
+        .await
+        .expect("actor batch");
+        sqlx::query(
+            r#"INSERT INTO scrim.match_requests(
+                 id, batch_id, team_a_id, team_b_id, status, slot_options,
+                 team_query_message_ids, posted_at, released_slot_index, released_slot,
+                 released_at, released_by_user_id, released_by_display_name, override_reason,
+                 team_status_message_ids, status_message_state, status_message_last_error,
+                 status_message_posted_at, status_message_updated_at
+             ) VALUES (
+                 936010,
+                 936009,
+                 936001,
+                 936002,
+                 'open',
+                 '{"private":"SLOT_OPTION_SECRET","candidate_user":"42"}'::jsonb,
+                 '{"team_a":"QUERY_MESSAGE_ID_LEAK"}'::jsonb,
+                 now(),
+                 0,
+                 '{"steam_id":"76561198000000420","secret":"RELEASED_SLOT_SECRET"}'::jsonb,
+                 now(),
+                 '42',
+                 'DeleteMe',
+                 'override 42 steam 76561198000000420 account 39734692 foreign 99 keep 4242 user42',
+                 '{"team_a":"STATUS_MESSAGE_ID_LEAK"}'::jsonb,
+                 'posted',
+                 'status error 42 steam 76561198000000420 account 39734692 foreign 99 keep 4242 user42',
+                 now(),
+                 now()
+             )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("actor match request");
+
+        let export = export_user_data(pool, 42, 1_000)
+            .await
+            .expect("actor privacy export");
+        let match_actor_rows = export["tables"]["scrim_matches.lobby_code_source_user_id.redacted"]
+            .as_array()
+            .expect("match actor export");
+        assert_eq!(match_actor_rows.len(), 1);
+        let match_actor = &match_actor_rows[0];
+        assert_eq!(
+            match_actor["lobby_code_source_user_id"],
+            serde_json::json!("42")
+        );
+        assert_eq!(
+            match_actor["lobby_code_source_display_name"],
+            serde_json::json!("DeleteMe")
+        );
+        assert!(match_actor["result_json"]["md5"].is_string());
+        assert!(match_actor["lobby_code_corrections"]["md5"].is_string());
+        assert_eq!(
+            match_actor["lobby_code_corrections"]
+                .as_object()
+                .expect("actor correction hash object")
+                .len(),
+            1,
+            "actor export must keep lobby corrections hash-only"
+        );
+        assert!(match_actor["lobby_code_message_ids"]["md5"].is_string());
+
+        let request_actor_rows = export["tables"]
+            ["scrim_match_requests.released_by_user_id.redacted"]
+            .as_array()
+            .expect("match request actor export");
+        assert_eq!(request_actor_rows.len(), 1);
+        let request_actor = &request_actor_rows[0];
+        assert_eq!(
+            request_actor["released_by_user_id"],
+            serde_json::json!("42")
+        );
+        assert_eq!(
+            request_actor["released_by_display_name"],
+            serde_json::json!("DeleteMe")
+        );
+        assert!(request_actor["slot_options"]["md5"].is_string());
+        assert!(request_actor["released_slot"]["md5"].is_string());
+        assert!(request_actor["team_query_message_ids"]["md5"].is_string());
+        assert!(request_actor["team_status_message_ids"]["md5"].is_string());
+        assert_eq!(
+            request_actor["override_reason"],
+            serde_json::json!("redacted")
+        );
+        assert_eq!(
+            request_actor["status_message_last_error"],
+            serde_json::json!("redacted")
+        );
+
+        let correction_rows = export["tables"]["scrim_matches.lobby_code_corrections"]
+            .as_array()
+            .expect("lobby code corrections subject export");
+        assert_eq!(correction_rows.len(), 1);
+        let correction_row = correction_rows[0]
+            .as_object()
+            .expect("lobby corrections hash-only row");
+        assert_eq!(
+            correction_row.len(),
+            2,
+            "per-field lobby corrections DSAR must expose only id plus hash"
+        );
+        assert_eq!(correction_row["id"], serde_json::json!(936003));
+        assert!(correction_row["lobby_code_corrections"]["md5"].is_string());
+        let correction_export = serde_json::to_string(correction_rows).expect("correction export");
+        for marker in [
+            "DL-8Q4K",
+            "DL-7N2P",
+            "DL-5J1L",
+            "DL-2X9R",
+            "TARGET_CORRECTION_NOTE",
+            "FOREIGN_CORRECTION_NOTE",
+            "DeleteMe",
+            "OtherUser",
+        ] {
+            assert!(
+                !correction_export.contains(marker),
+                "hash-only lobby corrections DSAR leaked {marker}: {correction_export}"
+            );
+        }
+
+        let actor_export = serde_json::to_string(&serde_json::json!({
+            "match": match_actor_rows,
+            "request": request_actor_rows,
+        }))
+        .expect("actor export json");
+        for marker in [
+            "SECRET_WHEN_TEXT",
+            "SECRET_PARTY_ID",
+            "SECRET_LOBBY_CODE",
+            "RAW_MATCH_RESULT_SECRET",
+            "QUERY_MESSAGE_ID_LEAK",
+            "STATUS_MESSAGE_ID_LEAK",
+            "SLOT_OPTION_SECRET",
+            "RELEASED_SLOT_SECRET",
+            "DL-8Q4K",
+            "DL-7N2P",
+            "DL-5J1L",
+            "DL-2X9R",
+            "TARGET_CORRECTION_NOTE",
+            "FOREIGN_CORRECTION_NOTE",
+            "override 42",
+            "status error 42",
+        ] {
+            assert!(
+                !actor_export.contains(marker),
+                "unsafe actor DSAR field leaked: {marker}: {actor_export}"
+            );
+        }
+
+        let summary = delete_user_data(pool, 42, "actor-match-test".to_string(), 2_000)
+            .await
+            .expect("actor privacy delete");
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_matches.lobby_code_source_user_id.redacted"),
+            Some(&1)
+        );
+        assert!(summary.counts.get("scrim_matches.lobby_code_corrections") >= Some(&1));
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_match_requests.released_by_user_id.redacted"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.counts.get("scrim_match_requests.override_reason"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary
+                .counts
+                .get("scrim_match_requests.status_message_last_error"),
+            Some(&1)
+        );
+
+        let stored_corrections: Value = sqlx::query_scalar(
+            "SELECT lobby_code_corrections FROM scrim.matches WHERE id = 936003",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("stored corrections after delete");
+        let stored_corrections =
+            serde_json::to_string(&stored_corrections).expect("corrections json");
+        assert!(!stored_corrections.contains("\"42\""));
+        assert!(!stored_corrections.contains("DeleteMe"));
+        assert!(stored_corrections.contains("DL-8Q4K"));
+        assert!(stored_corrections.contains("DL-7N2P"));
+        assert!(stored_corrections.contains("TARGET_CORRECTION_NOTE"));
+        assert!(stored_corrections.contains("OtherUser"));
+        assert!(stored_corrections.contains("DL-5J1L"));
+        assert!(stored_corrections.contains("DL-2X9R"));
+        assert!(stored_corrections.contains("FOREIGN_CORRECTION_NOTE"));
+
+        let request_after: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT released_by_user_id,
+                    released_by_display_name,
+                    override_reason,
+                    status_message_last_error
+               FROM scrim.match_requests
+              WHERE id = 936010",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("request after delete");
+        assert_eq!(request_after.0, "redacted");
+        assert_eq!(request_after.1, "redacted");
+        for text in [
+            request_after.2.as_deref().expect("override reason"),
+            request_after
+                .3
+                .as_deref()
+                .expect("status message last error"),
+        ] {
+            assert!(!text.contains(" 42 "), "Discord target survived: {text}");
+            assert!(
+                !text.contains(target_steam_id64),
+                "Steam target survived: {text}"
+            );
+            assert!(
+                !text.contains(target_account_id),
+                "account target survived: {text}"
+            );
+            assert!(text.contains("foreign 99"));
+            assert!(text.contains("4242"));
+            assert!(text.contains("user42"));
+        }
+    }
+
+    #[tokio::test]
     async fn opt_in_wartet_hinter_laufender_loeschung_und_bestimmt_endzustand() {
         let db = mk_db().await;
         let pool = db.pool().clone();
@@ -2775,6 +7566,143 @@ mod tests {
                 .expect("hash");
         assert_eq!(remaining, 1);
         assert_eq!(newest_hash, "new");
+    }
+
+    #[tokio::test]
+    async fn delete_rollbackt_purge_grabstein_und_redactions_bei_spaetem_fehler() {
+        let db = mk_db().await;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42)")
+            .execute(db.pool())
+            .await
+            .expect("core user");
+        sqlx::query(
+            "CREATE TABLE privacy_force_late_failure(
+                 user_id BIGINT NOT NULL REFERENCES core.users(discord_id) ON DELETE RESTRICT
+             )",
+        )
+        .execute(db.pool())
+        .await
+        .expect("force late failure table");
+        sqlx::query("INSERT INTO privacy_force_late_failure(user_id) VALUES (42)")
+            .execute(db.pool())
+            .await
+            .expect("force late failure row");
+        sqlx::query(
+            r#"
+            INSERT INTO server_config.rollback_exports(
+                guild_id, created_by_user_id, artifact_hash, artifact_json, metadata, expires_at
+            )
+            VALUES (1, 42, 'atomic-old', $1::text::jsonb, '{}'::jsonb, $2)
+            "#,
+        )
+        .bind(r#"{"member_role_assignments":[{"member_id":42,"role_ids":[1]}]}"#)
+        .bind(now - Duration::seconds(1))
+        .execute(db.pool())
+        .await
+        .expect("insert expired rollback export");
+        sqlx::query(
+            "INSERT INTO scrim.command_receipts(command_scope, idempotency_key, payload_hash, payload)
+             VALUES ('privacy_atomic', 'atomic:redaction', $1, '{\"id\":\"42\"}'::jsonb)",
+        )
+        .bind(vec![7_u8; 32])
+        .execute(db.pool())
+        .await
+        .expect("insert redaction row");
+        sqlx::query(
+            "INSERT INTO scrim.teams(id, name, created_at)
+             VALUES (606001, 'Atomic A', now()), (606002, 'Atomic B', now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("insert atomic teams");
+        sqlx::query(
+            "INSERT INTO scrim.matches(id, team_a_id, team_b_id, status, created_at)
+             VALUES (606003, 606001, 606002, 'scheduled', now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("insert atomic match");
+        sqlx::query(
+            "UPDATE scrim.matches
+                SET result_json = '{\"account_id\":\"42\"}'::jsonb
+              WHERE id = 606003",
+        )
+        .execute(db.pool())
+        .await
+        .expect("insert atomic legacy result json");
+        let result_ref_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.match_result_refs(
+                 match_id, steam_match_id, source_user_id, source_display_name,
+                 fetch_status, winner_team_id, raw_result_json, normalized_result_json,
+                 validation_status, last_error
+             ) VALUES (
+                 606003, 606311, '99', 'Foreign', 'fetched', 606001,
+                 '{\"account_id\":\"42\"}'::jsonb,
+                 '{\"account_id\":\"42\"}'::jsonb,
+                 'valid',
+                 'target 42 must roll back'
+             ) RETURNING id",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("insert atomic result ref");
+
+        let result =
+            delete_user_data(db.pool(), 42, "atomic-test".to_string(), now.timestamp()).await;
+        assert!(result.is_err(), "forced late FK failure must abort erasure");
+
+        let rollback_export_still_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM server_config.rollback_exports WHERE artifact_hash = 'atomic-old')",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("rollback export still exists");
+        let tombstone_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM core.user_privacy WHERE user_id = 42)")
+                .fetch_one(db.pool())
+                .await
+                .expect("privacy tombstone rollback");
+        let payload_still_contains_target: bool = sqlx::query_scalar(
+            "SELECT scrim.jsonb_contains_user_ref(payload, '42')
+               FROM scrim.command_receipts
+              WHERE command_scope = 'privacy_atomic'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("payload rollback");
+        assert!(rollback_export_still_exists);
+        assert!(!tombstone_exists);
+        assert!(payload_still_contains_target);
+        let result_json_still_contains_target: bool = sqlx::query_scalar(
+            "SELECT
+                 (SELECT scrim.jsonb_contains_user_ref(result_json, '42')
+                    FROM scrim.matches
+                   WHERE id = 606003)
+                 AND
+                 (SELECT scrim.jsonb_contains_user_ref(raw_result_json, '42')
+                    FROM scrim.match_result_refs
+                   WHERE id = $1)
+                 AND
+                 (SELECT scrim.jsonb_contains_user_ref(normalized_result_json, '42')
+                    FROM scrim.match_result_refs
+                   WHERE id = $1)",
+        )
+        .bind(result_ref_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("result json rollback");
+        let last_error_still_contains_target: bool = sqlx::query_scalar(
+            "SELECT last_error LIKE '%42%'
+               FROM scrim.match_result_refs
+              WHERE id = $1",
+        )
+        .bind(result_ref_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("last error rollback");
+        assert!(result_json_still_contains_target);
+        assert!(last_error_still_contains_target);
     }
 
     #[tokio::test]
@@ -2962,7 +7890,7 @@ mod tests {
             .execute(db.pool())
             .await
             .expect("bans");
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO bot.kv_store(ns,k,v) VALUES
               ('ai_onboarding:sessions','42','{}'),
@@ -2972,7 +7900,7 @@ mod tests {
               ('native_onboarding:completed','1:42','{"guild_id":1,"user_id":42}'),
               ('onboarding_bridge_dm','42','dm_done'),
               ('onboarding_tour','42','{"schema":1,"status":"active"}')
-            "#
+            "#,
         )
         .execute(db.pool())
         .await
