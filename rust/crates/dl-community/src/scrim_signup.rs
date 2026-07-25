@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use dl_central_db::scrim_runtime::{require_local_scrim_write, ScrimRuntimeGateError};
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter, ModalField,
     ModalSpec,
@@ -34,6 +35,7 @@ const SCRIM_SIGNUP_REPLY_INVALID: &str =
     "⚠️ Das konnte ich nicht lesen. Beispiel für die Zeiten: Mo-Fr ab 19 Uhr — und gib bitte eine Rolle an.";
 const SCRIM_SIGNUP_REPLY_FAILED: &str =
     "⚠️ Da ist was schiefgelaufen — bitte gleich nochmal versuchen.";
+const SCRIM_SIGNUP_REPLY_RUNTIME_DENIED: &str = "PLATZHALTER";
 
 const DAY_KEYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
@@ -79,6 +81,8 @@ struct RankChoice {
 #[derive(Debug, thiserror::Error)]
 enum ScrimSignupError {
     #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
+    #[error(transparent)]
     Db(#[from] CommunityDbError),
     #[error(transparent)]
     Input(#[from] ScrimSignupInputError),
@@ -119,6 +123,12 @@ impl ScrimSignup {
         )
         .ok_or(ScrimSignupInputError::RankInvalid)?;
 
+        require_local_scrim_write(
+            &self.pool,
+            "dl-community::scrim_signup",
+            "scrim.participants self-service upsert",
+        )
+        .await?;
         upsert_structured_participant(
             &self.pool,
             discord_id,
@@ -151,6 +161,10 @@ impl InteractionHandler for ScrimSignup {
             Err(ScrimSignupError::Input(err)) => {
                 tracing::info!(%err, "Scrim-Signup: ungueltige Modal-Eingabe");
                 BridgeReply::ephemeral_text(SCRIM_SIGNUP_REPLY_INVALID)
+            }
+            Err(ScrimSignupError::RuntimeGate(err)) => {
+                tracing::warn!(%err, "Scrim-Signup: Runtime-Gate hat Speichern abgelehnt");
+                BridgeReply::ephemeral_text(SCRIM_SIGNUP_REPLY_RUNTIME_DENIED)
             }
             Err(ScrimSignupError::Db(err)) => {
                 tracing::warn!(%err, "Scrim-Signup: Speichern fehlgeschlagen");
@@ -630,6 +644,60 @@ async fn upsert_structured_participant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dl_central_db::testing::{
+        set_scrim_runtime_inconsistent, set_scrim_runtime_turniere, test_pool,
+    };
+
+    fn signup_interaction(user_id: u64, display_name: &str) -> BridgeInteraction {
+        BridgeInteraction {
+            custom_id: SCRIM_SIGNUP_MODAL_CUSTOM_ID.to_string(),
+            user_id,
+            author_name: display_name.to_string(),
+            author_display_name: display_name.to_string(),
+            options: [
+                ("rank".to_string(), json!("initiate")),
+                ("roles".to_string(), json!("Support")),
+                ("availability".to_string(), json!("Mo-Fr ab 19 Uhr")),
+            ]
+            .into_iter()
+            .collect(),
+            ..BridgeInteraction::default()
+        }
+    }
+
+    async fn participant_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT count(*) FROM scrim.participants")
+            .fetch_one(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn self_service_signup_schreibt_nur_im_legacy_runtime(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = test_pool().await?;
+        let reply = ScrimSignup::new(legacy.pool().clone())
+            .handle(signup_interaction(1, "Legacy"))
+            .await;
+        assert_eq!(reply.content.as_deref(), Some(SCRIM_SIGNUP_REPLY_SAVED));
+        assert_eq!(participant_count(legacy.pool()).await?, 1);
+
+        let turniere = test_pool().await?;
+        set_scrim_runtime_turniere(turniere.pool()).await?;
+        let reply = ScrimSignup::new(turniere.pool().clone())
+            .handle(signup_interaction(2, "Turniere"))
+            .await;
+        assert_eq!(reply.content.as_deref(), Some("PLATZHALTER"));
+        assert_eq!(participant_count(turniere.pool()).await?, 0);
+
+        let inconsistent = test_pool().await?;
+        set_scrim_runtime_inconsistent(inconsistent.pool()).await?;
+        let reply = ScrimSignup::new(inconsistent.pool().clone())
+            .handle(signup_interaction(3, "Widerspruch"))
+            .await;
+        assert_eq!(reply.content.as_deref(), Some("PLATZHALTER"));
+        assert_eq!(participant_count(inconsistent.pool()).await?, 0);
+        Ok(())
+    }
 
     #[test]
     fn availability_slots_roundtrip_documented_json() {

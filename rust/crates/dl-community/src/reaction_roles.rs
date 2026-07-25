@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dl_central_db::scrim_runtime::{require_local_scrim_write, ScrimRuntimeGateError};
 use dl_squads::store::PARTICIPANTS_LOCK;
 use serenity::all::{EmojiId, ReactionType};
 use sqlx::PgPool;
@@ -43,6 +44,8 @@ impl DmErr {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReactionRoleError {
+    #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
     #[error(transparent)]
     Db(#[from] CommunityDbError),
 }
@@ -238,7 +241,7 @@ impl ReactionRoleService {
             Ok(()) => {
                 if allow_scrim_pool_upsert {
                     self.upsert_scrim_signup_participant(mapping, user_id, display_name)
-                        .await;
+                        .await?;
                 }
             }
             Err(err) => {
@@ -290,9 +293,9 @@ impl ReactionRoleService {
         mapping: &ReactionRoleMapping,
         user_id: u64,
         display_name: Option<&str>,
-    ) {
+    ) -> Result<(), ReactionRoleError> {
         if mapping.role_id != SCRIM_SIGNUP_ROLE_ID {
-            return;
+            return Ok(());
         }
         let Ok(discord_id) = i64::try_from(user_id) else {
             tracing::warn!(
@@ -300,11 +303,17 @@ impl ReactionRoleService {
                 user_id,
                 "Scrim-Signup: Discord-ID passt nicht in i64"
             );
-            return;
+            return Ok(());
         };
         let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) else {
-            return;
+            return Ok(());
         };
+        require_local_scrim_write(
+            &self.pool,
+            "dl-community::reaction_roles",
+            "scrim.participants reaction-role upsert",
+        )
+        .await?;
         if let Err(err) =
             upsert_scrim_participant_by_discord(&self.pool, discord_id, display_name).await
         {
@@ -315,6 +324,7 @@ impl ReactionRoleService {
                 "Scrim-Signup: Pool-Upsert fehlgeschlagen"
             );
         }
+        Ok(())
     }
 
     async fn mapping_for_message(
@@ -599,6 +609,113 @@ fn reaction_type_from_canonical(value: &str) -> ReactionType {
         }
     }
     ReactionType::Unicode(value.to_string())
+}
+
+#[cfg(test)]
+mod runtime_gate_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use dl_central_db::testing::{
+        set_scrim_runtime_inconsistent, set_scrim_runtime_turniere, test_pool,
+    };
+
+    #[derive(Default)]
+    struct RoleOnlyPort {
+        added: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ReactionRolePort for RoleOnlyPort {
+        async fn add_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+        ) -> Result<(), PortErr> {
+            self.added.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn remove_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+        ) -> Result<(), PortErr> {
+            Ok(())
+        }
+
+        async fn send_dm(&self, _user_id: u64, _content: &str) -> Result<(), DmErr> {
+            Ok(())
+        }
+
+        async fn reaction_users(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _emoji: &ReactionType,
+            _after: Option<u64>,
+        ) -> Result<Vec<ReactedUser>, PortErr> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn scrim_mapping() -> ReactionRoleMapping {
+        ReactionRoleMapping {
+            id: 1,
+            guild_id: 42,
+            source_channel_id: 43,
+            message_id: 44,
+            emoji: "✅".to_string(),
+            role_id: SCRIM_SIGNUP_ROLE_ID,
+            dm_enabled: false,
+            dm_text: None,
+            remove_on_unreact: true,
+        }
+    }
+
+    async fn participant_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT count(*) FROM scrim.participants")
+            .fetch_one(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn reaction_role_schreibt_roster_nur_im_legacy_runtime(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let legacy = test_pool().await?;
+        let port = Arc::new(RoleOnlyPort::default());
+        let service = ReactionRoleService::new(legacy.pool().clone(), port.clone());
+        service
+            .apply_mapping_add(&scrim_mapping(), 42, 1, Some("Legacy"), true)
+            .await?;
+        assert_eq!(participant_count(legacy.pool()).await?, 1);
+        assert_eq!(port.added.load(Ordering::Relaxed), 1);
+
+        let turniere = test_pool().await?;
+        set_scrim_runtime_turniere(turniere.pool()).await?;
+        let port = Arc::new(RoleOnlyPort::default());
+        let service = ReactionRoleService::new(turniere.pool().clone(), port.clone());
+        service
+            .apply_mapping_add(&scrim_mapping(), 42, 2, Some("Turniere"), true)
+            .await
+            .expect_err("turniere/turniere muss den Reaction-Roster-Write ablehnen");
+        assert_eq!(participant_count(turniere.pool()).await?, 0);
+        assert_eq!(port.added.load(Ordering::Relaxed), 1);
+
+        let inconsistent = test_pool().await?;
+        set_scrim_runtime_inconsistent(inconsistent.pool()).await?;
+        let port = Arc::new(RoleOnlyPort::default());
+        let service = ReactionRoleService::new(inconsistent.pool().clone(), port.clone());
+        service
+            .apply_mapping_add(&scrim_mapping(), 42, 3, Some("Widerspruch"), true)
+            .await
+            .expect_err("turniere/dl-bots muss den Reaction-Roster-Write ablehnen");
+        assert_eq!(participant_count(inconsistent.pool()).await?, 0);
+        assert_eq!(port.added.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]

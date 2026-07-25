@@ -8,6 +8,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use dl_ai::ChatProviderError;
+use dl_central_db::scrim_runtime::require_local_scrim_write;
 use dl_squads::lagebild::{
     revise_lagebild, LagebildError, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
 };
@@ -565,6 +566,16 @@ pub async fn scrims_update_participant_notes(
         Ok(notes) => notes,
         Err(resp) => return resp,
     };
+    if require_local_scrim_write(
+        app.pool(),
+        "dl-dashboard::scrims",
+        "scrim.participants notes update",
+    )
+    .await
+    .is_err()
+    {
+        return err_text(503, "PLATZHALTER");
+    }
     match update_participant_notes(app.pool(), participant_id, notes.clone()).await {
         Ok(true) => {
             tracing::info!(
@@ -3808,6 +3819,77 @@ mod tests {
         .bind(evidence_url)
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    async fn insert_participant_for_notes(pool: &PgPool, id: i32) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO scrim.participants(
+                 id, display_name, rank_source, status, source, created_at, updated_at
+             )
+             VALUES($1, 'Notes Test', 'manual', 'new', 'test', now(), now())",
+        )
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn participant_notes(pool: &PgPool, id: i32) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT notes FROM scrim.participants WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn dashboard_roster_schreibt_nur_im_legacy_runtime(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (legacy_db, legacy_app, session_id, csrf) = app_with_session().await?;
+        insert_participant_for_notes(legacy_db.pool(), 1).await?;
+        let response = legacy_app
+            .oneshot(auth_post(
+                "/api/scrims/participants/1/notes",
+                &session_id,
+                &csrf,
+                json!({ "notes": "legacy" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            participant_notes(legacy_db.pool(), 1).await?.as_deref(),
+            Some("legacy")
+        );
+
+        let (turniere_db, turniere_app, session_id, csrf) = app_with_session().await?;
+        insert_participant_for_notes(turniere_db.pool(), 2).await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(turniere_db.pool()).await?;
+        let response = turniere_app
+            .oneshot(auth_post(
+                "/api/scrims/participants/2/notes",
+                &session_id,
+                &csrf,
+                json!({ "notes": "turniere" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        assert_eq!(body.as_ref(), b"PLATZHALTER");
+        assert_eq!(participant_notes(turniere_db.pool(), 2).await?, None);
+
+        let (inconsistent_db, inconsistent_app, session_id, csrf) = app_with_session().await?;
+        insert_participant_for_notes(inconsistent_db.pool(), 3).await?;
+        dl_central_db::testing::set_scrim_runtime_inconsistent(inconsistent_db.pool()).await?;
+        let response = inconsistent_app
+            .oneshot(auth_post(
+                "/api/scrims/participants/3/notes",
+                &session_id,
+                &csrf,
+                json!({ "notes": "widerspruch" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(participant_notes(inconsistent_db.pool(), 3).await?, None);
         Ok(())
     }
 

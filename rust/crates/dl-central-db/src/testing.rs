@@ -22,6 +22,68 @@ pub struct TestDb {
     db_name: String,
 }
 
+pub async fn set_scrim_runtime_turniere(pool: &PgPool) -> Result<(), CentralDbError> {
+    for (expected_epoch, mode) in [(0_i64, "draining"), (1_i64, "turniere")] {
+        let applied: bool = sqlx::query_scalar(
+            "SELECT applied
+               FROM scrim.transition_runtime_control(
+                    $1, $2, 'turniere', '42', 'Test',
+                    'runtime:test', 'runtime:test', '{}'::jsonb
+               )",
+        )
+        .bind(expected_epoch)
+        .bind(mode)
+        .fetch_one(pool)
+        .await?;
+        if !applied {
+            return Err(CentralDbError::TestHarness(format!(
+                "Scrim-Runtime-Testwechsel auf {mode} wurde abgelehnt"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub async fn set_scrim_runtime_inconsistent(pool: &PgPool) -> Result<(), CentralDbError> {
+    sqlx::query("ALTER VIEW scrim.runtime_control RENAME TO runtime_control_consistent")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE VIEW scrim.runtime_control AS
+         SELECT control_key,
+                'turniere'::text AS mode,
+                epoch,
+                'dl-bots'::text AS operational_writer,
+                actor_type,
+                actor_pseudonym,
+                actor_source,
+                request_id,
+                correlation_id,
+                decision_data,
+                created_at,
+                updated_at
+           FROM scrim.runtime_control_consistent",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_scrim_runtime_missing(pool: &PgPool) -> Result<(), CentralDbError> {
+    sqlx::query("ALTER VIEW scrim.runtime_control RENAME TO runtime_control_consistent")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE VIEW scrim.runtime_control AS
+         SELECT *
+           FROM scrim.runtime_control_consistent
+          WHERE false",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 impl TestDb {
     pub fn pool(&self) -> &PgPool {
         self.pool

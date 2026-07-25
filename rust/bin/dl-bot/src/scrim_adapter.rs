@@ -14,6 +14,7 @@ use axum::{
     Json, Router,
 };
 use dl_ai::ChatProvider;
+use dl_central_db::scrim_runtime::{load_scrim_runtime_state, local_scrim_writes_allowed};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler};
 use dl_squads::lagebild::CorrectionActor;
 use serde::{Deserialize, Serialize};
@@ -42,13 +43,6 @@ const LAGEBILD_LEASE_SECONDS: i64 = 30;
 pub enum InteractionRoute {
     LegacyMutation,
     RelayToTurnier,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScrimRuntimeState {
-    pub mode: String,
-    pub operational_writer: String,
-    pub epoch: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -104,23 +98,9 @@ impl ScrimRuntimeGate {
     }
 
     async fn load_fresh(&self) -> Result<CachedRuntimeRoute, String> {
-        let row = sqlx::query(
-            r#"
-            SELECT mode, operational_writer, epoch
-              FROM scrim.runtime_control
-             WHERE control_key = 'scrim_runtime'
-            "#,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| format!("scrim.runtime_control nicht lesbar: {error}"))?
-        .ok_or_else(|| "scrim.runtime_control fehlt".to_string())?;
-
-        let state = ScrimRuntimeState {
-            mode: row.get("mode"),
-            operational_writer: row.get("operational_writer"),
-            epoch: row.get("epoch"),
-        };
+        let state = load_scrim_runtime_state(&self.pool)
+            .await
+            .map_err(|error| error.to_string())?;
         let route = interaction_route_for_runtime(&state.mode, &state.operational_writer)
             .ok_or_else(|| {
                 format!(
@@ -141,15 +121,16 @@ pub fn interaction_route_for_runtime(
     operational_writer: &str,
 ) -> Option<InteractionRoute> {
     match (mode, operational_writer) {
-        ("legacy", "dl-bots") => Some(InteractionRoute::LegacyMutation),
+        _ if local_scrim_writes_allowed(mode, operational_writer) => {
+            Some(InteractionRoute::LegacyMutation)
+        }
         ("draining" | "turniere", "turniere") => Some(InteractionRoute::RelayToTurnier),
         _ => None,
     }
 }
 
 pub fn legacy_driver_enabled_for_runtime(mode: &str, operational_writer: &str) -> bool {
-    interaction_route_for_runtime(mode, operational_writer)
-        == Some(InteractionRoute::LegacyMutation)
+    local_scrim_writes_allowed(mode, operational_writer)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
