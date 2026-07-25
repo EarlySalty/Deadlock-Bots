@@ -2632,12 +2632,12 @@ fn match_request_reminder_message(
         MATCH_REQUEST_REMINDER_TEMPLATE_MISSING_RESPONSE => Ok(format!(
             "Erinnerung für {team_name}: Es fehlen noch Antworten von {target}.\nBitte stimmt in der Terminabfrage oben ab."
         )),
-        MATCH_REQUEST_REMINDER_TEMPLATE_DEADLINE_SOON => {
-            Ok(format!("{target}\n{}", "PLATZHALTER"))
-        }
-        MATCH_REQUEST_REMINDER_TEMPLATE_CONFIRMATION_OPEN => {
-            Ok(format!("{target}\n{}", "PLATZHALTER"))
-        }
+        MATCH_REQUEST_REMINDER_TEMPLATE_DEADLINE_SOON => Ok(format!(
+            "Erinnerung für {team_name}: Die Frist läuft bald ab und es fehlen noch Antworten von {target}.\nBitte stimmt in der Terminabfrage oben ab, damit der Termin stehen kann."
+        )),
+        MATCH_REQUEST_REMINDER_TEMPLATE_CONFIRMATION_OPEN => Ok(format!(
+            "Erinnerung für {team_name}: Es fehlen noch Bestätigungen von {target}.\nBitte gebt oben kurz Bescheid, ob ihr beim Match dabei seid."
+        )),
         _ => Err(anyhow!("Unbekannte Scrim-Reminder-Vorlage: {template}")),
     }
 }
@@ -3631,11 +3631,11 @@ mod tests {
     fn match_request_reminder_waehlt_gespeicherte_vorlage() -> TestResult {
         assert_eq!(
             match_request_reminder_message("frist_bald", "Team Alpha", &[555], None)?,
-            "<@555>\nPLATZHALTER"
+            "Erinnerung für Team Alpha: Die Frist läuft bald ab und es fehlen noch Antworten von <@555>.\nBitte stimmt in der Terminabfrage oben ab, damit der Termin stehen kann."
         );
         assert_eq!(
             match_request_reminder_message("bestaetigung_offen", "Team Alpha", &[], Some(888))?,
-            "<@&888>\nPLATZHALTER"
+            "Erinnerung für Team Alpha: Es fehlen noch Bestätigungen von <@&888>.\nBitte gebt oben kurz Bescheid, ob ihr beim Match dabei seid."
         );
         Ok(())
     }
