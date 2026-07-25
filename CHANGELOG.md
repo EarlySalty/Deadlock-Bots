@@ -1,3 +1,11 @@
+## #293 — Scrim-Umbau bekommt eine sichere gemeinsame Grundlage
+
+Problem: Turnier-, Discord- und Steam-Abläufe hatten noch keinen gemeinsamen, ausfallsicheren Übergabevertrag; Wiederholungen, Ergebniswahl und spätere Datenlöschung wären beim Umbau riskant gewesen.
+
+Änderung: Eine additive Datenbasis führt eindeutige Übergaben, unveränderliche Nachweise, kontrollierte Writer-Umschaltung, klare Ergebnisfreigaben und automatisierte Privacy-Regeln ein. Ergebnisdaten, Lobby-Korrekturen, alte Fehler-/Override-Texte, sicher verknüpfte Steam-Account-IDs und sensible Payloads sind dabei in Auskunft und Löschung mit abgedeckt, ohne Rohdaten, Nachbarfelder oder Lobby-Secrets offenzulegen.
+
+Aktuelles Verhalten: Der Live-Betrieb bleibt im bisherigen Modus; weder Writer noch Steam-Automatik werden umgeschaltet. Die nächsten Umbauphasen können auf einer getesteten und rückverfolgbaren Grundlage aufsetzen.
+
 ## #292 – Ticket-Shadow zeigt Urteil und Antwortkandidat
 
 - **Problem:** Bei nicht sicher beantwortbaren Tickets zeigte der Shadow-Test nur einen festen Ausweichtext. Damit war nicht sichtbar, welche erste Antwort der Bot tatsächlich formulieren würde; nach einem Bot-Neustart konnte dasselbe offene Ticket außerdem erneut ausgewertet werden.
