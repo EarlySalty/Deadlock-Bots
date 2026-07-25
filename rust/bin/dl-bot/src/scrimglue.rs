@@ -1118,7 +1118,7 @@ async fn handle_match_request_reminder(
         }
         Err(err) => {
             if let Err(mark_err) =
-                mark_pending_discord_effect_uncertain(pool, outbox_id, &err).await
+                mark_pending_discord_effect_uncertain(pool, adapter, outbox_id, &err).await
             {
                 tracing::warn!(%mark_err, reminder_id = reminder.reminder_id, outbox_id, "Scrim-Reminder-Outbox-Fehler konnte nicht gespeichert werden");
             }
@@ -1523,7 +1523,8 @@ async fn sync_match_status_messages(
                 Err(err) => {
                     let error = format!("edit {}/{}: {err}", target.channel_id, message_id);
                     if let Err(mark_err) =
-                        mark_pending_discord_effect_uncertain(pool, outbox_id, &error).await
+                        mark_pending_discord_effect_uncertain(pool, adapter, outbox_id, &error)
+                            .await
                     {
                         errors.push(format!("outbox-error {}: {mark_err}", target.team_id));
                     }
@@ -1556,7 +1557,8 @@ async fn sync_match_status_messages(
                 Err(err) => {
                     let error = format!("post {}: {err}", target.channel_id);
                     if let Err(mark_err) =
-                        mark_pending_discord_effect_uncertain(pool, outbox_id, &error).await
+                        mark_pending_discord_effect_uncertain(pool, adapter, outbox_id, &error)
+                            .await
                     {
                         errors.push(format!("outbox-error {}: {mark_err}", target.team_id));
                     }
@@ -1650,6 +1652,7 @@ async fn mark_pending_discord_effect_delivered(
             "Discord-Outbox {outbox_id} konnte nicht delivered markiert werden"
         ));
     }
+    reconcile_discord_effect_links_tx(&mut tx, outbox_id).await?;
     sqlx::query(
         r#"
         INSERT INTO scrim.effect_receipts(
@@ -1670,12 +1673,37 @@ async fn mark_pending_discord_effect_delivered(
     Ok(())
 }
 
+async fn reconcile_discord_effect_links_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        WITH reconciled_reminder AS (
+            UPDATE scrim.match_request_reminder_effects
+               SET reconciled_at = now()
+             WHERE outbox_effect_id = $1
+               AND reconciled_at IS NULL
+        )
+        UPDATE scrim.status_publication_effects
+           SET reconciled_at = now()
+         WHERE outbox_effect_id = $1
+           AND reconciled_at IS NULL
+        "#,
+    )
+    .bind(outbox_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn mark_pending_discord_effect_uncertain(
     pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
     outbox_id: i64,
     error: &str,
 ) -> anyhow::Result<()> {
-    let updated = sqlx::query(
+    let row = sqlx::query(
         r#"
         UPDATE scrim.outbox_effects
            SET state = 'uncertain',
@@ -1686,17 +1714,32 @@ async fn mark_pending_discord_effect_uncertain(
                updated_at = now()
          WHERE id = $1
            AND state IN ('pending', 'leased')
+        RETURNING attempts, payload ->> 'message_kind' AS effect_type, last_error_code
         "#,
     )
     .bind(outbox_id)
     .bind(scrim_payload_hash(&json!({"error": error})))
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    if updated.rows_affected() != 1 {
+    let Some(row) = row else {
         return Err(anyhow!(
             "Discord-Outbox {outbox_id} konnte nicht uncertain markiert werden"
         ));
-    }
+    };
+    let attempts = row.get::<i32, _>("attempts");
+    let effect_type = row
+        .get::<Option<String>, _>("effect_type")
+        .unwrap_or_else(|| "unknown".to_string());
+    let last_error_code = row.get::<String, _>("last_error_code");
+    report_uncertain_discord_effect(
+        sender,
+        outbox_id,
+        &effect_type,
+        attempts,
+        &last_error_code,
+        error,
+    )
+    .await;
     Ok(())
 }
 
@@ -2944,6 +2987,7 @@ fn scrim_payload_hash(value: &Value) -> Vec<u8> {
 #[async_trait::async_trait]
 trait ScrimDiscordEffectSender: Send + Sync {
     async fn send_effect(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String>;
+    async fn post_log(&self, content: &str) -> Result<(), String>;
     async fn send_dm_effect(
         &self,
         recipient_user_id: &str,
@@ -2961,6 +3005,12 @@ trait ScrimDiscordEffectSender: Send + Sync {
 impl ScrimDiscordEffectSender for dl_discord::DiscordAdapter {
     async fn send_effect(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String> {
         self.send_raw_public(channel_id, body).await
+    }
+
+    async fn post_log(&self, content: &str) -> Result<(), String> {
+        send_content(self, LOG_CHANNEL_ID, content)
+            .await
+            .map(|_| ())
     }
 
     async fn send_dm_effect(
@@ -3010,6 +3060,7 @@ struct ClaimedDiscordEffect {
     id: i64,
     attempts: i32,
     payload_hash: Vec<u8>,
+    effect_type: String,
     operation: DiscordEffectOperation,
     target: DiscordEffectTarget,
     message_id: Option<u64>,
@@ -3020,14 +3071,18 @@ async fn process_one_discord_outbox(
     pool: &PgPool,
     sender: &dyn ScrimDiscordEffectSender,
 ) -> anyhow::Result<()> {
-    mark_expired_discord_effect_leases_uncertain(pool).await?;
+    mark_expired_discord_effect_leases_uncertain(pool, sender).await?;
     let Some(effect) = claim_next_discord_effect(pool).await? else {
         return Ok(());
     };
     deliver_claimed_discord_effect(pool, sender, effect).await
 }
 
-async fn mark_expired_discord_effect_leases_uncertain(pool: &PgPool) -> anyhow::Result<()> {
+async fn mark_expired_discord_effect_leases_uncertain(
+    pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
     let rows = sqlx::query(
         r#"
         UPDATE scrim.outbox_effects
@@ -3040,30 +3095,46 @@ async fn mark_expired_discord_effect_leases_uncertain(pool: &PgPool) -> anyhow::
          WHERE effect_type = 'discord_scrim_effect'
            AND state = 'leased'
            AND lease_until <= now()
-         RETURNING id, attempts, payload_hash
+         RETURNING id, attempts, payload_hash, payload ->> 'message_kind' AS effect_type,
+                   last_error_code
         "#,
     )
     .bind(scrim_payload_hash(&json!({"error": "lease_expired"})))
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    for row in rows {
+    for row in &rows {
         let id = row.get::<i64, _>("id");
         let attempts = row.get::<i32, _>("attempts");
         let payload_hash = row.get::<Vec<u8>, _>("payload_hash");
-        insert_uncertain_effect_receipt(
-            pool,
+        let last_error_code = row.get::<String, _>("last_error_code");
+        insert_uncertain_effect_receipt_tx(
+            &mut tx,
             id,
             attempts,
             &payload_hash,
-            "err_discord_effect_lease_expired",
+            &last_error_code,
             "leased outbox effect expired before delivery proof",
         )
         .await?;
-        tracing::warn!(
-            outbox_effect_id = id,
+    }
+    tx.commit().await?;
+    for row in rows {
+        let id = row.get::<i64, _>("id");
+        let attempts = row.get::<i32, _>("attempts");
+        let effect_type = row
+            .get::<Option<String>, _>("effect_type")
+            .unwrap_or_else(|| "unknown".to_string());
+        let last_error_code = row.get::<String, _>("last_error_code");
+        let error = "leased outbox effect expired before delivery proof";
+        report_uncertain_discord_effect(
+            sender,
+            id,
+            &effect_type,
             attempts,
-            "Scrim-Discord-Outbox-Lease abgelaufen und auf uncertain gesetzt"
-        );
+            &last_error_code,
+            error,
+        )
+        .await;
     }
     Ok(())
 }
@@ -3188,6 +3259,7 @@ fn parse_discord_effect_payload(
         id,
         attempts,
         payload_hash,
+        effect_type: message_kind.to_string(),
         operation,
         target,
         message_id,
@@ -3476,6 +3548,7 @@ async fn deliver_claimed_discord_effect(
                     Err(err) => {
                         mark_discord_effect_uncertain(
                             pool,
+                            sender,
                             &effect,
                             "err_discord_post_uncertain",
                             &err,
@@ -3497,6 +3570,7 @@ async fn deliver_claimed_discord_effect(
                     Err(err) => {
                         mark_discord_effect_uncertain(
                             pool,
+                            sender,
                             &effect,
                             "err_discord_dm_uncertain",
                             &err,
@@ -3530,6 +3604,7 @@ async fn deliver_claimed_discord_effect(
                         Err(err) => {
                             mark_discord_effect_uncertain(
                                 pool,
+                                sender,
                                 &effect,
                                 "err_discord_edit_uncertain",
                                 &err,
@@ -3628,6 +3703,7 @@ async fn mark_discord_effect_delivered(
             effect.id
         ));
     }
+    reconcile_discord_effect_links_tx(&mut tx, effect.id).await?;
     sqlx::query(
         r#"
         INSERT INTO scrim.effect_receipts(
@@ -3696,6 +3772,7 @@ async fn mark_discord_effect_dead(
 
 async fn mark_discord_effect_uncertain(
     pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
     effect: &ClaimedDiscordEffect,
     error_code: &'static str,
     error: &str,
@@ -3735,30 +3812,46 @@ async fn mark_discord_effect_uncertain(
     )
     .await?;
     tx.commit().await?;
-    tracing::warn!(outbox_effect_id = effect.id, error_code, error = %error.chars().take(200).collect::<String>(), "Scrim-Discord-Outbox-Sendestatus uncertain");
-    Ok(())
-}
-
-async fn insert_uncertain_effect_receipt(
-    pool: &PgPool,
-    outbox_id: i64,
-    attempts: i32,
-    payload_hash: &[u8],
-    error_code: &'static str,
-    error: &str,
-) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
-    insert_uncertain_effect_receipt_tx(
-        &mut tx,
-        outbox_id,
-        attempts,
-        payload_hash,
+    report_uncertain_discord_effect(
+        sender,
+        effect.id,
+        &effect.effect_type,
+        effect.attempts,
         error_code,
         error,
     )
-    .await?;
-    tx.commit().await?;
+    .await;
     Ok(())
+}
+
+async fn report_uncertain_discord_effect(
+    sender: &dyn ScrimDiscordEffectSender,
+    outbox_effect_id: i64,
+    effect_type: &str,
+    attempts: i32,
+    last_error_code: &str,
+    error: &str,
+) {
+    let cause = short_error(error);
+    tracing::warn!(
+        outbox_effect_id,
+        effect_type,
+        attempts,
+        last_error_code,
+        cause = %cause,
+        "Scrim-Discord-Outbox-Sendestatus uncertain"
+    );
+    let content = format!(
+        "PLATZHALTER outbox_effect_id={outbox_effect_id} effect_type={effect_type} attempts={attempts} last_error_code={last_error_code} cause={cause}"
+    );
+    if let Err(err) = sender.post_log(&content).await {
+        tracing::warn!(
+            %err,
+            outbox_effect_id,
+            channel_id = LOG_CHANNEL_ID,
+            "Scrim-Discord-Outbox-Log-Post fehlgeschlagen"
+        );
+    }
 }
 
 async fn insert_uncertain_effect_receipt_tx(
@@ -3766,7 +3859,7 @@ async fn insert_uncertain_effect_receipt_tx(
     outbox_id: i64,
     attempts: i32,
     payload_hash: &[u8],
-    error_code: &'static str,
+    error_code: &str,
     error: &str,
 ) -> anyhow::Result<()> {
     let remote_task_id = format!("outbox:{outbox_id}:attempt:{attempts}");
@@ -4615,6 +4708,7 @@ mod tests {
     struct RecordingDiscordSender {
         sent: tokio::sync::Mutex<Vec<(u64, Value)>>,
         dm_sent: tokio::sync::Mutex<Vec<(String, Value)>>,
+        logs: tokio::sync::Mutex<Vec<String>>,
         fail_send: bool,
     }
 
@@ -4623,6 +4717,7 @@ mod tests {
             Self {
                 sent: tokio::sync::Mutex::new(Vec::new()),
                 dm_sent: tokio::sync::Mutex::new(Vec::new()),
+                logs: tokio::sync::Mutex::new(Vec::new()),
                 fail_send,
             }
         }
@@ -4644,6 +4739,11 @@ mod tests {
             } else {
                 Ok(9001)
             }
+        }
+
+        async fn post_log(&self, content: &str) -> Result<(), String> {
+            self.logs.lock().await.push(content.to_string());
+            Ok(())
         }
 
         async fn send_dm_effect(
@@ -6081,6 +6181,178 @@ mod tests {
         .fetch_one(pool)
         .await?;
         assert_eq!(linked, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivered_effect_setzt_reminder_link_reconciled_at() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "antwort_fehlt", &[], &[]).await?;
+        let payload = discord_effect_payload(
+            "match_request_reminder",
+            "post",
+            100,
+            None,
+            &match_request_reminder_body("Antwort fehlt", 9001, &[]),
+        );
+        let outbox_id =
+            insert_discord_effect(pool, "discord:test_reminder_reconciled", &payload, "leased")
+                .await?;
+        sqlx::query(
+            "INSERT INTO scrim.match_request_reminder_effects(reminder_id, outbox_effect_id) VALUES(80, $1)",
+        )
+        .bind(outbox_id)
+        .execute(pool)
+        .await?;
+
+        mark_pending_discord_effect_delivered(pool, outbox_id, &payload, 100, 9101).await?;
+
+        let reconciled_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT reconciled_at FROM scrim.match_request_reminder_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(reconciled_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivered_effect_setzt_status_publication_link_reconciled_at() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let approval_id = approve_status_publication_for_test(pool, 31).await?;
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        let outbox_id =
+            insert_discord_effect(pool, "discord:test_status_reconciled", &payload, "leased")
+                .await?;
+        sqlx::query(
+            "INSERT INTO scrim.status_publication_effects(status_publication_approval_id, outbox_effect_id) VALUES($1, $2)",
+        )
+        .bind(approval_id)
+        .bind(outbox_id)
+        .execute(pool)
+        .await?;
+
+        mark_pending_discord_effect_delivered(pool, outbox_id, &payload, 100, 9101).await?;
+
+        let reconciled_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT reconciled_at FROM scrim.status_publication_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(reconciled_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn uncertain_uebergang_meldet_alle_pflichtfelder_genau_einmal() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        let outbox_id =
+            insert_discord_effect(pool, "discord:test_direct_uncertain", &payload, "leased")
+                .await?;
+        sqlx::query("UPDATE scrim.outbox_effects SET attempts = 3 WHERE id = $1")
+            .bind(outbox_id)
+            .execute(pool)
+            .await?;
+
+        mark_pending_discord_effect_uncertain(
+            pool,
+            &sender,
+            outbox_id,
+            "discord timeout after send attempt",
+        )
+        .await?;
+
+        let logs = sender.logs.lock().await;
+        assert_eq!(logs.len(), 1);
+        let log = &logs[0];
+        assert!(log.contains(&format!("outbox_effect_id={outbox_id}")));
+        assert!(log.contains("effect_type=match_status"));
+        assert!(log.contains("attempts=3"));
+        assert!(log.contains("last_error_code=err_discord_effect_uncertain"));
+        assert!(log.contains("cause=discord timeout after send attempt"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abgelaufener_lease_batch_meldet_jede_zeile_einzeln() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        for key in [
+            "discord:test_expired_batch_1",
+            "discord:test_expired_batch_2",
+        ] {
+            let id = insert_discord_effect(pool, key, &payload, "leased").await?;
+            sqlx::query(
+                "UPDATE scrim.outbox_effects SET lease_until = now() - interval '1 second', attempts = 2 WHERE id = $1",
+            )
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+
+        mark_expired_discord_effect_leases_uncertain(pool, &sender).await?;
+
+        let logs = sender.logs.lock().await;
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().all(|log| {
+            log.contains("effect_type=match_status")
+                && log.contains("attempts=2")
+                && log.contains("last_error_code=err_discord_effect_lease_expired")
+                && log.contains("cause=leased outbox effect expired before delivery proof")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn uncertain_effect_wird_von_claim_query_nicht_aufgenommen() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        insert_discord_effect(
+            pool,
+            "discord:test_uncertain_not_claimed",
+            &payload,
+            "uncertain",
+        )
+        .await?;
+
+        assert!(claim_next_discord_effect(pool).await?.is_none());
         Ok(())
     }
 
