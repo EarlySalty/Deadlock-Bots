@@ -1740,6 +1740,16 @@ fn copy_first(raw: &Value, obj: &mut Map<String, Value>, target: &str, keys: &[&
     }
 }
 
+async fn result_winner_team_name(pool: &PgPool, team_id: i64) -> anyhow::Result<Option<String>> {
+    let team_id = i32::try_from(team_id).context("Ungültige Sieger-Team-ID")?;
+    Ok(
+        sqlx::query_scalar("SELECT name FROM scrim.teams WHERE id = $1")
+            .bind(team_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
 async fn handle_result(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
@@ -1770,10 +1780,26 @@ async fn handle_result(
             {
                 tracing::error!(%err, match_id = claim.match_id, action = "error", "Scrim-Voice-Cleanup fehlgeschlagen");
             }
+            let winner_team_name = if let Some(team_id) = outcome.winner_team_id {
+                match result_winner_team_name(pool, team_id).await {
+                    Ok(team_name) => team_name,
+                    Err(err) => {
+                        tracing::warn!(%err, team_id, "Sieger-Teamname konnte nicht aufgelöst werden");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             post_to_targets_or_log(
                 adapter,
                 &claim.team_channels,
-                result_success_message(claim.match_id, &outcome, line!()),
+                result_success_message(
+                    claim.match_id,
+                    &outcome,
+                    winner_team_name.as_deref(),
+                    line!(),
+                ),
                 "result_success",
                 claim.match_id,
             )
@@ -3063,15 +3089,18 @@ fn start_failure_message(match_id: i64, _source_line: u32) -> String {
     )
 }
 
-// ponytail: Sieger als interne Team-ID; Auflösung auf den Team-Namen ist ein Follow-up, falls es stört.
 fn result_success_message(
     match_id: i64,
     outcome: &ScrimMatchResultOutcome,
+    winner_team_name: Option<&str>,
     _source_line: u32,
 ) -> String {
     match outcome.winner_team_id {
         Some(team_id) => {
-            format!("Scrim beendet. Das Ergebnis ist eingetragen. Sieger: Team {team_id}.")
+            let winner = winner_team_name
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Team {team_id}"));
+            format!("Scrim beendet. Das Ergebnis ist eingetragen. Sieger: {winner}.")
         }
         None => {
             format!("Scrim beendet. Das Ergebnis ist eingetragen (Match {match_id}).")
@@ -3607,13 +3636,31 @@ mod tests {
     }
 
     #[test]
+    fn result_success_message_nennt_teamnamen_mit_id_fallback() {
+        let outcome = ScrimMatchResultOutcome {
+            steam_match_id: Some(123),
+            winner_team_id: Some(1),
+            result_json: json!({}),
+        };
+
+        assert_eq!(
+            result_success_message(30, &outcome, Some("Team Alpha"), line!()),
+            "Scrim beendet. Das Ergebnis ist eingetragen. Sieger: Team Alpha."
+        );
+        assert_eq!(
+            result_success_message(30, &outcome, None, line!()),
+            "Scrim beendet. Das Ergebnis ist eingetragen. Sieger: Team 1."
+        );
+    }
+
+    #[test]
     fn sichtbare_scrim_ergebnistexte_sind_klar_und_ohne_standard_emojis() {
         let outcome = ScrimMatchResultOutcome {
             steam_match_id: Some(123),
             winner_team_id: Some(1),
             result_json: json!({}),
         };
-        let success = result_success_message(30, &outcome, line!());
+        let success = result_success_message(30, &outcome, Some("Team Alpha"), line!());
         let failure = result_failure_message(30, "noch nicht verfügbar", line!());
 
         for text in [success, failure] {
