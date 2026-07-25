@@ -1751,6 +1751,38 @@ mod tests {
     }
 
     #[test]
+    fn faq_produktionsblock_injiziert_minimax_generator() {
+        let source = include_str!("main.rs");
+        let start = ["// FAQ-", "Chat (6)"].concat();
+        let end = ["// Concierge-", "Onboarding Slice A"].concat();
+        let block = source
+            .split_once(start.as_str())
+            .and_then(|(_, rest)| {
+                rest.split_once(end.as_str())
+                    .map(|(faq_block, _)| faq_block)
+            })
+            .expect("FAQ-Produktionsblock");
+        let generator_constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
+        let old_constructor = ["FaqChat::", "new("].concat();
+        let minimax_client = ["MiniMaxClient::", "from_env("].concat();
+
+        assert_eq!(
+            block.matches(generator_constructor.as_str()).count(),
+            1,
+            "FAQ-Produktionsblock muss genau den Generator-Konstruktor verwenden"
+        );
+        assert_eq!(
+            block.matches(minimax_client.as_str()).count(),
+            1,
+            "FAQ-Produktionsblock muss genau einen MiniMax-Client injizieren"
+        );
+        assert!(
+            !block.contains(old_constructor.as_str()),
+            "FAQ-Produktionsblock darf den alten Konstruktor nicht verwenden"
+        );
+    }
+
+    #[test]
     fn moderation_enforce_defaults_to_shadow_when_all_vars_are_unset() {
         let vars = HashMap::new();
 
