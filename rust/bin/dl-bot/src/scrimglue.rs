@@ -3842,7 +3842,7 @@ async fn report_uncertain_discord_effect(
         "Scrim-Discord-Outbox-Sendestatus uncertain"
     );
     let content = format!(
-        "PLATZHALTER outbox_effect_id={outbox_effect_id} effect_type={effect_type} attempts={attempts} last_error_code={last_error_code} cause={cause}"
+        "Scrim-Zustellung unklar: Eine Discord-Nachricht ist weder als zugestellt noch als fehlgeschlagen bestätigt. Sie wird nicht automatisch wiederholt, damit kein doppelter Post entsteht, also bitte im Zielkanal nachsehen. outbox_effect_id={outbox_effect_id} effect_type={effect_type} attempts={attempts} last_error_code={last_error_code} cause={cause}"
     );
     if let Err(err) = sender.post_log(&content).await {
         tracing::warn!(
