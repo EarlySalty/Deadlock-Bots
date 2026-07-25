@@ -2790,7 +2790,20 @@ fn match_request_summary_json(
     }
 
     let recommended_slot_index = if deadline_passed {
-        best_match_request_slot_index(&slots, teams.len())
+        let replacement_need_counts = (0..slots.len())
+            .map(|index| {
+                match_request_replacement_needs(
+                    request,
+                    &slot_values,
+                    members,
+                    responses,
+                    Some(index),
+                    true,
+                )
+                .len()
+            })
+            .collect::<Vec<_>>();
+        best_match_request_slot_index(&slots, &replacement_need_counts, teams.len())
     } else {
         None
     };
@@ -2928,22 +2941,35 @@ fn match_request_replacement_needs(
     needs
 }
 
-fn best_match_request_slot_index(slots: &[Value], required_team_count: usize) -> Option<usize> {
-    let mut best: Option<(usize, u64, u64)> = None;
-    for (index, slot) in slots.iter().enumerate() {
-        let available = slot["available_count"].as_u64().unwrap_or_default();
-        let team_available = slot["team_available_count"].as_u64().unwrap_or_default() as usize;
-        if available == 0 || team_available < required_team_count {
-            continue;
-        }
-        let starters = slot["starter_available_count"].as_u64().unwrap_or_default();
-        if best.is_none_or(|(_, best_available, best_starters)| {
-            available > best_available || (available == best_available && starters > best_starters)
-        }) {
-            best = Some((index, available, starters));
-        }
-    }
-    best.map(|(index, _, _)| index)
+fn best_match_request_slot_index(
+    slots: &[Value],
+    replacement_need_counts: &[usize],
+    required_team_count: usize,
+) -> Option<usize> {
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| {
+            slot["available_count"].as_u64().unwrap_or_default() > 0
+                && slot["team_available_count"].as_u64().unwrap_or_default() as usize
+                    >= required_team_count
+        })
+        .max_by_key(|(index, slot)| {
+            (
+                slot["available_count"].as_u64().unwrap_or_default(),
+                std::cmp::Reverse(
+                    replacement_need_counts
+                        .get(*index)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                ),
+                slot["starter_available_count"].as_u64().unwrap_or_default(),
+                // max_by_key liefert bei Gleichstand das letzte Maximum; der Index kehrt das um,
+                // damit bei komplettem Gleichstand die frühere Slotoption vorne bleibt.
+                std::cmp::Reverse(*index),
+            )
+        })
+        .map(|(index, _)| index)
 }
 
 async fn load_match(pool: &PgPool, id: i32) -> DashboardDbResult<Option<Value>> {
@@ -3954,6 +3980,42 @@ mod tests {
         assert_eq!(first_match["missing_response_count"], 1);
         assert_eq!(first_match["no_slot_count"], 1);
         Ok(())
+    }
+
+    #[test]
+    fn match_request_slot_empfiehlt_weniger_ersatzbedarf_vor_mehr_stammspielern() {
+        let slots = vec![
+            json!({
+                "available_count": 4,
+                "team_available_count": 2,
+                "starter_available_count": 1,
+            }),
+            json!({
+                "available_count": 4,
+                "team_available_count": 2,
+                "starter_available_count": 2,
+            }),
+        ];
+
+        assert_eq!(best_match_request_slot_index(&slots, &[0, 1], 2), Some(0));
+    }
+
+    #[test]
+    fn match_request_slot_bleibt_bei_gleichstand_auf_der_frueheren_option() {
+        let slots = vec![
+            json!({
+                "available_count": 4,
+                "team_available_count": 2,
+                "starter_available_count": 2,
+            }),
+            json!({
+                "available_count": 4,
+                "team_available_count": 2,
+                "starter_available_count": 2,
+            }),
+        ];
+
+        assert_eq!(best_match_request_slot_index(&slots, &[1, 1], 2), Some(0));
     }
 
     #[tokio::test]
