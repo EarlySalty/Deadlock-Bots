@@ -4427,13 +4427,31 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                         .join(', ');
                     const label = document.createElement('span');
                     label.textContent = `${team.team_name}: offen bei ${names}`;
+                    const template = document.createElement('select');
+                    template.setAttribute('aria-label', 'Reminder-Vorlage');
+                    [
+                        ['antwort_fehlt', 'Antwort fehlt'],
+                        ['frist_bald', 'Frist läuft bald ab'],
+                        ['bestaetigung_offen', 'Bestätigung offen'],
+                    ].forEach(([value, text]) => {
+                        const option = document.createElement('option');
+                        option.value = value;
+                        option.textContent = text;
+                        template.appendChild(option);
+                    });
                     const remind = document.createElement('button');
                     remind.type = 'button';
                     remind.className = 'namespace';
                     remind.textContent = 'Jetzt erinnern';
                     remind.disabled = !(match.status === 'open' || match.status === 'post_failed');
-                    remind.addEventListener('click', () => approveScrimReminder(match.request_id, team.team_id, remind));
+                    remind.addEventListener('click', () => approveScrimReminder(
+                        match.request_id,
+                        team.team_id,
+                        template.value,
+                        remind,
+                    ));
                     row.appendChild(label);
+                    row.appendChild(template);
                     row.appendChild(remind);
                     item.appendChild(row);
                 });
@@ -4867,13 +4885,13 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         }
     }
 
-    async function approveScrimReminder(requestId, teamId, button) {
+    async function approveScrimReminder(requestId, teamId, template, button) {
         const wasDisabled = Boolean(button && button.disabled);
         if (button) button.disabled = true;
         try {
             await fetchJSON(`/api/scrims/match-requests/${requestId}/reminders`, {
                 method: 'POST',
-                body: JSON.stringify({ team_id: teamId }),
+                body: JSON.stringify({ team_id: teamId, template }),
             });
             setScrimMessage('Reminder freigegeben. Der Bot postet im Teamkanal.', 'success');
             await loadScrims();

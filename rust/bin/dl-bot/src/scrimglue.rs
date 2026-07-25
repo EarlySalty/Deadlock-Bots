@@ -39,6 +39,9 @@ const MATCH_REQUEST_REMINDER_STATUS_POSTING: &str = "posting";
 const MATCH_REQUEST_REMINDER_STATUS_POSTED: &str = "posted";
 const MATCH_REQUEST_REMINDER_STATUS_FAILED: &str = "failed";
 const MATCH_REQUEST_REMINDER_STATUS_CANCELLED: &str = "cancelled";
+const MATCH_REQUEST_REMINDER_TEMPLATE_MISSING_RESPONSE: &str = "antwort_fehlt";
+const MATCH_REQUEST_REMINDER_TEMPLATE_DEADLINE_SOON: &str = "frist_bald";
+const MATCH_REQUEST_REMINDER_TEMPLATE_CONFIRMATION_OPEN: &str = "bestaetigung_offen";
 const MATCH_STATUS_MESSAGE_STATE_PENDING: &str = "pending";
 const MATCH_STATUS_MESSAGE_STATE_POSTING: &str = "posting";
 const MATCH_STATUS_MESSAGE_STATE_POSTED: &str = "posted";
@@ -234,6 +237,7 @@ struct ClaimedMatchRequestReminder {
     reminder_id: i64,
     request_id: i64,
     team_id: i64,
+    template: String,
     team_name: String,
     channel_id: u64,
     source_message_id: u64,
@@ -700,6 +704,7 @@ async fn claim_next_pending_match_request_reminder(
         SELECT r.id::bigint AS reminder_id,
                r.request_id::bigint AS request_id,
                r.team_id::bigint AS team_id,
+               r.template,
                r.target_participant_ids,
                r.target_role_id,
                r.discord_channel_id,
@@ -851,6 +856,7 @@ async fn claim_next_pending_match_request_reminder(
         reminder_id,
         request_id,
         team_id,
+        template: row.get("template"),
         team_name: row.get("team_name"),
         channel_id: u64::try_from(row.get::<i64, _>("discord_channel_id"))
             .context("Scrim-Reminder-Channel-ID ungültig")?,
@@ -921,10 +927,11 @@ async fn handle_match_request_reminder(
     reminder: ClaimedMatchRequestReminder,
 ) -> anyhow::Result<()> {
     let content = match_request_reminder_message(
+        &reminder.template,
         &reminder.team_name,
         &reminder.target_user_ids,
         reminder.target_role_id,
-    );
+    )?;
     let mut body = match_request_reminder_body(
         &content,
         reminder.source_message_id,
@@ -2607,10 +2614,11 @@ fn discord_message_url(channel_id: u64, message_id: u64) -> String {
 }
 
 fn match_request_reminder_message(
+    template: &str,
     team_name: &str,
     target_user_ids: &[u64],
     target_role_id: Option<u64>,
-) -> String {
+) -> anyhow::Result<String> {
     let target = if target_user_ids.is_empty() {
         target_role_id.map_or_else(|| "euch".to_string(), |id| format!("<@&{id}>"))
     } else {
@@ -2620,9 +2628,18 @@ fn match_request_reminder_message(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    format!(
-        "Erinnerung für {team_name}: Es fehlen noch Antworten von {target}.\nBitte stimmt in der Terminabfrage oben ab."
-    )
+    match template {
+        MATCH_REQUEST_REMINDER_TEMPLATE_MISSING_RESPONSE => Ok(format!(
+            "Erinnerung für {team_name}: Es fehlen noch Antworten von {target}.\nBitte stimmt in der Terminabfrage oben ab."
+        )),
+        MATCH_REQUEST_REMINDER_TEMPLATE_DEADLINE_SOON => {
+            Ok(format!("{target}\n{}", "PLATZHALTER"))
+        }
+        MATCH_REQUEST_REMINDER_TEMPLATE_CONFIRMATION_OPEN => {
+            Ok(format!("{target}\n{}", "PLATZHALTER"))
+        }
+        _ => Err(anyhow!("Unbekannte Scrim-Reminder-Vorlage: {template}")),
+    }
 }
 
 fn match_request_reminder_body(
@@ -3581,8 +3598,9 @@ mod tests {
     }
 
     #[test]
-    fn match_request_reminder_body_verlinkt_abfrage_und_pinged_nur_fehlende() {
-        let content = match_request_reminder_message("Team Alpha", &[555, 666], None);
+    fn match_request_reminder_body_verlinkt_abfrage_und_pinged_nur_fehlende() -> TestResult {
+        let content =
+            match_request_reminder_message("antwort_fehlt", "Team Alpha", &[555, 666], None)?;
         assert!(content.contains("Team Alpha"));
         assert!(content.contains("<@555>"));
         assert!(content.contains("<@666>"));
@@ -3597,13 +3615,29 @@ mod tests {
             body["allowed_mentions"],
             json!({ "parse": [], "users": ["555", "666"], "replied_user": false })
         );
+        Ok(())
     }
 
     #[test]
-    fn match_request_reminder_nennt_teamrolle_wenn_einzelziele_fehlen() {
-        let content = match_request_reminder_message("Team Alpha", &[], Some(888));
+    fn match_request_reminder_nennt_teamrolle_wenn_einzelziele_fehlen() -> TestResult {
+        let content =
+            match_request_reminder_message("antwort_fehlt", "Team Alpha", &[], Some(888))?;
         assert!(content.contains("<@&888>"));
         assert!(!content.contains("von euch"));
+        Ok(())
+    }
+
+    #[test]
+    fn match_request_reminder_waehlt_gespeicherte_vorlage() -> TestResult {
+        assert_eq!(
+            match_request_reminder_message("frist_bald", "Team Alpha", &[555], None)?,
+            "<@555>\nPLATZHALTER"
+        );
+        assert_eq!(
+            match_request_reminder_message("bestaetigung_offen", "Team Alpha", &[], Some(888))?,
+            "<@&888>\nPLATZHALTER"
+        );
+        Ok(())
     }
 
     #[test]
@@ -3703,7 +3737,7 @@ mod tests {
         )
         .await?;
         insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
-        insert_match_request_reminder(pool, 80, 31, 1, &[502], &[666]).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "frist_bald", &[502], &[666]).await?;
 
         let claim = claim_next_pending_match_request_reminder(pool)
             .await?
@@ -3711,6 +3745,7 @@ mod tests {
         assert_eq!(claim.reminder_id, 80);
         assert_eq!(claim.request_id, 31);
         assert_eq!(claim.team_id, 1);
+        assert_eq!(claim.template, "frist_bald");
         assert_eq!(claim.channel_id, 100);
         assert_eq!(claim.source_message_id, 9001);
         assert_eq!(claim.target_user_ids, vec![666]);
@@ -3760,7 +3795,8 @@ mod tests {
             MATCH_REQUEST_STATUS_OPEN,
         )
         .await?;
-        insert_match_request_reminder(pool, 80, 31, 1, &[501, 502], &[555, 666]).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "antwort_fehlt", &[501, 502], &[555, 666])
+            .await?;
         insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
 
         let claim = claim_next_pending_match_request_reminder(pool)
@@ -3791,7 +3827,7 @@ mod tests {
             MATCH_REQUEST_STATUS_OPEN,
         )
         .await?;
-        insert_match_request_reminder(pool, 80, 31, 1, &[501], &[555]).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "antwort_fehlt", &[501], &[555]).await?;
         insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
 
         assert_eq!(claim_next_pending_match_request_reminder(pool).await?, None);
@@ -3819,7 +3855,7 @@ mod tests {
             MATCH_REQUEST_STATUS_OPEN,
         )
         .await?;
-        insert_match_request_reminder(pool, 80, 31, 1, &[501], &[555]).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "antwort_fehlt", &[501], &[555]).await?;
         sqlx::query("UPDATE scrim.match_requests SET status = 'closed' WHERE id = 31")
             .execute(pool)
             .await?;
@@ -3852,7 +3888,7 @@ mod tests {
             MATCH_REQUEST_STATUS_OPEN,
         )
         .await?;
-        insert_match_request_reminder(pool, 80, 31, 1, &[501], &[]).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "antwort_fehlt", &[501], &[]).await?;
 
         assert_eq!(claim_next_pending_match_request_reminder(pool).await?, None);
         assert_eq!(match_request_reminder_status(pool, 80).await?, "failed");
@@ -4542,6 +4578,7 @@ mod tests {
         reminder_id: i32,
         request_id: i32,
         team_id: i32,
+        template: &str,
         target_participant_ids: &[i32],
         target_user_ids: &[i64],
     ) -> anyhow::Result<()> {
@@ -4554,7 +4591,7 @@ mod tests {
                 source_message_id, created_at, updated_at
             )
             VALUES(
-                $1, $2, $3, 'antwort_fehlt', 'members', $4, $5, 1, '42',
+                $1, $2, $3, $4, 'members', $5, $6, 1, '42',
                 'Coach', now(), now(), 'approved', 100, 9001, now(), now()
             )
             "#,
@@ -4562,6 +4599,7 @@ mod tests {
         .bind(reminder_id)
         .bind(request_id)
         .bind(team_id)
+        .bind(template)
         .bind(target_participant_ids)
         .bind(target_user_ids)
         .execute(pool)

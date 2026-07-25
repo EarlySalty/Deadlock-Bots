@@ -28,6 +28,9 @@ const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
 const MATCH_REQUEST_MAX_SLOTS: usize = 5;
 const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
+const MATCH_REQUEST_REMINDER_DEFAULT_TEMPLATE: &str = "antwort_fehlt";
+const MATCH_REQUEST_REMINDER_TEMPLATES: [&str; 3] =
+    ["antwort_fehlt", "frist_bald", "bestaetigung_offen"];
 const MATCH_REQUEST_REPLACEMENT_DATA_NOTE: &str =
     "Rollen/Lineup-Daten fehlen; angezeigt werden nur konkrete Personen aus Teammitgliedern und Antworten.";
 
@@ -252,11 +255,22 @@ pub async fn scrims_create_match_request_reminder(
         Ok(id) => id,
         Err(resp) => return resp,
     };
+    let template = match payload.get("template") {
+        None => MATCH_REQUEST_REMINDER_DEFAULT_TEMPLATE,
+        Some(Value::String(value))
+            if MATCH_REQUEST_REMINDER_TEMPLATES.contains(&value.as_str()) =>
+        {
+            value
+        }
+        Some(Value::String(_)) => return err_text(400, "Invalid reminder template"),
+        Some(_) => return err_text(400, "template must be string"),
+    };
 
     match create_match_request_reminder_record(
         app.pool(),
         request_id,
         team_id,
+        template,
         &session.user_id.to_string(),
         &session.display_name,
     )
@@ -2314,6 +2328,7 @@ async fn create_match_request_reminder_record(
     pool: &PgPool,
     request_id: i32,
     team_id: i32,
+    template: &str,
     approved_by_user_id: &str,
     approved_by_display_name: &str,
 ) -> Result<Option<Value>, MatchRequestReminderCreateError> {
@@ -2443,8 +2458,8 @@ async fn create_match_request_reminder_record(
             source_message_id, created_at, updated_at
         )
         VALUES(
-            'missing_response_reminder', $1, $2, 'antwort_fehlt', $3, $4, $5, $6, $7, $8,
-            $9, now(), now(), 'approved', $10, $11, now(), now()
+            'missing_response_reminder', $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, now(), now(), 'approved', $11, $12, now(), now()
         )
         RETURNING id::bigint AS id, request_id, team_id, action, template, target_kind,
                   missing_count, approved_at, scheduled_for, status
@@ -2452,6 +2467,7 @@ async fn create_match_request_reminder_record(
     )
     .bind(request_id)
     .bind(team_id)
+    .bind(template)
     .bind(target_kind)
     .bind(&target_participant_ids)
     .bind(&target_discord_user_ids)
@@ -4235,11 +4251,12 @@ mod tests {
         .await?;
 
         let response = app
+            .clone()
             .oneshot(auth_post(
                 "/api/scrims/match-requests/91/reminders",
                 &session_id,
                 &csrf,
-                json!({ "team_id": 1 }),
+                json!({ "team_id": 1, "template": "frist_bald" }),
             )?)
             .await?;
 
@@ -4248,12 +4265,13 @@ mod tests {
         let data: Value = serde_json::from_slice(&body)?;
         assert_eq!(data["reminder"]["request_id"], 91);
         assert_eq!(data["reminder"]["team_id"], 1);
+        assert_eq!(data["reminder"]["template"], "frist_bald");
         assert_eq!(data["reminder"]["target_kind"], "members");
         assert_eq!(data["reminder"]["missing_count"], 1);
 
         let row = sqlx::query(
             r#"
-            SELECT request_id, team_id, target_kind, target_participant_ids,
+            SELECT request_id, team_id, template, target_kind, target_participant_ids,
                    approved_by_user_id, approved_by_display_name, status
               FROM scrim.match_request_reminders
              WHERE id = $1
@@ -4269,6 +4287,7 @@ mod tests {
         .await?;
         assert_eq!(row.try_get::<i32, _>("request_id")?, 91);
         assert_eq!(row.try_get::<i32, _>("team_id")?, 1);
+        assert_eq!(row.try_get::<String, _>("template")?, "frist_bald");
         assert_eq!(row.try_get::<String, _>("target_kind")?, "members");
         assert_eq!(
             row.try_get::<Vec<i32>, _>("target_participant_ids")?,
@@ -4280,6 +4299,36 @@ mod tests {
             "Coach"
         );
         assert_eq!(row.try_get::<String, _>("status")?, "approved");
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests/91/reminders",
+                &session_id,
+                &csrf,
+                json!({ "team_id": 2 }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["reminder"]["template"], "antwort_fehlt");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_reminder_route_lehnt_unbekannte_vorlage_ab(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, session_id, csrf) = app_with_session().await?;
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/match-requests/91/reminders",
+                &session_id,
+                &csrf,
+                json!({ "team_id": 1, "template": "frei_formuliert" }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 
