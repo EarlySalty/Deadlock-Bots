@@ -1,3 +1,11 @@
+## #294 — Discord-Scrims lassen sich ohne Doppelwrite umschalten
+
+Problem: Discord-Interaktionen, sichtbare Posts und Lagebild-Korrekturen brauchten für den Scrim-Umzug einen ausfallsicheren Übergabepfad, ohne Antworten doppelt zu verarbeiten oder persönliche Rohtexte in unveränderliche Nachweise zu kopieren.
+
+Änderung: Der Bot prüft die aktuelle Zuständigkeit direkt vor jeder Änderung, übergibt Terminantworten wiederholbar an den Turnierdienst und verarbeitet sichtbare Discord-Effekte mit klaren Erfolgs-, Fehler- und Unsicher-Zuständen. Lagebild-Akteure werden pseudonymisiert; Korrekturtexte bleiben nur im dafür löschbaren Datenbereich.
+
+Aktuelles Verhalten: Im bisherigen Modus läuft die vorhandene Scrim-Orga weiter. Nach der kontrollierten Umschaltung führt der Bot nur noch Discord- und AI-Aufgaben aus, während fachliche Schreibzugriffe beim Turnierdienst liegen.
+
 ## #293 — Scrim-Umbau bekommt eine sichere gemeinsame Grundlage
 
 Problem: Turnier-, Discord- und Steam-Abläufe hatten noch keinen gemeinsamen, ausfallsicheren Übergabevertrag; Wiederholungen, Ergebniswahl und spätere Datenlöschung wären beim Umbau riskant gewesen.
