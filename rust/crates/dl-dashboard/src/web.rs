@@ -442,6 +442,15 @@ pub fn router(app: DashboardApp) -> Router {
             get(crate::scrims::scrims_match_request_defaults),
         )
         .route(
+            "/api/scrims/slot-presets",
+            post(crate::scrims::scrims_create_slot_preset),
+        )
+        .route(
+            "/api/scrims/slot-presets/{preset_id}",
+            axum::routing::put(crate::scrims::scrims_update_slot_preset)
+                .delete(crate::scrims::scrims_delete_slot_preset),
+        )
+        .route(
             "/api/scrims/match-requests",
             post(crate::scrims::scrims_create_match_request_batch),
         )
