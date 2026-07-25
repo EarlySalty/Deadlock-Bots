@@ -398,7 +398,7 @@ async fn claim_next_match(
                         SELECT 1
                           FROM scrim.match_result_refs result_ref
                          WHERE result_ref.match_id = m.id
-                           AND result_ref.fetch_status IN ($9, $10)
+                           AND result_ref.fetch_status IN ($9, $10, $11)
                            AND result_ref.updated_at <= now() - interval '15 minutes'
                     )
                 ))
@@ -435,6 +435,9 @@ async fn claim_next_match(
     .bind(include_result_retries)
     .bind(MATCH_RESULT_REF_STATUS_FAILED)
     .bind(MATCH_RESULT_REF_STATUS_FETCHING)
+    // ponytail: pending erst nach dem gleichen 15-Minuten-Backoff, damit der Normalpfad
+    // über result_requested unverändert bleibt und nur hängende Refs geheilt werden.
+    .bind(MATCH_RESULT_REF_STATUS_PENDING)
     .fetch_optional(pool)
     .await
     .context("Scrim-Match-Claim fehlgeschlagen")?;
@@ -732,6 +735,14 @@ async fn claim_next_pending_match_request_reminder(
     ) {
         cancel_match_request_reminder(&mut tx, reminder_id, "Terminabfrage geschlossen").await?;
         tx.commit().await?;
+        tracing::info!(
+            reminder_id,
+            request_id,
+            team_id,
+            action = "cancelled",
+            reason = "request_closed",
+            "Scrim-Reminder nicht gepostet"
+        );
         return Ok(None);
     }
     let approved_participant_ids = row.get::<Vec<i32>, _>("target_participant_ids");
@@ -758,6 +769,14 @@ async fn claim_next_pending_match_request_reminder(
     if missing_rows.is_empty() {
         cancel_match_request_reminder(&mut tx, reminder_id, "Keine offenen Antworten mehr").await?;
         tx.commit().await?;
+        tracing::info!(
+            reminder_id,
+            request_id,
+            team_id,
+            action = "cancelled",
+            reason = "no_missing_answers",
+            "Scrim-Reminder nicht gepostet"
+        );
         return Ok(None);
     }
 
@@ -1340,7 +1359,7 @@ async fn send_match_request_batch(
     for request in &batch.requests {
         if !request.missing_targets.is_empty() {
             errors.push(format!(
-                "request {}: fehlender Teamkanal fuer {}",
+                "request {}: fehlender Teamkanal für {}",
                 request.request_id,
                 request.missing_targets.join(", ")
             ));
@@ -2939,7 +2958,7 @@ fn day_label(day: &str) -> &str {
 
 fn minute_label(value: i64) -> anyhow::Result<String> {
     if !(0..=1440).contains(&value) {
-        return Err(anyhow!("slot minute ausserhalb des Tages"));
+        return Err(anyhow!("slot minute außerhalb des Tages"));
     }
     Ok(format!("{:02}:{:02}", value / 60, value % 60))
 }
@@ -3412,6 +3431,29 @@ mod tests {
         let claim = claim_next_pending_match_or_result_retry(pool)
             .await?
             .expect("stale failed ref on finished match");
+        assert_eq!(claim.match_id, 30);
+        assert_eq!(claim.action, ScrimDriverAction::FetchResult);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn haengende_pending_id_wird_ausserhalb_der_anforderungsstates_neu_geclaimt() -> TestResult
+    {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match(pool, 30, STATE_LOBBY_POSTED).await?;
+        insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
+        sqlx::query(
+            "UPDATE scrim.match_result_refs SET fetch_status = 'pending', updated_at = now() - interval '16 minutes' WHERE id = 70",
+        )
+        .execute(pool)
+        .await?;
+
+        let claim = claim_next_pending_match_or_result_retry(pool)
+            .await?
+            .expect("stale pending ref outside request states");
         assert_eq!(claim.match_id, 30);
         assert_eq!(claim.action, ScrimDriverAction::FetchResult);
         Ok(())

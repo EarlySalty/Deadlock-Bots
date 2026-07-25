@@ -357,15 +357,22 @@ async fn generate_lagebilder_for_teams(
                     )
                 }
             },
-            None => (
-                fallback_lagebild(&input),
-                STATUS_ERROR,
-                None,
-                "error",
-                "ai_provider_missing",
-                "fallback_snapshot_created",
-                Some("AI-Provider fehlt".to_string()),
-            ),
+            None => {
+                tracing::warn!(
+                    team_id = input.team_id,
+                    generated_for,
+                    "Scrim-Lagebild ohne AI-Provider erzeugt"
+                );
+                (
+                    fallback_lagebild(&input),
+                    STATUS_ERROR,
+                    None,
+                    "error",
+                    "ai_provider_missing",
+                    "fallback_snapshot_created",
+                    Some("AI-Provider fehlt".to_string()),
+                )
+            }
         };
         let mut tx = pool.begin().await?;
         let snapshot_id = insert_snapshot(

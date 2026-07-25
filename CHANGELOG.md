@@ -1,3 +1,11 @@
+## #294 — Scrim-Orga zeigt ihren Stand und bleibt nicht mehr hängen
+
+Problem: Ob eine Terminabfrage wirklich im Teamkanal ankam, war im Dashboard nicht zu sehen; ein fehlgeschlagener Post blieb still. Ein neu eingetragener Ergebnisabruf konnte in seltenen Fällen dauerhaft liegen bleiben, und ein abgesagter Reminder verschwand ohne jede Spur.
+
+Änderung: Jede Terminabfrage zeigt ihren Stand jetzt im Klartext an. Liegengebliebene Ergebnisabrufe werden nach kurzer Wartezeit von selbst wieder aufgenommen, und jeder abgesagte Reminder wird mit seinem Grund protokolliert.
+
+Aktuelles Verhalten: Am Terminabfrage-Eintrag steht sichtbar, ob sie Entwurf ist, gepostet wurde oder fehlgeschlagen ist. Ergebnisabrufe heilen sich selbst, statt unbemerkt stehen zu bleiben, und niemand muss mehr raten, warum ein freigegebener Reminder nicht kam.
+
 ## #293 — Scrim-Umbau bekommt eine sichere gemeinsame Grundlage
 
 Problem: Turnier-, Discord- und Steam-Abläufe hatten noch keinen gemeinsamen, ausfallsicheren Übergabevertrag; Wiederholungen, Ergebniswahl und spätere Datenlöschung wären beim Umbau riskant gewesen.
