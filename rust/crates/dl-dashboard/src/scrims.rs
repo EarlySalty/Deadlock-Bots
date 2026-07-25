@@ -49,6 +49,77 @@ pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap
     }
 }
 
+pub async fn scrim_runtime_control(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    match load_runtime_control(app.pool()).await {
+        Ok(data) => ok_json(data),
+        Err(err) => {
+            tracing::error!(%err, "scrim_runtime_control fehlgeschlagen");
+            err_text(500, "PLATZHALTER")
+        }
+    }
+}
+
+pub async fn scrim_runtime_control_transition(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
+    let input = match serde_json::from_slice::<RuntimeControlTransitionInput>(&body) {
+        Ok(input) => input,
+        Err(_) => return err_text(400, "PLATZHALTER"),
+    };
+    let transition = sqlx::query_as::<_, (bool, Option<i64>)>(
+        r#"
+        SELECT applied, current_epoch
+          FROM scrim.transition_runtime_control(
+              $1, $2, $3, $4, $5, 'dashboard:runtime-control',
+              'dashboard:runtime-control', '{}'::jsonb
+          )
+        "#,
+    )
+    .bind(input.expected_epoch)
+    .bind(&input.mode)
+    .bind(&input.operational_writer)
+    .bind(session.user_id.to_string())
+    .bind(&session.display_name)
+    .fetch_one(app.pool())
+    .await;
+    match transition {
+        Ok((false, _)) => return err_text(409, "PLATZHALTER"),
+        Ok((true, _)) => {}
+        Err(err)
+            if err
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref()
+                == Some("23514") =>
+        {
+            return err_text(400, "PLATZHALTER");
+        }
+        Err(err) => {
+            tracing::error!(%err, "scrim_runtime_control_transition fehlgeschlagen");
+            return err_text(500, "PLATZHALTER");
+        }
+    }
+    match load_runtime_control(app.pool()).await {
+        Ok(data) => ok_json(data),
+        Err(err) => {
+            tracing::error!(%err, "scrim_runtime_control nach Umschaltung nicht lesbar");
+            err_text(500, "PLATZHALTER")
+        }
+    }
+}
+
 pub async fn scrims_create_match(
     State(app): State<DashboardApp>,
     headers: HeaderMap,
@@ -932,6 +1003,13 @@ struct CreateMatchInput {
     coach_spectator_discord_id: Option<i64>,
 }
 
+#[derive(serde::Deserialize)]
+struct RuntimeControlTransitionInput {
+    expected_epoch: i64,
+    mode: String,
+    operational_writer: String,
+}
+
 struct MatchRequestBatchInput {
     template: String,
     deadline_at: DateTime<Utc>,
@@ -1357,6 +1435,21 @@ fn parse_match_result_id(payload: &Value) -> Result<i64, Response> {
         return Err(err_text(400, "match_id must be a positive integer"));
     }
     Ok(value)
+}
+
+async fn load_runtime_control(pool: &PgPool) -> DashboardDbResult<Value> {
+    let row = sqlx::query(
+        "SELECT mode, operational_writer, epoch, updated_at
+           FROM scrim.runtime_control",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(json!({
+        "mode": row.try_get::<String, _>("mode")?,
+        "operational_writer": row.try_get::<String, _>("operational_writer")?,
+        "epoch": row.try_get::<i64, _>("epoch")?,
+        "updated_at": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("updated_at")?)),
+    }))
 }
 
 async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
@@ -3510,6 +3603,13 @@ mod tests {
     async fn app_with_session(
     ) -> Result<(dl_central_db::TestDb, axum::Router, String, String), Box<dyn std::error::Error>>
     {
+        app_with_access_level(AccessLevel::Full).await
+    }
+
+    async fn app_with_access_level(
+        access_level: AccessLevel,
+    ) -> Result<(dl_central_db::TestDb, axum::Router, String, String), Box<dyn std::error::Error>>
+    {
         let db = dl_central_db::testing::test_pool().await?;
         let session_id = "scrim-test-session".to_string();
         let csrf = "scrim-test-csrf".to_string();
@@ -3523,7 +3623,7 @@ mod tests {
                 "username": "coach",
                 "display_name": "Coach",
                 "reason": "test",
-                "access_level": AccessLevel::Full.as_str(),
+                "access_level": access_level.as_str(),
                 "csrf_token": csrf,
                 "created_at": now,
                 "last_seen_at": now,
@@ -3831,6 +3931,190 @@ mod tests {
             .bind(id)
             .fetch_one(pool)
             .await
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_liefert_aktuellen_zustand(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        let expected_updated_at: i64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM updated_at)::bigint FROM scrim.runtime_control",
+        )
+        .fetch_one(db.pool())
+        .await?;
+
+        let response = app
+            .oneshot(auth_get("/api/scrim-runtime-control", &session_id)?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["mode"], "legacy");
+        assert_eq!(data["operational_writer"], "dl-bots");
+        assert_eq!(data["epoch"], 0);
+        assert_eq!(
+            data["updated_at"].as_i64().ok_or("missing updated_at")?,
+            expected_updated_at
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_schaltet_auf_draining_und_protokolliert(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": 0,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["mode"], "draining");
+        assert_eq!(data["operational_writer"], "turniere");
+        assert_eq!(data["epoch"], 1);
+        let history: (String, String, i64, String) = sqlx::query_as(
+            "SELECT mode, operational_writer, epoch, actor_source
+               FROM scrim.runtime_control_history
+              ORDER BY epoch DESC
+              LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(
+            history,
+            (
+                "draining".to_string(),
+                "turniere".to_string(),
+                1,
+                "user".to_string()
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_erlaubt_rueckweg_aus_turniere(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+        let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM scrim.runtime_control")
+            .fetch_one(db.pool())
+            .await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": epoch,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": epoch + 1,
+                    "mode": "legacy",
+                    "operational_writer": "dl-bots",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let current: (String, String, i64) =
+            sqlx::query_as("SELECT mode, operational_writer, epoch FROM scrim.runtime_control")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(
+            current,
+            ("legacy".to_string(), "dl-bots".to_string(), epoch + 2)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_lehnt_falschen_epoch_ohne_aenderung_ab(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": 7,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let current: (String, String, i64) =
+            sqlx::query_as("SELECT mode, operational_writer, epoch FROM scrim.runtime_control")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(current, ("legacy".to_string(), "dl-bots".to_string(), 0));
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.runtime_control_history")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(history_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_lehnt_nutzer_ohne_adminrecht_ohne_aenderung_ab(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_access_level(AccessLevel::TurnierOnly).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": 0,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let current: (String, String, i64) =
+            sqlx::query_as("SELECT mode, operational_writer, epoch FROM scrim.runtime_control")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(current, ("legacy".to_string(), "dl-bots".to_string(), 0));
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.runtime_control_history")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(history_count, 1);
+        Ok(())
     }
 
     #[tokio::test]

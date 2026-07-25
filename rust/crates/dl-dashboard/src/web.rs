@@ -432,6 +432,11 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/reaction-roles/{id}",
             axum::routing::delete(crate::reaction_roles::reaction_role_delete),
         )
+        .route(
+            "/api/scrim-runtime-control",
+            get(crate::scrims::scrim_runtime_control)
+                .post(crate::scrims::scrim_runtime_control_transition),
+        )
         .merge(scrim_router(app.clone()))
         // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
         // POST nimmt bis zu 5 Bilder (5 MiB) → Body-Limit hochsetzen.
