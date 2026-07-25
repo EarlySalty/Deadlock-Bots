@@ -1,3 +1,11 @@
+## #295 — Scrim-Orga: passende Erinnerung, klügere Terminwahl, eigene Slot-Presets
+
+Problem: Für Erinnerungen gab es nur einen einzigen Text, auch wenn es gar nicht um fehlende Antworten ging. Bei gleich vielen Zusagen entschied die Terminempfehlung ohne Blick auf den Ersatzbedarf, im Ergebnispost stand statt des Teamnamens eine interne Nummer, und die vorgeschlagenen Zeitfenster waren fest eingebaut.
+
+Änderung: Beim Freigeben einer Erinnerung lässt sich jetzt zwischen drei Vorlagen wählen: Antwort fehlt, Frist läuft bald ab und Bestätigung offen. Die Terminempfehlung zieht bei gleicher Stimmenzahl den Termin mit weniger Ersatzbedarf vor. Slot-Presets lassen sich im Dashboard anlegen, ändern und löschen.
+
+Aktuelles Verhalten: Die Erinnerung im Teamkanal passt zum Anlass und spricht weiterhin nur die offenen Personen an. Der Ergebnispost nennt den Sieger beim Namen. Wer Termine plant, übernimmt ein gespeichertes Preset als Startpunkt und passt es vor dem Senden an.
+
 ## #294 — Scrim-Orga zeigt ihren Stand und bleibt nicht mehr hängen
 
 Problem: Ob eine Terminabfrage wirklich im Teamkanal ankam, war im Dashboard nicht zu sehen; ein fehlgeschlagener Post blieb still. Ein neu eingetragener Ergebnisabruf konnte in seltenen Fällen dauerhaft liegen bleiben, und ein abgesagter Reminder verschwand ohne jede Spur.
