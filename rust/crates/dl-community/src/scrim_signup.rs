@@ -35,7 +35,8 @@ const SCRIM_SIGNUP_REPLY_INVALID: &str =
     "⚠️ Das konnte ich nicht lesen. Beispiel für die Zeiten: Mo-Fr ab 19 Uhr — und gib bitte eine Rolle an.";
 const SCRIM_SIGNUP_REPLY_FAILED: &str =
     "⚠️ Da ist was schiefgelaufen — bitte gleich nochmal versuchen.";
-const SCRIM_SIGNUP_REPLY_RUNTIME_DENIED: &str = "PLATZHALTER";
+const SCRIM_SIGNUP_REPLY_RUNTIME_DENIED: &str =
+    "Deine Anmeldung wurde nicht gespeichert. Die Scrim-Verwaltung wird gerade umgestellt und nimmt hier keine Einträge an. Bitte versuche es später noch einmal.";
 
 const DAY_KEYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
@@ -686,7 +687,10 @@ mod tests {
         let reply = ScrimSignup::new(turniere.pool().clone())
             .handle(signup_interaction(2, "Turniere"))
             .await;
-        assert_eq!(reply.content.as_deref(), Some("PLATZHALTER"));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(SCRIM_SIGNUP_REPLY_RUNTIME_DENIED)
+        );
         assert_eq!(participant_count(turniere.pool()).await?, 0);
 
         let inconsistent = test_pool().await?;
@@ -694,7 +698,10 @@ mod tests {
         let reply = ScrimSignup::new(inconsistent.pool().clone())
             .handle(signup_interaction(3, "Widerspruch"))
             .await;
-        assert_eq!(reply.content.as_deref(), Some("PLATZHALTER"));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(SCRIM_SIGNUP_REPLY_RUNTIME_DENIED)
+        );
         assert_eq!(participant_count(inconsistent.pool()).await?, 0);
         Ok(())
     }

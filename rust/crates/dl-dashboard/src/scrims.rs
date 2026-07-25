@@ -28,6 +28,8 @@ const STATE_RESULT_REQUESTED: &str = "result_requested";
 const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
 const MATCH_REQUEST_MAX_SLOTS: usize = 5;
+const SCRIM_RUNTIME_DENIED_MESSAGE: &str =
+    "Die Scrim-Verwaltung wird gerade umgestellt. Änderungen am Roster sind über dieses Dashboard vorübergehend nicht möglich.";
 const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
 const MATCH_REQUEST_REMINDER_DEFAULT_TEMPLATE: &str = "antwort_fehlt";
 const MATCH_REQUEST_REMINDER_TEMPLATES: [&str; 3] =
@@ -574,7 +576,7 @@ pub async fn scrims_update_participant_notes(
     .await
     .is_err()
     {
-        return err_text(503, "PLATZHALTER");
+        return err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE);
     }
     match update_participant_notes(app.pool(), participant_id, notes.clone()).await {
         Ok(true) => {
@@ -3874,7 +3876,7 @@ mod tests {
             .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(response.into_body(), 4096).await?;
-        assert_eq!(body.as_ref(), b"PLATZHALTER");
+        assert_eq!(body.as_ref(), SCRIM_RUNTIME_DENIED_MESSAGE.as_bytes());
         assert_eq!(participant_notes(turniere_db.pool(), 2).await?, None);
 
         let (inconsistent_db, inconsistent_app, session_id, csrf) = app_with_session().await?;
