@@ -4311,6 +4311,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 const meta = document.createElement('div');
                 meta.className = 'scrim-request-meta';
                 meta.textContent = [
+                    `Status: ${scrimStatusLabel(match.status)}`,
                     summary.deadline_passed ? 'Frist vorbei' : 'Frist offen',
                     `bis ${scrimDate(batch.deadline_at)}`,
                     `${match.missing_response_count || 0} offen`,
