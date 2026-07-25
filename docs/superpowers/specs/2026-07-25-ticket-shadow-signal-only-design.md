@@ -35,6 +35,12 @@ Wissen oder Modell verbessert werden müssen.
 Beide Ergebnisse bleiben ausschließlich intern. Im Ticket selbst sendet der
 Bot niemals etwas.
 
+Für die erste gültige Nachricht wird pro Ticket dauerhaft höchstens ein
+Auswertungsversuch gestartet. Nach erfolgreicher Shadow-Konfiguration
+beansprucht der Bot die Ticket-ID atomar im vorhandenen zentralen KV-Store.
+Dieser Claim überlebt Bot-Neustarts und bleibt auch dann bestehen, wenn
+Generator oder Shadow-Post später fehlschlagen.
+
 ## Fester Verhaltensvertrag
 
 | Urteil | Kandidatengenerierung | Shadow-Kanal | Ticket |
@@ -54,6 +60,20 @@ Der Ticket-Helfer bleibt dauerhaft im Shadow-Modus:
 - Aus Shadow-Ergebnissen folgt niemals automatisch eine Aktion.
 
 ## Architektur
+
+### Restartfester One-shot
+
+Vor Knowledge und Generator prüft der Ticket-Pfad in dieser Reihenfolge:
+Guild, Ticket-Kategorie, nichtleeren getrimmten Text und die feste
+Shadow-Konfiguration. Erst danach beansprucht er die Ticket-ID mit einem
+atomaren `INSERT ... ON CONFLICT DO NOTHING` in `bot.kv_store`.
+
+Nur ein neu angelegter Claim setzt die Auswertung fort. Ein bereits
+vorhandener Claim beendet den Pfad still, auch in einer frisch gestarteten
+Bot-Instanz. Ein Claim-Fehler stoppt vor Knowledge, Generator und Discord und
+wird ausschließlich mit IDs sowie einem festen maschinenlesbaren Fehlerstatus
+geloggt. Der Claim wird nach späteren Fehlern nicht zurückgenommen, damit ein
+Ticket höchstens einen Auswertungsversuch erhält.
 
 ### Stufe 1: unabhängiges Urteil
 
@@ -132,7 +152,9 @@ ohne eine falsche Nutzerantwort vorzutäuschen.
 ## Fehlerbehandlung und Beobachtbarkeit
 
 - Fehlende oder falsche Shadow-Konfiguration bleibt fail-closed: kein
-  Knowledge-Aufruf, keine Generierung und kein Discord-Post.
+  Claim, kein Knowledge-Aufruf, keine Generierung und kein Discord-Post.
+- Persistenzfehler beim Ticket-Claim bleiben fail-closed und loggen nur IDs,
+  `reason` und `error_class`, niemals Ticket-, Kandidaten- oder Fehlerrohtext.
 - Stufe 1 loggt weiterhin jedes Urteil samt vorhandener Confidence-, Quellen-
   und Fehlerfelder.
 - Stufe 2 loggt `generated`, `timeout`, `empty` oder `unavailable`.
@@ -154,6 +176,12 @@ ohne eine falsche Nutzerantwort vorzutäuschen.
   Daten und enthält den Sprach- und Qualitätsvertrag.
 - Fehlender, identischer oder nicht freigegebener Shadow-Kanal bleibt
   fail-closed.
+- Zwei frische `FaqChat`-Instanzen mit gemeinsamem Claim-State werten dasselbe
+  Ticket zusammen genau einmal aus.
+- Der atomare KV-Claim liefert beim ersten Insert `true`, beim Konflikt
+  `false` und überschreibt den ersten Wert nicht.
+- Claim-Persistenzfehler stoppen vor Knowledge, Generator und Discord und
+  bleiben im Journal redigiert sichtbar.
 - Die Produktionskonfiguration bleibt fest auf den internen Logkanal
   verdrahtet.
 

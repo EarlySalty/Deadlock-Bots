@@ -16,7 +16,7 @@
 //! Patchnote-Anreicherung der Antworten ist eine dokumentierte Lücke
 //! (im Original optional und fehlertolerant).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -71,6 +71,9 @@ const FAQ_TIMEOUT_PENDING_TEXT: &str = "Hier war 24 Stunden nichts los, deshalb 
 const SHADOW_NOT_CONFIGURED: &str = "shadow_not_configured";
 const SHADOW_EQUALS_TICKET: &str = "shadow_equals_ticket";
 const SHADOW_NOT_ALLOWLISTED: &str = "shadow_not_allowlisted";
+const TICKET_CLAIM_FAILED: &str = "ticket_claim_failed";
+const TICKET_CLAIM_KV_NS: &str = "faq_ticket_shadow_claims";
+const TICKET_CLAIM_VALUE: &str = "claimed";
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
@@ -770,13 +773,35 @@ pub trait FaqPort: Send + Sync {
     async fn delete_panel(&self, channel_id: u64, message_id: u64);
 }
 
+#[async_trait::async_trait]
+trait TicketClaimStore: Send + Sync {
+    async fn claim(&self, ticket_channel_id: u64) -> Result<bool, dl_central_db::CentralDbError>;
+}
+
+struct KvTicketClaimStore {
+    pool: PgPool,
+}
+
+#[async_trait::async_trait]
+impl TicketClaimStore for KvTicketClaimStore {
+    async fn claim(&self, ticket_channel_id: u64) -> Result<bool, dl_central_db::CentralDbError> {
+        kv::set_if_absent(
+            &self.pool,
+            TICKET_CLAIM_KV_NS,
+            &ticket_channel_id.to_string(),
+            TICKET_CLAIM_VALUE,
+        )
+        .await
+    }
+}
+
 pub struct FaqChat {
     pub store: FaqStore,
     pub port: Arc<dyn FaqPort>,
     pub knowledge_url: String,
     shadow_channel_id: Option<u64>,
     ticket_generator: Option<Arc<dyn TextGenerator>>,
-    answered_tickets: tokio::sync::Mutex<HashSet<u64>>,
+    ticket_claims: Arc<dyn TicketClaimStore>,
     chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -815,13 +840,32 @@ impl FaqChat {
         shadow_channel_id: Option<u64>,
         ticket_generator: Option<Arc<dyn TextGenerator>>,
     ) -> Arc<Self> {
+        let ticket_claims = Arc::new(KvTicketClaimStore { pool: pool.clone() });
+        Self::new_with_claim_store(
+            pool,
+            port,
+            knowledge_url,
+            shadow_channel_id,
+            ticket_generator,
+            ticket_claims,
+        )
+    }
+
+    fn new_with_claim_store(
+        pool: PgPool,
+        port: Arc<dyn FaqPort>,
+        knowledge_url: String,
+        shadow_channel_id: Option<u64>,
+        ticket_generator: Option<Arc<dyn TextGenerator>>,
+        ticket_claims: Arc<dyn TicketClaimStore>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: FaqStore { pool },
             port,
             knowledge_url,
             shadow_channel_id,
             ticket_generator,
-            answered_tickets: tokio::sync::Mutex::new(HashSet::new()),
+            ticket_claims,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -1247,13 +1291,6 @@ impl FaqChat {
         if problem.is_empty() {
             return;
         }
-        {
-            let mut answered = self.answered_tickets.lock().await;
-            if answered.contains(&channel_id) {
-                return;
-            }
-            answered.insert(channel_id);
-        }
         let question_chars = problem.chars().count();
         let Some(shadow_channel_id) = self.shadow_channel_id else {
             let (verdict, confidence, absent) = ("uncertain", "none", "absent");
@@ -1305,6 +1342,21 @@ impl FaqChat {
                 "FAQ-Ticket-Auto-Hilfe fail-closed"
             );
             return;
+        }
+        match self.ticket_claims.claim(channel_id).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(_) => {
+                tracing::warn!(
+                    guild_id,
+                    channel_id,
+                    author_id,
+                    reason = %TICKET_CLAIM_FAILED,
+                    error_class = %TICKET_CLAIM_FAILED,
+                    "FAQ-Ticket-Auto-Hilfe fail-closed"
+                );
+                return;
+            }
         }
         let outcome = self.ticket_auto_answer(problem, author_id).await;
         let (candidate_status, candidate) = self.ticket_candidate(problem, &outcome).await;
@@ -1974,6 +2026,7 @@ mod tests {
 
     use super::*;
     use dl_ai::{GenerateRequest, TextGenerator};
+    use std::collections::HashSet;
 
     #[cfg(feature = "testing")]
     async fn wait_for_db_lock(pool: &PgPool, query_fragment: &str, wait_event: Option<&str>) {
@@ -2043,6 +2096,21 @@ mod tests {
             .expect("lazy pg pool")
     }
 
+    #[derive(Default)]
+    struct MemoryTicketClaimStore {
+        claimed: tokio::sync::Mutex<HashSet<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TicketClaimStore for MemoryTicketClaimStore {
+        async fn claim(
+            &self,
+            ticket_channel_id: u64,
+        ) -> Result<bool, dl_central_db::CentralDbError> {
+            Ok(self.claimed.lock().await.insert(ticket_channel_id))
+        }
+    }
+
     #[derive(Clone)]
     struct RecordingGenerator {
         requests: Arc<std::sync::Mutex<Vec<GenerateRequest>>>,
@@ -2091,7 +2159,13 @@ mod tests {
         knowledge_url: String,
         generator: Option<Arc<dyn TextGenerator>>,
     ) -> Arc<FaqChat> {
-        ticket_faq_with_shadow(port, knowledge_url, Some(LOG_CHANNEL_ID), generator)
+        ticket_faq_with_claim_store(
+            port,
+            knowledge_url,
+            Some(LOG_CHANNEL_ID),
+            generator,
+            Arc::new(MemoryTicketClaimStore::default()),
+        )
     }
 
     fn ticket_faq_with_shadow(
@@ -2100,12 +2174,29 @@ mod tests {
         shadow_channel_id: Option<u64>,
         generator: Option<Arc<dyn TextGenerator>>,
     ) -> Arc<FaqChat> {
-        FaqChat::new_with_all_config(
+        ticket_faq_with_claim_store(
+            port,
+            knowledge_url,
+            shadow_channel_id,
+            generator,
+            Arc::new(MemoryTicketClaimStore::default()),
+        )
+    }
+
+    fn ticket_faq_with_claim_store(
+        port: Arc<MockPanelPort>,
+        knowledge_url: String,
+        shadow_channel_id: Option<u64>,
+        generator: Option<Arc<dyn TextGenerator>>,
+        ticket_claims: Arc<dyn TicketClaimStore>,
+    ) -> Arc<FaqChat> {
+        FaqChat::new_with_claim_store(
             lazy_pool(),
             port,
             knowledge_url,
             shadow_channel_id,
             generator,
+            ticket_claims,
         )
     }
 
@@ -4255,6 +4346,104 @@ mod tests {
         let sent = port.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].1.contains("Zweite Nachricht verarbeitet"));
+    }
+
+    #[tokio::test]
+    async fn ticket_shadow_one_shot_ueberlebt_neue_faq_instanz() {
+        let port = ticket_port();
+        let (first_url, first_handle, first_called) = knowledge_server(
+            200,
+            r#"{"answerable":false,"answer":null,"sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let (second_url, second_handle, second_called) = knowledge_server(
+            200,
+            r#"{"answerable":false,"answer":null,"sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let (first_generator, first_requests) = recording_generator(Some("Erster Kandidat"));
+        let (second_generator, second_requests) = recording_generator(Some("Zweiter Kandidat"));
+        let ticket_claims: Arc<dyn TicketClaimStore> = Arc::new(MemoryTicketClaimStore::default());
+        let first = ticket_faq_with_claim_store(
+            port.clone(),
+            first_url,
+            Some(LOG_CHANNEL_ID),
+            Some(first_generator),
+            ticket_claims.clone(),
+        );
+        let second = ticket_faq_with_claim_store(
+            port.clone(),
+            second_url,
+            Some(LOG_CHANNEL_ID),
+            Some(second_generator),
+            ticket_claims,
+        );
+
+        first
+            .handle_ticket_message(1, 222, 111111111111111111, "Erste Nachricht")
+            .await;
+        second
+            .handle_ticket_message(1, 222, 111111111111111111, "Nach Neustart")
+            .await;
+        first_handle.abort();
+        second_handle.abort();
+
+        assert_eq!(
+            usize::from(first_called.load(Ordering::SeqCst))
+                + usize::from(second_called.load(Ordering::SeqCst)),
+            1
+        );
+        assert_eq!(
+            first_requests.lock().unwrap().len() + second_requests.lock().unwrap().len(),
+            1
+        );
+        assert_eq!(port.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ticket_shadow_claim_fehler_bleibt_vor_side_effects_fail_closed() {
+        let port = ticket_port();
+        let (url, handle, knowledge_called) = knowledge_server(
+            200,
+            r#"{"answerable":false,"answer":null,"sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let ticket_marker = "PRIVATE_TICKET_CLAIM_FAILURE_MARKER";
+        let candidate_marker = "PRIVATE_CANDIDATE_CLAIM_FAILURE_MARKER";
+        let (generator, requests) = recording_generator(Some(candidate_marker));
+        let faq = FaqChat::new_with_all_config(
+            lazy_pool(),
+            port.clone(),
+            url,
+            Some(LOG_CHANNEL_ID),
+            Some(generator),
+        );
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        faq.handle_ticket_message(1, 222, 111111111111111111, ticket_marker)
+            .await;
+        drop(guard);
+        handle.abort();
+
+        assert!(!knowledge_called.load(Ordering::SeqCst));
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(port.sent.lock().unwrap().is_empty());
+        let logs = capture.text();
+        assert!(logs.contains("reason=ticket_claim_failed"), "{logs}");
+        assert!(logs.contains("error_class=ticket_claim_failed"), "{logs}");
+        for private in [ticket_marker, candidate_marker] {
+            assert!(!logs.contains(private), "Rohtext im Journal: {logs}");
+        }
     }
 
     #[tokio::test]
