@@ -60,7 +60,10 @@ pub async fn scrim_runtime_control(
         Ok(data) => ok_json(data),
         Err(err) => {
             tracing::error!(%err, "scrim_runtime_control fehlgeschlagen");
-            err_text(500, "PLATZHALTER")
+            err_text(
+                500,
+                "Die aktuelle Zuständigkeit konnte nicht gelesen werden.",
+            )
         }
     }
 }
@@ -76,7 +79,12 @@ pub async fn scrim_runtime_control_transition(
     };
     let input = match serde_json::from_slice::<RuntimeControlTransitionInput>(&body) {
         Ok(input) => input,
-        Err(_) => return err_text(400, "PLATZHALTER"),
+        Err(_) => {
+            return err_text(
+                400,
+                "Die Anfrage war unvollständig. Modus, schreibender Dienst und erwarteter Stand müssen gesetzt sein.",
+            )
+        }
     };
     let transition = sqlx::query_as::<_, (bool, Option<i64>)>(
         r#"
@@ -95,7 +103,12 @@ pub async fn scrim_runtime_control_transition(
     .fetch_one(app.pool())
     .await;
     match transition {
-        Ok((false, _)) => return err_text(409, "PLATZHALTER"),
+        Ok((false, _)) => {
+            return err_text(
+                409,
+                "Die Zuständigkeit wurde zwischenzeitlich geändert. Bitte lade die Seite neu und schalte dann erneut um.",
+            )
+        }
         Ok((true, _)) => {}
         Err(err)
             if err
@@ -104,18 +117,27 @@ pub async fn scrim_runtime_control_transition(
                 .as_deref()
                 == Some("23514") =>
         {
-            return err_text(400, "PLATZHALTER");
+            return err_text(
+                400,
+                "Dieser Wechsel ist nicht erlaubt. Prüfe die Kombination aus Modus und Dienst; von turniere geht es nur über draining zurück auf legacy.",
+            );
         }
         Err(err) => {
             tracing::error!(%err, "scrim_runtime_control_transition fehlgeschlagen");
-            return err_text(500, "PLATZHALTER");
+            return err_text(
+                500,
+                "Das Umschalten ist fehlgeschlagen. Die Zuständigkeit wurde nicht geändert.",
+            );
         }
     }
     match load_runtime_control(app.pool()).await {
         Ok(data) => ok_json(data),
         Err(err) => {
             tracing::error!(%err, "scrim_runtime_control nach Umschaltung nicht lesbar");
-            err_text(500, "PLATZHALTER")
+            err_text(
+                500,
+                "Die Zuständigkeit wurde umgeschaltet, der neue Zustand konnte aber nicht gelesen werden. Bitte lade die Seite neu.",
+            )
         }
     }
 }
@@ -3937,8 +3959,10 @@ mod tests {
     async fn runtime_control_route_liefert_aktuellen_zustand(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, app, session_id, _csrf) = app_with_session().await?;
+        // FLOOR, weil EXTRACT(EPOCH ...)::bigint rundet, die Route den Zeitstempel aber
+        // abschneidet. Ohne FLOOR schlaegt der Vergleich bei Sekundenbruchteil >= 0,5 fehl.
         let expected_updated_at: i64 = sqlx::query_scalar(
-            "SELECT EXTRACT(EPOCH FROM updated_at)::bigint FROM scrim.runtime_control",
+            "SELECT FLOOR(EXTRACT(EPOCH FROM updated_at))::bigint FROM scrim.runtime_control",
         )
         .fetch_one(db.pool())
         .await?;

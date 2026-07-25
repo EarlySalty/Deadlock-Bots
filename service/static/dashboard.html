@@ -2352,42 +2352,42 @@
                 </div>
             </div>
             <div class="card scrim-runtime-control" id="scrim-runtime-control">
-                <h3>PLATZHALTER</h3>
+                <h3>Scrim-Zuständigkeit</h3>
                 <div class="scrim-runtime-values">
                     <div class="scrim-runtime-value">
-                        <span class="voice-meta">PLATZHALTER</span>
+                        <span class="voice-meta">Modus</span>
                         <strong id="scrim-runtime-mode">-</strong>
                     </div>
                     <div class="scrim-runtime-value">
-                        <span class="voice-meta">PLATZHALTER</span>
+                        <span class="voice-meta">Schreibt gerade</span>
                         <strong id="scrim-runtime-writer">-</strong>
                     </div>
                     <div class="scrim-runtime-value">
-                        <span class="voice-meta">PLATZHALTER</span>
+                        <span class="voice-meta">Stand</span>
                         <strong id="scrim-runtime-epoch">-</strong>
                     </div>
                     <div class="scrim-runtime-value">
-                        <span class="voice-meta">PLATZHALTER</span>
+                        <span class="voice-meta">Zuletzt geändert</span>
                         <strong id="scrim-runtime-updated-at">-</strong>
                     </div>
                 </div>
                 <form class="scrim-form scrim-runtime-form" id="scrim-runtime-form">
                     <label>
-                        PLATZHALTER
+                        Neuer Modus
                         <select id="scrim-runtime-mode-select">
-                            <option value="legacy">PLATZHALTER</option>
-                            <option value="draining">PLATZHALTER</option>
-                            <option value="turniere">PLATZHALTER</option>
+                            <option value="legacy">legacy: der Bot verwaltet die Scrims</option>
+                            <option value="draining">draining: Übergabe läuft</option>
+                            <option value="turniere">turniere: der Turnierdienst verwaltet die Scrims</option>
                         </select>
                     </label>
                     <label>
-                        PLATZHALTER
+                        Schreibt danach
                         <select id="scrim-runtime-writer-select">
-                            <option value="dl-bots">PLATZHALTER</option>
-                            <option value="turniere">PLATZHALTER</option>
+                            <option value="dl-bots">dl-bots</option>
+                            <option value="turniere">turniere</option>
                         </select>
                     </label>
-                    <button class="load" type="submit">PLATZHALTER</button>
+                    <button class="load" type="submit">Umschalten</button>
                 </form>
                 <div class="scrim-message" id="scrim-runtime-message" aria-live="polite"></div>
             </div>
@@ -3774,7 +3774,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         scrimRuntimeUpdatedAt.textContent = scrimDate(data.updated_at);
         scrimRuntimeModeSelect.value = data.mode;
         scrimRuntimeWriterSelect.value = data.operational_writer;
-        scrimRuntimeMessage.textContent = localWrites ? '' : 'PLATZHALTER';
+        scrimRuntimeMessage.textContent = localWrites ? '' : 'Der Bot nimmt gerade keine Scrim-Änderungen an. Anmeldungen, Roster-Änderungen und Aktionen in diesem Dashboard werden abgelehnt, solange hier nicht legacy mit dl-bots steht.';
         scrimRuntimeMessage.className = localWrites ? 'scrim-message' : 'scrim-message error';
     }
 
@@ -3782,7 +3782,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         try {
             renderScrimRuntimeControl(await fetchJSON('/api/scrim-runtime-control'));
         } catch (_err) {
-            scrimRuntimeMessage.textContent = 'PLATZHALTER';
+            scrimRuntimeMessage.textContent = 'Die Zuständigkeit konnte nicht geladen werden. Bitte lade die Seite neu.';
             scrimRuntimeMessage.className = 'scrim-message error';
         }
     }
@@ -3804,7 +3804,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             renderScrimRuntimeControl(data);
         } catch (_err) {
             await loadScrimRuntimeControl();
-            scrimRuntimeMessage.textContent = 'PLATZHALTER';
+            scrimRuntimeMessage.textContent = 'Das Umschalten hat nicht geklappt. Oben steht der Zustand, der gerade wirklich gilt.';
             scrimRuntimeMessage.className = 'scrim-message error';
         } finally {
             button.disabled = false;

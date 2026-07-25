@@ -1,3 +1,11 @@
+## #296 — Scrim-Zuständigkeit ist sichtbar und umschaltbar
+
+Problem: Der Umzug der Scrim-Verwaltung zum Turnierdienst war vorbereitet, aber nirgends bedienbar. Wer gerade zuständig ist, war im Dashboard nicht zu sehen, und mehrere Wege schrieben unabhängig davon weiter mit. Eine Discord-Nachricht, deren Zustellung unklar blieb, verschwand außerdem spurlos.
+
+Änderung: Das Scrim-Dashboard zeigt jetzt oben, wer die Scrims verwaltet, und erlaubt das Umschalten samt Rückweg. Jeder schreibende Weg prüft diese Zuständigkeit an derselben Stelle. Unklare Zustellungen melden sich mit Grund im Log, statt still zu verschwinden.
+
+Aktuelles Verhalten: Solange der Bot zuständig ist, läuft alles wie bisher. Liegt die Zuständigkeit woanders, lehnt der Bot Anmeldungen und Dashboard-Änderungen mit klarer Meldung ab, statt halb mitzuschreiben. Die AI-Lagebilder bleiben in jedem Fall beim Bot.
+
 ## #295 — Scrim-Orga: passende Erinnerung, klügere Terminwahl, eigene Slot-Presets
 
 Problem: Für Erinnerungen gab es nur einen einzigen Text, auch wenn es gar nicht um fehlende Antworten ging. Bei gleich vielen Zusagen entschied die Terminempfehlung ohne Blick auf den Ersatzbedarf, im Ergebnispost stand statt des Teamnamens eine interne Nummer, und die vorgeschlagenen Zeitfenster waren fest eingebaut.
@@ -13,14 +21,6 @@ Problem: Ob eine Terminabfrage wirklich im Teamkanal ankam, war im Dashboard nic
 Änderung: Jede Terminabfrage zeigt ihren Stand jetzt im Klartext an. Liegengebliebene Ergebnisabrufe werden nach kurzer Wartezeit von selbst wieder aufgenommen, und jeder abgesagte Reminder wird mit seinem Grund protokolliert.
 
 Aktuelles Verhalten: Am Terminabfrage-Eintrag steht sichtbar, ob sie Entwurf ist, gepostet wurde oder fehlgeschlagen ist. Ergebnisabrufe heilen sich selbst, statt unbemerkt stehen zu bleiben, und niemand muss mehr raten, warum ein freigegebener Reminder nicht kam.
-
-### Discord-Scrims lassen sich ohne Doppelwrite umschalten
-
-Problem: Discord-Interaktionen, sichtbare Posts und Lagebild-Korrekturen brauchten für den Scrim-Umzug einen ausfallsicheren Übergabepfad, ohne Antworten doppelt zu verarbeiten oder persönliche Rohtexte in unveränderliche Nachweise zu kopieren.
-
-Änderung: Der Bot prüft die aktuelle Zuständigkeit direkt vor jeder Änderung, übergibt Terminantworten wiederholbar an den Turnierdienst und verarbeitet sichtbare Discord-Effekte mit klaren Erfolgs-, Fehler- und Unsicher-Zuständen. Lagebild-Akteure werden pseudonymisiert; Korrekturtexte bleiben nur im dafür löschbaren Datenbereich.
-
-Aktuelles Verhalten: Im bisherigen Modus läuft die vorhandene Scrim-Orga weiter. Nach der kontrollierten Umschaltung führt der Bot nur noch Discord- und AI-Aufgaben aus, während fachliche Schreibzugriffe beim Turnierdienst liegen.
 
 ## #293 — Scrim-Umbau bekommt eine sichere gemeinsame Grundlage
 
