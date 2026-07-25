@@ -2948,6 +2948,9 @@ fn best_match_request_slot_index(
                         .unwrap_or(usize::MAX),
                 ),
                 slot["starter_available_count"].as_u64().unwrap_or_default(),
+                // max_by_key liefert bei Gleichstand das letzte Maximum; der Index kehrt das um,
+                // damit bei komplettem Gleichstand die frühere Slotoption vorne bleibt.
+                std::cmp::Reverse(*index),
             )
         })
         .map(|(index, _)| index)
@@ -3979,6 +3982,24 @@ mod tests {
         ];
 
         assert_eq!(best_match_request_slot_index(&slots, &[0, 1], 2), Some(0));
+    }
+
+    #[test]
+    fn match_request_slot_bleibt_bei_gleichstand_auf_der_frueheren_option() {
+        let slots = vec![
+            json!({
+                "available_count": 4,
+                "team_available_count": 2,
+                "starter_available_count": 2,
+            }),
+            json!({
+                "available_count": 4,
+                "team_available_count": 2,
+                "starter_available_count": 2,
+            }),
+        ];
+
+        assert_eq!(best_match_request_slot_index(&slots, &[1, 1], 2), Some(0));
     }
 
     #[tokio::test]
