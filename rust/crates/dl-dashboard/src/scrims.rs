@@ -105,7 +105,116 @@ pub async fn scrims_match_request_defaults(
     if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
-    ok_json(match_request_defaults_json())
+    match load_slot_presets(app.pool()).await {
+        Ok(presets) => ok_json(match_request_defaults_json(presets)),
+        Err(err) => {
+            tracing::error!(%err, "Scrim-Slot-Presets konnten nicht geladen werden");
+            err_text(500, "Scrim slot presets unavailable")
+        }
+    }
+}
+
+pub async fn scrims_create_slot_preset(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
+    let input = match parse_slot_preset_body(&body) {
+        Ok(input) => input,
+        Err(resp) => return resp,
+    };
+    match create_slot_preset(app.pool(), &session.user_id.to_string(), input).await {
+        Ok(preset) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.slot_preset.create",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                preset_id = preset["id"].as_i64().unwrap_or_default(),
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "preset": preset }))
+        }
+        Err(err) => {
+            tracing::error!(%err, "Scrim-Slot-Preset konnte nicht angelegt werden");
+            err_text(500, "Create scrim slot preset failed")
+        }
+    }
+}
+
+pub async fn scrims_update_slot_preset(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(preset_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
+    let preset_id = match parse_path_i64(&preset_id, "preset_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let input = match parse_slot_preset_body(&body) {
+        Ok(input) => input,
+        Err(resp) => return resp,
+    };
+    match update_slot_preset(app.pool(), preset_id, input).await {
+        Ok(Some(preset)) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.slot_preset.update",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                preset_id,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "preset": preset }))
+        }
+        Ok(None) => err_text(404, "Scrim slot preset not found"),
+        Err(err) => {
+            tracing::error!(%err, preset_id, "Scrim-Slot-Preset konnte nicht geändert werden");
+            err_text(500, "Update scrim slot preset failed")
+        }
+    }
+}
+
+pub async fn scrims_delete_slot_preset(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(preset_id): Path<String>,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
+    let preset_id = match parse_path_i64(&preset_id, "preset_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match delete_slot_preset(app.pool(), preset_id).await {
+        Ok(true) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.slot_preset.delete",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                preset_id,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "deleted": true, "id": preset_id }))
+        }
+        Ok(false) => err_text(404, "Scrim slot preset not found"),
+        Err(err) => {
+            tracing::error!(%err, preset_id, "Scrim-Slot-Preset konnte nicht gelöscht werden");
+            err_text(500, "Delete scrim slot preset failed")
+        }
+    }
 }
 
 pub async fn scrims_create_match_request_batch(
@@ -868,6 +977,11 @@ struct MatchRequestReleaseInput {
     reason: Option<String>,
 }
 
+struct SlotPresetInput {
+    name: String,
+    slots: Vec<Value>,
+}
+
 #[derive(Clone)]
 struct ScrimTeamOption {
     id: i64,
@@ -923,7 +1037,7 @@ fn parse_create_match(payload: &Value) -> Result<CreateMatchInput, Response> {
     })
 }
 
-fn match_request_defaults_json() -> Value {
+fn match_request_defaults_json(presets: Vec<Value>) -> Value {
     json!({
         "default_deadline_hours": MATCH_REQUEST_DEFAULT_DEADLINE_HOURS,
         "min_slots": MATCH_REQUEST_MIN_SLOTS,
@@ -945,11 +1059,7 @@ fn match_request_defaults_json() -> Value {
                 "focus": "Interne Aktivität und Zusammenspiel"
             }
         ],
-        "presets": [{
-            "key": "weekend_evening",
-            "name": "Wochenende abends",
-            "slots": default_match_request_slots()
-        }]
+        "presets": presets
     })
 }
 
@@ -1045,6 +1155,21 @@ fn parse_match_request_release(payload: &Value) -> Result<MatchRequestReleaseInp
     })
 }
 
+fn parse_slot_preset_body(body: &[u8]) -> Result<SlotPresetInput, Response> {
+    let payload = match serde_json::from_slice::<Value>(body) {
+        Ok(value) if value.is_object() => value,
+        _ => return Err(err_text(400, "Invalid JSON body")),
+    };
+    Ok(SlotPresetInput {
+        name: parse_required_text(payload.get("name"), "name", 100)?,
+        slots: parse_match_request_slots(
+            payload
+                .get("slots")
+                .ok_or_else(|| err_text(400, "slots must be an array"))?,
+        )?,
+    })
+}
+
 fn parse_match_request_slots(raw: &Value) -> Result<Vec<Value>, Response> {
     let Some(items) = raw.as_array() else {
         return Err(err_text(400, "slots must be an array"));
@@ -1123,6 +1248,14 @@ fn parse_path_i32(raw: &str, field: &'static str) -> Result<i32, Response> {
         .parse::<i64>()
         .map_err(|_| err_text(400, &format!("{field} must be integer")))?;
     i64_to_i32(value, field).map_err(|_| err_text(400, &format!("{field} must fit integer")))
+}
+
+fn parse_path_i64(raw: &str, field: &str) -> Result<i64, Response> {
+    raw.trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| err_text(400, &format!("{field} must be a positive integer")))
 }
 
 fn parse_optional_datetime(
@@ -1239,6 +1372,87 @@ async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
         "suggested_block": suggested_block,
         "lagebilder": lagebilder,
     }))
+}
+
+async fn load_slot_presets(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, slots, created_by_user_id, created_at, updated_at
+          FROM scrim.slot_presets
+         ORDER BY created_at ASC, id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(slot_preset_json).collect()
+}
+
+fn slot_preset_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
+    let id = row.try_get::<i64, _>("id")?;
+    Ok(json!({
+        "id": id,
+        // ponytail: "key" liest niemand mehr, das Frontend adressiert Presets über "id".
+        // Bleibt nur, weil der Defaults-Vertrag es bisher zusagt; beim naechsten Anfassen loeschen.
+        "key": if id == 1 { "weekend_evening".to_string() } else { format!("slot_preset_{id}") },
+        "name": row.try_get::<String, _>("name")?,
+        "slots": row.try_get::<Value, _>("slots")?,
+        "created_by_user_id": row.try_get::<String, _>("created_by_user_id")?,
+        "created_at": row.try_get::<DateTime<Utc>, _>("created_at")?.timestamp(),
+        "updated_at": row.try_get::<DateTime<Utc>, _>("updated_at")?.timestamp(),
+    }))
+}
+
+async fn create_slot_preset(
+    pool: &PgPool,
+    created_by_user_id: &str,
+    input: SlotPresetInput,
+) -> DashboardDbResult<Value> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO scrim.slot_presets(name, slots, created_by_user_id)
+        VALUES($1, $2::jsonb, $3)
+        RETURNING id, name, slots, created_by_user_id, created_at, updated_at
+        "#,
+    )
+    .bind(input.name)
+    .bind(Value::Array(input.slots))
+    .bind(created_by_user_id)
+    .fetch_one(pool)
+    .await?;
+    slot_preset_json(row)
+}
+
+async fn update_slot_preset(
+    pool: &PgPool,
+    preset_id: i64,
+    input: SlotPresetInput,
+) -> DashboardDbResult<Option<Value>> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.slot_presets
+           SET name = $2,
+               slots = $3::jsonb,
+               updated_at = now()
+         WHERE id = $1
+        RETURNING id, name, slots, created_by_user_id, created_at, updated_at
+        "#,
+    )
+    .bind(preset_id)
+    .bind(input.name)
+    .bind(Value::Array(input.slots))
+    .fetch_optional(pool)
+    .await?
+    .map(slot_preset_json)
+    .transpose()
+}
+
+async fn delete_slot_preset(pool: &PgPool, preset_id: i64) -> DashboardDbResult<bool> {
+    Ok(sqlx::query("DELETE FROM scrim.slot_presets WHERE id = $1")
+        .bind(preset_id)
+        .execute(pool)
+        .await?
+        .rows_affected()
+        > 0)
 }
 
 async fn load_lagebilder(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
@@ -3379,8 +3593,18 @@ mod tests {
         csrf: &str,
         body: Value,
     ) -> Result<Request<Body>, axum::http::Error> {
+        auth_mutation("POST", uri, session_id, csrf, body)
+    }
+
+    fn auth_mutation(
+        method: &str,
+        uri: &str,
+        session_id: &str,
+        csrf: &str,
+        body: Value,
+    ) -> Result<Request<Body>, axum::http::Error> {
         Request::builder()
-            .method("POST")
+            .method(method)
             .uri(uri)
             .header(header::CONTENT_TYPE, "application/json")
             .header(
@@ -3657,8 +3881,141 @@ mod tests {
         assert_eq!(data["templates"][0]["key"], "regular_scrim");
         assert_eq!(data["templates"][1]["key"], "testmatch");
         assert_eq!(data["templates"][2]["key"], "training");
+        assert_eq!(data["presets"][0]["key"], "weekend_evening");
+        assert_eq!(data["presets"][0]["name"], "Wochenende abends");
         assert_eq!(data["presets"][0]["slots"][0]["day"], "sat");
+        assert_eq!(data["presets"][0]["slots"][0]["from"], 20 * 60);
+        assert_eq!(data["presets"][0]["slots"][0]["to"], 22 * 60);
         assert_eq!(data["presets"][0]["slots"][1]["day"], "sun");
+        assert_eq!(data["presets"][0]["slots"][1]["from"], 20 * 60);
+        assert_eq!(data["presets"][0]["slots"][1]["to"], 22 * 60);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slot_preset_anlegen_erscheint_in_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, session_id, csrf) = app_with_session().await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrims/slot-presets",
+                &session_id,
+                &csrf,
+                json!({
+                    "name": "Werktags",
+                    "slots": [
+                        { "day": "tue", "from": 18 * 60, "to": 20 * 60 },
+                        { "day": "thu", "from": 19 * 60, "to": 21 * 60 }
+                    ]
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let created: Value = serde_json::from_slice(&body)?;
+        assert_eq!(created["preset"]["name"], "Werktags");
+        assert_eq!(created["preset"]["created_by_user_id"], "42");
+        let preset_id = created["preset"]["id"]
+            .as_i64()
+            .ok_or("missing preset id")?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/defaults",
+                &session_id,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let defaults: Value = serde_json::from_slice(&body)?;
+        assert!(defaults["presets"]
+            .as_array()
+            .is_some_and(|presets| presets.iter().any(|preset| {
+                preset["id"] == created["preset"]["id"] && preset["slots"][0]["day"] == "tue"
+            })));
+
+        let response = app
+            .clone()
+            .oneshot(auth_mutation(
+                "PUT",
+                &format!("/api/scrims/slot-presets/{preset_id}"),
+                &session_id,
+                &csrf,
+                json!({
+                    "name": "Spät",
+                    "slots": [
+                        { "day": "fri", "from": 20 * 60, "to": 22 * 60 },
+                        { "day": "sat", "from": 21 * 60, "to": 23 * 60 }
+                    ]
+                }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let updated: Value = serde_json::from_slice(&body)?;
+        assert_eq!(updated["preset"]["name"], "Spät");
+        assert_eq!(updated["preset"]["slots"][0]["day"], "fri");
+
+        let response = app
+            .clone()
+            .oneshot(auth_mutation(
+                "DELETE",
+                &format!("/api/scrims/slot-presets/{preset_id}"),
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_get(
+                "/api/scrims/match-requests/defaults",
+                &session_id,
+            )?)
+            .await?;
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let defaults: Value = serde_json::from_slice(&body)?;
+        assert!(!defaults["presets"]
+            .as_array()
+            .is_some_and(|presets| presets.iter().any(|preset| preset["id"] == preset_id)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slot_preset_api_verwendet_block_slot_validierung(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, session_id, csrf) = app_with_session().await?;
+        let invalid_slots = [
+            json!([
+                { "day": "invalid", "from": 18 * 60, "to": 20 * 60 },
+                { "day": "thu", "from": 19 * 60, "to": 21 * 60 }
+            ]),
+            json!([
+                { "day": "tue", "from": -1, "to": 20 * 60 },
+                { "day": "thu", "from": 19 * 60, "to": 21 * 60 }
+            ]),
+            json!([
+                { "day": "tue", "from": 20 * 60, "to": 18 * 60 },
+                { "day": "thu", "from": 19 * 60, "to": 21 * 60 }
+            ]),
+        ];
+
+        for slots in invalid_slots {
+            let response = app
+                .clone()
+                .oneshot(auth_post(
+                    "/api/scrims/slot-presets",
+                    &session_id,
+                    &csrf,
+                    json!({ "name": "Ungültig", "slots": slots }),
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
         Ok(())
     }
 

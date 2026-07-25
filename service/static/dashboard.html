@@ -2325,16 +2325,28 @@
                     <form class="scrim-form" id="scrim-block-form">
                         <label>
                             Vorlage
-                            <select id="scrim-block-template">
-                                <option value="regular_scrim">Regulärer Scrim</option>
-                                <option value="testmatch">Testmatch</option>
-                                <option value="training">Training/Teamspiel</option>
-                            </select>
+                            <select id="scrim-block-template"></select>
                         </label>
                         <label>
                             Antwortfrist
                             <input type="datetime-local" id="scrim-block-deadline">
                         </label>
+                        <div class="scrim-form-label">Slot-Presets</div>
+                        <select id="scrim-preset-select" aria-label="Slot-Preset auswählen"></select>
+                        <div class="scrim-actions">
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-apply">Slots übernehmen</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-new">Neues Preset</button>
+                        </div>
+                        <label>
+                            Name des Presets
+                            <input type="text" id="scrim-preset-name" maxlength="100">
+                        </label>
+                        <div id="scrim-preset-slots" class="scrim-slot-list"></div>
+                        <div class="scrim-actions">
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-add-slot">Slot hinzufügen</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-save">Preset speichern</button>
+                            <button class="namespace scrim-small-button" type="button" id="scrim-preset-delete">Preset löschen</button>
+                        </div>
                         <div class="scrim-form-label">Gemeinsame Slots</div>
                         <div id="scrim-block-slots" class="scrim-slot-list"></div>
                         <button class="namespace scrim-small-button" type="button" id="scrim-block-add-slot">Slot hinzufügen</button>
@@ -2894,6 +2906,14 @@
     const scrimBlockTemplateBtn = document.getElementById('scrim-block-template-btn');
     const scrimBlockAddSlotBtn = document.getElementById('scrim-block-add-slot');
     const scrimBlockAddMatchBtn = document.getElementById('scrim-block-add-match');
+    const scrimPresetSelect = document.getElementById('scrim-preset-select');
+    const scrimPresetApplyBtn = document.getElementById('scrim-preset-apply');
+    const scrimPresetNewBtn = document.getElementById('scrim-preset-new');
+    const scrimPresetNameInput = document.getElementById('scrim-preset-name');
+    const scrimPresetSlots = document.getElementById('scrim-preset-slots');
+    const scrimPresetAddSlotBtn = document.getElementById('scrim-preset-add-slot');
+    const scrimPresetSaveBtn = document.getElementById('scrim-preset-save');
+    const scrimPresetDeleteBtn = document.getElementById('scrim-preset-delete');
     const scrimCreateForm = document.getElementById('scrim-create-form');
     const scrimTeamASelect = document.getElementById('scrim-team-a');
     const scrimTeamBSelect = document.getElementById('scrim-team-b');
@@ -2989,9 +3009,13 @@
     let heroesLoading = false;
     let heroBuildDraftRows = [];
     let scrimData = { teams: [], participants: [], matches: [], match_request_summaries: [], suggested_block: null, lagebilder: [] };
+    let scrimDefaults = { templates: [], presets: [] };
     let scrimBlockInitialized = false;
     let scrimBlockCommonSlots = [];
     let scrimBlockMatchDrafts = [];
+    let scrimSelectedPresetId = null;
+    let scrimPresetDraftName = '';
+    let scrimPresetDraftSlots = [];
     const REACTION_ROLE_DEFAULT_DM_TEXT = `Hey! 👋 Schön, dass du beim Scrim-Coaching dabei bist.
 
 Kurz worum's geht: Wir (Leo & deniz) stellen feste Teams mit einem festen Coach zusammen, spielen regelmäßig Showmatches gegeneinander und setzen uns zwischendurch zusammen, um an euren Punkten zu arbeiten — Schritt für Schritt besser werden, als Team.
@@ -3797,12 +3821,10 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
 
     function scrimDefaultSlots() {
-        const slots = scrimData.suggested_block && Array.isArray(scrimData.suggested_block.slots)
-            ? scrimData.suggested_block.slots
-            : [
-                { day: 'sat', from: 20 * 60, to: 22 * 60 },
-                { day: 'sun', from: 20 * 60, to: 22 * 60 },
-            ];
+        const preset = (scrimDefaults.presets || [])[0];
+        const slots = preset && Array.isArray(preset.slots)
+            ? preset.slots
+            : ((scrimData.suggested_block && scrimData.suggested_block.slots) || []);
         return slots.map(scrimCloneSlot);
     }
 
@@ -3880,6 +3902,115 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
             row.appendChild(remove);
             container.appendChild(row);
         });
+    }
+
+    function renderScrimTemplates() {
+        if (!scrimBlockTemplateSelect) return;
+        const selected = scrimBlockTemplateSelect.value;
+        scrimBlockTemplateSelect.innerHTML = '';
+        (scrimDefaults.templates || []).forEach((template) => {
+            const option = document.createElement('option');
+            option.value = template.key;
+            option.textContent = template.name;
+            scrimBlockTemplateSelect.appendChild(option);
+        });
+        scrimBlockTemplateSelect.value = selected || 'regular_scrim';
+    }
+
+    function selectScrimPreset(presetId) {
+        const preset = (scrimDefaults.presets || []).find((item) => Number(item.id) === Number(presetId));
+        scrimSelectedPresetId = preset ? Number(preset.id) : null;
+        scrimPresetDraftName = preset ? String(preset.name || '') : '';
+        scrimPresetDraftSlots = preset && Array.isArray(preset.slots)
+            ? preset.slots.map(scrimCloneSlot)
+            : scrimDefaultSlots();
+        renderScrimPresetEditor();
+    }
+
+    function renderScrimPresetEditor() {
+        if (!scrimPresetSelect) return;
+        scrimPresetSelect.innerHTML = '';
+        if (scrimSelectedPresetId === null) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'Neues Preset';
+            scrimPresetSelect.appendChild(option);
+        }
+        (scrimDefaults.presets || []).forEach((preset) => {
+            const option = document.createElement('option');
+            option.value = String(preset.id);
+            option.textContent = preset.name;
+            scrimPresetSelect.appendChild(option);
+        });
+        scrimPresetSelect.value = scrimSelectedPresetId === null ? '' : String(scrimSelectedPresetId);
+        if (scrimPresetNameInput) scrimPresetNameInput.value = scrimPresetDraftName;
+        if (scrimPresetSlots) {
+            appendScrimSlotEditor(scrimPresetSlots, scrimPresetDraftSlots, renderScrimPresetEditor);
+        }
+        if (scrimPresetApplyBtn) scrimPresetApplyBtn.disabled = scrimSelectedPresetId === null;
+        if (scrimPresetDeleteBtn) scrimPresetDeleteBtn.disabled = scrimSelectedPresetId === null;
+        if (scrimPresetAddSlotBtn) scrimPresetAddSlotBtn.disabled = scrimPresetDraftSlots.length >= 5;
+    }
+
+    function applyScrimPreset() {
+        try {
+            scrimBlockCommonSlots = checkedScrimSlots(scrimPresetDraftSlots).map(scrimCloneSlot);
+            renderScrimBlockForm();
+            setScrimMessage('Slots aus dem Preset übernommen.', 'success');
+        } catch (err) {
+            setScrimMessage(err.message || 'Bitte Slot-Zeiten prüfen.', 'error');
+        }
+    }
+
+    function newScrimPreset() {
+        selectScrimPreset(null);
+    }
+
+    function addScrimPresetSlot() {
+        if (scrimPresetDraftSlots.length >= 5) {
+            setScrimMessage('Maximal fünf Slots pro Preset.', 'error');
+            return;
+        }
+        scrimPresetDraftSlots.push(scrimCloneSlot(scrimPresetDraftSlots[scrimPresetDraftSlots.length - 1]));
+        renderScrimPresetEditor();
+    }
+
+    async function saveScrimPreset() {
+        let slots;
+        try {
+            slots = checkedScrimSlots(scrimPresetDraftSlots);
+        } catch (err) {
+            setScrimMessage(err.message || 'Bitte Slot-Zeiten prüfen.', 'error');
+            return;
+        }
+        const uri = scrimSelectedPresetId === null
+            ? '/api/scrims/slot-presets'
+            : `/api/scrims/slot-presets/${scrimSelectedPresetId}`;
+        try {
+            const result = await fetchJSON(uri, {
+                method: scrimSelectedPresetId === null ? 'POST' : 'PUT',
+                body: JSON.stringify({ name: scrimPresetDraftName, slots }),
+            });
+            scrimSelectedPresetId = Number(result.preset.id);
+            setScrimMessage('Preset gespeichert.', 'success');
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(err.message || 'Preset konnte nicht gespeichert werden.', 'error');
+        }
+    }
+
+    async function deleteScrimPreset() {
+        if (scrimSelectedPresetId === null || !confirm('Preset wirklich löschen?')) return;
+        try {
+            await fetchJSON(`/api/scrims/slot-presets/${scrimSelectedPresetId}`, {
+                method: 'DELETE',
+            });
+            scrimSelectedPresetId = null;
+            setScrimMessage('Preset gelöscht.', 'success');
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(err.message || 'Preset konnte nicht gelöscht werden.', 'error');
+        }
     }
 
     function applyScrimBlockSuggestion() {
@@ -4719,6 +4850,8 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
 
     function renderScrims() {
+        renderScrimTemplates();
+        renderScrimPresetEditor();
         renderScrimBlockForm();
         renderScrimTeamOptions();
         renderScrimMatches();
@@ -4732,7 +4865,10 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     async function loadScrims() {
         if (!scrimMatchRows) return;
         try {
-            const data = await fetchJSON('/api/scrims');
+            const [data, defaults] = await Promise.all([
+                fetchJSON('/api/scrims'),
+                fetchJSON('/api/scrims/match-requests/defaults'),
+            ]);
             scrimData = {
                 teams: Array.isArray(data.teams) ? data.teams : [],
                 participants: Array.isArray(data.participants) ? data.participants : [],
@@ -4741,6 +4877,15 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 suggested_block: data.suggested_block || null,
                 lagebilder: Array.isArray(data.lagebilder) ? data.lagebilder : [],
             };
+            scrimDefaults = {
+                templates: Array.isArray(defaults.templates) ? defaults.templates : [],
+                presets: Array.isArray(defaults.presets) ? defaults.presets : [],
+            };
+            renderScrimTemplates();
+            const selectedPreset = scrimDefaults.presets.find((preset) => Number(preset.id) === scrimSelectedPresetId)
+                || scrimDefaults.presets[0]
+                || null;
+            selectScrimPreset(selectedPreset && selectedPreset.id);
             if (!scrimBlockInitialized) applyScrimBlockSuggestion();
             renderScrims();
             if (scrimUpdated) scrimUpdated.textContent = 'Liste aktualisiert';
@@ -5227,6 +5372,29 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
     if (scrimBlockAddMatchBtn) {
         scrimBlockAddMatchBtn.addEventListener('click', addScrimBlockMatch);
+    }
+    if (scrimPresetSelect) {
+        scrimPresetSelect.addEventListener('change', () => selectScrimPreset(scrimPresetSelect.value));
+    }
+    if (scrimPresetNameInput) {
+        scrimPresetNameInput.addEventListener('input', () => {
+            scrimPresetDraftName = scrimPresetNameInput.value;
+        });
+    }
+    if (scrimPresetApplyBtn) {
+        scrimPresetApplyBtn.addEventListener('click', applyScrimPreset);
+    }
+    if (scrimPresetNewBtn) {
+        scrimPresetNewBtn.addEventListener('click', newScrimPreset);
+    }
+    if (scrimPresetAddSlotBtn) {
+        scrimPresetAddSlotBtn.addEventListener('click', addScrimPresetSlot);
+    }
+    if (scrimPresetSaveBtn) {
+        scrimPresetSaveBtn.addEventListener('click', saveScrimPreset);
+    }
+    if (scrimPresetDeleteBtn) {
+        scrimPresetDeleteBtn.addEventListener('click', deleteScrimPreset);
     }
     if (scrimCreateForm) {
         scrimCreateForm.addEventListener('submit', createScrimMatch);
