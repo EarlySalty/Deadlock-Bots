@@ -1,3 +1,11 @@
+## #297 — „Wir vermissen dich" erreicht wieder echte Mitglieder
+
+Problem: Die Erinnerung an länger inaktive Leute kam zuletzt bei kaum noch jemandem an. Der Bot schrieb überwiegend Personen an, die den Server längst verlassen hatten, und versuchte es bei denselben bis zu 47 Mal — weil ein gescheiterter Versuch nicht mitzählte. Dadurch war die tägliche Liste dauerhaft von denselben unerreichbaren Leuten belegt, und wer wirklich angeschrieben werden sollte, kam nie an die Reihe.
+
+Änderung: Wer nicht mehr auf dem Server ist, wird jetzt erkannt und nicht weiter angeschrieben. Endgültige Fehler zählen als verbrauchter Versuch, vorübergehende Störungen nicht. Nach jedem Lauf meldet der Bot, wie viele Nachrichten tatsächlich ankamen, und warnt, wenn die Quote einbricht.
+
+Aktuelles Verhalten: Die Erinnerung geht wieder an aktive Mitglieder. Sind die Serverdaten direkt nach einem Neustart noch unvollständig, lässt der Bot den Lauf lieber ganz aus, statt jemanden versehentlich dauerhaft auszusortieren.
+
 ## #296 — Scrim-Zuständigkeit ist sichtbar und umschaltbar
 
 Problem: Der Umzug der Scrim-Verwaltung zum Turnierdienst war vorbereitet, aber nirgends bedienbar. Wer gerade zuständig ist, war im Dashboard nicht zu sehen, und mehrere Wege schrieben unabhängig davon weiter mit. Eine Discord-Nachricht, deren Zustellung unklar blieb, verschwand außerdem spurlos.
