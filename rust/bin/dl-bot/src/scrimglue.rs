@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
+use dl_central_db::scrim_runtime::{SCRIM_TRANSITION_LOCK_A, SCRIM_TRANSITION_LOCK_B};
 use dl_squads::scrim_match::{
     fetch_scrim_match_result, fetch_scrim_match_result_by_steam_match_id, start_scrim_match,
     ScrimMatchResultOutcome, StartScrimMatchOutcome,
@@ -52,8 +53,6 @@ const MATCH_REQUEST_RESPONSE_PREFIX: &str = "scrimreq:v1:";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
 const MAIN_GUILD_ID: u64 = 1289721245281292288;
 const SCRIM_VOICE_CHANNEL_NAME: &str = "Scrim Team";
-const SCRIM_TRANSITION_LOCK_A: i32 = 724_060_001;
-const SCRIM_TRANSITION_LOCK_B: i32 = 724_060_002;
 const SCRIM_GOLD_ACCENT: u32 = 0xC8A86B;
 const DISCORD_EFFECT_MAX_BODY_BYTES: usize = 32 * 1024;
 const DIRECT_DISCORD_EFFECT_LEASE_OWNER: &str = "dlbots:scrim_direct_dispatch";

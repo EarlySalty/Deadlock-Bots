@@ -1,6 +1,8 @@
 use crate::model::{Participant, SeedPlayer};
 use chrono::{DateTime, Utc};
-use dl_central_db::scrim_runtime::{require_local_scrim_write, ScrimRuntimeGateError};
+use dl_central_db::scrim_runtime::{
+    require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
+};
 use sqlx::PgPool;
 use std::num::TryFromIntError;
 
@@ -64,15 +66,15 @@ pub async fn upsert_participant_by_discord(
     discord_id: i64,
     display_name: &str,
 ) -> Result<i64, SquadErr> {
-    require_local_scrim_write(
-        pool,
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
         "dl-squads::store::upsert_participant_by_discord",
         "scrim.participants upsert",
     )
     .await?;
     let display_name = normalize_participant_name(display_name)?;
     let now = now_utc();
-    let mut tx = pool.begin().await?;
     lock_scrim_key(&mut tx, PARTICIPANTS_LOCK).await?;
 
     if let Some(row) = sqlx::query!(
@@ -193,8 +195,9 @@ pub async fn upsert_participant_by_name(
     pool: &PgPool,
     player: &SeedPlayer,
 ) -> Result<i64, SquadErr> {
-    require_local_scrim_write(
-        pool,
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
         "dl-squads::store::upsert_participant_by_name",
         "scrim.participants upsert",
     )
@@ -204,7 +207,6 @@ pub async fn upsert_participant_by_name(
     let roles = player.roles.clone();
     let availability = availability_json(player)?;
     let now = now_utc();
-    let mut tx = pool.begin().await?;
     lock_scrim_key(&mut tx, PARTICIPANTS_LOCK).await?;
 
     if let Some(row) = sqlx::query!(
@@ -324,8 +326,9 @@ pub async fn add_team_member(
     is_captain: bool,
     is_bench: bool,
 ) -> Result<(), SquadErr> {
-    require_local_scrim_write(
-        pool,
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
         "dl-squads::store::add_team_member",
         "scrim.team_members upsert und scrim.participants status update",
     )
@@ -340,7 +343,6 @@ pub async fn add_team_member(
     let team_id_i32 = to_i32_id("team_id", team_id)?;
     let participant_id_i32 = to_i32_id("participant_id", participant_id)?;
     let now = now_utc();
-    let mut tx = pool.begin().await?;
 
     ensure_team_exists(&mut tx, team_id_i32, team_id).await?;
     ensure_participant_exists(&mut tx, participant_id_i32, participant_id).await?;
@@ -500,8 +502,9 @@ pub(crate) async fn set_participant_status(
     participant_id: i64,
     status: &str,
 ) -> Result<(), SquadErr> {
-    require_local_scrim_write(
-        pool,
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
         "dl-squads::store::set_participant_status",
         "scrim.participants status update",
     )
@@ -519,8 +522,9 @@ pub(crate) async fn set_participant_status(
         now,
         participant_id
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 

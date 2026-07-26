@@ -8,6 +8,9 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use dl_ai::ChatProviderError;
+use dl_central_db::scrim_runtime::{
+    require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
+};
 use dl_squads::lagebild::{
     revise_lagebild, LagebildError, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
 };
@@ -186,6 +189,7 @@ pub async fn scrims_create_match(
             );
             ok_json(json!({ "match": scrim_match }))
         }
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, "Scrim-Match-Anlage fehlgeschlagen");
             err_text(500, "Create match failed")
@@ -234,6 +238,7 @@ pub async fn scrims_create_slot_preset(
             );
             ok_json(json!({ "preset": preset }))
         }
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, "Scrim-Slot-Preset konnte nicht angelegt werden");
             err_text(500, "Create scrim slot preset failed")
@@ -272,6 +277,7 @@ pub async fn scrims_update_slot_preset(
             ok_json(json!({ "preset": preset }))
         }
         Ok(None) => err_text(404, "Scrim slot preset not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, preset_id, "Scrim-Slot-Preset konnte nicht geändert werden");
             err_text(500, "Update scrim slot preset failed")
@@ -305,6 +311,7 @@ pub async fn scrims_delete_slot_preset(
             ok_json(json!({ "deleted": true, "id": preset_id }))
         }
         Ok(false) => err_text(404, "Scrim slot preset not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, preset_id, "Scrim-Slot-Preset konnte nicht gelöscht werden");
             err_text(500, "Delete scrim slot preset failed")
@@ -350,6 +357,7 @@ pub async fn scrims_create_match_request_batch(
             ok_json(json!({ "batch": batch }))
         }
         Err(MatchRequestCreateError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestCreateError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(MatchRequestCreateError::Db(err)) => {
             tracing::error!(%err, "Scrim-Match-Abfrage-Anlage fehlgeschlagen");
             err_text(500, "Create match request failed")
@@ -426,6 +434,9 @@ pub async fn scrims_release_match_request(
         Err(MatchRequestReleaseError::BadRequest(message)) => err_text(400, message),
         Err(MatchRequestReleaseError::Conflict(message)) => err_text(409, message),
         Err(MatchRequestReleaseError::NotFound) => err_text(404, "Match request not found"),
+        Err(MatchRequestReleaseError::RuntimeGate(_)) => {
+            err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE)
+        }
         Err(MatchRequestReleaseError::Dashboard(err)) => {
             tracing::error!(%err, request_id, "Scrim-Match-Abfrage-Freigabe-Auswertung fehlgeschlagen");
             err_text(500, "Release match request failed")
@@ -496,6 +507,9 @@ pub async fn scrims_create_match_request_reminder(
         }
         Ok(None) => err_text(404, "Match request team not found"),
         Err(MatchRequestReminderCreateError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestReminderCreateError::RuntimeGate(_)) => {
+            err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE)
+        }
         Err(MatchRequestReminderCreateError::Db(err)) => {
             tracing::error!(%err, request_id, team_id, "Scrim-Reminder-Freigabe fehlgeschlagen");
             err_text(500, "Create reminder failed")
@@ -569,6 +583,7 @@ pub async fn scrims_set_lobby_code(
                 current.unwrap_or_default()
             ),
         ),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, match_id, "Scrim-Lobbycode-Speicherung fehlgeschlagen");
             err_text(500, "Save lobby code failed")
@@ -623,6 +638,7 @@ pub async fn scrims_add_match_id(
         }
         Ok(MatchResultRefUpdate::Duplicate) => err_text(409, "Match ID already exists"),
         Ok(MatchResultRefUpdate::NotFound) => err_text(404, "Match not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, match_id, steam_match_id, "Scrim-Match-ID-Speicherung fehlgeschlagen");
             err_text(500, "Save match id failed")
@@ -674,6 +690,7 @@ pub async fn scrims_update_participant_notes(
             ok_json(json!({ "participant_id": participant_id, "notes": notes }))
         }
         Ok(false) => err_text(404, "Participant not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, participant_id, "Scrim-Participant-Notiz fehlgeschlagen");
             err_text(500, "Save notes failed")
@@ -1011,6 +1028,7 @@ async fn request_state(
                 current.unwrap_or_default()
             ),
         ),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, match_id, "Scrim-Lobby-State-Request fehlgeschlagen");
             err_text(500, "Lobby state update failed")
@@ -1095,6 +1113,8 @@ enum MatchRequestCreateError {
     #[error("{0}")]
     BadRequest(&'static str),
     #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
+    #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
@@ -1107,6 +1127,8 @@ enum MatchRequestReleaseError {
     #[error("not found")]
     NotFound,
     #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
+    #[error(transparent)]
     Dashboard(#[from] DashboardDbError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -1116,6 +1138,8 @@ enum MatchRequestReleaseError {
 enum MatchRequestReminderCreateError {
     #[error("{0}")]
     BadRequest(&'static str),
+    #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -1524,6 +1548,8 @@ async fn create_slot_preset(
     created_by_user_id: &str,
     input: SlotPresetInput,
 ) -> DashboardDbResult<Value> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(&mut tx, "/api/scrims/slot-presets", "POST").await?;
     let row = sqlx::query(
         r#"
         INSERT INTO scrim.slot_presets(name, slots, created_by_user_id)
@@ -1534,8 +1560,9 @@ async fn create_slot_preset(
     .bind(input.name)
     .bind(Value::Array(input.slots))
     .bind(created_by_user_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     slot_preset_json(row)
 }
 
@@ -1544,7 +1571,14 @@ async fn update_slot_preset(
     preset_id: i64,
     input: SlotPresetInput,
 ) -> DashboardDbResult<Option<Value>> {
-    sqlx::query(
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/slot-presets/{preset_id}",
+        "PUT",
+    )
+    .await?;
+    let row = sqlx::query(
         r#"
         UPDATE scrim.slot_presets
            SET name = $2,
@@ -1557,19 +1591,28 @@ async fn update_slot_preset(
     .bind(preset_id)
     .bind(input.name)
     .bind(Value::Array(input.slots))
-    .fetch_optional(pool)
-    .await?
-    .map(slot_preset_json)
-    .transpose()
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    row.map(slot_preset_json).transpose()
 }
 
 async fn delete_slot_preset(pool: &PgPool, preset_id: i64) -> DashboardDbResult<bool> {
-    Ok(sqlx::query("DELETE FROM scrim.slot_presets WHERE id = $1")
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/slot-presets/{preset_id}",
+        "DELETE",
+    )
+    .await?;
+    let deleted = sqlx::query("DELETE FROM scrim.slot_presets WHERE id = $1")
         .bind(preset_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
-        > 0)
+        > 0;
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 async fn load_lagebilder(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
@@ -2371,6 +2414,7 @@ fn correction_context_from_detail(detail: &Value) -> Vec<String> {
 
 async fn create_match_record(pool: &PgPool, input: CreateMatchInput) -> DashboardDbResult<Value> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(&mut tx, "/api/scrims/matches", "POST").await?;
     advisory_lock(&mut tx, MATCHES_LOCK).await?;
     let id = sqlx::query_scalar::<_, i32>(
         r#"
@@ -2417,6 +2461,7 @@ async fn create_match_request_batch_record(
         .flatten()
         .collect::<Vec<_>>();
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(&mut tx, "/api/scrims/match-requests", "POST").await?;
     advisory_lock(&mut tx, MATCHES_LOCK).await?;
 
     let existing_team_count: i64 =
@@ -2538,6 +2583,12 @@ async fn release_match_request_slot(
     released_by_display_name: &str,
 ) -> Result<Value, MatchRequestReleaseError> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/match-requests/{request_id}/release",
+        "POST",
+    )
+    .await?;
     let Some(row) = sqlx::query(
         r#"
         SELECT mr.batch_id, mr.slot_options, mr.status, mr.released_at,
@@ -2823,6 +2874,13 @@ async fn create_match_request_reminder_record(
     let missing_count = i32::try_from(target_participant_ids.len())
         .map_err(|_| MatchRequestReminderCreateError::BadRequest("Too many missing responses"))?;
 
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/match-requests/{request_id}/reminders",
+        "POST",
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO scrim.match_request_reminders(
@@ -2851,8 +2909,9 @@ async fn create_match_request_reminder_record(
     .bind(approved_by_display_name)
     .bind(channel_id)
     .bind(source_message_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(Some(json!({
         "id": row.try_get::<i64, _>("id")?,
@@ -3412,6 +3471,12 @@ async fn set_lobby_code(
     source_display_name: &str,
 ) -> DashboardDbResult<LobbyCodeUpdate> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/matches/{match_id}/lobby-code",
+        "POST",
+    )
+    .await?;
     let current = sqlx::query(
         r#"
         SELECT lobby_state, join_code
@@ -3484,6 +3549,12 @@ async fn add_match_result_ref(
     source_display_name: &str,
 ) -> DashboardDbResult<MatchResultRefUpdate> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/matches/{match_id}/match-ids",
+        "POST",
+    )
+    .await?;
     let current = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT id
@@ -3547,6 +3618,12 @@ async fn set_lobby_request(
     requested_state: &'static str,
 ) -> DashboardDbResult<LobbyRequest> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/matches/{match_id}/result",
+        "POST",
+    )
+    .await?;
     let current = sqlx::query(
         r#"
         SELECT lobby_state
@@ -3611,6 +3688,13 @@ async fn update_participant_notes(
     participant_id: i32,
     notes: Option<String>,
 ) -> DashboardDbResult<bool> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/participants/{participant_id}/notes",
+        "POST",
+    )
+    .await?;
     let changed = sqlx::query(
         r#"
         UPDATE scrim.participants
@@ -3621,9 +3705,10 @@ async fn update_participant_notes(
     )
     .bind(participant_id)
     .bind(notes)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    tx.commit().await?;
     Ok(changed > 0)
 }
 

@@ -8,7 +8,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_central_db::scrim_runtime::{require_local_scrim_write, ScrimRuntimeGateError};
+use dl_central_db::scrim_runtime::{
+    require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
+};
 use dl_squads::store::PARTICIPANTS_LOCK;
 use serenity::all::{EmojiId, ReactionType};
 use sqlx::PgPool;
@@ -308,15 +310,30 @@ impl ReactionRoleService {
         let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) else {
             return Ok(());
         };
-        require_local_scrim_write(
-            &self.pool,
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    mapping_id = mapping.id,
+                    user_id,
+                    "Scrim-Signup: Pool-Upsert fehlgeschlagen"
+                );
+                return Ok(());
+            }
+        };
+        require_local_scrim_write_in_transaction(
+            &mut tx,
             "dl-community::reaction_roles",
             "scrim.participants reaction-role upsert",
         )
         .await?;
-        if let Err(err) =
-            upsert_scrim_participant_by_discord(&self.pool, discord_id, display_name).await
-        {
+        let result =
+            match upsert_scrim_participant_by_discord(&mut tx, discord_id, display_name).await {
+                Ok(_) => tx.commit().await.map_err(CommunityDbError::from),
+                Err(err) => Err(err),
+            };
+        if let Err(err) = result {
             tracing::warn!(
                 %err,
                 mapping_id = mapping.id,
@@ -476,14 +493,13 @@ impl ReactionRoleService {
 }
 
 async fn upsert_scrim_participant_by_discord(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     discord_id: i64,
     display_name: &str,
 ) -> CommunityDbResult<i64> {
     let display_name = display_name.trim().to_string();
     let now = chrono::Utc::now();
-    let mut tx = pool.begin().await?;
-    advisory_lock(&mut tx, PARTICIPANTS_LOCK).await?;
+    advisory_lock(tx, PARTICIPANTS_LOCK).await?;
 
     let existing_id = sqlx::query_scalar!(
         r#"
@@ -495,7 +511,7 @@ async fn upsert_scrim_participant_by_discord(
         "#,
         discord_id,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if let Some(id) = existing_id {
         sqlx::query!(
@@ -509,9 +525,8 @@ async fn upsert_scrim_participant_by_discord(
             display_name,
             now,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         return Ok(i64::from(id));
     }
 
@@ -525,7 +540,7 @@ async fn upsert_scrim_participant_by_discord(
         "#,
         display_name,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if let Some(id) = name_id {
         sqlx::query!(
@@ -539,9 +554,8 @@ async fn upsert_scrim_participant_by_discord(
             discord_id,
             now,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         return Ok(i64::from(id));
     }
 
@@ -551,7 +565,7 @@ async fn upsert_scrim_participant_by_discord(
           FROM scrim.participants
         "#
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     sqlx::query!(
         r#"
@@ -566,9 +580,8 @@ async fn upsert_scrim_participant_by_discord(
         display_name,
         now,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(i64::from(next_id))
 }
 

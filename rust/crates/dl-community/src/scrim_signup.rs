@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use dl_central_db::scrim_runtime::{require_local_scrim_write, ScrimRuntimeGateError};
+use dl_central_db::scrim_runtime::{
+    require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
+};
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter, ModalField,
     ModalSpec,
@@ -124,14 +126,15 @@ impl ScrimSignup {
         )
         .ok_or(ScrimSignupInputError::RankInvalid)?;
 
-        require_local_scrim_write(
-            &self.pool,
+        let mut tx = self.pool.begin().await.map_err(CommunityDbError::from)?;
+        require_local_scrim_write_in_transaction(
+            &mut tx,
             "dl-community::scrim_signup",
             "scrim.participants self-service upsert",
         )
         .await?;
         upsert_structured_participant(
-            &self.pool,
+            &mut tx,
             discord_id,
             &display_name,
             &rank,
@@ -139,6 +142,7 @@ impl ScrimSignup {
             &availability_slots,
         )
         .await?;
+        tx.commit().await.map_err(CommunityDbError::from)?;
         Ok(())
     }
 }
@@ -514,7 +518,7 @@ fn unknown_week() -> BTreeMap<String, AvailabilitySlot> {
 }
 
 async fn upsert_structured_participant(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     discord_id: i64,
     display_name: &str,
     rank: &RankChoice,
@@ -523,8 +527,7 @@ async fn upsert_structured_participant(
 ) -> CommunityDbResult<i64> {
     let availability_slots = serde_json::to_string(availability_slots)?;
     let now = chrono::Utc::now();
-    let mut tx = pool.begin().await?;
-    advisory_lock(&mut tx, PARTICIPANTS_LOCK).await?;
+    advisory_lock(tx, PARTICIPANTS_LOCK).await?;
 
     if let Some(row) = sqlx::query(
         r#"
@@ -536,7 +539,7 @@ async fn upsert_structured_participant(
         "#,
     )
     .bind(discord_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     {
         let id: i32 = row.try_get("id")?;
@@ -561,9 +564,8 @@ async fn upsert_structured_participant(
         .bind(roles)
         .bind(&availability_slots)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         return Ok(i64::from(id));
     }
 
@@ -577,7 +579,7 @@ async fn upsert_structured_participant(
         "#,
     )
     .bind(display_name)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     {
         let id: i32 = row.try_get("id")?;
@@ -602,9 +604,8 @@ async fn upsert_structured_participant(
         .bind(roles)
         .bind(&availability_slots)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         return Ok(i64::from(id));
     }
 
@@ -614,7 +615,7 @@ async fn upsert_structured_participant(
           FROM scrim.participants
         "#,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     sqlx::query(
         r#"
@@ -636,9 +637,8 @@ async fn upsert_structured_participant(
     .bind(STATUS_NEW)
     .bind(SOURCE_DISCORD_MODAL)
     .bind(now)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(i64::from(id))
 }
 

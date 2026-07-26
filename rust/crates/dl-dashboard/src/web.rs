@@ -548,6 +548,7 @@ async fn gate_scrim_mutation(
     if route == "/api/scrims/teams/{team_id}/lagebild/corrections" {
         return next.run(request).await;
     }
+    // Dieser Check ist nur ein schneller Vorfilter; die Absicherung liegt in der Schreibtransaktion.
     if dl_central_db::scrim_runtime::require_local_scrim_write(app.pool(), &route, method.as_str())
         .await
         .is_err()

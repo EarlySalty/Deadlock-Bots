@@ -1,4 +1,10 @@
-use sqlx::{PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+
+pub const SCRIM_TRANSITION_LOCK_A: i32 = 724_060_001;
+pub const SCRIM_TRANSITION_LOCK_B: i32 = 724_060_002;
+const SCRIM_RUNTIME_STATE_SQL: &str = "SELECT mode, operational_writer, epoch
+                                        FROM scrim.runtime_control
+                                       WHERE control_key = 'scrim_runtime'";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrimRuntimeState {
@@ -27,21 +33,13 @@ pub fn local_scrim_writes_allowed(mode: &str, operational_writer: &str) -> bool 
 pub async fn load_scrim_runtime_state(
     pool: &PgPool,
 ) -> Result<ScrimRuntimeState, ScrimRuntimeGateError> {
-    let row = sqlx::query(
-        "SELECT mode, operational_writer, epoch
-           FROM scrim.runtime_control
-          WHERE control_key = 'scrim_runtime'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(ScrimRuntimeGateError::Read)?
-    .ok_or(ScrimRuntimeGateError::Missing)?;
+    let row = sqlx::query(SCRIM_RUNTIME_STATE_SQL)
+        .fetch_optional(pool)
+        .await
+        .map_err(ScrimRuntimeGateError::Read)?
+        .ok_or(ScrimRuntimeGateError::Missing)?;
 
-    Ok(ScrimRuntimeState {
-        mode: row.get("mode"),
-        operational_writer: row.get("operational_writer"),
-        epoch: row.get("epoch"),
-    })
+    Ok(scrim_runtime_state(row))
 }
 
 pub async fn require_local_scrim_write(
@@ -49,7 +47,43 @@ pub async fn require_local_scrim_write(
     path: &str,
     action: &str,
 ) -> Result<ScrimRuntimeState, ScrimRuntimeGateError> {
-    match load_scrim_runtime_state(pool).await {
+    enforce_local_scrim_write(load_scrim_runtime_state(pool).await, path, action)
+}
+
+pub async fn require_local_scrim_write_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    path: &str,
+    action: &str,
+) -> Result<ScrimRuntimeState, ScrimRuntimeGateError> {
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1, $2)")
+        .bind(SCRIM_TRANSITION_LOCK_A)
+        .bind(SCRIM_TRANSITION_LOCK_B)
+        .execute(&mut **tx)
+        .await
+        .map_err(ScrimRuntimeGateError::Read)?;
+    let state = sqlx::query(SCRIM_RUNTIME_STATE_SQL)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(ScrimRuntimeGateError::Read)?
+        .map(scrim_runtime_state)
+        .ok_or(ScrimRuntimeGateError::Missing);
+    enforce_local_scrim_write(state, path, action)
+}
+
+fn scrim_runtime_state(row: PgRow) -> ScrimRuntimeState {
+    ScrimRuntimeState {
+        mode: row.get("mode"),
+        operational_writer: row.get("operational_writer"),
+        epoch: row.get("epoch"),
+    }
+}
+
+fn enforce_local_scrim_write(
+    state: Result<ScrimRuntimeState, ScrimRuntimeGateError>,
+    path: &str,
+    action: &str,
+) -> Result<ScrimRuntimeState, ScrimRuntimeGateError> {
+    match state {
         Ok(state) if local_scrim_writes_allowed(&state.mode, &state.operational_writer) => {
             Ok(state)
         }
@@ -94,6 +128,8 @@ pub async fn require_local_scrim_write(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -107,5 +143,59 @@ mod tests {
         ] {
             assert!(!local_scrim_writes_allowed(mode, writer));
         }
+    }
+
+    #[tokio::test]
+    async fn laufender_schreibzugriff_serialisiert_runtime_umschaltung(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = crate::testing::test_pool().await?;
+        let pool = db.pool().clone();
+        let mut write_tx = pool.begin().await?;
+        require_local_scrim_write_in_transaction(
+            &mut write_tx,
+            "test::scrim_write",
+            "scrim test write",
+        )
+        .await?;
+
+        let transition_pool = pool.clone();
+        let transition = tokio::spawn(async move {
+            sqlx::query_as::<_, (bool, i64)>(
+                "SELECT applied, current_epoch
+                   FROM scrim.transition_runtime_control(
+                        0, 'draining', 'turniere', '42', 'Test',
+                        'runtime:gate-test', 'runtime:gate-test', '{}'::jsonb
+                   )",
+            )
+            .fetch_one(&transition_pool)
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                         SELECT 1
+                           FROM pg_stat_activity
+                          WHERE datname = current_database()
+                            AND query LIKE '%runtime:gate-test%'
+                            AND wait_event_type = 'Lock'
+                     )",
+                )
+                .fetch_one(&mut *write_tx)
+                .await?;
+                if waiting {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await??;
+        assert!(!transition.is_finished());
+
+        write_tx.commit().await?;
+        let switched = tokio::time::timeout(Duration::from_secs(2), transition).await???;
+        assert_eq!(switched, (true, 1));
+        Ok(())
     }
 }
