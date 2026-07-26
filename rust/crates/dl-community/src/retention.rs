@@ -38,14 +38,24 @@ const INACTIVITY_THRESHOLD_DAYS: i64 = 14;
 const MIN_DAYS_BETWEEN_MESSAGES: i64 = 30;
 const MAX_MISS_YOU_PER_USER: i64 = 1;
 const CHECK_HOUR: u32 = 12;
-// Genug Vorlauf, damit entfernte Mitglieder nicht das Zustelllimit blockieren.
-const MISS_YOU_CANDIDATE_FETCH_LIMIT: i64 = 500;
+const MISS_YOU_CANDIDATE_PAGE_SIZE: i64 = 500;
 const MAX_MISS_YOU_DELIVERIES_PER_RUN: usize = 50;
 // Bewusst grobe Untergrenze gegen leere/halb gefüllte Caches nach Bot-Neustarts, kein Feintuning.
 const MIN_PLAUSIBLE_GUILD_CACHE_MEMBERS: usize = 100;
 /// Log-Meldung beim Abbruch wegen unvollständigem Guild-Cache. Als Konstante,
 /// damit Tests auf die Meldung prüfen können, ohne am Wortlaut zu kleben.
 pub const MISS_YOU_CACHE_ABORT_LOG: &str = "⚠️ Miss-You-Lauf abgebrochen: Der Server-Cache ist unvollständig, deshalb wurde heute niemand angeschrieben. Das repariert sich normalerweise von selbst, sobald der Bot durchgelaufen ist.";
+
+/// Bilanz-Zusatz, wenn der Lauf am Tageslimit endete und Kandidaten offen
+/// blieben — kein stilles Abschneiden. Leer, wenn alles geprüft wurde.
+/// Produktionscode und Tests teilen diese Funktion, damit Textänderungen
+/// keine Tests brechen.
+pub fn miss_you_remaining_suffix(not_checked: usize) -> String {
+    if not_checked == 0 {
+        return String::new();
+    }
+    format!(" Übrig für morgen: {not_checked} Kandidaten, das Tageslimit war erreicht.")
+}
 const SERVER_LINK: &str = "https://discord.com/channels/1289721245281292288/1289721245281292291";
 const VOICE_LINK: &str = "https://discord.com/channels/1289721245281292288/1501089974093873232";
 const EXCLUDED_ROLE_IDS: [u64; 2] = [1304416311383818240, 1309741866098491479];
@@ -101,6 +111,7 @@ struct MissYouRunStats {
     blocked: usize,
     not_member: usize,
     errors: usize,
+    not_checked: usize,
 }
 
 enum MissYouDecision {
@@ -309,17 +320,26 @@ impl RetentionTracker {
     /// Inaktive Stamm-User (Python `_find_inactive_regular_users`): regelmäßig
     /// aktiv gewesen, jetzt über der Schwelle inaktiv, nicht opted-out,
     /// Spam-Schutz greift. Liefert `(user_id, guild_id, days_inactive)`.
-    async fn find_inactive_users(&self, now: i64) -> Vec<(u64, u64, i64)> {
+    async fn find_inactive_users(
+        &self,
+        now: i64,
+        after: Option<(i64, i64)>,
+        limit: i64,
+    ) -> (Vec<(u64, u64, i64)>, usize) {
         let Ok(now_dt) = utc_from_unix(now) else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
         let inactivity_threshold = now_dt - chrono::Duration::days(INACTIVITY_THRESHOLD_DAYS);
         let min_gap = now_dt - chrono::Duration::days(MIN_DAYS_BETWEEN_MESSAGES);
+        let (after_days_inactive, after_user_id) = after
+            .map(|(days_inactive, user_id)| (Some(days_inactive), Some(user_id)))
+            .unwrap_or((None, None));
         let rows = sqlx::query!(
             r#"
             SELECT user_id,
                    guild_id,
-                   FLOOR(EXTRACT(EPOCH FROM ($1 - last_active_at)) / 86400)::BIGINT AS "days_inactive!"
+                   FLOOR(EXTRACT(EPOCH FROM ($1 - last_active_at)) / 86400)::BIGINT AS "days_inactive!",
+                   COUNT(*) OVER() AS "candidate_count!"
               FROM activity.user_retention_tracking
              WHERE avg_weekly_sessions >= $2
                AND total_active_days >= $3
@@ -327,8 +347,16 @@ impl RetentionTracker {
                AND opted_out = FALSE
                AND miss_you_count < $5
                AND (last_miss_you_sent_at IS NULL OR last_miss_you_sent_at < $6)
-             ORDER BY 3 DESC
-             LIMIT $7
+               AND (
+                    $7::BIGINT IS NULL
+                    OR FLOOR(EXTRACT(EPOCH FROM ($1 - last_active_at)) / 86400)::BIGINT < $7
+                    OR (
+                        FLOOR(EXTRACT(EPOCH FROM ($1 - last_active_at)) / 86400)::BIGINT = $7
+                        AND user_id > $8
+                    )
+               )
+             ORDER BY 3 DESC, user_id ASC
+             LIMIT $9
             "#,
             now_dt,
             MIN_WEEKLY_SESSIONS,
@@ -336,12 +364,19 @@ impl RetentionTracker {
             inactivity_threshold,
             i64_to_i32(MAX_MISS_YOU_PER_USER, "MAX_MISS_YOU_PER_USER").unwrap_or(i32::MAX),
             min_gap,
-            MISS_YOU_CANDIDATE_FETCH_LIMIT,
+            after_days_inactive,
+            after_user_id,
+            limit,
         )
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default();
-        rows.into_iter()
+        let candidate_count = rows
+            .first()
+            .and_then(|row| usize::try_from(row.candidate_count).ok())
+            .unwrap_or_default();
+        let candidates = rows
+            .into_iter()
             .filter_map(|row| {
                 Some((
                     i64_to_u64(row.user_id, "user_id")?,
@@ -349,7 +384,8 @@ impl RetentionTracker {
                     row.days_inactive,
                 ))
             })
-            .collect()
+            .collect();
+        (candidates, candidate_count)
     }
 
     /// Stündlicher Miss-You-Check (Python `daily_retention_check`): nur zur
@@ -376,60 +412,91 @@ impl RetentionTracker {
     }
 
     async fn run_miss_you_candidates(&self, port: &Arc<dyn RetentionPort>, now: i64) {
+        self.run_miss_you_candidates_with_page_size(port, now, MISS_YOU_CANDIDATE_PAGE_SIZE)
+            .await;
+    }
+
+    async fn run_miss_you_candidates_with_page_size(
+        &self,
+        port: &Arc<dyn RetentionPort>,
+        now: i64,
+        page_size: i64,
+    ) {
         let mut stats = MissYouRunStats::default();
-        let candidates = self.find_inactive_users(now).await;
-        for &(_, guild_id, _) in &candidates {
-            let member_count = port.guild_member_count(guild_id).await;
-            if !matches!(
-                member_count,
-                Some(count) if count >= MIN_PLAUSIBLE_GUILD_CACHE_MEMBERS
-            ) {
-                tracing::warn!(
-                    guild_id,
-                    member_count,
-                    entscheidung = "abgebrochen",
-                    grund = "cache_unplausibel",
-                    "Miss-You-Lauf abgebrochen"
-                );
-                port.send_log(MISS_YOU_CACHE_ABORT_LOG.to_string()).await;
-                return;
-            }
-        }
-
-        for (user_id, guild_id, days_inactive) in candidates {
-            if !port.is_guild_member(guild_id, user_id).await {
-                tracing::info!(
-                    user_id,
-                    guild_id,
-                    entscheidung = "uebersprungen",
-                    grund = "cache_unsicher",
-                    "Miss-You-Zustellentscheidung"
-                );
-                stats.not_member += 1;
-                continue;
-            }
-
-            if stats.attempted >= MAX_MISS_YOU_DELIVERIES_PER_RUN {
+        let mut after = None;
+        'pages: loop {
+            let (candidates, candidate_count) =
+                self.find_inactive_users(now, after, page_size).await;
+            if candidates.is_empty() {
                 break;
             }
-            match self
-                .send_miss_you(port, user_id, guild_id, days_inactive)
-                .await
-            {
-                MissYouDecision::Sent => {
-                    stats.attempted += 1;
-                    stats.delivered += 1;
+            for &(_, guild_id, _) in &candidates {
+                let member_count = port.guild_member_count(guild_id).await;
+                if !matches!(
+                    member_count,
+                    Some(count) if count >= MIN_PLAUSIBLE_GUILD_CACHE_MEMBERS
+                ) {
+                    tracing::warn!(
+                        guild_id,
+                        member_count,
+                        entscheidung = "abgebrochen",
+                        grund = "cache_unplausibel",
+                        "Miss-You-Lauf abgebrochen"
+                    );
+                    port.send_log(MISS_YOU_CACHE_ABORT_LOG.to_string()).await;
+                    return;
                 }
-                MissYouDecision::Blocked => {
-                    stats.attempted += 1;
-                    stats.blocked += 1;
-                }
-                MissYouDecision::PermanentFailed | MissYouDecision::TransientFailed => {
-                    stats.attempted += 1;
-                    stats.errors += 1;
-                }
-                MissYouDecision::Skipped => {}
             }
+
+            let page_len = candidates.len();
+            let next_after = candidates.last().and_then(|(user_id, _, days_inactive)| {
+                u64_to_i64(*user_id, "user_id")
+                    .ok()
+                    .map(|user_id| (*days_inactive, user_id))
+            });
+            for (index, (user_id, guild_id, days_inactive)) in candidates.into_iter().enumerate() {
+                if !port.is_guild_member(guild_id, user_id).await {
+                    tracing::info!(
+                        user_id,
+                        guild_id,
+                        entscheidung = "uebersprungen",
+                        grund = "cache_unsicher",
+                        "Miss-You-Zustellentscheidung"
+                    );
+                    stats.not_member += 1;
+                    continue;
+                }
+
+                match self
+                    .send_miss_you(port, user_id, guild_id, days_inactive)
+                    .await
+                {
+                    MissYouDecision::Sent => {
+                        stats.attempted += 1;
+                        stats.delivered += 1;
+                    }
+                    MissYouDecision::Blocked => {
+                        stats.attempted += 1;
+                        stats.blocked += 1;
+                    }
+                    MissYouDecision::PermanentFailed | MissYouDecision::TransientFailed => {
+                        stats.attempted += 1;
+                        stats.errors += 1;
+                    }
+                    MissYouDecision::Skipped => {}
+                }
+                if stats.attempted >= MAX_MISS_YOU_DELIVERIES_PER_RUN {
+                    stats.not_checked = candidate_count.saturating_sub(index + 1);
+                    break 'pages;
+                }
+            }
+            if candidate_count <= page_len {
+                break;
+            }
+            let Some(next_after) = next_after else {
+                break;
+            };
+            after = Some(next_after);
         }
         let delivery_rate = (stats.delivered * 100)
             .checked_div(stats.attempted)
@@ -439,8 +506,9 @@ impl RetentionTracker {
         } else {
             ""
         };
+        let remaining = miss_you_remaining_suffix(stats.not_checked);
         port.send_log(format!(
-            "🔔 Miss-You-Lauf — versucht: {}, zugestellt: {}, DMs zu: {}, nicht mehr auf dem Server: {}, Fehler: {}, Zustellquote: {} %.{}",
+            "🔔 Miss-You-Lauf — versucht: {}, zugestellt: {}, DMs zu: {}, nicht mehr auf dem Server: {}, Fehler: {}, Zustellquote: {} %.{}{}",
             stats.attempted,
             stats.delivered,
             stats.blocked,
@@ -448,6 +516,7 @@ impl RetentionTracker {
             stats.errors,
             delivery_rate,
             warning,
+            remaining,
         ))
         .await;
     }
@@ -1000,6 +1069,7 @@ mod tests {
         guild_member_count: Option<usize>,
         deliveries: tokio::sync::Mutex<VecDeque<MissYouDelivery>>,
         send_calls: AtomicUsize,
+        member_checks: tokio::sync::Mutex<Vec<u64>>,
         logs: tokio::sync::Mutex<Vec<String>>,
     }
 
@@ -1015,6 +1085,7 @@ mod tests {
                 guild_member_count,
                 deliveries: tokio::sync::Mutex::new(deliveries.into_iter().collect()),
                 send_calls: AtomicUsize::new(0),
+                member_checks: tokio::sync::Mutex::new(Vec::new()),
                 logs: tokio::sync::Mutex::new(Vec::new()),
             }
         }
@@ -1038,6 +1109,7 @@ mod tests {
         }
 
         async fn is_guild_member(&self, _guild_id: u64, user_id: u64) -> bool {
+            self.member_checks.lock().await.push(user_id);
             self.is_member(user_id)
         }
 
@@ -1320,8 +1392,9 @@ mod tests {
             .expect("insert tracking");
         }
         let found: Vec<u64> = tracker
-            .find_inactive_users(now.timestamp())
+            .find_inactive_users(now.timestamp(), None, MISS_YOU_CANDIDATE_PAGE_SIZE)
             .await
+            .0
             .into_iter()
             .map(|(user_id, _, _)| user_id)
             .collect();
@@ -1329,28 +1402,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nicht_mitglieder_verbrauchen_keinen_sendeplatz() {
+    async fn pagination_erreicht_mitglieder_hinter_einem_vollen_block_nicht_mitglieder() {
         let (db, tracker) = mk().await;
         let now = utc_from_unix(2_000_000_000).expect("now");
-        let non_members: Vec<i64> = (1_000..1_060).collect();
-        let members: Vec<i64> = (2_000..2_050).collect();
+        let non_members: Vec<i64> = (1_000..1_004).collect();
+        let members = [2_000];
         insert_inactive_candidates(&db, &non_members, now, 30).await;
         insert_inactive_candidates(&db, &members, now, 20).await;
         let mock = Arc::new(
-            MockRetentionPort::new(
-                false,
-                Some(100),
-                std::iter::repeat_with(|| MissYouDelivery::Sent).take(50),
-            )
-            .with_guild_members(members.iter().map(|&id| id as u64)),
+            MockRetentionPort::new(false, Some(100), [MissYouDelivery::Sent])
+                .with_guild_members(members.iter().map(|&id| id as u64)),
         );
         let port: Arc<dyn RetentionPort> = mock.clone();
 
         tracker
-            .run_miss_you_candidates(&port, now.timestamp())
+            .run_miss_you_candidates_with_page_size(&port, now.timestamp(), 3)
             .await;
 
-        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 50);
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pagination_laesst_keinen_kandidaten_aus_und_prueft_keinen_doppelt() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidates(&db, &[8_000, 2_000, 5_000, 1_000, 3_000], now, 20).await;
+        let mock = Arc::new(MockRetentionPort::new(false, Some(100), []));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates_with_page_size(&port, now.timestamp(), 2)
+            .await;
+
+        assert_eq!(
+            *mock.member_checks.lock().await,
+            vec![1_000, 2_000, 3_000, 5_000, 8_000]
+        );
     }
 
     #[tokio::test]
@@ -1378,28 +1465,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sendelimit_gilt_bei_500_geladenen_kandidaten() {
+    async fn sendelimit_stoppt_nach_50_versuchen_und_bilanziert_offene_kandidaten() {
         let (db, tracker) = mk().await;
         let now = utc_from_unix(2_000_000_000).expect("now");
-        let candidates: Vec<i64> = (5_000..5_500).collect();
+        let candidates: Vec<i64> = (5_000..5_053).collect();
         insert_inactive_candidates(&db, &candidates, now, 20).await;
-        assert_eq!(
-            tracker.find_inactive_users(now.timestamp()).await.len(),
-            500,
-            "SQL-Auswahl muss 500 Kandidaten für den Membership-Filter laden"
-        );
         let mock = Arc::new(MockRetentionPort::new(
             true,
-            Some(500),
-            std::iter::repeat_with(|| MissYouDelivery::Sent).take(500),
+            Some(100),
+            std::iter::repeat_with(|| MissYouDelivery::Sent).take(53),
         ));
         let port: Arc<dyn RetentionPort> = mock.clone();
 
         tracker
-            .run_miss_you_candidates(&port, now.timestamp())
+            .run_miss_you_candidates_with_page_size(&port, now.timestamp(), 10)
             .await;
 
         assert_eq!(mock.send_calls.load(Ordering::SeqCst), 50);
+        let logs = mock.logs.lock().await;
+        let expected = miss_you_remaining_suffix(3);
+        assert!(!expected.is_empty());
+        assert!(
+            logs.iter().any(|log| log.ends_with(&expected)),
+            "Laufbilanz: {logs:?}"
+        );
     }
 
     #[tokio::test]
@@ -1424,8 +1513,13 @@ mod tests {
         assert_eq!(miss_you_count, 0);
         assert!(
             !tracker
-                .find_inactive_users((now + chrono::Duration::days(1)).timestamp())
+                .find_inactive_users(
+                    (now + chrono::Duration::days(1)).timestamp(),
+                    None,
+                    MISS_YOU_CANDIDATE_PAGE_SIZE,
+                )
                 .await
+                .0
                 .is_empty(),
             "Cache-Miss muss am Folgetag erneut Kandidat sein"
         );
