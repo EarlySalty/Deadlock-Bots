@@ -47,3 +47,4 @@ dl-central-db = { workspace = true, features = ["testing"] }
 dl-dashboard.workspace = true
 tempfile.workspace = true
 tower.workspace = true
+tracing-subscriber.workspace = true
