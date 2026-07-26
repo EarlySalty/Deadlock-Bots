@@ -44,5 +44,6 @@ workspace = true
 
 [dev-dependencies]
 dl-central-db = { workspace = true, features = ["testing"] }
+dl-dashboard.workspace = true
 tempfile.workspace = true
 tower.workspace = true

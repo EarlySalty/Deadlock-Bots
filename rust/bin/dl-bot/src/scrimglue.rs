@@ -4700,10 +4700,35 @@ fn missing_target_message(match_id: i64, message_kind: &str, _source_line: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     struct RelayOnlyHandler;
+
+    struct NoDashboardMemberLookup;
+
+    #[async_trait::async_trait]
+    impl dl_dashboard::MemberLookup for NoDashboardMemberLookup {
+        async fn member_access(
+            &self,
+            _guild_id: Option<u64>,
+            _user_id: u64,
+        ) -> Option<dl_dashboard::MemberAccessInfo> {
+            None
+        }
+    }
+
+    struct NoDashboardNameResolver;
+
+    #[async_trait::async_trait]
+    impl dl_dashboard::NameResolver for NoDashboardNameResolver {
+        async fn resolve(&self, _user_ids: &[u64]) -> std::collections::HashMap<u64, String> {
+            std::collections::HashMap::new()
+        }
+    }
 
     struct RecordingDiscordSender {
         sent: tokio::sync::Mutex<Vec<(u64, Value)>>,
@@ -6101,6 +6126,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_release_authorisiert_und_postet_match_status_idempotent() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_team_member(pool, 2, 601, 777).await?;
+        insert_match_request_batch_with_deadline_offset(pool, 30, -1).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 1,
+                    channel_id: 100,
+                    message_id: 9001,
+                },
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 2,
+                    channel_id: 200,
+                    message_id: 9002,
+                },
+            ],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
+        insert_match_request_response(pool, 31, 2, 601, 777, 0, (Some(9002), Some(200))).await?;
+        let (app, session_id, csrf) = dashboard_app_with_session(pool).await?;
+
+        let response = app
+            .clone()
+            .oneshot(dashboard_release_request(&session_id, &csrf)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let claim = claim_next_pending_match_status(pool)
+            .await?
+            .expect("dashboard release did not authorize status publication");
+        let target = claim.targets.first().expect("status target");
+        let body = match_status_body(&match_status_message(&claim, target)?);
+        let payload =
+            discord_effect_payload("match_status", "post", target.channel_id, None, &body);
+        let outbox_id = enqueue_status_publication_effect(pool, &claim, target, &payload).await?;
+        let sender = RecordingDiscordSender::new(false);
+        deliver_claimed_discord_effect(
+            pool,
+            &sender,
+            ClaimedDiscordEffect {
+                id: outbox_id,
+                attempts: 1,
+                payload_hash: scrim_payload_hash(&payload),
+                effect_type: "match_status".to_string(),
+                operation: DiscordEffectOperation::Post,
+                target: DiscordEffectTarget::Channel {
+                    channel_id: target.channel_id,
+                },
+                message_id: None,
+                body,
+            },
+        )
+        .await?;
+        assert_eq!(sender.sent.lock().await.len(), 1);
+
+        let response = app
+            .oneshot(dashboard_release_request(&session_id, &csrf)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval = sqlx::query(
+            r#"
+            SELECT COUNT(*)::BIGINT AS approval_count,
+                   MIN(decided_by_user_id) AS decided_by_user_id,
+                   MIN(decided_by_display_name) AS decided_by_display_name
+              FROM scrim.status_publication_approvals
+             WHERE target_kind = 'match_request'
+               AND target_id = '31'
+               AND status_kind = 'match_status'
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(approval.get::<i64, _>("approval_count"), 1);
+        assert_eq!(
+            approval
+                .get::<Option<String>, _>("decided_by_user_id")
+                .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            approval
+                .get::<Option<String>, _>("decided_by_display_name")
+                .as_deref(),
+            Some("Coach")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn approved_match_status_publication_wird_als_components_v2_outbox_persistiert(
     ) -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
@@ -6791,6 +6916,65 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    async fn dashboard_app_with_session(
+        pool: &PgPool,
+    ) -> Result<(axum::Router, String, String), Box<dyn std::error::Error + Send + Sync>> {
+        let session_id = "scrim-status-release-session".to_string();
+        let csrf = "scrim-status-release-csrf".to_string();
+        let now = dl_dashboard::now_unix_f64();
+        dl_central_db::kv::set(
+            pool,
+            "dl_dashboard_admin_session",
+            &session_id,
+            &json!({
+                "user_id": 42,
+                "username": "coach",
+                "display_name": "Coach",
+                "reason": "test",
+                "access_level": dl_dashboard::AccessLevel::Full.as_str(),
+                "csrf_token": csrf,
+                "created_at": now,
+                "last_seen_at": now,
+                "expires_at": now + 3600.0,
+            })
+            .to_string(),
+        )
+        .await?;
+        let config = dl_dashboard::DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let app = dl_dashboard::DashboardApp::new(
+            config,
+            pool.clone(),
+            Arc::new(NoDashboardMemberLookup),
+            Arc::new(NoDashboardNameResolver),
+        )
+        .await?;
+        Ok((dl_dashboard::router(app), session_id, csrf))
+    }
+
+    fn dashboard_release_request(
+        session_id: &str,
+        csrf: &str,
+    ) -> Result<Request<Body>, axum::http::Error> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/scrims/match-requests/31/release")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::ORIGIN,
+                "https://admin.deutsche-deadlock-community.de",
+            )
+            .header("X-CSRF-Token", csrf)
+            .header(
+                header::COOKIE,
+                format!("{}={session_id}", dl_dashboard::SESSION_COOKIE),
+            )
+            .body(Body::from("{}"))
     }
 
     async fn approve_status_publication_for_test(

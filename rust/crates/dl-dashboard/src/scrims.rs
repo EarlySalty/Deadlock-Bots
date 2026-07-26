@@ -2540,7 +2540,8 @@ async fn release_match_request_slot(
     let mut tx = pool.begin().await?;
     let Some(row) = sqlx::query(
         r#"
-        SELECT mr.batch_id, mr.slot_options, mr.status, b.deadline_at
+        SELECT mr.batch_id, mr.slot_options, mr.status, mr.released_at,
+               mr.released_slot_index, b.deadline_at
           FROM scrim.match_requests mr
           JOIN scrim.match_request_batches b ON b.id = mr.batch_id
          WHERE mr.id = $1
@@ -2554,14 +2555,29 @@ async fn release_match_request_slot(
         return Err(MatchRequestReleaseError::NotFound);
     };
 
+    let batch_id = row.try_get::<i32, _>("batch_id")?;
     let status = row.try_get::<String, _>("status")?;
+    if status == "closed"
+        && row
+            .try_get::<Option<DateTime<Utc>>, _>("released_at")?
+            .is_some()
+        && row
+            .try_get::<Option<i32>, _>("released_slot_index")?
+            .is_some()
+    {
+        tx.rollback().await?;
+        let summary = load_match_request_summary(pool, batch_id)
+            .await?
+            .ok_or(MatchRequestReleaseError::NotFound)?;
+        return match_request_from_summary(&summary, request_id)
+            .ok_or(MatchRequestReleaseError::NotFound);
+    }
     if !matches!(status.as_str(), "open" | "post_failed") {
         return Err(MatchRequestReleaseError::Conflict(
             "Match request is not open",
         ));
     }
 
-    let batch_id = row.try_get::<i32, _>("batch_id")?;
     let deadline_at = row.try_get::<DateTime<Utc>, _>("deadline_at")?;
     if deadline_at > Utc::now() {
         return Err(MatchRequestReleaseError::Conflict(
@@ -2628,6 +2644,33 @@ async fn release_match_request_slot(
     .bind(released_by_user_id)
     .bind(released_by_display_name)
     .bind(&override_reason)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.status_publication_approvals(
+            target_kind, target_id, status_kind, payload, payload_hash,
+            decision, decided_by_user_id, decided_by_display_name, decided_at
+        )
+        VALUES(
+            'match_request', $1::text, 'match_status', '{}'::jsonb,
+            scrim.status_publication_effect_hash(
+                'match_request', $1::text, 'match_status', '{}'::jsonb
+            ),
+            'approved', $2, $3, now()
+        )
+        ON CONFLICT (target_kind, target_id, status_kind)
+            WHERE decision IN ('pending', 'approved')
+        DO UPDATE
+           SET decision = 'approved',
+               decided_by_user_id = EXCLUDED.decided_by_user_id,
+               decided_by_display_name = EXCLUDED.decided_by_display_name,
+               decided_at = EXCLUDED.decided_at
+        "#,
+    )
+    .bind(request_id)
+    .bind(released_by_user_id)
+    .bind(released_by_display_name)
     .execute(&mut *tx)
     .await?;
     sqlx::query(

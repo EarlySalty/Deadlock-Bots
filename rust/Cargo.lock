@@ -909,6 +909,7 @@ dependencies = [
  "dl-changelog",
  "dl-community",
  "dl-core",
+ "dl-dashboard",
  "dl-discord",
  "dl-moderation",
  "dl-server-as-code",
