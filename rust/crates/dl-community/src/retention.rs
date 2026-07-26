@@ -38,6 +38,9 @@ const INACTIVITY_THRESHOLD_DAYS: i64 = 14;
 const MIN_DAYS_BETWEEN_MESSAGES: i64 = 30;
 const MAX_MISS_YOU_PER_USER: i64 = 1;
 const CHECK_HOUR: u32 = 12;
+// Genug Vorlauf, damit entfernte Mitglieder nicht das Zustelllimit blockieren.
+const MISS_YOU_CANDIDATE_FETCH_LIMIT: i64 = 500;
+const MAX_MISS_YOU_DELIVERIES_PER_RUN: usize = 50;
 // Bewusst grobe Untergrenze gegen leere/halb gefüllte Caches nach Bot-Neustarts, kein Feintuning.
 const MIN_PLAUSIBLE_GUILD_CACHE_MEMBERS: usize = 100;
 /// Log-Meldung beim Abbruch wegen unvollständigem Guild-Cache. Als Konstante,
@@ -305,7 +308,7 @@ impl RetentionTracker {
 
     /// Inaktive Stamm-User (Python `_find_inactive_regular_users`): regelmäßig
     /// aktiv gewesen, jetzt über der Schwelle inaktiv, nicht opted-out,
-    /// Spam-Schutz greift. Liefert `(user_id, guild_id, days_inactive)`, max. 50.
+    /// Spam-Schutz greift. Liefert `(user_id, guild_id, days_inactive)`.
     async fn find_inactive_users(&self, now: i64) -> Vec<(u64, u64, i64)> {
         let Ok(now_dt) = utc_from_unix(now) else {
             return Vec::new();
@@ -325,7 +328,7 @@ impl RetentionTracker {
                AND miss_you_count < $5
                AND (last_miss_you_sent_at IS NULL OR last_miss_you_sent_at < $6)
              ORDER BY 3 DESC
-             LIMIT 50
+             LIMIT $7
             "#,
             now_dt,
             MIN_WEEKLY_SESSIONS,
@@ -333,6 +336,7 @@ impl RetentionTracker {
             inactivity_threshold,
             i64_to_i32(MAX_MISS_YOU_PER_USER, "MAX_MISS_YOU_PER_USER").unwrap_or(i32::MAX),
             min_gap,
+            MISS_YOU_CANDIDATE_FETCH_LIMIT,
         )
         .fetch_all(&self.pool)
         .await
@@ -401,9 +405,13 @@ impl RetentionTracker {
                     grund = "cache_unsicher",
                     "Miss-You-Zustellentscheidung"
                 );
+                stats.not_member += 1;
                 continue;
             }
 
+            if stats.attempted >= MAX_MISS_YOU_DELIVERIES_PER_RUN {
+                break;
+            }
             match self
                 .send_miss_you(port, user_id, guild_id, days_inactive)
                 .await
@@ -983,11 +991,12 @@ pub fn spawn(
 mod tests {
     use super::*;
     use dl_central_db::testing::{test_pool, TestDb};
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockRetentionPort {
         guild_member: bool,
+        guild_members: Option<HashSet<u64>>,
         guild_member_count: Option<usize>,
         deliveries: tokio::sync::Mutex<VecDeque<MissYouDelivery>>,
         send_calls: AtomicUsize,
@@ -1002,11 +1011,23 @@ mod tests {
         ) -> Self {
             Self {
                 guild_member,
+                guild_members: None,
                 guild_member_count,
                 deliveries: tokio::sync::Mutex::new(deliveries.into_iter().collect()),
                 send_calls: AtomicUsize::new(0),
                 logs: tokio::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_guild_members(mut self, guild_members: impl IntoIterator<Item = u64>) -> Self {
+            self.guild_members = Some(guild_members.into_iter().collect());
+            self
+        }
+
+        fn is_member(&self, user_id: u64) -> bool {
+            self.guild_members
+                .as_ref()
+                .map_or(self.guild_member, |members| members.contains(&user_id))
         }
     }
 
@@ -1016,12 +1037,12 @@ mod tests {
             self.guild_member_count
         }
 
-        async fn is_guild_member(&self, _guild_id: u64, _user_id: u64) -> bool {
-            self.guild_member
+        async fn is_guild_member(&self, _guild_id: u64, user_id: u64) -> bool {
+            self.is_member(user_id)
         }
 
-        async fn member_info(&self, _guild_id: u64, _user_id: u64) -> Option<RetentionMember> {
-            self.guild_member.then(|| RetentionMember {
+        async fn member_info(&self, _guild_id: u64, user_id: u64) -> Option<RetentionMember> {
+            self.is_member(user_id).then(|| RetentionMember {
                 display_name: "Test".to_string(),
                 role_ids: Vec::new(),
             })
@@ -1069,17 +1090,27 @@ mod tests {
     }
 
     async fn insert_inactive_candidate(db: &TestDb, user_id: i64, now: DateTime<Utc>) {
-        let inactive = now - chrono::Duration::days(20);
+        insert_inactive_candidates(db, &[user_id], now, 20).await;
+    }
+
+    async fn insert_inactive_candidates(
+        db: &TestDb,
+        user_ids: &[i64],
+        now: DateTime<Utc>,
+        days_inactive: i64,
+    ) {
+        let inactive = now - chrono::Duration::days(days_inactive);
         sqlx::query(
             r#"
             INSERT INTO activity.user_retention_tracking(
                 user_id, guild_id, first_seen_at, last_active_at, total_active_days,
                 avg_weekly_sessions, miss_you_count, opted_out, updated_at
             )
-            VALUES ($1, 1, $2, $2, 5, 1.0, 0, FALSE, $3)
+            SELECT user_id, 1, $2, $2, 5, 1.0, 0, FALSE, $3
+              FROM UNNEST($1::BIGINT[]) AS candidate(user_id)
             "#,
         )
-        .bind(user_id)
+        .bind(user_ids)
         .bind(inactive)
         .bind(now)
         .execute(db.pool())
@@ -1295,6 +1326,80 @@ mod tests {
             .map(|(user_id, _, _)| user_id)
             .collect();
         assert_eq!(found, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn nicht_mitglieder_verbrauchen_keinen_sendeplatz() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        let non_members: Vec<i64> = (1_000..1_060).collect();
+        let members: Vec<i64> = (2_000..2_050).collect();
+        insert_inactive_candidates(&db, &non_members, now, 30).await;
+        insert_inactive_candidates(&db, &members, now, 20).await;
+        let mock = Arc::new(
+            MockRetentionPort::new(
+                false,
+                Some(100),
+                std::iter::repeat_with(|| MissYouDelivery::Sent).take(50),
+            )
+            .with_guild_members(members.iter().map(|&id| id as u64)),
+        );
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 50);
+    }
+
+    #[tokio::test]
+    async fn laufbilanz_zaehlt_per_cache_uebersprungene_nicht_mitglieder() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidates(&db, &[3_000, 3_001, 3_002], now, 30).await;
+        insert_inactive_candidate(&db, 4_000, now).await;
+        let mock = Arc::new(
+            MockRetentionPort::new(false, Some(100), [MissYouDelivery::Sent])
+                .with_guild_members([4_000]),
+        );
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        let logs = mock.logs.lock().await;
+        assert!(
+            logs.last()
+                .is_some_and(|log| log.contains("nicht mehr auf dem Server: 3")),
+            "Laufbilanz: {logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sendelimit_gilt_bei_500_geladenen_kandidaten() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        let candidates: Vec<i64> = (5_000..5_500).collect();
+        insert_inactive_candidates(&db, &candidates, now, 20).await;
+        assert_eq!(
+            tracker.find_inactive_users(now.timestamp()).await.len(),
+            500,
+            "SQL-Auswahl muss 500 Kandidaten für den Membership-Filter laden"
+        );
+        let mock = Arc::new(MockRetentionPort::new(
+            true,
+            Some(500),
+            std::iter::repeat_with(|| MissYouDelivery::Sent).take(500),
+        ));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 50);
     }
 
     #[tokio::test]
