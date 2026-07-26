@@ -1684,6 +1684,12 @@ async fn reconcile_discord_effect_links_tx(
                SET reconciled_at = now()
              WHERE outbox_effect_id = $1
                AND reconciled_at IS NULL
+        ),
+        reconciled_replacement AS (
+            UPDATE scrim.replacement_request_effects
+               SET reconciled_at = now()
+             WHERE outbox_effect_id = $1
+               AND reconciled_at IS NULL
         )
         UPDATE scrim.status_publication_effects
            SET reconciled_at = now()
@@ -6343,6 +6349,58 @@ mod tests {
         .fetch_one(pool)
         .await?;
         assert!(reconciled_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivered_effect_setzt_replacement_link_reconciled_at() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let need_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_needs(reason, created_by_user_id, created_by_display_name)
+             VALUES('lineup_gap', '42', 'Coach') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let replacement_request_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_requests(
+                 need_id, discord_user_id, requested_by_user_id, requested_by_display_name
+             )
+             VALUES($1, 555, '42', 'Coach') RETURNING id",
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await?;
+        let body = replacement_request_body(replacement_request_id, "Kannst du einspringen?");
+        let payload = discord_dm_effect_payload("replacement_request", 555, &body);
+        let outbox_id = insert_discord_effect(
+            pool,
+            "discord:test_replacement_reconciled",
+            &payload,
+            "leased",
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO scrim.replacement_request_effects(replacement_request_id, outbox_effect_id)
+             VALUES($1, $2)",
+        )
+        .bind(replacement_request_id)
+        .bind(outbox_id)
+        .execute(pool)
+        .await?;
+
+        mark_pending_discord_effect_delivered(pool, outbox_id, &payload, 555, 9102).await?;
+
+        let reconciled_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT reconciled_at FROM scrim.replacement_request_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(
+            reconciled_at.is_some(),
+            "zugestellte Ersatz-DM muss ihren Link reconciled setzen"
+        );
         Ok(())
     }
 
