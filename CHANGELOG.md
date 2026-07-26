@@ -1,3 +1,11 @@
+## #298 — Wer allein im Voice sitzt, wird nicht mehr übersehen
+
+Problem: Wer sich allein in eine Lane setzt und wartet, hatte in den letzten 30 Tagen nur in einem von fünf Fällen überhaupt Zuwachs. Wer allein blieb, ging nach rund sieben Minuten wieder — kam dagegen jemand dazu, passierte das im Schnitt erst nach elf. Die meisten geben also auf, kurz bevor es üblicherweise klappt, und dass sie überhaupt dasitzen, sieht schlicht niemand.
+
+Änderung: Sitzt jemand zwei Minuten allein in einer offenen Lane und ist noch neu hier, fragt der Bot per DM, ob er einen Eintrag in der Mitspieler-Suche absetzen soll. Der Eintrag entsteht nicht automatisch: Du gibst selbst an, wie lange du Zeit hast und auf welchem Rang du spielst, den Rest füllt der Bot vor. Sobald jemand dazukommt oder du gehst, verschwindet der Eintrag von selbst.
+
+Aktuelles Verhalten: Wer schon länger dabei ist, wird nicht gefragt — da wissen die Leute, wie es läuft. Ein „Nie fragen" gilt dauerhaft, und öfter als einmal am Tag meldet sich der Bot ohnehin nicht. In Mod-, VIP-, Coaching-, Scrim- und AFK-Kanälen passiert gar nichts.
+
 ## #297 — „Wir vermissen dich" erreicht wieder echte Mitglieder
 
 Problem: Die Erinnerung an länger inaktive Leute kam zuletzt bei kaum noch jemandem an. Der Bot schrieb überwiegend Personen an, die den Server längst verlassen hatten, und versuchte es bei denselben bis zu 47 Mal — weil ein gescheiterter Versuch nicht mitzählte. Dadurch war die tägliche Liste dauerhaft von denselben unerreichbaren Leuten belegt, und wer wirklich angeschrieben werden sollte, kam nie an die Reihe.

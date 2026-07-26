@@ -911,6 +911,7 @@ impl InteractionHandler for FeedbackHandler {
                         placeholder:
                             "Erzähl uns, was dich stört oder was wir besser machen können..."
                                 .to_string(),
+                        value: None,
                         required: true,
                         min_length: 0,
                         max_length: 1000,

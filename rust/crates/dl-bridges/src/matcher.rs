@@ -1039,6 +1039,7 @@ impl InteractionHandler for ReviewHandler {
                             custom_id: "discord_input".to_string(),
                             label: "Discord-Name oder ID".to_string(),
                             placeholder: "z.B. username oder 123456789012345678".to_string(),
+                            value: None,
                             required: true,
                             min_length: 2,
                             max_length: 100,

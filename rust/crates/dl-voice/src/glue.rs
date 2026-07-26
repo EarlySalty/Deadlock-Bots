@@ -1545,6 +1545,145 @@ impl crate::nudge::NudgePort for NudgeGlue {
     }
 }
 
+/// Solo-LFG-Anbindung: Cache, zentrale DB und Discord-REST.
+pub struct SoloWatchGlue {
+    pub adapter: Arc<DiscordAdapter>,
+    pub pool: sqlx::PgPool,
+    pub log_channel_id: u64,
+}
+
+#[async_trait::async_trait]
+impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
+    async fn lane_snapshot(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+    ) -> Option<crate::solo_watch::LaneSnapshot> {
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
+        let channel = guild.channels.get(&ChannelId::new(channel_id))?;
+        let category_id = channel.parent_id?.get();
+        let non_bot_members = guild
+            .voice_states
+            .iter()
+            .filter(|(_, state)| state.channel_id == Some(channel.id))
+            .filter(|(user_id, _)| {
+                guild
+                    .members
+                    .get(user_id)
+                    .map(|member| !member.user.bot)
+                    .unwrap_or(true)
+            })
+            .map(|(user_id, _)| user_id.get())
+            .collect();
+        Some(crate::solo_watch::LaneSnapshot {
+            category_id,
+            name: channel.name.clone(),
+            non_bot_members,
+            user_limit: channel
+                .user_limit
+                .and_then(|limit| usize::try_from(limit).ok())
+                .filter(|limit| *limit > 0),
+        })
+    }
+
+    async fn claim_prompt(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::solo_watch::PromptDecision, String> {
+        crate::solo_watch::claim_prompt_db(&self.pool, guild_id, user_id, now).await
+    }
+
+    async fn verified_rank(&self, user_id: u64) -> Result<Option<String>, String> {
+        crate::solo_watch::verified_rank_db(&self.pool, user_id).await
+    }
+
+    async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String> {
+        let body = body
+            .as_object()
+            .ok_or_else(|| "Solo-LFG-DM ist kein JSON-Objekt".to_string())?;
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(|error| error.to_string())?;
+        self.adapter
+            .send_raw_public(channel.id.get(), body)
+            .await
+            .map(|_| ())
+    }
+
+    async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
+        crate::solo_watch::set_never_ask_db(&self.pool, user_id).await
+    }
+
+    async fn post_lfg(&self, channel_id: u64, content: String) -> Result<u64, String> {
+        let body = serde_json::Map::from_iter([
+            ("content".to_string(), json!(content)),
+            ("allowed_mentions".to_string(), json!({ "parse": [] })),
+        ]);
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn load_active_posts(&self) -> Result<Vec<crate::solo_watch::PersistedPost>, String> {
+        crate::solo_watch::load_active_posts_db(&self.pool).await
+    }
+
+    async fn save_active_post(
+        &self,
+        post: &crate::solo_watch::PersistedPost,
+    ) -> Result<(), String> {
+        crate::solo_watch::save_active_post_db(&self.pool, post).await
+    }
+
+    async fn remove_active_post(&self, user_id: u64) -> Result<(), String> {
+        crate::solo_watch::remove_active_post_db(&self.pool, user_id).await
+    }
+
+    async fn delete_post(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn send_log(&self, text: String) -> Result<(), String> {
+        let body = serde_json::Map::from_iter([("content".to_string(), json!(text))]);
+        self.adapter
+            .send_raw_public(self.log_channel_id, &body)
+            .await
+            .map(|_| ())
+    }
+
+    fn log_decision(
+        &self,
+        user_id: u64,
+        decision: &'static str,
+        reason: &'static str,
+        error: Option<&str>,
+    ) {
+        tracing::info!(
+            user_id,
+            entscheidung = decision,
+            grund = reason,
+            fehler = error.unwrap_or_default(),
+            "Solo-LFG-Entscheidung"
+        );
+    }
+}
+
 fn is_missing_or_forbidden(err: &serenity::Error) -> bool {
     matches!(
         err,

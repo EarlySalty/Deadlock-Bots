@@ -64,6 +64,7 @@ pub fn feedback_modal(request_id: i64) -> ModalSpec {
             custom_id: custom_id.to_string(),
             label: label.to_string(),
             placeholder: placeholder.to_string(),
+            value: None,
             required,
             min_length: 0,
             max_length: max,

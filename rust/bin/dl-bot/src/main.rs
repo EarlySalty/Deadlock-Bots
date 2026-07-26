@@ -540,6 +540,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::nudge::register(&mut router, nudge.clone());
 
+    let solo_watch =
+        dl_voice::solo_watch::SoloWatch::new(Arc::new(dl_voice::glue::SoloWatchGlue {
+            adapter: adapter.clone(),
+            pool: central_pool.clone(),
+            log_channel_id: dl_voice::solo_watch::LOG_CHANNEL_ID,
+        }));
+    dl_voice::solo_watch::register(&mut router, solo_watch.clone());
+
     // TempVoice-Engine (4b/4c) — Panel-Buttons brauchen den Router,
     // der Event-Subscriber startet erst mit dem Gateway
     let voice_pair_store = Arc::new(dl_voice::voice_pair_guard::VoicePairGuardStore::new(
@@ -1318,6 +1326,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
         // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
         dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());
+        dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
         // Voice-Feedback: Freitext-Antworten auf Feedback-DMs.
         dl_voice::feedback::spawn_dm_responses(
             voice_feedback.clone(),
