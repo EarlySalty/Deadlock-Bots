@@ -410,19 +410,28 @@ fn modal_data(modal: &crate::interactions::ModalSpec) -> Value {
     json!({
         "custom_id": modal.custom_id,
         "title": modal.title,
-        "components": modal.fields.iter().map(|field| json!({
-            "type": 1,
-            "components": [{
-                "type": 4,
-                "custom_id": field.custom_id,
-                "label": field.label,
-                "style": if field.paragraph { 2 } else { 1 },
-                "placeholder": field.placeholder,
-                "required": field.required,
-                "min_length": field.min_length,
-                "max_length": field.max_length,
-            }],
-        })).collect::<Vec<_>>(),
+        "components": modal.fields.iter().map(|field| {
+            let mut input = serde_json::Map::from_iter([
+                ("type".to_string(), json!(4)),
+                ("custom_id".to_string(), json!(field.custom_id)),
+                ("label".to_string(), json!(field.label)),
+                (
+                    "style".to_string(),
+                    json!(if field.paragraph { 2 } else { 1 }),
+                ),
+                ("placeholder".to_string(), json!(field.placeholder)),
+                ("required".to_string(), json!(field.required)),
+                ("min_length".to_string(), json!(field.min_length)),
+                ("max_length".to_string(), json!(field.max_length)),
+            ]);
+            if let Some(value) = &field.value {
+                input.insert("value".to_string(), json!(value));
+            }
+            json!({
+                "type": 1,
+                "components": [input],
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -733,6 +742,7 @@ mod tests {
                 custom_id: "f1".into(),
                 label: "Feld".into(),
                 placeholder: "…".into(),
+                value: Some("Vorbelegt".into()),
                 required: true,
                 min_length: 1,
                 max_length: 32,
@@ -743,6 +753,7 @@ mod tests {
         assert_eq!(data["custom_id"], "m1");
         assert_eq!(data["components"][0]["components"][0]["type"], 4);
         assert_eq!(data["components"][0]["components"][0]["max_length"], 32);
+        assert_eq!(data["components"][0]["components"][0]["value"], "Vorbelegt");
     }
 
     #[test]

@@ -922,6 +922,7 @@ fn modal(custom_id: String, title: &str, field_id: &str, label: &str) -> BridgeR
                 custom_id: field_id.to_string(),
                 label: label.to_string(),
                 placeholder: "Kurz und konkret".to_string(),
+                value: None,
                 required: true,
                 min_length: 2,
                 max_length: 1_000,

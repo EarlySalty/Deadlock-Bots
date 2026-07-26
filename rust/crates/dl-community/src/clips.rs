@@ -504,6 +504,7 @@ impl InteractionHandler for ClipHandler {
                             custom_id: "clip_link".to_string(),
                             label: "Clip-Link (YouTube/Twitch/etc.)".to_string(),
                             placeholder: "https://…".to_string(),
+                            value: None,
                             required: true,
                             min_length: 0,
                             max_length: 400,
@@ -513,6 +514,7 @@ impl InteractionHandler for ClipHandler {
                             custom_id: "credit".to_string(),
                             label: "Credit/Username (Overlay)".to_string(),
                             placeholder: "@DeadlockPlayer123".to_string(),
+                            value: None,
                             required: true,
                             min_length: 0,
                             max_length: 100,
@@ -523,6 +525,7 @@ impl InteractionHandler for ClipHandler {
                             label: "Info (Kontext/Zeitstempel)".to_string(),
                             placeholder: "z. B. Held, Map, Timestamp 00:36, Besonderheiten"
                                 .to_string(),
+                            value: None,
                             required: false,
                             min_length: 0,
                             max_length: 1000,

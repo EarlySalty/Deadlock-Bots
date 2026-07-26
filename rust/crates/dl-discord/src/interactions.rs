@@ -71,6 +71,8 @@ pub struct ModalField {
     pub custom_id: String,
     pub label: String,
     pub placeholder: String,
+    /// Optional vorbelegter Wert des Discord-Textfelds.
+    pub value: Option<String>,
     pub required: bool,
     pub min_length: u16,
     pub max_length: u16,

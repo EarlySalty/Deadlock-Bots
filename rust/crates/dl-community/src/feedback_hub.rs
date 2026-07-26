@@ -59,6 +59,7 @@ impl InteractionHandler for FeedbackHandler {
                 custom_id: id.to_string(),
                 label: label.to_string(),
                 placeholder: placeholder.to_string(),
+                value: None,
                 required,
                 min_length: 0,
                 max_length: 1024,

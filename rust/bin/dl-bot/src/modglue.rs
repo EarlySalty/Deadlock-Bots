@@ -1195,6 +1195,7 @@ impl InteractionHandler for ReviewHandler {
                         custom_id: "reason".to_string(),
                         label: "Grund".to_string(),
                         placeholder: "Warum ist das kein Verstoß?".to_string(),
+                        value: None,
                         required: true,
                         min_length: 4,
                         max_length: 500,

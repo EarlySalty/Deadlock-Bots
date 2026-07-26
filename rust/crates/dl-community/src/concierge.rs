@@ -6705,6 +6705,7 @@ impl InteractionHandler for ConciergeHandler {
                             custom_id: "text".to_string(),
                             label: STECKBRIEF_MODAL_LABEL.to_string(),
                             placeholder: STECKBRIEF_MODAL_PLACEHOLDER.to_string(),
+                            value: None,
                             required: true,
                             min_length: 1,
                             max_length: 1000,

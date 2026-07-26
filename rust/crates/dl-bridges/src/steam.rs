@@ -311,6 +311,7 @@ fn friend_code_modal() -> ModalSpec {
             custom_id: "friend_code".to_string(),
             label: "Freundescode".to_string(),
             placeholder: "z. B. 820142646".to_string(),
+            value: None,
             required: true,
             min_length: 1,
             max_length: 32,

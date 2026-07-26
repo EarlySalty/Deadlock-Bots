@@ -439,6 +439,7 @@ impl InteractionHandler for SurveyPulseHandler {
                             custom_id: "freetext".to_string(),
                             label: "Dein Feedback".to_string(),
                             placeholder: "Was fehlt, was nervt, was wünschst du dir?".to_string(),
+                            value: None,
                             required: true,
                             min_length: 1,
                             max_length: 1_000,
