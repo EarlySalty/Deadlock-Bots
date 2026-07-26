@@ -267,6 +267,29 @@ impl DiscordAdapter {
             .map_err(|err| err.to_string())
     }
 
+    /// Sendet einen rohen Discord-API-Body per DM. Ein- und Ausgabe-IDs bleiben
+    /// Snowflake-Strings, damit Aufrufer keine praezisionskritischen JSON-Zahlen bauen.
+    pub async fn send_raw_dm_public(
+        &self,
+        recipient_user_id: &str,
+        body: &Map<String, Value>,
+    ) -> Result<(String, String), String> {
+        let user_id = recipient_user_id
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "Discord-DM-Recipient-ID ungueltig".to_string())?;
+        let dm_channel = self
+            .open_dm(user_id)
+            .await
+            .map_err(|err| format!("Discord-DM konnte nicht geoeffnet werden: {err}"))?;
+        let message_id = self
+            .send_raw(dm_channel.get(), body)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok((dm_channel.get().to_string(), message_id.to_string()))
+    }
+
     /// Öffentliche Variante, wenn Aufrufer den typisierten Serenity-Fehler brauchen.
     pub async fn send_raw_public_typed(
         &self,

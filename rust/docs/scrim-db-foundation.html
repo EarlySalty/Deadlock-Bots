@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Scrim-DB-Foundation 2026072408..2416</title>
+  <title>Scrim-DB-Foundation 2026072408..2418</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -179,8 +179,8 @@
 <a class="skip-link" href="#inhalt">Direkt zum Inhalt</a>
 
 <header>
-  <h1>Scrim-DB-Foundation 2026072408..2416</h1>
-  <p class="lead">Versionierter technischer Foundation-Vertrag für die Datenbank-Migrationen <code>2026072408</code> bis <code>2026072416</code>. Die Dokumentation fasst die Schema-, Runtime-, Queue-, Result-, Steam-V1- und Privacy-Verträge zusammen.</p>
+  <h1>Scrim-DB-Foundation 2026072408..2418</h1>
+  <p class="lead">Versionierter technischer Foundation-Vertrag für die Datenbank-Migrationen <code>2026072408</code> bis <code>2026072418</code>. Die Dokumentation fasst die Schema-, Runtime-, Queue-, Result-, Steam-V1-, Match-Request-/Ersatz- und Privacy-Verträge zusammen.</p>
   <p class="muted">Das Anwenden dieser Migrationen allein aktiviert keine Consumer, keinen Writer-Cutover und keinen Identity-Cutover.</p>
 </header>
 
@@ -193,6 +193,7 @@
       <li><a href="#runtime">Runtime-Control, CAS, Historie und Audit</a></li>
       <li><a href="#queues">Queues, Idempotenz und terminale Regeln</a></li>
       <li><a href="#publication">Publikation, Ersatzspieler und KI-Ledger</a></li>
+      <li><a href="#request-workflow">Match-Request-/Ersatz-Workflow</a></li>
       <li><a href="#result-selection">Result-Selection-Vertrag</a></li>
       <li><a href="#steam-v1">Steam V1 Persistenz</a></li>
       <li><a href="#privacy">Privacy, DSAR und Erasure</a></li>
@@ -265,9 +266,19 @@
           <td><code>privacy_field_registry.sql</code></td>
           <td>AI-Decision-Ref-Existenzcheck und zentrales Privacy-Feldregister für die Foundation-Spalten.</td>
         </tr>
+        <tr>
+          <th scope="row">2026072417</th>
+          <td><code>scrim_lagebild_privacy_registry.sql</code></td>
+          <td>Privacy-Registry und Redaction-Guards fuer Lagebild-Snapshots, Evidences und Korrekturen.</td>
+        </tr>
+        <tr>
+          <th scope="row">2026072418</th>
+          <td><code>scrim_request_workflow.sql</code></td>
+          <td>Match-Request-Bezug fuer Ersatzbedarf, selected/uncertain-Status, Reminder-/Status-State-Erweiterung, Outbox-Linktabellen und Privacy-Klassifikation der neuen Domain-IDs.</td>
+        </tr>
       </tbody>
     </table>
-    <p>Alle neun Migrationen setzen <code>lock_timeout</code> auf <code>2s</code> und resetten ihn am Ende. Die Reihenfolge ist bindend, weil spätere Migrationen Funktionen, Tabellen oder Constraints aus früheren Migrationen referenzieren.</p>
+    <p>Alle elf Migrationen setzen <code>lock_timeout</code> auf <code>2s</code> und resetten ihn am Ende. Die Reihenfolge ist bindend, weil spätere Migrationen Funktionen, Tabellen oder Constraints aus früheren Migrationen referenzieren.</p>
   </section>
 
   <section id="runtime">
@@ -408,18 +419,18 @@
         </tr>
         <tr>
           <th scope="row"><code>scrim.replacement_needs</code></th>
-          <td>Status: <code>open</code>, <code>contacting</code>, <code>filled</code>, <code>cancelled</code>, <code>expired</code>. Optionaler Bezug auf Match, Team und Participant. <code>needed_role</code> und <code>reason</code> sind Machine-Codes, keine Freitexte.</td>
-          <td><code>closed_at</code> ist nur bei <code>filled</code>, <code>cancelled</code> oder <code>expired</code> gesetzt. Offene Suche ist über <code>(status, created_at, id)</code> indexiert. Menschliche Details gehören in kontrollierte Payloads, nicht in <code>reason</code>.</td>
+          <td>Status: <code>open</code>, <code>contacting</code>, <code>filled</code>, <code>cancelled</code>, <code>expired</code>. Optionaler Bezug auf Match, Match-Request, Slot, Team und Participant. <code>needed_role</code> und <code>reason</code> sind Machine-Codes, keine Freitexte.</td>
+          <td><code>match_request_id</code> und <code>slot_index</code> muessen gemeinsam gesetzt oder gemeinsam leer sein. Je <code>(match_request_id, team_id, participant_id, slot_index)</code> darf es nur einen Need geben, aber exakt nur unter dem Predicate <code>match_request_id IS NOT NULL AND team_id IS NOT NULL AND participant_id IS NOT NULL AND slot_index IS NOT NULL</code>. <code>closed_at</code> ist nur bei <code>filled</code>, <code>cancelled</code> oder <code>expired</code> gesetzt.</td>
         </tr>
         <tr>
           <th scope="row"><code>scrim.replacement_candidates</code></th>
-          <td>Status: <code>candidate</code>, <code>shortlisted</code>, <code>requested</code>, <code>accepted</code>, <code>declined</code>, <code>expired</code>, <code>rejected</code>. Identität über <code>participant_id</code> oder <code>discord_user_id</code>. <code>candidate_data</code> und <code>score_data</code> können personenbezogene JSON-Refs enthalten.</td>
-          <td>Mindestens eine Identität ist Pflicht. Je <code>need_id</code> ist <code>participant_id</code> beziehungsweise <code>discord_user_id</code> eindeutig. Zusätzlich existiert ein eindeutiges <code>(need_id, id)</code> für Request-FKs. JSON-Payloads werden automatisiert für Discord- und verlinkte Steam-Refs geschrubbt; DSAR gibt dafür Hashes aus.</td>
+          <td>Status: <code>candidate</code>, <code>shortlisted</code>, <code>requested</code>, <code>accepted</code>, <code>declined</code>, <code>expired</code>, <code>rejected</code>, <code>selected</code>. Identität über <code>participant_id</code> oder <code>discord_user_id</code>. <code>candidate_data</code> und <code>score_data</code> können personenbezogene JSON-Refs enthalten.</td>
+          <td>Mindestens eine Identität ist Pflicht. Je <code>need_id</code> ist <code>participant_id</code> beziehungsweise <code>discord_user_id</code> eindeutig. Es darf hoechstens ein <code>selected</code>-Candidate je Need existieren; mehrere <code>accepted</code>-Candidates bleiben erlaubt.</td>
         </tr>
         <tr>
           <th scope="row"><code>scrim.replacement_requests</code></th>
-          <td>Status: <code>pending</code>, <code>sent</code>, <code>accepted</code>, <code>declined</code>, <code>expired</code>, <code>cancelled</code>, <code>failed</code>. Identität über Candidate, Participant oder Discord-User. <code>request_payload</code> kann personenbezogene JSON-Refs enthalten.</td>
-          <td>Candidate-Referenz muss zur gleichen Need gehören. <code>responded_at</code> ist nur bei <code>accepted</code>, <code>declined</code> oder <code>expired</code> gesetzt. Remote-Message-ID ist je Remote-System eindeutig. Wenn nur der Requester gelöscht wird, bleibt die fremde Request-Zeile erhalten, aber Requester-Felder und Payload-Refs werden geschrubbt.</td>
+          <td>Status: <code>pending</code>, <code>sent</code>, <code>accepted</code>, <code>declined</code>, <code>expired</code>, <code>cancelled</code>, <code>failed</code>, <code>uncertain</code>, <code>selected</code>. Identität über Candidate, Participant oder Discord-User. <code>request_payload</code> kann personenbezogene JSON-Refs enthalten.</td>
+          <td>Candidate-Referenz muss zur gleichen Need gehören. <code>responded_at</code> ist bei <code>accepted</code>, <code>declined</code>, <code>expired</code> und <code>selected</code> Pflicht; bei <code>pending</code>, <code>sent</code>, <code>uncertain</code> und <code>failed</code> bleibt es leer. <code>cancelled</code> ist vor und nach einer Antwort legal, damit Coach-Selection konkurrierende Zusagen ohne Zeitbeweisverlust abbrechen kann. Remote-Message-ID ist je Remote-System eindeutig.</td>
         </tr>
         <tr>
           <th scope="row"><code>scrim.match_lineup_snapshots</code></th>
@@ -456,6 +467,44 @@
         </tr>
       </tbody>
     </table>
+  </section>
+
+  <section id="request-workflow">
+    <h2>Match-Request-/Ersatz-Workflow</h2>
+    <div class="card">
+      <h3>Reminder und Status-State</h3>
+      <p><code>scrim.status_publication_approvals.decision</code> akzeptiert <code>pending</code>, <code>approved</code>, <code>rejected</code>, <code>cancelled</code>, <code>published</code>, <code>failed</code> und <code>uncertain</code>. So kann der Turnier-Reconciler auch unklare oder fehlgeschlagene Publikationsversuche abbilden.</p>
+      <p><code>scrim.match_request_reminders.status</code> akzeptiert jetzt <code>approved</code>, <code>queued</code>, <code>posting</code>, <code>posted</code>, <code>failed</code>, <code>uncertain</code> und <code>cancelled</code>. <code>posted</code> verlangt <code>posted_at</code>; die bestehenden direkten Legacy-Pfade bleiben kompatibel.</p>
+      <p><code>scrim.match_requests.status_message_state</code> akzeptiert <code>pending</code>, <code>queued</code>, <code>posting</code>, <code>posted</code>, <code>post_failed</code>, <code>failed</code>, <code>uncertain</code> und <code>cancelled</code>. <code>posted</code> verlangt <code>status_message_posted_at</code>.</p>
+    </div>
+    <table>
+      <caption>Outbox-Linktabellen</caption>
+      <thead>
+        <tr>
+          <th scope="col">Tabelle</th>
+          <th scope="col">Fachbezug</th>
+          <th scope="col">Regel</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row"><code>scrim.match_request_reminder_effects</code></th>
+          <td><code>reminder_id</code> zu <code>scrim.match_request_reminders</code>, <code>outbox_effect_id</code> zu <code>scrim.outbox_effects</code>, optional <code>reconciled_at</code></td>
+          <td>Ein Reminder kann genau einen Outbox-Effekt referenzieren; ein Outbox-Effekt gehoert nur zu einem Reminder-Link. Unreconciled Zeilen sind per partiellem Index auf <code>outbox_effect_id</code> suchbar.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.status_publication_effects</code></th>
+          <td>Kanonisch <code>status_publication_approval_id</code> zu <code>scrim.status_publication_approvals</code>, <code>outbox_effect_id</code> zu <code>scrim.outbox_effects</code>, optional <code>reconciled_at</code></td>
+          <td>Eine Status-Freigabe kann mehrere Team-Posts erzeugen; eindeutig ist der einzelne <code>outbox_effect_id</code>. Unreconciled Zeilen sind per partiellem Index auf <code>outbox_effect_id</code> suchbar.</td>
+        </tr>
+        <tr>
+          <th scope="row"><code>scrim.replacement_request_effects</code></th>
+          <td><code>replacement_request_id</code> zu <code>scrim.replacement_requests</code>, <code>outbox_effect_id</code> zu <code>scrim.outbox_effects</code>, optional <code>reconciled_at</code></td>
+          <td>Eine Ersatzanfrage kann genau einen DM-Outbox-Effekt referenzieren; ein Outbox-Effekt gehoert nur zu einem Replacement-Link. Unreconciled Zeilen sind per partiellem Index auf <code>outbox_effect_id</code> suchbar.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Alle neuen IDs in diesen Tabellen sind als nicht-personenbezogene Domain-IDs klassifiziert und per FK oder CHECK strukturell gestuetzt. <code>reconciled_at</code> ist als nicht-personenbezogener <code>machine_timestamp</code> klassifiziert. Personenbezogene Felder werden nicht dupliziert; DM-Remote-Receipts verwenden DM-Channel- und Message-ID statt User-ID im Remote-Key.</p>
   </section>
 
   <section id="result-selection">
@@ -631,7 +680,7 @@
     <h3>Privacy-Feldregister</h3>
     <p><code>core.privacy_field_registry</code> ist Primärschlüssel <code>(schema_name, table_name, column_name)</code>. Die erlaubten Kategorien sind exakt:</p>
     <ul class="compact-list">
-      <li><code>data_category</code>: <code>user_id</code>, <code>display_name</code>, <code>json_payload</code>, <code>free_text</code>, <code>domain_id</code>, <code>machine_code</code>, <code>content_hash</code>, <code>pseudonym</code></li>
+      <li><code>data_category</code>: <code>user_id</code>, <code>display_name</code>, <code>json_payload</code>, <code>free_text</code>, <code>domain_id</code>, <code>machine_code</code>, <code>machine_timestamp</code>, <code>content_hash</code>, <code>pseudonym</code></li>
       <li><code>retention_action</code>: <code>retain_operational</code>, <code>retain_audit</code>, <code>expire_with_domain</code>, <code>manual_review</code></li>
       <li><code>erasure_action</code>: <code>redact_on_user_delete</code>, <code>delete_row_on_user_delete</code>, <code>retain_hash_only</code>, <code>retain_non_personal</code>, <code>manual_review</code></li>
     </ul>
@@ -651,7 +700,7 @@
       <tbody>
         <tr>
           <th scope="row">Additiver Rollout</th>
-          <td>Neue Tabellen, Views, Funktionen, Trigger, Constraints und Registry-Zeilen werden additiv angelegt. Bestehende Writer bleiben auf Legacy-Pfaden. <code>scrim.match_result_refs</code> wird erweitert, aber nicht durch neue nichtkonkurrente Live-Indizes belastet. Die dynamischen SQL-Helper <code>scrim.ensure_check_constraint</code> und <code>scrim.validate_constraints</code> sind nur migrationsintern und werden am Ende von <code>2026072416</code> wieder entfernt.</td>
+          <td>Neue Tabellen, Views, Funktionen, Trigger, Constraints und Registry-Zeilen werden additiv angelegt. Bestehende Writer bleiben auf Legacy-Pfaden. <code>scrim.match_result_refs</code> wird erweitert, aber nicht durch neue nichtkonkurrente Live-Indizes belastet. Die dynamischen SQL-Helper <code>scrim.ensure_check_constraint</code> und <code>scrim.validate_constraints</code> sind nur migrationsintern und werden am Ende der jeweiligen Foundation-Migration wieder entfernt.</td>
         </tr>
         <tr>
           <th scope="row">Preflight</th>
@@ -659,7 +708,7 @@
         </tr>
         <tr>
           <th scope="row">Verifikation</th>
-          <td>Die Foundation-Tests <code>scrim_db_foundation.rs</code> prüfen Tabellen/Spalten, Runtime-CAS und Serialisierung, Audit-Immutability, Idempotenz, terminale Guards, Result-Selection, Backfill aus 2407, Constraint-Validierung, Steam-V1-Generation/Leases, Privacy-Redaction und Registry-Abdeckung. <code>rust/scripts/central_fresh_schema.sh</code> bindet den Foundation-Testlauf in den frischen Schema-Drift-Check ein.</td>
+          <td>Die Foundation-Tests <code>scrim_db_foundation.rs</code> prüfen Tabellen/Spalten, Runtime-CAS und Serialisierung, Audit-Immutability, Idempotenz, terminale Guards, Result-Selection, Backfill aus 2407, Match-Request-/Ersatz-Constraints, Outbox-Linktabellen, Steam-V1-Generation/Leases, Privacy-Redaction und Registry-Abdeckung. <code>rust/scripts/central_fresh_schema.sh</code> bindet den Foundation-Testlauf in den frischen Schema-Drift-Check ein.</td>
         </tr>
         <tr>
           <th scope="row">Rollback</th>
@@ -676,7 +725,7 @@
       <li>Kein Identity-Cutover der bestehenden Scrim-Tabellen und keine neuen Identity-Defaults auf Legacy-ID-Spalten.</li>
       <li>Kein Steam-V1-Consumer, keine Aktivierung von Capability-Flags und kein automatischer Start von Steam-V1-Workflows.</li>
       <li>Keine neue HTTP-, Discord- oder Bot-API. Die Migrationen definieren Datenbankverträge.</li>
-      <li>Kein Versand von Announcements, Status-Publications oder Replacement-Requests; es werden nur Persistenz- und Approval-Objekte angelegt.</li>
+      <li>Kein Versand von Announcements oder lokalen Replacement-Requests durch die DB-Migration; Versand passiert nur durch explizite Outbox-Consumer.</li>
       <li>Keine harte Löschung von Result-Refs als Fachoperation. Result-Refs werden soft-voided, superseded oder canonical ausgewählt.</li>
       <li>Kein neuer nichtkonkurrenter Index auf der Live-Tabelle <code>scrim.match_result_refs</code>; diese Review ist ausdrücklich nach Cutover vertagt.</li>
       <li>Kein Ersetzen von <code>steam.steam_tasks</code>. Steam-V1 kann optional auf Legacy-Tasks referenzieren, aber der Legacy-Vertrag bleibt bestehen.</li>
@@ -685,7 +734,7 @@
 </main>
 
 <footer>
-  <p>Quellen: Datenbank-Migrationen <code>2026072408</code> bis <code>2026072416</code>, Foundation-Tests und Privacy-Vertrag. Keine Secrets, keine externen Ressourcen.</p>
+  <p>Quellen: Datenbank-Migrationen <code>2026072408</code> bis <code>2026072418</code>, Foundation-Tests und Privacy-Vertrag. Keine Secrets, keine externen Ressourcen.</p>
 </footer>
 </body>
 </html>

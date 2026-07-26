@@ -7,6 +7,8 @@ use sqlx::{Postgres, Transaction};
 #[derive(Debug, thiserror::Error)]
 pub enum DashboardDbError {
     #[error(transparent)]
+    RuntimeGate(#[from] dl_central_db::scrim_runtime::ScrimRuntimeGateError),
+    #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     Central(#[from] dl_central_db::CentralDbError),

@@ -3,6 +3,7 @@ pub mod kv;
 mod locks;
 pub mod pool;
 mod proactive_dm;
+pub mod scrim_runtime;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 

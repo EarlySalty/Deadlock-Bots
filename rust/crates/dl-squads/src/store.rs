@@ -1,10 +1,15 @@
 use crate::model::{Participant, SeedPlayer};
 use chrono::{DateTime, Utc};
+use dl_central_db::scrim_runtime::{
+    require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
+};
 use sqlx::PgPool;
 use std::num::TryFromIntError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SquadErr {
+    #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error("Seed-Daten konnten nicht serialisiert werden: {0}")]
@@ -61,9 +66,15 @@ pub async fn upsert_participant_by_discord(
     discord_id: i64,
     display_name: &str,
 ) -> Result<i64, SquadErr> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "dl-squads::store::upsert_participant_by_discord",
+        "scrim.participants upsert",
+    )
+    .await?;
     let display_name = normalize_participant_name(display_name)?;
     let now = now_utc();
-    let mut tx = pool.begin().await?;
     lock_scrim_key(&mut tx, PARTICIPANTS_LOCK).await?;
 
     if let Some(row) = sqlx::query!(
@@ -184,12 +195,18 @@ pub async fn upsert_participant_by_name(
     pool: &PgPool,
     player: &SeedPlayer,
 ) -> Result<i64, SquadErr> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "dl-squads::store::upsert_participant_by_name",
+        "scrim.participants upsert",
+    )
+    .await?;
     let name = normalize_participant_name(&player.name)?;
     let rank = player.rank.clone();
     let roles = player.roles.clone();
     let availability = availability_json(player)?;
     let now = now_utc();
-    let mut tx = pool.begin().await?;
     lock_scrim_key(&mut tx, PARTICIPANTS_LOCK).await?;
 
     if let Some(row) = sqlx::query!(
@@ -309,6 +326,13 @@ pub async fn add_team_member(
     is_captain: bool,
     is_bench: bool,
 ) -> Result<(), SquadErr> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "dl-squads::store::add_team_member",
+        "scrim.team_members upsert und scrim.participants status update",
+    )
+    .await?;
     let role = role.map(str::to_string);
     let status = if is_bench {
         STATUS_BENCH
@@ -319,7 +343,6 @@ pub async fn add_team_member(
     let team_id_i32 = to_i32_id("team_id", team_id)?;
     let participant_id_i32 = to_i32_id("participant_id", participant_id)?;
     let now = now_utc();
-    let mut tx = pool.begin().await?;
 
     ensure_team_exists(&mut tx, team_id_i32, team_id).await?;
     ensure_participant_exists(&mut tx, participant_id_i32, participant_id).await?;
@@ -479,6 +502,13 @@ pub(crate) async fn set_participant_status(
     participant_id: i64,
     status: &str,
 ) -> Result<(), SquadErr> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "dl-squads::store::set_participant_status",
+        "scrim.participants status update",
+    )
+    .await?;
     let participant_id = to_i32_id("participant_id", participant_id)?;
     let now = now_utc();
     sqlx::query!(
@@ -492,8 +522,9 @@ pub(crate) async fn set_participant_status(
         now,
         participant_id
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -633,4 +664,49 @@ fn availability_json(player: &SeedPlayer) -> Result<Option<String>, serde_json::
 
 fn now_utc() -> DateTime<Utc> {
     Utc::now()
+}
+
+#[cfg(test)]
+mod runtime_gate_tests {
+    use super::*;
+    use dl_central_db::testing::{
+        set_scrim_runtime_inconsistent, set_scrim_runtime_missing, set_scrim_runtime_turniere,
+        test_pool,
+    };
+
+    async fn participant_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT count(*) FROM scrim.participants")
+            .fetch_one(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn roster_store_schreibt_nur_im_legacy_runtime() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let legacy = test_pool().await?;
+        upsert_participant_by_discord(legacy.pool(), 1, "Legacy").await?;
+        assert_eq!(participant_count(legacy.pool()).await?, 1);
+
+        let turniere = test_pool().await?;
+        set_scrim_runtime_turniere(turniere.pool()).await?;
+        upsert_participant_by_discord(turniere.pool(), 2, "Turniere")
+            .await
+            .expect_err("turniere/turniere muss den Roster-Write ablehnen");
+        assert_eq!(participant_count(turniere.pool()).await?, 0);
+
+        let inconsistent = test_pool().await?;
+        set_scrim_runtime_inconsistent(inconsistent.pool()).await?;
+        upsert_participant_by_discord(inconsistent.pool(), 3, "Widerspruch")
+            .await
+            .expect_err("turniere/dl-bots muss den Roster-Write ablehnen");
+        assert_eq!(participant_count(inconsistent.pool()).await?, 0);
+
+        let missing = test_pool().await?;
+        set_scrim_runtime_missing(missing.pool()).await?;
+        upsert_participant_by_discord(missing.pool(), 4, "Fehlend")
+            .await
+            .expect_err("fehlende Runtime-Zeile muss den Roster-Write ablehnen");
+        assert_eq!(participant_count(missing.pool()).await?, 0);
+        Ok(())
+    }
 }

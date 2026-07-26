@@ -725,6 +725,65 @@ async fn steam_rank_history_covering_index_count(pool: &PgPool) -> i64 {
     .expect("steam_rank_history covering index count")
 }
 
+async fn scrim_unreconciled_outbox_index_count(pool: &PgPool, table: &str, index: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT array_agg(a.attname::text ORDER BY k.ord) AS columns,
+                       pg_get_expr(i.indpred, i.indrelid) AS predicate
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN pg_class idx ON idx.oid = i.indexrelid
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'scrim'
+                   AND t.relname = $1
+                   AND idx.relname = $2
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid, i.indpred, i.indrelid
+           ) indexes
+          WHERE columns = ARRAY['outbox_effect_id']::text[]
+            AND predicate = '(reconciled_at IS NULL)'",
+    )
+    .bind(table)
+    .bind(index)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|err| panic!("scrim unreconciled outbox index count for {table}: {err}"))
+}
+
+async fn scrim_single_column_fk_count(
+    pool: &PgPool,
+    table: &str,
+    column: &str,
+    referenced_table: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM pg_constraint con
+           JOIN pg_class source_table ON source_table.oid = con.conrelid
+           JOIN pg_namespace source_ns ON source_ns.oid = source_table.relnamespace
+           JOIN pg_class target_table ON target_table.oid = con.confrelid
+           JOIN pg_attribute source_column ON source_column.attrelid = con.conrelid
+                                        AND source_column.attnum = con.conkey[1]
+          WHERE source_ns.nspname = 'scrim'
+            AND source_table.relname = $1
+            AND source_column.attname = $2
+            AND target_table.relname = $3
+            AND con.contype = 'f'
+            AND array_length(con.conkey, 1) = 1",
+    )
+    .bind(table)
+    .bind(column)
+    .bind(referenced_table)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|err| panic!("scrim FK count for {table}.{column}: {err}"))
+}
+
 async fn trigger_names(pool: &PgPool, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT tg.tgname
@@ -1130,6 +1189,127 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(timescaledb_count, 1);
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "scrim", "match_request_reminder_effects").await,
+        vec![
+            "reminder_id",
+            "outbox_effect_id",
+            "created_at",
+            "reconciled_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "scrim", "status_publication_effects").await,
+        vec![
+            "status_publication_approval_id",
+            "outbox_effect_id",
+            "created_at",
+            "reconciled_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "scrim", "replacement_request_effects").await,
+        vec![
+            "replacement_request_id",
+            "outbox_effect_id",
+            "created_at",
+            "reconciled_at"
+        ]
+    );
+    for (table, index) in [
+        (
+            "match_request_reminder_effects",
+            "match_request_reminder_effects_unreconciled_outbox_idx",
+        ),
+        (
+            "status_publication_effects",
+            "status_publication_effects_unreconciled_outbox_idx",
+        ),
+        (
+            "replacement_request_effects",
+            "replacement_request_effects_unreconciled_outbox_idx",
+        ),
+    ] {
+        assert_eq!(
+            scrim_unreconciled_outbox_index_count(&pool, table, index).await,
+            1,
+            "{table} has exactly one unreconciled outbox-effect index"
+        );
+    }
+    for (table, column, referenced_table) in [
+        (
+            "match_request_reminder_effects",
+            "reminder_id",
+            "match_request_reminders",
+        ),
+        (
+            "match_request_reminder_effects",
+            "outbox_effect_id",
+            "outbox_effects",
+        ),
+        (
+            "status_publication_effects",
+            "status_publication_approval_id",
+            "status_publication_approvals",
+        ),
+        (
+            "status_publication_effects",
+            "outbox_effect_id",
+            "outbox_effects",
+        ),
+        (
+            "replacement_request_effects",
+            "replacement_request_id",
+            "replacement_requests",
+        ),
+        (
+            "replacement_request_effects",
+            "outbox_effect_id",
+            "outbox_effects",
+        ),
+    ] {
+        assert_eq!(
+            scrim_single_column_fk_count(&pool, table, column, referenced_table).await,
+            1,
+            "{table}.{column} keeps FK to {referenced_table}"
+        );
+    }
+    for table in [
+        "match_request_reminder_effects",
+        "status_publication_effects",
+        "replacement_request_effects",
+    ] {
+        assert_column_in_schema(
+            &pool,
+            "scrim",
+            table,
+            "reconciled_at",
+            "timestamp with time zone",
+            "timestamptz",
+            "YES",
+            None,
+        )
+        .await;
+    }
+    let reconciliation_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'scrim'
+            AND column_name = 'reconciled_at'
+            AND table_name IN (
+                'match_request_reminder_effects',
+                'status_publication_effects',
+                'replacement_request_effects'
+            )
+            AND data_category = 'machine_timestamp'
+            AND retention_action = 'retain_operational'
+            AND erasure_action = 'retain_non_personal'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("reconciliation timestamp privacy registry rows");
+    assert_eq!(reconciliation_privacy_rows, 3);
 
     assert_eq!(
         table_columns_in_schema(&pool, "brain", "knowledge_events").await,

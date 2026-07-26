@@ -8,6 +8,9 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use dl_ai::ChatProviderError;
+use dl_central_db::scrim_runtime::{
+    require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
+};
 use dl_squads::lagebild::{
     revise_lagebild, LagebildError, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
 };
@@ -27,6 +30,8 @@ const STATE_RESULT_REQUESTED: &str = "result_requested";
 const MATCH_REQUEST_DEFAULT_DEADLINE_HOURS: i64 = 48;
 const MATCH_REQUEST_MIN_SLOTS: usize = 2;
 const MATCH_REQUEST_MAX_SLOTS: usize = 5;
+pub(crate) const SCRIM_RUNTIME_DENIED_MESSAGE: &str =
+    "Die Scrim-Verwaltung wird gerade umgestellt. Änderungen am Roster sind über dieses Dashboard vorübergehend nicht möglich.";
 const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
 const MATCH_REQUEST_REMINDER_DEFAULT_TEMPLATE: &str = "antwort_fehlt";
 const MATCH_REQUEST_REMINDER_TEMPLATES: [&str; 3] =
@@ -43,6 +48,99 @@ pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap
         Err(err) => {
             tracing::error!(%err, "scrims_overview fehlgeschlagen");
             err_text(500, "Scrims unavailable")
+        }
+    }
+}
+
+pub async fn scrim_runtime_control(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    match load_runtime_control(app.pool()).await {
+        Ok(data) => ok_json(data),
+        Err(err) => {
+            tracing::error!(%err, "scrim_runtime_control fehlgeschlagen");
+            err_text(
+                500,
+                "Die aktuelle Zuständigkeit konnte nicht gelesen werden.",
+            )
+        }
+    }
+}
+
+pub async fn scrim_runtime_control_transition(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
+    let input = match serde_json::from_slice::<RuntimeControlTransitionInput>(&body) {
+        Ok(input) => input,
+        Err(_) => {
+            return err_text(
+                400,
+                "Die Anfrage war unvollständig. Modus, schreibender Dienst und erwarteter Stand müssen gesetzt sein.",
+            )
+        }
+    };
+    let transition = sqlx::query_as::<_, (bool, Option<i64>)>(
+        r#"
+        SELECT applied, current_epoch
+          FROM scrim.transition_runtime_control(
+              $1, $2, $3, $4, $5, 'dashboard:runtime-control',
+              'dashboard:runtime-control', '{}'::jsonb
+          )
+        "#,
+    )
+    .bind(input.expected_epoch)
+    .bind(&input.mode)
+    .bind(&input.operational_writer)
+    .bind(session.user_id.to_string())
+    .bind(&session.display_name)
+    .fetch_one(app.pool())
+    .await;
+    match transition {
+        Ok((false, _)) => {
+            return err_text(
+                409,
+                "Die Zuständigkeit wurde zwischenzeitlich geändert. Bitte lade die Seite neu und schalte dann erneut um.",
+            )
+        }
+        Ok((true, _)) => {}
+        Err(err)
+            if err
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref()
+                == Some("23514") =>
+        {
+            return err_text(
+                400,
+                "Dieser Wechsel ist nicht erlaubt. Prüfe die Kombination aus Modus und Dienst; von turniere geht es nur über draining zurück auf legacy.",
+            );
+        }
+        Err(err) => {
+            tracing::error!(%err, "scrim_runtime_control_transition fehlgeschlagen");
+            return err_text(
+                500,
+                "Das Umschalten ist fehlgeschlagen. Die Zuständigkeit wurde nicht geändert.",
+            );
+        }
+    }
+    match load_runtime_control(app.pool()).await {
+        Ok(data) => ok_json(data),
+        Err(err) => {
+            tracing::error!(%err, "scrim_runtime_control nach Umschaltung nicht lesbar");
+            err_text(
+                500,
+                "Die Zuständigkeit wurde umgeschaltet, der neue Zustand konnte aber nicht gelesen werden. Bitte lade die Seite neu.",
+            )
         }
     }
 }
@@ -91,6 +189,7 @@ pub async fn scrims_create_match(
             );
             ok_json(json!({ "match": scrim_match }))
         }
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, "Scrim-Match-Anlage fehlgeschlagen");
             err_text(500, "Create match failed")
@@ -139,6 +238,7 @@ pub async fn scrims_create_slot_preset(
             );
             ok_json(json!({ "preset": preset }))
         }
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, "Scrim-Slot-Preset konnte nicht angelegt werden");
             err_text(500, "Create scrim slot preset failed")
@@ -177,6 +277,7 @@ pub async fn scrims_update_slot_preset(
             ok_json(json!({ "preset": preset }))
         }
         Ok(None) => err_text(404, "Scrim slot preset not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, preset_id, "Scrim-Slot-Preset konnte nicht geändert werden");
             err_text(500, "Update scrim slot preset failed")
@@ -210,6 +311,7 @@ pub async fn scrims_delete_slot_preset(
             ok_json(json!({ "deleted": true, "id": preset_id }))
         }
         Ok(false) => err_text(404, "Scrim slot preset not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, preset_id, "Scrim-Slot-Preset konnte nicht gelöscht werden");
             err_text(500, "Delete scrim slot preset failed")
@@ -255,6 +357,7 @@ pub async fn scrims_create_match_request_batch(
             ok_json(json!({ "batch": batch }))
         }
         Err(MatchRequestCreateError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestCreateError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(MatchRequestCreateError::Db(err)) => {
             tracing::error!(%err, "Scrim-Match-Abfrage-Anlage fehlgeschlagen");
             err_text(500, "Create match request failed")
@@ -331,6 +434,9 @@ pub async fn scrims_release_match_request(
         Err(MatchRequestReleaseError::BadRequest(message)) => err_text(400, message),
         Err(MatchRequestReleaseError::Conflict(message)) => err_text(409, message),
         Err(MatchRequestReleaseError::NotFound) => err_text(404, "Match request not found"),
+        Err(MatchRequestReleaseError::RuntimeGate(_)) => {
+            err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE)
+        }
         Err(MatchRequestReleaseError::Dashboard(err)) => {
             tracing::error!(%err, request_id, "Scrim-Match-Abfrage-Freigabe-Auswertung fehlgeschlagen");
             err_text(500, "Release match request failed")
@@ -401,6 +507,9 @@ pub async fn scrims_create_match_request_reminder(
         }
         Ok(None) => err_text(404, "Match request team not found"),
         Err(MatchRequestReminderCreateError::BadRequest(message)) => err_text(400, message),
+        Err(MatchRequestReminderCreateError::RuntimeGate(_)) => {
+            err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE)
+        }
         Err(MatchRequestReminderCreateError::Db(err)) => {
             tracing::error!(%err, request_id, team_id, "Scrim-Reminder-Freigabe fehlgeschlagen");
             err_text(500, "Create reminder failed")
@@ -474,6 +583,7 @@ pub async fn scrims_set_lobby_code(
                 current.unwrap_or_default()
             ),
         ),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, match_id, "Scrim-Lobbycode-Speicherung fehlgeschlagen");
             err_text(500, "Save lobby code failed")
@@ -528,6 +638,7 @@ pub async fn scrims_add_match_id(
         }
         Ok(MatchResultRefUpdate::Duplicate) => err_text(409, "Match ID already exists"),
         Ok(MatchResultRefUpdate::NotFound) => err_text(404, "Match not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, match_id, steam_match_id, "Scrim-Match-ID-Speicherung fehlgeschlagen");
             err_text(500, "Save match id failed")
@@ -579,6 +690,7 @@ pub async fn scrims_update_participant_notes(
             ok_json(json!({ "participant_id": participant_id, "notes": notes }))
         }
         Ok(false) => err_text(404, "Participant not found"),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, participant_id, "Scrim-Participant-Notiz fehlgeschlagen");
             err_text(500, "Save notes failed")
@@ -916,6 +1028,7 @@ async fn request_state(
                 current.unwrap_or_default()
             ),
         ),
+        Err(DashboardDbError::RuntimeGate(_)) => err_text(503, SCRIM_RUNTIME_DENIED_MESSAGE),
         Err(err) => {
             tracing::error!(%err, match_id, "Scrim-Lobby-State-Request fehlgeschlagen");
             err_text(500, "Lobby state update failed")
@@ -928,6 +1041,13 @@ struct CreateMatchInput {
     team_b_id: i32,
     scheduled_at: Option<DateTime<Utc>>,
     coach_spectator_discord_id: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct RuntimeControlTransitionInput {
+    expected_epoch: i64,
+    mode: String,
+    operational_writer: String,
 }
 
 struct MatchRequestBatchInput {
@@ -993,6 +1113,8 @@ enum MatchRequestCreateError {
     #[error("{0}")]
     BadRequest(&'static str),
     #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
+    #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
@@ -1005,6 +1127,8 @@ enum MatchRequestReleaseError {
     #[error("not found")]
     NotFound,
     #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
+    #[error(transparent)]
     Dashboard(#[from] DashboardDbError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -1014,6 +1138,8 @@ enum MatchRequestReleaseError {
 enum MatchRequestReminderCreateError {
     #[error("{0}")]
     BadRequest(&'static str),
+    #[error(transparent)]
+    RuntimeGate(#[from] ScrimRuntimeGateError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -1357,6 +1483,21 @@ fn parse_match_result_id(payload: &Value) -> Result<i64, Response> {
     Ok(value)
 }
 
+async fn load_runtime_control(pool: &PgPool) -> DashboardDbResult<Value> {
+    let row = sqlx::query(
+        "SELECT mode, operational_writer, epoch, updated_at
+           FROM scrim.runtime_control",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(json!({
+        "mode": row.try_get::<String, _>("mode")?,
+        "operational_writer": row.try_get::<String, _>("operational_writer")?,
+        "epoch": row.try_get::<i64, _>("epoch")?,
+        "updated_at": utc_to_json_unix(Some(row.try_get::<DateTime<Utc>, _>("updated_at")?)),
+    }))
+}
+
 async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
     let participants = load_participants(pool).await?;
     let teams = load_teams(pool).await?;
@@ -1407,6 +1548,8 @@ async fn create_slot_preset(
     created_by_user_id: &str,
     input: SlotPresetInput,
 ) -> DashboardDbResult<Value> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(&mut tx, "/api/scrims/slot-presets", "POST").await?;
     let row = sqlx::query(
         r#"
         INSERT INTO scrim.slot_presets(name, slots, created_by_user_id)
@@ -1417,8 +1560,9 @@ async fn create_slot_preset(
     .bind(input.name)
     .bind(Value::Array(input.slots))
     .bind(created_by_user_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     slot_preset_json(row)
 }
 
@@ -1427,7 +1571,14 @@ async fn update_slot_preset(
     preset_id: i64,
     input: SlotPresetInput,
 ) -> DashboardDbResult<Option<Value>> {
-    sqlx::query(
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/slot-presets/{preset_id}",
+        "PUT",
+    )
+    .await?;
+    let row = sqlx::query(
         r#"
         UPDATE scrim.slot_presets
            SET name = $2,
@@ -1440,19 +1591,28 @@ async fn update_slot_preset(
     .bind(preset_id)
     .bind(input.name)
     .bind(Value::Array(input.slots))
-    .fetch_optional(pool)
-    .await?
-    .map(slot_preset_json)
-    .transpose()
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    row.map(slot_preset_json).transpose()
 }
 
 async fn delete_slot_preset(pool: &PgPool, preset_id: i64) -> DashboardDbResult<bool> {
-    Ok(sqlx::query("DELETE FROM scrim.slot_presets WHERE id = $1")
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/slot-presets/{preset_id}",
+        "DELETE",
+    )
+    .await?;
+    let deleted = sqlx::query("DELETE FROM scrim.slot_presets WHERE id = $1")
         .bind(preset_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
-        > 0)
+        > 0;
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 async fn load_lagebilder(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
@@ -2254,6 +2414,7 @@ fn correction_context_from_detail(detail: &Value) -> Vec<String> {
 
 async fn create_match_record(pool: &PgPool, input: CreateMatchInput) -> DashboardDbResult<Value> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(&mut tx, "/api/scrims/matches", "POST").await?;
     advisory_lock(&mut tx, MATCHES_LOCK).await?;
     let id = sqlx::query_scalar::<_, i32>(
         r#"
@@ -2300,6 +2461,7 @@ async fn create_match_request_batch_record(
         .flatten()
         .collect::<Vec<_>>();
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(&mut tx, "/api/scrims/match-requests", "POST").await?;
     advisory_lock(&mut tx, MATCHES_LOCK).await?;
 
     let existing_team_count: i64 =
@@ -2421,9 +2583,16 @@ async fn release_match_request_slot(
     released_by_display_name: &str,
 ) -> Result<Value, MatchRequestReleaseError> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/match-requests/{request_id}/release",
+        "POST",
+    )
+    .await?;
     let Some(row) = sqlx::query(
         r#"
-        SELECT mr.batch_id, mr.slot_options, mr.status, b.deadline_at
+        SELECT mr.batch_id, mr.slot_options, mr.status, mr.released_at,
+               mr.released_slot_index, b.deadline_at
           FROM scrim.match_requests mr
           JOIN scrim.match_request_batches b ON b.id = mr.batch_id
          WHERE mr.id = $1
@@ -2437,14 +2606,29 @@ async fn release_match_request_slot(
         return Err(MatchRequestReleaseError::NotFound);
     };
 
+    let batch_id = row.try_get::<i32, _>("batch_id")?;
     let status = row.try_get::<String, _>("status")?;
+    if status == "closed"
+        && row
+            .try_get::<Option<DateTime<Utc>>, _>("released_at")?
+            .is_some()
+        && row
+            .try_get::<Option<i32>, _>("released_slot_index")?
+            .is_some()
+    {
+        tx.rollback().await?;
+        let summary = load_match_request_summary(pool, batch_id)
+            .await?
+            .ok_or(MatchRequestReleaseError::NotFound)?;
+        return match_request_from_summary(&summary, request_id)
+            .ok_or(MatchRequestReleaseError::NotFound);
+    }
     if !matches!(status.as_str(), "open" | "post_failed") {
         return Err(MatchRequestReleaseError::Conflict(
             "Match request is not open",
         ));
     }
 
-    let batch_id = row.try_get::<i32, _>("batch_id")?;
     let deadline_at = row.try_get::<DateTime<Utc>, _>("deadline_at")?;
     if deadline_at > Utc::now() {
         return Err(MatchRequestReleaseError::Conflict(
@@ -2511,6 +2695,33 @@ async fn release_match_request_slot(
     .bind(released_by_user_id)
     .bind(released_by_display_name)
     .bind(&override_reason)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.status_publication_approvals(
+            target_kind, target_id, status_kind, payload, payload_hash,
+            decision, decided_by_user_id, decided_by_display_name, decided_at
+        )
+        VALUES(
+            'match_request', $1::text, 'match_status', '{}'::jsonb,
+            scrim.status_publication_effect_hash(
+                'match_request', $1::text, 'match_status', '{}'::jsonb
+            ),
+            'approved', $2, $3, now()
+        )
+        ON CONFLICT (target_kind, target_id, status_kind)
+            WHERE decision IN ('pending', 'approved')
+        DO UPDATE
+           SET decision = 'approved',
+               decided_by_user_id = EXCLUDED.decided_by_user_id,
+               decided_by_display_name = EXCLUDED.decided_by_display_name,
+               decided_at = EXCLUDED.decided_at
+        "#,
+    )
+    .bind(request_id)
+    .bind(released_by_user_id)
+    .bind(released_by_display_name)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -2663,6 +2874,13 @@ async fn create_match_request_reminder_record(
     let missing_count = i32::try_from(target_participant_ids.len())
         .map_err(|_| MatchRequestReminderCreateError::BadRequest("Too many missing responses"))?;
 
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/match-requests/{request_id}/reminders",
+        "POST",
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO scrim.match_request_reminders(
@@ -2691,8 +2909,9 @@ async fn create_match_request_reminder_record(
     .bind(approved_by_display_name)
     .bind(channel_id)
     .bind(source_message_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(Some(json!({
         "id": row.try_get::<i64, _>("id")?,
@@ -3252,6 +3471,12 @@ async fn set_lobby_code(
     source_display_name: &str,
 ) -> DashboardDbResult<LobbyCodeUpdate> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/matches/{match_id}/lobby-code",
+        "POST",
+    )
+    .await?;
     let current = sqlx::query(
         r#"
         SELECT lobby_state, join_code
@@ -3324,6 +3549,12 @@ async fn add_match_result_ref(
     source_display_name: &str,
 ) -> DashboardDbResult<MatchResultRefUpdate> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/matches/{match_id}/match-ids",
+        "POST",
+    )
+    .await?;
     let current = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT id
@@ -3387,6 +3618,12 @@ async fn set_lobby_request(
     requested_state: &'static str,
 ) -> DashboardDbResult<LobbyRequest> {
     let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/matches/{match_id}/result",
+        "POST",
+    )
+    .await?;
     let current = sqlx::query(
         r#"
         SELECT lobby_state
@@ -3451,6 +3688,13 @@ async fn update_participant_notes(
     participant_id: i32,
     notes: Option<String>,
 ) -> DashboardDbResult<bool> {
+    let mut tx = pool.begin().await?;
+    require_local_scrim_write_in_transaction(
+        &mut tx,
+        "/api/scrims/participants/{participant_id}/notes",
+        "POST",
+    )
+    .await?;
     let changed = sqlx::query(
         r#"
         UPDATE scrim.participants
@@ -3461,9 +3705,10 @@ async fn update_participant_notes(
     )
     .bind(participant_id)
     .bind(notes)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    tx.commit().await?;
     Ok(changed > 0)
 }
 
@@ -3508,6 +3753,13 @@ mod tests {
     async fn app_with_session(
     ) -> Result<(dl_central_db::TestDb, axum::Router, String, String), Box<dyn std::error::Error>>
     {
+        app_with_access_level(AccessLevel::Full).await
+    }
+
+    async fn app_with_access_level(
+        access_level: AccessLevel,
+    ) -> Result<(dl_central_db::TestDb, axum::Router, String, String), Box<dyn std::error::Error>>
+    {
         let db = dl_central_db::testing::test_pool().await?;
         let session_id = "scrim-test-session".to_string();
         let csrf = "scrim-test-csrf".to_string();
@@ -3521,7 +3773,7 @@ mod tests {
                 "username": "coach",
                 "display_name": "Coach",
                 "reason": "test",
-                "access_level": AccessLevel::Full.as_str(),
+                "access_level": access_level.as_str(),
                 "csrf_token": csrf,
                 "created_at": now,
                 "last_seen_at": now,
@@ -3776,7 +4028,7 @@ mod tests {
         Ok(())
     }
 
-    async fn insert_lagebild_seed(pool: &PgPool) -> Result<(), sqlx::Error> {
+    async fn insert_lagebild_seed(pool: &PgPool, evidence_url: &str) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             INSERT INTO scrim.lagebild_snapshots(
@@ -3800,13 +4052,321 @@ mod tests {
             )
             VALUES(
                 7001, 'match_request', 'Terminabfrage',
-                'https://discord.com/channels/1289721245281292288/100/9001',
+                $1,
                 now(), '{"request_id":91}'::jsonb
             )
             "#,
         )
+        .bind(evidence_url)
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    async fn insert_participant_for_notes(pool: &PgPool, id: i32) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO scrim.participants(
+                 id, display_name, rank_source, status, source, created_at, updated_at
+             )
+             VALUES($1, 'Notes Test', 'manual', 'new', 'test', now(), now())",
+        )
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn participant_notes(pool: &PgPool, id: i32) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT notes FROM scrim.participants WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_liefert_aktuellen_zustand(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        // FLOOR, weil EXTRACT(EPOCH ...)::bigint rundet, die Route den Zeitstempel aber
+        // abschneidet. Ohne FLOOR schlaegt der Vergleich bei Sekundenbruchteil >= 0,5 fehl.
+        let expected_updated_at: i64 = sqlx::query_scalar(
+            "SELECT FLOOR(EXTRACT(EPOCH FROM updated_at))::bigint FROM scrim.runtime_control",
+        )
+        .fetch_one(db.pool())
+        .await?;
+
+        let response = app
+            .oneshot(auth_get("/api/scrim-runtime-control", &session_id)?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["mode"], "legacy");
+        assert_eq!(data["operational_writer"], "dl-bots");
+        assert_eq!(data["epoch"], 0);
+        assert_eq!(
+            data["updated_at"].as_i64().ok_or("missing updated_at")?,
+            expected_updated_at
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_schaltet_auf_draining_und_protokolliert(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": 0,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        assert_eq!(data["mode"], "draining");
+        assert_eq!(data["operational_writer"], "turniere");
+        assert_eq!(data["epoch"], 1);
+        let history: (String, String, i64, String) = sqlx::query_as(
+            "SELECT mode, operational_writer, epoch, actor_source
+               FROM scrim.runtime_control_history
+              ORDER BY epoch DESC
+              LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(
+            history,
+            (
+                "draining".to_string(),
+                "turniere".to_string(),
+                1,
+                "user".to_string()
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_erlaubt_rueckweg_aus_turniere(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+        let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM scrim.runtime_control")
+            .fetch_one(db.pool())
+            .await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": epoch,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": epoch + 1,
+                    "mode": "legacy",
+                    "operational_writer": "dl-bots",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let current: (String, String, i64) =
+            sqlx::query_as("SELECT mode, operational_writer, epoch FROM scrim.runtime_control")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(
+            current,
+            ("legacy".to_string(), "dl-bots".to_string(), epoch + 2)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_lehnt_falschen_epoch_ohne_aenderung_ab(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": 7,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let current: (String, String, i64) =
+            sqlx::query_as("SELECT mode, operational_writer, epoch FROM scrim.runtime_control")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(current, ("legacy".to_string(), "dl-bots".to_string(), 0));
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.runtime_control_history")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(history_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_control_route_lehnt_nutzer_ohne_adminrecht_ohne_aenderung_ab(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_access_level(AccessLevel::TurnierOnly).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrim-runtime-control",
+                &session_id,
+                &csrf,
+                json!({
+                    "expected_epoch": 0,
+                    "mode": "draining",
+                    "operational_writer": "turniere",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let current: (String, String, i64) =
+            sqlx::query_as("SELECT mode, operational_writer, epoch FROM scrim.runtime_control")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(current, ("legacy".to_string(), "dl-bots".to_string(), 0));
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.runtime_control_history")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(history_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dashboard_roster_schreibt_nur_im_legacy_runtime(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (legacy_db, legacy_app, session_id, csrf) = app_with_session().await?;
+        insert_participant_for_notes(legacy_db.pool(), 1).await?;
+        let response = legacy_app
+            .oneshot(auth_post(
+                "/api/scrims/participants/1/notes",
+                &session_id,
+                &csrf,
+                json!({ "notes": "legacy" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            participant_notes(legacy_db.pool(), 1).await?.as_deref(),
+            Some("legacy")
+        );
+
+        let (turniere_db, turniere_app, session_id, csrf) = app_with_session().await?;
+        insert_participant_for_notes(turniere_db.pool(), 2).await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(turniere_db.pool()).await?;
+        let response = turniere_app
+            .oneshot(auth_post(
+                "/api/scrims/participants/2/notes",
+                &session_id,
+                &csrf,
+                json!({ "notes": "turniere" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        assert_eq!(body.as_ref(), SCRIM_RUNTIME_DENIED_MESSAGE.as_bytes());
+        assert_eq!(participant_notes(turniere_db.pool(), 2).await?, None);
+
+        let (inconsistent_db, inconsistent_app, session_id, csrf) = app_with_session().await?;
+        insert_participant_for_notes(inconsistent_db.pool(), 3).await?;
+        dl_central_db::testing::set_scrim_runtime_inconsistent(inconsistent_db.pool()).await?;
+        let response = inconsistent_app
+            .oneshot(auth_post(
+                "/api/scrims/participants/3/notes",
+                &session_id,
+                &csrf,
+                json!({ "notes": "widerspruch" }),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(participant_notes(inconsistent_db.pool(), 3).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrim_mutation_gate_blockiert_turniere_und_fehlende_runtime_control(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for missing_runtime_control in [false, true] {
+            let (db, app, session_id, csrf) = app_with_session().await?;
+            insert_team(db.pool(), 1, "A").await?;
+            insert_team(db.pool(), 2, "B").await?;
+            if missing_runtime_control {
+                dl_central_db::testing::set_scrim_runtime_missing(db.pool()).await?;
+            } else {
+                dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+            }
+
+            let response = app
+                .oneshot(auth_post(
+                    "/api/scrims/matches",
+                    &session_id,
+                    &csrf,
+                    json!({
+                        "team_a_id": 1,
+                        "team_b_id": 2,
+                        "coach_spectator_discord_id": "123456789",
+                        "scheduled_at": "2026-07-06T19:00:00Z",
+                    }),
+                )?)
+                .await?;
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+            assert_eq!(body.as_ref(), SCRIM_RUNTIME_DENIED_MESSAGE.as_bytes());
+            let match_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrim.matches")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(match_count, 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrim_get_bleibt_im_turniere_runtime_erlaubt() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 
@@ -4050,7 +4610,11 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, app, session_id, _csrf) = app_with_session().await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
 
@@ -4080,12 +4644,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, app, session_id, _csrf) = app_with_session().await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
-        sqlx::query(
-            "UPDATE scrim.lagebild_evidences SET url = 'javascript:alert(1)' WHERE snapshot_id = 7001",
-        )
-        .execute(db.pool())
-        .await?;
+        insert_lagebild_seed(db.pool(), "javascript:alert(1)").await?;
 
         let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
         assert_eq!(response.status(), StatusCode::OK);
@@ -4106,7 +4665,11 @@ mod tests {
         ))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app
             .oneshot(auth_post(
@@ -4147,6 +4710,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lagebild_korrektur_bleibt_im_turniere_runtime_erlaubt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
+            r#"{"reply":"Überarbeitet.","lagebild":"Korrigierte Lage."}"#,
+        ))]);
+        let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
+        dl_central_db::testing::set_scrim_runtime_turniere(db.pool()).await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/teams/1/lagebild/corrections",
+                &session_id,
+                &csrf,
+                json!({ "message": "A2 hat inzwischen zugesagt." }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let correction_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scrim.lagebild_corrections")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(correction_count, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn lagebild_korrektur_rollt_ai_daten_ohne_entscheidungslog_zurueck(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
@@ -4154,7 +4750,11 @@ mod tests {
         ))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
         sqlx::query(
             "ALTER TABLE bot.ai_decision_ledger ADD CONSTRAINT reject_scrim_correction_test CHECK (source <> 'scrim.lagebild.correction')",
         )
@@ -4191,7 +4791,11 @@ mod tests {
         let provider = MockChatProvider::new(vec![Err(ChatProviderError::Timeout)]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app
             .oneshot(auth_post(
@@ -4217,7 +4821,11 @@ mod tests {
         let provider = MockChatProvider::new(vec![Ok(ChatResponse::text("kein JSON"))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
-        insert_lagebild_seed(db.pool()).await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
 
         let response = app
             .oneshot(auth_post(

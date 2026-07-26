@@ -1,0 +1,13 @@
+{
+  "schema_version": "turnier-scrim-replacement-request-response:v1",
+  "event": "scrimrepl:v1:interaction:44",
+  "idempotency": "scrimrepl:v1:interaction:44",
+  "replacement_request": "77",
+  "action": "decline",
+  "interaction": "900719925474099344",
+  "guild": "1289721245281292288",
+  "channel": "900719925474099366",
+  "message": "900719925474099377",
+  "actor": "900719925474099388",
+  "actor_display_name": "Coach Name"
+}

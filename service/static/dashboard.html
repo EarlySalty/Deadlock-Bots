@@ -1674,6 +1674,35 @@
             gap: 1rem;
             align-items: start;
         }
+        .scrim-runtime-control {
+            display: grid;
+            gap: 0.75rem;
+            margin-top: 1rem;
+            border: 1px solid rgba(81, 207, 102, 0.55);
+        }
+        .scrim-runtime-control.warning {
+            border-color: #ff6b6b;
+            background: rgba(255, 107, 107, 0.12);
+            box-shadow: 0 0 0 2px rgba(255, 107, 107, 0.16);
+        }
+        .scrim-runtime-values {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.75rem;
+        }
+        .scrim-runtime-value {
+            display: grid;
+            gap: 0.25rem;
+        }
+        .scrim-runtime-value strong {
+            overflow-wrap: anywhere;
+        }
+        .scrim-runtime-form {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+            gap: 0.75rem;
+            align-items: end;
+        }
         .scrim-form {
             display: grid;
             gap: 0.75rem;
@@ -1869,6 +1898,10 @@
         }
         @media (max-width: 900px) {
             .scrim-grid {
+                grid-template-columns: 1fr;
+            }
+            .scrim-runtime-values,
+            .scrim-runtime-form {
                 grid-template-columns: 1fr;
             }
             .scrim-slot-row,
@@ -2317,6 +2350,46 @@
                     <button id="scrim-refresh" class="reload">Neu laden</button>
                     <span class="voice-meta" id="scrim-updated">noch nicht geladen</span>
                 </div>
+            </div>
+            <div class="card scrim-runtime-control" id="scrim-runtime-control">
+                <h3>Scrim-Zuständigkeit</h3>
+                <div class="scrim-runtime-values">
+                    <div class="scrim-runtime-value">
+                        <span class="voice-meta">Modus</span>
+                        <strong id="scrim-runtime-mode">-</strong>
+                    </div>
+                    <div class="scrim-runtime-value">
+                        <span class="voice-meta">Schreibt gerade</span>
+                        <strong id="scrim-runtime-writer">-</strong>
+                    </div>
+                    <div class="scrim-runtime-value">
+                        <span class="voice-meta">Stand</span>
+                        <strong id="scrim-runtime-epoch">-</strong>
+                    </div>
+                    <div class="scrim-runtime-value">
+                        <span class="voice-meta">Zuletzt geändert</span>
+                        <strong id="scrim-runtime-updated-at">-</strong>
+                    </div>
+                </div>
+                <form class="scrim-form scrim-runtime-form" id="scrim-runtime-form">
+                    <label>
+                        Neuer Modus
+                        <select id="scrim-runtime-mode-select">
+                            <option value="legacy">legacy: der Bot verwaltet die Scrims</option>
+                            <option value="draining">draining: Übergabe läuft</option>
+                            <option value="turniere">turniere: der Turnierdienst verwaltet die Scrims</option>
+                        </select>
+                    </label>
+                    <label>
+                        Schreibt danach
+                        <select id="scrim-runtime-writer-select">
+                            <option value="dl-bots">dl-bots</option>
+                            <option value="turniere">turniere</option>
+                        </select>
+                    </label>
+                    <button class="load" type="submit">Umschalten</button>
+                </form>
+                <div class="scrim-message" id="scrim-runtime-message" aria-live="polite"></div>
             </div>
             <div class="scrim-grid" style="margin-top:1rem;">
                 <div class="card">
@@ -2898,6 +2971,15 @@
     const scrimRefreshBtn = document.getElementById('scrim-refresh');
     const scrimUpdated = document.getElementById('scrim-updated');
     const scrimMessage = document.getElementById('scrim-message');
+    const scrimRuntimeControl = document.getElementById('scrim-runtime-control');
+    const scrimRuntimeMode = document.getElementById('scrim-runtime-mode');
+    const scrimRuntimeWriter = document.getElementById('scrim-runtime-writer');
+    const scrimRuntimeEpoch = document.getElementById('scrim-runtime-epoch');
+    const scrimRuntimeUpdatedAt = document.getElementById('scrim-runtime-updated-at');
+    const scrimRuntimeForm = document.getElementById('scrim-runtime-form');
+    const scrimRuntimeModeSelect = document.getElementById('scrim-runtime-mode-select');
+    const scrimRuntimeWriterSelect = document.getElementById('scrim-runtime-writer-select');
+    const scrimRuntimeMessage = document.getElementById('scrim-runtime-message');
     const scrimBlockForm = document.getElementById('scrim-block-form');
     const scrimBlockTemplateSelect = document.getElementById('scrim-block-template');
     const scrimBlockDeadlineInput = document.getElementById('scrim-block-deadline');
@@ -3009,6 +3091,7 @@
     let heroesLoading = false;
     let heroBuildDraftRows = [];
     let scrimData = { teams: [], participants: [], matches: [], match_request_summaries: [], suggested_block: null, lagebilder: [] };
+    let scrimRuntimeData = null;
     let scrimDefaults = { templates: [], presets: [] };
     let scrimBlockInitialized = false;
     let scrimBlockCommonSlots = [];
@@ -3679,6 +3762,53 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         scrimMessage.className = text
             ? 'scrim-message ' + (type === 'error' ? 'error' : 'success')
             : 'scrim-message';
+    }
+
+    function renderScrimRuntimeControl(data) {
+        scrimRuntimeData = data;
+        const localWrites = data.mode === 'legacy' && data.operational_writer === 'dl-bots';
+        scrimRuntimeControl.classList.toggle('warning', !localWrites);
+        scrimRuntimeMode.textContent = data.mode;
+        scrimRuntimeWriter.textContent = data.operational_writer;
+        scrimRuntimeEpoch.textContent = String(data.epoch);
+        scrimRuntimeUpdatedAt.textContent = scrimDate(data.updated_at);
+        scrimRuntimeModeSelect.value = data.mode;
+        scrimRuntimeWriterSelect.value = data.operational_writer;
+        scrimRuntimeMessage.textContent = localWrites ? '' : 'Der Bot nimmt gerade keine Scrim-Änderungen an. Anmeldungen, Roster-Änderungen und Aktionen in diesem Dashboard werden abgelehnt, solange hier nicht legacy mit dl-bots steht.';
+        scrimRuntimeMessage.className = localWrites ? 'scrim-message' : 'scrim-message error';
+    }
+
+    async function loadScrimRuntimeControl() {
+        try {
+            renderScrimRuntimeControl(await fetchJSON('/api/scrim-runtime-control'));
+        } catch (_err) {
+            scrimRuntimeMessage.textContent = 'Die Zuständigkeit konnte nicht geladen werden. Bitte lade die Seite neu.';
+            scrimRuntimeMessage.className = 'scrim-message error';
+        }
+    }
+
+    async function transitionScrimRuntimeControl(ev) {
+        ev.preventDefault();
+        if (!scrimRuntimeData) return;
+        const button = scrimRuntimeForm.querySelector('button[type="submit"]');
+        button.disabled = true;
+        try {
+            const data = await fetchJSON('/api/scrim-runtime-control', {
+                method: 'POST',
+                body: JSON.stringify({
+                    expected_epoch: scrimRuntimeData.epoch,
+                    mode: scrimRuntimeModeSelect.value,
+                    operational_writer: scrimRuntimeWriterSelect.value,
+                }),
+            });
+            renderScrimRuntimeControl(data);
+        } catch (_err) {
+            await loadScrimRuntimeControl();
+            scrimRuntimeMessage.textContent = 'Das Umschalten hat nicht geklappt. Oben steht der Zustand, der gerade wirklich gilt.';
+            scrimRuntimeMessage.className = 'scrim-message error';
+        } finally {
+            button.disabled = false;
+        }
     }
 
     function scrimErrorMessage(error, fallback) {
@@ -4864,6 +4994,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
 
     async function loadScrims() {
         if (!scrimMatchRows) return;
+        loadScrimRuntimeControl();
         try {
             const [data, defaults] = await Promise.all([
                 fetchJSON('/api/scrims'),
@@ -5360,6 +5491,9 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
     if (scrimRefreshBtn) {
         scrimRefreshBtn.addEventListener('click', () => loadScrims());
+    }
+    if (scrimRuntimeForm) {
+        scrimRuntimeForm.addEventListener('submit', transitionScrimRuntimeControl);
     }
     if (scrimBlockForm) {
         scrimBlockForm.addEventListener('submit', createScrimBlock);

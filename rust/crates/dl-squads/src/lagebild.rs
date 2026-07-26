@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use dl_ai::{ChatMessage, ChatParams, ChatProvider, ChatProviderError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Row};
 
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
@@ -106,6 +107,259 @@ pub struct CorrectionAiResult {
     pub reply: String,
     pub lagebild: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LagebildActionReceipt {
+    pub team_id: i64,
+    pub snapshot_id: i64,
+    pub verdict: String,
+    pub reason: String,
+    pub lagebild: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionActor {
+    pub author_user_id: String,
+    pub author_display_name: String,
+    pub request_id: String,
+    pub idempotency_key: String,
+}
+
+pub async fn refresh_team_lagebild(
+    pool: &PgPool,
+    provider: Option<&dyn ChatProvider>,
+    team_id: i64,
+    actor: CorrectionActor,
+) -> Result<LagebildActionReceipt, LagebildError> {
+    let input = load_lagebild_input(pool, team_id, "manual_refresh").await?;
+    let summary = input_summary(&input);
+    let (text, status, model, verdict, reason, error) = match provider {
+        Some(provider) => match generate_lagebild(provider, &input).await {
+            Ok((text, model)) => (text, STATUS_OK, model, "yes", "lagebild_generated", None),
+            Err(error) => {
+                let (verdict, reason) = lagebild_failure_decision(&error);
+                (
+                    fallback_lagebild(&input),
+                    STATUS_ERROR,
+                    None,
+                    verdict,
+                    reason,
+                    Some(error.to_string()),
+                )
+            }
+        },
+        None => (
+            fallback_lagebild(&input),
+            STATUS_ERROR,
+            None,
+            "error",
+            "ai_provider_missing",
+            Some("AI-Provider fehlt".to_string()),
+        ),
+    };
+    let mut tx = pool.begin().await?;
+    let model_for_run = model.clone();
+    let snapshot_id = insert_snapshot(
+        &mut tx,
+        &input,
+        SNAPSHOT_SOURCE_AI,
+        status,
+        &text,
+        model,
+        error.as_deref(),
+    )
+    .await?;
+    insert_evidences(&mut tx, snapshot_id, &input.evidences).await?;
+    let actor_pseudonym = audit_actor_pseudonym(&mut tx, &actor).await?;
+    log_ai_decision(
+        &mut tx,
+        AiDecisionLog {
+            source: "scrim.lagebild.refresh",
+            subject_user_id: None,
+            team_id,
+            snapshot_id: Some(snapshot_id),
+            run_kind: "lagebild_refresh",
+            model: model_for_run.as_deref(),
+            input_summary: &summary,
+            decision: verdict,
+            confidence: None,
+            reason,
+            action_taken: "snapshot_created",
+            run_state: ai_run_state_for_decision(verdict),
+            error_code: ai_error_code_for_decision(verdict),
+            request_id: Some(&actor.request_id),
+            idempotency_key: Some(&actor.idempotency_key),
+            payload: json!({
+                "team_id": team_id,
+                "snapshot_id": snapshot_id,
+                "actor_pseudonym": actor_pseudonym,
+                "request_id": actor.request_id.clone(),
+                "idempotency_key": actor.idempotency_key.clone(),
+            }),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(LagebildActionReceipt {
+        team_id,
+        snapshot_id,
+        verdict: verdict.to_string(),
+        reason: reason.to_string(),
+        lagebild: text,
+    })
+}
+
+pub async fn correct_team_lagebild(
+    pool: &PgPool,
+    provider: Option<&dyn ChatProvider>,
+    team_id: i64,
+    message: &str,
+    actor: CorrectionActor,
+) -> Result<LagebildActionReceipt, LagebildError> {
+    let input = load_lagebild_input(pool, team_id, "correction").await?;
+    let current = sqlx::query("SELECT id, lagebild_text FROM scrim.lagebild_snapshots WHERE team_id = $1 ORDER BY generated_at DESC, id DESC LIMIT 1")
+        .bind(to_i32_id("team_id", team_id)?)
+        .fetch_optional(pool).await?;
+    let current_id = current.as_ref().map(|row| row.get::<i64, _>("id"));
+    let current_text = current
+        .as_ref()
+        .map(|row| row.get::<String, _>("lagebild_text"));
+    let result = match provider {
+        Some(provider) => {
+            revise_lagebild(
+                provider,
+                &input.team_name,
+                current_text.as_deref(),
+                message,
+                &input.corrections,
+                &input.evidences,
+            )
+            .await
+        }
+        None => Err(LagebildError::Provider(ChatProviderError::Provider(
+            "ai_provider_missing".to_string(),
+        ))),
+    };
+    let (reply, revised, model, verdict, reason, snapshot_status, snapshot_error) = match result {
+        Ok(result) => {
+            let verdict = if result.lagebild.is_some() {
+                "yes"
+            } else {
+                "no"
+            };
+            let reason = if result.lagebild.is_some() {
+                "lagebild_corrected"
+            } else {
+                "lagebild_not_revised"
+            };
+            (
+                result.reply,
+                result.lagebild,
+                result.model,
+                verdict,
+                reason,
+                STATUS_OK,
+                None,
+            )
+        }
+        Err(error) => {
+            let (verdict, reason) = lagebild_failure_decision(&error);
+            (
+                "Korrektur ist gespeichert. Die automatische Überarbeitung ist fehlgeschlagen."
+                    .to_string(),
+                None,
+                None,
+                verdict,
+                reason,
+                STATUS_ERROR,
+                Some(error.to_string()),
+            )
+        }
+    };
+    let mut tx = pool.begin().await?;
+    let user_correction_id = insert_correction(
+        &mut tx,
+        team_id,
+        current_id,
+        "user",
+        Some(&actor.author_user_id),
+        &actor.author_display_name,
+        message,
+    )
+    .await?;
+    let assistant_correction_id = insert_correction(
+        &mut tx,
+        team_id,
+        current_id,
+        "assistant",
+        None,
+        "DL-Bots",
+        &reply,
+    )
+    .await?;
+    let text = revised.unwrap_or_else(|| current_text.unwrap_or_else(|| fallback_lagebild(&input)));
+    let model_for_run = model.clone();
+    let snapshot_id = insert_snapshot(
+        &mut tx,
+        &input,
+        "correction",
+        snapshot_status,
+        &text,
+        model,
+        snapshot_error.as_deref(),
+    )
+    .await?;
+    insert_evidences(&mut tx, snapshot_id, &input.evidences).await?;
+    let correction_summary = correction_decision_summary(team_id, user_correction_id, message);
+    let actor_pseudonym = audit_actor_pseudonym(&mut tx, &actor).await?;
+    log_ai_decision(&mut tx, AiDecisionLog { source: "scrim.lagebild.correction", subject_user_id: None, team_id, snapshot_id: Some(snapshot_id), run_kind: "lagebild_correction", model: model_for_run.as_deref(), input_summary: &correction_summary, decision: verdict, confidence: None, reason, action_taken: "correction_saved", run_state: ai_run_state_for_decision(verdict), error_code: ai_error_code_for_decision(verdict), request_id: Some(&actor.request_id), idempotency_key: Some(&actor.idempotency_key), payload: json!({"team_id": team_id, "snapshot_id": snapshot_id, "user_correction_id": user_correction_id, "assistant_correction_id": assistant_correction_id, "actor_pseudonym": actor_pseudonym, "request_id": actor.request_id.clone(), "idempotency_key": actor.idempotency_key.clone()}) }).await?;
+    tx.commit().await?;
+    Ok(LagebildActionReceipt {
+        team_id,
+        snapshot_id,
+        verdict: verdict.to_string(),
+        reason: reason.to_string(),
+        lagebild: text,
+    })
+}
+
+fn correction_decision_summary(team_id: i64, user_correction_id: i64, message: &str) -> String {
+    format!(
+        "team={team_id} correction_ref=scrim.lagebild_corrections:{user_correction_id} chars={} hash={}",
+        message.chars().count(),
+        stable_short_hash(message)
+    )
+}
+
+async fn insert_correction(
+    connection: &mut PgConnection,
+    team_id: i64,
+    snapshot_id: Option<i64>,
+    role: &str,
+    author_user_id: Option<&str>,
+    author_display_name: &str,
+    message: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("INSERT INTO scrim.lagebild_corrections(team_id, snapshot_id, role, author_user_id, author_display_name, message, created_at) VALUES($1, $2, $3, $4, $5, $6, now()) RETURNING id")
+        .bind(i32::try_from(team_id).map_err(|error| sqlx::Error::Protocol(error.to_string()))?)
+        .bind(snapshot_id)
+        .bind(role)
+        .bind(author_user_id)
+        .bind(author_display_name)
+        .bind(message)
+        .fetch_one(&mut *connection)
+        .await
+}
+
+async fn audit_actor_pseudonym(
+    connection: &mut PgConnection,
+    actor: &CorrectionActor,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT scrim.audit_actor_pseudonym('user', $1)")
+        .bind(&actor.author_user_id)
+        .fetch_one(&mut *connection)
+        .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -375,6 +629,7 @@ async fn generate_lagebilder_for_teams(
             }
         };
         let mut tx = pool.begin().await?;
+        let model_for_run = model.clone();
         let snapshot_id = insert_snapshot(
             &mut tx,
             &input,
@@ -391,13 +646,21 @@ async fn generate_lagebilder_for_teams(
             AiDecisionLog {
                 source: "scrim.lagebild.generate",
                 subject_user_id: None,
+                team_id: input.team_id,
+                snapshot_id: Some(snapshot_id),
+                run_kind: "lagebild_generate",
+                model: model_for_run.as_deref(),
                 input_summary: &input_summary,
                 decision,
                 confidence: None,
                 reason,
                 action_taken: action,
+                run_state: ai_run_state_for_decision(decision),
+                error_code: ai_error_code_for_decision(decision),
+                request_id: None,
+                idempotency_key: None,
                 payload: json!({
-                    "team_id": input.team_id,
+                        "team_id": input.team_id,
                     "generated_for": generated_for,
                     "snapshot_id": snapshot_id,
                     "data_limited": input.data_limited,
@@ -414,6 +677,11 @@ async fn generate_lagebilder_for_teams(
 fn lagebild_failure_decision(error: &LagebildError) -> (&'static str, &'static str) {
     match error {
         LagebildError::Provider(ChatProviderError::Timeout) => ("timeout", "ai_timeout"),
+        LagebildError::Provider(ChatProviderError::Provider(message))
+            if message == "ai_provider_missing" =>
+        {
+            ("error", "ai_provider_missing")
+        }
         LagebildError::InvalidAi(_) => ("unsure", "ai_response_invalid"),
         _ => ("error", "ai_generation_failed"),
     }
@@ -609,33 +877,19 @@ async fn load_match_facts(
                m.status,
                m.lobby_state,
                m.scheduled_at,
-               m.steam_match_id,
-               m.winner_team_id::bigint AS winner_team_id,
-               m.result_json,
+               selected.steam_match_id,
+               selected.winner_team_id::bigint AS winner_team_id,
+               selected.result_ref_id,
+               selected.selected_at,
                ta.name AS team_a_name,
                tb.name AS team_b_name
           FROM scrim.matches m
+          JOIN scrim.selected_match_results selected ON selected.match_id = m.id
           LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
           LEFT JOIN scrim.teams tb ON tb.id = m.team_b_id
          WHERE (m.team_a_id = $1 OR m.team_b_id = $1)
-           AND (
-                lower(COALESCE(m.lobby_state, '')) = 'finished'
-                OR lower(COALESCE(m.status, '')) IN ('finished', 'completed')
-                OR m.result_json IS NOT NULL
-                OR EXISTS (
-                    SELECT 1
-                      FROM scrim.match_result_refs result_ref
-                     WHERE result_ref.match_id = m.id
-                       AND result_ref.fetch_status = 'fetched'
-                )
-           )
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM scrim.match_result_refs pending_ref
-                 WHERE pending_ref.match_id = m.id
-                   AND pending_ref.fetch_status IN ('pending', 'fetching')
-           )
-         ORDER BY COALESCE(m.scheduled_at, m.created_at) DESC, m.id DESC
+           AND selected.result_ref_id IS NOT NULL
+          ORDER BY COALESCE(selected.selected_at, m.scheduled_at, m.created_at) DESC, m.id DESC
         "#,
     )
     .bind(team_id_i32)
@@ -672,9 +926,14 @@ async fn load_match_facts(
         facts.push(format!(
             "Match {id}: {scheduled}, Status {status}, Lobby {lobby_state}, Ergebnis {winner}{steam_match}."
         ));
-        if let Some(result) = row.get::<Option<Value>, _>("result_json") {
-            facts.push(format!("Match {id}: Ergebnisdaten vorhanden ({result})."));
-        }
+        let result_ref_id = row.get::<i64, _>("result_ref_id");
+        let selected_at = row
+            .get::<Option<DateTime<Utc>>, _>("selected_at")
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "ohne Auswahlzeit".to_string());
+        facts.push(format!(
+            "Match {id}: Ergebnisreferenz {result_ref_id} final ausgewählt um {selected_at}."
+        ));
     }
     Ok(())
 }
@@ -779,11 +1038,19 @@ async fn insert_evidences(
 struct AiDecisionLog<'a> {
     source: &'a str,
     subject_user_id: Option<i64>,
+    team_id: i64,
+    snapshot_id: Option<i64>,
+    run_kind: &'a str,
+    model: Option<&'a str>,
     input_summary: &'a str,
     decision: &'a str,
     confidence: Option<f32>,
     reason: &'a str,
     action_taken: &'a str,
+    run_state: &'a str,
+    error_code: Option<&'a str>,
+    request_id: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
     payload: Value,
 }
 
@@ -808,10 +1075,140 @@ async fn log_ai_decision(
     .bind(entry.confidence)
     .bind(entry.reason)
     .bind(entry.action_taken)
-    .bind(entry.payload)
+    .bind(entry.payload.clone())
     .execute(&mut *connection)
     .await?;
+    log_scrim_ai_run_and_decision(connection, &entry).await?;
     Ok(())
+}
+
+async fn log_scrim_ai_run_and_decision(
+    connection: &mut PgConnection,
+    entry: &AiDecisionLog<'_>,
+) -> Result<(), sqlx::Error> {
+    let input_hash = Sha256::digest(entry.input_summary.as_bytes()).to_vec();
+    let idempotency_key = entry
+        .idempotency_key
+        .map(|value| {
+            format!(
+                "airun:v1:{}:{}:{}",
+                entry.run_kind,
+                entry.team_id,
+                stable_short_hash(value)
+            )
+        })
+        .unwrap_or_else(|| format!("airun:v1:{}:{}", entry.run_kind, entry.team_id));
+    let sanitized_model = entry.model.and_then(machine_code_model);
+    let error_hash = entry
+        .error_code
+        .map(|code| Sha256::digest(format!("{code}:{}", entry.reason).as_bytes()).to_vec());
+    let run_id: i64 = sqlx::query_scalar(
+        r#"
+        WITH next_generation AS (
+            SELECT COALESCE(MAX(idempotency_generation) + 1, 0) AS generation
+              FROM scrim.ai_runs
+             WHERE run_kind = $1
+               AND idempotency_key = $2
+        )
+        INSERT INTO scrim.ai_runs(
+            run_kind, subject_kind, subject_id, idempotency_key,
+            idempotency_generation, input_hash, state, provider, model,
+            decision_ref_kind, decision_ref_id, lagebild_snapshot_id,
+            request_id, correlation_id, last_error_code, last_error_hash, started_at, finished_at
+        )
+        SELECT $1, 'team', $3, $2, generation, $4, $5,
+               NULL, $6, NULL, NULL, $7, $8, $9, $10, $11, now(), now()
+          FROM next_generation
+        RETURNING id
+        "#,
+    )
+    .bind(entry.run_kind)
+    .bind(idempotency_key)
+    .bind(entry.team_id.to_string())
+    .bind(input_hash)
+    .bind(entry.run_state)
+    .bind(sanitized_model.as_deref())
+    .bind(entry.snapshot_id)
+    .bind(entry.request_id)
+    .bind(entry.idempotency_key)
+    .bind(entry.error_code)
+    .bind(error_hash.as_deref())
+    .fetch_one(&mut *connection)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.ai_decision_refs(
+            run_id, decision_kind, target_kind, target_id,
+            decision_data, confidence, created_at
+        )
+        VALUES($1, 'lagebild_verdict', 'team', $2, $3::jsonb, $4::double precision::numeric, now())
+        "#,
+    )
+    .bind(run_id)
+    .bind(entry.team_id.to_string())
+    .bind(json!({
+        "source": entry.source,
+        "input_summary": entry.input_summary,
+        "verdict": entry.decision,
+        "confidence": entry.confidence,
+        "reason": entry.reason,
+        "action_taken": entry.action_taken,
+        "request_id": entry.request_id,
+        "idempotency_key": entry.idempotency_key,
+        "payload": entry.payload,
+    }))
+    .bind(entry.confidence.map(f64::from))
+    .execute(&mut *connection)
+    .await?;
+    tracing::info!(
+        input = %entry.input_summary.chars().take(240).collect::<String>(),
+        verdict = entry.decision,
+        confidence = ?entry.confidence,
+        reason = entry.reason,
+        "Scrim-Lagebild-AI-Entscheidung"
+    );
+    Ok(())
+}
+
+fn stable_short_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex::encode(&digest[..8])
+}
+
+fn ai_run_state_for_decision(decision: &str) -> &'static str {
+    match decision {
+        "yes" | "no" => "succeeded",
+        "unsure" => "uncertain",
+        "timeout" | "error" => "failed",
+        _ => "uncertain",
+    }
+}
+
+fn ai_error_code_for_decision(decision: &str) -> Option<&'static str> {
+    match decision {
+        "unsure" => Some("err_ai_unsure"),
+        "timeout" => Some("err_ai_timeout"),
+        "error" => Some("err_ai_failed"),
+        _ => None,
+    }
+}
+
+fn machine_code_model(value: &str) -> Option<String> {
+    let mut out = String::new();
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_').chars().take(64).collect::<String>();
+    if out.len() >= 3 && out.chars().next().is_some_and(|ch| ch.is_ascii_lowercase()) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 fn fallback_lagebild(input: &ScrimLagebildInput) -> String {

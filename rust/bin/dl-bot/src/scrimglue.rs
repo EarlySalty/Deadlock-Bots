@@ -4,14 +4,17 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
+use dl_central_db::scrim_runtime::{SCRIM_TRANSITION_LOCK_A, SCRIM_TRANSITION_LOCK_B};
 use dl_squads::scrim_match::{
     fetch_scrim_match_result, fetch_scrim_match_result_by_steam_match_id, start_scrim_match,
     ScrimMatchResultOutcome, StartScrimMatchOutcome,
 };
 use serde_json::{json, Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use tokio::task::JoinHandle;
 use tokio::time::{self, MissedTickBehavior};
+
+use crate::scrim_adapter::{self, InteractionRoute, ScrimRuntimeGate};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 const STATE_LOBBY_OPEN: &str = "lobby_open";
@@ -50,6 +53,9 @@ const MATCH_REQUEST_RESPONSE_PREFIX: &str = "scrimreq:v1:";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
 const MAIN_GUILD_ID: u64 = 1289721245281292288;
 const SCRIM_VOICE_CHANNEL_NAME: &str = "Scrim Team";
+const SCRIM_GOLD_ACCENT: u32 = 0xC8A86B;
+const DISCORD_EFFECT_MAX_BODY_BYTES: usize = 32 * 1024;
+const DIRECT_DISCORD_EFFECT_LEASE_OWNER: &str = "dlbots:scrim_direct_dispatch";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScrimVoiceConfig {
@@ -213,6 +219,7 @@ struct MatchStatusTarget {
 #[derive(Debug, Clone, PartialEq)]
 struct ClaimedMatchStatus {
     request_id: i64,
+    publication_approval_id: i64,
     team_a_name: String,
     team_b_name: Option<String>,
     released_slot: Value,
@@ -262,6 +269,7 @@ enum MatchRequestResponseOutcome {
     NotOpen,
     WrongMessage,
     WrongTeam,
+    RuntimeClosed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,11 +283,79 @@ struct MatchRequestResponseHandler {
     pool: PgPool,
 }
 
-pub fn register(router: &mut dl_discord::InteractionRouter, pool: PgPool) {
+struct RuntimeAwareMatchRequestResponseHandler {
+    pool: PgPool,
+    runtime_gate: ScrimRuntimeGate,
+    relay_handler: Arc<dyn dl_discord::InteractionHandler>,
+}
+
+struct RuntimeAwareReplacementRequestResponseHandler {
+    runtime_gate: ScrimRuntimeGate,
+    relay_handler: Arc<dyn dl_discord::InteractionHandler>,
+}
+
+pub fn register(
+    router: &mut dl_discord::InteractionRouter,
+    pool: PgPool,
+    runtime_gate: ScrimRuntimeGate,
+    relay_handler: Arc<dyn dl_discord::InteractionHandler>,
+) {
+    let handler = Arc::new(RuntimeAwareMatchRequestResponseHandler {
+        pool,
+        runtime_gate: runtime_gate.clone(),
+        relay_handler: relay_handler.clone(),
+    });
+    router.on_prefix(MATCH_REQUEST_RESPONSE_PREFIX, handler);
     router.on_prefix(
-        MATCH_REQUEST_RESPONSE_PREFIX,
-        Arc::new(MatchRequestResponseHandler { pool }),
+        scrim_adapter::SCRIMREPL_PREFIX,
+        Arc::new(RuntimeAwareReplacementRequestResponseHandler {
+            runtime_gate,
+            relay_handler,
+        }),
     );
+}
+
+#[async_trait::async_trait]
+impl dl_discord::InteractionHandler for RuntimeAwareMatchRequestResponseHandler {
+    async fn handle(&self, interaction: dl_discord::BridgeInteraction) -> dl_discord::BridgeReply {
+        match self.runtime_gate.interaction_route().await {
+            Ok(InteractionRoute::LegacyMutation) => {
+                MatchRequestResponseHandler {
+                    pool: self.pool.clone(),
+                }
+                .handle(interaction)
+                .await
+            }
+            Ok(InteractionRoute::RelayToTurnier) => self.relay_handler.handle(interaction).await,
+            Err(error) => {
+                tracing::warn!(%error, "Scrim-Runtime-Gate blockiert Interaction fail-closed");
+                dl_discord::BridgeReply::ephemeral_text(
+                    "Scrim-Planung ist gerade nicht eindeutig erreichbar. Bitte kurz spaeter erneut versuchen.",
+                )
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl dl_discord::InteractionHandler for RuntimeAwareReplacementRequestResponseHandler {
+    async fn handle(&self, interaction: dl_discord::BridgeInteraction) -> dl_discord::BridgeReply {
+        match self.runtime_gate.interaction_route_fresh().await {
+            Ok(InteractionRoute::RelayToTurnier) => self.relay_handler.handle(interaction).await,
+            Ok(InteractionRoute::LegacyMutation) => {
+                tracing::warn!(custom_id = %interaction.custom_id, "Scrim-Ersatzbutton im Legacy-Modus fail-closed ohne lokale Semantik");
+                dl_discord::BridgeReply::ephemeral_text(
+                    "Ersatzantworten werden hier nicht lokal verarbeitet. Bitte die aktuelle Turnier-Nachricht verwenden.",
+                )
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Scrim-Runtime-Gate blockiert Ersatz-Interaction fail-closed");
+                dl_discord::BridgeReply::ephemeral_text(
+                    "Scrim-Planung ist gerade nicht eindeutig erreichbar. Bitte kurz spaeter erneut versuchen.",
+                )
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -310,6 +386,7 @@ pub fn spawn(
     adapter: Arc<dl_discord::DiscordAdapter>,
     tempvoice: Arc<dl_voice::tempvoice::TempVoiceEngine>,
     voice_config: ScrimVoiceConfig,
+    runtime_gate: ScrimRuntimeGate,
     lagebild_ai: Option<Arc<dyn dl_ai::ChatProvider>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -322,6 +399,7 @@ pub fn spawn(
                 adapter.as_ref(),
                 tempvoice.as_ref(),
                 voice_config,
+                &runtime_gate,
                 lagebild_ai.as_deref(),
             )
             .await
@@ -337,8 +415,14 @@ async fn process_one_pending(
     adapter: &dl_discord::DiscordAdapter,
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     voice_config: ScrimVoiceConfig,
+    _runtime_gate: &ScrimRuntimeGate,
     lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
 ) -> anyhow::Result<()> {
+    process_one_discord_outbox(pool, adapter).await?;
+    let tick_guard = match begin_legacy_operational_tick(pool).await? {
+        Some(tx) => tx,
+        None => return Ok(()),
+    };
     cleanup_terminal_scrim_voice_channels(pool, tempvoice).await?;
     if let Some(claim) = claim_next_pending_match(pool).await? {
         handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild_ai, &claim).await?;
@@ -362,7 +446,55 @@ async fn process_one_pending(
             tracing::error!(%err, "Scrim-Lagebild-Wochenlauf fehlgeschlagen");
         }
     }
+    tick_guard.commit().await?;
     Ok(())
+}
+
+async fn begin_legacy_operational_tick(
+    pool: &PgPool,
+) -> anyhow::Result<Option<Transaction<'_, Postgres>>> {
+    let mut tx = pool.begin().await?;
+    if !lock_transition_and_require_legacy(&mut tx).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    Ok(Some(tx))
+}
+
+async fn lock_transition_and_require_legacy(
+    tx: &mut Transaction<'_, Postgres>,
+) -> anyhow::Result<bool> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(SCRIM_TRANSITION_LOCK_A)
+        .bind(SCRIM_TRANSITION_LOCK_B)
+        .execute(&mut **tx)
+        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT mode, operational_writer
+          FROM scrim.runtime_control
+         WHERE control_key = 'scrim_runtime'
+        "#,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        tracing::warn!(
+            "Scrim-Runtime-Gate blockiert lokalen Driver ohne Runtime-Zeile fail-closed"
+        );
+        return Ok(false);
+    };
+    let mode = row.get::<String, _>("mode");
+    let writer = row.get::<String, _>("operational_writer");
+    let legacy = scrim_adapter::legacy_driver_enabled_for_runtime(&mode, &writer);
+    if !legacy {
+        tracing::info!(
+            mode,
+            writer,
+            "Scrim-Runtime-Gate blockiert lokalen Driver nach frischem DB-Read"
+        );
+    }
+    Ok(legacy)
 }
 
 async fn claim_next_pending_match(pool: &PgPool) -> anyhow::Result<Option<ClaimedMatch>> {
@@ -946,10 +1078,30 @@ async fn handle_match_request_reminder(
             ),
         );
     }
+    let effect_payload = discord_effect_payload(
+        "match_request_reminder",
+        "post",
+        reminder.channel_id,
+        None,
+        &body,
+    );
+    let outbox_id =
+        enqueue_match_request_reminder_effect(pool, reminder.reminder_id, &effect_payload).await?;
 
     match adapter.send_raw_public(reminder.channel_id, &body).await {
         Ok(message_id) => {
             save_match_request_reminder_success(pool, reminder.reminder_id, message_id).await?;
+            if let Err(err) = mark_pending_discord_effect_delivered(
+                pool,
+                outbox_id,
+                &effect_payload,
+                reminder.channel_id,
+                message_id,
+            )
+            .await
+            {
+                tracing::warn!(%err, reminder_id = reminder.reminder_id, outbox_id, "Scrim-Reminder-Outbox-Receipt konnte nicht bestaetigt werden");
+            }
             post_log(
                 adapter,
                 match_request_reminder_success_log_message(
@@ -964,6 +1116,11 @@ async fn handle_match_request_reminder(
             .await;
         }
         Err(err) => {
+            if let Err(mark_err) =
+                mark_pending_discord_effect_uncertain(pool, adapter, outbox_id, &err).await
+            {
+                tracing::warn!(%mark_err, reminder_id = reminder.reminder_id, outbox_id, "Scrim-Reminder-Outbox-Fehler konnte nicht gespeichert werden");
+            }
             save_match_request_reminder_failure(pool, reminder.reminder_id, &err).await?;
             post_log(
                 adapter,
@@ -979,6 +1136,44 @@ async fn handle_match_request_reminder(
         }
     }
     Ok(())
+}
+
+async fn enqueue_match_request_reminder_effect(
+    pool: &PgPool,
+    reminder_id: i64,
+    payload: &Value,
+) -> anyhow::Result<i64> {
+    let payload_hash = scrim_payload_hash(payload);
+    let idempotency_key = format!("scrimreminder:v1:{reminder_id}");
+    let mut tx = pool.begin().await?;
+    let outbox_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO scrim.outbox_effects(
+            effect_type, idempotency_key, idempotency_generation, payload_hash,
+            payload, state, lease_owner, lease_until, attempts, command_receipt_id, remote_system
+        )
+        VALUES('discord_scrim_effect', $1, 0, $2, $3::jsonb, 'leased', $4, now() + interval '30 seconds', 1, NULL, 'discord')
+        RETURNING id
+        "#,
+    )
+    .bind(idempotency_key)
+    .bind(&payload_hash)
+    .bind(payload)
+    .bind(DIRECT_DISCORD_EFFECT_LEASE_OWNER)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.match_request_reminder_effects(reminder_id, outbox_effect_id)
+        VALUES($1, $2)
+        "#,
+    )
+    .bind(reminder_id)
+    .bind(outbox_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(outbox_id)
 }
 
 async fn claim_next_pending_match_status(
@@ -998,10 +1193,16 @@ async fn claim_next_pending_match_status(
                    mr.released_slot_index,
                    mr.released_slot,
                    mr.team_query_message_ids,
-                   mr.team_status_message_ids
+                   mr.team_status_message_ids,
+                   approval.id AS publication_approval_id
               FROM scrim.match_requests mr
               JOIN scrim.teams ta ON ta.id = mr.team_a_id
               LEFT JOIN scrim.teams tb ON tb.id = mr.team_b_id
+              JOIN scrim.status_publication_approvals approval
+                ON approval.target_kind = 'match_request'
+               AND approval.target_id = mr.id::text
+               AND approval.status_kind = 'match_status'
+               AND approval.decision = 'approved'
              WHERE mr.status = $3
                AND mr.released_at IS NOT NULL
                AND mr.released_slot_index IS NOT NULL
@@ -1027,7 +1228,8 @@ async fn claim_next_pending_match_status(
                   candidate.released_slot_index,
                   candidate.released_slot,
                   candidate.team_query_message_ids,
-                  candidate.team_status_message_ids
+                  candidate.team_status_message_ids,
+                  candidate.publication_approval_id::bigint AS publication_approval_id
         "#,
     )
     .bind(MATCH_STATUS_MESSAGE_STATE_PENDING)
@@ -1165,6 +1367,7 @@ async fn claim_next_pending_match_status(
 
     Ok(Some(ClaimedMatchStatus {
         request_id,
+        publication_approval_id: row.get("publication_approval_id"),
         team_a_name,
         team_b_name,
         released_slot,
@@ -1225,11 +1428,14 @@ async fn handle_match_status(
     adapter: &dl_discord::DiscordAdapter,
     status: ClaimedMatchStatus,
 ) -> anyhow::Result<()> {
-    let result = sync_match_status_messages(adapter, &status).await;
+    let result = sync_match_status_messages(pool, adapter, &status).await;
     let mut errors = status.missing_targets.clone();
     errors.extend(result.errors);
     let error = (!errors.is_empty()).then(|| errors.join("; "));
     save_match_status_messages(pool, status.request_id, &result.posts, error.as_deref()).await?;
+    if error.is_none() {
+        mark_status_publication_published(pool, status.publication_approval_id).await?;
+    }
 
     if let Some(reason) = error {
         post_log(
@@ -1250,6 +1456,7 @@ async fn handle_match_status(
 }
 
 async fn sync_match_status_messages(
+    pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
     status: &ClaimedMatchStatus,
 ) -> MatchStatusSyncResult {
@@ -1266,34 +1473,299 @@ async fn sync_match_status_messages(
                 continue;
             }
         };
-        let body = message_body(&content);
+        let body = match_status_body(&content);
+        let effect_payload = discord_effect_payload(
+            "match_status",
+            if target.status_message_id.is_some() {
+                "edit"
+            } else {
+                "post"
+            },
+            target.channel_id,
+            target.status_message_id,
+            &body,
+        );
+        let outbox_id =
+            match enqueue_status_publication_effect(pool, status, target, &effect_payload).await {
+                Ok(outbox_id) => outbox_id,
+                Err(err) => {
+                    errors.push(format!("outbox {}: {err}", target.team_id));
+                    continue;
+                }
+            };
         if let Some(message_id) = target.status_message_id {
             match adapter
                 .edit_raw_public(target.channel_id, message_id, &body)
                 .await
             {
-                Ok(()) => posts.push(MatchStatusPost {
-                    team_id: target.team_id,
-                    channel_id: target.channel_id,
-                    message_id,
-                }),
-                Err(err) => errors.push(format!(
-                    "edit {}/{}: {}",
-                    target.channel_id, message_id, err
-                )),
+                Ok(()) => {
+                    if let Err(err) = mark_pending_discord_effect_delivered(
+                        pool,
+                        outbox_id,
+                        &effect_payload,
+                        target.channel_id,
+                        message_id,
+                    )
+                    .await
+                    {
+                        errors.push(format!(
+                            "receipt {}/{}: {err}",
+                            target.channel_id, message_id
+                        ));
+                    }
+                    posts.push(MatchStatusPost {
+                        team_id: target.team_id,
+                        channel_id: target.channel_id,
+                        message_id,
+                    })
+                }
+                Err(err) => {
+                    let error = format!("edit {}/{}: {err}", target.channel_id, message_id);
+                    if let Err(mark_err) =
+                        mark_pending_discord_effect_uncertain(pool, adapter, outbox_id, &error)
+                            .await
+                    {
+                        errors.push(format!("outbox-error {}: {mark_err}", target.team_id));
+                    }
+                    errors.push(error);
+                }
             }
         } else {
             match adapter.send_raw_public(target.channel_id, &body).await {
-                Ok(message_id) => posts.push(MatchStatusPost {
-                    team_id: target.team_id,
-                    channel_id: target.channel_id,
-                    message_id,
-                }),
-                Err(err) => errors.push(format!("post {}: {err}", target.channel_id)),
+                Ok(message_id) => {
+                    if let Err(err) = mark_pending_discord_effect_delivered(
+                        pool,
+                        outbox_id,
+                        &effect_payload,
+                        target.channel_id,
+                        message_id,
+                    )
+                    .await
+                    {
+                        errors.push(format!(
+                            "receipt {}/{}: {err}",
+                            target.channel_id, message_id
+                        ));
+                    }
+                    posts.push(MatchStatusPost {
+                        team_id: target.team_id,
+                        channel_id: target.channel_id,
+                        message_id,
+                    })
+                }
+                Err(err) => {
+                    let error = format!("post {}: {err}", target.channel_id);
+                    if let Err(mark_err) =
+                        mark_pending_discord_effect_uncertain(pool, adapter, outbox_id, &error)
+                            .await
+                    {
+                        errors.push(format!("outbox-error {}: {mark_err}", target.team_id));
+                    }
+                    errors.push(error);
+                }
             }
         }
     }
     MatchStatusSyncResult { posts, errors }
+}
+
+async fn enqueue_status_publication_effect(
+    pool: &PgPool,
+    status: &ClaimedMatchStatus,
+    target: &MatchStatusTarget,
+    payload: &Value,
+) -> anyhow::Result<i64> {
+    let payload_hash = scrim_payload_hash(payload);
+    let idempotency_key = format!(
+        "scrimstatus:v1:request:{}:team:{}",
+        status.request_id, target.team_id
+    );
+    let outbox_id = sqlx::query_scalar(
+        r#"
+        WITH next_generation AS (
+            SELECT COALESCE(MAX(idempotency_generation) + 1, 0) AS generation
+              FROM scrim.outbox_effects
+             WHERE effect_type = 'discord_scrim_effect'
+               AND idempotency_key = $1
+        )
+        INSERT INTO scrim.outbox_effects(
+            effect_type, idempotency_key, idempotency_generation, payload_hash,
+            payload, state, lease_owner, lease_until, attempts, command_receipt_id, remote_system
+        )
+        SELECT 'discord_scrim_effect', $1, generation, $2, $3::jsonb,
+               'leased', $4, now() + interval '30 seconds', 1, NULL, 'discord'
+          FROM next_generation
+        RETURNING id
+        "#,
+    )
+    .bind(idempotency_key)
+    .bind(payload_hash)
+    .bind(payload)
+    .bind(DIRECT_DISCORD_EFFECT_LEASE_OWNER)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.status_publication_effects(status_publication_approval_id, outbox_effect_id)
+        VALUES($1, $2)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(status.publication_approval_id)
+    .bind(outbox_id)
+    .execute(pool)
+    .await?;
+    Ok(outbox_id)
+}
+
+async fn mark_pending_discord_effect_delivered(
+    pool: &PgPool,
+    outbox_id: i64,
+    payload: &Value,
+    channel_id: u64,
+    message_id: u64,
+) -> anyhow::Result<()> {
+    let payload_hash = scrim_payload_hash(payload);
+    let remote_message_id = format!("discord:{channel_id}:{message_id}");
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE scrim.outbox_effects
+           SET state = 'delivered',
+               lease_owner = NULL,
+               lease_until = NULL,
+               remote_system = 'discord',
+               remote_message_id = $2,
+               updated_at = now(),
+               delivered_at = now()
+          WHERE id = $1
+            AND state IN ('pending', 'leased')
+        "#,
+    )
+    .bind(outbox_id)
+    .bind(&remote_message_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow!(
+            "Discord-Outbox {outbox_id} konnte nicht delivered markiert werden"
+        ));
+    }
+    reconcile_discord_effect_links_tx(&mut tx, outbox_id).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.effect_receipts(
+            outbox_effect_id, remote_system, remote_message_id, payload_hash,
+            receipt_payload, status, observed_at
+        )
+        VALUES($1, 'discord', $2, $3, $4::jsonb, 'confirmed', now())
+        ON CONFLICT (remote_system, remote_message_id) WHERE remote_message_id IS NOT NULL DO NOTHING
+        "#,
+    )
+    .bind(outbox_id)
+    .bind(&remote_message_id)
+    .bind(payload_hash)
+    .bind(json!({"channel_id": channel_id.to_string(), "message_id": message_id.to_string()}))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn reconcile_discord_effect_links_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        WITH reconciled_reminder AS (
+            UPDATE scrim.match_request_reminder_effects
+               SET reconciled_at = now()
+             WHERE outbox_effect_id = $1
+               AND reconciled_at IS NULL
+        ),
+        reconciled_replacement AS (
+            UPDATE scrim.replacement_request_effects
+               SET reconciled_at = now()
+             WHERE outbox_effect_id = $1
+               AND reconciled_at IS NULL
+        )
+        UPDATE scrim.status_publication_effects
+           SET reconciled_at = now()
+         WHERE outbox_effect_id = $1
+           AND reconciled_at IS NULL
+        "#,
+    )
+    .bind(outbox_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn mark_pending_discord_effect_uncertain(
+    pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
+    outbox_id: i64,
+    error: &str,
+) -> anyhow::Result<()> {
+    let row = sqlx::query(
+        r#"
+        UPDATE scrim.outbox_effects
+           SET state = 'uncertain',
+               lease_owner = NULL,
+               lease_until = NULL,
+               last_error_code = 'err_discord_effect_uncertain',
+               last_error_hash = $2,
+               updated_at = now()
+         WHERE id = $1
+           AND state IN ('pending', 'leased')
+        RETURNING attempts, payload ->> 'message_kind' AS effect_type, last_error_code
+        "#,
+    )
+    .bind(outbox_id)
+    .bind(scrim_payload_hash(&json!({"error": error})))
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Err(anyhow!(
+            "Discord-Outbox {outbox_id} konnte nicht uncertain markiert werden"
+        ));
+    };
+    let attempts = row.get::<i32, _>("attempts");
+    let effect_type = row
+        .get::<Option<String>, _>("effect_type")
+        .unwrap_or_else(|| "unknown".to_string());
+    let last_error_code = row.get::<String, _>("last_error_code");
+    report_uncertain_discord_effect(
+        sender,
+        outbox_id,
+        &effect_type,
+        attempts,
+        &last_error_code,
+        error,
+    )
+    .await;
+    Ok(())
+}
+
+async fn mark_status_publication_published(
+    pool: &PgPool,
+    publication_approval_id: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.status_publication_approvals
+           SET decision = 'published',
+               decided_at = now(),
+               remote_system = 'discord'
+         WHERE id = $1
+           AND decision = 'approved'
+        "#,
+    )
+    .bind(publication_approval_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn save_match_status_messages(
@@ -2486,18 +2958,1047 @@ fn message_body(content: &str) -> Map<String, Value> {
     body
 }
 
+fn match_status_body(content: &str) -> Map<String, Value> {
+    components_v2_body(
+        content,
+        Vec::new(),
+        json!({ "parse": [], "replied_user": false }),
+    )
+}
+
+fn components_v2_body(
+    content: &str,
+    extra_components: Vec<Value>,
+    allowed_mentions: Value,
+) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("flags".to_string(), json!(scrim_adapter::COMPONENTS_V2));
+    body.insert("allowed_mentions".to_string(), allowed_mentions);
+    let mut components = vec![json!({ "type": 10, "content": content })];
+    components.extend(extra_components);
+    body.insert(
+        "components".to_string(),
+        json!([{ "type": 17, "accent_color": SCRIM_GOLD_ACCENT, "components": components }]),
+    );
+    body
+}
+
+fn scrim_payload_hash(value: &Value) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(value.to_string().as_bytes()).to_vec()
+}
+
+#[async_trait::async_trait]
+trait ScrimDiscordEffectSender: Send + Sync {
+    async fn send_effect(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String>;
+    async fn post_log(&self, content: &str) -> Result<(), String>;
+    async fn send_dm_effect(
+        &self,
+        recipient_user_id: &str,
+        body: &Map<String, Value>,
+    ) -> Result<DiscordDmReceipt, String>;
+    async fn edit_effect(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: &Map<String, Value>,
+    ) -> Result<(), String>;
+}
+
+#[async_trait::async_trait]
+impl ScrimDiscordEffectSender for dl_discord::DiscordAdapter {
+    async fn send_effect(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String> {
+        self.send_raw_public(channel_id, body).await
+    }
+
+    async fn post_log(&self, content: &str) -> Result<(), String> {
+        send_content(self, LOG_CHANNEL_ID, content)
+            .await
+            .map(|_| ())
+    }
+
+    async fn send_dm_effect(
+        &self,
+        recipient_user_id: &str,
+        body: &Map<String, Value>,
+    ) -> Result<DiscordDmReceipt, String> {
+        let (dm_channel_id, message_id) = self.send_raw_dm_public(recipient_user_id, body).await?;
+        Ok(DiscordDmReceipt {
+            dm_channel_id,
+            message_id,
+        })
+    }
+
+    async fn edit_effect(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: &Map<String, Value>,
+    ) -> Result<(), String> {
+        self.edit_raw_public(channel_id, message_id, body)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscordEffectOperation {
+    Post,
+    Edit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordDmReceipt {
+    dm_channel_id: String,
+    message_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscordEffectTarget {
+    Channel { channel_id: u64 },
+    Dm { recipient_user_id: String },
+}
+
+#[derive(Debug, Clone)]
+struct ClaimedDiscordEffect {
+    id: i64,
+    attempts: i32,
+    payload_hash: Vec<u8>,
+    effect_type: String,
+    operation: DiscordEffectOperation,
+    target: DiscordEffectTarget,
+    message_id: Option<u64>,
+    body: Map<String, Value>,
+}
+
+async fn process_one_discord_outbox(
+    pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
+) -> anyhow::Result<()> {
+    mark_expired_discord_effect_leases_uncertain(pool, sender).await?;
+    let Some(effect) = claim_next_discord_effect(pool).await? else {
+        return Ok(());
+    };
+    deliver_claimed_discord_effect(pool, sender, effect).await
+}
+
+async fn mark_expired_discord_effect_leases_uncertain(
+    pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        UPDATE scrim.outbox_effects
+           SET state = 'uncertain',
+               lease_owner = NULL,
+               lease_until = NULL,
+               last_error_code = 'err_discord_effect_lease_expired',
+               last_error_hash = $1,
+               updated_at = now()
+         WHERE effect_type = 'discord_scrim_effect'
+           AND state = 'leased'
+           AND lease_until <= now()
+         RETURNING id, attempts, payload_hash, payload ->> 'message_kind' AS effect_type,
+                   last_error_code
+        "#,
+    )
+    .bind(scrim_payload_hash(&json!({"error": "lease_expired"})))
+    .fetch_all(&mut *tx)
+    .await?;
+    for row in &rows {
+        let id = row.get::<i64, _>("id");
+        let attempts = row.get::<i32, _>("attempts");
+        let payload_hash = row.get::<Vec<u8>, _>("payload_hash");
+        let last_error_code = row.get::<String, _>("last_error_code");
+        insert_uncertain_effect_receipt_tx(
+            &mut tx,
+            id,
+            attempts,
+            &payload_hash,
+            &last_error_code,
+            "leased outbox effect expired before delivery proof",
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    for row in rows {
+        let id = row.get::<i64, _>("id");
+        let attempts = row.get::<i32, _>("attempts");
+        let effect_type = row
+            .get::<Option<String>, _>("effect_type")
+            .unwrap_or_else(|| "unknown".to_string());
+        let last_error_code = row.get::<String, _>("last_error_code");
+        let error = "leased outbox effect expired before delivery proof";
+        report_uncertain_discord_effect(
+            sender,
+            id,
+            &effect_type,
+            attempts,
+            &last_error_code,
+            error,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn claim_next_discord_effect(pool: &PgPool) -> anyhow::Result<Option<ClaimedDiscordEffect>> {
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT id
+              FROM scrim.outbox_effects
+             WHERE effect_type = 'discord_scrim_effect'
+               AND (
+                    state = 'pending'
+                    OR (state = 'retry' AND next_attempt_at <= now())
+               )
+             ORDER BY created_at, id
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE scrim.outbox_effects effect
+           SET state = 'leased',
+               lease_owner = 'dlbots:scrim_discord_outbox',
+               lease_until = now() + interval '30 seconds',
+               attempts = attempts + 1,
+               next_attempt_at = NULL,
+               updated_at = now()
+          FROM candidate
+         WHERE effect.id = candidate.id
+        RETURNING effect.id, effect.attempts, effect.payload_hash, effect.payload
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let id = row.get::<i64, _>("id");
+    let attempts = row.get::<i32, _>("attempts");
+    let payload_hash = row.get::<Vec<u8>, _>("payload_hash");
+    let payload = row.get::<Value, _>("payload");
+    match parse_discord_effect_payload(id, attempts, payload_hash.clone(), &payload) {
+        Ok(effect) => Ok(Some(effect)),
+        Err(err) => {
+            mark_discord_effect_dead(
+                pool,
+                id,
+                attempts,
+                &payload_hash,
+                "err_discord_effect_invalid_payload",
+                &err.to_string(),
+            )
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+fn parse_discord_effect_payload(
+    id: i64,
+    attempts: i32,
+    payload_hash: Vec<u8>,
+    payload: &Value,
+) -> anyhow::Result<ClaimedDiscordEffect> {
+    let schema = payload
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("discord effect schema_version fehlt"))?;
+    if schema != "discord-scrim-effect:v1" {
+        return Err(anyhow!("discord effect schema_version ungueltig"));
+    }
+    let message_kind = payload
+        .get("message_kind")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        })
+        .ok_or_else(|| anyhow!("discord effect message_kind ungueltig"))?;
+    let operation = match payload.get("operation").and_then(Value::as_str) {
+        Some("post") => DiscordEffectOperation::Post,
+        Some("edit") => DiscordEffectOperation::Edit,
+        _ => return Err(anyhow!("discord effect operation ungueltig")),
+    };
+    let channel_id = optional_snowflake(payload, "channel_id")?;
+    let recipient_user_id = optional_snowflake(payload, "recipient_user_id")?;
+    let target = match (channel_id, recipient_user_id) {
+        (Some(channel_id), None) => DiscordEffectTarget::Channel {
+            channel_id: snowflake_to_u64(&channel_id, "discord effect channel_id ungueltig")?,
+        },
+        (None, Some(recipient_user_id)) => DiscordEffectTarget::Dm { recipient_user_id },
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "discord effect target darf nicht Channel und DM sein"
+            ))
+        }
+        (None, None) => return Err(anyhow!("discord effect target fehlt")),
+    };
+    let message_id = payload
+        .get("message_id")
+        .and_then(Value::as_str)
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| anyhow!("discord effect message_id ungueltig"))?
+        .filter(|value| *value > 0);
+    if operation == DiscordEffectOperation::Edit && message_id.is_none() {
+        return Err(anyhow!("discord edit effect braucht message_id"));
+    }
+    if operation == DiscordEffectOperation::Edit && matches!(target, DiscordEffectTarget::Dm { .. })
+    {
+        return Err(anyhow!("discord dm effect erlaubt nur post"));
+    }
+    let body = payload
+        .get("body")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| anyhow!("discord effect body fehlt"))?;
+    validate_discord_effect_body(message_kind, operation, &target, &body)?;
+    Ok(ClaimedDiscordEffect {
+        id,
+        attempts,
+        payload_hash,
+        effect_type: message_kind.to_string(),
+        operation,
+        target,
+        message_id,
+        body,
+    })
+}
+
+fn optional_snowflake(payload: &Value, field: &str) -> anyhow::Result<Option<String>> {
+    match payload.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if snowflake_to_u64(value, "snowflake ungueltig").is_ok() => {
+            Ok(Some(value.clone()))
+        }
+        _ => Err(anyhow!("discord effect {field} ungueltig")),
+    }
+}
+
+fn snowflake_to_u64(value: &str, error: &str) -> anyhow::Result<u64> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| anyhow!(error.to_string()))
+}
+
+fn validate_discord_effect_body(
+    message_kind: &str,
+    operation: DiscordEffectOperation,
+    target: &DiscordEffectTarget,
+    body: &Map<String, Value>,
+) -> anyhow::Result<()> {
+    let body_bytes = serde_json::to_vec(&Value::Object(body.clone()))?;
+    if body_bytes.len() > DISCORD_EFFECT_MAX_BODY_BYTES {
+        return Err(anyhow!("discord effect body zu gross"));
+    }
+    validate_allowed_mentions(body.get("allowed_mentions"))?;
+    match message_kind {
+        "match_status" => {
+            require_channel_target(target)?;
+            validate_structured_scrim_body(body)
+        }
+        "match_request_reminder" => {
+            require_channel_target(target)?;
+            if operation != DiscordEffectOperation::Post {
+                return Err(anyhow!("match_request_reminder erlaubt nur post"));
+            }
+            validate_structured_scrim_body(body)
+        }
+        "replacement_request" => {
+            require_dm_target(target)?;
+            if operation != DiscordEffectOperation::Post {
+                return Err(anyhow!("replacement_request erlaubt nur post"));
+            }
+            validate_replacement_request_body(body)
+        }
+        "lobby_code_text" => {
+            require_channel_target(target)?;
+            validate_lobby_code_body(body)
+        }
+        _ => Err(anyhow!("discord effect message_kind unbekannt")),
+    }
+}
+
+fn require_channel_target(target: &DiscordEffectTarget) -> anyhow::Result<()> {
+    if matches!(target, DiscordEffectTarget::Channel { .. }) {
+        Ok(())
+    } else {
+        Err(anyhow!("discord effect braucht Channel-Ziel"))
+    }
+}
+
+fn require_dm_target(target: &DiscordEffectTarget) -> anyhow::Result<()> {
+    if matches!(target, DiscordEffectTarget::Dm { .. }) {
+        Ok(())
+    } else {
+        Err(anyhow!("discord effect braucht DM-Ziel"))
+    }
+}
+
+fn validate_allowed_mentions(value: Option<&Value>) -> anyhow::Result<()> {
+    let allowed = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("allowed_mentions fehlt"))?;
+    for key in allowed.keys() {
+        if !matches!(key.as_str(), "parse" | "users" | "roles" | "replied_user") {
+            return Err(anyhow!("allowed_mentions enthaelt unbekanntes Feld"));
+        }
+    }
+    let parse = allowed
+        .get("parse")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("allowed_mentions.parse fehlt"))?;
+    if !parse.is_empty() {
+        return Err(anyhow!("allowed_mentions.parse muss leer sein"));
+    }
+    for key in ["users", "roles"] {
+        if let Some(values) = allowed.get(key) {
+            let values = values
+                .as_array()
+                .ok_or_else(|| anyhow!("allowed_mentions.{key} ist keine Liste"))?;
+            for value in values {
+                let id = value
+                    .as_str()
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| anyhow!("allowed_mentions.{key} enthaelt ungueltige ID"))?;
+                if id == 0 {
+                    return Err(anyhow!("allowed_mentions.{key} enthaelt 0"));
+                }
+            }
+        }
+    }
+    if let Some(replied_user) = allowed.get("replied_user") {
+        if !replied_user.is_boolean() {
+            return Err(anyhow!("allowed_mentions.replied_user ist kein Bool"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_structured_scrim_body(body: &Map<String, Value>) -> anyhow::Result<()> {
+    for key in body.keys() {
+        if !matches!(
+            key.as_str(),
+            "flags" | "allowed_mentions" | "components" | "message_reference"
+        ) {
+            return Err(anyhow!(
+                "structured discord effect enthaelt unbekanntes Feld"
+            ));
+        }
+    }
+    if body.contains_key("content") {
+        return Err(anyhow!(
+            "structured discord effect darf kein top-level content haben"
+        ));
+    }
+    if body.get("flags").and_then(Value::as_u64) != Some(scrim_adapter::COMPONENTS_V2) {
+        return Err(anyhow!(
+            "structured discord effect braucht Components V2 flags"
+        ));
+    }
+    let components = body
+        .get("components")
+        .and_then(Value::as_array)
+        .filter(|components| !components.is_empty())
+        .ok_or_else(|| anyhow!("structured discord effect braucht components"))?;
+    for component in components {
+        let component = component
+            .as_object()
+            .ok_or_else(|| anyhow!("structured discord component ist kein Objekt"))?;
+        if component.get("type").and_then(Value::as_u64) != Some(17) {
+            return Err(anyhow!(
+                "structured discord effect braucht type-17 container"
+            ));
+        }
+        if component.get("accent_color").and_then(Value::as_u64)
+            != Some(u64::from(SCRIM_GOLD_ACCENT))
+        {
+            return Err(anyhow!(
+                "structured discord effect braucht Scrim-Gold-Accent"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_replacement_request_body(body: &Map<String, Value>) -> anyhow::Result<()> {
+    validate_structured_scrim_body(body)?;
+    if body.contains_key("message_reference") {
+        return Err(anyhow!(
+            "replacement_request dm darf keine message_reference haben"
+        ));
+    }
+    validate_no_direct_mentions(body.get("allowed_mentions"))?;
+
+    let mut request_id: Option<String> = None;
+    let mut accept = false;
+    let mut decline = false;
+    let containers = body
+        .get("components")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("replacement_request braucht components"))?;
+    for container in containers {
+        let Some(container_components) = container.get("components").and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for component in container_components {
+            if component.get("type").and_then(Value::as_u64) != Some(1) {
+                continue;
+            }
+            let row_components = component
+                .get("components")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("replacement_request action row ungueltig"))?;
+            for button in row_components {
+                let button = button
+                    .as_object()
+                    .ok_or_else(|| anyhow!("replacement_request button ist kein Objekt"))?;
+                if button.get("type").and_then(Value::as_u64) != Some(2) {
+                    return Err(anyhow!("replacement_request erlaubt nur Buttons"));
+                }
+                let custom_id = button
+                    .get("custom_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("replacement_request button custom_id fehlt"))?;
+                let (button_request_id, action) =
+                    scrim_adapter::replacement_request_button_parts(custom_id)
+                        .map_err(|err| anyhow!(err))?;
+                if let Some(expected) = &request_id {
+                    if expected != &button_request_id {
+                        return Err(anyhow!("replacement_request button ids uneinheitlich"));
+                    }
+                } else {
+                    request_id = Some(button_request_id);
+                }
+                match action {
+                    scrim_adapter::ReplacementRequestAction::Accept => accept = true,
+                    scrim_adapter::ReplacementRequestAction::Decline => decline = true,
+                }
+            }
+        }
+    }
+    if request_id.is_none() || !accept || !decline {
+        return Err(anyhow!(
+            "replacement_request braucht accept und decline Buttons"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_no_direct_mentions(value: Option<&Value>) -> anyhow::Result<()> {
+    let allowed = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("allowed_mentions fehlt"))?;
+    for key in ["users", "roles"] {
+        if let Some(values) = allowed.get(key).and_then(Value::as_array) {
+            if !values.is_empty() {
+                return Err(anyhow!(
+                    "replacement_request dm darf keine Mentions erlauben"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_lobby_code_body(body: &Map<String, Value>) -> anyhow::Result<()> {
+    for key in body.keys() {
+        if !matches!(key.as_str(), "content" | "allowed_mentions") {
+            return Err(anyhow!(
+                "lobby_code_text erlaubt nur content und allowed_mentions"
+            ));
+        }
+    }
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("lobby_code_text braucht content"))?;
+    if content.chars().count() > 2_000 || !content.starts_with("Lobby Code: ") {
+        return Err(anyhow!("lobby_code_text content ungueltig"));
+    }
+    Ok(())
+}
+
+async fn deliver_claimed_discord_effect(
+    pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
+    effect: ClaimedDiscordEffect,
+) -> anyhow::Result<()> {
+    match effect.operation {
+        DiscordEffectOperation::Post => match &effect.target {
+            DiscordEffectTarget::Channel { channel_id } => {
+                match sender.send_effect(*channel_id, &effect.body).await {
+                    Ok(message_id) => {
+                        mark_discord_effect_delivered(
+                            pool,
+                            &effect,
+                            DiscordDeliveryReceipt::Channel {
+                                channel_id: *channel_id,
+                                message_id,
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(err) => {
+                        mark_discord_effect_uncertain(
+                            pool,
+                            sender,
+                            &effect,
+                            "err_discord_post_uncertain",
+                            &err,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            DiscordEffectTarget::Dm { recipient_user_id } => {
+                match sender.send_dm_effect(recipient_user_id, &effect.body).await {
+                    Ok(receipt) => {
+                        mark_discord_effect_delivered(
+                            pool,
+                            &effect,
+                            DiscordDeliveryReceipt::Dm { receipt },
+                        )
+                        .await?;
+                    }
+                    Err(err) => {
+                        mark_discord_effect_uncertain(
+                            pool,
+                            sender,
+                            &effect,
+                            "err_discord_dm_uncertain",
+                            &err,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        },
+        DiscordEffectOperation::Edit => {
+            let message_id = effect
+                .message_id
+                .ok_or_else(|| anyhow!("discord edit effect braucht message_id"))?;
+            match &effect.target {
+                DiscordEffectTarget::Channel { channel_id } => {
+                    match sender
+                        .edit_effect(*channel_id, message_id, &effect.body)
+                        .await
+                    {
+                        Ok(()) => {
+                            mark_discord_effect_delivered(
+                                pool,
+                                &effect,
+                                DiscordDeliveryReceipt::Channel {
+                                    channel_id: *channel_id,
+                                    message_id,
+                                },
+                            )
+                            .await?;
+                        }
+                        Err(err) => {
+                            mark_discord_effect_uncertain(
+                                pool,
+                                sender,
+                                &effect,
+                                "err_discord_edit_uncertain",
+                                &err,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                DiscordEffectTarget::Dm { .. } => {
+                    mark_discord_effect_dead(
+                        pool,
+                        effect.id,
+                        effect.attempts,
+                        &effect.payload_hash,
+                        "err_discord_effect_invalid_payload",
+                        "discord dm edit ist nicht erlaubt",
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+enum DiscordDeliveryReceipt {
+    Channel { channel_id: u64, message_id: u64 },
+    Dm { receipt: DiscordDmReceipt },
+}
+
+impl DiscordDeliveryReceipt {
+    fn remote_message_id(&self) -> String {
+        match self {
+            Self::Channel {
+                channel_id,
+                message_id,
+            } => format!("discord:{channel_id}:{message_id}"),
+            Self::Dm { receipt } => {
+                format!("discorddm:{}:{}", receipt.dm_channel_id, receipt.message_id)
+            }
+        }
+    }
+
+    fn payload(&self, operation: DiscordEffectOperation) -> Value {
+        match self {
+            Self::Channel {
+                channel_id,
+                message_id,
+            } => json!({
+                "schema_version": "discord-scrim-effect-receipt:v1",
+                "target": "channel",
+                "channel_id": channel_id.to_string(),
+                "message_id": message_id.to_string(),
+                "operation": match operation { DiscordEffectOperation::Post => "post", DiscordEffectOperation::Edit => "edit" },
+            }),
+            Self::Dm { receipt } => json!({
+                "schema_version": "discord-scrim-effect-receipt:v1",
+                "target": "dm",
+                "dm_channel_id": receipt.dm_channel_id,
+                "message_id": receipt.message_id,
+                "operation": "post",
+            }),
+        }
+    }
+}
+
+async fn mark_discord_effect_delivered(
+    pool: &PgPool,
+    effect: &ClaimedDiscordEffect,
+    delivery: DiscordDeliveryReceipt,
+) -> anyhow::Result<()> {
+    let remote_message_id = delivery.remote_message_id();
+    let receipt_payload = delivery.payload(effect.operation);
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE scrim.outbox_effects
+           SET state = 'delivered',
+               lease_owner = NULL,
+               lease_until = NULL,
+               remote_system = 'discord',
+               remote_message_id = $2,
+               updated_at = now(),
+               delivered_at = now()
+         WHERE id = $1
+           AND state = 'leased'
+        "#,
+    )
+    .bind(effect.id)
+    .bind(&remote_message_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow!(
+            "discord effect {} konnte nicht delivered markiert werden",
+            effect.id
+        ));
+    }
+    reconcile_discord_effect_links_tx(&mut tx, effect.id).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.effect_receipts(
+            outbox_effect_id, remote_system, remote_message_id, payload_hash,
+            receipt_payload, status, observed_at
+        )
+        VALUES($1, 'discord', $2, $3, $4::jsonb, 'confirmed', now())
+        ON CONFLICT (remote_system, remote_message_id) WHERE remote_message_id IS NOT NULL DO NOTHING
+        "#,
+    )
+    .bind(effect.id)
+    .bind(&remote_message_id)
+    .bind(&effect.payload_hash)
+    .bind(receipt_payload)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn mark_discord_effect_dead(
+    pool: &PgPool,
+    outbox_id: i64,
+    attempts: i32,
+    payload_hash: &[u8],
+    error_code: &'static str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE scrim.outbox_effects
+           SET state = 'dead',
+               lease_owner = NULL,
+               lease_until = NULL,
+               last_error_code = $2,
+               last_error_hash = $3,
+               updated_at = now()
+         WHERE id = $1
+           AND state = 'leased'
+        "#,
+    )
+    .bind(outbox_id)
+    .bind(error_code)
+    .bind(scrim_payload_hash(&json!({"error": error})))
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow!(
+            "discord effect {outbox_id} konnte nicht dead markiert werden"
+        ));
+    }
+    insert_failed_effect_receipt_tx(
+        &mut tx,
+        outbox_id,
+        attempts,
+        payload_hash,
+        error_code,
+        error,
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::warn!(outbox_effect_id = outbox_id, error_code, error = %error.chars().take(200).collect::<String>(), "Scrim-Discord-Outbox-Payload dead");
+    Ok(())
+}
+
+async fn mark_discord_effect_uncertain(
+    pool: &PgPool,
+    sender: &dyn ScrimDiscordEffectSender,
+    effect: &ClaimedDiscordEffect,
+    error_code: &'static str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE scrim.outbox_effects
+           SET state = 'uncertain',
+               lease_owner = NULL,
+               lease_until = NULL,
+               last_error_code = $2,
+               last_error_hash = $3,
+               updated_at = now()
+         WHERE id = $1
+           AND state = 'leased'
+        "#,
+    )
+    .bind(effect.id)
+    .bind(error_code)
+    .bind(scrim_payload_hash(&json!({"error": error})))
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow!(
+            "discord effect {} konnte nicht uncertain markiert werden",
+            effect.id
+        ));
+    }
+    insert_uncertain_effect_receipt_tx(
+        &mut tx,
+        effect.id,
+        effect.attempts,
+        &effect.payload_hash,
+        error_code,
+        error,
+    )
+    .await?;
+    tx.commit().await?;
+    report_uncertain_discord_effect(
+        sender,
+        effect.id,
+        &effect.effect_type,
+        effect.attempts,
+        error_code,
+        error,
+    )
+    .await;
+    Ok(())
+}
+
+async fn report_uncertain_discord_effect(
+    sender: &dyn ScrimDiscordEffectSender,
+    outbox_effect_id: i64,
+    effect_type: &str,
+    attempts: i32,
+    last_error_code: &str,
+    error: &str,
+) {
+    let cause = short_error(error);
+    tracing::warn!(
+        outbox_effect_id,
+        effect_type,
+        attempts,
+        last_error_code,
+        cause = %cause,
+        "Scrim-Discord-Outbox-Sendestatus uncertain"
+    );
+    let content = format!(
+        "Scrim-Zustellung unklar: Eine Discord-Nachricht ist weder als zugestellt noch als fehlgeschlagen bestätigt. Sie wird nicht automatisch wiederholt, damit kein doppelter Post entsteht, also bitte im Zielkanal nachsehen. outbox_effect_id={outbox_effect_id} effect_type={effect_type} attempts={attempts} last_error_code={last_error_code} cause={cause}"
+    );
+    if let Err(err) = sender.post_log(&content).await {
+        tracing::warn!(
+            %err,
+            outbox_effect_id,
+            channel_id = LOG_CHANNEL_ID,
+            "Scrim-Discord-Outbox-Log-Post fehlgeschlagen"
+        );
+    }
+}
+
+async fn insert_uncertain_effect_receipt_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+    attempts: i32,
+    payload_hash: &[u8],
+    error_code: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let remote_task_id = format!("outbox:{outbox_id}:attempt:{attempts}");
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.effect_receipts(
+            outbox_effect_id, remote_system, remote_task_id, payload_hash,
+            receipt_payload, status, observed_at
+        )
+        VALUES($1, 'discord', $2, $3, $4::jsonb, 'uncertain', now())
+        ON CONFLICT (remote_system, remote_task_id) WHERE remote_task_id IS NOT NULL DO NOTHING
+        "#,
+    )
+    .bind(outbox_id)
+    .bind(remote_task_id)
+    .bind(payload_hash)
+    .bind(json!({
+        "schema_version": "discord-scrim-effect-receipt:v1",
+        "error_code": error_code,
+        "error_hash": hex::encode(scrim_payload_hash(&json!({"error": error}))),
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_failed_effect_receipt_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+    attempts: i32,
+    payload_hash: &[u8],
+    error_code: &'static str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let remote_task_id = format!("outbox:{outbox_id}:attempt:{attempts}:dead");
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.effect_receipts(
+            outbox_effect_id, remote_system, remote_task_id, payload_hash,
+            receipt_payload, status, observed_at
+        )
+        VALUES($1, 'discord', $2, $3, $4::jsonb, 'failed', now())
+        ON CONFLICT (remote_system, remote_task_id) WHERE remote_task_id IS NOT NULL DO NOTHING
+        "#,
+    )
+    .bind(outbox_id)
+    .bind(remote_task_id)
+    .bind(payload_hash)
+    .bind(json!({
+        "schema_version": "discord-scrim-effect-receipt:v1",
+        "error_code": error_code,
+        "error_hash": hex::encode(scrim_payload_hash(&json!({"error": error}))),
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn discord_effect_payload(
+    message_kind: &str,
+    operation: &str,
+    channel_id: u64,
+    message_id: Option<u64>,
+    body: &Map<String, Value>,
+) -> Value {
+    json!({
+        "schema_version": "discord-scrim-effect:v1",
+        "message_kind": message_kind,
+        "operation": operation,
+        "channel_id": channel_id.to_string(),
+        "recipient_user_id": null,
+        "message_id": message_id.map(|value| value.to_string()),
+        "body": body,
+    })
+}
+
+#[cfg(test)]
+fn discord_dm_effect_payload(
+    message_kind: &str,
+    recipient_user_id: u64,
+    body: &Map<String, Value>,
+) -> Value {
+    json!({
+        "schema_version": "discord-scrim-effect:v1",
+        "message_kind": message_kind,
+        "operation": "post",
+        "channel_id": null,
+        "recipient_user_id": recipient_user_id.to_string(),
+        "message_id": null,
+        "body": body,
+    })
+}
+
 fn match_request_body(
     request_id: i64,
     team_id: i64,
     content: &str,
     slot_options: &Value,
 ) -> anyhow::Result<Map<String, Value>> {
-    let mut body = message_body(content);
-    body.insert(
-        "components".to_string(),
-        match_request_components(request_id, team_id, slot_options)?,
-    );
-    Ok(body)
+    let components = match_request_components(request_id, team_id, slot_options)?;
+    let action_rows = components
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow!("match_request_components ist kein Array"))?;
+    Ok(components_v2_body(
+        content,
+        action_rows,
+        json!({ "parse": [], "replied_user": false }),
+    ))
+}
+
+#[cfg(test)]
+fn replacement_request_body(replacement_request_id: i64, content: &str) -> Map<String, Value> {
+    components_v2_body(
+        content,
+        vec![json!({
+            "type": 1,
+            "components": [
+                {
+                    "type": 2,
+                    "style": 3,
+                    "label": "Ich springe ein",
+                    "custom_id": format!("scrimrepl:v1:{replacement_request_id}:accept")
+                },
+                {
+                    "type": 2,
+                    "style": 4,
+                    "label": "Passt nicht",
+                    "custom_id": format!("scrimrepl:v1:{replacement_request_id}:decline")
+                }
+            ]
+        })],
+        json!({ "parse": [], "replied_user": false }),
+    )
 }
 
 fn start_success_message(
@@ -2673,18 +4174,18 @@ fn match_request_reminder_body(
     source_message_id: u64,
     target_user_ids: &[u64],
 ) -> Map<String, Value> {
-    let mut body = message_body(content);
-    body.insert(
-        "message_reference".to_string(),
-        json!({ "message_id": source_message_id.to_string(), "fail_if_not_exists": false }),
-    );
-    body.insert(
-        "allowed_mentions".to_string(),
+    let mut body = components_v2_body(
+        content,
+        Vec::new(),
         json!({
             "parse": [],
             "users": target_user_ids.iter().map(u64::to_string).collect::<Vec<_>>(),
             "replied_user": false,
         }),
+    );
+    body.insert(
+        "message_reference".to_string(),
+        json!({ "message_id": source_message_id.to_string(), "fail_if_not_exists": false }),
     );
     body
 }
@@ -2769,6 +4270,12 @@ async fn record_match_request_response(
         .transpose()
         .context("Discord-Message-ID zu gross")?;
 
+    let mut tx = pool.begin().await?;
+    if !lock_transition_and_require_legacy(&mut tx).await? {
+        tx.rollback().await?;
+        return Ok(MatchRequestResponseOutcome::RuntimeClosed);
+    }
+
     let Some(row) = sqlx::query(
         r#"
         SELECT mr.status,
@@ -2785,9 +4292,10 @@ async fn record_match_request_response(
     .bind(i32::try_from(parsed.request_id)?)
     .bind(i32::try_from(parsed.team_id)?)
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     else {
+        tx.rollback().await?;
         return Ok(MatchRequestResponseOutcome::InvalidAction);
     };
 
@@ -2796,10 +4304,12 @@ async fn record_match_request_response(
         status.as_str(),
         MATCH_REQUEST_STATUS_OPEN | MATCH_REQUEST_STATUS_POST_FAILED
     ) {
+        tx.rollback().await?;
         return Ok(MatchRequestResponseOutcome::NotOpen);
     }
     let participant_id = row.get::<Option<i64>, _>("participant_id");
     let Some(participant_id) = participant_id else {
+        tx.rollback().await?;
         return Ok(MatchRequestResponseOutcome::WrongTeam);
     };
     let slot_options: Value = row.get("slot_options");
@@ -2808,32 +4318,70 @@ async fn record_match_request_response(
         .ok_or_else(|| anyhow!("slot_options ist kein Array"))?
         .len();
     if parsed.slot_index >= 0 && parsed.slot_index as usize >= slot_count {
+        tx.rollback().await?;
         return Ok(MatchRequestResponseOutcome::InvalidAction);
     }
     let message_ids: Value = row.get("team_query_message_ids");
     if !posted_message_matches(&message_ids, parsed.team_id, channel_id, message_id) {
+        tx.rollback().await?;
         return Ok(MatchRequestResponseOutcome::WrongMessage);
     }
 
-    let mut tx = pool.begin().await?;
     let (lock_a, lock_b) = match_request_response_lock_keys(parsed.request_id, participant_id)?;
     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
         .bind(lock_a)
         .bind(lock_b)
         .execute(&mut *tx)
         .await?;
-    let current_status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM scrim.match_requests WHERE id = $1 FOR UPDATE",
+
+    let Some(current_row) = sqlx::query(
+        r#"
+        SELECT mr.status,
+               mr.slot_options,
+               mr.team_query_message_ids,
+               tm.participant_id::bigint AS participant_id
+          FROM scrim.match_requests mr
+          LEFT JOIN scrim.participants p ON p.discord_id = $3
+          LEFT JOIN scrim.team_members tm ON tm.participant_id = p.id AND tm.team_id = $2
+         WHERE mr.id = $1
+           AND (mr.team_a_id = $2 OR mr.team_b_id = $2)
+         FOR UPDATE OF mr
+        "#,
     )
     .bind(i32::try_from(parsed.request_id)?)
-    .fetch_one(&mut *tx)
-    .await?;
+    .bind(i32::try_from(parsed.team_id)?)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.rollback().await?;
+        return Ok(MatchRequestResponseOutcome::InvalidAction);
+    };
+    let current_status = current_row.get::<String, _>("status");
     if !matches!(
         current_status.as_str(),
         MATCH_REQUEST_STATUS_OPEN | MATCH_REQUEST_STATUS_POST_FAILED
     ) {
         tx.rollback().await?;
         return Ok(MatchRequestResponseOutcome::NotOpen);
+    }
+    if current_row.get::<Option<i64>, _>("participant_id") != Some(participant_id) {
+        tx.rollback().await?;
+        return Ok(MatchRequestResponseOutcome::WrongTeam);
+    }
+    let current_slot_options: Value = current_row.get("slot_options");
+    let current_slot_count = current_slot_options
+        .as_array()
+        .ok_or_else(|| anyhow!("slot_options ist kein Array"))?
+        .len();
+    if parsed.slot_index >= 0 && parsed.slot_index as usize >= current_slot_count {
+        tx.rollback().await?;
+        return Ok(MatchRequestResponseOutcome::InvalidAction);
+    }
+    let current_message_ids: Value = current_row.get("team_query_message_ids");
+    if !posted_message_matches(&current_message_ids, parsed.team_id, channel_id, message_id) {
+        tx.rollback().await?;
+        return Ok(MatchRequestResponseOutcome::WrongMessage);
     }
     if parsed.slot_index == -1 {
         sqlx::query(
@@ -2951,6 +4499,10 @@ fn match_request_response_reply(outcome: MatchRequestResponseOutcome) -> dl_disc
         }
         MatchRequestResponseOutcome::WrongTeam => {
             "Diese Terminabfrage gehört nicht zu deinem Team.".to_string()
+        }
+        MatchRequestResponseOutcome::RuntimeClosed => {
+            "Scrim-Planung ist gerade nicht eindeutig lokal beschreibbar. Bitte kurz spaeter erneut versuchen."
+                .to_string()
         }
     };
     dl_discord::BridgeReply::ephemeral_text(text)
@@ -3153,8 +4705,252 @@ fn missing_target_message(match_id: i64, message_kind: &str, _source_line: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    struct RelayOnlyHandler;
+
+    struct NoDashboardMemberLookup;
+
+    #[async_trait::async_trait]
+    impl dl_dashboard::MemberLookup for NoDashboardMemberLookup {
+        async fn member_access(
+            &self,
+            _guild_id: Option<u64>,
+            _user_id: u64,
+        ) -> Option<dl_dashboard::MemberAccessInfo> {
+            None
+        }
+    }
+
+    struct NoDashboardNameResolver;
+
+    #[async_trait::async_trait]
+    impl dl_dashboard::NameResolver for NoDashboardNameResolver {
+        async fn resolve(&self, _user_ids: &[u64]) -> std::collections::HashMap<u64, String> {
+            std::collections::HashMap::new()
+        }
+    }
+
+    struct RecordingDiscordSender {
+        sent: tokio::sync::Mutex<Vec<(u64, Value)>>,
+        dm_sent: tokio::sync::Mutex<Vec<(String, Value)>>,
+        logs: tokio::sync::Mutex<Vec<String>>,
+        fail_send: bool,
+    }
+
+    impl RecordingDiscordSender {
+        fn new(fail_send: bool) -> Self {
+            Self {
+                sent: tokio::sync::Mutex::new(Vec::new()),
+                dm_sent: tokio::sync::Mutex::new(Vec::new()),
+                logs: tokio::sync::Mutex::new(Vec::new()),
+                fail_send,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ScrimDiscordEffectSender for RecordingDiscordSender {
+        async fn send_effect(
+            &self,
+            channel_id: u64,
+            body: &Map<String, Value>,
+        ) -> Result<u64, String> {
+            self.sent
+                .lock()
+                .await
+                .push((channel_id, Value::Object(body.clone())));
+            if self.fail_send {
+                Err("discord timeout after send attempt".to_string())
+            } else {
+                Ok(9001)
+            }
+        }
+
+        async fn post_log(&self, content: &str) -> Result<(), String> {
+            self.logs.lock().await.push(content.to_string());
+            Ok(())
+        }
+
+        async fn send_dm_effect(
+            &self,
+            recipient_user_id: &str,
+            body: &Map<String, Value>,
+        ) -> Result<DiscordDmReceipt, String> {
+            self.dm_sent
+                .lock()
+                .await
+                .push((recipient_user_id.to_string(), Value::Object(body.clone())));
+            if self.fail_send {
+                Err("discord dm timeout after send attempt".to_string())
+            } else {
+                Ok(DiscordDmReceipt {
+                    dm_channel_id: "7001".to_string(),
+                    message_id: "9001".to_string(),
+                })
+            }
+        }
+
+        async fn edit_effect(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            body: &Map<String, Value>,
+        ) -> Result<(), String> {
+            self.sent.lock().await.push((
+                channel_id,
+                json!({"message_id": message_id, "body": Value::Object(body.clone())}),
+            ));
+            if self.fail_send {
+                Err("discord edit timeout".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    async fn insert_discord_effect(
+        pool: &PgPool,
+        idempotency_key: &str,
+        payload: &Value,
+        state: &str,
+    ) -> anyhow::Result<i64> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO scrim.outbox_effects(
+                effect_type, idempotency_key, payload_hash, payload, state, lease_owner, lease_until
+            )
+            VALUES(
+                'discord_scrim_effect', $1, $2, $3::jsonb, $4,
+                CASE WHEN $4 = 'leased' THEN 'dlbots:scrim_discord_outbox' ELSE NULL END,
+                CASE WHEN $4 = 'leased' THEN now() + interval '30 seconds' ELSE NULL END
+            )
+            RETURNING id
+            "#,
+        )
+        .bind(idempotency_key)
+        .bind(scrim_payload_hash(payload))
+        .bind(payload)
+        .bind(state)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.get("id"))
+    }
+
+    #[async_trait::async_trait]
+    impl dl_discord::InteractionHandler for RelayOnlyHandler {
+        async fn handle(
+            &self,
+            _interaction: dl_discord::BridgeInteraction,
+        ) -> dl_discord::BridgeReply {
+            dl_discord::BridgeReply::ephemeral_text("Turnier hat die Antwort erhalten.")
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_interaction_hat_keinen_lokalen_mutation_fallback() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_match_request_batch(pool, 30).await?;
+        sqlx::query(
+            "SELECT applied FROM scrim.transition_runtime_control(0, 'draining', 'turniere', '42', 'Coach', 'runtime:test', 'runtime:test', '{}'::jsonb)",
+        )
+        .fetch_one(pool)
+        .await?;
+        let mut router = dl_discord::InteractionRouter::new();
+        register(
+            &mut router,
+            pool.clone(),
+            ScrimRuntimeGate::new(pool.clone(), Duration::ZERO),
+            Arc::new(RelayOnlyHandler),
+        );
+
+        let handler = router
+            .resolve_component("scrimreq:v1:slot:31:1:0")
+            .expect("relay handler");
+        let reply = handler
+            .handle(dl_discord::BridgeInteraction {
+                custom_id: "scrimreq:v1:slot:31:1:0".to_string(),
+                user_id: 555,
+                channel_id: 100,
+                message_id: Some(9001),
+                ..dl_discord::BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("Turnier hat die Antwort erhalten.")
+        );
+        let writes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scrim.match_request_responses WHERE request_id = 31",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(writes, 0, "relay must not fall back to local persistence");
+
+        let replacement_handler = router
+            .resolve_component("scrimrepl:v1:77:accept")
+            .expect("replacement relay handler");
+        let replacement_reply = replacement_handler
+            .handle(dl_discord::BridgeInteraction {
+                custom_id: "scrimrepl:v1:77:accept".to_string(),
+                user_id: 555,
+                channel_id: 100,
+                message_id: Some(9001),
+                ..dl_discord::BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            replacement_reply.content.as_deref(),
+            Some("Turnier hat die Antwort erhalten.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacement_button_legacy_fail_closed_ohne_lokalen_fallback() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let mut router = dl_discord::InteractionRouter::new();
+        register(
+            &mut router,
+            pool.clone(),
+            ScrimRuntimeGate::new(pool.clone(), Duration::ZERO),
+            Arc::new(RelayOnlyHandler),
+        );
+
+        let handler = router
+            .resolve_component("scrimrepl:v1:77:accept")
+            .expect("replacement handler");
+        let reply = handler
+            .handle(dl_discord::BridgeInteraction {
+                custom_id: "scrimrepl:v1:77:accept".to_string(),
+                user_id: 555,
+                channel_id: 100,
+                message_id: Some(9001),
+                ..dl_discord::BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(
+                "Ersatzantworten werden hier nicht lokal verarbeitet. Bitte die aktuelle Turnier-Nachricht verwenden."
+            )
+        );
+        let writes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scrim.replacement_requests")
+            .fetch_one(pool)
+            .await?;
+        assert_eq!(writes, 0);
+        Ok(())
+    }
 
     #[test]
     fn scrim_voice_entscheidung_deckt_create_skip_keep_und_cleanup_ab() {
@@ -3577,9 +5373,24 @@ mod tests {
         assert!(!content.contains("Regulaerer"));
         assert!(content.contains("<t:1783354800:f>"));
         assert!(!content.contains("<@"));
+        let body = match_request_body(
+            31,
+            1,
+            &content,
+            &json!([
+                { "day": "sat", "from": 1200, "to": 1320 },
+                { "day": "sun", "from": 1200, "to": 1320 }
+            ]),
+        )?;
+        assert_eq!(body["flags"], json!(scrim_adapter::COMPONENTS_V2));
         assert_eq!(
-            message_body(&content)["allowed_mentions"],
-            json!({ "parse": [] })
+            body["allowed_mentions"],
+            json!({ "parse": [], "replied_user": false })
+        );
+        assert_eq!(body["components"][0]["type"], json!(17));
+        assert_eq!(
+            body["components"][0]["accent_color"],
+            json!(SCRIM_GOLD_ACCENT)
         );
         Ok(())
     }
@@ -3643,6 +5454,12 @@ mod tests {
         assert_eq!(
             body["allowed_mentions"],
             json!({ "parse": [], "users": ["555", "666"], "replied_user": false })
+        );
+        assert_eq!(body["flags"], json!(scrim_adapter::COMPONENTS_V2));
+        assert_eq!(body["components"][0]["type"], json!(17));
+        assert_eq!(
+            body["components"][0]["accent_color"],
+            json!(SCRIM_GOLD_ACCENT)
         );
         Ok(())
     }
@@ -3708,6 +5525,7 @@ mod tests {
         let content = match_status_message(
             &ClaimedMatchStatus {
                 request_id: 31,
+                publication_approval_id: 80,
                 team_a_name: "team-1".to_string(),
                 team_b_name: Some("team-2".to_string()),
                 released_slot: json!({ "day": "sat", "from": 1200, "to": 1320 }),
@@ -3753,9 +5571,16 @@ mod tests {
         assert!(content
             .contains("Terminabfrage: https://discord.com/channels/1289721245281292288/100/9001"));
         assert!(!content.contains("<@"));
+        let body = match_status_body(&content);
         assert_eq!(
-            message_body(&content)["allowed_mentions"],
-            json!({ "parse": [] })
+            body["allowed_mentions"],
+            json!({ "parse": [], "replied_user": false })
+        );
+        assert_eq!(body["flags"], json!(scrim_adapter::COMPONENTS_V2));
+        assert_eq!(body["components"][0]["type"], json!(17));
+        assert_eq!(
+            body["components"][0]["accent_color"],
+            json!(SCRIM_GOLD_ACCENT)
         );
         Ok(())
     }
@@ -3798,6 +5623,56 @@ mod tests {
         assert_eq!(claim.target_user_ids, vec![666]);
         assert_eq!(claim.target_kind, "members");
         assert_eq!(match_request_reminder_status(pool, 80).await?, "posting");
+
+        let reminder_content = match_request_reminder_message(
+            &claim.template,
+            &claim.team_name,
+            &claim.target_user_ids,
+            claim.target_role_id,
+        )?;
+        let reminder_body = match_request_reminder_body(
+            &reminder_content,
+            claim.source_message_id,
+            &claim.target_user_ids,
+        );
+        let reminder_payload = discord_effect_payload(
+            "match_request_reminder",
+            "post",
+            claim.channel_id,
+            None,
+            &reminder_body,
+        );
+        let outbox_id = enqueue_match_request_reminder_effect(pool, 80, &reminder_payload).await?;
+        let outbox = sqlx::query(
+            "SELECT effect_type, idempotency_key, state, payload FROM scrim.outbox_effects WHERE id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            outbox.get::<String, _>("effect_type"),
+            "discord_scrim_effect"
+        );
+        assert_eq!(
+            outbox.get::<String, _>("idempotency_key"),
+            "scrimreminder:v1:80"
+        );
+        assert_eq!(outbox.get::<String, _>("state"), "leased");
+        let payload = outbox.get::<Value, _>("payload");
+        assert_eq!(payload["message_kind"], json!("match_request_reminder"));
+        assert_eq!(payload["operation"], json!("post"));
+        assert_eq!(payload["channel_id"], json!("100"));
+        assert_eq!(
+            payload["body"]["message_reference"]["message_id"],
+            json!("9001")
+        );
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM scrim.match_request_reminder_effects WHERE reminder_id = 80 AND outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(linked, 1);
 
         save_match_request_reminder_failure(pool, 80, "discord down").await?;
         let row = sqlx::query(
@@ -4190,8 +6065,15 @@ mod tests {
         insert_match_request_response(pool, 31, 2, 601, 777, 0, (Some(9002), Some(200))).await?;
         release_match_request_for_test(pool, 31).await?;
 
+        assert!(
+            claim_next_pending_match_status(pool).await?.is_none(),
+            "unapproved status publication must not be claimed"
+        );
+        approve_status_publication_for_test(pool, 31).await?;
+
         let claim = claim_next_pending_match_status(pool).await?.expect("claim");
         assert_eq!(claim.request_id, 31);
+        assert!(claim.publication_approval_id > 0);
         assert_eq!(claim.targets.len(), 2);
         assert_eq!(claim.targets[0].query_message_id, 9001);
         assert_eq!(claim.targets[0].status_message_id, None);
@@ -4245,6 +6127,698 @@ mod tests {
             .expect("edit claim");
         assert_eq!(edit_claim.targets[0].status_message_id, Some(9101));
         assert_eq!(edit_claim.targets[1].status_message_id, Some(9102));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dashboard_release_authorisiert_und_postet_match_status_idempotent() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_team_member(pool, 2, 601, 777).await?;
+        insert_match_request_batch_with_deadline_offset(pool, 30, -1).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 1,
+                    channel_id: 100,
+                    message_id: 9001,
+                },
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 2,
+                    channel_id: 200,
+                    message_id: 9002,
+                },
+            ],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
+        insert_match_request_response(pool, 31, 2, 601, 777, 0, (Some(9002), Some(200))).await?;
+        let (app, session_id, csrf) = dashboard_app_with_session(pool).await?;
+
+        let response = app
+            .clone()
+            .oneshot(dashboard_release_request(&session_id, &csrf)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let claim = claim_next_pending_match_status(pool)
+            .await?
+            .expect("dashboard release did not authorize status publication");
+        let target = claim.targets.first().expect("status target");
+        let body = match_status_body(&match_status_message(&claim, target)?);
+        let payload =
+            discord_effect_payload("match_status", "post", target.channel_id, None, &body);
+        let outbox_id = enqueue_status_publication_effect(pool, &claim, target, &payload).await?;
+        let sender = RecordingDiscordSender::new(false);
+        deliver_claimed_discord_effect(
+            pool,
+            &sender,
+            ClaimedDiscordEffect {
+                id: outbox_id,
+                attempts: 1,
+                payload_hash: scrim_payload_hash(&payload),
+                effect_type: "match_status".to_string(),
+                operation: DiscordEffectOperation::Post,
+                target: DiscordEffectTarget::Channel {
+                    channel_id: target.channel_id,
+                },
+                message_id: None,
+                body,
+            },
+        )
+        .await?;
+        assert_eq!(sender.sent.lock().await.len(), 1);
+
+        let response = app
+            .oneshot(dashboard_release_request(&session_id, &csrf)?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval = sqlx::query(
+            r#"
+            SELECT COUNT(*)::BIGINT AS approval_count,
+                   MIN(decided_by_user_id) AS decided_by_user_id,
+                   MIN(decided_by_display_name) AS decided_by_display_name
+              FROM scrim.status_publication_approvals
+             WHERE target_kind = 'match_request'
+               AND target_id = '31'
+               AND status_kind = 'match_status'
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(approval.get::<i64, _>("approval_count"), 1);
+        assert_eq!(
+            approval
+                .get::<Option<String>, _>("decided_by_user_id")
+                .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            approval
+                .get::<Option<String>, _>("decided_by_display_name")
+                .as_deref(),
+            Some("Coach")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approved_match_status_publication_wird_als_components_v2_outbox_persistiert(
+    ) -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_team_member(pool, 1, 501, 555).await?;
+        insert_team_member(pool, 2, 601, 777).await?;
+        insert_match_request_batch(pool, 30).await?;
+        save_match_request_posts(
+            pool,
+            30,
+            &[
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 1,
+                    channel_id: 100,
+                    message_id: 9001,
+                },
+                MatchRequestPost {
+                    request_id: 31,
+                    team_id: 2,
+                    channel_id: 200,
+                    message_id: 9002,
+                },
+            ],
+            MATCH_REQUEST_STATUS_OPEN,
+        )
+        .await?;
+        insert_match_request_response(pool, 31, 1, 501, 555, 0, (Some(9001), Some(100))).await?;
+        insert_match_request_response(pool, 31, 2, 601, 777, 0, (Some(9002), Some(200))).await?;
+        release_match_request_for_test(pool, 31).await?;
+        approve_status_publication_for_test(pool, 31).await?;
+        let claim = claim_next_pending_match_status(pool).await?.expect("claim");
+        let target = &claim.targets[0];
+        let content = match_status_message(&claim, target)?;
+        let body = match_status_body(&content);
+        let effect_payload =
+            discord_effect_payload("match_status", "post", target.channel_id, None, &body);
+
+        let outbox_id =
+            enqueue_status_publication_effect(pool, &claim, target, &effect_payload).await?;
+
+        let row = sqlx::query(
+            "SELECT effect_type, idempotency_key, state, payload FROM scrim.outbox_effects WHERE id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("effect_type"), "discord_scrim_effect");
+        assert_eq!(
+            row.get::<String, _>("idempotency_key"),
+            "scrimstatus:v1:request:31:team:1"
+        );
+        assert_eq!(row.get::<String, _>("state"), "leased");
+        let payload = row.get::<Value, _>("payload");
+        assert_eq!(payload["schema_version"], json!("discord-scrim-effect:v1"));
+        assert_eq!(payload["message_kind"], json!("match_status"));
+        assert_eq!(payload["operation"], json!("post"));
+        assert_eq!(payload["channel_id"], json!("100"));
+        assert_eq!(
+            payload["body"]["flags"],
+            json!(scrim_adapter::COMPONENTS_V2)
+        );
+        assert_eq!(
+            payload["body"]["allowed_mentions"],
+            json!({"parse": [], "replied_user": false})
+        );
+        assert_eq!(payload["body"]["components"][0]["type"], json!(17));
+        assert_eq!(
+            payload["body"]["components"][0]["accent_color"],
+            json!(SCRIM_GOLD_ACCENT)
+        );
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM scrim.status_publication_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(linked, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivered_effect_setzt_reminder_link_reconciled_at() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        insert_match_request_reminder(pool, 80, 31, 1, "antwort_fehlt", &[], &[]).await?;
+        let payload = discord_effect_payload(
+            "match_request_reminder",
+            "post",
+            100,
+            None,
+            &match_request_reminder_body("Antwort fehlt", 9001, &[]),
+        );
+        let outbox_id =
+            insert_discord_effect(pool, "discord:test_reminder_reconciled", &payload, "leased")
+                .await?;
+        sqlx::query(
+            "INSERT INTO scrim.match_request_reminder_effects(reminder_id, outbox_effect_id) VALUES(80, $1)",
+        )
+        .bind(outbox_id)
+        .execute(pool)
+        .await?;
+
+        mark_pending_discord_effect_delivered(pool, outbox_id, &payload, 100, 9101).await?;
+
+        let reconciled_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT reconciled_at FROM scrim.match_request_reminder_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(reconciled_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivered_effect_setzt_replacement_link_reconciled_at() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let need_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_needs(reason, created_by_user_id, created_by_display_name)
+             VALUES('lineup_gap', '42', 'Coach') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let replacement_request_id: i64 = sqlx::query_scalar(
+            "INSERT INTO scrim.replacement_requests(
+                 need_id, discord_user_id, requested_by_user_id, requested_by_display_name
+             )
+             VALUES($1, 555, '42', 'Coach') RETURNING id",
+        )
+        .bind(need_id)
+        .fetch_one(pool)
+        .await?;
+        let body = replacement_request_body(replacement_request_id, "Kannst du einspringen?");
+        let payload = discord_dm_effect_payload("replacement_request", 555, &body);
+        let outbox_id = insert_discord_effect(
+            pool,
+            "discord:test_replacement_reconciled",
+            &payload,
+            "leased",
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO scrim.replacement_request_effects(replacement_request_id, outbox_effect_id)
+             VALUES($1, $2)",
+        )
+        .bind(replacement_request_id)
+        .bind(outbox_id)
+        .execute(pool)
+        .await?;
+
+        mark_pending_discord_effect_delivered(pool, outbox_id, &payload, 555, 9102).await?;
+
+        let reconciled_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT reconciled_at FROM scrim.replacement_request_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(
+            reconciled_at.is_some(),
+            "zugestellte Ersatz-DM muss ihren Link reconciled setzen"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delivered_effect_setzt_status_publication_link_reconciled_at() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let approval_id = approve_status_publication_for_test(pool, 31).await?;
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        let outbox_id =
+            insert_discord_effect(pool, "discord:test_status_reconciled", &payload, "leased")
+                .await?;
+        sqlx::query(
+            "INSERT INTO scrim.status_publication_effects(status_publication_approval_id, outbox_effect_id) VALUES($1, $2)",
+        )
+        .bind(approval_id)
+        .bind(outbox_id)
+        .execute(pool)
+        .await?;
+
+        mark_pending_discord_effect_delivered(pool, outbox_id, &payload, 100, 9101).await?;
+
+        let reconciled_at: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT reconciled_at FROM scrim.status_publication_effects WHERE outbox_effect_id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(reconciled_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn uncertain_uebergang_meldet_alle_pflichtfelder_genau_einmal() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        let outbox_id =
+            insert_discord_effect(pool, "discord:test_direct_uncertain", &payload, "leased")
+                .await?;
+        sqlx::query("UPDATE scrim.outbox_effects SET attempts = 3 WHERE id = $1")
+            .bind(outbox_id)
+            .execute(pool)
+            .await?;
+
+        mark_pending_discord_effect_uncertain(
+            pool,
+            &sender,
+            outbox_id,
+            "discord timeout after send attempt",
+        )
+        .await?;
+
+        let logs = sender.logs.lock().await;
+        assert_eq!(logs.len(), 1);
+        let log = &logs[0];
+        assert!(log.contains(&format!("outbox_effect_id={outbox_id}")));
+        assert!(log.contains("effect_type=match_status"));
+        assert!(log.contains("attempts=3"));
+        assert!(log.contains("last_error_code=err_discord_effect_uncertain"));
+        assert!(log.contains("cause=discord timeout after send attempt"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abgelaufener_lease_batch_meldet_jede_zeile_einzeln() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        for key in [
+            "discord:test_expired_batch_1",
+            "discord:test_expired_batch_2",
+        ] {
+            let id = insert_discord_effect(pool, key, &payload, "leased").await?;
+            sqlx::query(
+                "UPDATE scrim.outbox_effects SET lease_until = now() - interval '1 second', attempts = 2 WHERE id = $1",
+            )
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
+
+        mark_expired_discord_effect_leases_uncertain(pool, &sender).await?;
+
+        let logs = sender.logs.lock().await;
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().all(|log| {
+            log.contains("effect_type=match_status")
+                && log.contains("attempts=2")
+                && log.contains("last_error_code=err_discord_effect_lease_expired")
+                && log.contains("cause=leased outbox effect expired before delivery proof")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn uncertain_effect_wird_von_claim_query_nicht_aufgenommen() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let payload = discord_effect_payload(
+            "match_status",
+            "post",
+            100,
+            None,
+            &match_status_body("Status ist bereit"),
+        );
+        insert_discord_effect(
+            pool,
+            "discord:test_uncertain_not_claimed",
+            &payload,
+            "uncertain",
+        )
+        .await?;
+
+        assert!(claim_next_discord_effect(pool).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_consumer_liefert_einmalig_und_schreibt_receipt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let body = match_status_body("Status ist bereit");
+        let payload = discord_effect_payload("match_status", "post", 100, None, &body);
+        insert_discord_effect(pool, "discord:test_success", &payload, "pending").await?;
+
+        process_one_discord_outbox(pool, &sender).await?;
+        process_one_discord_outbox(pool, &sender).await?;
+
+        assert_eq!(sender.sent.lock().await.len(), 1);
+        let row = sqlx::query(
+            "SELECT state, remote_message_id FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_success'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("state"), "delivered");
+        assert_eq!(
+            row.get::<Option<String>, _>("remote_message_id"),
+            Some("discord:100:9001".to_string())
+        );
+        let receipt_status: String = sqlx::query_scalar(
+            "SELECT status FROM scrim.effect_receipts WHERE remote_message_id = 'discord:100:9001'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(receipt_status, "confirmed");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_dm_liefert_einmalig_und_schreibt_domain_receipt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let body = replacement_request_body(77, "Kannst du einspringen?");
+        let payload = discord_dm_effect_payload("replacement_request", 555, &body);
+        insert_discord_effect(pool, "discord:test_dm_success", &payload, "pending").await?;
+
+        process_one_discord_outbox(pool, &sender).await?;
+        process_one_discord_outbox(pool, &sender).await?;
+
+        assert!(sender.sent.lock().await.is_empty());
+        assert_eq!(sender.dm_sent.lock().await.len(), 1);
+        let row = sqlx::query(
+            "SELECT state, remote_message_id FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_dm_success'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("state"), "delivered");
+        assert_eq!(
+            row.get::<Option<String>, _>("remote_message_id"),
+            Some("discorddm:7001:9001".to_string())
+        );
+        let receipt: Value = sqlx::query_scalar(
+            "SELECT receipt_payload FROM scrim.effect_receipts WHERE remote_message_id = 'discorddm:7001:9001'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(receipt["target"], json!("dm"));
+        assert_eq!(receipt["dm_channel_id"], json!("7001"));
+        assert!(receipt.get("recipient_user_id").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_invalid_payload_wird_dead_vor_send() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let payload =
+            json!({"schema_version": "discord-scrim-effect:v1", "operation": "post", "body": {}});
+        insert_discord_effect(pool, "discord:test_invalid", &payload, "pending").await?;
+
+        process_one_discord_outbox(pool, &sender).await?;
+
+        assert!(sender.sent.lock().await.is_empty());
+        let row = sqlx::query(
+            "SELECT state, next_attempt_at IS NOT NULL AS has_retry FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_invalid'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.get::<String, _>("state"), "dead");
+        assert!(!row.get::<bool, _>("has_retry"));
+        let receipt_status: String = sqlx::query_scalar(
+            "SELECT status FROM scrim.effect_receipts WHERE outbox_effect_id = (SELECT id FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_invalid')",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(receipt_status, "failed");
+        Ok(())
+    }
+
+    #[test]
+    fn discord_effect_payload_validation_blockt_unsichere_bodies_und_erlaubt_lobby_code_text() {
+        let body = match_status_body("Status ist bereit");
+        let valid = discord_effect_payload("match_status", "post", 100, None, &body);
+        assert!(parse_discord_effect_payload(1, 1, vec![0; 32], &valid).is_ok());
+
+        let reminder_body = match_request_reminder_body("Antwort fehlt", 9001, &[555]);
+        let reminder =
+            discord_effect_payload("match_request_reminder", "post", 100, None, &reminder_body);
+        assert!(parse_discord_effect_payload(10, 1, vec![0; 32], &reminder).is_ok());
+
+        let replacement_body = replacement_request_body(77, "Kannst du einspringen?");
+        let replacement = discord_dm_effect_payload("replacement_request", 555, &replacement_body);
+        assert!(parse_discord_effect_payload(11, 1, vec![0; 32], &replacement).is_ok());
+
+        let replacement_channel =
+            discord_effect_payload("replacement_request", "post", 100, None, &replacement_body);
+        assert!(parse_discord_effect_payload(12, 1, vec![0; 32], &replacement_channel).is_err());
+
+        let mut both_targets = replacement.clone();
+        both_targets["channel_id"] = json!("100");
+        assert!(parse_discord_effect_payload(13, 1, vec![0; 32], &both_targets).is_err());
+
+        let mut edit_dm = replacement.clone();
+        edit_dm["operation"] = json!("edit");
+        edit_dm["message_id"] = json!("9001");
+        assert!(parse_discord_effect_payload(14, 1, vec![0; 32], &edit_dm).is_err());
+
+        let mut unsafe_replacement_mentions = replacement_body.clone();
+        unsafe_replacement_mentions.insert(
+            "allowed_mentions".to_string(),
+            json!({"parse": [], "users": ["555"], "replied_user": false}),
+        );
+        let unsafe_replacement =
+            discord_dm_effect_payload("replacement_request", 555, &unsafe_replacement_mentions);
+        assert!(parse_discord_effect_payload(15, 1, vec![0; 32], &unsafe_replacement).is_err());
+
+        let mut missing_decline = replacement_body.clone();
+        missing_decline["components"][0]["components"][1]["components"] = json!([
+            {
+                "type": 2,
+                "style": 3,
+                "label": "Ich springe ein",
+                "custom_id": "scrimrepl:v1:77:accept"
+            }
+        ]);
+        let invalid_buttons =
+            discord_dm_effect_payload("replacement_request", 555, &missing_decline);
+        assert!(parse_discord_effect_payload(16, 1, vec![0; 32], &invalid_buttons).is_err());
+
+        let mut unsafe_mentions = body.clone();
+        unsafe_mentions.insert(
+            "allowed_mentions".to_string(),
+            json!({"parse": ["everyone"]}),
+        );
+        let unsafe_payload =
+            discord_effect_payload("match_status", "post", 100, None, &unsafe_mentions);
+        assert!(parse_discord_effect_payload(2, 1, vec![0; 32], &unsafe_payload).is_err());
+
+        let mut missing_flags = body.clone();
+        missing_flags.remove("flags");
+        let missing_flags_payload =
+            discord_effect_payload("match_status", "post", 100, None, &missing_flags);
+        assert!(parse_discord_effect_payload(3, 1, vec![0; 32], &missing_flags_payload).is_err());
+
+        let mut wrong_accent = body.clone();
+        wrong_accent["components"][0]["accent_color"] = json!(1);
+        let wrong_accent_payload =
+            discord_effect_payload("match_status", "post", 100, None, &wrong_accent);
+        assert!(parse_discord_effect_payload(4, 1, vec![0; 32], &wrong_accent_payload).is_err());
+
+        let lobby = discord_effect_payload(
+            "lobby_code_text",
+            "post",
+            100,
+            None,
+            &message_body("Lobby Code: DL-ABCD"),
+        );
+        assert!(parse_discord_effect_payload(5, 1, vec![0; 32], &lobby).is_ok());
+
+        let arbitrary_text = discord_effect_payload(
+            "lobby_code_text",
+            "post",
+            100,
+            None,
+            &message_body("Hallo @everyone"),
+        );
+        assert!(parse_discord_effect_payload(6, 1, vec![0; 32], &arbitrary_text).is_err());
+
+        let huge_lobby = discord_effect_payload(
+            "lobby_code_text",
+            "post",
+            100,
+            None,
+            &message_body(&format!(
+                "Lobby Code: {}",
+                "X".repeat(DISCORD_EFFECT_MAX_BODY_BYTES)
+            )),
+        );
+        assert!(parse_discord_effect_payload(7, 1, vec![0; 32], &huge_lobby).is_err());
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_send_timeout_wird_uncertain_und_nicht_repostet() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(true);
+        let body = match_status_body("Status ist bereit");
+        let payload = discord_effect_payload("match_status", "post", 100, None, &body);
+        insert_discord_effect(pool, "discord:test_uncertain", &payload, "pending").await?;
+
+        process_one_discord_outbox(pool, &sender).await?;
+        process_one_discord_outbox(pool, &sender).await?;
+
+        assert_eq!(sender.sent.lock().await.len(), 1);
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_uncertain'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(state, "uncertain");
+        let receipt_status: String = sqlx::query_scalar(
+            "SELECT status FROM scrim.effect_receipts WHERE outbox_effect_id = (SELECT id FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_uncertain')",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(receipt_status, "uncertain");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_dm_timeout_wird_uncertain_und_nicht_repostet() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(true);
+        let body = replacement_request_body(77, "Kannst du einspringen?");
+        let payload = discord_dm_effect_payload("replacement_request", 555, &body);
+        insert_discord_effect(pool, "discord:test_dm_uncertain", &payload, "pending").await?;
+
+        process_one_discord_outbox(pool, &sender).await?;
+        process_one_discord_outbox(pool, &sender).await?;
+
+        assert_eq!(sender.dm_sent.lock().await.len(), 1);
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_dm_uncertain'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(state, "uncertain");
+        let receipt_status: String = sqlx::query_scalar(
+            "SELECT status FROM scrim.effect_receipts WHERE outbox_effect_id = (SELECT id FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_dm_uncertain')",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(receipt_status, "uncertain");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_abgelaufene_lease_wird_uncertain_und_nicht_gesendet() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let sender = RecordingDiscordSender::new(false);
+        let body = match_status_body("Status ist bereit");
+        let payload = discord_effect_payload("match_status", "post", 100, None, &body);
+        let id = insert_discord_effect(pool, "discord:test_expired", &payload, "leased").await?;
+        sqlx::query(
+            "UPDATE scrim.outbox_effects
+                SET lease_owner = 'dlbots:scrim_discord_outbox',
+                    lease_until = now() - interval '1 second',
+                    attempts = 1
+              WHERE id = $1",
+        )
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+        process_one_discord_outbox(pool, &sender).await?;
+
+        assert!(sender.sent.lock().await.is_empty());
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM scrim.outbox_effects WHERE idempotency_key = 'discord:test_expired'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(state, "uncertain");
         Ok(())
     }
 
@@ -4399,6 +6973,88 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    async fn dashboard_app_with_session(
+        pool: &PgPool,
+    ) -> Result<(axum::Router, String, String), Box<dyn std::error::Error + Send + Sync>> {
+        let session_id = "scrim-status-release-session".to_string();
+        let csrf = "scrim-status-release-csrf".to_string();
+        let now = dl_dashboard::now_unix_f64();
+        dl_central_db::kv::set(
+            pool,
+            "dl_dashboard_admin_session",
+            &session_id,
+            &json!({
+                "user_id": 42,
+                "username": "coach",
+                "display_name": "Coach",
+                "reason": "test",
+                "access_level": dl_dashboard::AccessLevel::Full.as_str(),
+                "csrf_token": csrf,
+                "created_at": now,
+                "last_seen_at": now,
+                "expires_at": now + 3600.0,
+            })
+            .to_string(),
+        )
+        .await?;
+        let config = dl_dashboard::DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let app = dl_dashboard::DashboardApp::new(
+            config,
+            pool.clone(),
+            Arc::new(NoDashboardMemberLookup),
+            Arc::new(NoDashboardNameResolver),
+        )
+        .await?;
+        Ok((dl_dashboard::router(app), session_id, csrf))
+    }
+
+    fn dashboard_release_request(
+        session_id: &str,
+        csrf: &str,
+    ) -> Result<Request<Body>, axum::http::Error> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/scrims/match-requests/31/release")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::ORIGIN,
+                "https://admin.deutsche-deadlock-community.de",
+            )
+            .header("X-CSRF-Token", csrf)
+            .header(
+                header::COOKIE,
+                format!("{}={session_id}", dl_dashboard::SESSION_COOKIE),
+            )
+            .body(Body::from("{}"))
+    }
+
+    async fn approve_status_publication_for_test(
+        pool: &PgPool,
+        request_id: i32,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query_scalar(
+            r#"
+            INSERT INTO scrim.status_publication_approvals(
+                target_kind, target_id, status_kind, payload, payload_hash,
+                decision, decided_by_user_id, decided_by_display_name, decided_at
+            )
+            VALUES(
+                'match_request', $1::text, 'match_status', '{}'::jsonb,
+                scrim.status_publication_effect_hash('match_request', $1::text, 'match_status', '{}'::jsonb),
+                'approved', '42', 'Coach', now()
+            )
+            RETURNING id
+            "#,
+        )
+        .bind(request_id)
+        .fetch_one(pool)
+        .await?)
     }
 
     async fn match_request_status_message_state(

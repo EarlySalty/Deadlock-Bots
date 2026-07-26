@@ -1109,6 +1109,13 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
 
 const REDACTED_TEXT_USER_COLUMNS: &[RedactionSpec] = &[
     RedactionSpec::new(
+        "scrim_slot_presets",
+        "created_by_user_id",
+        "scrim.slot_presets",
+        "created_by_user_id",
+        None,
+    ),
+    RedactionSpec::new(
         "scrim_match_request_batches",
         "created_by_user_id",
         "scrim.match_request_batches",
@@ -4535,6 +4542,37 @@ mod privacy_contract_tests {
         pool.close().await;
 
         assert!(is_opted_out(&pool, 7).await);
+    }
+}
+
+#[cfg(test)]
+mod runtime_gate_privacy_tests {
+    use super::*;
+    use dl_central_db::testing::{set_scrim_runtime_turniere, test_pool};
+
+    #[tokio::test]
+    async fn privacy_loeschung_funktioniert_im_turniere_runtime(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = test_pool().await?;
+        sqlx::query(
+            "INSERT INTO scrim.participants(
+                 id, discord_id, display_name, rank_source, status, source,
+                 created_at, updated_at
+             )
+             VALUES(1, 42, 'Privacy', 'manual', 'new', 'test', now(), now())",
+        )
+        .execute(db.pool())
+        .await?;
+        set_scrim_runtime_turniere(db.pool()).await?;
+
+        delete_user_data(db.pool(), 42, "test".to_string(), 1_000).await?;
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM scrim.participants WHERE discord_id = 42")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(remaining, 0);
+        Ok(())
     }
 }
 
