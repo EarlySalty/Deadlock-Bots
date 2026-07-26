@@ -3268,6 +3268,20 @@ pub struct RetentionGlue {
 
 #[async_trait::async_trait]
 impl dl_community::retention::RetentionPort for RetentionGlue {
+    async fn guild_member_count(&self, guild_id: u64) -> Option<usize> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|guild| guild.members.len())
+    }
+
+    async fn is_guild_member(&self, guild_id: u64, user_id: u64) -> bool {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .is_some_and(|guild| guild.members.contains_key(&UserId::new(user_id)))
+    }
+
     async fn member_info(
         &self,
         guild_id: u64,
@@ -3327,9 +3341,23 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
         match self.adapter.send_raw_public(channel.id.get(), &body).await {
             Ok(_) => MissYouDelivery::Sent,
             // 50007 = Cannot send messages to this user (DMs deaktiviert).
-            Err(err) if err.contains("50007") => MissYouDelivery::Blocked,
+            Err(err)
+                if err.contains("50007")
+                    && !err.to_ascii_lowercase().contains("no mutual guild") =>
+            {
+                MissYouDelivery::Blocked
+            }
             Err(err) => MissYouDelivery::Failed(err),
         }
+    }
+
+    async fn send_log(&self, text: String) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        let _ = self
+            .adapter
+            .send_raw_public(dl_community::retention::LOG_CHANNEL_ID, &body)
+            .await;
     }
 }
 

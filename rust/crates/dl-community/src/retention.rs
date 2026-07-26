@@ -38,10 +38,16 @@ const INACTIVITY_THRESHOLD_DAYS: i64 = 14;
 const MIN_DAYS_BETWEEN_MESSAGES: i64 = 30;
 const MAX_MISS_YOU_PER_USER: i64 = 1;
 const CHECK_HOUR: u32 = 12;
+// Bewusst grobe Untergrenze gegen leere/halb gefüllte Caches nach Bot-Neustarts, kein Feintuning.
+const MIN_PLAUSIBLE_GUILD_CACHE_MEMBERS: usize = 100;
+/// Log-Meldung beim Abbruch wegen unvollständigem Guild-Cache. Als Konstante,
+/// damit Tests auf die Meldung prüfen können, ohne am Wortlaut zu kleben.
+pub const MISS_YOU_CACHE_ABORT_LOG: &str = "⚠️ Miss-You-Lauf abgebrochen: Der Server-Cache ist unvollständig, deshalb wurde heute niemand angeschrieben. Das repariert sich normalerweise von selbst, sobald der Bot durchgelaufen ist.";
 const SERVER_LINK: &str = "https://discord.com/channels/1289721245281292288/1289721245281292291";
 const VOICE_LINK: &str = "https://discord.com/channels/1289721245281292288/1501089974093873232";
 const EXCLUDED_ROLE_IDS: [u64; 2] = [1304416311383818240, 1309741866098491479];
 const RETENTION_MESSAGES_ID_LOCK: i64 = 0x4451_0008_0010_0002;
+pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
 
 /// Mitgliedsinfo für die Miss-You-Auswahl (Anzeigename + Rollen).
 pub struct RetentionMember {
@@ -59,6 +65,10 @@ pub enum MissYouDelivery {
 /// Discord-Anbindung der Miss-You-DM (vom Bot über den Cache/HTTP erfüllt).
 #[async_trait::async_trait]
 pub trait RetentionPort: Send + Sync {
+    /// Anzahl der im Guild-Cache vorhandenen Mitglieder; `None`, wenn die Guild fehlt.
+    async fn guild_member_count(&self, guild_id: u64) -> Option<usize>;
+    /// Ist der User aktuell Mitglied der Guild?
+    async fn is_guild_member(&self, guild_id: u64, user_id: u64) -> bool;
     /// Anzeigename + Rollen aus dem Guild-Cache; `None`, wenn kein Mitglied.
     async fn member_info(&self, guild_id: u64, user_id: u64) -> Option<RetentionMember>;
     /// Fallback-Name via `fetch_user` (`global_name` | `name`).
@@ -72,11 +82,30 @@ pub trait RetentionPort: Send + Sync {
         embed: Value,
         components: Value,
     ) -> MissYouDelivery;
+    /// Zusammenfassung eines Miss-You-Laufs in den Bot-Log-Channel senden.
+    async fn send_log(&self, text: String);
 }
 
 #[derive(Clone)]
 pub struct RetentionTracker {
     pool: PgPool,
+}
+
+#[derive(Default)]
+struct MissYouRunStats {
+    attempted: usize,
+    delivered: usize,
+    blocked: usize,
+    not_member: usize,
+    errors: usize,
+}
+
+enum MissYouDecision {
+    Sent,
+    Blocked,
+    PermanentFailed,
+    TransientFailed,
+    Skipped,
 }
 
 impl RetentionTracker {
@@ -339,11 +368,80 @@ impl RetentionTracker {
         }
         let _ = kv::set(&self.pool, "retention", "last_check_date", &today).await;
 
-        let now = now_dt.timestamp();
-        for (user_id, guild_id, days_inactive) in self.find_inactive_users(now).await {
-            self.send_miss_you(port, user_id, guild_id, days_inactive)
-                .await;
+        self.run_miss_you_candidates(port, now_dt.timestamp()).await;
+    }
+
+    async fn run_miss_you_candidates(&self, port: &Arc<dyn RetentionPort>, now: i64) {
+        let mut stats = MissYouRunStats::default();
+        let candidates = self.find_inactive_users(now).await;
+        for &(_, guild_id, _) in &candidates {
+            let member_count = port.guild_member_count(guild_id).await;
+            if !matches!(
+                member_count,
+                Some(count) if count >= MIN_PLAUSIBLE_GUILD_CACHE_MEMBERS
+            ) {
+                tracing::warn!(
+                    guild_id,
+                    member_count,
+                    entscheidung = "abgebrochen",
+                    grund = "cache_unplausibel",
+                    "Miss-You-Lauf abgebrochen"
+                );
+                port.send_log(MISS_YOU_CACHE_ABORT_LOG.to_string()).await;
+                return;
+            }
         }
+
+        for (user_id, guild_id, days_inactive) in candidates {
+            if !port.is_guild_member(guild_id, user_id).await {
+                tracing::info!(
+                    user_id,
+                    guild_id,
+                    entscheidung = "uebersprungen",
+                    grund = "cache_unsicher",
+                    "Miss-You-Zustellentscheidung"
+                );
+                continue;
+            }
+
+            match self
+                .send_miss_you(port, user_id, guild_id, days_inactive)
+                .await
+            {
+                MissYouDecision::Sent => {
+                    stats.attempted += 1;
+                    stats.delivered += 1;
+                }
+                MissYouDecision::Blocked => {
+                    stats.attempted += 1;
+                    stats.blocked += 1;
+                }
+                MissYouDecision::PermanentFailed | MissYouDecision::TransientFailed => {
+                    stats.attempted += 1;
+                    stats.errors += 1;
+                }
+                MissYouDecision::Skipped => {}
+            }
+        }
+        let delivery_rate = (stats.delivered * 100)
+            .checked_div(stats.attempted)
+            .unwrap_or(100);
+        let warning = if stats.attempted > 0 && delivery_rate < 50 {
+            " ⚠️ WARNUNG: Zustellquote unter 50 %."
+        } else {
+            ""
+        };
+        port.send_log(format!(
+            "🔔 Miss-You-Lauf — versucht: {}, zugestellt: {}, DMs zu: {}, nicht mehr auf dem Server: {}, Fehler: {}, Zustellquote: {} %.{}",
+            stats.attempted,
+            stats.delivered,
+            stats.blocked,
+            stats.not_member,
+            stats.errors,
+            delivery_rate,
+            warning,
+        ))
+        .await;
     }
 
     /// Eine Miss-You-DM aufbauen, senden und das Ergebnis protokollieren
@@ -354,27 +452,36 @@ impl RetentionTracker {
         user_id: u64,
         guild_id: u64,
         days_inactive: i64,
-    ) {
+    ) -> MissYouDecision {
         // Globaler Privacy-Opt-out hat Vorrang vor der Retention-Spalte.
         let Ok(user_id_i64) = u64_to_i64(user_id, "user_id") else {
-            return;
+            return MissYouDecision::Skipped;
         };
         let Ok(guild_id_i64) = u64_to_i64(guild_id, "guild_id") else {
-            return;
+            return MissYouDecision::Skipped;
         };
         if crate::privacy::is_opted_out(&self.pool, user_id_i64).await {
             tracing::info!(
                 writer = "activity.user_retention_messages",
                 user_id = user_id_i64,
+                entscheidung = "übersprungen",
+                grund = "privacy_opt_out",
                 "übersprungen wegen Opt-out"
             );
-            return;
+            return MissYouDecision::Skipped;
         }
         // Name + Excluded-Rollen aus dem Cache; ausgeschlossene Rollen → kein DM.
         let member = port.member_info(guild_id, user_id).await;
         if let Some(m) = &member {
             if m.role_ids.iter().any(|r| EXCLUDED_ROLE_IDS.contains(r)) {
-                return;
+                tracing::info!(
+                    user_id,
+                    guild_id,
+                    entscheidung = "übersprungen",
+                    grund = "ausgeschlossene_rolle",
+                    "Miss-You-Zustellentscheidung"
+                );
+                return MissYouDecision::Skipped;
             }
         }
         let display_name = match member.map(|m| m.display_name) {
@@ -393,8 +500,10 @@ impl RetentionTracker {
         let now = chrono::Utc::now();
         match delivery {
             MissYouDelivery::Sent => {
-                let _ = self.update_miss_you_sent(user_id_i64, now).await;
-                let _ = self
+                if let Err(err) = self.update_miss_you_sent(user_id_i64, now).await {
+                    tracing::warn!(%err, user_id, "Miss-You-Zähler konnte nicht aktualisiert werden");
+                }
+                if let Err(err) = self
                     .insert_retention_message(
                         user_id_i64,
                         guild_id_i64,
@@ -403,10 +512,24 @@ impl RetentionTracker {
                         "sent",
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(%err, user_id, "Miss-You-Erfolg konnte nicht protokolliert werden");
+                }
+                tracing::info!(
+                    user_id,
+                    guild_id,
+                    entscheidung = "zugestellt",
+                    grund = "discord_dm_sent",
+                    "Miss-You-Zustellentscheidung"
+                );
+                MissYouDecision::Sent
             }
             MissYouDelivery::Blocked => {
-                let _ = self
+                if let Err(err) = self.mark_miss_you_terminal(user_id_i64, now).await {
+                    tracing::warn!(%err, user_id, "Miss-You-Zähler konnte nicht aktualisiert werden");
+                }
+                if let Err(err) = self
                     .insert_retention_message(
                         user_id_i64,
                         guild_id_i64,
@@ -415,21 +538,113 @@ impl RetentionTracker {
                         "blocked",
                         Some("DMs disabled".to_string()),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(%err, user_id, "Miss-You-Blockierung konnte nicht protokolliert werden");
+                }
+                tracing::info!(
+                    user_id,
+                    guild_id,
+                    entscheidung = "blocked",
+                    grund = "dms_disabled",
+                    "Miss-You-Zustellentscheidung"
+                );
+                MissYouDecision::Blocked
             }
             MissYouDelivery::Failed(err) => {
-                let _ = self
+                if is_blocked_delivery_error(&err) {
+                    if let Err(db_err) = self.mark_miss_you_terminal(user_id_i64, now).await {
+                        tracing::warn!(%db_err, user_id, "Miss-You-Zähler konnte nicht aktualisiert werden");
+                    }
+                    if let Err(db_err) = self
+                        .insert_retention_message(
+                            user_id_i64,
+                            guild_id_i64,
+                            "miss_you",
+                            now,
+                            "blocked",
+                            Some(err.clone()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%db_err, user_id, "Miss-You-Blockierung konnte nicht protokolliert werden");
+                    }
+                    tracing::info!(
+                        user_id,
+                        guild_id,
+                        entscheidung = "blocked",
+                        grund = %err,
+                        "Miss-You-Zustellentscheidung"
+                    );
+                    return MissYouDecision::Blocked;
+                }
+
+                let permanent = is_permanent_delivery_error(&err);
+                if permanent {
+                    if let Err(db_err) = self.mark_miss_you_terminal(user_id_i64, now).await {
+                        tracing::warn!(%db_err, user_id, "Miss-You-Zähler konnte nicht aktualisiert werden");
+                    }
+                }
+                if let Err(db_err) = self
                     .insert_retention_message(
                         user_id_i64,
                         guild_id_i64,
                         "miss_you",
                         now,
                         "failed",
-                        Some(err),
+                        Some(err.clone()),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(%db_err, user_id, "Miss-You-Fehler konnte nicht protokolliert werden");
+                }
+                if permanent {
+                    tracing::warn!(
+                        user_id,
+                        guild_id,
+                        entscheidung = "permanent_failed",
+                        grund = %err,
+                        "Miss-You-Zustellentscheidung"
+                    );
+                    MissYouDecision::PermanentFailed
+                } else {
+                    tracing::warn!(
+                        user_id,
+                        guild_id,
+                        entscheidung = "transient_failed",
+                        grund = %err,
+                        "Miss-You-Zustellentscheidung"
+                    );
+                    MissYouDecision::TransientFailed
+                }
             }
         }
+    }
+
+    async fn mark_miss_you_terminal(
+        &self,
+        user_id: i64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let mut tx = self.pool.begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            tx.commit().await?;
+            return Ok(());
+        }
+        sqlx::query(
+            r#"
+            UPDATE activity.user_retention_tracking
+               SET miss_you_count = miss_you_count + 1,
+                   updated_at = $1
+             WHERE user_id = $2
+            "#,
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn update_miss_you_sent(
@@ -512,6 +727,17 @@ impl RetentionTracker {
         tx.commit().await?;
         Ok(next_id)
     }
+}
+
+fn is_blocked_delivery_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("dms disabled")
+        || (error.contains("50007") && !error.contains("no mutual guild"))
+}
+
+fn is_permanent_delivery_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("no mutual guild") || error.contains("cannot send messages to this user")
 }
 
 /// Miss-You-Embed (Python `_send_miss_you_message`): blau, optional Guild-Icon.
@@ -757,6 +983,76 @@ pub fn spawn(
 mod tests {
     use super::*;
     use dl_central_db::testing::{test_pool, TestDb};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockRetentionPort {
+        guild_member: bool,
+        guild_member_count: Option<usize>,
+        deliveries: tokio::sync::Mutex<VecDeque<MissYouDelivery>>,
+        send_calls: AtomicUsize,
+        logs: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockRetentionPort {
+        fn new(
+            guild_member: bool,
+            guild_member_count: Option<usize>,
+            deliveries: impl IntoIterator<Item = MissYouDelivery>,
+        ) -> Self {
+            Self {
+                guild_member,
+                guild_member_count,
+                deliveries: tokio::sync::Mutex::new(deliveries.into_iter().collect()),
+                send_calls: AtomicUsize::new(0),
+                logs: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RetentionPort for MockRetentionPort {
+        async fn guild_member_count(&self, _guild_id: u64) -> Option<usize> {
+            self.guild_member_count
+        }
+
+        async fn is_guild_member(&self, _guild_id: u64, _user_id: u64) -> bool {
+            self.guild_member
+        }
+
+        async fn member_info(&self, _guild_id: u64, _user_id: u64) -> Option<RetentionMember> {
+            self.guild_member.then(|| RetentionMember {
+                display_name: "Test".to_string(),
+                role_ids: Vec::new(),
+            })
+        }
+
+        async fn fetch_user_name(&self, _user_id: u64) -> Option<String> {
+            Some("Test".to_string())
+        }
+
+        async fn guild_label(&self, _guild_id: u64) -> (String, Option<String>) {
+            ("Test-Guild".to_string(), None)
+        }
+
+        async fn send_miss_you_dm(
+            &self,
+            _user_id: u64,
+            _embed: Value,
+            _components: Value,
+        ) -> MissYouDelivery {
+            self.send_calls.fetch_add(1, Ordering::SeqCst);
+            self.deliveries
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_else(|| MissYouDelivery::Failed("keine Testzustellung".to_string()))
+        }
+
+        async fn send_log(&self, text: String) {
+            self.logs.lock().await.push(text);
+        }
+    }
 
     async fn mk() -> (TestDb, RetentionTracker) {
         let db = test_pool().await.expect("test_pool");
@@ -770,6 +1066,25 @@ mod tests {
             .expect("timestamp")
             .format("%Y-%m-%d")
             .to_string()
+    }
+
+    async fn insert_inactive_candidate(db: &TestDb, user_id: i64, now: DateTime<Utc>) {
+        let inactive = now - chrono::Duration::days(20);
+        sqlx::query(
+            r#"
+            INSERT INTO activity.user_retention_tracking(
+                user_id, guild_id, first_seen_at, last_active_at, total_active_days,
+                avg_weekly_sessions, miss_you_count, opted_out, updated_at
+            )
+            VALUES ($1, 1, $2, $2, 5, 1.0, 0, FALSE, $3)
+            "#,
+        )
+        .bind(user_id)
+        .bind(inactive)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("insert candidate");
     }
 
     #[tokio::test]
@@ -980,5 +1295,181 @@ mod tests {
             .map(|(user_id, _, _)| user_id)
             .collect();
         assert_eq!(found, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn cache_miss_veraendert_zaehler_nicht_und_bleibt_kandidat() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidate(&db, 10, now).await;
+        let mock = Arc::new(MockRetentionPort::new(false, Some(100), []));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 0);
+        let miss_you_count = sqlx::query_scalar::<_, i32>(
+            "SELECT miss_you_count FROM activity.user_retention_tracking WHERE user_id = 10",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("miss_you_count");
+        assert_eq!(miss_you_count, 0);
+        assert!(
+            !tracker
+                .find_inactive_users((now + chrono::Duration::days(1)).timestamp())
+                .await
+                .is_empty(),
+            "Cache-Miss muss am Folgetag erneut Kandidat sein"
+        );
+        let message_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM activity.user_retention_messages WHERE user_id = 10",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("message count");
+        assert_eq!(message_count, 0);
+    }
+
+    #[tokio::test]
+    async fn permanenter_fehler_verhindert_folgeversuch() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidate(&db, 11, now).await;
+        let mock = Arc::new(MockRetentionPort::new(
+            true,
+            Some(100),
+            [
+                MissYouDelivery::Failed(
+                    "Cannot send messages to this user due to having no mutual guilds".to_string(),
+                ),
+                MissYouDelivery::Sent,
+            ],
+        ));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+        tracker
+            .run_miss_you_candidates(&port, (now + chrono::Duration::days(1)).timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 1);
+        let miss_you_count = sqlx::query_scalar::<_, i32>(
+            "SELECT miss_you_count FROM activity.user_retention_tracking WHERE user_id = 11",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("miss_you_count");
+        assert_eq!(miss_you_count, 1);
+    }
+
+    #[tokio::test]
+    async fn transienter_fehler_erlaubt_folgeversuch() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidate(&db, 12, now).await;
+        let mock = Arc::new(MockRetentionPort::new(
+            true,
+            Some(100),
+            [
+                MissYouDelivery::Failed("HTTP 503 Service Unavailable".to_string()),
+                MissYouDelivery::Sent,
+            ],
+        ));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+        tracker
+            .run_miss_you_candidates(&port, (now + chrono::Duration::days(1)).timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn blocked_wird_als_blocked_statt_failed_protokolliert() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidate(&db, 13, now).await;
+        let mock = Arc::new(MockRetentionPort::new(
+            true,
+            Some(100),
+            [MissYouDelivery::Failed(
+                "Discord API 50007: Cannot send messages to this user (DMs disabled)".to_string(),
+            )],
+        ));
+        let port: Arc<dyn RetentionPort> = mock;
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        let statuses = sqlx::query_scalar::<_, String>(
+            "SELECT delivery_status FROM activity.user_retention_messages WHERE user_id = 13",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("delivery statuses");
+        assert_eq!(statuses, vec!["blocked"]);
+    }
+
+    #[tokio::test]
+    async fn fehlende_guild_im_cache_bricht_lauf_ohne_aenderungen_ab() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidate(&db, 14, now).await;
+        let mock = Arc::new(MockRetentionPort::new(true, None, [MissYouDelivery::Sent]));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 0);
+        let miss_you_count = sqlx::query_scalar::<_, i32>(
+            "SELECT miss_you_count FROM activity.user_retention_tracking WHERE user_id = 14",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("miss_you_count");
+        assert_eq!(miss_you_count, 0);
+        let logs = mock.logs.lock().await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0], MISS_YOU_CACHE_ABORT_LOG);
+    }
+
+    #[tokio::test]
+    async fn zu_kleiner_guild_cache_bricht_lauf_ohne_aenderungen_ab() {
+        let (db, tracker) = mk().await;
+        let now = utc_from_unix(2_000_000_000).expect("now");
+        insert_inactive_candidate(&db, 15, now).await;
+        let mock = Arc::new(MockRetentionPort::new(
+            true,
+            Some(99),
+            [MissYouDelivery::Sent],
+        ));
+        let port: Arc<dyn RetentionPort> = mock.clone();
+
+        tracker
+            .run_miss_you_candidates(&port, now.timestamp())
+            .await;
+
+        assert_eq!(mock.send_calls.load(Ordering::SeqCst), 0);
+        let miss_you_count = sqlx::query_scalar::<_, i32>(
+            "SELECT miss_you_count FROM activity.user_retention_tracking WHERE user_id = 15",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("miss_you_count");
+        assert_eq!(miss_you_count, 0);
+        let logs = mock.logs.lock().await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0], MISS_YOU_CACHE_ABORT_LOG);
     }
 }
