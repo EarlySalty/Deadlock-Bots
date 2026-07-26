@@ -143,7 +143,6 @@ CREATE TABLE IF NOT EXISTS scrim.match_request_reminder_effects (
     reminder_id BIGINT NOT NULL REFERENCES scrim.match_request_reminders(id),
     outbox_effect_id BIGINT NOT NULL REFERENCES scrim.outbox_effects(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    reconciled_at TIMESTAMPTZ,
     PRIMARY KEY (reminder_id, outbox_effect_id),
     UNIQUE (reminder_id),
     UNIQUE (outbox_effect_id)
@@ -153,7 +152,6 @@ CREATE TABLE IF NOT EXISTS scrim.status_publication_effects (
     status_publication_approval_id BIGINT NOT NULL REFERENCES scrim.status_publication_approvals(id),
     outbox_effect_id BIGINT NOT NULL REFERENCES scrim.outbox_effects(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    reconciled_at TIMESTAMPTZ,
     PRIMARY KEY (status_publication_approval_id, outbox_effect_id),
     UNIQUE (outbox_effect_id)
 );
@@ -162,36 +160,10 @@ CREATE TABLE IF NOT EXISTS scrim.replacement_request_effects (
     replacement_request_id BIGINT NOT NULL REFERENCES scrim.replacement_requests(id),
     outbox_effect_id BIGINT NOT NULL REFERENCES scrim.outbox_effects(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    reconciled_at TIMESTAMPTZ,
     PRIMARY KEY (replacement_request_id, outbox_effect_id),
     UNIQUE (replacement_request_id),
     UNIQUE (outbox_effect_id)
 );
-
-ALTER TABLE scrim.match_request_reminder_effects
-    ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMPTZ;
-ALTER TABLE scrim.status_publication_effects
-    ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMPTZ;
-ALTER TABLE scrim.replacement_request_effects
-    ADD COLUMN IF NOT EXISTS reconciled_at TIMESTAMPTZ;
-
-CREATE INDEX IF NOT EXISTS match_request_reminder_effects_unreconciled_outbox_idx
-    ON scrim.match_request_reminder_effects (outbox_effect_id)
-    WHERE reconciled_at IS NULL;
-CREATE INDEX IF NOT EXISTS status_publication_effects_unreconciled_outbox_idx
-    ON scrim.status_publication_effects (outbox_effect_id)
-    WHERE reconciled_at IS NULL;
-CREATE INDEX IF NOT EXISTS replacement_request_effects_unreconciled_outbox_idx
-    ON scrim.replacement_request_effects (outbox_effect_id)
-    WHERE reconciled_at IS NULL;
-
-ALTER TABLE core.privacy_field_registry
-    DROP CONSTRAINT IF EXISTS privacy_field_registry_data_category_check;
-ALTER TABLE core.privacy_field_registry
-    ADD CONSTRAINT privacy_field_registry_data_category_check
-    CHECK (data_category IN ('user_id', 'display_name', 'json_payload', 'free_text', 'domain_id', 'machine_code', 'machine_timestamp', 'content_hash', 'pseudonym')) NOT VALID;
-ALTER TABLE core.privacy_field_registry
-    VALIDATE CONSTRAINT privacy_field_registry_data_category_check;
 
 INSERT INTO core.privacy_field_registry(
     schema_name,
@@ -208,13 +180,10 @@ VALUES
     ('scrim', 'replacement_needs', 'slot_index', 'domain_id', 'retain_operational', 'retain_non_personal', 'turniere', 'slot index scoped to a match request; not a user id'),
     ('scrim', 'match_request_reminder_effects', 'reminder_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'match request reminder domain id'),
     ('scrim', 'match_request_reminder_effects', 'outbox_effect_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'outbox effect domain id'),
-    ('scrim', 'match_request_reminder_effects', 'reconciled_at', 'machine_timestamp', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'non-personal reconciliation marker timestamp'),
     ('scrim', 'status_publication_effects', 'status_publication_approval_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'status publication approval domain id'),
     ('scrim', 'status_publication_effects', 'outbox_effect_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'outbox effect domain id'),
-    ('scrim', 'status_publication_effects', 'reconciled_at', 'machine_timestamp', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'non-personal reconciliation marker timestamp'),
     ('scrim', 'replacement_request_effects', 'replacement_request_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'replacement request domain id'),
-    ('scrim', 'replacement_request_effects', 'outbox_effect_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'outbox effect domain id'),
-    ('scrim', 'replacement_request_effects', 'reconciled_at', 'machine_timestamp', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'non-personal reconciliation marker timestamp')
+    ('scrim', 'replacement_request_effects', 'outbox_effect_id', 'domain_id', 'retain_operational', 'retain_non_personal', 'dl-bots-discord-adapter', 'outbox effect domain id')
 ON CONFLICT (schema_name, table_name, column_name) DO UPDATE
     SET data_category = EXCLUDED.data_category,
         retention_action = EXCLUDED.retention_action,
