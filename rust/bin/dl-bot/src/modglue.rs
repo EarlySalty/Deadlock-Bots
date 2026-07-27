@@ -3116,7 +3116,9 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
         message_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
     ) {
-        let _ = self
+        // Ohne Log bliebe ein abgelehnter Edit unsichtbar: die Anfrage haengt
+        // dann im alten Zustand, und niemand erfaehrt warum.
+        if let Err(err) = self
             .adapter
             .http
             .edit_message(
@@ -3125,7 +3127,15 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
                 &body,
                 Vec::new(),
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                %err,
+                channel_id,
+                message_id,
+                "Coaching: Anfrage-Nachricht konnte nicht aktualisiert werden"
+            );
+        }
     }
 
     async fn send_channel_text(&self, channel_id: u64, content: &str) {
