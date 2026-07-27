@@ -1667,6 +1667,13 @@ impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
             .map(|_| ())
     }
 
+    async fn log_ai_decision(
+        &self,
+        entry: crate::solo_watch::AiDecisionEntry,
+    ) -> Result<(), String> {
+        crate::solo_watch::log_ai_decision_db(&self.pool, &entry).await
+    }
+
     fn log_decision(
         &self,
         user_id: u64,

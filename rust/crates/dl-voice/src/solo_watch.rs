@@ -17,6 +17,8 @@ pub const NEW_PLAYER_CATEGORY_ID: u64 = 1465839366634209361;
 pub const LFG_CHANNEL_ID: u64 = 1376335502919335936;
 pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
 pub const SOLO_DELAY: Duration = Duration::seconds(120);
+pub const UNKNOWN_SESSION_THRESHOLD: usize = 4;
+pub const PROMPT_COOLDOWN: Duration = Duration::hours(24);
 pub const TICK_INTERVAL: StdDuration = StdDuration::from_secs(5);
 pub const NEVER_ASK_NS: &str = "solo_lfg_never_ask";
 pub const LAST_PROMPT_NS: &str = "solo_lfg_last_prompt";
@@ -61,11 +63,11 @@ pub struct LaneSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptDecision {
-    Prompt,
+    Prompt(usize),
     TooManySessions(usize),
     OptedOut,
-    NeverAsk,
-    Cooldown,
+    NeverAsk(usize),
+    Cooldown(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +76,19 @@ pub struct PersistedPost {
     pub channel_id: u64,
     pub message_id: u64,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiDecisionEntry {
+    pub source: &'static str,
+    pub subject_user_id: u64,
+    pub guild_id: u64,
+    pub input_summary: String,
+    pub decision: &'static str,
+    pub confidence: Option<f32>,
+    pub reason: &'static str,
+    pub action_taken: Option<String>,
+    pub payload: Value,
 }
 
 #[async_trait::async_trait]
@@ -99,6 +114,7 @@ pub trait SoloWatchPort: Send + Sync {
         reason: &str,
     ) -> Result<(), String>;
     async fn send_log(&self, text: String) -> Result<(), String>;
+    async fn log_ai_decision(&self, entry: AiDecisionEntry) -> Result<(), String>;
     fn log_decision(
         &self,
         user_id: u64,
@@ -122,6 +138,28 @@ struct ActivePost {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+struct PromptContext {
+    guild_id: u64,
+    channel_id: u64,
+    lane: LaneSnapshot,
+    session_count: usize,
+    minutes_alone: i64,
+    rank_known: bool,
+    prompted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct DecisionInput {
+    user_id: u64,
+    guild_id: u64,
+    channel_id: u64,
+    lane: Option<LaneSnapshot>,
+    session_count: Option<usize>,
+    minutes_alone: Option<i64>,
+    rank_known: bool,
+}
+
 #[derive(Debug, Default)]
 struct DailyCounters {
     checked: u64,
@@ -134,6 +172,7 @@ struct DailyCounters {
 pub struct SoloWatch {
     port: Arc<dyn SoloWatchPort>,
     pending: tokio::sync::Mutex<HashMap<u64, PendingSolo>>,
+    prompts: tokio::sync::Mutex<HashMap<u64, PromptContext>>,
     posts: tokio::sync::Mutex<HashMap<u64, ActivePost>>,
     daily: tokio::sync::Mutex<DailyCounters>,
 }
@@ -143,6 +182,7 @@ impl SoloWatch {
         Arc::new(Self {
             port,
             pending: tokio::sync::Mutex::new(HashMap::new()),
+            prompts: tokio::sync::Mutex::new(HashMap::new()),
             posts: tokio::sync::Mutex::new(HashMap::new()),
             daily: tokio::sync::Mutex::new(DailyCounters::default()),
         })
@@ -156,6 +196,53 @@ impl SoloWatch {
         error: Option<&str>,
     ) {
         self.port.log_decision(user_id, decision, reason, error);
+    }
+
+    async fn record_ai_decision(&self, entry: AiDecisionEntry) {
+        if let Err(error) = self.port.log_ai_decision(entry).await {
+            tracing::warn!(%error, "Solo-LFG: Brain-Ledger-Eintrag fehlgeschlagen");
+        }
+    }
+
+    async fn record_prompt_decision(
+        &self,
+        input: DecisionInput,
+        decision: &'static str,
+        reason: &'static str,
+        action_taken: Option<String>,
+    ) {
+        self.record_ai_decision(ai_decision_entry(
+            "solo_lfg.prompt",
+            &input,
+            decision,
+            reason,
+            action_taken,
+        ))
+        .await;
+    }
+
+    async fn record_outcome(
+        &self,
+        mut input: DecisionInput,
+        decision: &'static str,
+        reason: &'static str,
+        action_taken: Option<String>,
+    ) {
+        let context = self.prompts.lock().await.remove(&input.user_id);
+        if let Some(context) = context {
+            input.lane = Some(context.lane);
+            input.session_count = Some(context.session_count);
+            input.minutes_alone = Some(context.minutes_alone);
+            input.rank_known |= context.rank_known;
+        }
+        self.record_ai_decision(ai_decision_entry(
+            "solo_lfg.outcome",
+            &input,
+            decision,
+            reason,
+            action_taken,
+        ))
+        .await;
     }
 
     async fn count_checked(&self) {
@@ -212,30 +299,97 @@ impl SoloWatch {
             self.log_cleared_pending(channel_id, "kanal_nicht_im_cache")
                 .await;
             self.decision(actor_id, "verworfen", "kanal_nicht_im_cache", None);
+            self.record_prompt_decision(
+                decision_input(actor_id, guild_id, channel_id, None, None, Some(0), false),
+                "no",
+                "kanal_nicht_im_cache",
+                None,
+            )
+            .await;
             return;
         };
         if guild_id != MAIN_GUILD_ID {
             self.log_cleared_pending(channel_id, "falscher_server")
                 .await;
             self.decision(actor_id, "verworfen", "falscher_server", None);
+            self.record_prompt_decision(
+                decision_input(
+                    actor_id,
+                    guild_id,
+                    channel_id,
+                    Some(&lane),
+                    None,
+                    Some(0),
+                    false,
+                ),
+                "no",
+                "falscher_server",
+                None,
+            )
+            .await;
             return;
         }
         if HARD_EXCLUDED_CATEGORY_IDS.contains(&lane.category_id) {
             self.log_cleared_pending(channel_id, "ausgeschlossene_kategorie")
                 .await;
             self.decision(actor_id, "verworfen", "ausgeschlossene_kategorie", None);
+            self.record_prompt_decision(
+                decision_input(
+                    actor_id,
+                    guild_id,
+                    channel_id,
+                    Some(&lane),
+                    None,
+                    Some(0),
+                    false,
+                ),
+                "no",
+                "ausgeschlossene_kategorie",
+                None,
+            )
+            .await;
             return;
         }
         if !allowed_category(lane.category_id) {
             self.log_cleared_pending(channel_id, "falsche_kategorie")
                 .await;
             self.decision(actor_id, "verworfen", "falsche_kategorie", None);
+            self.record_prompt_decision(
+                decision_input(
+                    actor_id,
+                    guild_id,
+                    channel_id,
+                    Some(&lane),
+                    None,
+                    Some(0),
+                    false,
+                ),
+                "no",
+                "falsche_kategorie",
+                None,
+            )
+            .await;
             return;
         }
         let [user_id] = lane.non_bot_members.as_slice() else {
             self.log_cleared_pending(channel_id, "nicht_mehr_allein")
                 .await;
             self.decision(actor_id, "verworfen", "nicht_allein", None);
+            self.record_prompt_decision(
+                decision_input(
+                    actor_id,
+                    guild_id,
+                    channel_id,
+                    Some(&lane),
+                    None,
+                    Some(0),
+                    false,
+                ),
+                "no",
+                "nicht_mehr_allein",
+                None,
+            )
+            .await;
             return;
         };
 
@@ -401,6 +555,37 @@ impl SoloWatch {
     }
 
     pub async fn tick_at(&self, now: DateTime<Utc>) {
+        let timed_out: Vec<(u64, PromptContext)> = {
+            let mut prompts = self.prompts.lock().await;
+            let users = prompts
+                .iter()
+                .filter(|(_, context)| now - context.prompted_at >= PROMPT_COOLDOWN)
+                .map(|(user_id, _)| *user_id)
+                .collect::<Vec<_>>();
+            users
+                .into_iter()
+                .filter_map(|user_id| prompts.remove(&user_id).map(|context| (user_id, context)))
+                .collect()
+        };
+        for (user_id, context) in timed_out {
+            self.record_ai_decision(ai_decision_entry(
+                "solo_lfg.outcome",
+                &decision_input(
+                    user_id,
+                    context.guild_id,
+                    context.channel_id,
+                    Some(&context.lane),
+                    Some(context.session_count),
+                    Some(context.minutes_alone),
+                    context.rank_known,
+                ),
+                "timeout",
+                "keine_reaktion",
+                None,
+            ))
+            .await;
+        }
+
         let expired: Vec<(u64, ActivePost)> = {
             let posts = self.posts.lock().await;
             posts
@@ -431,36 +616,180 @@ impl SoloWatch {
     }
 
     async fn check_due(&self, user_id: u64, pending: PendingSolo, now: DateTime<Utc>) {
+        let minutes_alone = (now - pending.since).num_minutes().max(0);
         let Some(lane) = self
             .port
             .lane_snapshot(pending.guild_id, pending.channel_id)
             .await
         else {
             self.decision(user_id, "verworfen", "kanal_nicht_im_cache", None);
+            self.record_prompt_decision(
+                decision_input(
+                    user_id,
+                    pending.guild_id,
+                    pending.channel_id,
+                    None,
+                    None,
+                    Some(minutes_alone),
+                    false,
+                ),
+                "no",
+                "kanal_nicht_im_cache",
+                None,
+            )
+            .await;
             return;
         };
-        if !allowed_category(lane.category_id) || lane.non_bot_members.as_slice() != [user_id] {
+        if HARD_EXCLUDED_CATEGORY_IDS.contains(&lane.category_id) {
+            self.decision(user_id, "verworfen", "ausgeschlossene_kategorie", None);
+            self.record_prompt_decision(
+                decision_input(
+                    user_id,
+                    pending.guild_id,
+                    pending.channel_id,
+                    Some(&lane),
+                    None,
+                    Some(minutes_alone),
+                    false,
+                ),
+                "no",
+                "ausgeschlossene_kategorie",
+                None,
+            )
+            .await;
+            return;
+        }
+        if !allowed_category(lane.category_id) {
+            self.decision(user_id, "verworfen", "falsche_kategorie", None);
+            self.record_prompt_decision(
+                decision_input(
+                    user_id,
+                    pending.guild_id,
+                    pending.channel_id,
+                    Some(&lane),
+                    None,
+                    Some(minutes_alone),
+                    false,
+                ),
+                "no",
+                "falsche_kategorie",
+                None,
+            )
+            .await;
+            return;
+        }
+        if lane.non_bot_members.as_slice() != [user_id] {
             self.decision(user_id, "verworfen", "nicht_mehr_allein", None);
+            self.record_prompt_decision(
+                decision_input(
+                    user_id,
+                    pending.guild_id,
+                    pending.channel_id,
+                    Some(&lane),
+                    None,
+                    Some(minutes_alone),
+                    false,
+                ),
+                "no",
+                "nicht_mehr_allein",
+                None,
+            )
+            .await;
             return;
         }
 
         match self.port.claim_prompt(pending.guild_id, user_id, now).await {
             Err(error) => {
                 self.decision(user_id, "verworfen", "eligibility_fehler", Some(&error));
+                self.record_prompt_decision(
+                    decision_input(
+                        user_id,
+                        pending.guild_id,
+                        pending.channel_id,
+                        Some(&lane),
+                        None,
+                        Some(minutes_alone),
+                        false,
+                    ),
+                    "error",
+                    "eligibility_fehler",
+                    Some(truncate_chars(&error, 500)),
+                )
+                .await;
             }
-            Ok(PromptDecision::TooManySessions(_)) => {
+            Ok(PromptDecision::TooManySessions(session_count)) => {
                 self.decision(user_id, "verworfen", "zu_viele_sessions", None);
+                self.record_prompt_decision(
+                    decision_input(
+                        user_id,
+                        pending.guild_id,
+                        pending.channel_id,
+                        Some(&lane),
+                        Some(session_count),
+                        Some(minutes_alone),
+                        false,
+                    ),
+                    "no",
+                    "zu_viele_sessions",
+                    None,
+                )
+                .await;
             }
             Ok(PromptDecision::OptedOut) => {
                 self.decision(user_id, "verworfen", "Opt-out", None);
+                self.record_prompt_decision(
+                    decision_input(
+                        user_id,
+                        pending.guild_id,
+                        pending.channel_id,
+                        Some(&lane),
+                        None,
+                        Some(minutes_alone),
+                        false,
+                    ),
+                    "suppressed",
+                    "datenschutz_optout",
+                    None,
+                )
+                .await;
             }
-            Ok(PromptDecision::NeverAsk) => {
+            Ok(PromptDecision::NeverAsk(session_count)) => {
                 self.decision(user_id, "verworfen", "nie_fragen", None);
+                self.record_prompt_decision(
+                    decision_input(
+                        user_id,
+                        pending.guild_id,
+                        pending.channel_id,
+                        Some(&lane),
+                        Some(session_count),
+                        Some(minutes_alone),
+                        false,
+                    ),
+                    "no",
+                    "nie_fragen",
+                    None,
+                )
+                .await;
             }
-            Ok(PromptDecision::Cooldown) => {
+            Ok(PromptDecision::Cooldown(session_count)) => {
                 self.decision(user_id, "verworfen", "cooldown", None);
+                self.record_prompt_decision(
+                    decision_input(
+                        user_id,
+                        pending.guild_id,
+                        pending.channel_id,
+                        Some(&lane),
+                        Some(session_count),
+                        Some(minutes_alone),
+                        false,
+                    ),
+                    "no",
+                    "cooldown",
+                    None,
+                )
+                .await;
             }
-            Ok(PromptDecision::Prompt) => {
+            Ok(PromptDecision::Prompt(session_count)) => {
                 let rank = match self.port.verified_rank(user_id).await {
                     Ok(rank) => rank,
                     Err(error) => {
@@ -468,15 +797,58 @@ impl SoloWatch {
                         None
                     }
                 };
+                let rank_known = rank.is_some();
                 let body = dm_body(pending.guild_id, pending.channel_id, &lane, rank.as_deref());
                 match self.port.send_dm(user_id, body).await {
                     Ok(()) => {
                         self.daily.lock().await.prompted += 1;
                         self.decision(user_id, "dm_zugestellt", "solo_2_minuten", None);
+                        self.prompts.lock().await.insert(
+                            user_id,
+                            PromptContext {
+                                guild_id: pending.guild_id,
+                                channel_id: pending.channel_id,
+                                lane: lane.clone(),
+                                session_count,
+                                minutes_alone,
+                                rank_known,
+                                prompted_at: now,
+                            },
+                        );
+                        self.record_prompt_decision(
+                            decision_input(
+                                user_id,
+                                pending.guild_id,
+                                pending.channel_id,
+                                Some(&lane),
+                                Some(session_count),
+                                Some(minutes_alone),
+                                rank_known,
+                            ),
+                            "yes",
+                            "solo_2_minuten",
+                            Some("dm_gesendet".to_string()),
+                        )
+                        .await;
                     }
                     Err(error) => {
                         self.daily.lock().await.dm_errors += 1;
                         self.decision(user_id, "dm_fehlgeschlagen", "discord_fehler", Some(&error));
+                        self.record_prompt_decision(
+                            decision_input(
+                                user_id,
+                                pending.guild_id,
+                                pending.channel_id,
+                                Some(&lane),
+                                Some(session_count),
+                                Some(minutes_alone),
+                                rank_known,
+                            ),
+                            "error",
+                            "discord_fehler",
+                            Some(truncate_chars(&error, 500)),
+                        )
+                        .await;
                     }
                 }
             }
@@ -491,7 +863,9 @@ impl SoloWatch {
                 .handle_enter(interaction.user_id, guild_id, channel_id)
                 .await;
         }
-        if custom_id_context(&interaction.custom_id, LATER_CUSTOM_ID).is_some() {
+        if let Some((guild_id, channel_id)) =
+            custom_id_context(&interaction.custom_id, LATER_CUSTOM_ID)
+        {
             self.daily.lock().await.rejected += 1;
             self.decision(
                 interaction.user_id,
@@ -499,10 +873,29 @@ impl SoloWatch {
                 "nicht_jetzt_gewaehlt",
                 None,
             );
+            self.record_outcome(
+                decision_input(
+                    interaction.user_id,
+                    guild_id,
+                    channel_id,
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
+                "no",
+                "spaeter",
+                None,
+            )
+            .await;
             return BridgeReply::ephemeral_text(LATER_REPLY);
         }
-        if custom_id_context(&interaction.custom_id, NEVER_CUSTOM_ID).is_some() {
-            return self.handle_never(interaction.user_id).await;
+        if let Some((guild_id, channel_id)) =
+            custom_id_context(&interaction.custom_id, NEVER_CUSTOM_ID)
+        {
+            return self
+                .handle_never(interaction.user_id, guild_id, channel_id)
+                .await;
         }
         if let Some((guild_id, channel_id)) =
             custom_id_context(&interaction.custom_id, MODAL_CUSTOM_ID)
@@ -541,11 +934,18 @@ impl SoloWatch {
         }
     }
 
-    async fn handle_never(&self, user_id: u64) -> BridgeReply {
+    async fn handle_never(&self, user_id: u64, guild_id: u64, channel_id: u64) -> BridgeReply {
         match self.port.set_never_ask(user_id).await {
             Ok(()) => {
                 self.daily.lock().await.rejected += 1;
                 self.decision(user_id, "abgelehnt", "nie_fragen_gewaehlt", None);
+                self.record_outcome(
+                    decision_input(user_id, guild_id, channel_id, None, None, None, false),
+                    "no",
+                    "nie_fragen",
+                    None,
+                )
+                .await;
                 BridgeReply::ephemeral_text(NEVER_REPLY)
             }
             Err(error) => {
@@ -654,6 +1054,21 @@ impl SoloWatch {
         }
         self.daily.lock().await.registered += 1;
         self.decision(user_id, "post_erstellt", "modal_abgesendet", None);
+        self.record_outcome(
+            decision_input(
+                user_id,
+                guild_id,
+                channel_id,
+                Some(&lane),
+                None,
+                None,
+                !value("rank").is_empty(),
+            ),
+            "yes",
+            "modal_abgesendet",
+            Some("post_erstellt".to_string()),
+        )
+        .await;
 
         let current = self.port.lane_snapshot(guild_id, channel_id).await;
         self.reconcile_posts(channel_id, current.as_ref()).await;
@@ -673,6 +1088,82 @@ impl SoloWatch {
         if let Err(error) = self.port.send_log(text).await {
             tracing::warn!(%error, "Solo-LFG: tägliche Zusammenfassung fehlgeschlagen");
         }
+    }
+}
+
+fn ai_decision_entry(
+    source: &'static str,
+    input: &DecisionInput,
+    decision: &'static str,
+    reason: &'static str,
+    action_taken: Option<String>,
+) -> AiDecisionEntry {
+    let lane_name = input
+        .lane
+        .as_ref()
+        .map(|lane| truncate_chars(&lane.name, 80))
+        .unwrap_or_else(|| "nicht im Cache".to_string());
+    let category_id = input.lane.as_ref().map(|lane| lane.category_id);
+    let sessions = input
+        .session_count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "nicht geprüft".to_string());
+    let minutes = input
+        .minutes_alone
+        .map(|minutes| minutes.to_string())
+        .unwrap_or_else(|| "nicht geprüft".to_string());
+    AiDecisionEntry {
+        source,
+        subject_user_id: input.user_id,
+        guild_id: input.guild_id,
+        input_summary: format!(
+            "Lane: {lane_name}; Kategorie: {}; Sessions/90T: {sessions}; allein: {minutes} Min.",
+            category_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "nicht geprüft".to_string())
+        ),
+        decision,
+        // Regelentscheidung ohne probabilistisches Modell: keine erfundene Confidence.
+        confidence: None,
+        reason,
+        action_taken,
+        payload: json!({
+            "session_count": input.session_count,
+            "category_id": category_id,
+            "channel_id": input.channel_id,
+            "minutes_alone": input.minutes_alone,
+            "rank_known": input.rank_known,
+        }),
+    }
+}
+
+fn decision_input(
+    user_id: u64,
+    guild_id: u64,
+    channel_id: u64,
+    lane: Option<&LaneSnapshot>,
+    session_count: Option<usize>,
+    minutes_alone: Option<i64>,
+    rank_known: bool,
+) -> DecisionInput {
+    DecisionInput {
+        user_id,
+        guild_id,
+        channel_id,
+        lane: lane.cloned(),
+        session_count,
+        minutes_alone,
+        rank_known,
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 
@@ -848,6 +1339,13 @@ pub fn register(router: &mut InteractionRouter, watch: Arc<SoloWatch>) {
 pub fn spawn(watch: Arc<SoloWatch>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
     tokio::spawn(async move {
+        tracing::info!(
+            solo_delay_seconds = SOLO_DELAY.num_seconds(),
+            unknown_session_threshold = UNKNOWN_SESSION_THRESHOLD,
+            target_channel_id = LFG_CHANNEL_ID,
+            cooldown_hours = PROMPT_COOLDOWN.num_hours(),
+            "Solo-LFG-Watch gestartet"
+        );
         watch.restore_at(Utc::now()).await;
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         let mut daily = tokio::time::interval(StdDuration::from_secs(24 * 60 * 60));
@@ -899,7 +1397,7 @@ pub(crate) async fn claim_prompt_db(
     .fetch_one(&mut *tx)
     .await
     .map_err(|error| error.to_string())?;
-    if sessions >= 4 {
+    if sessions >= UNKNOWN_SESSION_THRESHOLD as i64 {
         tx.commit().await.map_err(|error| error.to_string())?;
         return Ok(PromptDecision::TooManySessions(sessions as usize));
     }
@@ -913,7 +1411,7 @@ pub(crate) async fn claim_prompt_db(
             .map_err(|error| error.to_string())?;
     if never.is_some() {
         tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(PromptDecision::NeverAsk);
+        return Ok(PromptDecision::NeverAsk(sessions as usize));
     }
 
     let last_prompt: Option<String> =
@@ -929,9 +1427,9 @@ pub(crate) async fn claim_prompt_db(
             .map_err(|error| format!("ungültiger Solo-LFG-Cooldown: {error}"))?;
         let last_prompt = DateTime::from_timestamp(timestamp, 0)
             .ok_or_else(|| "ungültiger Solo-LFG-Cooldown-Zeitstempel".to_string())?;
-        if now - last_prompt < Duration::hours(24) {
+        if now - last_prompt < PROMPT_COOLDOWN {
             tx.commit().await.map_err(|error| error.to_string())?;
-            return Ok(PromptDecision::Cooldown);
+            return Ok(PromptDecision::Cooldown(sessions as usize));
         }
     }
 
@@ -947,7 +1445,38 @@ pub(crate) async fn claim_prompt_db(
     .await
     .map_err(|error| error.to_string())?;
     tx.commit().await.map_err(|error| error.to_string())?;
-    Ok(PromptDecision::Prompt)
+    Ok(PromptDecision::Prompt(sessions as usize))
+}
+
+pub(crate) async fn log_ai_decision_db(
+    pool: &PgPool,
+    entry: &AiDecisionEntry,
+) -> Result<(), String> {
+    let subject_user_id =
+        i64::try_from(entry.subject_user_id).map_err(|error| error.to_string())?;
+    let guild_id = i64::try_from(entry.guild_id).map_err(|error| error.to_string())?;
+    sqlx::query(
+        r#"
+        INSERT INTO bot.ai_decision_ledger(
+            source, subject_user_id, guild_id, input_summary, decision,
+            confidence, reason, action_taken, payload
+        )
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+        "#,
+    )
+    .bind(entry.source)
+    .bind(subject_user_id)
+    .bind(guild_id)
+    .bind(&entry.input_summary)
+    .bind(entry.decision)
+    .bind(entry.confidence)
+    .bind(entry.reason)
+    .bind(&entry.action_taken)
+    .bind(entry.payload.clone())
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn set_never_ask_db(pool: &PgPool, user_id: u64) -> Result<(), String> {
@@ -1038,12 +1567,15 @@ mod tests {
         sessions: usize,
         opted_out: bool,
         never: bool,
+        fail_dm: bool,
+        fail_ledger: bool,
         last_prompt_at: Option<DateTime<Utc>>,
         persisted_posts: HashMap<u64, (u64, u64, DateTime<Utc>)>,
         dms: Vec<(u64, Value)>,
         posts: Vec<(u64, String)>,
         deletes: Vec<(u64, u64, String)>,
         logs: Vec<String>,
+        ledger: Vec<AiDecisionEntry>,
     }
 
     #[derive(Clone, Default)]
@@ -1082,17 +1614,17 @@ mod tests {
             let decision = if state.opted_out {
                 PromptDecision::OptedOut
             } else if state.never {
-                PromptDecision::NeverAsk
-            } else if state.sessions >= 4 {
+                PromptDecision::NeverAsk(state.sessions)
+            } else if state.sessions >= UNKNOWN_SESSION_THRESHOLD {
                 PromptDecision::TooManySessions(state.sessions)
             } else if state
                 .last_prompt_at
-                .is_some_and(|last| now - last < Duration::hours(24))
+                .is_some_and(|last| now - last < PROMPT_COOLDOWN)
             {
-                PromptDecision::Cooldown
+                PromptDecision::Cooldown(state.sessions)
             } else {
                 state.last_prompt_at = Some(now);
-                PromptDecision::Prompt
+                PromptDecision::Prompt(state.sessions)
             };
             Ok(decision)
         }
@@ -1102,7 +1634,11 @@ mod tests {
         }
 
         async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String> {
-            self.state.lock().expect("lock").dms.push((user_id, body));
+            let mut state = self.state.lock().expect("lock");
+            if state.fail_dm {
+                return Err("DM nicht zustellbar".to_string());
+            }
+            state.dms.push((user_id, body));
             Ok(())
         }
 
@@ -1174,6 +1710,15 @@ mod tests {
             Ok(())
         }
 
+        async fn log_ai_decision(&self, entry: AiDecisionEntry) -> Result<(), String> {
+            let mut state = self.state.lock().expect("lock");
+            if state.fail_ledger {
+                return Err("Ledger nicht erreichbar".to_string());
+            }
+            state.ledger.push(entry);
+            Ok(())
+        }
+
         fn log_decision(
             &self,
             user_id: u64,
@@ -1227,6 +1772,11 @@ mod tests {
         prompt(&watch, &port).await;
 
         assert_eq!(port.dms(), 0);
+        let state = port.state.lock().expect("lock");
+        assert_eq!(state.ledger.len(), 1);
+        assert_eq!(state.ledger[0].source, "solo_lfg.prompt");
+        assert_eq!(state.ledger[0].decision, "no");
+        assert_eq!(state.ledger[0].reason, "zu_viele_sessions");
     }
 
     #[tokio::test]
@@ -1256,6 +1806,16 @@ mod tests {
             state.dms[0].1["components"][0]["components"][2]["label"],
             "Nie fragen"
         );
+        assert_eq!(state.ledger.len(), 1);
+        assert_eq!(state.ledger[0].source, "solo_lfg.prompt");
+        assert_eq!(state.ledger[0].decision, "yes");
+        assert_eq!(state.ledger[0].confidence, None);
+        assert_eq!(state.ledger[0].payload["session_count"], 3);
+        assert_eq!(state.ledger[0].payload["category_id"], CHILL);
+        assert_eq!(state.ledger[0].payload["channel_id"], CHANNEL);
+        assert_eq!(state.ledger[0].payload["minutes_alone"], 2);
+        assert_eq!(state.ledger[0].payload["rank_known"], true);
+        assert!(state.ledger[0].input_summary.contains("Lobby 1"));
     }
 
     #[tokio::test]
@@ -1302,7 +1862,11 @@ mod tests {
             start_solo(&watch, &port, category_id).await;
             watch.tick_at(now() + SOLO_DELAY).await;
 
-            assert_eq!(port.dms(), 0, "Kategorie {category_id}");
+            let state = port.state.lock().expect("lock");
+            assert_eq!(state.dms.len(), 0, "Kategorie {category_id}");
+            assert_eq!(state.ledger.len(), 1, "Kategorie {category_id}");
+            assert_eq!(state.ledger[0].decision, "no");
+            assert_eq!(state.ledger[0].reason, "ausgeschlossene_kategorie");
         }
     }
 
@@ -1317,6 +1881,75 @@ mod tests {
         let state = port.state.lock().expect("lock");
         assert!(state.dms.is_empty());
         assert!(state.logs.iter().any(|line| line.contains("Opt-out")));
+        assert_eq!(state.ledger.len(), 1);
+        assert_eq!(state.ledger[0].decision, "suppressed");
+        assert_eq!(state.ledger[0].reason, "datenschutz_optout");
+    }
+
+    #[tokio::test]
+    async fn dm_fehler_wird_im_ledger_erfasst() {
+        let port = Arc::new(MockPort::default());
+        port.state.lock().expect("lock").fail_dm = true;
+        let watch = SoloWatch::new(port.clone());
+
+        prompt(&watch, &port).await;
+
+        let state = port.state.lock().expect("lock");
+        assert!(state.dms.is_empty());
+        assert_eq!(state.ledger.len(), 1);
+        assert_eq!(state.ledger[0].source, "solo_lfg.prompt");
+        assert_eq!(state.ledger[0].decision, "error");
+        assert_eq!(state.ledger[0].reason, "discord_fehler");
+        assert_eq!(
+            state.ledger[0].action_taken.as_deref(),
+            Some("DM nicht zustellbar")
+        );
+    }
+
+    #[tokio::test]
+    async fn ledger_fehler_verhindert_dm_nicht() {
+        let port = Arc::new(MockPort::default());
+        port.state.lock().expect("lock").fail_ledger = true;
+        let watch = SoloWatch::new(port.clone());
+
+        prompt(&watch, &port).await;
+
+        assert_eq!(port.dms(), 1);
+    }
+
+    #[tokio::test]
+    async fn nicht_jetzt_erzeugt_no_outcome() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        prompt(&watch, &port).await;
+
+        watch
+            .handle_interaction(BridgeInteraction {
+                custom_id: format!("{LATER_CUSTOM_ID}:{GUILD}:{CHANNEL}"),
+                user_id: USER,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let state = port.state.lock().expect("lock");
+        assert_eq!(state.ledger.len(), 2);
+        assert_eq!(state.ledger[1].source, "solo_lfg.outcome");
+        assert_eq!(state.ledger[1].decision, "no");
+        assert_eq!(state.ledger[1].reason, "spaeter");
+    }
+
+    #[tokio::test]
+    async fn prompt_ohne_reaktion_erzeugt_timeout_outcome() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        prompt(&watch, &port).await;
+
+        watch.tick_at(now() + SOLO_DELAY + PROMPT_COOLDOWN).await;
+
+        let state = port.state.lock().expect("lock");
+        assert_eq!(state.ledger.len(), 2);
+        assert_eq!(state.ledger[1].source, "solo_lfg.outcome");
+        assert_eq!(state.ledger[1].decision, "timeout");
     }
 
     #[tokio::test]
@@ -1331,6 +1964,13 @@ mod tests {
             })
             .await;
         assert_eq!(reply.content.as_deref(), Some(NEVER_REPLY));
+        {
+            let state = port.state.lock().expect("lock");
+            assert_eq!(state.ledger.len(), 1);
+            assert_eq!(state.ledger[0].source, "solo_lfg.outcome");
+            assert_eq!(state.ledger[0].decision, "no");
+            assert_eq!(state.ledger[0].reason, "nie_fragen");
+        }
 
         let restarted = SoloWatch::new(port.clone());
         prompt(&restarted, &port).await;
@@ -1401,6 +2041,24 @@ mod tests {
         assert_eq!(
             state.posts[0].1,
             "<@42>\n**Casual** — Ascendant 2\nSitzt gerade in Lobby 1, 5 Plätze frei\n⏱️ eine Runde\n\"chill, kein Sweat\"\n\n→ Beitreten: https://discord.com/channels/1289721245281292288/99"
+        );
+    }
+
+    #[tokio::test]
+    async fn modal_erzeugt_zweiten_outcome_ledger_eintrag() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        prompt(&watch, &port).await;
+
+        create_post(&watch, &port).await;
+
+        let state = port.state.lock().expect("lock");
+        assert_eq!(state.ledger.len(), 2);
+        assert_eq!(state.ledger[1].source, "solo_lfg.outcome");
+        assert_eq!(state.ledger[1].decision, "yes");
+        assert_eq!(
+            state.ledger[1].action_taken.as_deref(),
+            Some("post_erstellt")
         );
     }
 
