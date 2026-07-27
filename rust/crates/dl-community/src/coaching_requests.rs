@@ -345,11 +345,11 @@ fn separator() -> Value {
     json!({ "type": 14, "divider": true, "spacing": 1 })
 }
 
-/// Baut die komplette Anfrage-Nachricht als Components-V2-Body.
+/// Baut die komplette Anfrage-Nachricht als Components-V2-Body zum **Senden**.
 ///
-/// `content` und `embeds` werden explizit geleert: Discord akzeptiert das
-/// V2-Flag beim Editieren nur, wenn beide Felder leer sind — sonst bleiben
-/// bestehende Nachrichten im alten Embed-Format hängen.
+/// Enthält bewusst weder `content` noch `embeds`: Discord lehnt einen
+/// Create-Request mit `IS_COMPONENTS_V2` ab, sobald eins der beiden Felder
+/// überhaupt mitgeschickt wird. Zum Editieren siehe [`request_edit_body_v2`].
 pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String, Value> {
     let mut lines = vec![
         format!("## {}", view.headline),
@@ -412,8 +412,6 @@ pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String,
 
     let mut body = Map::new();
     body.insert("flags".into(), json!(COACHING_COMPONENTS_V2_FLAG));
-    body.insert("content".into(), Value::Null);
-    body.insert("embeds".into(), json!([]));
     body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
     body.insert(
         "components".into(),
@@ -423,6 +421,16 @@ pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String,
             "components": container,
         }]),
     );
+    body
+}
+
+/// Wie [`request_body_v2`], aber zum **Editieren**: `content` und `embeds`
+/// werden explizit geleert. Ohne das übernimmt Discord das V2-Flag nicht und
+/// Nachrichten aus der Embed-Zeit bleiben im alten Format hängen.
+pub fn request_edit_body_v2(request: &RequestData, view: &RequestView) -> Map<String, Value> {
+    let mut body = request_body_v2(request, view);
+    body.insert("content".into(), Value::Null);
+    body.insert("embeds".into(), json!([]));
     body
 }
 
@@ -1228,7 +1236,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         } else {
             "🟢 Freigegeben – "
         };
-        let body = request_body_v2(
+        let body = request_edit_body_v2(
             &request,
             &RequestView {
                 headline: "🎮 Neue Coaching-Anfrage",
@@ -1266,7 +1274,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let Some(message_id) = message_id else {
             return;
         };
-        let body = request_body_v2(
+        let body = request_edit_body_v2(
             &request,
             &RequestView {
                 headline,
@@ -2060,7 +2068,7 @@ impl InteractionHandler for CoachingHandler {
                 )
                 .await;
             if let Some(message_id) = message_id {
-                let body = request_body_v2(
+                let body = request_edit_body_v2(
                     &request,
                     &RequestView {
                         headline: "🎓 Coaching läuft",
@@ -2548,9 +2556,16 @@ mod tests {
         );
 
         assert_eq!(body["flags"], json!(COACHING_COMPONENTS_V2_FLAG));
-        // Discord akzeptiert das V2-Flag beim Edit nur mit leerem content/embeds.
-        assert_eq!(body["content"], Value::Null);
-        assert_eq!(body["embeds"], json!([]));
+        // Create-Request: Discord antwortet mit 400, sobald content oder embeds
+        // neben IS_COMPONENTS_V2 ueberhaupt im Body stehen.
+        assert!(
+            !body.contains_key("content"),
+            "content darf beim Senden fehlen"
+        );
+        assert!(
+            !body.contains_key("embeds"),
+            "embeds darf beim Senden fehlen"
+        );
         assert_eq!(body["components"][0]["type"], 17);
         assert_eq!(body["components"][0]["accent_color"], COACHING_ACCENT_OPEN);
 
@@ -2571,6 +2586,29 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1, "genau eine Action-Row");
         assert_eq!(rows[0]["components"][0]["custom_id"], "coach_claim_7");
+    }
+
+    /// Beim Editieren gilt die umgekehrte Regel: nur wenn content und embeds
+    /// explizit geleert werden, uebernimmt Discord das V2-Flag fuer eine
+    /// Nachricht, die noch aus der Embed-Zeit stammt.
+    #[test]
+    fn edit_body_leert_content_und_embeds() {
+        let view = RequestView {
+            headline: "🎓 Coaching läuft",
+            status_line: "✅ geclaimt".to_string(),
+            accent: COACHING_ACCENT_ACTIVE,
+            include_ai: false,
+            reserved: None,
+            components: json!([]),
+        };
+        let send = request_body_v2(&demo_request(), &view);
+        let edit = request_edit_body_v2(&demo_request(), &view);
+
+        assert!(!send.contains_key("content") && !send.contains_key("embeds"));
+        assert_eq!(edit["content"], Value::Null);
+        assert_eq!(edit["embeds"], json!([]));
+        assert_eq!(edit["components"], send["components"]);
+        assert_eq!(edit["flags"], send["flags"]);
     }
 
     #[test]
