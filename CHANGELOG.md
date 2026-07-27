@@ -1,3 +1,11 @@
+## #303 — Scrim-Ergebnisse werden wieder auswählbar
+
+Problem: Erfolgreich abgerufene Scrim-Ergebnisse blieben intern ungeprüft und konnten deshalb nicht als Match-Ergebnis ausgewählt werden.
+
+Änderung: Abruf- und Prüfstatus werden jetzt gemeinsam gespeichert. Die Datenbank weist widersprüchliche Statuskombinationen künftig ab.
+
+Aktuelles Verhalten: Ein Ergebnis mit erkanntem Gewinner ist direkt gültig und auswählbar. Fehlt der Gewinner, bleibt es als mehrdeutig zur Klärung sichtbar.
+
 ## #302 — Coaching-Sessions finden ihren Coach wieder
 
 Problem: Seit die Anfragen über die Website laufen, erkannte der Bot bei keiner Session mehr, wer der zugewiesene Coach ist. Folge: Das Ende im Coaching-Voice wurde nicht mehr bemerkt, der Abschluss-Knopf meldete „keine aktive Session", und acht Sessions aus den letzten Wochen hingen fest — samt fehlender Feedback-Rolle und Umfrage.

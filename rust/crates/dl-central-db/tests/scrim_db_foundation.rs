@@ -7,6 +7,8 @@ use sqlx::{migrate::Migrator, PgPool};
 
 const PRE_FOUNDATION_VERSION: i64 = 2026072407;
 const FOUNDATION_END_VERSION: i64 = 2026072418;
+const PRE_STATUS_CONSISTENCY_VERSION: i64 = 2026072421;
+const STATUS_CONSISTENCY_VERSION: i64 = 2026072701;
 
 type ExistingResultRefRow = (i64, String, bool, String, bool, i32, bool, bool);
 
@@ -365,6 +367,149 @@ async fn scrim_db_foundation_contract_tables_constraints_and_legacy_id_safety() 
     assert_lagebild_privacy_redaction_guards(pool).await;
     assert_privacy_registry_covers_new_user_id_display_name_and_json_fields(pool).await;
     assert_foundation_privacy_inventory_is_classified(pool).await;
+}
+
+#[tokio::test]
+#[ignore = "requires CENTRAL_TEST_DSN; run via central_test_db.sh"]
+async fn match_result_ref_fetch_and_validation_statuses_stay_consistent() {
+    let db = test_pool().await.expect("create migrated test pool");
+    let pool = db.pool();
+    seed_match(pool, 910_001, 910_002, 910_003).await;
+    let superseded_by_ref_id = insert_result_ref(pool, 910_003, 910_001, 910_010, false)
+        .await
+        .expect("insert valid fetched result ref");
+
+    sqlx::query(
+        r#"INSERT INTO scrim.match_result_refs(
+               match_id, steam_match_id, source_user_id, source_display_name,
+               fetch_status, validation_status, voided_at, superseded_by_ref_id
+           )
+           VALUES
+               ($1, 910011, '424242', 'Tester', 'pending', 'unvalidated', NULL, NULL),
+               ($1, 910012, '424242', 'Tester', 'fetching', 'unvalidated', NULL, NULL),
+               ($1, 910013, '424242', 'Tester', 'failed', 'unvalidated', NULL, NULL),
+               ($1, 910014, '424242', 'Tester', 'fetched', 'ambiguous', NULL, NULL),
+               ($1, 910015, '424242', 'Tester', 'fetched', 'rejected', NULL, NULL),
+               ($1, 910016, '424242', 'Tester', 'fetched', 'void', now(), NULL),
+               ($1, 910017, '424242', 'Tester', 'fetched', 'superseded', NULL, $2)"#,
+    )
+    .bind(910_003_i32)
+    .bind(superseded_by_ref_id)
+    .execute(pool)
+    .await
+    .expect("insert every allowed fetch/validation status pair");
+
+    let fetched_unvalidated = sqlx::query(
+        "INSERT INTO scrim.match_result_refs(
+             match_id, steam_match_id, source_user_id, source_display_name,
+             fetch_status, validation_status
+         ) VALUES ($1, 910018, '424242', 'Tester', 'fetched', 'unvalidated')",
+    )
+    .bind(910_003_i32)
+    .execute(pool)
+    .await;
+    let pending_valid = sqlx::query(
+        "INSERT INTO scrim.match_result_refs(
+             match_id, steam_match_id, source_user_id, source_display_name,
+             fetch_status, validation_status
+         ) VALUES ($1, 910019, '424242', 'Tester', 'pending', 'valid')",
+    )
+    .bind(910_003_i32)
+    .execute(pool)
+    .await;
+
+    assert_eq!(
+        (
+            database_error_code(&fetched_unvalidated),
+            database_error_code(&pending_valid),
+        ),
+        (Some("23514".to_string()), Some("23514".to_string()))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires CENTRAL_TEST_DSN; run via central_test_db.sh"]
+async fn status_consistency_migration_repairs_existing_inconsistent_result_refs() {
+    let admin_dsn = test_dsn();
+    let admin = connect_pool(&admin_dsn)
+        .await
+        .expect("connect admin database");
+    let dbname = fresh_db_name("scrim_status_consistency_upgrade");
+    create_fresh_db(&admin, &dbname).await;
+    let db_dsn = swap_db(&admin_dsn, &dbname);
+    let pool = connect_pool(&db_dsn)
+        .await
+        .expect("connect upgrade fixture database");
+
+    run_migrations_between(&pool, i64::MIN, PRE_STATUS_CONSISTENCY_VERSION).await;
+    seed_match(&pool, 920_001, 920_002, 920_003).await;
+    let superseded_by_ref_id = insert_result_ref(&pool, 920_003, 920_001, 920_010, false)
+        .await
+        .expect("insert superseding result ref");
+
+    sqlx::query(
+        r#"INSERT INTO scrim.match_result_refs(
+               match_id, steam_match_id, source_user_id, source_display_name,
+               fetch_status, validation_status, winner_team_id, voided_at,
+               superseded_by_ref_id
+           )
+           VALUES
+               ($1, 920011, '424242', 'Tester', 'fetched', 'unvalidated', NULL, NULL, NULL),
+               ($1, 920012, '424242', 'Tester', 'fetched', 'unvalidated', 920001, NULL, NULL),
+               ($1, 920013, '424242', 'Tester', 'pending', 'valid', 920001, NULL, NULL),
+               ($1, 920014, '424242', 'Tester', 'fetching', 'ambiguous', NULL, NULL, NULL),
+               ($1, 920015, '424242', 'Tester', 'failed', 'rejected', NULL, NULL, NULL),
+               ($1, 920016, '424242', 'Tester', 'pending', 'void', NULL, now(), NULL),
+               ($1, 920017, '424242', 'Tester', 'failed', 'superseded', NULL, NULL, $2)"#,
+    )
+    .bind(920_003_i32)
+    .bind(superseded_by_ref_id)
+    .execute(&pool)
+    .await
+    .expect("insert inconsistent pre-migration result refs");
+
+    let migration_result =
+        run_migrations_between_result(&pool, i64::MIN, STATUS_CONSISTENCY_VERSION).await;
+    let migration_sqlstate = match &migration_result {
+        Err(
+            sqlx::migrate::MigrateError::Execute(error)
+            | sqlx::migrate::MigrateError::ExecuteMigration(error, _),
+        ) => error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned()),
+        _ => None,
+    };
+    assert!(
+        migration_result.is_ok(),
+        "status consistency migration failed with SQLSTATE {migration_sqlstate:?}: {migration_result:?}"
+    );
+
+    let statuses: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT steam_match_id, fetch_status, validation_status
+           FROM scrim.match_result_refs
+          WHERE steam_match_id BETWEEN 920011 AND 920017
+          ORDER BY steam_match_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read repaired result-ref statuses");
+    assert_eq!(
+        statuses,
+        vec![
+            (920_011, "fetched".to_string(), "ambiguous".to_string()),
+            (920_012, "fetched".to_string(), "valid".to_string()),
+            (920_013, "fetched".to_string(), "valid".to_string()),
+            (920_014, "fetched".to_string(), "ambiguous".to_string()),
+            (920_015, "fetched".to_string(), "rejected".to_string()),
+            (920_016, "fetched".to_string(), "void".to_string()),
+            (920_017, "fetched".to_string(), "superseded".to_string()),
+        ]
+    );
+
+    pool.close().await;
+    drop_db(&admin, &dbname).await;
+    admin.close().await;
 }
 
 #[tokio::test]
@@ -3958,6 +4103,7 @@ async fn assert_match_result_ref_constraints_are_validated(pool: &PgPool) {
         "match_result_refs_supersede_status_check",
         "match_result_refs_supersede_not_self_check",
         "match_result_refs_superseded_ref_fkey",
+        "match_result_refs_fetch_validation_status_check",
     ])
     .fetch_all(pool)
     .await
