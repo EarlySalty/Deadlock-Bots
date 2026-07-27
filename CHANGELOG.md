@@ -1,3 +1,19 @@
+## #301 — Coaching-Anfragen im neuen Look, Zustand auf einen Blick
+
+Problem: Eine Coaching-Anfrage sah in jeder Phase gleich aus. Ob sie offen war, gerade lief oder längst durch war, stand nur klein im Text — im Kanal ließ sich das kaum unterscheiden.
+
+Änderung: Die Anfrage nutzt jetzt Discords neue Nachrichtenbausteine statt eines Embeds. Der Farbstreifen links zeigt den Zustand: blau offen, gold läuft, grün abgeschlossen, rot abgebrochen. Überschrift und Statuszeile sagen dasselbe in Worten, und im Endzustand verschwinden die Knöpfe.
+
+Aktuelles Verhalten: Rang, Hero, Games, Slot und Problembeschreibung stehen weiterhin komplett drin, nur aufgeräumter. Ist ein Coaching vorbei, sieht man das an Farbe und Überschrift sofort — egal ob es der Bot selbst am Ende des Voice-Gesprächs erkannt hat oder der Coach den Knopf gedrückt hat.
+
+## #300 — „Coaching abgeschlossen" reagiert wieder
+
+Problem: Der grüne Knopf unter einer geclaimten Coaching-Anfrage tat nichts. Discord meldete nach drei Sekunden, der Bot habe nicht rechtzeitig reagiert. Der Grund war intern: Der Knopf trug eine Kennung, für die schlicht kein Zuständiger eingetragen war, also lief der Klick ins Leere.
+
+Änderung: Die Zuordnung deckt jetzt alle Coaching-Knöpfe ab, und ein Test prüft künftig für jeden erzeugten Knopf, dass es auch jemanden gibt, der ihn beantwortet.
+
+Aktuelles Verhalten: Der Abschluss-Knopf schließt die Session wieder ab — Anfrage wird grün als abgeschlossen markiert, die Feedback-Rolle wird vergeben und die Umfrage-DM geht raus. Der automatische Weg über das Verlassen des Coaching-Voice bleibt der Normalfall; der Knopf ist der Handgriff für alles andere.
+
 ## #299 — Der Invite-Hinweis erkennt jetzt auch „einzuladen"
 
 Problem: Wer im Invite-Kanal nach einer Einladung fragte, bekam den Hinweis auf den fehlenden Steam-Freundescode nur, wenn er ein bestimmtes Wort traf. Formulierungen wie „sucht jemand, der mich einzuladen mag" oder „wer lädt mich ein?" gingen durch, weil das Verb dort getrennt geschrieben steht — die Erkennung suchte aber nur nach dem zusammenhängenden Wort.

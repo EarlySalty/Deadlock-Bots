@@ -3102,15 +3102,8 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
     async fn send_request_message(
         &self,
         channel_id: u64,
-        content: &str,
-        embed: serde_json::Value,
-        components: serde_json::Value,
+        body: serde_json::Map<String, serde_json::Value>,
     ) -> Result<u64, String> {
-        let mut body = serde_json::Map::new();
-        body.insert("content".into(), json!(content));
-        body.insert("embeds".into(), json!([embed]));
-        body.insert("components".into(), components);
-        body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
         self.adapter
             .send_raw_public(channel_id, &body)
             .await
@@ -3121,14 +3114,8 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
         &self,
         channel_id: u64,
         message_id: u64,
-        content: &str,
-        embed: serde_json::Value,
-        components: serde_json::Value,
+        body: serde_json::Map<String, serde_json::Value>,
     ) {
-        let mut body = serde_json::Map::new();
-        body.insert("content".into(), json!(content));
-        body.insert("embeds".into(), json!([embed]));
-        body.insert("components".into(), components);
         let _ = self
             .adapter
             .http

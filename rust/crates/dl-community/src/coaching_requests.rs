@@ -310,116 +310,128 @@ fn required_u64(item: &Value, key: &str) -> Result<u64, String> {
     Err(format!("Notification-Feld {key} ist keine Discord-ID"))
 }
 
-fn build_request_embed_inner(
-    request: &RequestData,
-    assigned_coach_id: Option<u64>,
-    reserved_until: Option<i64>,
-    now_ts: i64,
-    include_ai: bool,
-    include_player: bool,
-) -> Value {
-    let mut fields = Vec::new();
-    if include_player {
-        fields.push(json!({
-            "name": "Spieler",
-            "value": format!("<@{}>", request.user_id),
-            "inline": true,
-        }));
+/// Components V2 (`IS_COMPONENTS_V2`): Die Anfrage-Nachricht besteht komplett
+/// aus Komponenten, `content`/`embeds` müssen dann leer sein.
+pub const COACHING_COMPONENTS_V2_FLAG: u64 = 1 << 15;
+/// Offen — jeder Coach darf claimen.
+pub const COACHING_ACCENT_OPEN: u64 = 0x3498DB;
+/// Läuft — geclaimt bzw. für einen Coach reserviert (Brand-Gold).
+pub const COACHING_ACCENT_ACTIVE: u64 = 0xC8A86B;
+/// Abgeschlossen.
+pub const COACHING_ACCENT_DONE: u64 = 0x2ECC71;
+/// Abgebrochen.
+pub const COACHING_ACCENT_CANCELLED: u64 = 0xE74C3C;
+
+/// Sichtbarer Zustand einer Anfrage-Nachricht.
+pub struct RequestView<'a> {
+    /// Überschrift im Container, z. B. "🎮 Neue Coaching-Anfrage".
+    pub headline: &'a str,
+    /// Statuszeile darunter, z. B. "🟢 offen für alle Coaches".
+    pub status_line: String,
+    /// Farbstreifen des Containers — trägt den Zustand auf einen Blick.
+    pub accent: u64,
+    pub include_ai: bool,
+    /// (Coach, Claim-Deadline) — nur solange die Reservierung läuft.
+    pub reserved: Option<(u64, i64)>,
+    /// Action-Rows; leeres Array = keine Buttons mehr (Endzustand).
+    pub components: Value,
+}
+
+fn text_display(content: String) -> Value {
+    json!({ "type": 10, "content": content })
+}
+
+fn separator() -> Value {
+    json!({ "type": 14, "divider": true, "spacing": 1 })
+}
+
+/// Baut die komplette Anfrage-Nachricht als Components-V2-Body zum **Senden**.
+///
+/// Enthält bewusst weder `content` noch `embeds`: Discord lehnt einen
+/// Create-Request mit `IS_COMPONENTS_V2` ab, sobald eins der beiden Felder
+/// überhaupt mitgeschickt wird. Zum Editieren siehe [`request_edit_body_v2`].
+pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String, Value> {
+    let mut lines = vec![
+        format!("## {}", view.headline),
+        format!("**{}** · <@{}>", request.username, request.user_id),
+        view.status_line.clone(),
+    ];
+    lines.push(String::new());
+    lines.push(format!(
+        "🏅 **Rang** {}",
+        normalize_inline(&request.rank, "N/A", 256)
+    ));
+    lines.push(format!(
+        "🦸 **Hero** {}",
+        normalize_inline(&request.hero, "Nicht angegeben", 256)
+    ));
+    lines.push(format!(
+        "🎮 **Games / Stunden** {}",
+        normalize_inline(&request.games_played, "N/A", 256)
+    ));
+    lines.push(format!(
+        "📅 **Bevorzugter Slot** {}",
+        normalize_inline(
+            &format_scheduled_slot_for_embed(&request.scheduled_slot),
+            "Nicht angegeben",
+            256
+        )
+    ));
+
+    let mut detail_lines = vec![format!(
+        "📝 **Probleme**\n{}",
+        normalize_inline(&request.current_problems, "Keine Beschreibung", 1024)
+    )];
+    if view.include_ai {
+        detail_lines.push(format!(
+            "🤖 **AI-Analyse**\n{}",
+            format_ai_summary(&request.ai_summary)
+        ));
     }
-    fields.extend([
-        json!({ "name": "Rang", "value": normalize_inline(&request.rank, "N/A", 256), "inline": true }),
-        json!({ "name": "Hero", "value": normalize_inline(&request.hero, "Nicht angegeben", 256), "inline": true }),
-        json!({ "name": "Games / Stunden", "value": normalize_inline(&request.games_played, "N/A", 256), "inline": true }),
-        json!({ "name": "📅 Bevorzugter Slot", "value": normalize_inline(&format_scheduled_slot_for_embed(&request.scheduled_slot), "Nicht angegeben", 256), "inline": false }),
-        json!({ "name": "📝 Probleme", "value": normalize_inline(&request.current_problems, "Keine Beschreibung", 1024), "inline": false }),
-    ]);
-    if include_ai {
-        fields.push(
-            json!({ "name": "🤖 AI Analyse", "value": format_ai_summary(&request.ai_summary), "inline": false }),
-        );
+    if let Some((coach, until)) = view.reserved {
+        detail_lines.push(format!(
+            "🎯 **Reserviert für** <@{coach}> – claim bis <t:{until}:R>"
+        ));
     }
-    if let (Some(coach), Some(until)) = (assigned_coach_id, reserved_until) {
-        if now_ts < until {
-            fields.push(json!({
-                "name": "🎯 Reserviert für",
-                "value": format!("<@{coach}> – claim bis <t:{until}:R>"),
-                "inline": false,
-            }));
+
+    let mut container = vec![
+        text_display(lines.join("\n")),
+        separator(),
+        text_display(detail_lines.join("\n\n")),
+    ];
+    if view
+        .components
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty())
+    {
+        container.push(separator());
+        if let Some(rows) = view.components.as_array() {
+            container.extend(rows.iter().cloned());
         }
     }
-    json!({
-        "title": "🎮 Neue Coaching-Anfrage",
-        "color": 0x3498DB,
-        "author": { "name": request.username },
-        "fields": fields,
-    })
+
+    let mut body = Map::new();
+    body.insert("flags".into(), json!(COACHING_COMPONENTS_V2_FLAG));
+    body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
+    body.insert(
+        "components".into(),
+        json!([{
+            "type": 17,
+            "accent_color": view.accent,
+            "components": container,
+        }]),
+    );
+    body
 }
 
-/// Anfrage-Embed (wie _build_request_embed).
-pub fn build_request_embed(
-    request: &RequestData,
-    assigned_coach_id: Option<u64>,
-    reserved_until: Option<i64>,
-    now_ts: i64,
-) -> Value {
-    build_request_embed_inner(
-        request,
-        assigned_coach_id,
-        reserved_until,
-        now_ts,
-        true,
-        false,
-    )
-}
-
-pub fn build_request_embed_no_ai(
-    request: &RequestData,
-    assigned_coach_id: Option<u64>,
-    reserved_until: Option<i64>,
-    now_ts: i64,
-) -> Value {
-    build_request_embed_inner(
-        request,
-        assigned_coach_id,
-        reserved_until,
-        now_ts,
-        false,
-        true,
-    )
-}
-
-fn build_request_embed_for_existing_request(
-    request: &RequestData,
-    assigned_coach_id: Option<u64>,
-    reserved_until: Option<i64>,
-    now_ts: i64,
-) -> Value {
-    if request.ai_summary.trim().is_empty() {
-        build_request_embed_no_ai(request, assigned_coach_id, reserved_until, now_ts)
-    } else {
-        build_request_embed(request, assigned_coach_id, reserved_until, now_ts)
-    }
-}
-
-fn build_request_embed_with_terminal_status(
-    request: &RequestData,
-    title: &str,
-    status_label: &str,
-    color: u32,
-) -> Value {
-    let mut embed = build_request_embed_for_existing_request(request, None, None, 0);
-    if let Some(map) = embed.as_object_mut() {
-        map.insert("title".into(), json!(title));
-        map.insert("color".into(), json!(color));
-        if let Some(fields) = map.get_mut("fields").and_then(Value::as_array_mut) {
-            fields.push(json!({
-                "name": "Status",
-                "value": status_label,
-                "inline": false,
-            }));
-        }
-    }
-    embed
+/// Wie [`request_body_v2`], aber zum **Editieren**: `content` und `embeds`
+/// werden explizit geleert. Ohne das übernimmt Discord das V2-Flag nicht und
+/// Nachrichten aus der Embed-Zeit bleiben im alten Format hängen.
+pub fn request_edit_body_v2(request: &RequestData, view: &RequestView) -> Map<String, Value> {
+    let mut body = request_body_v2(request, view);
+    body.insert("content".into(), Value::Null);
+    body.insert("embeds".into(), json!([]));
+    body
 }
 
 pub fn claim_components(request_id: i64, author_id: u64) -> Value {
@@ -535,20 +547,17 @@ pub trait CoachingPort: Send + Sync {
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64>;
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String;
     async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool;
+    /// Anfrage-Nachricht senden; `body` ist der fertige Components-V2-Payload.
     async fn send_request_message(
         &self,
         channel_id: u64,
-        content: &str,
-        embed: Value,
-        components: Value,
+        body: Map<String, Value>,
     ) -> Result<u64, String>;
     async fn edit_request_message(
         &self,
         channel_id: u64,
         message_id: u64,
-        content: &str,
-        embed: Value,
-        components: Value,
+        body: Map<String, Value>,
     );
     async fn send_channel_text(&self, channel_id: u64, content: &str);
     async fn send_dm(&self, user_id: u64, content: &str) -> bool;
@@ -901,24 +910,32 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let stats = self.auto_assign_stats().await;
         let assigned = pick_fair_coach(&stats);
         let reserved_until = assigned.map(|_| now_ts + CLAIM_RESERVATION_HOURS * 3600);
-        let embed = if include_ai {
-            build_request_embed(request, assigned, reserved_until, now_ts)
-        } else {
-            build_request_embed_no_ai(request, assigned, reserved_until, now_ts)
-        };
-        let content = match assigned {
-            Some(coach) => format!(
-                "📥 Anfrage von <@{}> – 🎯 reserviert für <@{coach}> ({CLAIM_RESERVATION_HOURS}h)",
-                request.user_id
+        let (status_line, accent) = match assigned {
+            Some(coach) => (
+                format!("🎯 reserviert für <@{coach}> ({CLAIM_RESERVATION_HOURS}h)"),
+                COACHING_ACCENT_ACTIVE,
             ),
-            None => format!(
-                "📥 Anfrage von <@{}> – 🟢 offen für alle Coaches",
-                request.user_id
+            None => (
+                "🟢 offen für alle Coaches".to_string(),
+                COACHING_ACCENT_OPEN,
             ),
         };
+        let body = request_body_v2(
+            request,
+            &RequestView {
+                headline: "🎮 Neue Coaching-Anfrage",
+                status_line,
+                accent,
+                include_ai,
+                reserved: assigned
+                    .zip(reserved_until)
+                    .filter(|(_, until)| now_ts < *until),
+                components,
+            },
+        );
         let message_id = self
             .port
-            .send_request_message(REQUEST_CHANNEL_ID, &content, embed, components)
+            .send_request_message(REQUEST_CHANNEL_ID, body)
             .await?;
         let request_id = request.id;
         let assigned_coach_id = assigned.map(|coach| coach.to_string());
@@ -1219,19 +1236,19 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         } else {
             "🟢 Freigegeben – "
         };
-        let content = format!(
-            "📥 Anfrage von <@{}> – {prefix}jetzt für alle Coaches offen",
-            request.user_id
+        let body = request_edit_body_v2(
+            &request,
+            &RequestView {
+                headline: "🎮 Neue Coaching-Anfrage",
+                status_line: format!("{prefix}jetzt für alle Coaches offen"),
+                accent: COACHING_ACCENT_OPEN,
+                include_ai: !request.ai_summary.trim().is_empty(),
+                reserved: None,
+                components: claim_components(request.id, request.user_id),
+            },
         );
-        let embed = build_request_embed_for_existing_request(&request, None, None, now.timestamp());
         self.port
-            .edit_request_message(
-                REQUEST_CHANNEL_ID,
-                message_id,
-                &content,
-                embed,
-                claim_components(request.id, request.user_id),
-            )
+            .edit_request_message(REQUEST_CHANNEL_ID, message_id, body)
             .await;
         // Website-Mirror (Python `_open_request_to_all`:742) — nur die Anfrage,
         // ohne Coach-/Session-Felder; status ist inzwischen wieder 'analyzed'
@@ -1242,12 +1259,14 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         });
     }
 
+    /// Endzustand: Farbstreifen + Überschrift zeigen das Ergebnis, die Buttons
+    /// verschwinden — die Nachricht ist danach reine Historie.
     async fn update_request_message_terminal(
         &self,
         request_id: i64,
-        title: &str,
-        status_label: &str,
-        color: u32,
+        headline: &str,
+        status_line: &str,
+        accent: u64,
     ) {
         let Some((request, _, _, _, message_id, _)) = self.load_request(request_id).await else {
             return;
@@ -1255,15 +1274,19 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let Some(message_id) = message_id else {
             return;
         };
-        let embed = build_request_embed_with_terminal_status(&request, title, status_label, color);
+        let body = request_edit_body_v2(
+            &request,
+            &RequestView {
+                headline,
+                status_line: status_line.to_string(),
+                accent,
+                include_ai: !request.ai_summary.trim().is_empty(),
+                reserved: None,
+                components: json!([]),
+            },
+        );
         self.port
-            .edit_request_message(
-                REQUEST_CHANNEL_ID,
-                message_id,
-                &format!("📥 Anfrage von <@{}> – {status_label}", request.user_id),
-                embed,
-                json!([]),
-            )
+            .edit_request_message(REQUEST_CHANNEL_ID, message_id, body)
             .await;
     }
 
@@ -1662,7 +1685,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             rid,
             "✅ Coaching abgeschlossen",
             "✅ abgeschlossen",
-            0x2ECC71,
+            COACHING_ACCENT_DONE,
         )
         .await;
         // Website-Mirror (Python `coaching_survey.py`:311): Session als
@@ -2045,15 +2068,23 @@ impl InteractionHandler for CoachingHandler {
                 )
                 .await;
             if let Some(message_id) = message_id {
-                let embed = build_request_embed_for_existing_request(&request, None, None, now_ts);
+                let body = request_edit_body_v2(
+                    &request,
+                    &RequestView {
+                        headline: "🎓 Coaching läuft",
+                        status_line: format!("✅ geclaimt von <@{}>", interaction.user_id),
+                        accent: COACHING_ACCENT_ACTIVE,
+                        include_ai: !request.ai_summary.trim().is_empty(),
+                        reserved: None,
+                        components: active_session_components(
+                            &session_id,
+                            request_id,
+                            request.user_id,
+                        ),
+                    },
+                );
                 c.port
-                    .edit_request_message(
-                        REQUEST_CHANNEL_ID,
-                        message_id,
-                        &format!("📥 Anfrage von <@{}> – ✅ geclaimt", request.user_id),
-                        embed,
-                        active_session_components(&session_id, request_id, request.user_id),
-                    )
+                    .edit_request_message(REQUEST_CHANNEL_ID, message_id, body)
                     .await;
             }
             // Website-Mirror (Python `CoachClaimButton.callback`:380):
@@ -2135,7 +2166,7 @@ impl InteractionHandler for CoachingHandler {
                                 request_id,
                                 "✅ Coaching abgeschlossen",
                                 "✅ abgeschlossen",
-                                0x2ECC71,
+                                COACHING_ACCENT_DONE,
                             )
                             .await;
                         });
@@ -2169,7 +2200,7 @@ impl InteractionHandler for CoachingHandler {
                         request_id,
                         "✅ Coaching abgeschlossen",
                         "✅ abgeschlossen",
-                        0x2ECC71,
+                        COACHING_ACCENT_DONE,
                     )
                     .await;
                 }
@@ -2334,7 +2365,7 @@ impl InteractionHandler for CoachingHandler {
                 request_id,
                 "🚫 Coaching abgebrochen",
                 "🚫 abgebrochen",
-                0xE74C3C,
+                COACHING_ACCENT_CANCELLED,
             )
             .await;
             c.mirror_to_website(MirrorOpts {
@@ -2350,6 +2381,18 @@ impl InteractionHandler for CoachingHandler {
         }
 
         BridgeReply::ephemeral_text("Unbekannte Aktion.")
+    }
+}
+
+/// custom_id-Präfixe, die der Coaching-Handler bedient. Jede in den
+/// `*_components()`-Buildern erzeugte custom_id muss von genau einem davon
+/// gedeckt sein — sonst findet der Dispatcher keinen Handler, antwortet nie
+/// und Discord meldet "hat nicht rechtzeitig reagiert".
+const COMPONENT_PREFIXES: &[&str] = &["coach_", "coaching_"];
+
+fn register_component_routes(router: &mut InteractionRouter, handler: Arc<dyn InteractionHandler>) {
+    for prefix in COMPONENT_PREFIXES {
+        router.on_prefix(*prefix, handler.clone());
     }
 }
 
@@ -2377,8 +2420,7 @@ pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>)
         },
         handler.clone(),
     );
-    router.on_custom_id("coaching_panel_start", handler.clone());
-    router.on_prefix("coach_", handler);
+    register_component_routes(router, handler);
     // Website-driven intake: Der neue Panel-Button ist ein Link-Button ohne
     // Interaction. Der Legacy-custom_id bleibt nur als Redirect-Fallback.
     // #17/#18 entfallen bewusst; Rollen-/Analyse-/Stale-Flows übernimmt die Website.
@@ -2444,6 +2486,192 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sammelt rekursiv alle `custom_id`-Werte aus einem Component-Baum.
+    fn collect_custom_ids(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(id) = map.get("custom_id").and_then(Value::as_str) {
+                    out.push(id.to_string());
+                }
+                for nested in map.values() {
+                    collect_custom_ids(nested, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_custom_ids(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    struct DummyHandler;
+
+    #[async_trait::async_trait]
+    impl InteractionHandler for DummyHandler {
+        async fn handle(&self, _interaction: BridgeInteraction) -> BridgeReply {
+            BridgeReply::ephemeral_text("ok")
+        }
+    }
+
+    fn demo_request() -> RequestData {
+        RequestData {
+            id: 7,
+            user_id: 4242,
+            username: "Fate".to_string(),
+            rank: "Arcanist 1".to_string(),
+            hero: "Lady Geist".to_string(),
+            games_played: "555Std / 555Std".to_string(),
+            scheduled_slot: String::new(),
+            current_problems: "Midgame und etwas Farm".to_string(),
+            ai_summary: String::new(),
+        }
+    }
+
+    fn v2_text(body: &Map<String, Value>) -> String {
+        body["components"][0]["components"]
+            .as_array()
+            .expect("container")
+            .iter()
+            .filter_map(|c| c["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn offene_anfrage_ist_components_v2_mit_buttons() {
+        let request = demo_request();
+        let body = request_body_v2(
+            &request,
+            &RequestView {
+                headline: "🎮 Neue Coaching-Anfrage",
+                status_line: "🟢 offen für alle Coaches".to_string(),
+                accent: COACHING_ACCENT_OPEN,
+                include_ai: false,
+                reserved: None,
+                components: claim_components(7, 4242),
+            },
+        );
+
+        assert_eq!(body["flags"], json!(COACHING_COMPONENTS_V2_FLAG));
+        // Create-Request: Discord antwortet mit 400, sobald content oder embeds
+        // neben IS_COMPONENTS_V2 ueberhaupt im Body stehen.
+        assert!(
+            !body.contains_key("content"),
+            "content darf beim Senden fehlen"
+        );
+        assert!(
+            !body.contains_key("embeds"),
+            "embeds darf beim Senden fehlen"
+        );
+        assert_eq!(body["components"][0]["type"], 17);
+        assert_eq!(body["components"][0]["accent_color"], COACHING_ACCENT_OPEN);
+
+        let text = v2_text(&body);
+        assert!(text.contains("## 🎮 Neue Coaching-Anfrage"), "{text}");
+        assert!(text.contains("**Fate** · <@4242>"), "{text}");
+        assert!(
+            text.contains("Arcanist 1") && text.contains("Lady Geist"),
+            "{text}"
+        );
+        assert!(text.contains("Midgame und etwas Farm"), "{text}");
+
+        let rows: Vec<&Value> = body["components"][0]["components"]
+            .as_array()
+            .expect("container")
+            .iter()
+            .filter(|c| c["type"] == 1)
+            .collect();
+        assert_eq!(rows.len(), 1, "genau eine Action-Row");
+        assert_eq!(rows[0]["components"][0]["custom_id"], "coach_claim_7");
+    }
+
+    /// Beim Editieren gilt die umgekehrte Regel: nur wenn content und embeds
+    /// explizit geleert werden, uebernimmt Discord das V2-Flag fuer eine
+    /// Nachricht, die noch aus der Embed-Zeit stammt.
+    #[test]
+    fn edit_body_leert_content_und_embeds() {
+        let view = RequestView {
+            headline: "🎓 Coaching läuft",
+            status_line: "✅ geclaimt".to_string(),
+            accent: COACHING_ACCENT_ACTIVE,
+            include_ai: false,
+            reserved: None,
+            components: json!([]),
+        };
+        let send = request_body_v2(&demo_request(), &view);
+        let edit = request_edit_body_v2(&demo_request(), &view);
+
+        assert!(!send.contains_key("content") && !send.contains_key("embeds"));
+        assert_eq!(edit["content"], Value::Null);
+        assert_eq!(edit["embeds"], json!([]));
+        assert_eq!(edit["components"], send["components"]);
+        assert_eq!(edit["flags"], send["flags"]);
+    }
+
+    #[test]
+    fn abgeschlossene_anfrage_ist_gruen_und_ohne_buttons() {
+        let body = request_body_v2(
+            &demo_request(),
+            &RequestView {
+                headline: "✅ Coaching abgeschlossen",
+                status_line: "✅ abgeschlossen".to_string(),
+                accent: COACHING_ACCENT_DONE,
+                include_ai: false,
+                reserved: None,
+                components: json!([]),
+            },
+        );
+
+        assert_eq!(body["components"][0]["accent_color"], COACHING_ACCENT_DONE);
+        let text = v2_text(&body);
+        assert!(text.contains("## ✅ Coaching abgeschlossen"), "{text}");
+        assert!(text.contains("✅ abgeschlossen"), "{text}");
+        assert!(
+            !body["components"][0]["components"]
+                .as_array()
+                .expect("container")
+                .iter()
+                .any(|c| c["type"] == 1),
+            "Endzustand darf keine Buttons mehr tragen"
+        );
+    }
+
+    /// Regression: `coaching_complete_{id}` wurde von `on_prefix("coach_")`
+    /// nicht gematcht — der grüne "Coaching abgeschlossen"-Button lief ohne
+    /// Handler ins 3-Sekunden-Timeout von Discord.
+    #[test]
+    fn jede_button_custom_id_findet_einen_handler() {
+        let mut router = InteractionRouter::new();
+        register_component_routes(&mut router, Arc::new(DummyHandler));
+
+        let mut ids = vec![
+            "coaching_panel_start".to_string(),
+            "coaching_request_modal".to_string(),
+        ];
+        for components in [
+            claim_components(42, 7),
+            claim_components_with_website_link(42, 7, "abc"),
+            active_session_components("sess-abc", 42, 7),
+            cancel_components("sess-abc", 7),
+            panel_components(),
+        ] {
+            collect_custom_ids(&components, &mut ids);
+        }
+        assert!(
+            ids.iter().any(|id| id.starts_with("coaching_complete_")),
+            "Testdaten decken den Abschluss-Button nicht ab"
+        );
+
+        for id in ids {
+            assert!(
+                router.resolve_component(&id).is_some(),
+                "kein Handler für custom_id {id}"
+            );
+        }
+    }
 
     #[test]
     fn combine_rank_und_games_hours_bleiben_python_kompatibel() {
@@ -2513,21 +2741,45 @@ mod pg_tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
+    /// Sichtbarer Text aller TextDisplays im V2-Container.
+    fn container_text(body: &Map<String, Value>) -> String {
+        body["components"][0]["components"]
+            .as_array()
+            .expect("container components")
+            .iter()
+            .filter_map(|c| c["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Buttons im Container (leer = Endzustand ohne Aktionen).
+    fn container_buttons(body: &Map<String, Value>) -> Vec<Value> {
+        body["components"][0]["components"]
+            .as_array()
+            .expect("container components")
+            .iter()
+            .filter(|c| c["type"] == 1)
+            .flat_map(|row| row["components"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+
+    fn container_accent(body: &Map<String, Value>) -> u64 {
+        body["components"][0]["accent_color"]
+            .as_u64()
+            .expect("accent_color")
+    }
+
     #[derive(Debug, Clone)]
     struct RequestMessageCall {
         channel_id: u64,
-        content: String,
-        embed: Value,
-        components: Value,
+        body: Map<String, Value>,
     }
 
     #[derive(Debug, Clone)]
     struct RequestMessageEdit {
         channel_id: u64,
         message_id: u64,
-        content: String,
-        embed: Value,
-        components: Value,
+        body: Map<String, Value>,
     }
 
     #[derive(Default)]
@@ -2611,18 +2863,11 @@ mod pg_tests {
         async fn send_request_message(
             &self,
             channel_id: u64,
-            content: &str,
-            embed: Value,
-            components: Value,
+            body: Map<String, Value>,
         ) -> Result<u64, String> {
             let mut messages = self.request_messages.lock().expect("request_messages lock");
             let message_id = 9000 + u64::try_from(messages.len()).expect("message count fits u64");
-            messages.push(RequestMessageCall {
-                channel_id,
-                content: content.to_string(),
-                embed,
-                components,
-            });
+            messages.push(RequestMessageCall { channel_id, body });
             Ok(message_id)
         }
 
@@ -2630,9 +2875,7 @@ mod pg_tests {
             &self,
             channel_id: u64,
             message_id: u64,
-            content: &str,
-            embed: Value,
-            components: Value,
+            body: Map<String, Value>,
         ) {
             self.request_edits
                 .lock()
@@ -2640,9 +2883,7 @@ mod pg_tests {
                 .push(RequestMessageEdit {
                     channel_id,
                     message_id,
-                    content: content.to_string(),
-                    embed,
-                    components,
+                    body,
                 });
         }
 
@@ -3017,9 +3258,20 @@ mod pg_tests {
             .clone();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].channel_id, REQUEST_CHANNEL_ID);
-        assert!(messages[0].content.contains("reserviert"));
-        assert_eq!(messages[0].embed["title"], "🎮 Neue Coaching-Anfrage");
-        assert_eq!(messages[0].components[0]["type"], 1);
+        let body = &messages[0].body;
+        assert_eq!(body["flags"], json!(COACHING_COMPONENTS_V2_FLAG));
+        let text = container_text(body);
+        assert!(text.contains("reserviert"), "{text}");
+        assert!(text.contains("## 🎮 Neue Coaching-Anfrage"), "{text}");
+        assert_eq!(container_accent(body), COACHING_ACCENT_ACTIVE);
+        assert!(
+            body["components"][0]["components"]
+                .as_array()
+                .expect("container components")
+                .iter()
+                .any(|c| c["type"] == 1),
+            "Action-Row muss im Container landen"
+        );
 
         let row = sqlx::query!(
             r#"
@@ -3208,9 +3460,13 @@ mod pg_tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].channel_id, REQUEST_CHANNEL_ID);
         assert_eq!(edits[0].message_id, 8800);
-        assert!(edits[0].content.contains("abgeschlossen"));
-        assert_eq!(edits[0].embed["title"], "✅ Coaching abgeschlossen");
-        assert_eq!(edits[0].components, json!([]));
+        let body = &edits[0].body;
+        assert!(container_text(body).contains("## ✅ Coaching abgeschlossen"));
+        assert_eq!(container_accent(body), COACHING_ACCENT_DONE);
+        assert!(
+            container_buttons(body).is_empty(),
+            "Endzustand ohne Buttons"
+        );
 
         let payload = {
             let mut found = None;
@@ -3334,8 +3590,13 @@ mod pg_tests {
             .clone();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].message_id, 8801);
-        assert_eq!(edits[0].embed["title"], "✅ Coaching abgeschlossen");
-        assert_eq!(edits[0].components, json!([]));
+        let body = &edits[0].body;
+        assert!(container_text(body).contains("## ✅ Coaching abgeschlossen"));
+        assert_eq!(container_accent(body), COACHING_ACCENT_DONE);
+        assert!(
+            container_buttons(body).is_empty(),
+            "Endzustand ohne Buttons"
+        );
 
         let payload = {
             let mut found = None;
@@ -3437,8 +3698,13 @@ mod pg_tests {
             .clone();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].message_id, 8802);
-        assert_eq!(edits[0].embed["title"], "✅ Coaching abgeschlossen");
-        assert_eq!(edits[0].components, json!([]));
+        let body = &edits[0].body;
+        assert!(container_text(body).contains("## ✅ Coaching abgeschlossen"));
+        assert_eq!(container_accent(body), COACHING_ACCENT_DONE);
+        assert!(
+            container_buttons(body).is_empty(),
+            "Endzustand ohne Buttons"
+        );
     }
 
     #[tokio::test]
