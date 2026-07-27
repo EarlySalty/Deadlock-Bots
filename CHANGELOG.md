@@ -1,3 +1,11 @@
+## #301 — Coaching-Anfragen im neuen Look, Zustand auf einen Blick
+
+Problem: Eine Coaching-Anfrage sah in jeder Phase gleich aus. Ob sie offen war, gerade lief oder längst durch war, stand nur klein im Text — im Kanal ließ sich das kaum unterscheiden.
+
+Änderung: Die Anfrage nutzt jetzt Discords neue Nachrichtenbausteine statt eines Embeds. Der Farbstreifen links zeigt den Zustand: blau offen, gold läuft, grün abgeschlossen, rot abgebrochen. Überschrift und Statuszeile sagen dasselbe in Worten, und im Endzustand verschwinden die Knöpfe.
+
+Aktuelles Verhalten: Rang, Hero, Games, Slot und Problembeschreibung stehen weiterhin komplett drin, nur aufgeräumter. Ist ein Coaching vorbei, sieht man das an Farbe und Überschrift sofort — egal ob es der Bot selbst am Ende des Voice-Gesprächs erkannt hat oder der Coach den Knopf gedrückt hat.
+
 ## #300 — „Coaching abgeschlossen" reagiert wieder
 
 Problem: Der grüne Knopf unter einer geclaimten Coaching-Anfrage tat nichts. Discord meldete nach drei Sekunden, der Bot habe nicht rechtzeitig reagiert. Der Grund war intern: Der Knopf trug eine Kennung, für die schlicht kein Zuständiger eingetragen war, also lief der Klick ins Leere.
