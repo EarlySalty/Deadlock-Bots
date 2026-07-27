@@ -5684,9 +5684,9 @@ mod tests {
             r#"
             INSERT INTO scrim.match_result_refs(
                 match_id, steam_match_id, source_user_id, source_display_name,
-                fetch_status, entered_at, fetched_at, updated_at
+                fetch_status, validation_status, entered_at, fetched_at, updated_at
             )
-            VALUES(22, 111, '42', 'Coach', 'fetched', now(), now(), now())
+            VALUES(22, 111, '42', 'Coach', 'fetched', 'ambiguous', now(), now(), now())
             "#,
         )
         .execute(db.pool())

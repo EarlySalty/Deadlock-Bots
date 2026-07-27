@@ -2138,6 +2138,7 @@ async fn save_match_result_ref_success(
                fetched_at = now(),
                last_error = NULL,
                winner_team_id = $3,
+               validation_status = CASE WHEN $3 IS NULL THEN 'ambiguous' ELSE 'valid' END,
                raw_result_json = $4,
                normalized_result_json = $5,
                updated_at = now()
@@ -5090,10 +5091,21 @@ mod tests {
             result_json: raw.clone(),
         };
         save_match_result_ref_success(pool, 70, &outcome).await?;
+        save_match_result_ref_success(
+            pool,
+            71,
+            &ScrimMatchResultOutcome {
+                steam_match_id: Some(987_654_322),
+                winner_team_id: None,
+                result_json: json!({"match_id": 987654322}),
+            },
+        )
+        .await?;
 
         let row = sqlx::query(
             r#"
             SELECT fetch_status,
+                   validation_status,
                    last_error,
                    raw_result_json,
                    normalized_result_json,
@@ -5105,7 +5117,25 @@ mod tests {
         )
         .fetch_one(pool)
         .await?;
-        assert_eq!(row.get::<String, _>("fetch_status"), "fetched");
+        let ambiguous_status: (String, String) = sqlx::query_as(
+            "SELECT fetch_status, validation_status
+               FROM scrim.match_result_refs
+              WHERE id = 71",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            (
+                row.get::<String, _>("fetch_status"),
+                row.get::<String, _>("validation_status"),
+                ambiguous_status,
+            ),
+            (
+                "fetched".to_string(),
+                "valid".to_string(),
+                ("fetched".to_string(), "ambiguous".to_string()),
+            )
+        );
         assert_eq!(row.get::<Option<String>, _>("last_error"), None);
         assert_eq!(row.get::<Option<Value>, _>("raw_result_json"), Some(raw));
         let normalized = row
@@ -5219,7 +5249,10 @@ mod tests {
         insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
         insert_match_result_ref(pool, 71, 30, 987_654_322).await?;
         sqlx::query(
-            "UPDATE scrim.match_result_refs SET fetch_status = CASE id WHEN 70 THEN 'fetched' ELSE 'failed' END WHERE match_id = 30",
+            "UPDATE scrim.match_result_refs
+                SET fetch_status = CASE id WHEN 70 THEN 'fetched' ELSE 'failed' END,
+                    validation_status = CASE id WHEN 70 THEN 'ambiguous' ELSE 'unvalidated' END
+              WHERE match_id = 30",
         )
         .execute(pool)
         .await?;
@@ -5243,7 +5276,10 @@ mod tests {
         insert_match_result_ref(pool, 70, 30, 987_654_321).await?;
         insert_match_result_ref(pool, 71, 30, 987_654_322).await?;
         sqlx::query(
-            "UPDATE scrim.match_result_refs SET fetch_status = CASE id WHEN 70 THEN 'fetched' ELSE 'fetching' END WHERE match_id = 30",
+            "UPDATE scrim.match_result_refs
+                SET fetch_status = CASE id WHEN 70 THEN 'fetched' ELSE 'fetching' END,
+                    validation_status = CASE id WHEN 70 THEN 'ambiguous' ELSE 'unvalidated' END
+              WHERE match_id = 30",
         )
         .execute(pool)
         .await?;

@@ -369,6 +369,64 @@ async fn scrim_db_foundation_contract_tables_constraints_and_legacy_id_safety() 
 
 #[tokio::test]
 #[ignore = "requires CENTRAL_TEST_DSN; run via central_test_db.sh"]
+async fn match_result_ref_fetch_and_validation_statuses_stay_consistent() {
+    let db = test_pool().await.expect("create migrated test pool");
+    let pool = db.pool();
+    seed_match(pool, 910_001, 910_002, 910_003).await;
+    let superseded_by_ref_id = insert_result_ref(pool, 910_003, 910_001, 910_010, false)
+        .await
+        .expect("insert valid fetched result ref");
+
+    sqlx::query(
+        r#"INSERT INTO scrim.match_result_refs(
+               match_id, steam_match_id, source_user_id, source_display_name,
+               fetch_status, validation_status, voided_at, superseded_by_ref_id
+           )
+           VALUES
+               ($1, 910011, '424242', 'Tester', 'pending', 'unvalidated', NULL, NULL),
+               ($1, 910012, '424242', 'Tester', 'fetching', 'unvalidated', NULL, NULL),
+               ($1, 910013, '424242', 'Tester', 'failed', 'unvalidated', NULL, NULL),
+               ($1, 910014, '424242', 'Tester', 'fetched', 'ambiguous', NULL, NULL),
+               ($1, 910015, '424242', 'Tester', 'fetched', 'rejected', NULL, NULL),
+               ($1, 910016, '424242', 'Tester', 'fetched', 'void', now(), NULL),
+               ($1, 910017, '424242', 'Tester', 'fetched', 'superseded', NULL, $2)"#,
+    )
+    .bind(910_003_i32)
+    .bind(superseded_by_ref_id)
+    .execute(pool)
+    .await
+    .expect("insert every allowed fetch/validation status pair");
+
+    let fetched_unvalidated = sqlx::query(
+        "INSERT INTO scrim.match_result_refs(
+             match_id, steam_match_id, source_user_id, source_display_name,
+             fetch_status, validation_status
+         ) VALUES ($1, 910018, '424242', 'Tester', 'fetched', 'unvalidated')",
+    )
+    .bind(910_003_i32)
+    .execute(pool)
+    .await;
+    let pending_valid = sqlx::query(
+        "INSERT INTO scrim.match_result_refs(
+             match_id, steam_match_id, source_user_id, source_display_name,
+             fetch_status, validation_status
+         ) VALUES ($1, 910019, '424242', 'Tester', 'pending', 'valid')",
+    )
+    .bind(910_003_i32)
+    .execute(pool)
+    .await;
+
+    assert_eq!(
+        (
+            database_error_code(&fetched_unvalidated),
+            database_error_code(&pending_valid),
+        ),
+        (Some("23514".to_string()), Some("23514".to_string()))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires CENTRAL_TEST_DSN; run via central_test_db.sh"]
 async fn scrim_privacy_registry_classifies_new_user_id_display_name_and_json_fields() {
     let db = test_pool().await.expect("create migrated test pool");
     assert_privacy_registry_covers_new_user_id_display_name_and_json_fields(db.pool()).await;
@@ -3958,6 +4016,7 @@ async fn assert_match_result_ref_constraints_are_validated(pool: &PgPool) {
         "match_result_refs_supersede_status_check",
         "match_result_refs_supersede_not_self_check",
         "match_result_refs_superseded_ref_fkey",
+        "match_result_refs_fetch_validation_status_check",
     ])
     .fetch_all(pool)
     .await
