@@ -36,6 +36,14 @@ fn env(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn warn_if_lagebild_token_empty(token: &str) {
+    if token.is_empty() {
+        tracing::warn!(
+            "TURNIER_INTERNAL_API_TOKEN is empty; Lagebild endpoint will reject every request with 401"
+        );
+    }
+}
+
 fn env_bool_default(name: &str, default: bool) -> bool {
     env(name)
         .map(|value| {
@@ -1135,6 +1143,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .await
         .with_context(|| format!("Broker-Port binden: {broker_addr}"))?;
     tracing::info!(addr = %broker_addr, "Master-Broker gebunden");
+    let lagebild_token = env("TURNIER_INTERNAL_API_TOKEN").unwrap_or_default();
+    warn_if_lagebild_token_empty(&lagebild_token);
     let broker_server = axum::serve(
         broker_listener,
         dl_broker::router(broker)
@@ -1145,7 +1155,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .merge(scrim_adapter::lagebild_router(
                 scrim_adapter::LagebildApiState {
                     provider: scrim_lagebild_ai.clone(),
-                    token: env("DL_SCRIM_LAGEBILD_INTERNAL_TOKEN").unwrap_or_default(),
+                    token: lagebild_token,
                     pool: central_pool.clone(),
                 },
             ))
@@ -1770,12 +1780,48 @@ mod tests {
     use super::{
         brain_channel_allowlist_from_value, legacy_lfg_responder_enabled, lfg_cutover_active,
         lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
-        moderation_enforce_from_lookup, validate_voice_worker_token,
+        moderation_enforce_from_lookup, validate_voice_worker_token, warn_if_lagebild_token_empty,
     };
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        io::Write,
+        sync::{Arc, Mutex},
+    };
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn lookup<'a>(vars: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
         |key| vars.get(key).map(|value| (*value).to_string())
+    }
+
+    #[test]
+    fn empty_lagebild_token_logs_that_endpoint_rejects_all_requests() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || LogWriter(writer.clone()))
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || warn_if_lagebild_token_empty(""));
+
+        let logs = logs.lock().expect("log buffer");
+        let logs = String::from_utf8_lossy(&logs);
+        assert!(logs.contains("TURNIER_INTERNAL_API_TOKEN"));
+        assert!(logs.contains("endpoint will reject every request with 401"));
     }
 
     fn faq_constructor_uses_minimax_as_third_argument(source: &str) -> bool {
