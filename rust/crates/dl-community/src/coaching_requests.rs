@@ -45,6 +45,18 @@ pub const REWARD_ROLE_DURATION_SECS: i64 = 5 * 24 * 60 * 60;
 pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
 /// Coaches die NICHT automatisch per Round-Robin zugewiesen werden (claimen bleibt erlaubt).
 pub const AUTO_ASSIGN_OPTOUT_IDS: &[u64] = &[907263048715239456];
+/// Discord-ID des Coaches aus `coaching.sessions`.
+///
+/// Die Spalte `coach_id` ist Text und trägt je nach Herkunft zwei Formate: der
+/// Website-Flow schreibt seine eigene Coach-ID ("krL5LJlcUuB7-mPe"), der
+/// Discord-Claim schreibt die Discord-ID als Ziffernfolge. Wer die Spalte
+/// blind als Zahl liest, verliert alle Website-Sessions — der Coach gilt dann
+/// als unbekannt, Auto-Abschluss und Buttons laufen ins Leere.
+///
+/// Erwartet die Tabellen-Aliase `s` (sessions) und `c` (coaches per
+/// `LEFT JOIN coaching.coaches c ON c.id = s.coach_id`).
+const COACH_DISCORD_ID_SQL: &str =
+    "COALESCE(c.discord_user_id, CASE WHEN s.coach_id ~ '^[0-9]+$' THEN s.coach_id::bigint END)";
 pub const CLAIM_RESERVATION_HOURS: i64 = 24;
 pub const ROLE_EXPIRY_HOURS: i64 = 168;
 pub const COACHING_WEBSITE_URL: &str = "https://deutsche-deadlock-community.de/coaching";
@@ -1507,33 +1519,46 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
 
     async fn load_survey_sessions(&self, member: Option<u64>) -> Vec<SurveySession> {
         let member_i64 = member.and_then(|value| u64_to_i64(value, "member_id").ok());
-        let member_text = member.map(|value| value.to_string());
-        let rows = sqlx::query!(
+        // Der Coach-Filter muss ueber die aufgeloeste Discord-ID laufen: sonst
+        // findet ein Voice-Event des Coaches seine eigene Website-Session nicht.
+        let rows = sqlx::query(&format!(
             r#"
-            SELECT id, coach_id, discord_user_id, voice_started_at, bot_request_id
-              FROM coaching.sessions
-             WHERE status = 'active'
-               AND survey_sent_at IS NULL
+            SELECT s.id, {COACH_DISCORD_ID_SQL} AS coach_discord_id,
+                   s.discord_user_id, s.voice_started_at, s.bot_request_id
+              FROM coaching.sessions s
+              LEFT JOIN coaching.coaches c ON c.id = s.coach_id
+             WHERE s.status = 'active'
+               AND s.survey_sent_at IS NULL
                AND (
                     $1::bigint IS NULL
-                    OR discord_user_id = $1
-                    OR coach_id = $2
+                    OR s.discord_user_id = $1
+                    OR {COACH_DISCORD_ID_SQL} = $1
                )
-            "#,
-            member_i64,
-            member_text,
-        )
+            "#
+        ))
+        .bind(member_i64)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default();
         rows.into_iter()
             .filter_map(|row| {
                 Some(SurveySession {
-                    id: row.id,
-                    coach_id: row.coach_id.and_then(|s| s.parse::<u64>().ok()),
-                    user_id: pg_i64_to_u64(row.discord_user_id?, "discord_user_id").ok()?,
-                    voice_started_at: row.voice_started_at.map(unix_from_utc),
-                    request_id: i64::from(row.bot_request_id?),
+                    id: row.try_get::<String, _>("id").ok()?,
+                    coach_id: row
+                        .try_get::<Option<i64>, _>("coach_discord_id")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| pg_i64_to_u64(value, "coach_discord_id").ok()),
+                    user_id: pg_i64_to_u64(
+                        row.try_get::<Option<i64>, _>("discord_user_id").ok()??,
+                        "discord_user_id",
+                    )
+                    .ok()?,
+                    voice_started_at: row
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("voice_started_at")
+                        .ok()?
+                        .map(unix_from_utc),
+                    request_id: i64::from(row.try_get::<Option<i32>, _>("bot_request_id").ok()??),
                 })
             })
             .collect()
@@ -2113,15 +2138,17 @@ impl InteractionHandler for CoachingHandler {
                 Ok(value) => value,
                 Err(_) => return BridgeReply::ephemeral_text("❌ Request-ID ungültig."),
             };
-            let row = match sqlx::query(
+            let row = match sqlx::query(&format!(
                 r#"
-                SELECT id, coach_id, discord_user_id, voice_started_at
-                  FROM coaching.sessions
-                 WHERE bot_request_id = $1 AND status = 'active'
-                 ORDER BY created_at DESC
+                SELECT s.id, {COACH_DISCORD_ID_SQL} AS coach_discord_id,
+                       s.discord_user_id, s.voice_started_at
+                  FROM coaching.sessions s
+                  LEFT JOIN coaching.coaches c ON c.id = s.coach_id
+                 WHERE s.bot_request_id = $1 AND s.status = 'active'
+                 ORDER BY s.created_at DESC
                  LIMIT 1
-                "#,
-            )
+                "#
+            ))
             .bind(request_id_i32)
             .fetch_optional(&c.pool)
             .await
@@ -2136,10 +2163,10 @@ impl InteractionHandler for CoachingHandler {
             };
             let Some(session) = row.and_then(|row| {
                 let coach_id = row
-                    .try_get::<Option<String>, _>("coach_id")
+                    .try_get::<Option<i64>, _>("coach_discord_id")
                     .ok()
                     .flatten()
-                    .and_then(|raw| raw.parse::<u64>().ok())?;
+                    .and_then(|value| pg_i64_to_u64(value, "coach_discord_id").ok())?;
                 let user_id = row
                     .try_get::<Option<i64>, _>("discord_user_id")
                     .ok()
@@ -2249,23 +2276,32 @@ impl InteractionHandler for CoachingHandler {
                 Some((sid, aid)) if aid.parse::<u64>().is_ok() => sid.to_string(),
                 _ => rest.to_string(),
             };
-            let session = sqlx::query!(
+            let session = sqlx::query(&format!(
                 r#"
-                SELECT coach_id, bot_request_id, discord_user_id
-                  FROM coaching.sessions
-                 WHERE id = $1
-                "#,
-                session_id,
-            )
+                SELECT {COACH_DISCORD_ID_SQL} AS coach_discord_id,
+                       s.bot_request_id, s.discord_user_id
+                  FROM coaching.sessions s
+                  LEFT JOIN coaching.coaches c ON c.id = s.coach_id
+                 WHERE s.id = $1
+                "#
+            ))
+            .bind(&session_id)
             .fetch_optional(&c.pool)
             .await
             .ok()
             .flatten()
             .and_then(|row| {
                 Some((
-                    row.coach_id.and_then(|raw| raw.parse::<u64>().ok()),
-                    i64::from(row.bot_request_id?),
-                    pg_i64_to_u64(row.discord_user_id?, "discord_user_id").ok()?,
+                    row.try_get::<Option<i64>, _>("coach_discord_id")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| pg_i64_to_u64(value, "coach_discord_id").ok()),
+                    i64::from(row.try_get::<Option<i32>, _>("bot_request_id").ok()??),
+                    pg_i64_to_u64(
+                        row.try_get::<Option<i64>, _>("discord_user_id").ok()??,
+                        "discord_user_id",
+                    )
+                    .ok()?,
                 ))
             });
             let Some((coach_id, request_id, author_id)) = session else {
@@ -3487,6 +3523,152 @@ mod pg_tests {
         assert_eq!(payload["website_request_id"], "web-complete");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["session_status"], "completed");
+    }
+
+    /// Der Voice-Listener sucht die Sessions eines Mitglieds ueber dessen
+    /// Discord-ID. Ohne Aufloesung der Website-Coach-ID findet ein Coach seine
+    /// eigene Session nie — die automatische Erkennung des Session-Endes
+    /// greift dann bei keiner Website-Session.
+    #[tokio::test]
+    async fn voice_listener_findet_session_ueber_website_coach_id() {
+        let db = test_pool().await.expect("test pool");
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            Arc::new(MockCoachingPort::default()),
+            None,
+            1,
+            None,
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.coaches(id, discord_user_id, display_name, created_at, updated_at)
+            VALUES ('zp0rljxYzdGkIv_U', 777, 'Gara', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("coach insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, coach_id, discord_user_id, discord_username,
+                discord_channel_id, status, created_at
+            )
+            VALUES ('sess-voice-web', 5, 'zp0rljxYzdGkIv_U', 900, 'Player900', 500,
+                    'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let sessions = coaching.load_survey_sessions(Some(777)).await;
+        assert_eq!(sessions.len(), 1, "Coach muss seine Session finden");
+        assert_eq!(
+            sessions[0].coach_id,
+            Some(777),
+            "coach_id muss auf die Discord-ID aufgeloest sein"
+        );
+
+        // Der Coachee findet dieselbe Session ueber seine eigene ID.
+        assert_eq!(coaching.load_survey_sessions(Some(900)).await.len(), 1);
+        // Unbeteiligte nicht.
+        assert!(coaching.load_survey_sessions(Some(4242)).await.is_empty());
+    }
+
+    #[tokio::test]
+    /// Regression: Sessions aus dem Website-Flow tragen in `coach_id` die
+    /// Website-Coach-ID ("krL5LJlcUuB7-mPe"), nicht die Discord-ID. Wer die
+    /// Spalte als u64 parst, findet den Coach nie — Auto-Abschluss und Button
+    /// liefen dadurch beide ins Leere.
+    async fn complete_button_loest_website_coach_id_auf() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((12345, vec![COACH_ROLE_ID]));
+        let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, discord_user_id, discord_username,
+                rank, subrank, hero, games_played, hours_played, availability,
+                current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES ('website:web-coach-id', 2, 900, 'Player900', 'Phantom', 'III',
+                    'Ivy', '120 games', '300h', '2026-07-25T12:30', 'Midgame',
+                    '', 'matched', $1, $1, 8802, $2)
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.coaches(id, discord_user_id, display_name, created_at, updated_at)
+            VALUES ('krL5LJlcUuB7-mPe', 12345, 'Coach Web', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("coach insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, coach_id, discord_user_id, discord_username,
+                discord_channel_id, status, created_at
+            )
+            VALUES ('sess-web-coach', 2, 'krL5LJlcUuB7-mPe', 900, 'Player900', 500,
+                    'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let reply = CoachingHandler { coaching }
+            .handle(BridgeInteraction {
+                custom_id: "coaching_complete_2".to_string(),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Coaching als abgeschlossen markiert."),
+            "der zugewiesene Coach muss ueber die Website-ID gefunden werden"
+        );
+        // Der Abschluss laeuft in einem tokio::spawn weiter, damit der Button
+        // innerhalb der 3-Sekunden-Frist von Discord ackt.
+        let mut session_status = String::new();
+        for _ in 0..40 {
+            session_status = sqlx::query_scalar::<_, String>(
+                "SELECT COALESCE(status, '') FROM coaching.sessions WHERE id = 'sess-web-coach'",
+            )
+            .fetch_one(db.pool())
+            .await
+            .expect("session status");
+            if session_status == "completed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(session_status, "completed");
     }
 
     #[tokio::test]
