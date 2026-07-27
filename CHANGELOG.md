@@ -1,3 +1,11 @@
+## #302 — Coaching-Sessions finden ihren Coach wieder
+
+Problem: Seit die Anfragen über die Website laufen, erkannte der Bot bei keiner Session mehr, wer der zugewiesene Coach ist. Folge: Das Ende im Coaching-Voice wurde nicht mehr bemerkt, der Abschluss-Knopf meldete „keine aktive Session", und acht Sessions aus den letzten Wochen hingen fest — samt fehlender Feedback-Rolle und Umfrage.
+
+Änderung: Der Bot löst die Coach-Kennung jetzt über das Coach-Profil auf, egal ob die Session über die Website oder direkt im Discord entstanden ist.
+
+Aktuelles Verhalten: Verlassen Coach und Spieler den Coaching-Voice, wird die Session wie früher automatisch beendet — Feedback-Rolle für fünf Tage, Umfrage-DM, Anfrage grün abgehakt. Sessions, die nie im Coaching-Voice stattfanden, schließt der Coach weiterhin per Knopf; auch der greift wieder.
+
 ## #301 — Coaching-Anfragen im neuen Look, Zustand auf einen Blick
 
 Problem: Eine Coaching-Anfrage sah in jeder Phase gleich aus. Ob sie offen war, gerade lief oder längst durch war, stand nur klein im Text — im Kanal ließ sich das kaum unterscheiden.
