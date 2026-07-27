@@ -28,6 +28,13 @@ static FRIEND_CODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\
 static STEAM_LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:https?://)?(?:www\.)?(?:s\.team/p/|steamcommunity\.com)").ok()
 });
+/// Laeuft auf umlaut-gefoldetem Kleintext. `ein\w{0,3}lad` deckt den trennbaren
+/// Verbstamm mit eingeschobenem `zu` ab (einladen/einzuladen/Einladung), die
+/// zweite Haelfte die echte Trennung ("laedt mich ein", "lade uns bitte ein").
+static INVITE_TERM_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"invite|playtest|beta|\bein\w{0,3}lad|\blad(?:e|et|t)?\s+(?:\w+\s+){0,3}\bein\b")
+        .ok()
+});
 static QUESTION_SIGNAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"(?iu)\b(?:wer|mag|kann|könnte|koennte|jemand|würde|wuerde|hätte|haette)\b").ok()
 });
@@ -191,10 +198,9 @@ fn is_newcomer(joined_at: Option<i64>, now: i64) -> bool {
 fn is_invite_request(content: &str) -> bool {
     let lower = content.to_lowercase();
     let folded = fold_german_umlauts(&lower);
-    let mentions_invite = folded.contains("invite")
-        || folded.contains("einlad")
-        || folded.contains("playtest")
-        || folded.contains("beta");
+    let mentions_invite = INVITE_TERM_RE
+        .as_ref()
+        .is_some_and(|regex| regex.is_match(&folded));
     mentions_invite && has_question_signal(&lower)
 }
 
@@ -242,6 +248,19 @@ mod tests {
         assert!(!should_reply_to_content(
             "Mag mich jemand zum Playtest einladen? Mein Code ist 123456789"
         ));
+    }
+
+    #[test]
+    fn trennbares_verb_einzuladen_triggert() {
+        assert!(should_reply_to_content(
+            "Hallöchen zusammen, bin neu hier und suche zum einen jemand der so freundlich wäre mich in Deadlock einzuladen und zum anderen bissl Anschluss zum Game"
+        ));
+    }
+
+    #[test]
+    fn getrenntes_laedt_mich_ein_triggert() {
+        assert!(should_reply_to_content("Wer lädt mich ein?"));
+        assert!(should_reply_to_content("Kann mich jemand mal einladen"));
     }
 
     #[test]

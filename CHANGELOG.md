@@ -1,3 +1,11 @@
+## #299 — Der Invite-Hinweis erkennt jetzt auch „einzuladen"
+
+Problem: Wer im Invite-Kanal nach einer Einladung fragte, bekam den Hinweis auf den fehlenden Steam-Freundescode nur, wenn er ein bestimmtes Wort traf. Formulierungen wie „sucht jemand, der mich einzuladen mag" oder „wer lädt mich ein?" gingen durch, weil das Verb dort getrennt geschrieben steht — die Erkennung suchte aber nur nach dem zusammenhängenden Wort.
+
+Änderung: Die Erkennung kennt jetzt auch die getrennte Form, egal ob das „zu" im Wort steckt oder das „ein" hinten allein steht.
+
+Aktuelles Verhalten: Wer neu ist und ohne Freundescode nach einem Invite fragt, bekommt den Tipp jetzt unabhängig von der Formulierung. Alles andere bleibt wie gehabt: nur Neulinge, höchstens einmal pro Tag, und wer den Code oder seinen Steam-Link schon mitschickt, wird in Ruhe gelassen.
+
 ## #298 — Wer allein im Voice sitzt, wird nicht mehr übersehen
 
 Problem: Wer sich allein in eine Lane setzt und wartet, hatte in den letzten 30 Tagen nur in einem von fünf Fällen überhaupt Zuwachs. Wer allein blieb, ging nach rund sieben Minuten wieder — kam dagegen jemand dazu, passierte das im Schnitt erst nach elf. Die meisten geben also auf, kurz bevor es üblicherweise klappt, und dass sie überhaupt dasitzen, sieht schlicht niemand.
