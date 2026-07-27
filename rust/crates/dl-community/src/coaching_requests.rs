@@ -2353,6 +2353,18 @@ impl InteractionHandler for CoachingHandler {
     }
 }
 
+/// custom_id-Präfixe, die der Coaching-Handler bedient. Jede in den
+/// `*_components()`-Buildern erzeugte custom_id muss von genau einem davon
+/// gedeckt sein — sonst findet der Dispatcher keinen Handler, antwortet nie
+/// und Discord meldet "hat nicht rechtzeitig reagiert".
+const COMPONENT_PREFIXES: &[&str] = &["coach_", "coaching_"];
+
+fn register_component_routes(router: &mut InteractionRouter, handler: Arc<dyn InteractionHandler>) {
+    for prefix in COMPONENT_PREFIXES {
+        router.on_prefix(*prefix, handler.clone());
+    }
+}
+
 pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>) {
     let handler = Arc::new(CoachingHandler { coaching });
     router.on_command(
@@ -2377,8 +2389,7 @@ pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>)
         },
         handler.clone(),
     );
-    router.on_custom_id("coaching_panel_start", handler.clone());
-    router.on_prefix("coach_", handler);
+    register_component_routes(router, handler);
     // Website-driven intake: Der neue Panel-Button ist ein Link-Button ohne
     // Interaction. Der Legacy-custom_id bleibt nur als Redirect-Fallback.
     // #17/#18 entfallen bewusst; Rollen-/Analyse-/Stale-Flows übernimmt die Website.
@@ -2444,6 +2455,69 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sammelt rekursiv alle `custom_id`-Werte aus einem Component-Baum.
+    fn collect_custom_ids(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(id) = map.get("custom_id").and_then(Value::as_str) {
+                    out.push(id.to_string());
+                }
+                for nested in map.values() {
+                    collect_custom_ids(nested, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_custom_ids(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    struct DummyHandler;
+
+    #[async_trait::async_trait]
+    impl InteractionHandler for DummyHandler {
+        async fn handle(&self, _interaction: BridgeInteraction) -> BridgeReply {
+            BridgeReply::ephemeral_text("ok")
+        }
+    }
+
+    /// Regression: `coaching_complete_{id}` wurde von `on_prefix("coach_")`
+    /// nicht gematcht — der grüne "Coaching abgeschlossen"-Button lief ohne
+    /// Handler ins 3-Sekunden-Timeout von Discord.
+    #[test]
+    fn jede_button_custom_id_findet_einen_handler() {
+        let mut router = InteractionRouter::new();
+        register_component_routes(&mut router, Arc::new(DummyHandler));
+
+        let mut ids = vec![
+            "coaching_panel_start".to_string(),
+            "coaching_request_modal".to_string(),
+        ];
+        for components in [
+            claim_components(42, 7),
+            claim_components_with_website_link(42, 7, "abc"),
+            active_session_components("sess-abc", 42, 7),
+            cancel_components("sess-abc", 7),
+            panel_components(),
+        ] {
+            collect_custom_ids(&components, &mut ids);
+        }
+        assert!(
+            ids.iter().any(|id| id.starts_with("coaching_complete_")),
+            "Testdaten decken den Abschluss-Button nicht ab"
+        );
+
+        for id in ids {
+            assert!(
+                router.resolve_component(&id).is_some(),
+                "kein Handler für custom_id {id}"
+            );
+        }
+    }
 
     #[test]
     fn combine_rank_und_games_hours_bleiben_python_kompatibel() {
