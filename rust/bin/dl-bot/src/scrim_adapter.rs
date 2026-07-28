@@ -13,12 +13,18 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use dl_ai::ChatProvider;
 use dl_central_db::scrim_runtime::{load_scrim_runtime_state, local_scrim_writes_allowed};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler};
-use dl_squads::lagebild::CorrectionActor;
+use dl_squads::lagebild::{
+    ChannelHistory, ChannelHistoryBatch, ChannelHistoryError, ChannelHistoryMessage,
+    CorrectionActor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use serenity::all::{ChannelId, MessageId};
+use serenity::http::MessagePagination;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::sync::RwLock;
@@ -38,6 +44,91 @@ const LAGEBILD_LEASE_OWNER: &str = "dlbots:lagebild_api";
 const LAGEBILD_REFRESH_SCOPE: &str = "lagebild_refresh";
 const LAGEBILD_CORRECTION_SCOPE: &str = "lagebild_correction";
 const LAGEBILD_LEASE_SECONDS: i64 = 30;
+
+#[derive(Clone)]
+pub struct DiscordChannelHistory {
+    http: Arc<serenity::http::Http>,
+}
+
+impl DiscordChannelHistory {
+    pub fn new(adapter: &dl_discord::DiscordAdapter) -> Self {
+        Self {
+            http: adapter.http.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChannelHistory for DiscordChannelHistory {
+    async fn recent_messages(
+        &self,
+        channel_id: u64,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<ChannelHistoryBatch, ChannelHistoryError> {
+        let limit = limit.min(200);
+        let mut messages = Vec::new();
+        let mut fetched = 0usize;
+        let mut before = None;
+        let mut reached_since = false;
+        let mut last_page_full = false;
+
+        for _ in 0..2 {
+            let page_limit = (limit.saturating_sub(fetched)).min(100);
+            if page_limit == 0 {
+                break;
+            }
+            let pagination = before.map(MessagePagination::Before);
+            let page = self
+                .http
+                .get_messages(
+                    ChannelId::new(channel_id),
+                    pagination,
+                    Some(page_limit as u8),
+                )
+                .await
+                .map_err(|error| {
+                    ChannelHistoryError(format!("Discord-Teamkanalabruf fehlgeschlagen: {error}"))
+                })?;
+            last_page_full = page.len() == page_limit;
+            fetched += page.len();
+            before = page.last().map(|message| MessageId::new(message.id.get()));
+
+            for message in page {
+                let timestamp = message
+                    .timestamp
+                    .to_rfc3339()
+                    .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                    .ok_or_else(|| {
+                        ChannelHistoryError(
+                            "Discord-Nachricht hat keinen gültigen Zeitstempel".to_string(),
+                        )
+                    })?;
+                if since.as_ref().is_some_and(|since| timestamp <= *since) {
+                    reached_since = true;
+                    break;
+                }
+                messages.push(ChannelHistoryMessage {
+                    id: message.id.get(),
+                    timestamp,
+                    author_display_name: message.author.display_name().to_string(),
+                    content: message.content,
+                    is_bot: message.author.bot,
+                });
+            }
+            if reached_since || !last_page_full {
+                break;
+            }
+        }
+
+        messages.sort_by_key(|message| (message.timestamp, message.id));
+        Ok(ChannelHistoryBatch {
+            messages,
+            truncated: !reached_since && fetched >= limit && last_page_full,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionRoute {
@@ -1328,6 +1419,7 @@ pub enum LagebildVerdict {
 #[derive(Clone)]
 pub struct LagebildApiState {
     pub provider: Option<Arc<dyn ChatProvider>>,
+    pub channel_history: Option<Arc<dyn ChannelHistory>>,
     pub token: String,
     pub pool: PgPool,
 }
@@ -1666,6 +1758,7 @@ async fn refresh_lagebild(
     let result = match dl_squads::lagebild::refresh_team_lagebild(
         &state.pool,
         state.provider.as_deref(),
+        state.channel_history.as_deref(),
         team_id,
         actor.clone(),
     )
@@ -1736,6 +1829,7 @@ async fn correct_lagebild(
     let result = match dl_squads::lagebild::correct_team_lagebild(
         &state.pool,
         state.provider.as_deref(),
+        state.channel_history.as_deref(),
         team_id,
         message,
         actor.clone(),
@@ -1787,6 +1881,7 @@ mod tests {
     fn lagebild_state() -> LagebildApiState {
         LagebildApiState {
             provider: None,
+            channel_history: None,
             token: "test-token".to_string(),
             pool: sqlx::postgres::PgPoolOptions::new()
                 .connect_lazy("postgres://test:test@127.0.0.1/test")
@@ -2147,6 +2242,7 @@ mod tests {
         let revision = correct_lagebild(
             State(LagebildApiState {
                 provider: None,
+                channel_history: None,
                 token: "test-token".to_string(),
                 pool: db.pool().clone(),
             }),
@@ -2171,6 +2267,7 @@ mod tests {
             .await?;
         let state = LagebildApiState {
             provider: None,
+            channel_history: None,
             token: "test-token".to_string(),
             pool: db.pool().clone(),
         };
@@ -2237,6 +2334,7 @@ mod tests {
             .await?;
         let state = LagebildApiState {
             provider: None,
+            channel_history: None,
             token: "test-token".to_string(),
             pool: db.pool().clone(),
         };
@@ -2300,6 +2398,7 @@ mod tests {
             .await?;
         let state = LagebildApiState {
             provider: None,
+            channel_history: None,
             token: "test-token".to_string(),
             pool: db.pool().clone(),
         };

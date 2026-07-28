@@ -1155,6 +1155,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .merge(scrim_adapter::lagebild_router(
                 scrim_adapter::LagebildApiState {
                     provider: scrim_lagebild_ai.clone(),
+                    channel_history: Some(Arc::new(scrim_adapter::DiscordChannelHistory::new(
+                        adapter.as_ref(),
+                    ))),
                     token: lagebild_token,
                     pool: central_pool.clone(),
                 },
