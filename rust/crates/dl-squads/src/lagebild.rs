@@ -178,6 +178,7 @@ pub fn plan_lagebild(input: &ScrimLagebildInput) -> LagebildPlan {
 pub struct CorrectionAiResult {
     pub reply: String,
     pub lagebild: Option<String>,
+    pub report: Option<LagebildReport>,
     pub model: Option<String>,
 }
 
@@ -206,10 +207,10 @@ pub async fn refresh_team_lagebild(
 ) -> Result<LagebildActionReceipt, LagebildError> {
     let input = load_lagebild_input(pool, team_id, "manual_refresh").await?;
     let summary = input_summary(&input);
-    let (text, status, model, verdict, reason, error) =
+    let (report, status, model, verdict, reason, error) =
         match lagebild_outcome(provider, &input).await {
             Ok(outcome) if !outcome.used_ai => (
-                outcome.text,
+                outcome.report,
                 STATUS_OK,
                 None,
                 "no",
@@ -217,7 +218,7 @@ pub async fn refresh_team_lagebild(
                 None,
             ),
             Ok(outcome) => (
-                outcome.text,
+                outcome.report,
                 STATUS_OK,
                 outcome.model,
                 "yes",
@@ -227,7 +228,7 @@ pub async fn refresh_team_lagebild(
             Err(error) => {
                 let (verdict, reason) = lagebild_failure_decision(&error);
                 (
-                    fallback_lagebild(&input),
+                    fallback_report(&input),
                     STATUS_ERROR,
                     None,
                     verdict,
@@ -236,16 +237,20 @@ pub async fn refresh_team_lagebild(
                 )
             }
         };
+    let text = render_lagebild_report(&report, &input.evidences);
     let mut tx = pool.begin().await?;
     let model_for_run = model.clone();
     let snapshot_id = insert_snapshot(
         &mut tx,
         &input,
-        SNAPSHOT_SOURCE_AI,
-        status,
-        &text,
-        model,
-        error.as_deref(),
+        SnapshotWrite {
+            source: SNAPSHOT_SOURCE_AI,
+            status,
+            text: &text,
+            report: Some(&report),
+            model,
+            error: error.as_deref(),
+        },
     )
     .await?;
     insert_evidences(&mut tx, snapshot_id, &input.evidences).await?;
@@ -319,42 +324,45 @@ pub async fn correct_team_lagebild(
             "ai_provider_missing".to_string(),
         ))),
     };
-    let (reply, revised, model, verdict, reason, snapshot_status, snapshot_error) = match result {
-        Ok(result) => {
-            let verdict = if result.lagebild.is_some() {
-                "yes"
-            } else {
-                "no"
-            };
-            let reason = if result.lagebild.is_some() {
-                "lagebild_corrected"
-            } else {
-                "lagebild_not_revised"
-            };
-            (
-                result.reply,
-                result.lagebild,
-                result.model,
-                verdict,
-                reason,
-                STATUS_OK,
-                None,
-            )
-        }
-        Err(error) => {
-            let (verdict, reason) = lagebild_failure_decision(&error);
-            (
-                "Korrektur ist gespeichert. Die automatische Überarbeitung ist fehlgeschlagen."
-                    .to_string(),
-                None,
-                None,
-                verdict,
-                reason,
-                STATUS_ERROR,
-                Some(error.to_string()),
-            )
-        }
-    };
+    let (reply, revised, revised_report, model, verdict, reason, snapshot_status, snapshot_error) =
+        match result {
+            Ok(result) => {
+                let verdict = if result.lagebild.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let reason = if result.lagebild.is_some() {
+                    "lagebild_corrected"
+                } else {
+                    "lagebild_not_revised"
+                };
+                (
+                    result.reply,
+                    result.lagebild,
+                    result.report,
+                    result.model,
+                    verdict,
+                    reason,
+                    STATUS_OK,
+                    None,
+                )
+            }
+            Err(error) => {
+                let (verdict, reason) = lagebild_failure_decision(&error);
+                (
+                    "Korrektur ist gespeichert. Die automatische Überarbeitung ist fehlgeschlagen."
+                        .to_string(),
+                    None,
+                    None,
+                    None,
+                    verdict,
+                    reason,
+                    STATUS_ERROR,
+                    Some(error.to_string()),
+                )
+            }
+        };
     let mut tx = pool.begin().await?;
     let user_correction_id = insert_correction(
         &mut tx,
@@ -376,16 +384,24 @@ pub async fn correct_team_lagebild(
         &reply,
     )
     .await?;
-    let text = revised.unwrap_or_else(|| current_text.unwrap_or_else(|| fallback_lagebild(&input)));
+    // Ohne Überarbeitung bleibt der bisherige Stand stehen; dessen Report kennen
+    // wir nicht mehr, deshalb wird die Priorität nur bei neuem Report gespeichert.
+    let fallback = fallback_report(&input);
+    let text = revised.unwrap_or_else(|| {
+        current_text.unwrap_or_else(|| render_lagebild_report(&fallback, &input.evidences))
+    });
     let model_for_run = model.clone();
     let snapshot_id = insert_snapshot(
         &mut tx,
         &input,
-        "correction",
-        snapshot_status,
-        &text,
-        model,
-        snapshot_error.as_deref(),
+        SnapshotWrite {
+            source: "correction",
+            status: snapshot_status,
+            text: &text,
+            report: revised_report.as_ref(),
+            model,
+            error: snapshot_error.as_deref(),
+        },
     )
     .await?;
     insert_evidences(&mut tx, snapshot_id, &input.evidences).await?;
@@ -523,6 +539,8 @@ pub fn render_lagebild_report(
     }
     body.push_str("\nNächster Schritt: ");
     body.push_str(&plain_text(&report.naechster_schritt));
+    body.push_str("\nPriorität: ");
+    body.push_str(report.prioritaet.as_str());
     finalize_lagebild_text(&body, evidences)
 }
 
@@ -622,13 +640,16 @@ pub async fn revise_lagebild(
     if reply.is_empty() {
         return Err(LagebildError::InvalidAi("reply fehlt".to_string()));
     }
-    let lagebild = parsed
+    let report = parsed
         .lagebild
-        .filter(|report| !report.lage.trim().is_empty())
-        .map(|report| render_lagebild_report(&report, evidences));
+        .filter(|report| !report.lage.trim().is_empty());
+    let lagebild = report
+        .as_ref()
+        .map(|report| render_lagebild_report(report, evidences));
     Ok(CorrectionAiResult {
         reply,
         lagebild,
+        report,
         model: response.model,
     })
 }
@@ -726,10 +747,10 @@ async fn generate_lagebilder_for_teams(
     for team_id in team_ids {
         let input = load_lagebild_input(pool, *team_id, generated_for).await?;
         let input_summary = input_summary(&input);
-        let (text, status, model, decision, reason, action, snapshot_error) =
+        let (report, status, model, decision, reason, action, snapshot_error) =
             match lagebild_outcome(provider, &input).await {
                 Ok(outcome) if !outcome.used_ai => (
-                    outcome.text,
+                    outcome.report,
                     STATUS_OK,
                     None,
                     "no",
@@ -738,7 +759,7 @@ async fn generate_lagebilder_for_teams(
                     None,
                 ),
                 Ok(outcome) => (
-                    outcome.text,
+                    outcome.report,
                     STATUS_OK,
                     outcome.model,
                     "yes",
@@ -751,7 +772,7 @@ async fn generate_lagebilder_for_teams(
                     let error = err.to_string();
                     let (decision, reason) = lagebild_failure_decision(&err);
                     (
-                        fallback_lagebild(&input),
+                        fallback_report(&input),
                         STATUS_ERROR,
                         None,
                         decision,
@@ -761,16 +782,20 @@ async fn generate_lagebilder_for_teams(
                     )
                 }
             };
+        let text = render_lagebild_report(&report, &input.evidences);
         let mut tx = pool.begin().await?;
         let model_for_run = model.clone();
         let snapshot_id = insert_snapshot(
             &mut tx,
             &input,
-            source,
-            status,
-            &text,
-            model,
-            snapshot_error.as_deref(),
+            SnapshotWrite {
+                source,
+                status,
+                text: &text,
+                report: Some(&report),
+                model,
+                error: snapshot_error.as_deref(),
+            },
         )
         .await?;
         insert_evidences(&mut tx, snapshot_id, &input.evidences).await?;
@@ -1127,15 +1152,28 @@ async fn load_corrections(pool: &PgPool, team_id_i32: i32) -> Result<Vec<String>
         .collect())
 }
 
+struct SnapshotWrite<'a> {
+    source: &'a str,
+    status: &'a str,
+    text: &'a str,
+    report: Option<&'a LagebildReport>,
+    model: Option<String>,
+    error: Option<&'a str>,
+}
+
 async fn insert_snapshot(
     connection: &mut PgConnection,
     input: &ScrimLagebildInput,
-    source: &str,
-    status: &str,
-    text: &str,
-    model: Option<String>,
-    error: Option<&str>,
+    snapshot: SnapshotWrite<'_>,
 ) -> Result<i64, sqlx::Error> {
+    let SnapshotWrite {
+        source,
+        status,
+        text,
+        report,
+        model,
+        error,
+    } = snapshot;
     sqlx::query_scalar(
         r#"
         INSERT INTO scrim.lagebild_snapshots(
@@ -1158,6 +1196,8 @@ async fn insert_snapshot(
         "report_version": REPORT_VERSION,
         "data_limited": input.data_limited,
         "has_operational_data": input.has_operational_data,
+        "prioritaet": report.map(|report| report.prioritaet.as_str()),
+        "naechster_schritt": report.map(|report| report.naechster_schritt.as_str()),
         "fact_count": input.facts.len(),
         "correction_count": input.corrections.len(),
         "evidence_count": input.evidences.len(),
@@ -1379,7 +1419,7 @@ fn machine_code_model(value: &str) -> Option<String> {
 
 /// Auch ohne AI bekommt der Admin eine Karte mit nächstem Schritt statt einer
 /// leeren Fehlermeldung.
-fn fallback_lagebild(input: &ScrimLagebildInput) -> String {
+fn fallback_report(input: &ScrimLagebildInput) -> LagebildReport {
     let offene_punkte = input
         .facts
         .iter()
@@ -1405,7 +1445,7 @@ fn fallback_lagebild(input: &ScrimLagebildInput) -> String {
             LagebildPrioritaet::Mittel
         },
     };
-    render_lagebild_report(&report, &input.evidences)
+    report
 }
 
 fn input_summary(input: &ScrimLagebildInput) -> String {

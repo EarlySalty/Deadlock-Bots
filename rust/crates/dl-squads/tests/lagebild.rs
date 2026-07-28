@@ -628,6 +628,7 @@ fn report_wird_als_kurze_karte_ohne_markdown_gerendert() {
         text.contains("Risiken:\n- Zwei Stammspieler haben nicht geantwortet.\n- Ersatz fehlt.")
     );
     assert!(text.contains("Nächster Schritt: Fehlende Antworten erinnern."));
+    assert!(text.contains("Priorität: hoch"));
     assert!(text.ends_with(
         "Evidenzen:\n- [Terminabfrage 5](https://discord.com/channels/1289721245281292288/100/9001)"
     ));
@@ -755,5 +756,15 @@ async fn team_ohne_operative_daten_bekommt_snapshot_ohne_ai_und_sichtbare_entsch
         decision.get::<String, _>("reason"),
         "keine_operativen_daten"
     );
+    let summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT data_summary FROM scrim.lagebild_snapshots WHERE team_id = 1 ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(summary["prioritaet"], "mittel");
+    assert!(summary["naechster_schritt"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Terminabfrage"));
     Ok(())
 }
