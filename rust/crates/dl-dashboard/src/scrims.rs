@@ -4709,7 +4709,7 @@ mod tests {
         )
         .fetch_one(db.pool())
         .await?;
-        assert_eq!(summary["report_version"], "3");
+        assert_eq!(summary["report_version"], "4");
         assert_eq!(summary["prioritaet"], "mittel");
 
         let correction_count: i64 =

@@ -18,8 +18,12 @@ const PRIVATE_CHAT_CONTENT_KIND: &str = "message_content";
 const PRIVATE_CHAT_AUTHOR_KIND: &str = "author_name";
 /// Format der Lagebildkarte. Wird die Karte umgebaut, macht eine neue Version
 /// alle alten Snapshots sofort fällig, statt sie eine Woche stehen zu lassen.
-pub const REPORT_VERSION: &str = "3";
+pub const REPORT_VERSION: &str = "4";
 const CHANNEL_HISTORY_LIMIT: usize = 200;
+/// Höchstzahl der Teamkanal-Belege je Karte. Die AI sieht weiterhin alle
+/// gelesenen Nachrichten als Fakten; gespeichert und ausgeliefert wird nur eine
+/// handhabbare Zahl von Links.
+const CHANNEL_EVIDENCE_LIMIT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelHistoryMessage {
@@ -1233,6 +1237,7 @@ async fn load_lagebild_input(
                         .unwrap_or(fetch_started_at);
                     let truncated = batch.truncated || batch.messages.len() > CHANNEL_HISTORY_LIMIT;
                     let mut message_count = 0usize;
+                    let mut chat_evidences: Vec<ScrimLagebildEvidence> = Vec::new();
                     for message in batch.messages.into_iter().take(CHANNEL_HISTORY_LIMIT) {
                         let content = message.content.trim();
                         if message.is_bot || content.is_empty() {
@@ -1247,7 +1252,13 @@ async fn load_lagebild_input(
                             message.author_display_name,
                             content
                         ));
-                        evidences.push(ScrimLagebildEvidence::discord_message(
+                        // Die AI bekommt jede Nachricht als Fakt, die Karte aber nur
+                        // die jüngsten Belege. Ein Link je gelesener Nachricht ist
+                        // kein Beleg, sondern ein Abzug des Kanals — und er sprengt
+                        // beim Ausliefern die Antwortgrenze des Website-Proxys.
+                        // Der Abruf liefert aufsteigend, deshalb erst sammeln und
+                        // am Ende das jüngste Stück behalten.
+                        chat_evidences.push(ScrimLagebildEvidence::discord_message(
                             format!(
                                 "Abstimmung im Teamkanal vom {}",
                                 message.timestamp.format("%d.%m.%Y %H:%M")
@@ -1257,6 +1268,8 @@ async fn load_lagebild_input(
                             Some(message.timestamp.to_rfc3339()),
                         ));
                     }
+                    let skip = chat_evidences.len().saturating_sub(CHANNEL_EVIDENCE_LIMIT);
+                    evidences.extend(chat_evidences.into_iter().skip(skip));
                     if truncated {
                         facts.push(format!(
                             "Der Teamkanal-Chatauszug wurde auf {CHANNEL_HISTORY_LIMIT} Nachrichten begrenzt."
