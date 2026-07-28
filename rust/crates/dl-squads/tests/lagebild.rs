@@ -538,6 +538,174 @@ async fn ai_fehler_rueckt_den_teamkanal_wasserstand_nicht_vor(
 }
 
 #[tokio::test]
+async fn teamkanal_abruf_fehler_rueckt_den_wasserstand_nicht_vor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    insert_terminabfrage(db.pool(), 1).await?;
+    let message = channel_message(9002, "Orga", "Wir können am Donnerstag um 20 Uhr spielen.");
+    let failed_history = FakeChannelHistory::error("Discord REST antwortete mit Status 503");
+    let loaded_history = FakeChannelHistory::ok(vec![message]);
+    let provider = dl_ai::MockChatProvider::new(vec![
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Die Terminabfrage läuft.","risiken":[],"naechster_schritt":"Rückmeldungen sammeln.","prioritaet":"mittel"}"#,
+        )),
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Das Team stimmt einen Termin für Donnerstag ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
+        )),
+    ]);
+
+    let first = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&failed_history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+    let first_snapshot = sqlx::query(
+        "SELECT status, data_summary
+           FROM scrim.lagebild_snapshots
+          WHERE id = $1",
+    )
+    .bind(first.snapshot_id)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(first_snapshot.get::<String, _>("status"), "ok");
+    assert_eq!(
+        first_snapshot.get::<serde_json::Value, _>("data_summary")["channel_history_state"],
+        "failed"
+    );
+    let second = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&loaded_history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(first.verdict, "yes");
+    assert_eq!(second.verdict, "yes");
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
+    assert_eq!(loaded_history.since_calls(), vec![None]);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let second_prompt = requests[1]
+        .0
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(second_prompt.contains("Wir können am Donnerstag um 20 Uhr spielen."));
+    Ok(())
+}
+
+#[tokio::test]
+async fn alter_snapshot_ohne_chat_ladezustand_rueckt_den_wasserstand_nicht_vor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![channel_message(
+        9002,
+        "Orga",
+        "Wir können am Donnerstag um 20 Uhr spielen.",
+    )]);
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.lagebild_snapshots(
+            team_id, generated_for, source, status, lagebild_text, data_summary
+        )
+        VALUES(1, 'weekly', 'ai', 'ok', 'Altes Lagebild', '{}'::jsonb)
+        "#,
+    )
+    .execute(db.pool())
+    .await?;
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Das Team stimmt einen Termin für Donnerstag ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
+    );
+
+    refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(history.since_calls(), vec![None]);
+    assert_eq!(provider.requests().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn nicht_angefragter_teamkanal_rueckt_den_wasserstand_nicht_vor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    insert_terminabfrage(db.pool(), 1).await?;
+    let provider = dl_ai::MockChatProvider::new(vec![
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Die Terminabfrage läuft.","risiken":[],"naechster_schritt":"Rückmeldungen sammeln.","prioritaet":"mittel"}"#,
+        )),
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Das Team stimmt einen Termin für Donnerstag ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
+        )),
+    ]);
+
+    let first = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        None,
+        1,
+        correction_actor(),
+    )
+    .await?;
+    let first_summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT data_summary
+           FROM scrim.lagebild_snapshots
+          WHERE id = $1",
+    )
+    .bind(first.snapshot_id)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(first_summary["channel_history_state"], "not_requested");
+    let history = FakeChannelHistory::ok(vec![channel_message(
+        9002,
+        "Orga",
+        "Wir können am Donnerstag um 20 Uhr spielen.",
+    )]);
+    refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(history.since_calls(), vec![None]);
+    assert_eq!(provider.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn teamkanal_rohtext_und_autor_bleiben_aus_geschriebenen_spalten(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;

@@ -4,7 +4,7 @@ Problem: Die Scrim-Orga läuft im Teamkanal, das Lagebild kannte bisher aber nur
 
 Änderung: Der Bot liest beim Lagebild-Lauf den Teamkanal seit der letzten Karte mit, höchstens 200 Nachrichten. Nachrichten und Autorennamen gehen nur an die KI; gespeichert werden ausschließlich ihre Schlussfolgerung und die Links zu den Nachrichten.
 
-Aktuelles Verhalten: Absprachen aus dem Teamkanal fließen direkt ins Lagebild ein. Ein abgebrochener Abruf und ein erreichtes Nachrichtenlimit stehen im Entscheidungslog, statt unbemerkt wie vollständige Daten zu wirken. Schlägt die KI fehl, bleiben dieselben Teamkanal-Nachrichten für den nächsten Versuch offen; erst eine erfolgreiche Karte rückt den Lesestand vor.
+Aktuelles Verhalten: Absprachen aus dem Teamkanal fließen direkt ins Lagebild ein. Ein abgebrochener Abruf und ein erreichtes Nachrichtenlimit stehen im Entscheidungslog, statt unbemerkt wie vollständige Daten zu wirken. Schlägt der Teamkanal-Abruf oder die KI fehl, bleiben dieselben Nachrichten für den nächsten Versuch offen; erst eine erfolgreiche Karte mit erfolgreich gelesenem Teamkanal rückt den Lesestand vor.
 
 ## #305 — Lagebilder sagen, was zu tun ist
 

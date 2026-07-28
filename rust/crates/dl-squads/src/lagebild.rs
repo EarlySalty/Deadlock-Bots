@@ -70,6 +70,14 @@ struct LoadedLagebildInput {
 }
 
 impl LoadedLagebildInput {
+    fn channel_history_state(&self) -> &'static str {
+        match self.channel_history {
+            ChannelHistoryLoad::NotRequested => "not_requested",
+            ChannelHistoryLoad::Loaded { .. } => "loaded",
+            ChannelHistoryLoad::Failed { .. } => "failed",
+        }
+    }
+
     fn channel_history_truncated(&self) -> bool {
         matches!(
             self.channel_history,
@@ -334,7 +342,7 @@ pub async fn refresh_team_lagebild(
     let model_for_run = model.clone();
     let snapshot_id = insert_snapshot(
         &mut tx,
-        input,
+        &loaded,
         SnapshotWrite {
             source: SNAPSHOT_SOURCE_AI,
             status,
@@ -496,7 +504,7 @@ pub async fn correct_team_lagebild(
     let model_for_run = model.clone();
     let snapshot_id = insert_snapshot(
         &mut tx,
-        input,
+        &loaded,
         SnapshotWrite {
             source: "correction",
             status: snapshot_status,
@@ -982,7 +990,7 @@ async fn generate_lagebilder_for_teams(
         let model_for_run = model.clone();
         let snapshot_id = insert_snapshot(
             &mut tx,
-            input,
+            &loaded,
             SnapshotWrite {
                 source,
                 status,
@@ -1091,11 +1099,12 @@ async fn load_lagebild_input(
         SELECT t.name,
                t.discord_channel_id,
                (
-                   SELECT snapshot.generated_at
-                     FROM scrim.lagebild_snapshots snapshot
-                   WHERE snapshot.team_id = t.id
-                     AND snapshot.status = 'ok'
-                    ORDER BY snapshot.generated_at DESC, snapshot.id DESC
+                    SELECT snapshot.generated_at
+                      FROM scrim.lagebild_snapshots snapshot
+                    WHERE snapshot.team_id = t.id
+                      AND snapshot.status = 'ok'
+                      AND snapshot.data_summary ->> 'channel_history_state' = 'loaded'
+                     ORDER BY snapshot.generated_at DESC, snapshot.id DESC
                     LIMIT 1
                ) AS last_snapshot_at,
                COUNT(tm.participant_id)::bigint AS member_count
@@ -1451,9 +1460,10 @@ struct SnapshotWrite<'a> {
 
 async fn insert_snapshot(
     connection: &mut PgConnection,
-    input: &ScrimLagebildInput,
+    loaded: &LoadedLagebildInput,
     snapshot: SnapshotWrite<'_>,
 ) -> Result<i64, sqlx::Error> {
+    let input = &loaded.input;
     let SnapshotWrite {
         source,
         status,
@@ -1492,6 +1502,9 @@ async fn insert_snapshot(
         "fact_count": input.facts.len(),
         "correction_count": input.corrections.len(),
         "evidence_count": input.evidences.len(),
+        "channel_history_state": loaded.channel_history_state(),
+        "channel_message_count": loaded.channel_message_count(),
+        "channel_history_truncated": loaded.channel_history_truncated(),
     }))
     .bind(model)
     .bind(error)
