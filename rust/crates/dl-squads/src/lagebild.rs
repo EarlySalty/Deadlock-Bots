@@ -65,7 +65,8 @@ enum ChannelHistoryLoad {
 struct LoadedLagebildInput {
     input: ScrimLagebildInput,
     channel_history: ChannelHistoryLoad,
-    private_chat_values: Vec<String>,
+    private_chat_authors: Vec<String>,
+    private_chat_contents: Vec<String>,
 }
 
 impl LoadedLagebildInput {
@@ -84,6 +85,10 @@ impl LoadedLagebildInput {
             ChannelHistoryLoad::Loaded { message_count, .. } => message_count,
             ChannelHistoryLoad::NotRequested | ChannelHistoryLoad::Failed { .. } => 0,
         }
+    }
+
+    fn has_private_chat(&self) -> bool {
+        !self.private_chat_authors.is_empty() || !self.private_chat_contents.is_empty()
     }
 }
 
@@ -724,18 +729,33 @@ fn ensure_text_does_not_copy_chat(
     persisted: &str,
     loaded: &LoadedLagebildInput,
 ) -> Result<(), LagebildError> {
-    if loaded
-        .private_chat_values
+    let copies_content = loaded
+        .private_chat_contents
         .iter()
         .map(|value| value.trim())
         .filter(|value| value.chars().count() >= 4)
-        .any(|value| persisted.contains(value))
-    {
+        .any(|value| persisted.contains(value));
+    let names_author = loaded
+        .private_chat_authors
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .any(|value| contains_whole_name(persisted, value));
+    if copies_content || names_author {
         return Err(LagebildError::InvalidAi(
             "AI-Antwort übernimmt private Chatdaten wörtlich".to_string(),
         ));
     }
     Ok(())
+}
+
+fn contains_whole_name(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + matched.len()..].chars().next();
+        before.is_none_or(|char| !char.is_alphanumeric())
+            && after.is_none_or(|char| !char.is_alphanumeric())
+    })
 }
 
 pub async fn revise_lagebild(
@@ -935,7 +955,7 @@ async fn generate_lagebilder_for_teams(
             ),
             Err(err) => {
                 let (decision, reason) = lagebild_failure_decision(&err);
-                if loaded.private_chat_values.is_empty() {
+                if !loaded.has_private_chat() {
                     tracing::error!(%err, team_id = input.team_id, generated_for, "Scrim-Lagebild-AI fehlgeschlagen");
                 } else {
                     tracing::error!(
@@ -1052,7 +1072,7 @@ fn lagebild_failure_decision(error: &LagebildError) -> (&'static str, &'static s
 }
 
 fn safe_lagebild_error(error: &LagebildError, loaded: &LoadedLagebildInput) -> String {
-    if loaded.private_chat_values.is_empty() {
+    if !loaded.has_private_chat() {
         error.to_string()
     } else {
         lagebild_failure_decision(error).1.to_string()
@@ -1073,7 +1093,8 @@ async fn load_lagebild_input(
                (
                    SELECT snapshot.generated_at
                      FROM scrim.lagebild_snapshots snapshot
-                    WHERE snapshot.team_id = t.id
+                   WHERE snapshot.team_id = t.id
+                     AND snapshot.status = 'ok'
                     ORDER BY snapshot.generated_at DESC, snapshot.id DESC
                     LIMIT 1
                ) AS last_snapshot_at,
@@ -1093,7 +1114,8 @@ async fn load_lagebild_input(
         "Team {team_name} hat {member_count} bekannte Mitglieder."
     )];
     let mut evidences = Vec::new();
-    let mut private_chat_values = Vec::new();
+    let mut private_chat_authors = Vec::new();
+    let mut private_chat_contents = Vec::new();
     let mut channel_history_load = ChannelHistoryLoad::NotRequested;
     let mut has_channel_messages = false;
     if let Some(channel_id) = valid_u64(team.get::<Option<i64>, _>("discord_channel_id")) {
@@ -1119,8 +1141,8 @@ async fn load_lagebild_input(
                             continue;
                         }
                         message_count += 1;
-                        private_chat_values.push(message.author_display_name.clone());
-                        private_chat_values.push(content.to_string());
+                        private_chat_authors.push(message.author_display_name.clone());
+                        private_chat_contents.push(content.to_string());
                         facts.push(format!(
                             "Teamkanal-Chat am {} von {}: {}",
                             message.timestamp.to_rfc3339(),
@@ -1192,7 +1214,8 @@ async fn load_lagebild_input(
             evidences,
         },
         channel_history: channel_history_load,
-        private_chat_values,
+        private_chat_authors,
+        private_chat_contents,
     })
 }
 

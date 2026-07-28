@@ -8,6 +8,7 @@ use dl_squads::lagebild::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn lagebild_text_haengt_relevante_evidenzen_ans_ende() {
@@ -492,6 +493,51 @@ async fn teamkanal_chat_loest_ohne_strukturdaten_einen_ai_call_aus(
 }
 
 #[tokio::test]
+async fn ai_fehler_rueckt_den_teamkanal_wasserstand_nicht_vor(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![channel_message(
+        9002,
+        "Orga",
+        "Wir können am Donnerstag um 20 Uhr spielen.",
+    )]);
+    let provider = dl_ai::MockChatProvider::new(vec![
+        Err(ChatProviderError::Timeout),
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Das Team stimmt einen Termin für Donnerstag ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
+        )),
+    ]);
+
+    let first = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+    let second = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(first.verdict, "timeout");
+    assert_eq!(second.verdict, "yes");
+    assert_eq!(history.since_calls(), vec![None, None]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn teamkanal_rohtext_und_autor_bleiben_aus_geschriebenen_spalten(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
@@ -546,6 +592,56 @@ async fn teamkanal_rohtext_und_autor_bleiben_aus_geschriebenen_spalten(
     .await?;
     assert!(!written.contains(raw_text));
     assert!(!written.contains(author));
+    Ok(())
+}
+
+#[tokio::test]
+async fn kurzer_teamkanal_autorenname_in_ai_antwort_wird_abgelehnt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![channel_message(
+        9002,
+        "Max",
+        "Wir stimmen den Termin ab.",
+    )]);
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Max stimmt den Termin ab.","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}"#,
+    );
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    Ok(())
+}
+
+#[tokio::test]
+async fn kurzer_teamkanal_autorenname_als_teilstring_wird_nicht_abgelehnt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![channel_message(
+        9002,
+        "Ari",
+        "Wir stimmen den Termin ab.",
+    )]);
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Die Planung bleibt variabel.","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}"#,
+    );
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
     Ok(())
 }
 
@@ -631,6 +727,7 @@ async fn teamkanal_deckelung_auf_200_nachrichten_ist_im_ledger_sichtbar(
 #[derive(Clone)]
 struct FakeChannelHistory {
     response: Result<ChannelHistoryBatch, ChannelHistoryError>,
+    since_calls: Arc<Mutex<Vec<Option<chrono::DateTime<chrono::Utc>>>>>,
 }
 
 impl FakeChannelHistory {
@@ -640,6 +737,7 @@ impl FakeChannelHistory {
                 messages,
                 truncated: false,
             }),
+            since_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -649,13 +747,19 @@ impl FakeChannelHistory {
                 messages,
                 truncated: true,
             }),
+            since_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn error(message: &str) -> Self {
         Self {
             response: Err(ChannelHistoryError(message.to_string())),
+            since_calls: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn since_calls(&self) -> Vec<Option<chrono::DateTime<chrono::Utc>>> {
+        self.since_calls.lock().expect("since calls").clone()
     }
 }
 
@@ -664,10 +768,16 @@ impl ChannelHistory for FakeChannelHistory {
     async fn recent_messages(
         &self,
         _channel_id: u64,
-        _since: Option<chrono::DateTime<chrono::Utc>>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
         _limit: usize,
     ) -> Result<ChannelHistoryBatch, ChannelHistoryError> {
-        self.response.clone()
+        self.since_calls.lock().expect("since calls").push(since);
+        self.response.clone().map(|mut batch| {
+            if let Some(since) = since {
+                batch.messages.retain(|message| message.timestamp > since);
+            }
+            batch
+        })
     }
 }
 
