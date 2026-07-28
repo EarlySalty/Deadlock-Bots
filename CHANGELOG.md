@@ -1,3 +1,11 @@
+## #305 — Lagebilder sagen, was zu tun ist
+
+Problem: Die Lagebilder lasen sich wie Aufsätze. Für jedes Team stand in neun Absätzen, wozu Daten fehlen, in jedem Team anders formatiert, teilweise mit sichtbaren Sternchen. Für Teams ohne jede Scrim-Aktivität wurde trotzdem jede Woche die KI befragt, die dann nur beschreiben konnte, dass nichts da ist.
+
+Änderung: Ein Lagebild ist jetzt eine kurze Karte: Lage in maximal zwei Sätzen, höchstens drei belegte Risiken, genau ein nächster Schritt und eine Priorität. Der Text wird immer gleich aufgebaut, Formatierungszeichen aus der KI-Antwort werden entfernt. Teams ohne Terminabfrage, Reminder und Match bekommen ihre Karte ohne KI-Anfrage, mit dem nächsten Schritt "Terminabfrage starten". Diese Entscheidung steht mit im Entscheidungslog.
+
+Aktuelles Verhalten: Jede Lagebild-Karte endet mit einem konkreten nächsten Schritt statt mit einer Aufzählung fehlender Daten. Karten im alten Format werden beim nächsten Lauf ersetzt, nicht erst nach einer Woche.
+
 ## #304 — Lagebilder nutzen dieselbe KI wie der Discord-Bot
 
 Problem: Die Scrim-Lagebilder liefen über einen eigenen KI-Zugang, während der Rest des Bots längst ein anderes Modell nutzt. Dazu war die Antwortlänge fest gedeckelt. Neuere Modelle denken vor der Antwort, und dieses Denken lief in die Obergrenze, sodass der halbfertige Denkprozess als Lagebild gespeichert wurde.

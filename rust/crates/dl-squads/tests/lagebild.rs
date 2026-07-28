@@ -1,7 +1,9 @@
 use dl_ai::ChatProviderError;
 use dl_squads::lagebild::{
-    correct_team_lagebild, finalize_lagebild_text, generate_due_lagebilder, lagebild_messages,
-    refresh_team_lagebild, CorrectionActor, ScrimLagebildEvidence, ScrimLagebildInput,
+    correct_team_lagebild, finalize_lagebild_text, generate_due_lagebilder, generate_lagebild,
+    lagebild_messages, plan_lagebild, refresh_team_lagebild, render_lagebild_report,
+    CorrectionActor, LagebildError, LagebildPlan, LagebildPrioritaet, LagebildReport,
+    ScrimLagebildEvidence, ScrimLagebildInput,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -31,6 +33,7 @@ fn lagebild_prompt_benennt_begrenzte_datenlage_und_schliesst_dms_aus() {
         team_name: "Team A".to_string(),
         generated_for: "weekly".to_string(),
         data_limited: true,
+        has_operational_data: true,
         facts: vec!["Nur Teamstamm und eine offene Terminabfrage sind vorhanden.".to_string()],
         corrections: vec!["Coach: A2 ist wieder verfügbar.".to_string()],
         evidences: Vec::new(),
@@ -55,6 +58,7 @@ async fn fehler_lagebild_wird_nach_kurzem_backoff_erneut_versucht(
     sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
         .execute(db.pool())
         .await?;
+    insert_terminabfrage(db.pool(), 1).await?;
 
     assert_eq!(generate_due_lagebilder(db.pool(), None, 1).await?, 1);
     assert_eq!(
@@ -132,7 +136,9 @@ async fn lagebild_match_history_nutzt_nur_final_ausgewaehlte_result_refs(
     .execute(db.pool())
     .await?;
 
-    let provider = dl_ai::MockChatProvider::single("Die Lage ist nachvollziehbar.");
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Die Lage ist nachvollziehbar.","risiken":[],"naechster_schritt":"Naechsten Scrim planen.","prioritaet":"keine"}"#,
+    );
     assert_eq!(
         generate_due_lagebilder(db.pool(), Some(provider.as_ref()), 1).await?,
         1
@@ -178,6 +184,7 @@ async fn lagebild_timeout_bleibt_im_ledger_und_snapshot_sichtbar(
     sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
         .execute(db.pool())
         .await?;
+    insert_terminabfrage(db.pool(), 1).await?;
     let provider = dl_ai::MockChatProvider::new(vec![Err(ChatProviderError::Timeout)]);
 
     assert_eq!(
@@ -540,4 +547,213 @@ fn correction_actor() -> CorrectionActor {
         request_id: "bff:lagebild-test".to_string(),
         idempotency_key: "bff:lagebild-test-idem".to_string(),
     }
+}
+
+async fn insert_terminabfrage(pool: &sqlx::PgPool, team_id: i32) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.match_request_batches(
+            id, template, deadline_at, status, created_by_user_id, created_by_display_name
+        )
+        VALUES($1, 'regular_scrim', now() + interval '2 days', 'open', '42', 'Coach')
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(team_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.match_requests(id, batch_id, team_a_id, status, slot_options)
+        VALUES($1, $1, $1, 'open', '[]'::jsonb)
+        "#,
+    )
+    .bind(team_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn input_ohne_operative_daten() -> ScrimLagebildInput {
+    ScrimLagebildInput {
+        team_id: 7,
+        team_name: "Team 7".to_string(),
+        generated_for: "weekly".to_string(),
+        data_limited: true,
+        has_operational_data: false,
+        facts: vec!["Team 7 hat 6 bekannte Mitglieder.".to_string()],
+        corrections: Vec::new(),
+        evidences: Vec::new(),
+    }
+}
+
+#[test]
+fn ohne_operative_daten_wird_die_ai_gar_nicht_erst_gefragt() {
+    let plan = plan_lagebild(&input_ohne_operative_daten());
+
+    let LagebildPlan::Deterministisch(report) = plan else {
+        panic!("ohne Terminabfrage, Reminder und Match darf kein AI-Call geplant werden");
+    };
+    assert_eq!(report.prioritaet, LagebildPrioritaet::Mittel);
+    assert!(report.naechster_schritt.contains("Terminabfrage"));
+    assert!(report.lage.contains("keine"));
+}
+
+#[test]
+fn mit_operativen_daten_fragt_das_lagebild_die_ai() {
+    let mut input = input_ohne_operative_daten();
+    input.has_operational_data = true;
+
+    assert!(matches!(plan_lagebild(&input), LagebildPlan::AiFragen));
+}
+
+#[test]
+fn report_wird_als_kurze_karte_ohne_markdown_gerendert() {
+    let report = LagebildReport {
+        lage: "**Team 7** trainiert regelmässig.".to_string(),
+        risiken: vec![
+            "Zwei Stammspieler haben nicht geantwortet.".to_string(),
+            "*Ersatz* fehlt.".to_string(),
+        ],
+        naechster_schritt: "Fehlende Antworten erinnern.".to_string(),
+        prioritaet: LagebildPrioritaet::Hoch,
+    };
+    let evidence = ScrimLagebildEvidence::discord_message("Terminabfrage 5", 100, 9001, None);
+
+    let text = render_lagebild_report(&report, &[evidence]);
+
+    assert!(!text.contains('*'));
+    assert!(text.starts_with("Lage: Team 7 trainiert regelmässig."));
+    assert!(
+        text.contains("Risiken:\n- Zwei Stammspieler haben nicht geantwortet.\n- Ersatz fehlt.")
+    );
+    assert!(text.contains("Nächster Schritt: Fehlende Antworten erinnern."));
+    assert!(text.ends_with(
+        "Evidenzen:\n- [Terminabfrage 5](https://discord.com/channels/1289721245281292288/100/9001)"
+    ));
+}
+
+#[test]
+fn prompt_verlangt_ein_json_report_mit_genau_einem_naechsten_schritt() {
+    let mut input = input_ohne_operative_daten();
+    input.has_operational_data = true;
+
+    let joined = lagebild_messages(&input)
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(joined.contains("naechster_schritt"));
+    assert!(joined.contains("prioritaet"));
+    assert!(joined.contains("risiken"));
+    assert!(joined.contains("Keine Markdown"));
+    assert!(joined.contains("Keine DMs"));
+}
+
+#[tokio::test]
+async fn ai_report_wird_geparst_gerendert_und_als_json_angefordert(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = input_ohne_operative_daten();
+    input.has_operational_data = true;
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Team 7 hat zwei offene Abfragen.","risiken":["Frist laeuft heute ab."],"naechster_schritt":"Fehlende Antworten erinnern.","prioritaet":"hoch"}"#,
+    );
+
+    let outcome = generate_lagebild(provider.as_ref(), &input).await?;
+
+    assert_eq!(outcome.report.prioritaet, LagebildPrioritaet::Hoch);
+    assert_eq!(
+        outcome.report.naechster_schritt,
+        "Fehlende Antworten erinnern."
+    );
+    assert!(outcome
+        .text
+        .starts_with("Lage: Team 7 hat zwei offene Abfragen."));
+    let request = provider.requests().pop().ok_or("missing AI request")?;
+    assert!(request.1.json_mode);
+    Ok(())
+}
+
+#[tokio::test]
+async fn freitext_statt_report_gilt_als_unklare_ai_antwort(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = input_ohne_operative_daten();
+    input.has_operational_data = true;
+    let provider = dl_ai::MockChatProvider::single("**Lagebild Team 7** Die Lage wirkt okay.");
+
+    let error = generate_lagebild(provider.as_ref(), &input)
+        .await
+        .expect_err("Freitext darf kein gueltiges Lagebild sein");
+
+    assert!(matches!(error, LagebildError::InvalidAi(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn lagebild_im_alten_format_wird_sofort_neu_erzeugt() -> Result<(), Box<dyn std::error::Error>>
+{
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
+        .execute(db.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.lagebild_snapshots(
+            team_id, generated_at, generated_for, source, status, lagebild_text, data_summary
+        )
+        VALUES(1, now(), 'weekly', 'ai', 'ok', '**Lagebild Team 1** Die Lage wirkt okay.', '{}'::jsonb)
+        "#,
+    )
+    .execute(db.pool())
+    .await?;
+
+    assert_eq!(generate_due_lagebilder(db.pool(), None, 5).await?, 1);
+    assert_eq!(generate_due_lagebilder(db.pool(), None, 5).await?, 0);
+    let text: String = sqlx::query_scalar(
+        "SELECT lagebild_text FROM scrim.lagebild_snapshots WHERE team_id = 1 ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert!(!text.contains('*'));
+    assert!(text.contains("Nächster Schritt: "));
+    Ok(())
+}
+
+#[tokio::test]
+async fn team_ohne_operative_daten_bekommt_snapshot_ohne_ai_und_sichtbare_entscheidung(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'Team 1', now())")
+        .execute(db.pool())
+        .await?;
+    let provider = dl_ai::MockChatProvider::single("darf nicht aufgerufen werden");
+
+    assert_eq!(
+        generate_due_lagebilder(db.pool(), Some(provider.as_ref()), 1).await?,
+        1
+    );
+
+    assert!(provider.requests().is_empty());
+    let snapshot = sqlx::query(
+        "SELECT status, lagebild_text, model FROM scrim.lagebild_snapshots WHERE team_id = 1 ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(snapshot.get::<String, _>("status"), "ok");
+    assert_eq!(snapshot.get::<Option<String>, _>("model"), None);
+    let text = snapshot.get::<String, _>("lagebild_text");
+    assert!(text.contains("Nächster Schritt: "));
+    assert!(text.contains("Terminabfrage"));
+    let decision = sqlx::query(
+        "SELECT decision, reason FROM bot.ai_decision_ledger WHERE source = 'scrim.lagebild.generate' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(decision.get::<String, _>("decision"), "no");
+    assert_eq!(
+        decision.get::<String, _>("reason"),
+        "keine_operativen_daten"
+    );
+    Ok(())
 }
