@@ -925,6 +925,42 @@ async fn laengere_teamkanal_passage_in_ai_antwort_wird_abgelehnt(
     Ok(())
 }
 
+/// Der Schutz muss auch greifen, wenn die AI nur einen Ausschnitt einer langen
+/// Nachricht übernimmt — nicht erst, wenn sie die ganze Nachricht kopiert.
+#[tokio::test]
+async fn teilzitat_aus_langer_teamkanal_nachricht_wird_abgelehnt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let raw_text = "Also ich muss diese Woche leider absagen weil meine Schicht verlegt wurde und ich erst spät zu Hause bin";
+    let ausschnitt = "diese Woche leider absagen";
+    assert!(raw_text.contains(ausschnitt));
+    let history = FakeChannelHistory::ok(vec![channel_message(9002, "Zed", raw_text)]);
+    let provider = dl_ai::MockChatProvider::single(format!(
+        r#"{{"lage":"Ein Spieler schrieb {ausschnitt}.","risiken":[],"naechster_schritt":"Ersatz suchen.","prioritaet":"hoch"}}"#
+    ));
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    let reason: String = sqlx::query_scalar(
+        "SELECT reason
+           FROM bot.ai_decision_ledger
+          WHERE source = 'scrim.lagebild.generate'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    assert_eq!(reason, "ai_response_copied_chat");
+    Ok(())
+}
+
 #[tokio::test]
 async fn kurzer_teamkanal_autorenname_in_ai_antwort_wird_abgelehnt(
 ) -> Result<(), Box<dyn std::error::Error>> {
