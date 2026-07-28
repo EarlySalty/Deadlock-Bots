@@ -991,6 +991,7 @@ pub async fn scrims_create_lagebild_correction(
 fn lagebild_correction_failure_decision(error: &LagebildError) -> (&'static str, &'static str) {
     match error {
         LagebildError::Provider(ChatProviderError::Timeout) => ("timeout", "ai_timeout"),
+        LagebildError::PrivateChatCopy { .. } => ("unsure", "ai_response_copied_chat"),
         LagebildError::InvalidAi(_) => ("unsure", "ai_response_invalid"),
         _ => ("error", "ai_revision_failed"),
     }

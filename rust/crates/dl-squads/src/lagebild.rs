@@ -14,6 +14,8 @@ const SNAPSHOT_SOURCE_MATCH: &str = "match";
 const STATUS_OK: &str = "ok";
 const STATUS_ERROR: &str = "error";
 const WEEKLY_GENERATED_FOR: &str = "weekly";
+const PRIVATE_CHAT_CONTENT_KIND: &str = "message_content";
+const PRIVATE_CHAT_AUTHOR_KIND: &str = "author_name";
 /// Format der Lagebildkarte. Wird die Karte umgebaut, macht eine neue Version
 /// alle alten Snapshots sofort fällig, statt sie eine Woche stehen zu lassen.
 pub const REPORT_VERSION: &str = "3";
@@ -150,6 +152,11 @@ pub enum LagebildError {
     Provider(#[from] ChatProviderError),
     #[error("AI-Antwort ist kein erwartetes JSON: {0}")]
     InvalidAi(String),
+    #[error("AI-Antwort übernimmt private Chatdaten wörtlich")]
+    PrivateChatCopy {
+        value_kind: &'static str,
+        value_chars: usize,
+    },
     #[error("Scrim-ID {label}={value} passt nicht in PostgreSQL int4")]
     IdOutOfRange {
         label: &'static str,
@@ -747,24 +754,85 @@ fn ensure_text_does_not_copy_chat(
     persisted: &str,
     loaded: &LoadedLagebildInput,
 ) -> Result<(), LagebildError> {
-    let copies_content = loaded
+    // Erst vier aufeinanderfolgende Wörter sind eine substanzielle Passage.
+    // Kürzere Alltagsphrasen würden bei realem Chatvolumen fast immer kollidieren.
+    // Geprüft wird jedes Vier-Wort-Fenster der Nachricht, nicht nur die ganze:
+    // sonst rutscht ein wörtlich übernommener Ausschnitt aus einer längeren
+    // Nachricht durch.
+    if let Some(value) = loaded
         .private_chat_contents
         .iter()
-        .map(|value| value.trim())
-        .filter(|value| value.chars().count() >= 4)
-        .any(|value| persisted.contains(value));
-    let names_author = loaded
+        .filter_map(|value| copied_passage(persisted, value))
+        .next()
+    {
+        let value_chars = value.chars().count();
+        tracing::error!(
+            team_id = loaded.input.team_id,
+            generated_for = loaded.input.generated_for,
+            reason = "ai_response_copied_chat",
+            matched_value_kind = PRIVATE_CHAT_CONTENT_KIND,
+            matched_value_chars = value_chars,
+            "Scrim-Lagebild-AI-Antwort wegen Zitat-Schutz verworfen"
+        );
+        return Err(LagebildError::PrivateChatCopy {
+            value_kind: PRIVATE_CHAT_CONTENT_KIND,
+            value_chars,
+        });
+    }
+    if let Some(value) = loaded
         .private_chat_authors
         .iter()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .any(|value| contains_whole_name(persisted, value));
-    if copies_content || names_author {
-        return Err(LagebildError::InvalidAi(
-            "AI-Antwort übernimmt private Chatdaten wörtlich".to_string(),
-        ));
+        .find(|value| contains_whole_name(persisted, value))
+    {
+        let value_chars = value.chars().count();
+        tracing::error!(
+            team_id = loaded.input.team_id,
+            generated_for = loaded.input.generated_for,
+            reason = "ai_response_copied_chat",
+            matched_value_kind = PRIVATE_CHAT_AUTHOR_KIND,
+            matched_value_chars = value_chars,
+            "Scrim-Lagebild-AI-Antwort wegen Zitat-Schutz verworfen"
+        );
+        return Err(LagebildError::PrivateChatCopy {
+            value_kind: PRIVATE_CHAT_AUTHOR_KIND,
+            value_chars,
+        });
     }
     Ok(())
+}
+
+/// Gibt das erste Vier-Wort-Fenster der Nachricht zurück, das wörtlich im Text
+/// steht. Die Fenstergrenzen laufen über Wortpositionen, damit auch ein
+/// Ausschnitt aus einer langen Nachricht erkannt wird — die Nachricht als
+/// Ganzes zu prüfen würde genau das verfehlen.
+fn copied_passage<'a>(text: &str, message: &'a str) -> Option<&'a str> {
+    const WINDOW_WORDS: usize = 4;
+    let words: Vec<(usize, &str)> = message.split_whitespace_indices_compat();
+    if words.len() < WINDOW_WORDS {
+        return None;
+    }
+    (0..=words.len() - WINDOW_WORDS).find_map(|start| {
+        let (from, _) = words[start];
+        let (last_start, last_word) = words[start + WINDOW_WORDS - 1];
+        let passage = &message[from..last_start + last_word.len()];
+        text.contains(passage).then_some(passage)
+    })
+}
+
+/// Wortpositionen samt Wort, ohne externe Abhängigkeit.
+trait SplitWhitespaceIndicesCompat {
+    fn split_whitespace_indices_compat(&self) -> Vec<(usize, &str)>;
+}
+
+impl SplitWhitespaceIndicesCompat for str {
+    fn split_whitespace_indices_compat(&self) -> Vec<(usize, &str)> {
+        let base = self.as_ptr() as usize;
+        self.split_whitespace()
+            .map(|word| (word.as_ptr() as usize - base, word))
+            .collect()
+    }
 }
 
 fn contains_whole_name(text: &str, name: &str) -> bool {
@@ -1084,6 +1152,7 @@ fn lagebild_failure_decision(error: &LagebildError) -> (&'static str, &'static s
         {
             ("error", "ai_provider_missing")
         }
+        LagebildError::PrivateChatCopy { .. } => ("unsure", "ai_response_copied_chat"),
         LagebildError::InvalidAi(_) => ("unsure", "ai_response_invalid"),
         _ => ("error", "ai_generation_failed"),
     }

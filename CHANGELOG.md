@@ -1,3 +1,11 @@
+## #307 — Lagebilder verwechseln Alltagswörter nicht mehr mit Zitaten
+
+Problem: Bei vielen Teamkanal-Nachrichten konnte schon ein Wort wie „passt“ eine fertige Lagebild-Karte verwerfen. Im Entscheidungslog sah dieser Fall genauso aus wie eine ungültige KI-Antwort.
+
+Änderung: Der Zitat-Schutz greift bei Nachrichten erst ab vier aufeinanderfolgenden Wörtern. Autorennamen bleiben unabhängig von ihrer Länge gesperrt; ungültige KI-Antworten und erkannte Chat-Zitate haben jetzt getrennte Fehlergründe.
+
+Aktuelles Verhalten: Kurze Alltagsphrasen verhindern die Karte nicht mehr. Längere wörtliche Passagen und Autorennamen werden weiterhin verworfen und im Log ohne den vertraulichen Text nachvollziehbar markiert.
+
 ## #306 — Lagebilder lesen den Teamkanal mit
 
 Problem: Die Scrim-Orga läuft im Teamkanal, das Lagebild kannte bisher aber nur Terminabfragen, Reminder und Matches. Ohne diese Einträge bekamen alle Teams dieselbe leere Karte.
