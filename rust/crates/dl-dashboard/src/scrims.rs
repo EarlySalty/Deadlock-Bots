@@ -4661,7 +4661,7 @@ mod tests {
     async fn lagebild_korrektur_route_speichert_chat_und_aktualisiert_letzten_stand(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockChatProvider::new(vec![Ok(ChatResponse::text(
-            r#"{"reply":"Überarbeitet.","lagebild":"Korrigierte Lage.\n\nEvidenzen:\n- [Terminabfrage](https://discord.com/channels/1289721245281292288/100/9001)"}"#,
+            r#"{"reply":"Überarbeitet.","lagebild":{"lage":"Korrigierte Lage.","risiken":[],"naechster_schritt":"Lineup bestätigen.","prioritaet":"mittel"}}"#,
         ))]);
         let (db, app, session_id, csrf) = app_with_session_and_ai(provider).await?;
         insert_team(db.pool(), 1, "A").await?;
