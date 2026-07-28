@@ -692,6 +692,64 @@ async fn freitext_statt_report_gilt_als_unklare_ai_antwort(
 }
 
 #[tokio::test]
+async fn korrektur_ohne_naechsten_schritt_gilt_als_unklare_antwort(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
+        .execute(db.pool())
+        .await?;
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"reply":"Angepasst.","lagebild":{"lage":"Neue Lage.","risiken":[],"naechster_schritt":"   ","prioritaet":"mittel"}}"#,
+    );
+
+    let receipt = correct_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        1,
+        "Bitte korrigieren",
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(receipt.verdict, "unsure");
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    Ok(())
+}
+
+#[tokio::test]
+async fn korrektur_ohne_ueberarbeitung_laesst_altes_format_faellig(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query("INSERT INTO scrim.teams(id, name, created_at) VALUES(1, 'A', now())")
+        .execute(db.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.lagebild_snapshots(
+            team_id, generated_at, generated_for, source, status, lagebild_text, data_summary
+        )
+        VALUES(1, now(), 'weekly', 'ai', 'ok', '**Altes Lagebild**', '{}'::jsonb)
+        "#,
+    )
+    .execute(db.pool())
+    .await?;
+    let provider = dl_ai::MockChatProvider::single(r#"{"reply":"Passt so","lagebild":null}"#);
+
+    correct_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        1,
+        "Passt das?",
+        correction_actor(),
+    )
+    .await?;
+
+    // Der alte Text steht weiter drin, also muss der Snapshot fällig bleiben.
+    assert_eq!(generate_due_lagebilder(db.pool(), None, 5).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn lagebild_im_alten_format_wird_sofort_neu_erzeugt() -> Result<(), Box<dyn std::error::Error>>
 {
     let db = dl_central_db::testing::test_pool().await?;

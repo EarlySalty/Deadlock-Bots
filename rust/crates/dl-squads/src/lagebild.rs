@@ -592,6 +592,10 @@ pub async fn generate_lagebild(
 fn parse_lagebild_report(raw: &str) -> Result<LagebildReport, LagebildError> {
     let report = serde_json::from_str::<LagebildReport>(raw.trim())
         .map_err(|err| LagebildError::InvalidAi(err.to_string()))?;
+    validate_report(report)
+}
+
+fn validate_report(report: LagebildReport) -> Result<LagebildReport, LagebildError> {
     if report.lage.trim().is_empty() {
         return Err(LagebildError::InvalidAi("lage fehlt".to_string()));
     }
@@ -640,9 +644,9 @@ pub async fn revise_lagebild(
     if reply.is_empty() {
         return Err(LagebildError::InvalidAi("reply fehlt".to_string()));
     }
-    let report = parsed
-        .lagebild
-        .filter(|report| !report.lage.trim().is_empty());
+    // Eine halbe Karte ist schlechter als keine: fehlt der nächste Schritt,
+    // gilt die Antwort als unklar statt als Korrektur.
+    let report = parsed.lagebild.map(validate_report).transpose()?;
     let lagebild = report
         .as_ref()
         .map(|report| render_lagebild_report(report, evidences));
@@ -1193,7 +1197,10 @@ async fn insert_snapshot(
     .bind(status)
     .bind(text)
     .bind(json!({
-        "report_version": REPORT_VERSION,
+        // Nur ein Text, der aus einem Report gerendert wurde, trägt die Version.
+        // Bleibt bei einer Korrektur ohne Überarbeitung der alte Text stehen,
+        // bleibt der Snapshot damit fällig statt sich als aktuell auszugeben.
+        "report_version": report.map(|_| REPORT_VERSION),
         "data_limited": input.data_limited,
         "has_operational_data": input.has_operational_data,
         "prioritaet": report.map(|report| report.prioritaet.as_str()),
