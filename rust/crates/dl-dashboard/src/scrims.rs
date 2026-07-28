@@ -34,6 +34,13 @@ const MATCH_REQUEST_MAX_SLOTS: usize = 5;
 pub(crate) const SCRIM_RUNTIME_DENIED_MESSAGE: &str =
     "Die Scrim-Verwaltung wird gerade umgestellt. Änderungen am Roster sind über dieses Dashboard vorübergehend nicht möglich.";
 const MATCH_REQUEST_SUMMARY_LIMIT: i64 = 10;
+/// Wie viele Lagebild-Snapshots je Team in die Antwort gehen. Ohne Grenze
+/// waechst die Timeline unbegrenzt mit.
+const LAGEBILD_TIMELINE_LIMIT: i64 = 10;
+/// Wie viele Belege je Snapshot ausgeliefert werden. Aeltere Karten aus der
+/// Zeit vor dem Belege-Limit tragen bis zu 190 Links; ungekuerzt sprengt die
+/// Antwort die 256-KB-Grenze des Website-Proxys.
+const LAGEBILD_EVIDENCE_LIMIT: i64 = 10;
 const MATCH_REQUEST_REMINDER_DEFAULT_TEMPLATE: &str = "antwort_fehlt";
 const MATCH_REQUEST_REMINDER_TEMPLATES: [&str; 3] =
     ["antwort_fehlt", "frist_bald", "bestaetigung_offen"];
@@ -1712,12 +1719,21 @@ async fn load_lagebild_snapshots(
                model,
                error,
                created_at
-          FROM scrim.lagebild_snapshots
-         WHERE team_id = ANY($1)
+          FROM (
+                SELECT *,
+                       row_number() OVER (
+                           PARTITION BY team_id
+                           ORDER BY generated_at DESC, id DESC
+                       ) AS rang
+                  FROM scrim.lagebild_snapshots
+                 WHERE team_id = ANY($1)
+               ) snapshot
+         WHERE rang <= $2
          ORDER BY team_id ASC, generated_at DESC, id DESC
         "#,
     )
     .bind(team_ids)
+    .bind(LAGEBILD_TIMELINE_LIMIT)
     .fetch_all(pool)
     .await?;
     let mut snapshots = Vec::with_capacity(rows.len());
@@ -1782,12 +1798,21 @@ async fn load_lagebild_evidences(
                reference_id,
                occurred_at,
                payload
-          FROM scrim.lagebild_evidences
-         WHERE snapshot_id = ANY($1)
+          FROM (
+                SELECT *,
+                       row_number() OVER (
+                           PARTITION BY snapshot_id
+                           ORDER BY occurred_at DESC NULLS LAST, id ASC
+                       ) AS rang
+                  FROM scrim.lagebild_evidences
+                 WHERE snapshot_id = ANY($1)
+               ) evidence
+         WHERE rang <= $2
          ORDER BY snapshot_id ASC, occurred_at DESC NULLS LAST, id ASC
         "#,
     )
     .bind(snapshot_ids)
+    .bind(LAGEBILD_EVIDENCE_LIMIT)
     .fetch_all(pool)
     .await?;
     let mut by_snapshot: HashMap<i64, Vec<Value>> = HashMap::new();
@@ -4648,6 +4673,55 @@ mod tests {
         assert_eq!(
             first["timeline"][0]["evidences"][0]["url"],
             "https://discord.com/channels/1289721245281292288/100/9001"
+        );
+        Ok(())
+    }
+
+    /// Karten aus der Zeit vor dem Belege-Limit tragen bis zu 190 Links. Ungekürzt
+    /// sprengt die Antwort die 256-KB-Grenze des Website-Proxys — live sichtbar
+    /// am 2026-07-29 als `class="response_too_large"` auf `/command-center`.
+    #[tokio::test]
+    async fn scrims_overview_kuerzt_alte_uebergrosse_evidenzlisten(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, _csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_lagebild_seed(
+            db.pool(),
+            "https://discord.com/channels/1289721245281292288/100/9001",
+        )
+        .await?;
+        let snapshot_id: i64 =
+            sqlx::query_scalar("SELECT id FROM scrim.lagebild_snapshots ORDER BY id DESC LIMIT 1")
+                .fetch_one(db.pool())
+                .await?;
+        for index in 0..60_i64 {
+            sqlx::query(
+                "INSERT INTO scrim.lagebild_evidences(
+                     snapshot_id, evidence_type, label, url, reference_id, occurred_at, payload
+                 ) VALUES($1, 'discord_message', 'Abstimmung im Teamkanal', $2, $3, now(), '{}'::jsonb)",
+            )
+            .bind(snapshot_id)
+            .bind(format!(
+                "https://discord.com/channels/1289721245281292288/100/{}",
+                9_100 + index
+            ))
+            .bind(format!("100/{}", 9_100 + index))
+            .execute(db.pool())
+            .await?;
+        }
+
+        let response = app.oneshot(auth_get("/api/scrims", &session_id)?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 262_144).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let evidenzen = data["lagebilder"][0]["timeline"][0]["evidences"]
+            .as_array()
+            .expect("Evidenzliste")
+            .len();
+        assert!(
+            evidenzen <= 10,
+            "hoechstens zehn Belege je Snapshot ausliefern, waren {evidenzen}"
         );
         Ok(())
     }
