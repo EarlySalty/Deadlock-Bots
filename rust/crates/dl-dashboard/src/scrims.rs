@@ -12,7 +12,8 @@ use dl_central_db::scrim_runtime::{
     require_local_scrim_write_in_transaction, ScrimRuntimeGateError,
 };
 use dl_squads::lagebild::{
-    revise_lagebild, LagebildError, ScrimLagebildEvidence, MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
+    report_data_summary, revise_lagebild, LagebildError, LagebildReport, ScrimLagebildEvidence,
+    MAIN_GUILD_ID as SCRIM_MAIN_GUILD_ID,
 };
 use serde_json::{json, Value};
 use sqlx::{PgConnection, PgPool, Row};
@@ -864,12 +865,15 @@ pub async fn scrims_create_lagebild_correction(
             let decision;
             let reason;
             let action;
-            if let Some(lagebild) = result.lagebild.as_deref() {
+            if let (Some(lagebild), Some(report)) =
+                (result.lagebild.as_deref(), result.report.as_ref())
+            {
                 match insert_corrected_lagebild_snapshot(
                     &mut tx,
                     team_id,
                     current_snapshot_id,
                     lagebild,
+                    report,
                     result.model.clone(),
                     assistant_message["id"].as_i64(),
                 )
@@ -2249,6 +2253,7 @@ async fn insert_corrected_lagebild_snapshot(
     team_id: i32,
     previous_snapshot_id: Option<i64>,
     text: &str,
+    report: &LagebildReport,
     model: Option<String>,
     correction_id: Option<i64>,
 ) -> DashboardDbResult<i64> {
@@ -2268,10 +2273,17 @@ async fn insert_corrected_lagebild_snapshot(
     .bind(team_id)
     .bind(&generated_for)
     .bind(text)
-    .bind(json!({
-        "previous_snapshot_id": previous_snapshot_id,
-        "correction_id": correction_id,
-    }))
+    .bind({
+        let mut summary = report_data_summary(report);
+        if let Some(object) = summary.as_object_mut() {
+            object.insert(
+                "previous_snapshot_id".to_string(),
+                json!(previous_snapshot_id),
+            );
+            object.insert("correction_id".to_string(), json!(correction_id));
+        }
+        summary
+    })
     .bind(model)
     .fetch_one(&mut *connection)
     .await?;
@@ -4688,6 +4700,16 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("Korrigierte Lage"));
+        // Ohne Formatversion würde der Wochenlauf die frische Korrektur sofort ersetzen.
+        let summary: Value = sqlx::query_scalar(
+            "SELECT data_summary FROM scrim.lagebild_snapshots
+              WHERE team_id = 1 AND source = 'correction'
+              ORDER BY generated_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(summary["report_version"], "2");
+        assert_eq!(summary["prioritaet"], "mittel");
 
         let correction_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM scrim.lagebild_corrections")

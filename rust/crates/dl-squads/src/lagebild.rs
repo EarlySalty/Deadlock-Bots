@@ -16,7 +16,18 @@ const STATUS_ERROR: &str = "error";
 const WEEKLY_GENERATED_FOR: &str = "weekly";
 /// Format der Lagebildkarte. Wird die Karte umgebaut, macht eine neue Version
 /// alle alten Snapshots sofort fällig, statt sie eine Woche stehen zu lassen.
-const REPORT_VERSION: &str = "2";
+pub const REPORT_VERSION: &str = "2";
+
+/// Zusatzdaten eines Snapshots, die aus einer fertigen Karte entstehen. Auch
+/// das Dashboard schreibt sie, damit eine frische Korrektur nicht sofort
+/// wieder als altes Format gilt.
+pub fn report_data_summary(report: &LagebildReport) -> Value {
+    json!({
+        "report_version": REPORT_VERSION,
+        "prioritaet": report.prioritaet.as_str(),
+        "naechster_schritt": report.naechster_schritt,
+    })
+}
 
 const LAGEBILD_SYSTEM_PROMPT: &str = r#"Du erstellst ein internes Lagebild für ein Deadlock-Scrim-Team.
 Es liest ein Scrim-Admin, der wenig Zeit hat und genau wissen will, was er als Nächstes tun soll.
