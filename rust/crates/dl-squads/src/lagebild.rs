@@ -54,6 +54,7 @@ enum ChannelHistoryLoad {
     Loaded {
         message_count: usize,
         truncated: bool,
+        read_at: DateTime<Utc>,
     },
     Failed {
         channel_id: u64,
@@ -92,6 +93,15 @@ impl LoadedLagebildInput {
         match self.channel_history {
             ChannelHistoryLoad::Loaded { message_count, .. } => message_count,
             ChannelHistoryLoad::NotRequested | ChannelHistoryLoad::Failed { .. } => 0,
+        }
+    }
+
+    fn channel_history_read_at(&self) -> Option<String> {
+        match self.channel_history {
+            ChannelHistoryLoad::Loaded { read_at, .. } => {
+                Some(read_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+            }
+            ChannelHistoryLoad::NotRequested | ChannelHistoryLoad::Failed { .. } => None,
         }
     }
 
@@ -1099,14 +1109,15 @@ async fn load_lagebild_input(
         SELECT t.name,
                t.discord_channel_id,
                (
-                    SELECT snapshot.generated_at
+                    SELECT (snapshot.data_summary ->> 'channel_history_read_at')::timestamptz
                       FROM scrim.lagebild_snapshots snapshot
                     WHERE snapshot.team_id = t.id
                       AND snapshot.status = 'ok'
                       AND snapshot.data_summary ->> 'channel_history_state' = 'loaded'
+                      AND snapshot.data_summary ->> 'channel_history_read_at' IS NOT NULL
                      ORDER BY snapshot.generated_at DESC, snapshot.id DESC
                     LIMIT 1
-               ) AS last_snapshot_at,
+               ) AS last_channel_history_read_at,
                COUNT(tm.participant_id)::bigint AS member_count
           FROM scrim.teams t
           LEFT JOIN scrim.team_members tm ON tm.team_id = t.id
@@ -1136,12 +1147,21 @@ async fn load_lagebild_input(
             json!({ "channel_id": channel_id }),
         ));
         if let Some(channel_history) = channel_history {
-            let since = team.get::<Option<DateTime<Utc>>, _>("last_snapshot_at");
+            let since = team.get::<Option<DateTime<Utc>>, _>("last_channel_history_read_at");
+            let fetch_started_at = Utc::now();
             match channel_history
                 .recent_messages(channel_id, since, CHANNEL_HISTORY_LIMIT)
                 .await
             {
                 Ok(batch) => {
+                    // Die jüngste gelesene Nachricht ist der exakte Lesepunkt. Bei leerer
+                    // Antwort rückt der Abrufstart konservativ vor, ohne das Abruffenster zu überspringen.
+                    let read_at = batch
+                        .messages
+                        .iter()
+                        .map(|message| message.timestamp)
+                        .max()
+                        .unwrap_or(fetch_started_at);
                     let truncated = batch.truncated || batch.messages.len() > CHANNEL_HISTORY_LIMIT;
                     let mut message_count = 0usize;
                     for message in batch.messages.into_iter().take(CHANNEL_HISTORY_LIMIT) {
@@ -1177,6 +1197,7 @@ async fn load_lagebild_input(
                     channel_history_load = ChannelHistoryLoad::Loaded {
                         message_count,
                         truncated,
+                        read_at,
                     };
                 }
                 Err(error) => {
@@ -1503,6 +1524,7 @@ async fn insert_snapshot(
         "correction_count": input.corrections.len(),
         "evidence_count": input.evidences.len(),
         "channel_history_state": loaded.channel_history_state(),
+        "channel_history_read_at": loaded.channel_history_read_at(),
         "channel_message_count": loaded.channel_message_count(),
         "channel_history_truncated": loaded.channel_history_truncated(),
     }))

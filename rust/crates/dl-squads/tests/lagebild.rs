@@ -493,6 +493,115 @@ async fn teamkanal_chat_loest_ohne_strukturdaten_einen_ai_call_aus(
 }
 
 #[tokio::test]
+async fn nach_dem_abruf_entstandene_nachricht_wird_im_naechsten_lauf_gelesen(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let mut bereits_gelesen = channel_message(9001, "Orga", "Die Abstimmung für Donnerstag läuft.");
+    bereits_gelesen.timestamp = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let nach_dem_abruf = channel_message(9002, "Orga", "Donnerstag um 20 Uhr passt.");
+    let history = MessageAfterFetchHistory::new(bereits_gelesen, nach_dem_abruf);
+    let provider = dl_ai::MockChatProvider::new(vec![
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Die Terminabstimmung läuft.","risiken":[],"naechster_schritt":"Rückmeldungen sammeln.","prioritaet":"mittel"}"#,
+        )),
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Donnerstag um 20 Uhr passt.","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}"#,
+        )),
+    ]);
+
+    refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+    refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let second_prompt = requests[1]
+        .0
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second_prompt.contains("Donnerstag um 20 Uhr passt."),
+        "Nachricht aus dem Fenster zwischen Abruf und Snapshot fehlt im zweiten Lauf"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn leerer_erfolgreicher_abruf_speichert_einen_neuen_lesepunkt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    insert_terminabfrage(db.pool(), 1).await?;
+    let history = FakeChannelHistory::ok(Vec::new());
+    let provider = dl_ai::MockChatProvider::new(vec![
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Die Terminabfrage läuft.","risiken":[],"naechster_schritt":"Rückmeldungen sammeln.","prioritaet":"mittel"}"#,
+        )),
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Die Terminabfrage läuft weiter.","risiken":[],"naechster_schritt":"Offene Rückmeldungen prüfen.","prioritaet":"mittel"}"#,
+        )),
+    ]);
+
+    let first = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+    let first_summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT data_summary
+           FROM scrim.lagebild_snapshots
+          WHERE id = $1",
+    )
+    .bind(first.snapshot_id)
+    .fetch_one(db.pool())
+    .await?;
+    let first_read_at = first_summary["channel_history_read_at"]
+        .as_str()
+        .ok_or("Lesepunkt fehlt nach leerem erfolgreichen Abruf")?
+        .parse::<chrono::DateTime<chrono::Utc>>()?;
+    refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(history.since_calls(), vec![None, Some(first_read_at)]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn ai_fehler_rueckt_den_teamkanal_wasserstand_nicht_vor(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
@@ -945,6 +1054,52 @@ impl ChannelHistory for FakeChannelHistory {
                 batch.messages.retain(|message| message.timestamp > since);
             }
             batch
+        })
+    }
+}
+
+#[derive(Clone)]
+struct MessageAfterFetchHistory {
+    first_message: ChannelHistoryMessage,
+    late_message: Arc<Mutex<ChannelHistoryMessage>>,
+    call_count: Arc<Mutex<usize>>,
+}
+
+impl MessageAfterFetchHistory {
+    fn new(first_message: ChannelHistoryMessage, late_message: ChannelHistoryMessage) -> Self {
+        Self {
+            first_message,
+            late_message: Arc::new(Mutex::new(late_message)),
+            call_count: Arc::new(Mutex::new(0)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChannelHistory for MessageAfterFetchHistory {
+    async fn recent_messages(
+        &self,
+        _channel_id: u64,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        _limit: usize,
+    ) -> Result<ChannelHistoryBatch, ChannelHistoryError> {
+        let mut call_count = self.call_count.lock().expect("call count");
+        let first_call = *call_count == 0;
+        *call_count += 1;
+        drop(call_count);
+        let mut messages = vec![self.first_message.clone()];
+        if first_call {
+            // Der erste Abruf ist zusammengestellt; die Nachricht entsteht erst danach.
+            self.late_message.lock().expect("late message").timestamp = chrono::Utc::now();
+        } else {
+            messages.push(self.late_message.lock().expect("late message").clone());
+        }
+        if let Some(since) = since {
+            messages.retain(|message| message.timestamp > since);
+        }
+        Ok(ChannelHistoryBatch {
+            messages,
+            truncated: false,
         })
     }
 }
