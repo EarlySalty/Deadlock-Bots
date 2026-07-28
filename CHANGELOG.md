@@ -1,3 +1,11 @@
+## #306 — Lagebilder lesen den Teamkanal mit
+
+Problem: Die Scrim-Orga läuft im Teamkanal, das Lagebild kannte bisher aber nur Terminabfragen, Reminder und Matches. Ohne diese Einträge bekamen alle Teams dieselbe leere Karte.
+
+Änderung: Der Bot liest beim Lagebild-Lauf den Teamkanal seit der letzten Karte mit, höchstens 200 Nachrichten. Nachrichten und Autorennamen gehen nur an die KI; gespeichert werden ausschließlich ihre Schlussfolgerung und die Links zu den Nachrichten.
+
+Aktuelles Verhalten: Absprachen aus dem Teamkanal fließen direkt ins Lagebild ein. Ein abgebrochener Abruf und ein erreichtes Nachrichtenlimit stehen im Entscheidungslog, statt unbemerkt wie vollständige Daten zu wirken. Schlägt der Teamkanal-Abruf oder die KI fehl, bleiben dieselben Nachrichten für den nächsten Versuch offen; erst eine erfolgreiche Karte mit erfolgreich gelesenem Teamkanal rückt den Lesestand vor.
+
 ## #305 — Lagebilder sagen, was zu tun ist
 
 Problem: Die Lagebilder lasen sich wie Aufsätze. Für jedes Team stand in neun Absätzen, wozu Daten fehlen, in jedem Team anders formatiert, teilweise mit sichtbaren Sternchen. Für Teams ohne jede Scrim-Aktivität wurde trotzdem jede Woche die KI befragt, die dann nur beschreiben konnte, dass nichts da ist.

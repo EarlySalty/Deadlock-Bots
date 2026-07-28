@@ -1263,6 +1263,7 @@ dependencies = [
 name = "dl-squads"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "dl-ai",
  "dl-central-db",

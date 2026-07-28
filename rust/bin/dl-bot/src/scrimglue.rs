@@ -437,7 +437,10 @@ async fn process_one_pending(
         handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild_ai, &claim).await?;
     }
 
-    match dl_squads::lagebild::generate_due_lagebilder(pool, lagebild_ai, 1).await {
+    let channel_history = scrim_adapter::DiscordChannelHistory::new(adapter);
+    match dl_squads::lagebild::generate_due_lagebilder(pool, lagebild_ai, Some(&channel_history), 1)
+        .await
+    {
         Ok(generated) if generated > 0 => {
             tracing::info!(generated, "Scrim-Lagebilder im Wochenlauf erzeugt");
         }
@@ -2293,7 +2296,7 @@ async fn handle_result(
             if set_result_state_after_attempt(pool, claim.match_id, false).await?
                 == ResultQueueState::Finished
             {
-                generate_lagebilder_after_result(pool, lagebild_ai, claim.match_id).await;
+                generate_lagebilder_after_result(pool, adapter, lagebild_ai, claim.match_id).await;
             }
         }
         Err(err) => {
@@ -2305,7 +2308,7 @@ async fn handle_result(
             if queue_state == ResultQueueState::Finished
                 && !has_match_lagebild_snapshot(pool, claim.match_id).await?
             {
-                generate_lagebilder_after_result(pool, lagebild_ai, claim.match_id).await;
+                generate_lagebilder_after_result(pool, adapter, lagebild_ai, claim.match_id).await;
             }
             post_log(
                 adapter,
@@ -2320,10 +2323,19 @@ async fn handle_result(
 
 async fn generate_lagebilder_after_result(
     pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
     lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
     match_id: i64,
 ) {
-    match dl_squads::lagebild::generate_match_lagebilder(pool, lagebild_ai, match_id).await {
+    let channel_history = scrim_adapter::DiscordChannelHistory::new(adapter);
+    match dl_squads::lagebild::generate_match_lagebilder(
+        pool,
+        lagebild_ai,
+        Some(&channel_history),
+        match_id,
+    )
+    .await
+    {
         Ok(generated) if generated > 0 => {
             tracing::info!(match_id, generated, "Scrim-Lagebilder nach Match erzeugt");
         }
