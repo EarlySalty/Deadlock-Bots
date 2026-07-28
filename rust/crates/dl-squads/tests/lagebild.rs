@@ -873,6 +873,59 @@ async fn teamkanal_rohtext_und_autor_bleiben_aus_geschriebenen_spalten(
 }
 
 #[tokio::test]
+async fn kurzes_alltagswort_aus_teamkanal_wird_nicht_abgelehnt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![channel_message(9002, "Zed", "passt")]);
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Der Termin passt.","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}"#,
+    );
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
+    Ok(())
+}
+
+#[tokio::test]
+async fn laengere_teamkanal_passage_in_ai_antwort_wird_abgelehnt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let raw_text = "Wir können am Donnerstag um 20 Uhr spielen.";
+    let history = FakeChannelHistory::ok(vec![channel_message(9002, "Zed", raw_text)]);
+    let provider = dl_ai::MockChatProvider::single(format!(
+        r#"{{"lage":"{raw_text}","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}}"#
+    ));
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    let reason: String = sqlx::query_scalar(
+        "SELECT reason
+           FROM bot.ai_decision_ledger
+          WHERE source = 'scrim.lagebild.generate'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    assert_eq!(reason, "ai_response_copied_chat");
+    Ok(())
+}
+
+#[tokio::test]
 async fn kurzer_teamkanal_autorenname_in_ai_antwort_wird_abgelehnt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
@@ -893,7 +946,17 @@ async fn kurzer_teamkanal_autorenname_in_ai_antwort_wird_abgelehnt(
 
     generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
 
+    let reason: String = sqlx::query_scalar(
+        "SELECT reason
+           FROM bot.ai_decision_ledger
+          WHERE source = 'scrim.lagebild.generate'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
     assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    assert_eq!(reason, "ai_response_copied_chat");
     Ok(())
 }
 
@@ -919,6 +982,60 @@ async fn kurzer_teamkanal_autorenname_als_teilstring_wird_nicht_abgelehnt(
     generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
 
     assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
+    Ok(())
+}
+
+#[tokio::test]
+async fn ungueltiges_json_und_zitatschutz_haben_unterschiedliche_ledger_gruende(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES
+             (1, 'Team 1', 100, now()),
+             (2, 'Team 2', 200, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let raw_text = "Wir können am Donnerstag um 20 Uhr spielen.";
+    let history = FakeChannelHistory::ok(vec![channel_message(9002, "Zed", raw_text)]);
+    let invalid_provider = dl_ai::MockChatProvider::single("kein JSON");
+    let copied_provider = dl_ai::MockChatProvider::single(format!(
+        r#"{{"lage":"{raw_text}","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}}"#
+    ));
+
+    refresh_team_lagebild(
+        db.pool(),
+        Some(invalid_provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+    refresh_team_lagebild(
+        db.pool(),
+        Some(copied_provider.as_ref()),
+        Some(&history),
+        2,
+        correction_actor(),
+    )
+    .await?;
+
+    let reasons: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT (payload ->> 'team_id')::bigint, reason
+           FROM bot.ai_decision_ledger
+          WHERE source = 'scrim.lagebild.refresh'
+          ORDER BY (payload ->> 'team_id')::bigint",
+    )
+    .fetch_all(db.pool())
+    .await?;
+    assert_eq!(
+        reasons,
+        vec![
+            (1, "ai_response_invalid".to_string()),
+            (2, "ai_response_copied_chat".to_string()),
+        ]
+    );
     Ok(())
 }
 
