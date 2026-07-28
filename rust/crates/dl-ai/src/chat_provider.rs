@@ -436,6 +436,9 @@ pub struct OpenAiChatProvider {
     api_key: String,
     default_model: String,
     retry: RetryConfig,
+    // Fireworks spricht dasselbe Wire-Format, muss sich im Log aber als
+    // fireworks zeigen, sonst sucht die Fehlersuche beim falschen Anbieter.
+    provider_label: &'static str,
 }
 
 impl OpenAiChatProvider {
@@ -455,7 +458,13 @@ impl OpenAiChatProvider {
             .or_else(|| read_env(&lookup, "AI_OPENAI_MODEL"))
             .unwrap_or_else(|| DEFAULT_OPENAI_CHAT_MODEL.into());
         tracing::info!(provider = "openai", %model, "LLM-Chat-Provider initialisiert");
-        Ok(Self::new(base_url, api_key, model))
+        Ok(Self::new_labeled(
+            base_url,
+            api_key,
+            model,
+            RetryConfig::default(),
+            "openai",
+        ))
     }
 
     pub fn from_fireworks_env(
@@ -475,7 +484,13 @@ impl OpenAiChatProvider {
             .or_else(|| read_env(&lookup, "FIREWORKS_MODEL"))
             .unwrap_or_else(|| crate::DEFAULT_FIREWORKS_MODEL.into());
         tracing::info!(provider = "fireworks", %model, "LLM-Chat-Provider initialisiert");
-        Ok(Self::new(base_url, api_key, model))
+        Ok(Self::new_labeled(
+            base_url,
+            api_key,
+            model,
+            RetryConfig::default(),
+            "fireworks",
+        ))
     }
 
     pub fn new(
@@ -492,12 +507,23 @@ impl OpenAiChatProvider {
         default_model: impl Into<String>,
         retry: RetryConfig,
     ) -> Arc<Self> {
+        Self::new_labeled(base_url, api_key, default_model, retry, "openai")
+    }
+
+    fn new_labeled(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        default_model: impl Into<String>,
+        retry: RetryConfig,
+        provider_label: &'static str,
+    ) -> Arc<Self> {
         Arc::new(Self {
             http: retry.http_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             default_model: default_model.into(),
             retry,
+            provider_label,
         })
     }
 }
@@ -536,7 +562,7 @@ impl ChatProvider for OpenAiChatProvider {
         }
 
         let url = format!("{}/chat/completions", self.base_url);
-        let result = send_json_with_retry("openai", &self.retry, || {
+        let result = send_json_with_retry(self.provider_label, &self.retry, || {
             self.http
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
@@ -544,7 +570,12 @@ impl ChatProvider for OpenAiChatProvider {
         })
         .await?;
         let response = parse_openai_chat_response(&result.body)?;
-        log_chat_success("openai", result.status, result.elapsed, &response.usage);
+        log_chat_success(
+            self.provider_label,
+            result.status,
+            result.elapsed,
+            &response.usage,
+        );
         Ok(response)
     }
 }
@@ -1382,6 +1413,37 @@ mod tests {
         assert_eq!(
             err,
             LlmProviderConfigError::UnknownProvider("unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn fireworks_meldet_sich_im_log_als_fireworks_nicht_als_openai() {
+        // Fireworks teilt sich den Client mit OpenAI. Ohne eigenes Label laufen
+        // die Lagebild-Requests unter provider="openai" durchs Journal und die
+        // Fehlersuche landet beim falschen Anbieter.
+        let fireworks = OpenAiChatProvider::from_fireworks_env(|key| {
+            (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string())
+        })
+        .expect("fireworks provider");
+        assert_eq!(fireworks.provider_label, "fireworks");
+
+        let openai = OpenAiChatProvider::from_env(|key| {
+            (key == "OPENAI_API_KEY").then(|| "oa-key".to_string())
+        })
+        .expect("openai provider");
+        assert_eq!(openai.provider_label, "openai");
+
+        // Das Label muss auch an beiden Logstellen ankommen, nicht nur im Feld.
+        let source = include_str!("chat_provider.rs");
+        let chat_impl = source
+            .split("impl ChatProvider for OpenAiChatProvider")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn openai_uses_reasoning_parameters").next())
+            .expect("OpenAiChatProvider-chat-Implementierung");
+        assert!(
+            chat_impl.contains("send_json_with_retry(self.provider_label")
+                && chat_impl.contains("log_chat_success(\n            self.provider_label"),
+            "chat() muss self.provider_label loggen statt eines festen Anbieternamens"
         );
     }
 
