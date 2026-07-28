@@ -601,6 +601,70 @@ async fn leerer_erfolgreicher_abruf_speichert_einen_neuen_lesepunkt(
     Ok(())
 }
 
+/// Ein Link je gelesener Nachricht sprengt beim Ausliefern die Antwortgrenze
+/// des Website-Proxys (256 KB, `class="response_too_large"` am 2026-07-29 live).
+/// Die AI sieht weiterhin jede Nachricht als Fakt.
+#[tokio::test]
+async fn teamkanal_belege_sind_je_karte_begrenzt() -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    // Gestaffelte Zeitstempel, aufsteigend wie der echte Abruf sie liefert.
+    let basis = chrono::Utc::now() - chrono::Duration::hours(70);
+    let messages: Vec<_> = (0..60)
+        .map(|index| ChannelHistoryMessage {
+            id: 9_000 + index,
+            timestamp: basis + chrono::Duration::minutes(index as i64),
+            author_display_name: "Orga".to_string(),
+            content: format!("Nachricht Nummer {index} zur Terminabstimmung"),
+            is_bot: false,
+        })
+        .collect();
+    let history = FakeChannelHistory::ok(messages);
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Das Team stimmt Termine ab.","risiken":[],"naechster_schritt":"Termin bestätigen.","prioritaet":"mittel"}"#,
+    );
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    let chat_evidences: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+           FROM scrim.lagebild_evidences
+          WHERE evidence_type = 'discord_message'",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert!(
+        chat_evidences <= 10,
+        "hoechstens zehn Teamkanal-Belege je Karte, waren {chat_evidences}"
+    );
+    assert!(chat_evidences > 0, "mindestens ein Beleg erwartet");
+
+    // Der Abruf liefert aufsteigend. Behalten werden muessen die juengsten
+    // Nachrichten, sonst stuetzen die Belege die aktuelle Lage nicht.
+    let aeltester_beleg: Option<String> = sqlx::query_scalar(
+        "SELECT reference_id
+           FROM scrim.lagebild_evidences
+          WHERE evidence_type = 'discord_message'
+          ORDER BY occurred_at ASC
+          LIMIT 1",
+    )
+    .fetch_optional(db.pool())
+    .await?
+    .flatten();
+    let erwartet_aeltester = format!("100/{}", 9_000 + 60 - 10);
+    assert_eq!(
+        aeltester_beleg.as_deref(),
+        Some(erwartet_aeltester.as_str()),
+        "die zehn juengsten Nachrichten muessen die Belege stellen"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn ai_fehler_rueckt_den_teamkanal_wasserstand_nicht_vor(
 ) -> Result<(), Box<dyn std::error::Error>> {

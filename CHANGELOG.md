@@ -1,3 +1,11 @@
+## #308 — Die Lage-Karten laden wieder
+
+Problem: Seit die Lagebilder den Teamkanal mitlesen, hing an jeder Karte ein Link zu jeder gelesenen Nachricht — knapp 190 Stück pro Team. Die Übersicht im Coach-Bereich lief damit in eine Größengrenze und zeigte nur noch „Die Lage lässt sich gerade nicht laden".
+
+Änderung: Die KI wertet weiterhin alle Nachrichten aus, an der Karte hängen aber nur noch die jüngsten zehn Belege. Bestehende Karten werden dadurch einmalig neu erzeugt.
+
+Aktuelles Verhalten: Die Übersicht lädt wieder, und die Belege unter einer Karte sind eine handhabbare Liste statt eines Kanalabzugs.
+
 ## #307 — Lagebilder verwechseln Alltagswörter nicht mehr mit Zitaten
 
 Problem: Bei vielen Teamkanal-Nachrichten konnte schon ein Wort wie „passt“ eine fertige Lagebild-Karte verwerfen. Im Entscheidungslog sah dieser Fall genauso aus wie eine ungültige KI-Antwort.
