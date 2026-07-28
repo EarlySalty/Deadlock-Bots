@@ -431,7 +431,9 @@ pub async fn generate_lagebild(
         .chat(
             &lagebild_messages(input),
             ChatParams {
-                max_tokens: Some(900),
+                // Reasoning-Modelle rechnen ihren Denkprozess gegen max_tokens.
+                // Ein Cap schneidet mitten im Denken ab, None laesst sie fertig denken.
+                max_tokens: None,
                 json_mode: false,
                 temperature: 0.2,
                 ..ChatParams::default()
@@ -468,7 +470,7 @@ pub async fn revise_lagebild(
                 ),
             ],
             ChatParams {
-                max_tokens: Some(900),
+                max_tokens: None,
                 json_mode: true,
                 temperature: 0.1,
                 ..ChatParams::default()

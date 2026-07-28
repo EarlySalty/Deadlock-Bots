@@ -1,3 +1,11 @@
+## #304 — Lagebilder nutzen dieselbe KI wie der Discord-Bot
+
+Problem: Die Scrim-Lagebilder liefen über einen eigenen KI-Zugang, während der Rest des Bots längst ein anderes Modell nutzt. Dazu war die Antwortlänge fest gedeckelt. Neuere Modelle denken vor der Antwort, und dieses Denken lief in die Obergrenze, sodass der halbfertige Denkprozess als Lagebild gespeichert wurde.
+
+Änderung: Lagebilder laufen jetzt über denselben Zugang und dasselbe Modell wie der Discord-Bot. Die Längenbegrenzung ist weg, das Modell denkt zu Ende. Antworten, die unterwegs abgeschnitten werden, gelten jetzt als Fehler statt als Ergebnis.
+
+Aktuelles Verhalten: Ein Lagebild ist entweder vollständig oder es steht sichtbar als Fehlversuch da. Abgeschnittener Zwischenstand landet nicht mehr im Text.
+
 ## #303 — Scrim-Ergebnisse werden wieder auswählbar
 
 Problem: Erfolgreich abgerufene Scrim-Ergebnisse blieben intern ungeprüft und konnten deshalb nicht als Match-Ergebnis ausgewählt werden.

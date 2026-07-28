@@ -392,7 +392,7 @@ fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
         LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
             LlmProviderKind::Mistral
         }
-        LlmUseCase::ScrimLagebild => LlmProviderKind::OpenAi,
+        LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
     }
 }
 
@@ -1006,10 +1006,18 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 }
 
 fn parse_openai_chat_response(data: &Value) -> Result<ChatResponse, ChatProviderError> {
-    let content = data
+    let first_choice = data
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
+        .and_then(|choices| choices.first());
+    // Reasoning-Modelle schuetten bei erschoepftem Budget ihren Denkprozess als
+    // content aus. Abgeschnitten ist immer Muell, nie eine brauchbare Antwort.
+    if first_choice.and_then(|choice| choice.get("finish_reason")) == Some(&json!("length")) {
+        return Err(ChatProviderError::Provider(
+            "response truncated (max_tokens)".to_string(),
+        ));
+    }
+    let content = first_choice
         .and_then(|choice| choice.get("message"))
         .and_then(|message| message.get("content"))
         .and_then(parse_openai_content)
@@ -1242,7 +1250,7 @@ mod tests {
                 LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
                     LlmProviderKind::Mistral
                 }
-                LlmUseCase::ScrimLagebild => LlmProviderKind::OpenAi,
+                LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
             };
             assert_eq!(
                 defaults
@@ -1575,6 +1583,30 @@ mod tests {
         }))
         .expect("mixed content");
         assert_eq!(mixed_response.content, "Gemischt");
+    }
+
+    #[test]
+    fn openai_response_parser_lehnt_abgeschnittene_antwort_ab() {
+        // Reasoning-Modelle (Deepseek v4) verbrauchen das Token-Budget beim Denken
+        // und schuetten bei finish_reason=length den Denkprozess als content aus.
+        // Ohne diese Pruefung landet der Rohtext ungefiltert im Lagebild.
+        let err = parse_openai_chat_response(&json!({
+            "model": "accounts/fireworks/models/deepseek-v4-flash",
+            "choices": [{
+                "finish_reason": "length",
+                "message": { "content": "Wir haben eine Anfrage zur Erstellung eines Lagebilds" }
+            }]
+        }))
+        .expect_err("abgeschnittene Antwort");
+        assert_eq!(
+            err,
+            ChatProviderError::Provider("response truncated (max_tokens)".to_string())
+        );
+
+        parse_openai_chat_response(&json!({
+            "choices": [{ "finish_reason": "stop", "message": { "content": "Fertig" } }]
+        }))
+        .expect("vollstaendige Antwort bleibt gueltig");
     }
 
     #[test]
