@@ -24,6 +24,10 @@ const CHANNEL_HISTORY_LIMIT: usize = 200;
 /// gelesenen Nachrichten als Fakten; gespeichert und ausgeliefert wird nur eine
 /// handhabbare Zahl von Links.
 const CHANNEL_EVIDENCE_LIMIT: usize = 10;
+/// Rückschaufenster für den Teamkanal. Deckt den Wochenlauf mit Reserve ab und
+/// macht jede Karte für sich vollständig, statt nur das Delta seit der letzten
+/// Karte zu kennen.
+const CHANNEL_HISTORY_WINDOW: chrono::Duration = chrono::Duration::days(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelHistoryMessage {
@@ -60,7 +64,6 @@ enum ChannelHistoryLoad {
     Loaded {
         message_count: usize,
         truncated: bool,
-        read_at: DateTime<Utc>,
     },
     Failed {
         channel_id: u64,
@@ -99,15 +102,6 @@ impl LoadedLagebildInput {
         match self.channel_history {
             ChannelHistoryLoad::Loaded { message_count, .. } => message_count,
             ChannelHistoryLoad::NotRequested | ChannelHistoryLoad::Failed { .. } => 0,
-        }
-    }
-
-    fn channel_history_read_at(&self) -> Option<String> {
-        match self.channel_history {
-            ChannelHistoryLoad::Loaded { read_at, .. } => {
-                Some(read_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-            }
-            ChannelHistoryLoad::NotRequested | ChannelHistoryLoad::Failed { .. } => None,
         }
     }
 
@@ -1181,16 +1175,6 @@ async fn load_lagebild_input(
         r#"
         SELECT t.name,
                t.discord_channel_id,
-               (
-                    SELECT (snapshot.data_summary ->> 'channel_history_read_at')::timestamptz
-                      FROM scrim.lagebild_snapshots snapshot
-                    WHERE snapshot.team_id = t.id
-                      AND snapshot.status = 'ok'
-                      AND snapshot.data_summary ->> 'channel_history_state' = 'loaded'
-                      AND snapshot.data_summary ->> 'channel_history_read_at' IS NOT NULL
-                     ORDER BY snapshot.generated_at DESC, snapshot.id DESC
-                    LIMIT 1
-               ) AS last_channel_history_read_at,
                COUNT(tm.participant_id)::bigint AS member_count
           FROM scrim.teams t
           LEFT JOIN scrim.team_members tm ON tm.team_id = t.id
@@ -1220,21 +1204,19 @@ async fn load_lagebild_input(
             json!({ "channel_id": channel_id }),
         ));
         if let Some(channel_history) = channel_history {
-            let since = team.get::<Option<DateTime<Utc>>, _>("last_channel_history_read_at");
-            let fetch_started_at = Utc::now();
+            // Festes Rückschaufenster statt Fortschreiben ab der letzten Karte.
+            // Inkrementell gelesen kannte jede neue Karte nur das Delta seit dem
+            // letzten Lauf — kam zwischendurch nichts, entstand eine leere Karte,
+            // obwohl die Woche voller Absprachen war (live am 2026-07-29 gesehen:
+            // facts=4, "keine_operativen_daten", direkt nach einer guten Karte).
+            // Ein festes Fenster kann ausserdem per Konstruktion nichts
+            // ueberspringen; der Wasserstand konnte das bei jedem Fehlerpfad.
+            let since = Some(Utc::now() - CHANNEL_HISTORY_WINDOW);
             match channel_history
                 .recent_messages(channel_id, since, CHANNEL_HISTORY_LIMIT)
                 .await
             {
                 Ok(batch) => {
-                    // Die jüngste gelesene Nachricht ist der exakte Lesepunkt. Bei leerer
-                    // Antwort rückt der Abrufstart konservativ vor, ohne das Abruffenster zu überspringen.
-                    let read_at = batch
-                        .messages
-                        .iter()
-                        .map(|message| message.timestamp)
-                        .max()
-                        .unwrap_or(fetch_started_at);
                     let truncated = batch.truncated || batch.messages.len() > CHANNEL_HISTORY_LIMIT;
                     let mut message_count = 0usize;
                     let mut chat_evidences: Vec<ScrimLagebildEvidence> = Vec::new();
@@ -1279,7 +1261,6 @@ async fn load_lagebild_input(
                     channel_history_load = ChannelHistoryLoad::Loaded {
                         message_count,
                         truncated,
-                        read_at,
                     };
                 }
                 Err(error) => {
@@ -1606,7 +1587,6 @@ async fn insert_snapshot(
         "correction_count": input.corrections.len(),
         "evidence_count": input.evidences.len(),
         "channel_history_state": loaded.channel_history_state(),
-        "channel_history_read_at": loaded.channel_history_read_at(),
         "channel_message_count": loaded.channel_message_count(),
         "channel_history_truncated": loaded.channel_history_truncated(),
     }))
