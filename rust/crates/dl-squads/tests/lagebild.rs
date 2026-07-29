@@ -548,7 +548,7 @@ async fn nach_dem_abruf_entstandene_nachricht_wird_im_naechsten_lauf_gelesen(
 }
 
 #[tokio::test]
-async fn leerer_erfolgreicher_abruf_speichert_einen_neuen_lesepunkt(
+async fn leerer_erfolgreicher_abruf_nutzt_das_feste_rueckschaufenster(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
     sqlx::query(
@@ -584,10 +584,10 @@ async fn leerer_erfolgreicher_abruf_speichert_einen_neuen_lesepunkt(
     .bind(first.snapshot_id)
     .fetch_one(db.pool())
     .await?;
-    let first_read_at = first_summary["channel_history_read_at"]
-        .as_str()
-        .ok_or("Lesepunkt fehlt nach leerem erfolgreichen Abruf")?
-        .parse::<chrono::DateTime<chrono::Utc>>()?;
+    assert!(
+        first_summary.get("channel_history_read_at").is_none(),
+        "der alte Teamkanal-Wasserstand darf nicht mehr gespeichert werden"
+    );
     refresh_team_lagebild(
         db.pool(),
         Some(provider.as_ref()),
@@ -597,7 +597,80 @@ async fn leerer_erfolgreicher_abruf_speichert_einen_neuen_lesepunkt(
     )
     .await?;
 
-    assert_eq!(history.since_calls(), vec![None, Some(first_read_at)]);
+    assert_fixed_window_calls(history.since_calls(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lauf_ohne_neue_nachrichten_sieht_den_teamkanal_im_fenster_weiter(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    insert_terminabfrage(db.pool(), 1).await?;
+    let mut message = channel_message(9002, "Orga", "Wir können am Donnerstag um 20 Uhr spielen.");
+    message.timestamp = chrono::Utc::now() - chrono::Duration::days(2);
+    let history = FakeChannelHistory::ok(vec![message]);
+    let provider = dl_ai::MockChatProvider::new(vec![
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Das Team stimmt einen Termin für Donnerstag ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
+        )),
+        Ok(dl_ai::ChatResponse::text(
+            r#"{"lage":"Das Team stimmt weiter denselben Termin ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
+        )),
+    ]);
+
+    refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+    let second = refresh_team_lagebild(
+        db.pool(),
+        Some(provider.as_ref()),
+        Some(&history),
+        1,
+        correction_actor(),
+    )
+    .await?;
+
+    assert_eq!(second.verdict, "yes");
+    assert_fixed_window_calls(history.since_calls(), 2);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let second_prompt = requests[1]
+        .0
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second_prompt.contains("Wir können am Donnerstag um 20 Uhr spielen."),
+        "Nachricht aus dem festen Fenster fehlt im zweiten Lauf ohne neue Nachrichten"
+    );
+    let second_summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT data_summary
+           FROM scrim.lagebild_snapshots
+          WHERE id = $1",
+    )
+    .bind(second.snapshot_id)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(second_summary["channel_history_state"], "loaded");
+    assert_eq!(second_summary["channel_message_count"], 1);
+    assert_eq!(second_summary["has_operational_data"], true);
+    assert_eq!(second_summary["data_limited"], false);
+    assert!(
+        second_summary.get("channel_history_read_at").is_none(),
+        "der alte Teamkanal-Wasserstand darf nicht mehr gespeichert werden"
+    );
     Ok(())
 }
 
@@ -666,7 +739,7 @@ async fn teamkanal_belege_sind_je_karte_begrenzt() -> Result<(), Box<dyn std::er
 }
 
 #[tokio::test]
-async fn ai_fehler_rueckt_den_teamkanal_wasserstand_nicht_vor(
+async fn ai_fehler_aendert_das_teamkanal_rueckschaufenster_nicht(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
     sqlx::query(
@@ -706,12 +779,12 @@ async fn ai_fehler_rueckt_den_teamkanal_wasserstand_nicht_vor(
 
     assert_eq!(first.verdict, "timeout");
     assert_eq!(second.verdict, "yes");
-    assert_eq!(history.since_calls(), vec![None, None]);
+    assert_fixed_window_calls(history.since_calls(), 2);
     Ok(())
 }
 
 #[tokio::test]
-async fn teamkanal_abruf_fehler_rueckt_den_wasserstand_nicht_vor(
+async fn teamkanal_abruf_fehler_aendert_das_rueckschaufenster_nicht(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
     sqlx::query(
@@ -766,7 +839,8 @@ async fn teamkanal_abruf_fehler_rueckt_den_wasserstand_nicht_vor(
     assert_eq!(first.verdict, "yes");
     assert_eq!(second.verdict, "yes");
     assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
-    assert_eq!(loaded_history.since_calls(), vec![None]);
+    assert_fixed_window_calls(failed_history.since_calls(), 1);
+    assert_fixed_window_calls(loaded_history.since_calls(), 1);
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
     let second_prompt = requests[1]
@@ -780,7 +854,7 @@ async fn teamkanal_abruf_fehler_rueckt_den_wasserstand_nicht_vor(
 }
 
 #[tokio::test]
-async fn alter_snapshot_ohne_chat_ladezustand_rueckt_den_wasserstand_nicht_vor(
+async fn alter_snapshot_ohne_chat_ladezustand_aendert_das_rueckschaufenster_nicht(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
     sqlx::query(
@@ -817,13 +891,13 @@ async fn alter_snapshot_ohne_chat_ladezustand_rueckt_den_wasserstand_nicht_vor(
     )
     .await?;
 
-    assert_eq!(history.since_calls(), vec![None]);
+    assert_fixed_window_calls(history.since_calls(), 1);
     assert_eq!(provider.requests().len(), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn nicht_angefragter_teamkanal_rueckt_den_wasserstand_nicht_vor(
+async fn nicht_angefragter_teamkanal_aendert_das_rueckschaufenster_nicht(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = dl_central_db::testing::test_pool().await?;
     sqlx::query(
@@ -859,6 +933,10 @@ async fn nicht_angefragter_teamkanal_rueckt_den_wasserstand_nicht_vor(
     .fetch_one(db.pool())
     .await?;
     assert_eq!(first_summary["channel_history_state"], "not_requested");
+    assert!(
+        first_summary.get("channel_history_read_at").is_none(),
+        "ohne Abruf darf kein alter Teamkanal-Wasserstand entstehen"
+    );
     let history = FakeChannelHistory::ok(vec![channel_message(
         9002,
         "Orga",
@@ -873,7 +951,7 @@ async fn nicht_angefragter_teamkanal_rueckt_den_wasserstand_nicht_vor(
     )
     .await?;
 
-    assert_eq!(history.since_calls(), vec![None]);
+    assert_fixed_window_calls(history.since_calls(), 1);
     assert_eq!(provider.requests().len(), 2);
     Ok(())
 }
@@ -1216,6 +1294,32 @@ async fn teamkanal_deckelung_auf_200_nachrichten_ist_im_ledger_sichtbar(
         .join("\n");
     assert!(prompt.contains("auf 200 Nachrichten begrenzt"));
     Ok(())
+}
+
+/// Jeder Abruf liest dasselbe feste Rückschaufenster: `since` liegt immer rund
+/// zehn Tage zurück, egal ob der Lauf davor an der AI, am Discord-Abruf oder
+/// gar nicht stattgefunden hat. Genau das ersetzt die alte Wasserstandsprüfung —
+/// die Frage "kann eine Nachricht verlorengehen" beantwortet jetzt die
+/// Fenstergröße statt eines fortgeschriebenen Lesepunkts.
+fn assert_fixed_window_calls(
+    calls: Vec<Option<chrono::DateTime<chrono::Utc>>>,
+    expected_calls: usize,
+) {
+    assert_eq!(
+        calls.len(),
+        expected_calls,
+        "unerwartete Zahl an Teamkanal-Abrufen: {calls:?}"
+    );
+    let now = chrono::Utc::now();
+    for (index, since) in calls.iter().enumerate() {
+        let since = since.unwrap_or_else(|| panic!("Abruf {index} lief ohne Rückschaufenster"));
+        let lookback_seconds = (now - since).num_seconds();
+        let expected_seconds = chrono::Duration::days(10).num_seconds();
+        assert!(
+            (lookback_seconds - expected_seconds).abs() <= 120,
+            "Abruf {index} las {lookback_seconds}s zurück, erwartet waren {expected_seconds}s"
+        );
+    }
 }
 
 #[derive(Clone)]

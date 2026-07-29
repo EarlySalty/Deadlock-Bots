@@ -1,3 +1,11 @@
+## #309 — Lage-Karten bleiben gefüllt, auch ohne neue Nachrichten
+
+Problem: Das Lagebild las den Teamkanal nur ab dem Punkt, an dem die letzte Karte aufgehört hatte. Kam seitdem nichts Neues, kannte die frische Karte nichts — und ersetzte eine Karte mit knapp 200 Fakten durch „keine operativen Daten".
+
+Änderung: Jeder Lauf liest jetzt dieselben zehn Tage zurück, unabhängig davon, was der Lauf davor gesehen hat oder ob er überhaupt durchlief.
+
+Aktuelles Verhalten: Jede Karte steht für sich und zeigt die Absprachen der letzten zehn Tage. Wird die Nachrichtengrenze erreicht, ist das an der Karte weiterhin als begrenzte Datenlage sichtbar.
+
 ## #308 — Die Lage-Karten laden wieder
 
 Problem: Seit die Lagebilder den Teamkanal mitlesen, hing an jeder Karte ein Link zu jeder gelesenen Nachricht — knapp 190 Stück pro Team. Die Übersicht im Coach-Bereich lief damit in eine Größengrenze und zeigte nur noch „Die Lage lässt sich gerade nicht laden".
