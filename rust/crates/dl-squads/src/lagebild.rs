@@ -18,7 +18,7 @@ const PRIVATE_CHAT_CONTENT_KIND: &str = "message_content";
 const PRIVATE_CHAT_AUTHOR_KIND: &str = "author_name";
 /// Format der Lagebildkarte. Wird die Karte umgebaut, macht eine neue Version
 /// alle alten Snapshots sofort fällig, statt sie eine Woche stehen zu lassen.
-pub const REPORT_VERSION: &str = "4";
+pub const REPORT_VERSION: &str = "5";
 const CHANNEL_HISTORY_LIMIT: usize = 200;
 /// Höchstzahl der Teamkanal-Belege je Karte. Die AI sieht weiterhin alle
 /// gelesenen Nachrichten als Fakten; gespeichert und ausgeliefert wird nur eine
@@ -132,7 +132,8 @@ Regeln:
 - risiken enthält nur belegbare Punkte aus den Daten. Ist nichts erkennbar, gib eine leere Liste.
 - naechster_schritt ist immer gefüllt und beschreibt eine Handlung, keine Beobachtung.
 - prioritaet ist hoch, wenn etwas heute blockiert, mittel bei offener Klärung, keine, wenn nichts zu tun ist.
-- Der Teamkanal-Chat ist eine zusätzliche Faktenquelle. Ziehe daraus Schlüsse, zitiere Nachrichten nicht wörtlich und nenne keine Autorennamen.
+- Der Teamkanal-Chat ist eine zusätzliche Faktenquelle. Ziehe daraus Schlüsse und zitiere Nachrichten nicht wörtlich.
+- Die Schreibenden im Teamkanal stehen pseudonymisiert und durchnummeriert da. Nutze genau diese Bezeichnungen und übernimm keinen Namen aus dem Nachrichtentext.
 Evidenzen werden vom System nachträglich angehängt."#;
 
 const CORRECTION_SYSTEM_PROMPT: &str = r#"Du hilfst im Dashboard, ein internes Scrim-Lagebild zu korrigieren.
@@ -1220,18 +1221,39 @@ async fn load_lagebild_input(
                     let truncated = batch.truncated || batch.messages.len() > CHANNEL_HISTORY_LIMIT;
                     let mut message_count = 0usize;
                     let mut chat_evidences: Vec<ScrimLagebildEvidence> = Vec::new();
+                    // Anzeigename -> Pseudonym, in Reihenfolge des ersten
+                    // Auftretens. Nur je Karte gültig; über Karten hinweg stabile
+                    // Pseudonyme wären wieder eine Personenzuordnung in der DB.
+                    let mut author_aliases: Vec<(String, String)> = Vec::new();
                     for message in batch.messages.into_iter().take(CHANNEL_HISTORY_LIMIT) {
                         let content = message.content.trim();
                         if message.is_bot || content.is_empty() {
                             continue;
                         }
                         message_count += 1;
+                        // Die AI sieht nie den echten Anzeigenamen. Die Anweisung
+                        // "nenne keine Autorennamen" hielt sie nicht ein, und der
+                        // Zitat-Schutz verwarf danach jede Karte des Teams. Ein
+                        // Name, der nicht im Prompt steht, kann nicht kopiert
+                        // werden; wer wer ist, steht weiterhin hinter den Belegen.
+                        let author_alias = match author_aliases
+                            .iter()
+                            .find(|(name, _)| name == &message.author_display_name)
+                        {
+                            Some((_, alias)) => alias.clone(),
+                            None => {
+                                let alias = format!("Spieler {}", author_aliases.len() + 1);
+                                author_aliases
+                                    .push((message.author_display_name.clone(), alias.clone()));
+                                alias
+                            }
+                        };
                         private_chat_authors.push(message.author_display_name.clone());
                         private_chat_contents.push(content.to_string());
                         facts.push(format!(
                             "Teamkanal-Chat am {} von {}: {}",
                             message.timestamp.to_rfc3339(),
-                            message.author_display_name,
+                            author_alias,
                             content
                         ));
                         // Die AI bekommt jede Nachricht als Fakt, die Karte aber nur

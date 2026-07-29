@@ -1,3 +1,11 @@
+## #310 — Lagebilder scheitern nicht mehr an Namen aus dem Teamkanal
+
+Problem: Die KI sollte keine Namen aus dem Teamkanal nennen, tat es aber trotzdem. Der Schutz gegen wörtlich übernommene Chatdaten verwarf die Karte daraufhin — bei einem Team seit Stunden jede einzelne, sichtbar nur als roter Fehlercode.
+
+Änderung: Die KI sieht die Schreibenden gar nicht mehr mit Namen, sondern nur noch durchnummeriert als „Spieler 1", „Spieler 2" und so weiter. Wer dahintersteckt, steht weiterhin hinter den verlinkten Belegen. Alle Karten werden dadurch einmalig neu erzeugt.
+
+Aktuelles Verhalten: Karten entstehen wieder, auch für Teams mit viel Chat. Nennt die KI doch einen echten Namen — etwa weil er in einer Nachricht stand — wird die Karte weiterhin verworfen.
+
 ## #309 — Lage-Karten bleiben gefüllt, auch ohne neue Nachrichten
 
 Problem: Das Lagebild las den Teamkanal nur ab dem Punkt, an dem die letzte Karte aufgehört hatte. Kam seitdem nichts Neues, kannte die frische Karte nichts — und ersetzte eine Karte mit knapp 200 Fakten durch „keine operativen Daten".

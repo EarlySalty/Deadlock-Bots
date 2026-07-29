@@ -466,7 +466,11 @@ async fn teamkanal_chat_loest_ohne_strukturdaten_einen_ai_call_aus(
     bot_message.is_bot = true;
     let history = FakeChannelHistory::ok(vec![
         bot_message,
-        channel_message(9001, "Orga", "Wir können am Donnerstag um 20 Uhr spielen."),
+        channel_message(
+            9001,
+            "Nachtfalke",
+            "Wir können am Donnerstag um 20 Uhr spielen.",
+        ),
     ]);
     let provider = dl_ai::MockChatProvider::single(
         r#"{"lage":"Das Team stimmt einen Termin für Donnerstag ab.","risiken":[],"naechster_schritt":"Den Termin für Donnerstag bestätigen.","prioritaet":"mittel"}"#,
@@ -486,9 +490,91 @@ async fn teamkanal_chat_loest_ohne_strukturdaten_einen_ai_call_aus(
         .collect::<Vec<_>>()
         .join("\n");
     assert!(prompt.contains("Wir können am Donnerstag um 20 Uhr spielen."));
-    assert!(prompt.contains("Orga"));
+    assert!(
+        !prompt.contains("Nachtfalke"),
+        "der echte Anzeigename darf nicht im Prompt stehen"
+    );
+    assert!(prompt.contains("Spieler 1"));
     assert!(!prompt.contains("Interner Bottext"));
     assert!(prompt.contains("nicht wörtlich"));
+    Ok(())
+}
+
+/// Die AI hielt sich nicht an die Anweisung, keine Autorennamen zu nennen —
+/// live verwarf der Zitat-Schutz deshalb jede Karte von Team 3. Ein Name, den
+/// die AI nie sieht, kann sie auch nicht kopieren.
+#[tokio::test]
+async fn teamkanal_autoren_stehen_nur_pseudonymisiert_im_prompt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![
+        channel_message(9001, "Nachtfalke", "Donnerstag um 20 Uhr passt mir."),
+        channel_message(9002, "Silberpfeil", "Ich kann erst ab 21 Uhr."),
+        channel_message(9003, "Nachtfalke", "Dann verschieben wir auf 21 Uhr."),
+    ]);
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Das Team einigt sich auf Donnerstag um 21 Uhr.","risiken":[],"naechster_schritt":"Den Termin bestätigen.","prioritaet":"mittel"}"#,
+    );
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "ok");
+    let requests = provider.requests();
+    let prompt = requests[0]
+        .0
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!prompt.contains("Nachtfalke"));
+    assert!(!prompt.contains("Silberpfeil"));
+    // Zwei Autoren, drei Nachrichten: derselbe Autor behält sein Pseudonym,
+    // sonst liest die AI aus einer Absprache zwei Personen heraus.
+    assert_eq!(prompt.matches("Spieler 1").count(), 2);
+    assert_eq!(prompt.matches("Spieler 2").count(), 1);
+    assert!(!prompt.contains("Spieler 3"));
+    Ok(())
+}
+
+/// Nennt die AI trotz Pseudonymen einen echten Namen — etwa weil er im
+/// Nachrichtentext selbst stand — bleibt der Zitat-Schutz die letzte Instanz.
+#[tokio::test]
+async fn echter_autorenname_aus_dem_nachrichtentext_wird_weiter_abgelehnt(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = dl_central_db::testing::test_pool().await?;
+    sqlx::query(
+        "INSERT INTO scrim.teams(id, name, discord_channel_id, created_at)
+         VALUES(1, 'Team 1', 100, now())",
+    )
+    .execute(db.pool())
+    .await?;
+    let history = FakeChannelHistory::ok(vec![
+        channel_message(9001, "Nachtfalke", "Ich kann Donnerstag."),
+        channel_message(9002, "Silberpfeil", "Nachtfalke fehlt am Freitag."),
+    ]);
+    let provider = dl_ai::MockChatProvider::single(
+        r#"{"lage":"Nachtfalke fehlt am Freitag.","risiken":[],"naechster_schritt":"Ersatz suchen.","prioritaet":"mittel"}"#,
+    );
+
+    generate_due_lagebilder(db.pool(), Some(provider.as_ref()), Some(&history), 1).await?;
+
+    assert_eq!(latest_snapshot_status(db.pool()).await?, "error");
+    let reason: String = sqlx::query_scalar(
+        "SELECT reason
+           FROM bot.ai_decision_ledger
+          WHERE source = 'scrim.lagebild.generate'
+          ORDER BY id DESC
+          LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(reason, "ai_response_copied_chat");
     Ok(())
 }
 
