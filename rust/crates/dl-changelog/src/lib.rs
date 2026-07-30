@@ -21,7 +21,9 @@ use serde_json::{json, Map, Value};
 pub const DEV_UPDATES_CHANNEL_ID: u64 = 1492910851483504821;
 pub const TWITCH_BOT_CHANNEL_ID: u64 = 1318329964713611385;
 pub const MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
-const EMBED_COLOR: u32 = 0x5865F2;
+/// Gold der Community-Marke (gleicher Ton wie Voice-Panel und Willkommens-Karten).
+const EMBED_COLOR: u32 = 0xC8A86B;
+const CHANGELOG_FOOTER: &str = "Deutsche Deadlock Community";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChangelogError {
@@ -285,11 +287,11 @@ fn utc_now_iso() -> String {
 
 fn build_embed(title: &str, content: &str, target: &str) -> Value {
     json!({
-        "title": format!("📋 {title}"),
+        "title": title,
         "description": content,
         "color": EMBED_COLOR,
         "timestamp": utc_now_iso(),
-        "footer": { "text": if target == "twitch" { "Twitch Bot" } else { "Deadlock Bots" } },
+        "footer": { "text": if target == "twitch" { "Twitch Bot" } else { CHANGELOG_FOOTER } },
     })
 }
 
@@ -531,7 +533,7 @@ async fn handle_rich(State(state): State<SharedChangelog>, body: Option<Json<Val
     let footer = if target == "twitch" {
         "Twitch Bot"
     } else {
-        "Deadlock Bots"
+        CHANGELOG_FOOTER
     };
     let mut embeds = Vec::new();
     let valid_sections: Vec<(&str, String)> = sections
@@ -876,6 +878,23 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, DEV_UPDATES_CHANNEL_ID);
         assert!(sent[0].3.is_none());
+    }
+
+    #[tokio::test]
+    async fn changelog_embed_traegt_das_community_branding() {
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({"token": "test-token", "title": "Titel", "content": "C"}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        let embed = &sent[0].2[0];
+        assert_eq!(embed["color"], 0xC8A86B, "Gold, nicht Discord-Blurple");
+        assert_eq!(embed["title"], "Titel", "kein Unicode-Präfix im Titel");
+        assert_eq!(embed["footer"]["text"], "Deutsche Deadlock Community");
     }
 
     #[tokio::test]
