@@ -1,3 +1,11 @@
+## #311 — Update-Posts sehen aus wie der Rest des Servers
+
+Problem: Die Beiträge in den Dev-Updates kamen in Discord-Blau, mit Klemmbrett-Symbol im Titel und der Fußzeile „Deadlock Bots" — also im Look eines fremden Bots statt im Gold der Community.
+
+Änderung: Update-Posts nutzen jetzt denselben Goldton wie Sprachkanal-Panel und Willkommenskarten, der Titel steht ohne Symbol davor, und in der Fußzeile steht die Community.
+
+Aktuelles Verhalten: Neue Update-Posts passen optisch zu den anderen Bot-Nachrichten. Ältere Beiträge bleiben, wie sie sind.
+
 ## #310 — Lagebilder scheitern nicht mehr an Namen aus dem Teamkanal
 
 Problem: Die KI sollte keine Namen aus dem Teamkanal nennen, tat es aber trotzdem. Der Schutz gegen wörtlich übernommene Chatdaten verwarf die Karte daraufhin — bei einem Team seit Stunden jede einzelne, sichtbar nur als roter Fehlercode.
