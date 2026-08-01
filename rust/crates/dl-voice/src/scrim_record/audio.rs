@@ -123,6 +123,7 @@ struct RecordingFailure {
     reason: Mutex<Option<String>>,
     dropped_frames: AtomicU64,
     recent_drops: Mutex<VecDeque<(Instant, u64)>>,
+    last_drop_log: Mutex<Option<Instant>>,
 }
 
 impl RecordingFailure {
@@ -133,6 +134,7 @@ impl RecordingFailure {
             reason: Mutex::new(None),
             dropped_frames: AtomicU64::new(0),
             recent_drops: Mutex::new(VecDeque::new()),
+            last_drop_log: Mutex::new(None),
         }
     }
 
@@ -206,20 +208,40 @@ impl RecordingFailure {
                 recent.iter().map(|(_, count)| count).sum::<u64>()
             }
         };
-        tracing::warn!(
-            guild_id = self.metadata.guild_id,
-            channel_id = self.metadata.voice_channel_id,
-            recorder = ?self.metadata.recorder,
-            reason = source,
-            dropped_frames = count,
-            dropped_frames_total = total,
-            dropped_audio_ms_total = total * TICK_MILLIS as u64,
-            dropped_frames_in_window = recent_total,
-            "Scrim-Record: Audioframes verworfen"
-        );
+        // Ein Tick verwirft bis zu 50 Frames pro Sekunde. Ungedrosselt flutet das das
+        // Journal stundenlang; die Gesamtsumme steht ohnehin beim Stop und in der
+        // Discord-Nachricht, hier reicht ein Eintrag pro Fenster.
+        if self.should_log_drop(now) {
+            tracing::warn!(
+                guild_id = self.metadata.guild_id,
+                channel_id = self.metadata.voice_channel_id,
+                recorder = ?self.metadata.recorder,
+                reason = source,
+                dropped_frames = count,
+                dropped_frames_total = total,
+                dropped_audio_ms_total = total * TICK_MILLIS as u64,
+                dropped_frames_in_window = recent_total,
+                "Scrim-Record: Audioframes verworfen"
+            );
+        }
         if recent_total > MAX_DROPPED_FRAMES_PER_WINDOW {
             self.fail(format!("sustained_audio_loss: {source}"));
         }
+    }
+
+    fn should_log_drop(&self, now: Instant) -> bool {
+        let mut last = match self.last_drop_log.lock() {
+            Ok(last) => last,
+            // Ein vergiftetes Log-Fenster darf die Aufnahme nicht beeinflussen; im
+            // Zweifel lieber loggen als schweigen.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let due = last
+            .is_none_or(|logged_at| now.saturating_duration_since(logged_at) >= DROP_FAILURE_WINDOW);
+        if due {
+            *last = Some(now);
+        }
+        due
     }
 
     fn dropped_frames(&self) -> u64 {
@@ -1068,6 +1090,16 @@ mod tests {
             Err("sustained_audio_loss: queue_full".to_string())
         );
         assert_eq!(failure.dropped_frames(), MAX_DROPPED_FRAMES_PER_WINDOW + 1);
+    }
+
+    #[test]
+    fn drop_logging_is_throttled_to_one_entry_per_window() {
+        let failure = RecordingFailure::new(metadata());
+        let now = Instant::now();
+
+        assert!(failure.should_log_drop(now));
+        assert!(!failure.should_log_drop(now + DROP_FAILURE_WINDOW / 2));
+        assert!(failure.should_log_drop(now + DROP_FAILURE_WINDOW));
     }
 
     #[test]

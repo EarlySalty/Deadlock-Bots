@@ -845,10 +845,29 @@ async fn dropped_audio_is_disclosed_in_the_upload_message() {
 
     assert_eq!(
         harness.port.upload_contents(),
-        vec![Some(
-            "Die Aufnahme enthält Lücken: 3 Audioframes (60 ms) konnten nicht aufgezeichnet werden."
-                .to_string()
-        )]
+        vec![Some("Die Aufnahme hat Lücken: 60 ms Ton fehlen.".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn dropped_audio_beyond_a_second_is_disclosed_in_seconds() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+    harness.backend.set_dropped_frames(211);
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    assert_eq!(
+        harness.port.upload_contents(),
+        vec![Some("Die Aufnahme hat Lücken: 4,2 Sekunden Ton fehlen.".to_string())]
     );
 }
 

@@ -113,18 +113,20 @@ pub trait RecordingBackend: Send + Sync {
     ) -> Result<RecordingLoss, RecordingStopError>;
 }
 
+// Frames sagen dem Team nichts — fehlende Tonzeit schon. Unter einer Sekunde in
+// Millisekunden, darüber in Sekunden, sonst stehen dort fünfstellige Zahlen.
 fn recording_loss_notice(loss: RecordingLoss) -> Option<String> {
     (loss.dropped_frames > 0).then(|| {
-        let frame_label = if loss.dropped_frames == 1 {
-            "Audioframe"
+        let millis = loss.dropped_audio.as_millis();
+        if millis < 1_000 {
+            format!("Die Aufnahme hat Lücken: {millis} ms Ton fehlen.")
         } else {
-            "Audioframes"
-        };
-        format!(
-            "Die Aufnahme enthält Lücken: {} {frame_label} ({} ms) konnten nicht aufgezeichnet werden.",
-            loss.dropped_frames,
-            loss.dropped_audio.as_millis()
-        )
+            format!(
+                "Die Aufnahme hat Lücken: {},{} Sekunden Ton fehlen.",
+                millis / 1_000,
+                (millis % 1_000) / 100
+            )
+        }
     })
 }
 
