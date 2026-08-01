@@ -59,7 +59,31 @@ pub trait ScrimRecordPort: Send + Sync {
 
     async fn post_text(&self, channel_id: u64, content: &str) -> Result<(), String>;
 
-    async fn upload_attachment(&self, channel_id: u64, path: &Path) -> Result<(), String>;
+    async fn upload_attachment(
+        &self,
+        channel_id: u64,
+        content: Option<&str>,
+        path: &Path,
+    ) -> Result<(), String>;
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingLoss {
+    pub dropped_frames: u64,
+    pub dropped_audio: Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{reason}")]
+pub struct RecordingStopError {
+    reason: String,
+    pub loss: RecordingLoss,
+}
+
+impl RecordingStopError {
+    pub(crate) fn new(reason: String, loss: RecordingLoss) -> Self {
+        Self { reason, loss }
+    }
 }
 
 #[async_trait::async_trait]
@@ -86,7 +110,22 @@ pub trait RecordingBackend: Send + Sync {
         identity: RecorderIdentity,
         guild_id: u64,
         voice_channel_id: u64,
-    ) -> Result<(), String>;
+    ) -> Result<RecordingLoss, RecordingStopError>;
+}
+
+fn recording_loss_notice(loss: RecordingLoss) -> Option<String> {
+    (loss.dropped_frames > 0).then(|| {
+        let frame_label = if loss.dropped_frames == 1 {
+            "Audioframe"
+        } else {
+            "Audioframes"
+        };
+        format!(
+            "Die Aufnahme enthält Lücken: {} {frame_label} ({} ms) konnten nicht aufgezeichnet werden.",
+            loss.dropped_frames,
+            loss.dropped_audio.as_millis()
+        )
+    })
 }
 
 #[async_trait::async_trait]
@@ -949,28 +988,37 @@ impl ScrimRecorder {
             recorder,
         );
 
-        match self
+        let recording_loss = match self
             .backend
             .stop(recorder, SCRIM_GUILD_ID, voice_channel_id)
             .await
         {
-            Ok(()) => tracing::info!(
-                guild_id = SCRIM_GUILD_ID,
-                channel_id = voice_channel_id,
-                recorder = ?recorder,
-                reason = trigger.reason(),
-                "Scrim-Record: Backend gestoppt und finalisiert"
-            ),
-            Err(err) => tracing::error!(
-                %err,
-                guild_id = SCRIM_GUILD_ID,
-                channel_id = voice_channel_id,
-                recorder = ?recorder,
-                reason = "backend_stop_failed",
-                trigger = trigger.reason(),
-                "Scrim-Record: Backend-Stop oder Finalisierung fehlgeschlagen"
-            ),
-        }
+            Ok(loss) => {
+                tracing::info!(
+                    guild_id = SCRIM_GUILD_ID,
+                    channel_id = voice_channel_id,
+                    recorder = ?recorder,
+                    reason = trigger.reason(),
+                    dropped_frames = loss.dropped_frames,
+                    dropped_audio_ms = loss.dropped_audio.as_millis(),
+                    "Scrim-Record: Backend gestoppt und finalisiert"
+                );
+                loss
+            }
+            Err(err) => {
+                let loss = err.loss;
+                tracing::error!(
+                    %err,
+                    guild_id = SCRIM_GUILD_ID,
+                    channel_id = voice_channel_id,
+                    recorder = ?recorder,
+                    reason = "backend_stop_failed",
+                    trigger = trigger.reason(),
+                    "Scrim-Record: Backend-Stop oder Finalisierung fehlgeschlagen"
+                );
+                loss
+            }
+        };
 
         let transcoded = match create_private_output_file(&files.mp3_path).await {
             Ok(()) => match self
@@ -1007,9 +1055,14 @@ impl ScrimRecorder {
         };
 
         let upload_succeeded = if transcoded {
+            let upload_content = recording_loss_notice(recording_loss);
             match self
                 .port
-                .upload_attachment(session.text_channel_id, &files.mp3_path)
+                .upload_attachment(
+                    session.text_channel_id,
+                    upload_content.as_deref(),
+                    &files.mp3_path,
+                )
                 .await
             {
                 Ok(()) => {
@@ -1020,6 +1073,8 @@ impl ScrimRecorder {
                         recorder = ?recorder,
                         reason = "attachment_uploaded",
                         trigger = trigger.reason(),
+                        dropped_frames = recording_loss.dropped_frames,
+                        dropped_audio_ms = recording_loss.dropped_audio.as_millis(),
                         "Scrim-Record: Aufnahme hochgeladen"
                     );
                     true
@@ -1033,6 +1088,8 @@ impl ScrimRecorder {
                         recorder = ?recorder,
                         reason = "attachment_upload_failed",
                         trigger = trigger.reason(),
+                        dropped_frames = recording_loss.dropped_frames,
+                        dropped_audio_ms = recording_loss.dropped_audio.as_millis(),
                         "Scrim-Record: Attachment-Upload fehlgeschlagen"
                     );
                     false
@@ -1122,11 +1179,13 @@ impl ScrimRecorder {
             .stop(recorder, SCRIM_GUILD_ID, voice_channel_id)
             .await
         {
-            Ok(()) => tracing::info!(
+            Ok(loss) => tracing::info!(
                 guild_id = SCRIM_GUILD_ID,
                 channel_id = voice_channel_id,
                 recorder = ?recorder,
                 reason,
+                dropped_frames = loss.dropped_frames,
+                dropped_audio_ms = loss.dropped_audio.as_millis(),
                 "Scrim-Record: Best-Effort-Backend-Stop abgeschlossen"
             ),
             Err(err) => tracing::error!(
