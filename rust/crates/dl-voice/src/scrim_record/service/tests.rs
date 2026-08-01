@@ -19,6 +19,7 @@ struct MockPortState {
     text_failures_remaining: usize,
     successful_posts: Vec<(u64, String)>,
     upload_attempts: Vec<(u64, PathBuf)>,
+    upload_contents: Vec<Option<String>>,
     fail_upload: bool,
 }
 
@@ -107,6 +108,14 @@ impl MockPort {
             .upload_attempts
             .clone()
     }
+
+    fn upload_contents(&self) -> Vec<Option<String>> {
+        self.state
+            .lock()
+            .expect("mock port lock")
+            .upload_contents
+            .clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -159,9 +168,15 @@ impl ScrimRecordPort for MockPort {
         Ok(())
     }
 
-    async fn upload_attachment(&self, channel_id: u64, path: &Path) -> Result<(), String> {
+    async fn upload_attachment(
+        &self,
+        channel_id: u64,
+        content: Option<&str>,
+        path: &Path,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().expect("mock port lock");
         state.upload_attempts.push((channel_id, path.to_path_buf()));
+        state.upload_contents.push(content.map(str::to_string));
         if state.fail_upload {
             Err("upload failure".to_string())
         } else {
@@ -182,6 +197,7 @@ struct MockBackendState {
     ready: [Result<bool, String>; 2],
     health: [Result<(), String>; 2],
     fail_starts_remaining: usize,
+    loss: RecordingLoss,
     starts: Vec<BackendCall>,
     stops: Vec<BackendCall>,
 }
@@ -192,6 +208,7 @@ impl Default for MockBackendState {
             ready: [Ok(true), Ok(true)],
             health: [Ok(()), Ok(())],
             fail_starts_remaining: 0,
+            loss: RecordingLoss::default(),
             starts: Vec::new(),
             stops: Vec::new(),
         }
@@ -239,6 +256,13 @@ impl MockBackend {
     fn fail_health(&self, identity: RecorderIdentity) {
         self.state.lock().expect("mock backend lock").health[Self::identity_index(identity)] =
             Err("recording unhealthy".to_string());
+    }
+
+    fn set_dropped_frames(&self, dropped_frames: u64) {
+        self.state.lock().expect("mock backend lock").loss = RecordingLoss {
+            dropped_frames,
+            dropped_audio: Duration::from_millis(dropped_frames * 20),
+        };
     }
 
     fn starts(&self) -> Vec<BackendCall> {
@@ -311,17 +335,17 @@ impl RecordingBackend for MockBackend {
         identity: RecorderIdentity,
         guild_id: u64,
         voice_channel_id: u64,
-    ) -> Result<(), String> {
-        self.state
-            .lock()
-            .expect("mock backend lock")
-            .stops
-            .push(BackendCall {
+    ) -> Result<RecordingLoss, RecordingStopError> {
+        let loss = {
+            let mut state = self.state.lock().expect("mock backend lock");
+            state.stops.push(BackendCall {
                 identity,
                 guild_id,
                 voice_channel_id,
                 wav_path: None,
             });
+            state.loss
+        };
         if self.block_stop.load(Ordering::SeqCst) {
             self.stop_entered.add_permits(1);
             self.release_stop
@@ -330,7 +354,7 @@ impl RecordingBackend for MockBackend {
                 .expect("stop-release semaphore")
                 .forget();
         }
-        Ok(())
+        Ok(loss)
     }
 }
 
@@ -801,6 +825,50 @@ async fn concurrent_stop_triggers_run_backend_and_upload_once() {
     assert_eq!(harness.transcoder.call_count(), 1);
     assert_eq!(harness.port.upload_attempts().len(), 1);
     harness.assert_temp_files_removed();
+}
+
+#[tokio::test]
+async fn dropped_audio_is_disclosed_in_the_upload_message() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+    harness.backend.set_dropped_frames(3);
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    assert_eq!(
+        harness.port.upload_contents(),
+        vec![Some("Die Aufnahme hat Lücken: 60 ms Ton fehlen.".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn dropped_audio_beyond_a_second_is_disclosed_in_seconds() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+    harness.backend.set_dropped_frames(211);
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    assert_eq!(
+        harness.port.upload_contents(),
+        vec![Some("Die Aufnahme hat Lücken: 4,2 Sekunden Ton fehlen.".to_string())]
+    );
 }
 
 #[tokio::test]

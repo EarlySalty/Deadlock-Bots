@@ -663,9 +663,14 @@ impl crate::scrim_record::ScrimRecordPort for CacheSnapshot {
             .map(|_| ())
     }
 
-    async fn upload_attachment(&self, channel_id: u64, path: &Path) -> Result<(), String> {
+    async fn upload_attachment(
+        &self,
+        channel_id: u64,
+        content: Option<&str>,
+        path: &Path,
+    ) -> Result<(), String> {
         self.adapter
-            .send_attachment_public(channel_id, None, path)
+            .send_attachment_public(channel_id, content, path)
             .await
             .map(|_| ())
             .map_err(|err| err.to_string())

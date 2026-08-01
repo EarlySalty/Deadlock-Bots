@@ -1,3 +1,11 @@
+## #312 — Scrim-Aufnahmen laufen bis zum Schluss durch
+
+Problem: Jede Aufnahme im Team-Sprachkanal brach nach wenigen Minuten von selbst ab. Der Bot lud trotzdem eine MP3 hoch — nur eben abgeschnitten, ohne dass jemand das merkte. Ursache war ein zu knapper Zwischenspeicher: schon ein kurzer Aussetzer beim Schreiben beendete die komplette Aufnahme.
+
+Änderung: Der Ton wird jetzt gebündelt geschrieben statt Einzelwert für Einzelwert, der Zwischenspeicher fasst zehn Sekunden statt einer, und einzelne verlorene Tonschnipsel beenden die Aufnahme nicht mehr. Abgebrochen wird erst, wenn über zehn Sekunden hinweg mehr als eine Sekunde Ton fehlt.
+
+Aktuelles Verhalten: Aufnahmen laufen bis zum Stopp oder bis zur Stundengrenze durch. Fehlt doch einmal etwas, steht es direkt bei der hochgeladenen Datei, zum Beispiel „Die Aufnahme hat Lücken: 60 ms Ton fehlen."
+
 ## #311 — Update-Posts sehen aus wie der Rest des Servers
 
 Problem: Die Beiträge in den Dev-Updates kamen in Discord-Blau, mit Klemmbrett-Symbol im Titel und der Fußzeile „Deadlock Bots" — also im Look eines fremden Bots statt im Gold der Community.

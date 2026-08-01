@@ -1,17 +1,19 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::BufWriter;
 use std::num::NonZeroU64;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use songbird::driver::{Channels, DecodeConfig, DecodeMode, SampleRate};
 use songbird::events::context_data::VoiceTick;
 use songbird::{Config, CoreEvent, Event, EventContext, EventHandler, Songbird};
 use tokio::sync::{mpsc, oneshot};
 
-use super::service::RecordingBackend;
+use super::service::{RecordingBackend, RecordingLoss, RecordingStopError};
 use super::RecorderIdentity;
 
 const SAMPLE_RATE_HZ: usize = 48_000;
@@ -20,7 +22,12 @@ const TICK_MILLIS: usize = 20;
 const SAMPLES_PER_TICK: usize = SAMPLE_RATE_HZ * CHANNELS * TICK_MILLIS / 1_000;
 const MAX_CARRY_TICKS_PER_SSRC: usize = 6;
 const MAX_CARRY_SAMPLES_PER_SSRC: usize = SAMPLES_PER_TICK * MAX_CARRY_TICKS_PER_SSRC;
-const FRAME_QUEUE_CAPACITY: usize = 50;
+// Ten seconds of stereo PCM cost about 1.9 MB per active recording.
+const FRAME_QUEUE_CAPACITY: usize = 10_000 / TICK_MILLIS;
+const WAV_BUFFER_CAPACITY: usize = 1024 * 1024;
+const DROP_FAILURE_WINDOW: Duration = Duration::from_secs(10);
+// More than one second of missing audio in ten seconds is an audible quality failure.
+const MAX_DROPPED_FRAMES_PER_WINDOW: u64 = 1_000 / TICK_MILLIS as u64;
 
 const WAV_SPEC: hound::WavSpec = hound::WavSpec {
     channels: CHANNELS as u16,
@@ -47,7 +54,7 @@ pub fn recording_songbird_manager() -> Arc<Songbird> {
 #[derive(Debug)]
 struct MixedFrame {
     samples: Vec<i16>,
-    overflowed: bool,
+    dropped_frames: u64,
 }
 
 #[derive(Debug, Default)]
@@ -60,13 +67,16 @@ impl StereoPcmMixer {
     where
         I: IntoIterator<Item = (u32, &'a [i16])>,
     {
-        let mut overflowed = false;
+        let mut dropped_frames = 0;
         for (ssrc, samples) in decoded_speakers {
             let queue = self.carry_by_ssrc.entry(ssrc).or_default();
             // Keep the current output tick plus at most six carry ticks (120ms).
             let capacity = SAMPLES_PER_TICK + MAX_CARRY_SAMPLES_PER_SSRC;
             let remaining_capacity = capacity.saturating_sub(queue.len());
-            overflowed |= samples.len() > remaining_capacity;
+            dropped_frames += samples
+                .len()
+                .saturating_sub(remaining_capacity)
+                .div_ceil(SAMPLES_PER_TICK) as u64;
             queue.extend(samples.iter().copied().take(remaining_capacity));
         }
 
@@ -82,14 +92,14 @@ impl StereoPcmMixer {
         self.carry_by_ssrc.retain(|_, queue| !queue.is_empty());
 
         // Clipping overlapping speakers to i16 is normal mixer behaviour, not a
-        // recording failure. `overflowed` only reports discarded carry data.
+        // recording failure. `dropped_frames` only reports discarded carry data.
         let samples = mixed
             .into_iter()
             .map(|sample| sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
             .collect();
         MixedFrame {
             samples,
-            overflowed,
+            dropped_frames,
         }
     }
 
@@ -111,6 +121,9 @@ struct RecordingFailure {
     metadata: RecordingMetadata,
     failed: AtomicBool,
     reason: Mutex<Option<String>>,
+    dropped_frames: AtomicU64,
+    recent_drops: Mutex<VecDeque<(Instant, u64)>>,
+    last_drop_log: Mutex<Option<Instant>>,
 }
 
 impl RecordingFailure {
@@ -119,6 +132,9 @@ impl RecordingFailure {
             metadata,
             failed: AtomicBool::new(false),
             reason: Mutex::new(None),
+            dropped_frames: AtomicU64::new(0),
+            recent_drops: Mutex::new(VecDeque::new()),
+            last_drop_log: Mutex::new(None),
         }
     }
 
@@ -168,6 +184,69 @@ impl RecordingFailure {
             }
         }
     }
+
+    fn record_dropped_frames(&self, count: u64, source: &'static str) {
+        self.record_dropped_frames_at(count, source, Instant::now());
+    }
+
+    fn record_dropped_frames_at(&self, count: u64, source: &'static str, now: Instant) {
+        let total = self.dropped_frames.fetch_add(count, Ordering::AcqRel) + count;
+        let recent_total = match self.recent_drops.lock() {
+            Ok(mut recent) => {
+                while recent.front().is_some_and(|(dropped_at, _)| {
+                    now.saturating_duration_since(*dropped_at) >= DROP_FAILURE_WINDOW
+                }) {
+                    recent.pop_front();
+                }
+                recent.push_back((now, count));
+                recent.iter().map(|(_, count)| count).sum::<u64>()
+            }
+            Err(poisoned) => {
+                self.fail("drop_window_lock_poisoned");
+                let mut recent = poisoned.into_inner();
+                recent.push_back((now, count));
+                recent.iter().map(|(_, count)| count).sum::<u64>()
+            }
+        };
+        // Ein Tick verwirft bis zu 50 Frames pro Sekunde. Ungedrosselt flutet das das
+        // Journal stundenlang; die Gesamtsumme steht ohnehin beim Stop und in der
+        // Discord-Nachricht, hier reicht ein Eintrag pro Fenster.
+        if self.should_log_drop(now) {
+            tracing::warn!(
+                guild_id = self.metadata.guild_id,
+                channel_id = self.metadata.voice_channel_id,
+                recorder = ?self.metadata.recorder,
+                reason = source,
+                dropped_frames = count,
+                dropped_frames_total = total,
+                dropped_audio_ms_total = total * TICK_MILLIS as u64,
+                dropped_frames_in_window = recent_total,
+                "Scrim-Record: Audioframes verworfen"
+            );
+        }
+        if recent_total > MAX_DROPPED_FRAMES_PER_WINDOW {
+            self.fail(format!("sustained_audio_loss: {source}"));
+        }
+    }
+
+    fn should_log_drop(&self, now: Instant) -> bool {
+        let mut last = match self.last_drop_log.lock() {
+            Ok(last) => last,
+            // Ein vergiftetes Log-Fenster darf die Aufnahme nicht beeinflussen; im
+            // Zweifel lieber loggen als schweigen.
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let due = last
+            .is_none_or(|logged_at| now.saturating_duration_since(logged_at) >= DROP_FAILURE_WINDOW);
+        if due {
+            *last = Some(now);
+        }
+        due
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        self.dropped_frames.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug)]
@@ -191,7 +270,7 @@ impl FrameQueue {
         )
     }
 
-    fn try_send(&self, samples: Vec<i16>) -> Result<(), String> {
+    fn try_send(&self, samples: Vec<i16>) -> Result<bool, String> {
         let sender = match self.sender.lock() {
             Ok(sender) => sender,
             Err(poisoned) => {
@@ -204,10 +283,10 @@ impl FrameQueue {
             return Err("queue_closed".to_string());
         };
         match sender.try_send(samples) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(true),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.failure.fail("queue_full");
-                Err("queue_full".to_string())
+                self.failure.record_dropped_frames(1, "queue_full");
+                Ok(false)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.failure.fail("queue_closed");
@@ -235,6 +314,13 @@ struct WavWriterTask {
     join: tokio::task::JoinHandle<Result<(), String>>,
 }
 
+fn new_buffered_wav_writer(file: File) -> Result<hound::WavWriter<BufWriter<File>>, hound::Error> {
+    hound::WavWriter::new(
+        BufWriter::with_capacity(WAV_BUFFER_CAPACITY, file),
+        WAV_SPEC,
+    )
+}
+
 impl WavWriterTask {
     async fn start(
         wav_path: PathBuf,
@@ -257,7 +343,7 @@ impl WavWriterTask {
                     return Err(error);
                 }
             };
-            let mut writer = match hound::WavWriter::new(file, WAV_SPEC) {
+            let mut writer = match new_buffered_wav_writer(file) {
                 Ok(writer) => writer,
                 Err(err) => {
                     let error = format!("writer_open_failed: {err}");
@@ -353,8 +439,9 @@ impl RecordingSink {
                     .map(|decoded| (*ssrc, decoded))
             }))
         };
-        if mixed.overflowed {
-            self.failure.fail("mixer_overflow");
+        if mixed.dropped_frames > 0 {
+            self.failure
+                .record_dropped_frames(mixed.dropped_frames, "mixer_overflow");
         }
         if self.active.load(Ordering::Acquire) {
             let _ = self.queue.try_send(mixed.samples);
@@ -699,7 +786,7 @@ impl RecordingBackend for SongbirdRecordingBackend {
         identity: RecorderIdentity,
         guild_id: u64,
         voice_channel_id: u64,
-    ) -> Result<(), String> {
+    ) -> Result<RecordingLoss, RecordingStopError> {
         let slot = self.slot(identity);
         let metadata = RecordingMetadata {
             guild_id,
@@ -709,7 +796,10 @@ impl RecordingBackend for SongbirdRecordingBackend {
         let active = {
             let mut state = slot.state.lock().map_err(|_| {
                 log_slot_fault(metadata, "slot_state_lock_poisoned");
-                "slot_state_lock_poisoned".to_string()
+                RecordingStopError::new(
+                    "slot_state_lock_poisoned".to_string(),
+                    RecordingLoss::default(),
+                )
             })?;
             let previous = std::mem::replace(&mut *state, SlotState::Stopping(metadata));
             match previous {
@@ -717,15 +807,18 @@ impl RecordingBackend for SongbirdRecordingBackend {
                 SlotState::Starting(starting) if starting == metadata => None,
                 SlotState::Idle => {
                     *state = SlotState::Idle;
-                    return Ok(());
+                    return Ok(RecordingLoss::default());
                 }
                 SlotState::Stopping(stopping) if stopping == metadata => {
                     *state = SlotState::Stopping(stopping);
-                    return Ok(());
+                    return Ok(RecordingLoss::default());
                 }
                 other => {
                     *state = other;
-                    return Err("recording_identity_or_channel_mismatch".to_string());
+                    return Err(RecordingStopError::new(
+                        "recording_identity_or_channel_mismatch".to_string(),
+                        RecordingLoss::default(),
+                    ));
                 }
             }
         };
@@ -733,8 +826,19 @@ impl RecordingBackend for SongbirdRecordingBackend {
         if let Some(active) = &active {
             active.sink.deactivate();
         }
+        let recording_loss = active
+            .as_ref()
+            .map(|active| {
+                let dropped_frames = active.sink.failure.dropped_frames();
+                RecordingLoss {
+                    dropped_frames,
+                    dropped_audio: Duration::from_millis(dropped_frames * TICK_MILLIS as u64),
+                }
+            })
+            .unwrap_or_default();
         let mut errors = Vec::new();
-        let songbird_guild_id = songbird_guild_id(guild_id)?;
+        let songbird_guild_id = songbird_guild_id(guild_id)
+            .map_err(|err| RecordingStopError::new(err, recording_loss))?;
         if let Err(err) = slot.manager.remove(songbird_guild_id).await {
             errors.push(format!("songbird_remove_failed: {err}"));
             if let Some(call) = slot.manager.get(songbird_guild_id) {
@@ -752,7 +856,17 @@ impl RecordingBackend for SongbirdRecordingBackend {
         if let Err(err) = self.force_idle(slot, metadata) {
             errors.push(err);
         }
+        tracing::info!(
+            guild_id,
+            channel_id = voice_channel_id,
+            recorder = ?identity,
+            dropped_frames = recording_loss.dropped_frames,
+            dropped_audio_ms = recording_loss.dropped_audio.as_millis(),
+            "Scrim-Record: Audio-Backend gestoppt"
+        );
         errors_to_result(errors)
+            .map(|()| recording_loss)
+            .map_err(|err| RecordingStopError::new(err, recording_loss))
     }
 }
 
@@ -767,6 +881,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
 
     use songbird::driver::{Channels, DecodeConfig, DecodeMode, SampleRate};
 
@@ -790,7 +905,7 @@ mod tests {
         assert_eq!(SAMPLES_PER_TICK, 1_920);
         assert_eq!(mixed.samples.len(), SAMPLES_PER_TICK);
         assert_eq!(mixed.samples, vec![0; SAMPLES_PER_TICK]);
-        assert!(!mixed.overflowed);
+        assert_eq!(mixed.dropped_frames, 0);
     }
 
     #[test]
@@ -804,7 +919,7 @@ mod tests {
 
         assert_eq!(mixed.samples.len(), SAMPLES_PER_TICK);
         assert_eq!(mixed.samples, speaker);
-        assert!(!mixed.overflowed);
+        assert_eq!(mixed.dropped_frames, 0);
     }
 
     #[test]
@@ -830,7 +945,7 @@ mod tests {
 
         assert_eq!(mixed.samples.len(), SAMPLES_PER_TICK);
         assert_eq!(mixed.samples, expected);
-        assert!(!mixed.overflowed);
+        assert_eq!(mixed.dropped_frames, 0);
     }
 
     #[test]
@@ -844,7 +959,7 @@ mod tests {
 
         assert_eq!(mixed.samples.len(), SAMPLES_PER_TICK);
         assert_eq!(mixed.samples, expected);
-        assert!(!mixed.overflowed);
+        assert_eq!(mixed.dropped_frames, 0);
     }
 
     #[test]
@@ -857,14 +972,14 @@ mod tests {
         let first = mixer.mix_voice_tick([(1, oversized.as_slice())]);
         assert_eq!(first.samples.len(), SAMPLES_PER_TICK);
         assert_eq!(first.samples, oversized[..SAMPLES_PER_TICK]);
-        assert!(!first.overflowed);
+        assert_eq!(first.dropped_frames, 0);
         assert_eq!(mixer.buffered_samples(), 4);
 
         let second = mixer.mix_voice_tick(std::iter::empty::<(u32, &[i16])>());
         let mut expected = vec![0; SAMPLES_PER_TICK];
         expected[..4].copy_from_slice(&oversized[SAMPLES_PER_TICK..]);
         assert_eq!(second.samples, expected);
-        assert!(!second.overflowed);
+        assert_eq!(second.dropped_frames, 0);
         assert_eq!(mixer.buffered_samples(), 0);
     }
 
@@ -875,7 +990,7 @@ mod tests {
 
         let mixed = mixer.mix_voice_tick([(1, oversized.as_slice())]);
 
-        assert!(mixed.overflowed);
+        assert_eq!(mixed.dropped_frames, 1);
         assert_eq!(mixer.buffered_samples(), SAMPLES_PER_TICK * 6);
         for _ in 0..6 {
             let carried = mixer.mix_voice_tick(std::iter::empty::<(u32, &[i16])>());
@@ -950,17 +1065,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_queue_reports_full_and_sets_visible_failure() {
+    async fn bounded_queue_counts_a_full_frame_without_failing_health() {
         let failure = Arc::new(RecordingFailure::new(metadata()));
         let (queue, _receiver) = FrameQueue::bounded(1, failure.clone());
 
-        assert!(queue.try_send(vec![1, -1]).is_ok());
-        let error = queue
-            .try_send(vec![2, -2])
-            .expect_err("second frame must exceed the bounded queue");
+        assert_eq!(queue.try_send(vec![1, -1]), Ok(true));
+        assert_eq!(queue.try_send(vec![2, -2]), Ok(false));
 
-        assert!(error.contains("full"));
-        assert!(failure.health().is_err());
+        assert_eq!(failure.dropped_frames(), 1);
+        assert_eq!(failure.health(), Ok(()));
+    }
+
+    #[test]
+    fn dropped_frames_fail_only_above_the_window_threshold() {
+        let failure = RecordingFailure::new(metadata());
+        let now = Instant::now();
+
+        failure.record_dropped_frames_at(MAX_DROPPED_FRAMES_PER_WINDOW, "queue_full", now);
+        assert_eq!(failure.health(), Ok(()));
+
+        failure.record_dropped_frames_at(1, "queue_full", now);
+        assert_eq!(
+            failure.health(),
+            Err("sustained_audio_loss: queue_full".to_string())
+        );
+        assert_eq!(failure.dropped_frames(), MAX_DROPPED_FRAMES_PER_WINDOW + 1);
+    }
+
+    #[test]
+    fn drop_logging_is_throttled_to_one_entry_per_window() {
+        let failure = RecordingFailure::new(metadata());
+        let now = Instant::now();
+
+        assert!(failure.should_log_drop(now));
+        assert!(!failure.should_log_drop(now + DROP_FAILURE_WINDOW / 2));
+        assert!(failure.should_log_drop(now + DROP_FAILURE_WINDOW));
+    }
+
+    #[test]
+    fn old_drops_do_not_trigger_a_lifetime_threshold() {
+        let failure = RecordingFailure::new(metadata());
+        let now = Instant::now();
+
+        failure.record_dropped_frames_at(MAX_DROPPED_FRAMES_PER_WINDOW, "mixer_overflow", now);
+        failure.record_dropped_frames_at(
+            MAX_DROPPED_FRAMES_PER_WINDOW,
+            "mixer_overflow",
+            now + DROP_FAILURE_WINDOW,
+        );
+
+        assert_eq!(failure.health(), Ok(()));
+        assert_eq!(failure.dropped_frames(), MAX_DROPPED_FRAMES_PER_WINDOW * 2);
+    }
+
+    #[test]
+    fn buffered_writer_finalize_flushes_a_readable_wav() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let wav_path = temp_dir.path().join("buffered.wav");
+        let samples = [1, -1, i16::MAX, i16::MIN, 23, -42];
+        let file = std::fs::File::create(&wav_path).expect("wav file");
+        let mut writer = new_buffered_wav_writer(file).expect("buffered writer");
+
+        for sample in samples {
+            writer.write_sample(sample).expect("write sample");
+        }
+        writer.finalize().expect("finalize and flush");
+
+        let mut reader = hound::WavReader::open(&wav_path).expect("read wav");
+        assert_eq!(reader.spec(), WAV_SPEC);
+        assert_eq!(reader.len(), samples.len() as u32);
+        assert_eq!(
+            reader
+                .samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .expect("wav samples"),
+            samples
+        );
     }
 
     #[tokio::test]
