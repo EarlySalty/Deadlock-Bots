@@ -37,6 +37,8 @@ const START_CONFIRMATION_TEXT: &str =
 const NO_ACTIVE_RECORDING_TEXT: &str = "In diesem Team-Sprachkanal läuft keine Aufnahme.";
 const STOP_CONFIRMATION_TEXT: &str =
     "Aufnahme beendet. Im Team-Textkanal findest du die MP3 oder bei einem Fehler einen Hinweis.";
+const PARTIAL_UPLOAD_TEXT: &str =
+    "Ein Teil der Aufnahme konnte nicht hochgeladen werden. Die übrigen Teile findet ihr hier im Kanal; der fehlende Teil lässt sich nicht nachträglich aus dem Bot abrufen. Meldet den Fehler bitte beim Community-Team.";
 const UPLOAD_FALLBACK_TEXT: &str =
     "Die Aufnahme wurde beendet, aber die MP3 konnte nicht bereitgestellt werden. Bitte meldet den technischen Fehler beim Community-Team; die Aufnahme kann nicht nachträglich aus dem Bot abgerufen werden.";
 const CAP_REACHED_TEXT: &str =
@@ -205,7 +207,12 @@ impl AudioTranscoder for FfmpegTranscoder {
             .ok_or_else(|| "segment_dir_missing".to_string())?;
         let stem = segment_stem(mp3_path)?;
         let pattern = dir.join(format!("{stem}{SEGMENT_MARKER}%02d.mp3"));
-        let status = Command::new("ffmpeg")
+        // ffmpeg legt die Segmente selbst an; ohne die umask lägen sie über Stunden mit
+        // 0644 im Verzeichnis. `sh -c ... "$@"` übergibt die Pfade unverändert weiter.
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg("umask 077; exec ffmpeg \"$@\"")
+            .arg("ffmpeg")
             .arg("-nostdin")
             .arg("-y")
             .arg("-i")
@@ -218,6 +225,8 @@ impl AudioTranscoder for FfmpegTranscoder {
             .arg("segment")
             .arg("-segment_time")
             .arg(SEGMENT_DURATION_SECONDS.to_string())
+            .arg("-segment_start_number")
+            .arg("1")
             .arg("-reset_timestamps")
             .arg("1")
             .arg(&pattern)
@@ -321,6 +330,30 @@ pub async fn prepare_recording_temp_dir(path: &Path) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Sechs Stunden Mono-WAV kosten 2,07 GB, dazu die MP3-Segmente. Unter diesem Rest
+/// wird nicht mehr gestartet, damit keine Aufnahme mitten in der Nacht am vollen
+/// Dateisystem abbricht.
+const REQUIRED_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+/// Freier Platz auf dem Dateisystem des Aufnahmeverzeichnisses.
+fn available_bytes(path: &Path) -> Result<u64, String> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|err| format!("statvfs_path_invalid: {err}"))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: c_path ist nullterminiert und lebt über den Aufruf; stat wird von statvfs
+    // vollständig geschrieben, bevor es gelesen wird.
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(format!(
+            "statvfs_failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: statvfs hat mit rc == 0 die Struktur initialisiert.
+    let stat = unsafe { stat.assume_init() };
+    Ok(stat.f_bavail * stat.f_frsize)
 }
 
 /// ffmpeg legt die Segmente selbst an; direkt danach werden sie auf 0600 gesetzt.
@@ -707,6 +740,38 @@ impl ScrimRecorder {
             .await?;
         let ready = self.recorder_readiness(guild_id, voice_channel_id).await?;
         let started_at = started_at.unwrap_or_else(Instant::now);
+        match available_bytes(&self.temp_dir) {
+            Ok(free) if free >= REQUIRED_FREE_BYTES => tracing::info!(
+                guild_id,
+                channel_id = voice_channel_id,
+                reason = "disk_space_ok",
+                free_bytes = free,
+                required_bytes = REQUIRED_FREE_BYTES,
+                "Scrim-Record: Platz fuer die Aufnahme geprueft"
+            ),
+            Ok(free) => {
+                tracing::error!(
+                    guild_id,
+                    channel_id = voice_channel_id,
+                    reason = "disk_space_too_low",
+                    free_bytes = free,
+                    required_bytes = REQUIRED_FREE_BYTES,
+                    "Scrim-Record: Start wegen zu wenig freiem Speicher abgewiesen"
+                );
+                return Err(StartError::SetupFailed);
+            }
+            Err(err) => {
+                tracing::error!(
+                    %err,
+                    guild_id,
+                    channel_id = voice_channel_id,
+                    reason = "disk_space_check_failed",
+                    "Scrim-Record: Freier Speicher konnte nicht geprueft werden"
+                );
+                return Err(StartError::SetupFailed);
+            }
+        }
+
         let file_id = self.next_file_id.fetch_add(1, Ordering::Relaxed);
         let wav_path = self.temp_dir.join(format!(
             "scrim-record-{guild_id}-{voice_channel_id}-{file_id}.wav"
@@ -1154,7 +1219,7 @@ impl ScrimRecorder {
         // sonst verschwindet er still, wenn ausgerechnet Teil 1 nicht hochgeht.
         let mut pending_loss_notice = recording_loss_notice(recording_loss);
         let parts_total = segments.len();
-        let mut upload_succeeded = parts_total > 0;
+        let mut failed_parts = 0usize;
         for (index, segment) in segments.iter().enumerate() {
             let part = index + 1;
             let upload_content =
@@ -1185,7 +1250,7 @@ impl ScrimRecorder {
                     );
                 }
                 Err(err) => {
-                    upload_succeeded = false;
+                    failed_parts += 1;
                     tracing::error!(
                         %err,
                         guild_id = SCRIM_GUILD_ID,
@@ -1203,9 +1268,23 @@ impl ScrimRecorder {
                 }
             }
         }
-        if !upload_succeeded {
-            self.post_fallback(session.text_channel_id, voice_channel_id, recorder, trigger)
-                .await;
+        // Kam wenigstens ein Teil an, ist der komplette Fehlschlag-Text falsch — dann sagt
+        // der Kanal, dass ein Teil fehlt, statt dass die Aufnahme nicht bereitsteht.
+        let delivered_parts = parts_total - failed_parts;
+        if failed_parts > 0 || parts_total == 0 {
+            let text = if delivered_parts > 0 {
+                PARTIAL_UPLOAD_TEXT
+            } else {
+                UPLOAD_FALLBACK_TEXT
+            };
+            self.post_fallback(
+                session.text_channel_id,
+                voice_channel_id,
+                recorder,
+                trigger,
+                text,
+            )
+            .await;
         }
 
         files.cleanup().await;
@@ -1245,11 +1324,9 @@ impl ScrimRecorder {
         voice_channel_id: u64,
         recorder: RecorderIdentity,
         trigger: StopTrigger,
+        text: &str,
     ) {
-        match self
-            .port
-            .post_text(text_channel_id, UPLOAD_FALLBACK_TEXT)
-            .await
+        match self.port.post_text(text_channel_id, text).await
         {
             Ok(()) => tracing::warn!(
                 guild_id = SCRIM_GUILD_ID,

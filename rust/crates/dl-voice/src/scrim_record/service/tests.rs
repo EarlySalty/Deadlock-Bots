@@ -408,7 +408,7 @@ impl AudioTranscoder for MockTranscoder {
             .expect("mp3 stem")
             .to_string();
         let mut written = Vec::new();
-        for index in 0..self.segments.load(Ordering::SeqCst) {
+        for index in 1..=self.segments.load(Ordering::SeqCst) {
             let path = dir.join(format!("{stem}-part{index:02}.mp3"));
             tokio::fs::write(&path, b"mp3")
                 .await
@@ -547,6 +547,8 @@ fn all_scrim_record_user_texts_are_final_and_explain_the_next_step() {
     assert!(START_CONFIRMATION_TEXT.contains("Team-Textkanal"));
     assert!(STOP_CONFIRMATION_TEXT.contains("Team-Textkanal"));
     assert!(UPLOAD_FALLBACK_TEXT.contains("MP3"));
+    assert!(PARTIAL_UPLOAD_TEXT.contains("Ein Teil der Aufnahme"));
+    assert!(PARTIAL_UPLOAD_TEXT.contains("übrigen Teile"));
     assert!(UPLOAD_FALLBACK_TEXT.contains("nicht nachträglich"));
     assert!(CAP_REACHED_TEXT.contains("6-Stunden-Limit"));
     assert!(CAP_REACHED_TEXT.contains("/record start"));
@@ -939,9 +941,9 @@ async fn long_recordings_are_uploaded_as_numbered_parts() {
                 .to_string()
         })
         .collect();
-    assert!(names[0].ends_with("-part00.mp3"), "unerwartet: {names:?}");
-    assert!(names[1].ends_with("-part01.mp3"), "unerwartet: {names:?}");
-    assert!(names[2].ends_with("-part02.mp3"), "unerwartet: {names:?}");
+    assert!(names[0].ends_with("-part01.mp3"), "unerwartet: {names:?}");
+    assert!(names[1].ends_with("-part02.mp3"), "unerwartet: {names:?}");
+    assert!(names[2].ends_with("-part03.mp3"), "unerwartet: {names:?}");
     assert_eq!(
         harness.port.upload_contents(),
         vec![
@@ -1035,6 +1037,44 @@ async fn the_gap_notice_moves_to_the_first_part_that_actually_arrives() {
     );
 }
 
+#[tokio::test]
+async fn one_missing_part_is_announced_as_a_gap_not_as_a_total_failure() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness.transcoder.set_segments(3);
+    harness.port.fail_next_uploads(1);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    let texts: Vec<String> = harness
+        .port
+        .successful_posts()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert!(
+        texts.iter().any(|text| text == PARTIAL_UPLOAD_TEXT),
+        "unerwartet: {texts:?}"
+    );
+    assert!(!texts.iter().any(|text| text == UPLOAD_FALLBACK_TEXT));
+}
+
+#[test]
+fn available_bytes_reports_real_space_and_fails_loudly_on_a_missing_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let free = available_bytes(dir.path()).expect("statvfs");
+    assert!(free > 0, "freier Platz war {free}");
+    assert!(available_bytes(&dir.path().join("gibt-es-nicht")).is_err());
+}
+
 #[test]
 fn segments_sort_numerically_not_lexicographically() {
     let stem = "scrim-record-1-2-3";
@@ -1082,7 +1122,7 @@ async fn ffmpeg_writes_mono_segments_at_the_configured_bitrate() {
         .file_name()
         .and_then(|name| name.to_str())
         .expect("segment name")
-        .ends_with("-part00.mp3"));
+        .ends_with("-part01.mp3"));
     assert_eq!(
         std::fs::metadata(&segments[0])
             .expect("segment metadata")

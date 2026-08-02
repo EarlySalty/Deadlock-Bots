@@ -23,6 +23,7 @@ mod vanity;
 use std::{
     collections::HashSet,
     num::NonZeroU64,
+    os::unix::fs::PermissionsExt,
     sync::{atomic::AtomicBool, Arc},
 };
 
@@ -592,12 +593,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 .map(|home| home.join(".local/state"))
         })
         .context("XDG_STATE_HOME und HOME fehlen fuer Scrim-Record")?;
-    let recording_temp_dir = recording_state_dir.join("deadlock-bots-scrim-recordings");
-    if let Some(parent) = recording_temp_dir.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("Scrim-Record-Basisverzeichnis erstellen")?;
-    }
+    // Der Elternordner muss privat sein (0700), sonst lehnt prepare_recording_temp_dir ab.
+    // Deshalb ein eigener, selbst angelegter Ordner statt des vorgefundenen State-Verzeichnisses.
+    let recording_base_dir = recording_state_dir.join("deadlock-bots");
+    tokio::fs::create_dir_all(&recording_base_dir)
+        .await
+        .context("Scrim-Record-Basisverzeichnis erstellen")?;
+    tokio::fs::set_permissions(
+        &recording_base_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .await
+    .context("Scrim-Record-Basisverzeichnis absichern")?;
+    let recording_temp_dir = recording_base_dir.join("scrim-recordings");
     dl_voice::scrim_record::prepare_recording_temp_dir(&recording_temp_dir)
         .await
         .map_err(anyhow::Error::msg)
