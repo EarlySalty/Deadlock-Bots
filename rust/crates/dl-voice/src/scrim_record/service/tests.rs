@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -86,13 +86,6 @@ impl MockPort {
         self.state.lock().expect("mock port lock").fail_upload = fail;
     }
 
-    fn fail_next_uploads(&self, count: usize) {
-        self.state
-            .lock()
-            .expect("mock port lock")
-            .upload_failures_remaining = count;
-    }
-
     fn successful_post_count(&self) -> usize {
         self.state
             .lock()
@@ -117,6 +110,7 @@ impl MockPort {
             .clone()
     }
 
+    /// Der Inhalt der Anhang-Nachricht — nur im Notnagel-Pfad relevant.
     fn upload_contents(&self) -> Vec<Option<String>> {
         self.state
             .lock()
@@ -372,14 +366,14 @@ impl RecordingBackend for MockBackend {
 
 struct MockTranscoder {
     calls: StdMutex<Vec<(PathBuf, PathBuf)>>,
-    segments: AtomicUsize,
+    fail: AtomicBool,
 }
 
 impl Default for MockTranscoder {
     fn default() -> Self {
         Self {
             calls: StdMutex::new(Vec::new()),
-            segments: AtomicUsize::new(1),
+            fail: AtomicBool::new(false),
         }
     }
 }
@@ -389,33 +383,70 @@ impl MockTranscoder {
         self.calls.lock().expect("mock transcoder lock").len()
     }
 
-    fn set_segments(&self, segments: usize) {
-        self.segments.store(segments, Ordering::SeqCst);
+    fn fail_transcode(&self) {
+        self.fail.store(true, Ordering::SeqCst);
     }
 }
 
 #[async_trait::async_trait]
 impl AudioTranscoder for MockTranscoder {
-    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<Vec<PathBuf>, String> {
+    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<PathBuf, String> {
         self.calls
             .lock()
             .expect("mock transcoder lock")
             .push((wav_path.to_path_buf(), mp3_path.to_path_buf()));
-        let dir = mp3_path.parent().expect("mp3 parent");
-        let stem = mp3_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .expect("mp3 stem")
-            .to_string();
-        let mut written = Vec::new();
-        for index in 1..=self.segments.load(Ordering::SeqCst) {
-            let path = dir.join(format!("{stem}-part{index:02}.mp3"));
-            tokio::fs::write(&path, b"mp3")
-                .await
-                .map_err(|err| err.to_string())?;
-            written.push(path);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err("transcode failure".to_string());
         }
-        Ok(written)
+        tokio::fs::write(mp3_path, b"mp3")
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(mp3_path.to_path_buf())
+    }
+}
+
+#[derive(Default)]
+struct MockArchiveState {
+    uploads: Vec<(PathBuf, String, String)>,
+    fail: bool,
+}
+
+#[derive(Default)]
+struct MockArchive {
+    state: StdMutex<MockArchiveState>,
+}
+
+impl MockArchive {
+    fn uploads(&self) -> Vec<(PathBuf, String, String)> {
+        self.state.lock().expect("mock archive lock").uploads.clone()
+    }
+
+    fn set_failure(&self, fail: bool) {
+        self.state.lock().expect("mock archive lock").fail = fail;
+    }
+}
+
+#[async_trait::async_trait]
+impl RecordingArchive for MockArchive {
+    async fn upload(
+        &self,
+        local_path: &Path,
+        folder: &str,
+        file_name: &str,
+    ) -> Result<ArchivedRecording, String> {
+        let mut state = self.state.lock().expect("mock archive lock");
+        state.uploads.push((
+            local_path.to_path_buf(),
+            folder.to_string(),
+            file_name.to_string(),
+        ));
+        if state.fail {
+            return Err("archive failure".to_string());
+        }
+        Ok(ArchivedRecording {
+            file_link: format!("https://drive.example/{file_name}"),
+            folder_link: format!("https://drive.example/ordner/{folder}"),
+        })
     }
 }
 
@@ -424,6 +455,7 @@ struct Harness {
     port: Arc<MockPort>,
     backend: Arc<MockBackend>,
     transcoder: Arc<MockTranscoder>,
+    archive: Arc<MockArchive>,
     recorder: Arc<ScrimRecorder>,
 }
 
@@ -433,10 +465,12 @@ impl Harness {
         let port = Arc::new(MockPort::default());
         let backend = Arc::new(MockBackend::default());
         let transcoder = Arc::new(MockTranscoder::default());
+        let archive = Arc::new(MockArchive::default());
         let recorder = ScrimRecorder::new(
             port.clone(),
             backend.clone(),
             transcoder.clone(),
+            archive.clone(),
             temp_dir.path().to_path_buf(),
         );
         Self {
@@ -444,6 +478,7 @@ impl Harness {
             port,
             backend,
             transcoder,
+            archive,
             recorder,
         }
     }
@@ -546,9 +581,7 @@ fn all_scrim_record_user_texts_are_final_and_explain_the_next_step() {
     assert!(SETUP_ERROR_TEXT.contains("erneut"));
     assert!(START_CONFIRMATION_TEXT.contains("Team-Textkanal"));
     assert!(STOP_CONFIRMATION_TEXT.contains("Team-Textkanal"));
-    assert!(UPLOAD_FALLBACK_TEXT.contains("MP3"));
-    assert!(PARTIAL_UPLOAD_TEXT.contains("Ein Teil der Aufnahme"));
-    assert!(PARTIAL_UPLOAD_TEXT.contains("übrigen Teile"));
+    assert!(UPLOAD_FALLBACK_TEXT.contains("Archiv"));
     assert!(UPLOAD_FALLBACK_TEXT.contains("nicht nachträglich"));
     assert!(CAP_REACHED_TEXT.contains("6-Stunden-Limit"));
     assert!(CAP_REACHED_TEXT.contains("/record start"));
@@ -793,7 +826,7 @@ async fn leave_during_consent_rechecks_empty_channel_after_success() {
     assert_eq!(stops_before_consent, 0);
     assert_eq!(harness.backend.stops().len(), 1);
     assert_eq!(harness.transcoder.call_count(), 1);
-    assert_eq!(harness.port.upload_attempts().len(), 1);
+    assert_eq!(harness.archive.uploads().len(), 1);
     assert_eq!(harness.recorder.session_count().await, 0);
     harness.assert_temp_files_removed();
 }
@@ -865,7 +898,7 @@ async fn concurrent_stop_triggers_run_backend_and_upload_once() {
     assert_eq!([first, second].into_iter().filter(|won| *won).count(), 1);
     assert_eq!(harness.backend.stops().len(), 1);
     assert_eq!(harness.transcoder.call_count(), 1);
-    assert_eq!(harness.port.upload_attempts().len(), 1);
+    assert_eq!(harness.archive.uploads().len(), 1);
     harness.assert_temp_files_removed();
 }
 
@@ -885,10 +918,15 @@ async fn dropped_audio_is_disclosed_in_the_upload_message() {
         Ok(RecorderIdentity::MainBot)
     );
 
-    assert_eq!(
-        harness.port.upload_contents(),
-        vec![Some("Die Aufnahme hat Lücken: 60 ms Ton fehlen.".to_string())]
-    );
+    let (_, text) = harness
+        .port
+        .successful_posts()
+        .into_iter()
+        .find(|(_, text)| text.starts_with("Die Aufnahme hat Lücken"))
+        .expect("Luecken-Hinweis fehlt");
+    assert!(text.contains("Die Aufnahme hat Lücken: 60 ms Ton fehlen."));
+    assert!(text.contains("Aufnahme: https://drive.example/"));
+    assert!(text.contains("Alle Aufnahmen von Team 1: https://drive.example/ordner/Team 1"));
 }
 
 #[tokio::test]
@@ -907,61 +945,76 @@ async fn dropped_audio_beyond_a_second_is_disclosed_in_seconds() {
         Ok(RecorderIdentity::MainBot)
     );
 
-    assert_eq!(
-        harness.port.upload_contents(),
-        vec![Some("Die Aufnahme hat Lücken: 4,2 Sekunden Ton fehlen.".to_string())]
-    );
+    assert!(harness
+        .port
+        .successful_posts()
+        .iter()
+        .any(|(_, text)| text.starts_with("Die Aufnahme hat Lücken: 4,2 Sekunden Ton fehlen.")));
 }
 
 #[tokio::test]
-async fn long_recordings_are_uploaded_as_numbered_parts() {
+async fn a_recording_lands_in_the_team_folder_and_the_channel_gets_both_links() {
     let harness = Harness::new();
     let role = harness.set_user_channel(1, 0);
-    harness.transcoder.set_segments(3);
     harness
         .recorder
         .start(SCRIM_GUILD_ID, 1, &[role])
         .await
         .expect("start");
-    harness.backend.set_dropped_frames(3);
 
     assert_eq!(
         harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
         Ok(RecorderIdentity::MainBot)
     );
 
-    let attempts = harness.port.upload_attempts();
-    assert_eq!(attempts.len(), 3);
-    let names: Vec<String> = attempts
-        .iter()
-        .map(|(_, path)| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .expect("segment name")
-                .to_string()
-        })
-        .collect();
-    assert!(names[0].ends_with("-part01.mp3"), "unerwartet: {names:?}");
-    assert!(names[1].ends_with("-part02.mp3"), "unerwartet: {names:?}");
-    assert!(names[2].ends_with("-part03.mp3"), "unerwartet: {names:?}");
-    assert_eq!(
-        harness.port.upload_contents(),
-        vec![
-            Some(
-                "Die Aufnahme hat Lücken: 60 ms Ton fehlen.\nTeil 1 von 3 der Aufnahme."
-                    .to_string()
-            ),
-            Some("Teil 2 von 3 der Aufnahme.".to_string()),
-            Some("Teil 3 von 3 der Aufnahme.".to_string()),
-        ]
+    let uploads = harness.archive.uploads();
+    assert_eq!(uploads.len(), 1);
+    let (path, folder, file_name) = &uploads[0];
+    assert_eq!(folder, "Team 1");
+    assert!(path.to_string_lossy().ends_with(".mp3"), "{path:?}");
+    assert!(
+        file_name.ends_with(&format!("-kanal-{}.mp3", TEAM_VOICE_CHANNELS[0].voice_channel_id)),
+        "unerwartet: {file_name}"
     );
+    // Der Anhang-Weg bleibt aus, solange das Archiv funktioniert.
+    assert!(harness.port.upload_attempts().is_empty());
+    let posts = harness.port.successful_posts();
+    let (_, link_post) = posts
+        .iter()
+        .find(|(_, text)| text.starts_with("Aufnahme: "))
+        .expect("Link-Nachricht fehlt");
+    assert!(link_post.contains(&format!("Aufnahme: https://drive.example/{file_name}")));
+    assert!(link_post.contains("Alle Aufnahmen von Team 1: https://drive.example/ordner/Team 1"));
     harness.assert_temp_files_removed();
 }
 
 #[tokio::test]
-async fn a_single_part_recording_carries_no_part_line() {
+async fn each_team_channel_writes_into_its_own_folder() {
+    for (index, config) in TEAM_VOICE_CHANNELS.iter().enumerate() {
+        let harness = Harness::new();
+        let role = harness.set_user_channel(1, index);
+        harness
+            .recorder
+            .start(SCRIM_GUILD_ID, 1, &[role])
+            .await
+            .expect("start");
+        harness
+            .recorder
+            .stop(SCRIM_GUILD_ID, 1, &[role])
+            .await
+            .expect("stop");
+
+        let uploads = harness.archive.uploads();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].1, config.archive_folder);
+    }
+}
+
+#[tokio::test]
+async fn a_broken_archive_falls_back_to_the_discord_attachment() {
     let harness = Harness::new();
     let role = harness.set_user_channel(1, 0);
+    harness.archive.set_failure(true);
     harness
         .recorder
         .start(SCRIM_GUILD_ID, 1, &[role])
@@ -973,15 +1026,23 @@ async fn a_single_part_recording_carries_no_part_line() {
         Ok(RecorderIdentity::MainBot)
     );
 
+    assert_eq!(harness.archive.uploads().len(), 1);
     assert_eq!(harness.port.upload_attempts().len(), 1);
+    // Ohne Luecken traegt der Notnagel-Anhang keinen Zusatztext.
     assert_eq!(harness.port.upload_contents(), vec![None]);
+    assert!(!harness
+        .port
+        .successful_posts()
+        .iter()
+        .any(|(_, text)| text == UPLOAD_FALLBACK_TEXT));
+    harness.assert_temp_files_removed();
 }
 
 #[tokio::test]
-async fn a_failing_part_upload_still_sends_the_remaining_parts() {
+async fn a_broken_archive_and_a_broken_attachment_say_so_in_the_channel() {
     let harness = Harness::new();
     let role = harness.set_user_channel(1, 0);
-    harness.transcoder.set_segments(3);
+    harness.archive.set_failure(true);
     harness.port.set_upload_failure(true);
     harness
         .recorder
@@ -994,7 +1055,6 @@ async fn a_failing_part_upload_still_sends_the_remaining_parts() {
         Ok(RecorderIdentity::MainBot)
     );
 
-    assert_eq!(harness.port.upload_attempts().len(), 3);
     assert!(harness
         .port
         .successful_posts()
@@ -1004,45 +1064,10 @@ async fn a_failing_part_upload_still_sends_the_remaining_parts() {
 }
 
 #[tokio::test]
-async fn the_gap_notice_moves_to_the_first_part_that_actually_arrives() {
+async fn a_failed_transcode_never_reaches_the_archive() {
     let harness = Harness::new();
     let role = harness.set_user_channel(1, 0);
-    harness.transcoder.set_segments(3);
-    harness.port.fail_next_uploads(1);
-    harness
-        .recorder
-        .start(SCRIM_GUILD_ID, 1, &[role])
-        .await
-        .expect("start");
-    harness.backend.set_dropped_frames(3);
-
-    assert_eq!(
-        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
-        Ok(RecorderIdentity::MainBot)
-    );
-
-    assert_eq!(
-        harness.port.upload_contents(),
-        vec![
-            Some(
-                "Die Aufnahme hat Lücken: 60 ms Ton fehlen.\nTeil 1 von 3 der Aufnahme."
-                    .to_string()
-            ),
-            Some(
-                "Die Aufnahme hat Lücken: 60 ms Ton fehlen.\nTeil 2 von 3 der Aufnahme."
-                    .to_string()
-            ),
-            Some("Teil 3 von 3 der Aufnahme.".to_string()),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn one_missing_part_is_announced_as_a_gap_not_as_a_total_failure() {
-    let harness = Harness::new();
-    let role = harness.set_user_channel(1, 0);
-    harness.transcoder.set_segments(3);
-    harness.port.fail_next_uploads(1);
+    harness.transcoder.fail_transcode();
     harness
         .recorder
         .start(SCRIM_GUILD_ID, 1, &[role])
@@ -1054,52 +1079,18 @@ async fn one_missing_part_is_announced_as_a_gap_not_as_a_total_failure() {
         Ok(RecorderIdentity::MainBot)
     );
 
-    let texts: Vec<String> = harness
+    assert!(harness.archive.uploads().is_empty());
+    assert!(harness
         .port
         .successful_posts()
-        .into_iter()
-        .map(|(_, text)| text)
-        .collect();
-    assert!(
-        texts.iter().any(|text| text == PARTIAL_UPLOAD_TEXT),
-        "unerwartet: {texts:?}"
-    );
-    assert!(!texts.iter().any(|text| text == UPLOAD_FALLBACK_TEXT));
-}
-
-#[test]
-fn available_bytes_reports_real_space_and_fails_loudly_on_a_missing_path() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let free = available_bytes(dir.path()).expect("statvfs");
-    assert!(free > 0, "freier Platz war {free}");
-    assert!(available_bytes(&dir.path().join("gibt-es-nicht")).is_err());
-}
-
-#[test]
-fn segments_sort_numerically_not_lexicographically() {
-    let stem = "scrim-record-1-2-3";
-    let mut names = ["part10", "part02", "part01"]
-        .into_iter()
-        .map(|part| format!("{stem}-{part}.mp3"))
-        .collect::<Vec<_>>();
-    names.sort_by_key(|name| segment_index(name, stem).expect("segment index"));
-    assert_eq!(
-        names,
-        vec![
-            format!("{stem}-part01.mp3"),
-            format!("{stem}-part02.mp3"),
-            format!("{stem}-part10.mp3"),
-        ]
-    );
-    assert_eq!(segment_index("keep.txt", stem), None);
-    assert_eq!(segment_index(&format!("{stem}.mp3"), stem), None);
+        .iter()
+        .any(|(_, text)| text == UPLOAD_FALLBACK_TEXT));
 }
 
 /// Der echte ffmpeg-Pfad, nicht der Fake: falsche Argumente fallen sonst erst live auf.
-/// Braucht ffmpeg im PATH, daher ignoriert im Standardlauf.
 #[tokio::test]
 #[ignore]
-async fn ffmpeg_writes_mono_segments_at_the_configured_bitrate() {
+async fn ffmpeg_writes_a_mono_mp3_at_the_configured_bitrate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let wav_path = dir.path().join("scrim-record-1-2-3.wav");
     let generated = tokio::process::Command::new("ffmpeg")
@@ -1112,20 +1103,14 @@ async fn ffmpeg_writes_mono_segments_at_the_configured_bitrate() {
         .expect("ffmpeg für Testeingabe");
     assert!(generated.success(), "Testeingabe konnte nicht erzeugt werden");
 
-    let segments = FfmpegTranscoder
+    let mp3_path = FfmpegTranscoder
         .transcode(&wav_path, &wav_path.with_extension("mp3"))
         .await
         .expect("transcode");
 
-    assert_eq!(segments.len(), 1, "3 Sekunden ergeben genau ein Segment");
-    assert!(segments[0]
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("segment name")
-        .ends_with("-part01.mp3"));
     assert_eq!(
-        std::fs::metadata(&segments[0])
-            .expect("segment metadata")
+        std::fs::metadata(&mp3_path)
+            .expect("mp3 metadata")
             .permissions()
             .mode()
             & 0o777,
@@ -1140,7 +1125,7 @@ async fn ffmpeg_writes_mono_segments_at_the_configured_bitrate() {
             "-of",
             "default=nw=1",
         ])
-        .arg(&segments[0])
+        .arg(&mp3_path)
         .output()
         .await
         .expect("ffprobe");
@@ -1150,18 +1135,52 @@ async fn ffmpeg_writes_mono_segments_at_the_configured_bitrate() {
 }
 
 #[test]
-fn ninety_minute_segments_stay_below_the_discord_attachment_limit() {
-    const DISCORD_TIER_2_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
-    let bitrate_bits_per_second: u64 = AUDIO_BITRATE
-        .trim_end_matches('k')
-        .parse::<u64>()
-        .expect("bitrate")
-        * 1000;
-    let segment_bytes = SEGMENT_DURATION_SECONDS * bitrate_bits_per_second / 8;
-    assert!(
-        segment_bytes < DISCORD_TIER_2_LIMIT_BYTES,
-        "Segment wäre {segment_bytes} Bytes und damit über dem 50-MB-Limit"
+fn archive_file_names_sort_chronologically_and_name_the_channel() {
+    let early = archive_file_name(
+        42,
+        chrono::DateTime::parse_from_rfc3339("2026-08-02T09:05:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
     );
+    let late = archive_file_name(
+        42,
+        chrono::DateTime::parse_from_rfc3339("2026-08-02T21:40:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc),
+    );
+    assert_eq!(early, "2026-08-02-0905-kanal-42.mp3");
+    assert!(early < late, "{early} sollte vor {late} sortieren");
+}
+
+#[test]
+fn rclone_output_yields_the_last_link_and_errors_without_one() {
+    assert_eq!(
+        RcloneArchive::last_link("Transferred: 1\nhttps://drive.google.com/file/d/abc/view\n")
+            .expect("link"),
+        "https://drive.google.com/file/d/abc/view"
+    );
+    assert!(RcloneArchive::last_link("Transferred: 1\n").is_err());
+}
+
+#[test]
+fn rclone_paths_keep_one_slash_between_base_folder_and_file() {
+    let archive = RcloneArchive::new("/usr/local/bin/rclone", "gdrive:Deadlock/Scrim-Aufnahmen/");
+    assert_eq!(
+        archive.file_path("Team 2", "2026-08-02-2140-kanal-42.mp3"),
+        "gdrive:Deadlock/Scrim-Aufnahmen/Team 2/2026-08-02-2140-kanal-42.mp3"
+    );
+    assert_eq!(
+        archive.folder_path("Team 2"),
+        "gdrive:Deadlock/Scrim-Aufnahmen/Team 2"
+    );
+}
+
+#[test]
+fn available_bytes_reports_real_space_and_fails_loudly_on_a_missing_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let free = available_bytes(dir.path()).expect("statvfs");
+    assert!(free > 0, "freier Platz war {free}");
+    assert!(available_bytes(&dir.path().join("gibt-es-nicht")).is_err());
 }
 
 #[tokio::test]
@@ -1183,7 +1202,7 @@ async fn concurrent_health_sweeps_stop_an_unhealthy_session_once() {
     assert_eq!(first + second, 1);
     assert_eq!(harness.backend.stops().len(), 1);
     assert_eq!(harness.transcoder.call_count(), 1);
-    assert_eq!(harness.port.upload_attempts().len(), 1);
+    assert_eq!(harness.archive.uploads().len(), 1);
     assert_eq!(harness.recorder.session_count().await, 0);
 }
 
@@ -1238,7 +1257,13 @@ async fn cap_triggers_at_exact_boundary_and_posts_hint() {
             .await,
         1
     );
-    assert_eq!(harness.port.successful_post_count(), 2);
+    // Einwilligungshinweis, Archiv-Link und Cap-Hinweis.
+    assert_eq!(harness.port.successful_post_count(), 3);
+    assert!(harness
+        .port
+        .successful_posts()
+        .iter()
+        .any(|(_, text)| text == CAP_REACHED_TEXT));
 }
 
 #[tokio::test]
@@ -1320,7 +1345,7 @@ async fn voice_event_stops_a_confirmed_empty_channel() {
         .await;
 
     assert_eq!(harness.backend.stops().len(), 1);
-    assert_eq!(harness.port.upload_attempts().len(), 1);
+    assert_eq!(harness.archive.uploads().len(), 1);
     assert_eq!(harness.recorder.session_count().await, 0);
 }
 
@@ -1339,7 +1364,7 @@ async fn reconcile_stops_a_confirmed_empty_channel() {
     harness.recorder.reconcile().await;
 
     assert_eq!(harness.backend.stops().len(), 1);
-    assert_eq!(harness.port.upload_attempts().len(), 1);
+    assert_eq!(harness.archive.uploads().len(), 1);
     assert_eq!(harness.recorder.session_count().await, 0);
 }
 

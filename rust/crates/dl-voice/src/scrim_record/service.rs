@@ -36,11 +36,9 @@ const START_CONFIRMATION_TEXT: &str =
     "Aufnahme gestartet. Im Team-Textkanal steht jetzt der Einwilligungshinweis.";
 const NO_ACTIVE_RECORDING_TEXT: &str = "In diesem Team-Sprachkanal läuft keine Aufnahme.";
 const STOP_CONFIRMATION_TEXT: &str =
-    "Aufnahme beendet. Im Team-Textkanal findest du die MP3 oder bei einem Fehler einen Hinweis.";
-const PARTIAL_UPLOAD_TEXT: &str =
-    "Ein Teil der Aufnahme konnte nicht hochgeladen werden. Die übrigen Teile findet ihr hier im Kanal; der fehlende Teil lässt sich nicht nachträglich aus dem Bot abrufen. Meldet den Fehler bitte beim Community-Team.";
+    "Aufnahme beendet. Im Team-Textkanal steht gleich der Link zur Aufnahme.";
 const UPLOAD_FALLBACK_TEXT: &str =
-    "Die Aufnahme wurde beendet, aber die MP3 konnte nicht bereitgestellt werden. Bitte meldet den technischen Fehler beim Community-Team; die Aufnahme kann nicht nachträglich aus dem Bot abgerufen werden.";
+    "Die Aufnahme wurde beendet, aber sie konnte nicht ins Archiv geladen werden. Bitte meldet den technischen Fehler beim Community-Team; die Aufnahme kann nicht nachträglich aus dem Bot abgerufen werden.";
 const CAP_REACHED_TEXT: &str =
     "Die Aufnahme wurde wegen des 6-Stunden-Limits automatisch beendet. Startet bei Bedarf mit /record start eine neue Aufnahme.";
 
@@ -132,68 +130,38 @@ fn recording_loss_notice(loss: RecordingLoss) -> Option<String> {
     })
 }
 
-/// Discord nimmt bei Boost-Tier 2 maximal 50 MB pro Anhang. Ein Segment von 90 Minuten
-/// kostet bei 64 kbit/s Mono rund 43 MB und bleibt damit unter dem Limit.
-const SEGMENT_DURATION_SECONDS: u64 = 90 * 60;
 const AUDIO_BITRATE: &str = "64k";
-const SEGMENT_MARKER: &str = "-part";
+/// Discord nimmt bei Boost-Tier 2 maximal 50 MB pro Anhang. Groessere Aufnahmen gehen
+/// nur ueber den Drive-Ordner; darunter taugt der Anhang noch als Notnagel.
+const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Text zur Nachricht eines Segments: der Lücken-Hinweis steht nur an der ersten Nachricht,
-/// die Teil-Zeile nur, wenn die Aufnahme überhaupt aufgeteilt wurde.
-fn upload_notice(loss_notice: Option<&str>, part: usize, parts_total: usize) -> Option<String> {
-    let part_line =
-        (parts_total > 1).then(|| format!("Teil {part} von {parts_total} der Aufnahme."));
-    match (loss_notice, part_line) {
-        (Some(loss), Some(part_line)) => Some(format!("{loss}\n{part_line}")),
-        (Some(loss), None) => Some(loss.to_string()),
-        (None, Some(part_line)) => Some(part_line),
-        (None, None) => None,
+/// Dateiname im Archiv: Datum und Uhrzeit vorn, damit der Ordner chronologisch sortiert.
+fn archive_file_name(voice_channel_id: u64, started_at: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "{}-kanal-{voice_channel_id}.mp3",
+        started_at.format("%Y-%m-%d-%H%M")
+    )
+}
+
+/// Nachricht im Team-Kanal: erst die Aufnahme selbst, dann der Ordner, der immer gleich
+/// bleibt. Ein Luecken-Hinweis steht davor, damit er nicht unter den Links verschwindet.
+fn archive_notice(archived: &ArchivedRecording, folder: &str, loss_notice: Option<&str>) -> String {
+    let mut text = String::new();
+    if let Some(loss) = loss_notice {
+        text.push_str(loss);
+        text.push('\n');
     }
+    text.push_str(&format!(
+        "Aufnahme: {}\nAlle Aufnahmen von {folder}: {}",
+        archived.file_link, archived.folder_link
+    ));
+    text
 }
 
 #[async_trait::async_trait]
 pub trait AudioTranscoder: Send + Sync {
-    /// Transkodiert die WAV-Aufnahme in ein oder mehrere MP3-Segmente und liefert deren
-    /// Pfade in Abspielreihenfolge. `mp3_path` gibt Verzeichnis und Basisnamen vor.
-    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<Vec<PathBuf>, String>;
-}
-
-/// Basisname ohne Endung, an den die Segmentnummer angehängt wird.
-fn segment_stem(mp3_path: &Path) -> Result<String, String> {
-    mp3_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| "segment_stem_missing".to_string())
-}
-
-fn segment_index(file_name: &str, stem: &str) -> Option<u32> {
-    let rest = file_name.strip_prefix(stem)?.strip_prefix(SEGMENT_MARKER)?;
-    rest.strip_suffix(".mp3")?.parse::<u32>().ok()
-}
-
-/// Sammelt die von ffmpeg erzeugten Segmente numerisch sortiert ein — `part2` vor `part10`,
-/// auch wenn die Namen lexikografisch anders sortieren würden.
-async fn collect_segments(dir: &Path, stem: &str) -> Result<Vec<PathBuf>, String> {
-    let mut entries = tokio::fs::read_dir(dir)
-        .await
-        .map_err(|err| format!("segment_dir_read_failed: {err}"))?;
-    let mut found: Vec<(u32, PathBuf)> = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|err| format!("segment_dir_entry_failed: {err}"))?
-    {
-        let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-        if let Some(index) = segment_index(file_name, stem) {
-            found.push((index, entry.path()));
-        }
-    }
-    found.sort_by_key(|(index, _)| *index);
-    Ok(found.into_iter().map(|(_, path)| path).collect())
+    /// Transkodiert die WAV-Aufnahme in eine MP3 und liefert deren Pfad.
+    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<PathBuf, String>;
 }
 
 #[derive(Debug, Default)]
@@ -201,14 +169,9 @@ pub struct FfmpegTranscoder;
 
 #[async_trait::async_trait]
 impl AudioTranscoder for FfmpegTranscoder {
-    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<Vec<PathBuf>, String> {
-        let dir = mp3_path
-            .parent()
-            .ok_or_else(|| "segment_dir_missing".to_string())?;
-        let stem = segment_stem(mp3_path)?;
-        let pattern = dir.join(format!("{stem}{SEGMENT_MARKER}%02d.mp3"));
-        // ffmpeg legt die Segmente selbst an; ohne die umask lägen sie über Stunden mit
-        // 0644 im Verzeichnis. `sh -c ... "$@"` übergibt die Pfade unverändert weiter.
+    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<PathBuf, String> {
+        // ffmpeg legt die Datei selbst an; ohne die umask laege sie mit 0644 im
+        // Verzeichnis. `sh -c ... "$@"` uebergibt die Pfade unveraendert weiter.
         let status = Command::new("sh")
             .arg("-c")
             .arg("umask 077; exec ffmpeg \"$@\"")
@@ -221,29 +184,115 @@ impl AudioTranscoder for FfmpegTranscoder {
             .arg("1")
             .arg("-b:a")
             .arg(AUDIO_BITRATE)
-            .arg("-f")
-            .arg("segment")
-            .arg("-segment_time")
-            .arg(SEGMENT_DURATION_SECONDS.to_string())
-            .arg("-segment_start_number")
-            .arg("1")
-            .arg("-reset_timestamps")
-            .arg("1")
-            .arg(&pattern)
+            .arg(mp3_path)
             .status()
             .await
             .map_err(|err| format!("ffmpeg konnte nicht gestartet werden: {err}"))?;
         if !status.success() {
             return Err(format!("ffmpeg endete mit Status {status}"));
         }
-        let segments = collect_segments(dir, &stem).await?;
-        if segments.is_empty() {
-            return Err("ffmpeg hat keine Segmente erzeugt".to_string());
+        if !mp3_path.is_file() {
+            return Err("ffmpeg hat keine Datei erzeugt".to_string());
         }
-        for segment in &segments {
-            restrict_output_file(segment).await?;
+        restrict_output_file(mp3_path).await?;
+        Ok(mp3_path.to_path_buf())
+    }
+}
+
+/// Ergebnis eines Archiv-Uploads: der Link auf die Aufnahme selbst und der auf den
+/// Team-Ordner, der dauerhaft gleich bleibt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedRecording {
+    pub file_link: String,
+    pub folder_link: String,
+}
+
+#[async_trait::async_trait]
+pub trait RecordingArchive: Send + Sync {
+    /// Laedt die fertige Aufnahme in den Team-Ordner des Archivs.
+    async fn upload(
+        &self,
+        local_path: &Path,
+        folder: &str,
+        file_name: &str,
+    ) -> Result<ArchivedRecording, String>;
+}
+
+/// Google Drive per rclone. Der Remote (`gdrive:`) traegt das OAuth-Token, dieser Typ
+/// kennt nur Remote-Praefix und Basisordner.
+pub struct RcloneArchive {
+    rclone_path: PathBuf,
+    remote_base: String,
+}
+
+impl RcloneArchive {
+    pub fn new(rclone_path: impl Into<PathBuf>, remote_base: impl Into<String>) -> Self {
+        Self {
+            rclone_path: rclone_path.into(),
+            remote_base: remote_base.into(),
         }
-        Ok(segments)
+    }
+
+    fn folder_path(&self, folder: &str) -> String {
+        format!("{}/{folder}", self.remote_base.trim_end_matches('/'))
+    }
+
+    fn file_path(&self, folder: &str, file_name: &str) -> String {
+        format!("{}/{file_name}", self.folder_path(folder))
+    }
+
+    async fn run(&self, args: &[String]) -> Result<String, String> {
+        let output = Command::new(&self.rclone_path)
+            .args(args)
+            .output()
+            .await
+            .map_err(|err| format!("rclone konnte nicht gestartet werden: {err}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "rclone {} endete mit Status {}: {}",
+                args.first().map(String::as_str).unwrap_or(""),
+                output.status,
+                stderr.trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// rclone schreibt den Link auf stdout; Fortschrittszeilen davor werden verworfen.
+    fn last_link(output: &str) -> Result<String, String> {
+        output
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| line.starts_with("http"))
+            .map(str::to_string)
+            .ok_or_else(|| "rclone lieferte keinen Link".to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl RecordingArchive for RcloneArchive {
+    async fn upload(
+        &self,
+        local_path: &Path,
+        folder: &str,
+        file_name: &str,
+    ) -> Result<ArchivedRecording, String> {
+        let remote_file = self.file_path(folder, file_name);
+        self.run(&[
+            "copyto".to_string(),
+            local_path.to_string_lossy().into_owned(),
+            remote_file.clone(),
+        ])
+        .await?;
+        let file_link = Self::last_link(&self.run(&["link".to_string(), remote_file]).await?)?;
+        let folder_link =
+            Self::last_link(&self.run(&["link".to_string(), self.folder_path(folder)]).await?)?;
+        Ok(ArchivedRecording {
+            file_link,
+            folder_link,
+        })
     }
 }
 
@@ -405,8 +454,10 @@ impl StopTrigger {
 pub(super) struct RecordingSession {
     state: SessionState,
     started_at: Instant,
+    started_at_utc: chrono::DateTime<chrono::Utc>,
     wav_path: PathBuf,
     text_channel_id: u64,
+    archive_folder: &'static str,
     recorder: RecorderIdentity,
 }
 
@@ -439,8 +490,10 @@ impl RegistryAllocator {
             RecordingSession {
                 state: SessionState::Starting,
                 started_at,
+                started_at_utc: chrono::Utc::now(),
                 wav_path,
                 text_channel_id: config.text_channel_id,
+                archive_folder: config.archive_folder,
                 recorder,
             },
         );
@@ -569,41 +622,8 @@ impl AudioFileGuard {
         self.armed = false;
     }
 
-    /// Alle Dateien, die zu dieser Aufnahme gehören: WAV plus jedes MP3-Segment, das
-    /// ffmpeg angelegt hat — auch die eines abgebrochenen Transcodes. Synchron für den
-    /// Drop-Pfad; `cleanup` sammelt dieselben Pfade asynchron ein.
-    fn artifact_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.wav_path.clone(), self.mp3_path.clone()];
-        let Some(dir) = self.mp3_path.parent() else {
-            return paths;
-        };
-        let Ok(stem) = segment_stem(&self.mp3_path) else {
-            return paths;
-        };
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return paths;
-        };
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let Some(file_name) = file_name.to_str() else {
-                continue;
-            };
-            if segment_index(file_name, &stem).is_some() {
-                paths.push(entry.path());
-            }
-        }
-        paths
-    }
-
     async fn cleanup(&mut self) {
-        let mut paths = vec![self.wav_path.clone(), self.mp3_path.clone()];
-        if let (Some(dir), Ok(stem)) = (self.mp3_path.parent(), segment_stem(&self.mp3_path)) {
-            if let Ok(segments) = collect_segments(dir, &stem).await {
-                paths.extend(segments);
-            }
-        }
-        for path in paths {
-            let path = &path;
+        for path in [&self.wav_path, &self.mp3_path] {
             match tokio::fs::remove_file(path).await {
                 Ok(()) => {
                     tracing::debug!(
@@ -638,8 +658,7 @@ impl Drop for AudioFileGuard {
         if !self.armed {
             return;
         }
-        for path in self.artifact_paths() {
-            let path = &path;
+        for path in [&self.wav_path, &self.mp3_path] {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => {}
@@ -663,6 +682,7 @@ pub struct ScrimRecorder {
     port: Arc<dyn ScrimRecordPort>,
     backend: Arc<dyn RecordingBackend>,
     transcoder: Arc<dyn AudioTranscoder>,
+    archive: Arc<dyn RecordingArchive>,
     temp_dir: PathBuf,
     state: Mutex<RegistryAllocator>,
     lifecycle: RwLock<()>,
@@ -675,12 +695,14 @@ impl ScrimRecorder {
         port: Arc<dyn ScrimRecordPort>,
         backend: Arc<dyn RecordingBackend>,
         transcoder: Arc<dyn AudioTranscoder>,
+        archive: Arc<dyn RecordingArchive>,
         temp_dir: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
             port,
             backend,
             transcoder,
+            archive,
             temp_dir,
             state: Mutex::new(RegistryAllocator::default()),
             lifecycle: RwLock::new(()),
@@ -1195,12 +1217,12 @@ impl ScrimRecorder {
             }
         };
 
-        let segments = match self
+        let mp3_path = match self
             .transcoder
             .transcode(&files.wav_path, &files.mp3_path)
             .await
         {
-            Ok(segments) => segments,
+            Ok(path) => Some(path),
             Err(err) => {
                 tracing::error!(
                     %err,
@@ -1211,78 +1233,121 @@ impl ScrimRecorder {
                     trigger = trigger.reason(),
                     "Scrim-Record: Audio-Transkodierung fehlgeschlagen"
                 );
-                Vec::new()
+                None
             }
         };
 
-        // Der Luecken-Hinweis haengt an der ersten Nachricht, die tatsaechlich ankommt —
-        // sonst verschwindet er still, wenn ausgerechnet Teil 1 nicht hochgeht.
-        let mut pending_loss_notice = recording_loss_notice(recording_loss);
-        let parts_total = segments.len();
-        let mut failed_parts = 0usize;
-        for (index, segment) in segments.iter().enumerate() {
-            let part = index + 1;
-            let upload_content =
-                upload_notice(pending_loss_notice.as_deref(), part, parts_total);
+        let loss_notice = recording_loss_notice(recording_loss);
+        let mut delivered = false;
+        if let Some(mp3_path) = mp3_path.as_deref() {
+            let file_name = archive_file_name(voice_channel_id, session.started_at_utc);
             match self
-                .port
-                .upload_attachment(
-                    session.text_channel_id,
-                    upload_content.as_deref(),
-                    segment,
-                )
+                .archive
+                .upload(mp3_path, session.archive_folder, &file_name)
                 .await
             {
-                Ok(()) => {
-                    pending_loss_notice = None;
+                Ok(archived) => {
+                    delivered = true;
                     tracing::info!(
                         guild_id = SCRIM_GUILD_ID,
                         channel_id = voice_channel_id,
-                        text_channel_id = session.text_channel_id,
                         recorder = ?recorder,
-                        reason = "attachment_uploaded",
+                        reason = "archive_uploaded",
                         trigger = trigger.reason(),
-                        part,
-                        parts_total,
+                        folder = session.archive_folder,
+                        file_name = %file_name,
                         dropped_frames = recording_loss.dropped_frames,
                         dropped_audio_ms = recording_loss.dropped_audio.as_millis(),
-                        "Scrim-Record: Aufnahme hochgeladen"
+                        "Scrim-Record: Aufnahme im Archiv abgelegt"
                     );
+                    let text =
+                        archive_notice(&archived, session.archive_folder, loss_notice.as_deref());
+                    if let Err(err) = self.port.post_text(session.text_channel_id, &text).await {
+                        tracing::error!(
+                            %err,
+                            guild_id = SCRIM_GUILD_ID,
+                            channel_id = voice_channel_id,
+                            text_channel_id = session.text_channel_id,
+                            recorder = ?recorder,
+                            reason = "archive_link_post_failed",
+                            trigger = trigger.reason(),
+                            "Scrim-Record: Archiv-Link konnte nicht gepostet werden"
+                        );
+                    }
                 }
-                Err(err) => {
-                    failed_parts += 1;
+                Err(err) => tracing::error!(
+                    %err,
+                    guild_id = SCRIM_GUILD_ID,
+                    channel_id = voice_channel_id,
+                    recorder = ?recorder,
+                    reason = "archive_upload_failed",
+                    trigger = trigger.reason(),
+                    folder = session.archive_folder,
+                    "Scrim-Record: Archiv-Upload fehlgeschlagen"
+                ),
+            }
+
+            // Notnagel, wenn das Archiv streikt: kleine Aufnahmen passen noch als Anhang.
+            if !delivered {
+                let size = tokio::fs::metadata(mp3_path)
+                    .await
+                    .map(|meta| meta.len())
+                    .unwrap_or(u64::MAX);
+                if size <= MAX_ATTACHMENT_BYTES {
+                    match self
+                        .port
+                        .upload_attachment(
+                            session.text_channel_id,
+                            loss_notice.as_deref(),
+                            mp3_path,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            delivered = true;
+                            tracing::warn!(
+                                guild_id = SCRIM_GUILD_ID,
+                                channel_id = voice_channel_id,
+                                recorder = ?recorder,
+                                reason = "attachment_fallback_uploaded",
+                                trigger = trigger.reason(),
+                                size_bytes = size,
+                                "Scrim-Record: Archiv nicht erreichbar, Aufnahme als Anhang zugestellt"
+                            );
+                        }
+                        Err(err) => tracing::error!(
+                            %err,
+                            guild_id = SCRIM_GUILD_ID,
+                            channel_id = voice_channel_id,
+                            recorder = ?recorder,
+                            reason = "attachment_fallback_failed",
+                            trigger = trigger.reason(),
+                            size_bytes = size,
+                            "Scrim-Record: Anhang-Notnagel fehlgeschlagen"
+                        ),
+                    }
+                } else {
                     tracing::error!(
-                        %err,
                         guild_id = SCRIM_GUILD_ID,
                         channel_id = voice_channel_id,
-                        text_channel_id = session.text_channel_id,
                         recorder = ?recorder,
-                        reason = "attachment_upload_failed",
+                        reason = "attachment_fallback_too_large",
                         trigger = trigger.reason(),
-                        part,
-                        parts_total,
-                        dropped_frames = recording_loss.dropped_frames,
-                        dropped_audio_ms = recording_loss.dropped_audio.as_millis(),
-                        "Scrim-Record: Attachment-Upload fehlgeschlagen"
+                        size_bytes = size,
+                        limit_bytes = MAX_ATTACHMENT_BYTES,
+                        "Scrim-Record: Aufnahme zu gross fuer den Anhang-Notnagel"
                     );
                 }
             }
         }
-        // Kam wenigstens ein Teil an, ist der komplette Fehlschlag-Text falsch — dann sagt
-        // der Kanal, dass ein Teil fehlt, statt dass die Aufnahme nicht bereitsteht.
-        let delivered_parts = parts_total - failed_parts;
-        if failed_parts > 0 || parts_total == 0 {
-            let text = if delivered_parts > 0 {
-                PARTIAL_UPLOAD_TEXT
-            } else {
-                UPLOAD_FALLBACK_TEXT
-            };
+
+        if !delivered {
             self.post_fallback(
                 session.text_channel_id,
                 voice_channel_id,
                 recorder,
                 trigger,
-                text,
+                UPLOAD_FALLBACK_TEXT,
             )
             .await;
         }
