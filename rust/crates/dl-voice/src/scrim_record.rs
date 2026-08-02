@@ -9,8 +9,9 @@ pub mod service;
 
 pub use audio::{recording_songbird_manager, SongbirdRecordingBackend};
 pub use service::{
-    prepare_recording_temp_dir, register, spawn, AudioTranscoder, FfmpegTranscoder,
-    RecordCommandHandler, RecordingBackend, ScrimRecordPort, ScrimRecorder, StartError, StopError,
+    prepare_recording_temp_dir, register, spawn, ArchivedRecording, AudioTranscoder,
+    FfmpegTranscoder, RcloneArchive, RecordCommandHandler, RecordingArchive, RecordingBackend,
+    ScrimRecordPort, ScrimRecorder, StartError, StopError,
 };
 
 const SCRIM_GUILD_ID: u64 = 1_289_721_245_281_292_288;
@@ -20,6 +21,8 @@ pub struct TeamChannelConfig {
     pub voice_channel_id: u64,
     pub team_role_id: u64,
     pub text_channel_id: u64,
+    /// Unterordner im Archiv — pro Team einer, damit der Freigabelink dauerhaft passt.
+    pub archive_folder: &'static str,
 }
 
 const COACH_ROLE_ID: u64 = 1_494_372_744_286_965_941;
@@ -29,21 +32,25 @@ const TEAM_VOICE_CHANNELS: &[TeamChannelConfig] = &[
         voice_channel_id: 1_521_167_264_533_970_954,
         team_role_id: 1_521_163_175_318_388_847,
         text_channel_id: 1_521_164_348_976_922_795,
+            archive_folder: "Team 1",
     },
     TeamChannelConfig {
         voice_channel_id: 1_521_167_309_828_526_183,
         team_role_id: 1_521_163_233_245_794_465,
         text_channel_id: 1_521_164_426_424_750_171,
+            archive_folder: "Team 2",
     },
     TeamChannelConfig {
         voice_channel_id: 1_521_167_476_711_358_505,
         team_role_id: 1_521_163_300_480_483_498,
         text_channel_id: 1_521_164_444_787_540_110,
+            archive_folder: "Team 3",
     },
     TeamChannelConfig {
         voice_channel_id: 1_521_939_025_982_652_416,
         team_role_id: 1_521_163_334_211_338_391,
         text_channel_id: 1_521_164_466_169_970_728,
+            archive_folder: "Team 4",
     },
 ];
 
@@ -178,21 +185,25 @@ mod tests {
             voice_channel_id: 1_521_167_264_533_970_954,
             team_role_id: 1_521_163_175_318_388_847,
             text_channel_id: 1_521_164_348_976_922_795,
+                    archive_folder: "Team 1",
         },
         TeamChannelConfig {
             voice_channel_id: 1_521_167_309_828_526_183,
             team_role_id: 1_521_163_233_245_794_465,
             text_channel_id: 1_521_164_426_424_750_171,
+                    archive_folder: "Team 2",
         },
         TeamChannelConfig {
             voice_channel_id: 1_521_167_476_711_358_505,
             team_role_id: 1_521_163_300_480_483_498,
             text_channel_id: 1_521_164_444_787_540_110,
+                    archive_folder: "Team 3",
         },
         TeamChannelConfig {
             voice_channel_id: 1_521_939_025_982_652_416,
             team_role_id: 1_521_163_334_211_338_391,
             text_channel_id: 1_521_164_466_169_970_728,
+                    archive_folder: "Team 4",
         },
     ];
 
@@ -207,6 +218,7 @@ mod tests {
                 voice_channel_id,
                 team_role_id: 1,
                 text_channel_id: 2,
+                archive_folder: "Testordner",
             },
             started_at,
             PathBuf::from(format!("{voice_channel_id}.wav")),

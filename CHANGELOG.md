@@ -1,3 +1,11 @@
+## #314 — Aufnahmen landen im Team-Ordner statt als Anhang
+
+Problem: Discord nimmt pro Datei nur 50 MB an. Deshalb wurde eine lange Aufnahme in mehrere Teile zerschnitten, die man einzeln herunterladen und zusammensuchen musste.
+
+Änderung: Die fertige Aufnahme wandert jetzt in einen Google-Drive-Ordner — einen pro Team. Im Team-Kanal steht danach der Link zur Aufnahme und der Link zum Ordner, in dem alle bisherigen Aufnahmen des Teams liegen. Beide Links funktionieren ohne Google-Konto. Klappt der Upload einmal nicht, versucht der Bot weiterhin den direkten Anhang, solange die Datei klein genug ist.
+
+Aktuelles Verhalten: Eine Aufnahme, eine Datei, ein Link — unabhängig von der Länge. Der Ordner-Link bleibt immer derselbe, den könnt ihr euch anpinnen.
+
 ## #313 — Scrim-Aufnahmen dürfen jetzt sechs Stunden laufen
 
 Problem: Nach 60 Minuten hat der Bot jede Aufnahme automatisch beendet. Für eine lange Scrim-Session hieß das: mittendrin abbrechen und neu starten.

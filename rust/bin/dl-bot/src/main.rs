@@ -610,10 +610,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .await
         .map_err(anyhow::Error::msg)
         .context("Scrim-Record-Temp-Verzeichnis erstellen")?;
+    // Ziel der Aufnahmen ist der Google-Drive-Ordner hinter dem rclone-Remote; beides
+    // ist konfigurierbar, damit ein Umzug keinen Rebuild braucht.
+    let rclone_path = std::env::var("SCRIM_RECORD_RCLONE_PATH")
+        .unwrap_or_else(|_| "/usr/local/bin/rclone".to_string());
+    let archive_base = std::env::var("SCRIM_RECORD_ARCHIVE_BASE")
+        .unwrap_or_else(|_| "gdrive:Deadlock/Scrim-Aufnahmen".to_string());
     let scrim_recorder = dl_voice::scrim_record::ScrimRecorder::new(
         cache_snapshot.clone(),
         recording_backend,
         Arc::new(dl_voice::scrim_record::FfmpegTranscoder),
+        Arc::new(dl_voice::scrim_record::RcloneArchive::new(
+            rclone_path,
+            archive_base,
+        )),
         recording_temp_dir,
     );
     dl_voice::scrim_record::register(
