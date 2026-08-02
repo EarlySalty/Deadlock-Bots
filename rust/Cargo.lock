@@ -1341,6 +1341,7 @@ dependencies = [
  "dl-community",
  "dl-discord",
  "hound",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

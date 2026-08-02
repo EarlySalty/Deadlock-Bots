@@ -16,6 +16,7 @@ dl-community.workspace = true
 dl-central-db.workspace = true
 dl-discord.workspace = true
 hound.workspace = true
+libc = "0.2"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

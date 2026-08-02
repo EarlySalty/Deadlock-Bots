@@ -29,8 +29,11 @@ const DROP_FAILURE_WINDOW: Duration = Duration::from_secs(10);
 // More than one second of missing audio in ten seconds is an audible quality failure.
 const MAX_DROPPED_FRAMES_PER_WINDOW: u64 = 1_000 / TICK_MILLIS as u64;
 
+// Die Aufnahme wird als Mono geschrieben: Sprache braucht die Stereobreite nicht, und
+// 6 Stunden stereo waeren 4,15 GB — zu nah am 4-GiB-Limit des WAV-Formats. Mono kostet
+// 346 MB/h, also 2,07 GB fuer die volle Aufnahmedauer.
 const WAV_SPEC: hound::WavSpec = hound::WavSpec {
-    channels: CHANNELS as u16,
+    channels: 1,
     sample_rate: SAMPLE_RATE_HZ as u32,
     bits_per_sample: 16,
     sample_format: hound::SampleFormat::Int,
@@ -314,6 +317,14 @@ struct WavWriterTask {
     join: tokio::task::JoinHandle<Result<(), String>>,
 }
 
+/// Der Mixer liefert interleaved Stereo; die WAV-Datei ist Mono. Der Mittelwert beider
+/// Kanaele haelt beide Seiten hoerbar, ohne zu uebersteuern.
+fn downmix_to_mono(frame: &[i16]) -> impl Iterator<Item = i16> + '_ {
+    frame
+        .chunks_exact(CHANNELS)
+        .map(|pair| ((i32::from(pair[0]) + i32::from(pair[1])) / 2) as i16)
+}
+
 fn new_buffered_wav_writer(file: File) -> Result<hound::WavWriter<BufWriter<File>>, hound::Error> {
     hound::WavWriter::new(
         BufWriter::with_capacity(WAV_BUFFER_CAPACITY, file),
@@ -356,7 +367,7 @@ impl WavWriterTask {
 
             let mut errors = Vec::new();
             'frames: while let Some(frame) = receiver.blocking_recv() {
-                for sample in frame {
+                for sample in downmix_to_mono(&frame) {
                     if let Err(err) = writer.write_sample(sample) {
                         let error = format!("writer_write_failed: {err}");
                         failure.fail(error.clone());
@@ -1143,8 +1154,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn downmix_averages_both_channels_without_overflowing() {
+        assert_eq!(downmix_to_mono(&[100, 200]).collect::<Vec<_>>(), vec![150]);
+        assert_eq!(
+            downmix_to_mono(&[i16::MAX, i16::MAX]).collect::<Vec<_>>(),
+            vec![i16::MAX]
+        );
+        assert_eq!(
+            downmix_to_mono(&[i16::MIN, i16::MIN]).collect::<Vec<_>>(),
+            vec![i16::MIN]
+        );
+        // Ein unvollstaendiges Kanalpaar wird verworfen statt halb geschrieben.
+        assert_eq!(downmix_to_mono(&[1, 2, 3]).collect::<Vec<_>>(), vec![1]);
+    }
+
     #[tokio::test]
-    async fn writer_creates_readable_stereo_48khz_wav_with_exact_samples() {
+    async fn writer_creates_readable_mono_48khz_wav_from_stereo_frames() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let wav_path = temp_dir.path().join("recording.wav");
         let samples = vec![1, -1, i16::MAX, i16::MIN, 23, -42];
@@ -1163,7 +1189,7 @@ mod tests {
         assert_eq!(
             reader.spec(),
             hound::WavSpec {
-                channels: 2,
+                channels: 1,
                 sample_rate: 48_000,
                 bits_per_sample: 16,
                 sample_format: hound::SampleFormat::Int,
@@ -1173,7 +1199,7 @@ mod tests {
             .samples::<i16>()
             .collect::<Result<Vec<_>, _>>()
             .expect("wav samples");
-        assert_eq!(actual, samples);
+        assert_eq!(actual, vec![0, 0, -9]);
         assert_eq!(
             std::fs::metadata(&wav_path)
                 .expect("wav metadata")

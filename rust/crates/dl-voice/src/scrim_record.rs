@@ -23,7 +23,7 @@ pub struct TeamChannelConfig {
 }
 
 const COACH_ROLE_ID: u64 = 1_494_372_744_286_965_941;
-const MAX_RECORDING_DURATION: Duration = Duration::from_secs(60 * 60);
+const MAX_RECORDING_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 const TEAM_VOICE_CHANNELS: &[TeamChannelConfig] = &[
     TeamChannelConfig {
         voice_channel_id: 1_521_167_264_533_970_954,
@@ -162,7 +162,7 @@ mod tests {
     const EXPECTED_COACH_ROLE_ID: u64 = 1_494_372_744_286_965_941;
     const UNKNOWN_CHANNEL_ID: u64 = 42;
     const UNRELATED_ROLE_ID: u64 = 7;
-    const SIXTY_MINUTES: Duration = Duration::from_secs(60 * 60);
+    const SIX_HOURS: Duration = Duration::from_secs(6 * 60 * 60);
 
     struct RouterContractHandler;
 
@@ -287,22 +287,23 @@ mod tests {
     }
 
     #[test]
-    fn duration_cap_does_not_trigger_just_below_sixty_minutes() {
-        assert!(!duration_cap_reached(
-            SIXTY_MINUTES - Duration::from_millis(1)
-        ));
+    fn duration_cap_does_not_trigger_just_below_six_hours() {
+        assert!(!duration_cap_reached(SIX_HOURS - Duration::from_millis(1)));
     }
 
     #[test]
-    fn duration_cap_triggers_at_exactly_sixty_minutes() {
-        assert!(duration_cap_reached(SIXTY_MINUTES));
+    fn duration_cap_does_not_trigger_after_five_hours_fifty_nine_minutes() {
+        assert!(!duration_cap_reached(Duration::from_secs(5 * 3600 + 59 * 60)));
     }
 
     #[test]
-    fn duration_cap_triggers_just_above_sixty_minutes() {
-        assert!(duration_cap_reached(
-            SIXTY_MINUTES + Duration::from_millis(1)
-        ));
+    fn duration_cap_triggers_at_exactly_six_hours() {
+        assert!(duration_cap_reached(SIX_HOURS));
+    }
+
+    #[test]
+    fn duration_cap_triggers_just_above_six_hours() {
+        assert!(duration_cap_reached(SIX_HOURS + Duration::from_millis(1)));
     }
 
     #[test]
