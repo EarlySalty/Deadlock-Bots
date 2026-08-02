@@ -139,9 +139,9 @@ const SEGMENT_MARKER: &str = "-part";
 /// Text zur Nachricht eines Segments: der Lücken-Hinweis steht nur an der ersten Nachricht,
 /// die Teil-Zeile nur, wenn die Aufnahme überhaupt aufgeteilt wurde.
 fn upload_notice(loss_notice: Option<&str>, part: usize, parts_total: usize) -> Option<String> {
-    let loss = if part == 1 { loss_notice } else { None };
-    let part_line = (parts_total > 1).then(|| format!("Teil {part} von {parts_total} der Aufnahme."));
-    match (loss, part_line) {
+    let part_line =
+        (parts_total > 1).then(|| format!("Teil {part} von {parts_total} der Aufnahme."));
+    match (loss_notice, part_line) {
         (Some(loss), Some(part_line)) => Some(format!("{loss}\n{part_line}")),
         (Some(loss), None) => Some(loss.to_string()),
         (None, Some(part_line)) => Some(part_line),
@@ -537,7 +537,8 @@ impl AudioFileGuard {
     }
 
     /// Alle Dateien, die zu dieser Aufnahme gehören: WAV plus jedes MP3-Segment, das
-    /// ffmpeg angelegt hat — auch die eines abgebrochenen Transcodes.
+    /// ffmpeg angelegt hat — auch die eines abgebrochenen Transcodes. Synchron für den
+    /// Drop-Pfad; `cleanup` sammelt dieselben Pfade asynchron ein.
     fn artifact_paths(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.wav_path.clone(), self.mp3_path.clone()];
         let Some(dir) = self.mp3_path.parent() else {
@@ -562,7 +563,13 @@ impl AudioFileGuard {
     }
 
     async fn cleanup(&mut self) {
-        for path in self.artifact_paths() {
+        let mut paths = vec![self.wav_path.clone(), self.mp3_path.clone()];
+        if let (Some(dir), Ok(stem)) = (self.mp3_path.parent(), segment_stem(&self.mp3_path)) {
+            if let Ok(segments) = collect_segments(dir, &stem).await {
+                paths.extend(segments);
+            }
+        }
+        for path in paths {
             let path = &path;
             match tokio::fs::remove_file(path).await {
                 Ok(()) => {
@@ -1143,12 +1150,15 @@ impl ScrimRecorder {
             }
         };
 
-        let loss_notice = recording_loss_notice(recording_loss);
+        // Der Luecken-Hinweis haengt an der ersten Nachricht, die tatsaechlich ankommt —
+        // sonst verschwindet er still, wenn ausgerechnet Teil 1 nicht hochgeht.
+        let mut pending_loss_notice = recording_loss_notice(recording_loss);
         let parts_total = segments.len();
         let mut upload_succeeded = parts_total > 0;
         for (index, segment) in segments.iter().enumerate() {
             let part = index + 1;
-            let upload_content = upload_notice(loss_notice.as_deref(), part, parts_total);
+            let upload_content =
+                upload_notice(pending_loss_notice.as_deref(), part, parts_total);
             match self
                 .port
                 .upload_attachment(
@@ -1159,6 +1169,7 @@ impl ScrimRecorder {
                 .await
             {
                 Ok(()) => {
+                    pending_loss_notice = None;
                     tracing::info!(
                         guild_id = SCRIM_GUILD_ID,
                         channel_id = voice_channel_id,

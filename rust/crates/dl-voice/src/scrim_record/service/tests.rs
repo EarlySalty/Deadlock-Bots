@@ -21,6 +21,7 @@ struct MockPortState {
     upload_attempts: Vec<(u64, PathBuf)>,
     upload_contents: Vec<Option<String>>,
     fail_upload: bool,
+    upload_failures_remaining: usize,
 }
 
 struct MockPort {
@@ -83,6 +84,13 @@ impl MockPort {
 
     fn set_upload_failure(&self, fail: bool) {
         self.state.lock().expect("mock port lock").fail_upload = fail;
+    }
+
+    fn fail_next_uploads(&self, count: usize) {
+        self.state
+            .lock()
+            .expect("mock port lock")
+            .upload_failures_remaining = count;
     }
 
     fn successful_post_count(&self) -> usize {
@@ -177,6 +185,10 @@ impl ScrimRecordPort for MockPort {
         let mut state = self.state.lock().expect("mock port lock");
         state.upload_attempts.push((channel_id, path.to_path_buf()));
         state.upload_contents.push(content.map(str::to_string));
+        if state.upload_failures_remaining > 0 {
+            state.upload_failures_remaining -= 1;
+            return Err("upload failure".to_string());
+        }
         if state.fail_upload {
             Err("upload failure".to_string())
         } else {
@@ -987,6 +999,40 @@ async fn a_failing_part_upload_still_sends_the_remaining_parts() {
         .iter()
         .any(|(_, text)| text == UPLOAD_FALLBACK_TEXT));
     harness.assert_temp_files_removed();
+}
+
+#[tokio::test]
+async fn the_gap_notice_moves_to_the_first_part_that_actually_arrives() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness.transcoder.set_segments(3);
+    harness.port.fail_next_uploads(1);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+    harness.backend.set_dropped_frames(3);
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    assert_eq!(
+        harness.port.upload_contents(),
+        vec![
+            Some(
+                "Die Aufnahme hat Lücken: 60 ms Ton fehlen.\nTeil 1 von 3 der Aufnahme."
+                    .to_string()
+            ),
+            Some(
+                "Die Aufnahme hat Lücken: 60 ms Ton fehlen.\nTeil 2 von 3 der Aufnahme."
+                    .to_string()
+            ),
+            Some("Teil 3 von 3 der Aufnahme.".to_string()),
+        ]
+    );
 }
 
 #[test]

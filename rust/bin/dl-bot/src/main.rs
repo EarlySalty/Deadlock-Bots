@@ -582,10 +582,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .map_err(anyhow::Error::msg)
         .context("Scrim-Record-Backend bauen")?,
     );
-    let recording_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+    // Nicht XDG_RUNTIME_DIR: das ist eine tmpfs von rund 1,5 GB, und eine sechsstuendige
+    // Aufnahme braucht 2,1 GB. Der Zwischenspeicher gehoert deshalb auf die Platte.
+    let recording_state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
-        .context("XDG_RUNTIME_DIR fehlt fuer Scrim-Record")?;
-    let recording_temp_dir = recording_runtime_dir.join("deadlock-bots-scrim-recordings");
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/state"))
+        })
+        .context("XDG_STATE_HOME und HOME fehlen fuer Scrim-Record")?;
+    let recording_temp_dir = recording_state_dir.join("deadlock-bots-scrim-recordings");
+    if let Some(parent) = recording_temp_dir.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("Scrim-Record-Basisverzeichnis erstellen")?;
+    }
     dl_voice::scrim_record::prepare_recording_temp_dir(&recording_temp_dir)
         .await
         .map_err(anyhow::Error::msg)
