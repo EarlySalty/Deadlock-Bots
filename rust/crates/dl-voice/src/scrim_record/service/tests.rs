@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -358,27 +358,52 @@ impl RecordingBackend for MockBackend {
     }
 }
 
-#[derive(Default)]
 struct MockTranscoder {
     calls: StdMutex<Vec<(PathBuf, PathBuf)>>,
+    segments: AtomicUsize,
+}
+
+impl Default for MockTranscoder {
+    fn default() -> Self {
+        Self {
+            calls: StdMutex::new(Vec::new()),
+            segments: AtomicUsize::new(1),
+        }
+    }
 }
 
 impl MockTranscoder {
     fn call_count(&self) -> usize {
         self.calls.lock().expect("mock transcoder lock").len()
     }
+
+    fn set_segments(&self, segments: usize) {
+        self.segments.store(segments, Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
 impl AudioTranscoder for MockTranscoder {
-    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<(), String> {
+    async fn transcode(&self, wav_path: &Path, mp3_path: &Path) -> Result<Vec<PathBuf>, String> {
         self.calls
             .lock()
             .expect("mock transcoder lock")
             .push((wav_path.to_path_buf(), mp3_path.to_path_buf()));
-        tokio::fs::write(mp3_path, b"mp3")
-            .await
-            .map_err(|err| err.to_string())
+        let dir = mp3_path.parent().expect("mp3 parent");
+        let stem = mp3_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("mp3 stem")
+            .to_string();
+        let mut written = Vec::new();
+        for index in 0..self.segments.load(Ordering::SeqCst) {
+            let path = dir.join(format!("{stem}-part{index:02}.mp3"));
+            tokio::fs::write(&path, b"mp3")
+                .await
+                .map_err(|err| err.to_string())?;
+            written.push(path);
+        }
+        Ok(written)
     }
 }
 
@@ -511,7 +536,7 @@ fn all_scrim_record_user_texts_are_final_and_explain_the_next_step() {
     assert!(STOP_CONFIRMATION_TEXT.contains("Team-Textkanal"));
     assert!(UPLOAD_FALLBACK_TEXT.contains("MP3"));
     assert!(UPLOAD_FALLBACK_TEXT.contains("nicht nachträglich"));
-    assert!(CAP_REACHED_TEXT.contains("60-Minuten-Limit"));
+    assert!(CAP_REACHED_TEXT.contains("6-Stunden-Limit"));
     assert!(CAP_REACHED_TEXT.contains("/record start"));
 }
 
@@ -549,9 +574,12 @@ async fn temp_dir_is_private_and_only_stale_recording_files_are_purged() {
     );
 
     let private_mp3 = recording_dir.join("scrim-record-1-2-4.mp3");
-    create_private_output_file(&private_mp3)
+    tokio::fs::write(&private_mp3, b"mp3")
         .await
-        .expect("create private output");
+        .expect("write output");
+    restrict_output_file(&private_mp3)
+        .await
+        .expect("restrict private output");
     assert_eq!(
         std::fs::metadata(private_mp3)
             .expect("private output metadata")
@@ -872,6 +900,185 @@ async fn dropped_audio_beyond_a_second_is_disclosed_in_seconds() {
 }
 
 #[tokio::test]
+async fn long_recordings_are_uploaded_as_numbered_parts() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness.transcoder.set_segments(3);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+    harness.backend.set_dropped_frames(3);
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    let attempts = harness.port.upload_attempts();
+    assert_eq!(attempts.len(), 3);
+    let names: Vec<String> = attempts
+        .iter()
+        .map(|(_, path)| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .expect("segment name")
+                .to_string()
+        })
+        .collect();
+    assert!(names[0].ends_with("-part00.mp3"), "unerwartet: {names:?}");
+    assert!(names[1].ends_with("-part01.mp3"), "unerwartet: {names:?}");
+    assert!(names[2].ends_with("-part02.mp3"), "unerwartet: {names:?}");
+    assert_eq!(
+        harness.port.upload_contents(),
+        vec![
+            Some(
+                "Die Aufnahme hat Lücken: 60 ms Ton fehlen.\nTeil 1 von 3 der Aufnahme."
+                    .to_string()
+            ),
+            Some("Teil 2 von 3 der Aufnahme.".to_string()),
+            Some("Teil 3 von 3 der Aufnahme.".to_string()),
+        ]
+    );
+    harness.assert_temp_files_removed();
+}
+
+#[tokio::test]
+async fn a_single_part_recording_carries_no_part_line() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    assert_eq!(harness.port.upload_attempts().len(), 1);
+    assert_eq!(harness.port.upload_contents(), vec![None]);
+}
+
+#[tokio::test]
+async fn a_failing_part_upload_still_sends_the_remaining_parts() {
+    let harness = Harness::new();
+    let role = harness.set_user_channel(1, 0);
+    harness.transcoder.set_segments(3);
+    harness.port.set_upload_failure(true);
+    harness
+        .recorder
+        .start(SCRIM_GUILD_ID, 1, &[role])
+        .await
+        .expect("start");
+
+    assert_eq!(
+        harness.recorder.stop(SCRIM_GUILD_ID, 1, &[role]).await,
+        Ok(RecorderIdentity::MainBot)
+    );
+
+    assert_eq!(harness.port.upload_attempts().len(), 3);
+    assert!(harness
+        .port
+        .successful_posts()
+        .iter()
+        .any(|(_, text)| text == UPLOAD_FALLBACK_TEXT));
+    harness.assert_temp_files_removed();
+}
+
+#[test]
+fn segments_sort_numerically_not_lexicographically() {
+    let stem = "scrim-record-1-2-3";
+    let mut names = ["part10", "part02", "part01"]
+        .into_iter()
+        .map(|part| format!("{stem}-{part}.mp3"))
+        .collect::<Vec<_>>();
+    names.sort_by_key(|name| segment_index(name, stem).expect("segment index"));
+    assert_eq!(
+        names,
+        vec![
+            format!("{stem}-part01.mp3"),
+            format!("{stem}-part02.mp3"),
+            format!("{stem}-part10.mp3"),
+        ]
+    );
+    assert_eq!(segment_index("keep.txt", stem), None);
+    assert_eq!(segment_index(&format!("{stem}.mp3"), stem), None);
+}
+
+/// Der echte ffmpeg-Pfad, nicht der Fake: falsche Argumente fallen sonst erst live auf.
+/// Braucht ffmpeg im PATH, daher ignoriert im Standardlauf.
+#[tokio::test]
+#[ignore]
+async fn ffmpeg_writes_mono_segments_at_the_configured_bitrate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wav_path = dir.path().join("scrim-record-1-2-3.wav");
+    let generated = tokio::process::Command::new("ffmpeg")
+        .args(["-nostdin", "-y", "-f", "lavfi", "-i"])
+        .arg("sine=frequency=440:duration=3")
+        .args(["-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
+        .arg(&wav_path)
+        .status()
+        .await
+        .expect("ffmpeg für Testeingabe");
+    assert!(generated.success(), "Testeingabe konnte nicht erzeugt werden");
+
+    let segments = FfmpegTranscoder
+        .transcode(&wav_path, &wav_path.with_extension("mp3"))
+        .await
+        .expect("transcode");
+
+    assert_eq!(segments.len(), 1, "3 Sekunden ergeben genau ein Segment");
+    assert!(segments[0]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("segment name")
+        .ends_with("-part00.mp3"));
+    assert_eq!(
+        std::fs::metadata(&segments[0])
+            .expect("segment metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let probe = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=channels,bit_rate",
+            "-of",
+            "default=nw=1",
+        ])
+        .arg(&segments[0])
+        .output()
+        .await
+        .expect("ffprobe");
+    let probe = String::from_utf8_lossy(&probe.stdout);
+    assert!(probe.contains("channels=1"), "unerwartet: {probe}");
+    assert!(probe.contains("bit_rate=64000"), "unerwartet: {probe}");
+}
+
+#[test]
+fn ninety_minute_segments_stay_below_the_discord_attachment_limit() {
+    const DISCORD_TIER_2_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
+    let bitrate_bits_per_second: u64 = AUDIO_BITRATE
+        .trim_end_matches('k')
+        .parse::<u64>()
+        .expect("bitrate")
+        * 1000;
+    let segment_bytes = SEGMENT_DURATION_SECONDS * bitrate_bits_per_second / 8;
+    assert!(
+        segment_bytes < DISCORD_TIER_2_LIMIT_BYTES,
+        "Segment wäre {segment_bytes} Bytes und damit über dem 50-MB-Limit"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_health_sweeps_stop_an_unhealthy_session_once() {
     let harness = Harness::new();
     let role = harness.set_user_channel(1, 0);
@@ -934,14 +1141,14 @@ async fn cap_triggers_at_exact_boundary_and_posts_hint() {
     assert_eq!(
         harness
             .recorder
-            .cap_sweep_at(started_at + Duration::from_secs(60 * 60) - Duration::from_nanos(1))
+            .cap_sweep_at(started_at + Duration::from_secs(6 * 60 * 60) - Duration::from_nanos(1))
             .await,
         0
     );
     assert_eq!(
         harness
             .recorder
-            .cap_sweep_at(started_at + Duration::from_secs(60 * 60))
+            .cap_sweep_at(started_at + Duration::from_secs(6 * 60 * 60))
             .await,
         1
     );
@@ -971,7 +1178,7 @@ async fn cap_loser_does_not_post_hint() {
     assert_eq!(
         harness
             .recorder
-            .cap_sweep_at(started_at + Duration::from_secs(60 * 60))
+            .cap_sweep_at(started_at + Duration::from_secs(6 * 60 * 60))
             .await,
         0
     );

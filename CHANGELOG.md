@@ -1,3 +1,11 @@
+## #313 — Scrim-Aufnahmen dürfen jetzt sechs Stunden laufen
+
+Problem: Nach 60 Minuten hat der Bot jede Aufnahme automatisch beendet. Für eine lange Scrim-Session hieß das: mittendrin abbrechen und neu starten.
+
+Änderung: Die Grenze liegt jetzt bei sechs Stunden. Weil Discord pro Datei nur 50 MB annimmt, wird die fertige Aufnahme intern in Blöcke von 90 Minuten geteilt und als mehrere nummerierte Dateien hochgeladen — der Ton ist dabei auf Sprachqualität eingestellt, damit die Blöcke unter dem Limit bleiben.
+
+Aktuelles Verhalten: Eine Aufnahme läuft bis zum Stopp oder bis zur Sechs-Stunden-Grenze. Danach kommen im Team-Textkanal je nach Länge eine oder mehrere Dateien an, jeweils mit „Teil 1 von 4 der Aufnahme." beschriftet.
+
 ## #312 — Scrim-Aufnahmen laufen bis zum Schluss durch
 
 Problem: Jede Aufnahme im Team-Sprachkanal brach nach wenigen Minuten von selbst ab. Der Bot lud trotzdem eine MP3 hoch — nur eben abgeschnitten, ohne dass jemand das merkte. Ursache war ein zu knapper Zwischenspeicher: schon ein kurzer Aussetzer beim Schreiben beendete die komplette Aufnahme.
