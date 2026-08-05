@@ -150,6 +150,8 @@ pub enum LlmUseCase {
     Faq,
     LfgFreitext,
     ScrimLagebild,
+    VerbinderMatch,
+    VerbinderKritik,
 }
 
 impl LlmUseCase {
@@ -160,6 +162,8 @@ impl LlmUseCase {
             Self::Faq,
             Self::LfgFreitext,
             Self::ScrimLagebild,
+            Self::VerbinderMatch,
+            Self::VerbinderKritik,
         ]
     }
 
@@ -170,6 +174,8 @@ impl LlmUseCase {
             Self::Faq => "FAQ",
             Self::LfgFreitext => "LFG_FREITEXT",
             Self::ScrimLagebild => "SCRIM_LAGEBILD",
+            Self::VerbinderMatch => "VERBINDER_MATCH",
+            Self::VerbinderKritik => "VERBINDER_KRITIK",
         }
     }
 
@@ -180,6 +186,8 @@ impl LlmUseCase {
             Self::Faq => "faq",
             Self::LfgFreitext => "lfg_freitext",
             Self::ScrimLagebild => "scrim_lagebild",
+            Self::VerbinderMatch => "verbinder_match",
+            Self::VerbinderKritik => "verbinder_kritik",
         }
     }
 }
@@ -393,6 +401,7 @@ fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
             LlmProviderKind::Mistral
         }
         LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
+        LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => LlmProviderKind::Fireworks,
     }
 }
 
@@ -1282,6 +1291,9 @@ mod tests {
                     LlmProviderKind::Mistral
                 }
                 LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
+                LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => {
+                    LlmProviderKind::Fireworks
+                }
             };
             assert_eq!(
                 defaults
