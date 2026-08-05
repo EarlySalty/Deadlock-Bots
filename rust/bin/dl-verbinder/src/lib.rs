@@ -388,6 +388,69 @@ pub fn pflichtzeile(nonce: &str, kandidaten: usize, zaehler: &BTreeMap<&'static 
     )
 }
 
+/// Teilt einen Bericht in sendbare Häppchen von höchstens `limit` Zeichen.
+/// Discord nimmt pro Nachricht 2000 Zeichen; ein voller Lauf-Post oder ein
+/// Wochenbericht reißt das, und ein 400er würde den ganzen Bericht in den
+/// stdout-Fallback schieben.
+///
+/// Getrennt wird an Zeilengrenzen, nie mitten in einer Zeile. Nur eine
+/// einzelne Zeile, die für sich schon zu lang ist, wird hart an einer
+/// Zeichengrenze geschnitten (nie mitten in einem Mehrbyte-Zeichen).
+/// `limit` zählt Zeichen, nicht Bytes — genau wie Discord.
+///
+/// Eine Leerzeile, die auf eine Schnittstelle fällt, entfällt: sie trägt
+/// keinen Inhalt und würde eine leere Nachricht erzeugen, die Discord
+/// ablehnt. Leere Chunks kommen darum nie zurück, leerer Text liefert
+/// einen leeren Vec.
+pub fn chunk_message(text: &str, limit: usize) -> Vec<String> {
+    if limit == 0 || text.is_empty() {
+        return Vec::new();
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut aktuell = String::new();
+    let mut aktuell_len = 0_usize;
+    let mut offen = false;
+
+    for zeile in text.split('\n') {
+        let zeilen_len = zeile.chars().count();
+        // Passt die Zeile samt Trenner nicht mehr, geht der Chunk raus.
+        if offen && aktuell_len + 1 + zeilen_len > limit {
+            chunks.push(std::mem::take(&mut aktuell));
+            aktuell_len = 0;
+            offen = false;
+        }
+        if !offen && zeile.is_empty() {
+            continue;
+        }
+        if zeilen_len > limit {
+            // Hierher kommt nur eine Zeile, die für sich zu lang ist; der
+            // laufende Chunk ist oben in jedem Fall geleert worden.
+            let mut rest = zeile;
+            while let Some((schnitt, _)) = rest.char_indices().nth(limit) {
+                chunks.push(rest[..schnitt].to_string());
+                rest = &rest[schnitt..];
+            }
+            if !rest.is_empty() {
+                aktuell.push_str(rest);
+                aktuell_len = rest.chars().count();
+                offen = true;
+            }
+            continue;
+        }
+        if offen {
+            aktuell.push('\n');
+            aktuell_len += 1;
+        }
+        aktuell.push_str(zeile);
+        aktuell_len += zeilen_len;
+        offen = true;
+    }
+    if offen {
+        chunks.push(aktuell);
+    }
+    chunks
+}
+
 /// Staff-Post eines Laufs. `None` heißt: nichts zu posten (kein yes, kein
 /// error) — der Lauf bleibt trotzdem vollständig im Ledger.
 /// Der Post nennt Vorschläge nur über Trigger und Kanal, nie über User-IDs:
@@ -755,6 +818,45 @@ mod tests {
             !post.contains("364796363709349912"),
             "Staff-Post darf keine User-IDs tragen"
         );
+    }
+
+    #[test]
+    fn chunk_laesst_kurzen_text_unangetastet() {
+        let text = "**Verbinder (Shadow)**\nVERBINDER[VB-1]: kandidaten=3 | yes=1";
+        let chunks = chunk_message(text, 1900);
+        assert_eq!(chunks, vec![text.to_string()]);
+        assert!(chunk_message("", 1900).is_empty());
+    }
+
+    #[test]
+    fn chunk_trennt_an_zeilengrenzen_ohne_zeichen_zu_verlieren() {
+        // Fünf Zeilen à 10 Zeichen bei Limit 25: je zwei Zeilen passen
+        // zusammen (21), drei nicht mehr (32).
+        let zeilen = ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc", "dddddddddd", "eeeeeeeeee"];
+        let text = zeilen.join("\n");
+        let chunks = chunk_message(&text, 25);
+
+        assert_eq!(chunks.len(), 3, "je zwei Zeilen müssen zusammen reisen");
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 25, "zu langer Chunk: {chunk:?}");
+            assert!(!chunk.is_empty(), "leerer Chunk");
+        }
+        assert_eq!(chunks.join("\n"), text, "kein Zeichen darf verloren gehen");
+    }
+
+    #[test]
+    fn chunk_schneidet_eine_ueberlange_zeile_hart_und_verliert_nichts() {
+        // Umlaute: der harte Schnitt muss an Zeichen-, nicht an Bytegrenzen
+        // liegen, sonst panict das Slicing.
+        let text = "ä".repeat(250);
+        let chunks = chunk_message(&text, 100);
+
+        assert_eq!(chunks.len(), 3);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 100, "zu langer Chunk");
+        }
+        assert_eq!(chunks.concat(), text, "kein Zeichen darf verloren gehen");
+        assert_eq!(chunks[2].chars().count(), 50);
     }
 
     #[test]

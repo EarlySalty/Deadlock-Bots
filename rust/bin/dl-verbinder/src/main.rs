@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use dl_ai::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, LlmProviderConfig, LlmUseCase};
 use dl_brain_community::{anonymize_for_privacy, Decision, LedgerEntry};
 use dl_verbinder::{
-    agreement_je_kategorie, ledger_entry_fuer_kritik, ledger_entry_fuer_match_fehler,
+    agreement_je_kategorie, chunk_message, ledger_entry_fuer_kritik, ledger_entry_fuer_match_fehler,
     ledger_entry_fuer_match_urteil, parse_kritik_antwort, parse_match_antwort, render_prompt,
     render_staff_post, render_tages_summary, render_wochenbericht, resolve_outcomes,
     text_verstoesse, waechter_filter, Akte, Caps, Kandidat, Kategorie, WochenberichtInput,
@@ -29,6 +29,9 @@ const DEFAULT_AKTE_PFAD: &str =
 const DEFAULT_GUILD_ID: i64 = 1289721245281292288;
 const DEFAULT_ROUTER_VC_ID: i64 = 1513468587195633674;
 const LLM_TIMEOUT: Duration = Duration::from_secs(45);
+/// Discord nimmt hart 2000 Zeichen pro Nachricht; 100 Zeichen Puffer, damit
+/// ein angehängter Hinweis den Bericht nicht doch noch über die Kante kippt.
+const DISCORD_CONTENT_LIMIT: usize = 1900;
 
 #[derive(Debug, Parser)]
 #[command(name = "dl-verbinder", about = "Verbinder-Agent R1, fester Shadow-Modus")]
@@ -842,6 +845,10 @@ async fn auswertung() -> Result<()> {
 /// Staff-Post nach Discord; ohne Kanal-Konfiguration auf stdout (dann sieht
 /// journalctl den Bericht). Fehler beim Senden fallen auf stdout zurück —
 /// ein Bericht darf nie stillschweigend verloren gehen.
+///
+/// Lange Berichte gehen als mehrere Nachrichten raus: Discord nimmt 2000
+/// Zeichen pro Nachricht, ein Lauf mit vollem Deckel oder ein Wochenbericht
+/// mit Stichprobe liegt darüber.
 async fn poste_staff(text: &str) {
     let kanal = match env("DL_VERBINDER_STAFF_CHANNEL_ID") {
         Some(wert) => wert,
@@ -866,21 +873,39 @@ async fn poste_staff(text: &str) {
             return;
         }
     };
-    let antwort = client
-        .post(format!("https://discord.com/api/v10/channels/{kanal}/messages"))
-        .header("Authorization", format!("Bot {token}"))
-        .header("User-Agent", "dl-verbinder/0.1")
-        .json(&json!({
-            "content": text,
-            "allowed_mentions": {"parse": []},
-        }))
-        .send()
-        .await;
-    match antwort.and_then(|r| r.error_for_status()) {
-        Ok(_) => {}
-        Err(error) => {
-            tracing::error!(%error, "Staff-Post fehlgeschlagen, Bericht auf stdout");
-            println!("{text}");
+    let teile = chunk_message(text, DISCORD_CONTENT_LIMIT);
+    if teile.is_empty() {
+        tracing::warn!("Staff-Post ohne Inhalt, nichts gesendet");
+        return;
+    }
+    let gesamt = teile.len();
+    let mut fehlgeschlagen = 0_usize;
+    for (nummer, teil) in teile.iter().enumerate() {
+        let antwort = client
+            .post(format!("https://discord.com/api/v10/channels/{kanal}/messages"))
+            .header("Authorization", format!("Bot {token}"))
+            .header("User-Agent", "dl-verbinder/0.1")
+            .json(&json!({
+                "content": teil,
+                "allowed_mentions": {"parse": []},
+            }))
+            .send()
+            .await;
+        // Ein gescheiterter Teil stoppt die restlichen nicht: lieber der halbe
+        // Bericht im Kanal als gar keiner.
+        if let Err(error) = antwort.and_then(|r| r.error_for_status()) {
+            fehlgeschlagen += 1;
+            tracing::error!(%error, teil = nummer + 1, gesamt, "Staff-Post-Teil fehlgeschlagen");
         }
+    }
+    if fehlgeschlagen > 0 {
+        tracing::error!(
+            fehlgeschlagen,
+            gesamt,
+            "Staff-Post unvollständig, Bericht auf stdout"
+        );
+        println!("{text}");
+    } else {
+        tracing::info!(gesamt, "Staff-Post gesendet");
     }
 }
