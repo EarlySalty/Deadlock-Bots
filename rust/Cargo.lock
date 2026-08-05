@@ -1330,6 +1330,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-verbinder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dl-ai",
+ "dl-brain-community",
+ "dl-central-db",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dl-voice"
 version = "0.1.0"
 dependencies = [

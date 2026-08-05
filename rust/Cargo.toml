@@ -30,6 +30,7 @@ members = [
     "bin/dl-repostats",
     "bin/dl-brain-community",
     "bin/dl-brain-feeder",
+    "bin/dl-verbinder",
     "bin/dl-central-migrate",
     "bin/dl-central-sync",
     "bin/dl-infisical-env",
