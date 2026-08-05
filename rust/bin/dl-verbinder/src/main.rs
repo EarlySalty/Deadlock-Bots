@@ -115,7 +115,9 @@ impl LlmSeite {
         let params = ChatParams {
             model: self.model_override.clone(),
             json_mode: true,
-            max_tokens: Some(700),
+            // None = Modell-Maximum: DeepSeek-Reasoning zählt ins Budget,
+            // Some(700) schnitt 142 von 149 Antworten ab (truncated).
+            max_tokens: None,
             ..ChatParams::default()
         };
         let antwort = tokio::time::timeout(
