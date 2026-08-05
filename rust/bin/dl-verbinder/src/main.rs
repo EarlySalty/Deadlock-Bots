@@ -15,10 +15,11 @@ use clap::{Parser, Subcommand};
 use dl_ai::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, LlmProviderConfig, LlmUseCase};
 use dl_brain_community::{anonymize_for_privacy, Decision, LedgerEntry};
 use dl_verbinder::{
-    agreement_je_kategorie, ledger_entry_fuer_kritik, ledger_entry_fuer_match, parse_kritik_antwort,
-    parse_match_antwort, render_prompt, render_staff_post, render_tages_summary,
-    render_wochenbericht, text_verstoesse, waechter_filter, Akte, Caps, Kandidat, Kategorie,
-    WochenberichtInput, SOURCE_KRITIK, SOURCE_MATCH,
+    agreement_je_kategorie, ledger_entry_fuer_kritik, ledger_entry_fuer_match_fehler,
+    ledger_entry_fuer_match_urteil, parse_kritik_antwort, parse_match_antwort, render_prompt,
+    render_staff_post, render_tages_summary, render_wochenbericht, resolve_outcomes,
+    text_verstoesse, waechter_filter, Akte, Caps, Kandidat, Kategorie, WochenberichtInput,
+    SOURCE_KRITIK, SOURCE_MATCH,
 };
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -195,57 +196,33 @@ async fn run(taeglich: bool) -> Result<()> {
                 Ok((antwort, modell)) => match parse_match_antwort(&antwort) {
                     Ok(urteil) => {
                         let verstoesse = text_verstoesse(&urteil.vorschlagstext);
-                        let entry = ledger_entry_fuer_match(
-                            kandidat,
-                            urteil.decision,
-                            urteil.confidence,
-                            format!("llm:{}", urteil.begruendung),
-                            Some(&urteil.vorschlagstext),
-                            Some(&urteil.kanal),
-                            &verstoesse,
-                            true,
-                        );
+                        let entry = ledger_entry_fuer_match_urteil(kandidat, &urteil, &verstoesse);
                         (entry, modell, Some(urteil))
                     }
                     Err(parse_fehler) => (
-                        ledger_entry_fuer_match(
+                        ledger_entry_fuer_match_fehler(
                             kandidat,
                             Decision::Error,
-                            None,
                             format!("antwort_unlesbar:{parse_fehler}"),
-                            None,
-                            None,
-                            &[],
-                            true,
                         ),
                         modell,
                         None,
                     ),
                 },
                 Err(ChatProviderError::Timeout) => (
-                    ledger_entry_fuer_match(
+                    ledger_entry_fuer_match_fehler(
                         kandidat,
                         Decision::Timeout,
-                        None,
                         "llm_timeout".into(),
-                        None,
-                        None,
-                        &[],
-                        true,
                     ),
                     None,
                     None,
                 ),
                 Err(fehler) => (
-                    ledger_entry_fuer_match(
+                    ledger_entry_fuer_match_fehler(
                         kandidat,
                         Decision::Error,
-                        None,
                         format!("llm_fehler:{fehler}"),
-                        None,
-                        None,
-                        &[],
-                        true,
                     ),
                     None,
                     None,
@@ -671,38 +648,6 @@ async fn zaehle_klassen_heute(pool: &PgPool) -> Result<BTreeMap<String, i64>> {
         .collect())
 }
 
-/// Grundwahrheit: Trafen sich die Vorgeschlagenen binnen 24 Stunden wirklich?
-/// Ein Urteil wird erst NACH Ablauf des 24-h-Fensters aufgelöst, sonst wäre
-/// jedes junge yes fälschlich not_met.
-async fn resolve_outcomes(pool: &PgPool, _guild_id: i64) -> Result<u64> {
-    let ergebnis = sqlx::query(
-        "UPDATE bot.ai_decision_ledger l
-            SET outcome = CASE WHEN EXISTS (
-                    SELECT 1 FROM activity.voice_session_log v
-                     WHERE v.user_id = (l.payload->'kandidaten'->>0)::BIGINT
-                       AND v.started_at BETWEEN l.decided_at AND l.decided_at + INTERVAL '24 hours'
-                       AND v.co_player_ids @> jsonb_build_array((l.payload->'kandidaten'->>1)::BIGINT)
-                ) OR EXISTS (
-                    SELECT 1 FROM activity.voice_session_log v
-                     WHERE v.user_id = (l.payload->'kandidaten'->>1)::BIGINT
-                       AND v.started_at BETWEEN l.decided_at AND l.decided_at + INTERVAL '24 hours'
-                       AND v.co_player_ids @> jsonb_build_array((l.payload->'kandidaten'->>0)::BIGINT)
-                ) THEN 'met' ELSE 'not_met' END,
-                outcome_at = now()
-          WHERE l.source = $1
-            AND l.decision = 'yes'
-            AND l.outcome IS NULL
-            AND l.decided_at <= now() - INTERVAL '24 hours'
-            AND l.decided_at >= now() - INTERVAL '14 days'
-            AND (l.payload->'kandidaten'->>1)::BIGINT <> 0",
-    )
-    .bind(SOURCE_MATCH)
-    .execute(pool)
-    .await
-    .context("Grundwahrheit auflösen")?;
-    Ok(ergebnis.rows_affected())
-}
-
 /// Ledgert alle Einträge einer Transaktion; Kritik-Einträge bekommen die
 /// echte Ledger-ID ihres Match-Eintrags in den Payload. Vor jedem Insert
 /// läuft der Privacy-Recheck unter dem Lock — für beide Beteiligten.
@@ -931,7 +876,7 @@ async fn poste_staff(text: &str) {
         }))
         .send()
         .await;
-    match antwort.and_then(|r| r.error_for_status().map_err(Into::into)) {
+    match antwort.and_then(|r| r.error_for_status()) {
         Ok(_) => {}
         Err(error) => {
             tracing::error!(%error, "Staff-Post fehlgeschlagen, Bericht auf stdout");

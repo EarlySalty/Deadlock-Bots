@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use anyhow::Context as _;
 use dl_brain_community::{Decision, LedgerEntry};
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
 pub const SOURCE_MATCH: &str = "agent.verbinder";
 pub const SOURCE_KRITIK: &str = "agent.verbinder.kritik";
@@ -461,6 +463,42 @@ pub fn render_tages_summary(
     )
 }
 
+/// Grundwahrheit: Trafen sich die Vorgeschlagenen binnen 24 Stunden wirklich?
+/// Ein Urteil wird erst NACH Ablauf des 24-h-Fensters aufgelöst, sonst wäre
+/// jedes junge yes fälschlich not_met.
+///
+/// Einzige Funktion hier mit Datenbankzugriff: sie liefert die Grundwahrheit,
+/// gegen die `agreement_je_kategorie` rechnet, und muss darum gegen eine echte
+/// Postgres-Instanz prüfbar sein.
+pub async fn resolve_outcomes(pool: &PgPool, _guild_id: i64) -> anyhow::Result<u64> {
+    let ergebnis = sqlx::query(
+        "UPDATE bot.ai_decision_ledger l
+            SET outcome = CASE WHEN EXISTS (
+                    SELECT 1 FROM activity.voice_session_log v
+                     WHERE v.user_id = (l.payload->'kandidaten'->>0)::BIGINT
+                       AND v.started_at BETWEEN l.decided_at AND l.decided_at + INTERVAL '24 hours'
+                       AND v.co_player_ids @> jsonb_build_array((l.payload->'kandidaten'->>1)::BIGINT)
+                ) OR EXISTS (
+                    SELECT 1 FROM activity.voice_session_log v
+                     WHERE v.user_id = (l.payload->'kandidaten'->>1)::BIGINT
+                       AND v.started_at BETWEEN l.decided_at AND l.decided_at + INTERVAL '24 hours'
+                       AND v.co_player_ids @> jsonb_build_array((l.payload->'kandidaten'->>0)::BIGINT)
+                ) THEN 'met' ELSE 'not_met' END,
+                outcome_at = now()
+          WHERE l.source = $1
+            AND l.decision = 'yes'
+            AND l.outcome IS NULL
+            AND l.decided_at <= now() - INTERVAL '24 hours'
+            AND l.decided_at >= now() - INTERVAL '14 days'
+            AND (l.payload->'kandidaten'->>1)::BIGINT <> 0",
+    )
+    .bind(SOURCE_MATCH)
+    .execute(pool)
+    .await
+    .context("Grundwahrheit auflösen")?;
+    Ok(ergebnis.rows_affected())
+}
+
 /// Agreement je Kategorie aus (kategorie, outcome)-Zeilen aufgelöster
 /// yes-Urteile. outcome ist `met` oder `not_met`.
 pub fn agreement_je_kategorie(rows: &[(String, String)]) -> BTreeMap<String, (u64, u64)> {
@@ -702,16 +740,14 @@ mod tests {
         assert!(nichts.is_none());
 
         let kand = kandidat(364796363709349912, 706215545044729888);
-        let entry = ledger_entry_fuer_match(
-            &kand,
-            Decision::Yes,
-            Some(0.9),
-            "llm".into(),
-            Some("Lust auf eine Runde?"),
-            Some("lfg_watch"),
-            &[],
-            true,
-        );
+        let urteil = MatchUrteil {
+            decision: Decision::Yes,
+            confidence: Some(0.9),
+            begruendung: "llm".into(),
+            vorschlagstext: "Lust auf eine Runde?".into(),
+            kanal: "lfg_watch".into(),
+        };
+        let entry = ledger_entry_fuer_match_urteil(&kand, &urteil, &[]);
         let post = render_staff_post("VB-1", 3, &[entry], &[]).expect("post");
         assert!(post.contains("VERBINDER[VB-1]: kandidaten=3 | yes=1"));
         assert!(post.contains("t1_solo_doppel"));
@@ -754,6 +790,106 @@ mod tests {
         assert!(bericht.contains("t3_rueckkehrer_anker: 1/1 eingetreten = 100.0 Prozent (Gate erreicht"));
         assert!(bericht.contains("Nur eine Urteilsklasse"));
         assert!(bericht.contains("2 yes noch unaufgelöst"));
+    }
+
+    /// Seedet ein yes-Urteil. `decided_at` hat DEFAULT now() und wird darum
+    /// explizit gesetzt — das Alter entscheidet, ob der Resolver anfassen darf.
+    async fn seed_yes(pool: &PgPool, alter_stunden: i32, a: i64, b: i64) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO bot.ai_decision_ledger(
+                 decided_at, source, subject_user_id, guild_id, input_summary,
+                 decision, confidence, reason, action_taken, payload
+             ) VALUES (now() - make_interval(hours => $1), $2, $3, 7,
+                       'trigger=t1_solo_doppel', 'yes', 0.9, 'llm:test', 'shadow', $4)
+             RETURNING id",
+        )
+        .bind(alter_stunden)
+        .bind(SOURCE_MATCH)
+        .bind(a)
+        .bind(json!({"trigger": "t1_solo_doppel", "kandidaten": [a, b], "llm": true}))
+        .fetch_one(pool)
+        .await
+        .expect("yes-Urteil seeden")
+    }
+
+    /// Voice-Session von `user_id`, gestartet `vor_stunden` Stunden.
+    async fn seed_session(pool: &PgPool, id: i64, user_id: i64, vor_stunden: i32, co: Value) {
+        sqlx::query(
+            "INSERT INTO activity.voice_session_log(
+                 id, user_id, guild_id, channel_id, started_at, ended_at,
+                 duration_seconds, points, co_player_ids
+             ) VALUES ($1, $2, 7, 4711, now() - make_interval(hours => $3),
+                       now() - make_interval(hours => $3) + INTERVAL '1 hour', 3600, 0, $4)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(vor_stunden)
+        .bind(co)
+        .execute(pool)
+        .await
+        .expect("Voice-Session seeden");
+    }
+
+    /// Liefert (outcome, outcome_at gesetzt) eines Ledger-Eintrags.
+    async fn outcome_von(pool: &PgPool, ledger_id: i64) -> (Option<String>, bool) {
+        sqlx::query_as::<_, (Option<String>, bool)>(
+            "SELECT outcome, outcome_at IS NOT NULL
+               FROM bot.ai_decision_ledger WHERE id = $1",
+        )
+        .bind(ledger_id)
+        .fetch_one(pool)
+        .await
+        .expect("outcome lesen")
+    }
+
+    #[tokio::test]
+    async fn resolve_setzt_met_wenn_paar_sich_traf() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let ledger_id = seed_yes(&pool, 25, 1001, 1002).await;
+        // Session von 1001 eine Stunde nach dem Urteil, 1002 ist Co-Player
+        // (neben einem Dritten: die Prüfung ist „enthält“, nicht „ist gleich“).
+        seed_session(&pool, 900_001, 1001, 24, json!([1002, 1003])).await;
+
+        let aufgeloest = resolve_outcomes(&pool, 7).await.expect("resolve");
+
+        assert_eq!(aufgeloest, 1, "genau das eine offene yes muss aufgelöst sein");
+        let (outcome, hat_zeitstempel) = outcome_von(&pool, ledger_id).await;
+        assert_eq!(outcome.as_deref(), Some("met"));
+        assert!(hat_zeitstempel, "outcome_at muss gesetzt sein");
+    }
+
+    #[tokio::test]
+    async fn resolve_setzt_not_met_ohne_gemeinsame_session() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let ledger_id = seed_yes(&pool, 25, 2001, 2002).await;
+        // Ablenkung: 2001 war im Voice, aber mit jemand anderem.
+        seed_session(&pool, 900_002, 2001, 24, json!([2003])).await;
+
+        let aufgeloest = resolve_outcomes(&pool, 7).await.expect("resolve");
+
+        assert_eq!(aufgeloest, 1);
+        let (outcome, hat_zeitstempel) = outcome_von(&pool, ledger_id).await;
+        assert_eq!(outcome.as_deref(), Some("not_met"));
+        assert!(hat_zeitstempel, "outcome_at muss auch bei not_met gesetzt sein");
+    }
+
+    #[tokio::test]
+    async fn resolve_laesst_junges_yes_im_offenen_24h_fenster_stehen() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let ledger_id = seed_yes(&pool, 1, 3001, 3002).await;
+
+        let aufgeloest = resolve_outcomes(&pool, 7).await.expect("resolve");
+
+        assert_eq!(aufgeloest, 0, "das Fenster läuft noch, nichts darf fallen");
+        let (outcome, hat_zeitstempel) = outcome_von(&pool, ledger_id).await;
+        assert_eq!(
+            outcome, None,
+            "junges yes darf nicht vorschnell not_met werden"
+        );
+        assert!(!hat_zeitstempel);
     }
 
     #[test]
