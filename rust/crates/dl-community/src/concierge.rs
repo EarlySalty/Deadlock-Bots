@@ -19,8 +19,36 @@ use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
-use crate::dm_assistant::check_cooldown;
 use crate::knowledge_client::{self, KnowledgeLookup};
+
+/// Rate-Limit fuer DM-Antworten: max. Aufrufe pro Fenster, Fensterlaenge,
+/// Mindestabstand (Sekunden). Uebernommen aus dem geloeschten DM-Assistenten,
+/// der Concierge war zuletzt der einzige Nutzer.
+const MAX_CALLS_PER_WINDOW: usize = 3;
+const WINDOW_SECONDS: f64 = 60.0;
+const MIN_INTERVAL_SECONDS: f64 = 10.0;
+
+/// Prueft das Rate-Limit: gibt eine Hinweis-Nachricht zurueck, wenn der User
+/// warten muss; sonst `None` und der Zeitstempel wird vermerkt.
+pub(crate) fn check_cooldown(stamps: &mut Vec<f64>, now: f64) -> Option<String> {
+    stamps.retain(|&t| now - t < WINDOW_SECONDS);
+    if let Some(&last) = stamps.last() {
+        if now - last < MIN_INTERVAL_SECONDS {
+            let wait = (MIN_INTERVAL_SECONDS - (now - last)) as i64 + 1;
+            return Some(format!(
+                "Bitte warte noch **{wait} Sekunden**, bevor du mir erneut schreibst. 😊"
+            ));
+        }
+    }
+    if stamps.len() >= MAX_CALLS_PER_WINDOW {
+        return Some(
+            "Du hast mich gerade zu oft angeschrieben. Bitte warte kurz (ca. 1 Minute) und versuche es dann erneut. 😊"
+                .to_string(),
+        );
+    }
+    stamps.push(now);
+    None
+}
 
 pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
@@ -6989,6 +7017,33 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn cooldown_min_intervall_und_max_calls() {
+        let mut stamps = Vec::new();
+        // Erster Aufruf ok.
+        assert!(check_cooldown(&mut stamps, 0.0).is_none());
+        // Sofort nochmal (< 10 s Abstand) → Hinweis.
+        assert!(check_cooldown(&mut stamps, 2.0)
+            .unwrap()
+            .contains("Sekunden"));
+        // Nach 11 s wieder ok (2. Aufruf gezählt).
+        assert!(check_cooldown(&mut stamps, 11.0).is_none());
+        // Nach weiteren 11 s der 3. Aufruf ok.
+        assert!(check_cooldown(&mut stamps, 22.0).is_none());
+        // 4. Aufruf im 60-s-Fenster → zu oft.
+        assert!(check_cooldown(&mut stamps, 33.0)
+            .unwrap()
+            .contains("zu oft"));
+    }
+
+    #[test]
+    fn cooldown_fenster_laeuft_ab() {
+        let mut stamps = vec![0.0, 10.0, 20.0];
+        // 85 s später sind alle alten Stempel (Abstand ≥ 60 s) aus dem Fenster.
+        assert!(check_cooldown(&mut stamps, 85.0).is_none());
+        assert_eq!(stamps, vec![85.0]);
+    }
 
     fn test_config(enabled: bool, allowlist: &[u64]) -> ConciergeConfig {
         let allowlist = allowlist

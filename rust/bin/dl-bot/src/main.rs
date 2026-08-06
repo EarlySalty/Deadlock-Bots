@@ -1587,23 +1587,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         let _voice_change_hint_responder =
             dl_community::voice_change_hint::spawn(voice_hint_responder, &dispatcher);
-        // KI-DM-Assistent bleibt nur fuer Concierge-Testmodus/disabled aktiv; Open-Modus antwortet nativ.
-        if !concierge_config.open_for_all() {
-            let concierge_dm_ignore = if concierge_config.enabled {
-                concierge_config.test_user_allowlist.clone()
-            } else {
-                std::collections::HashSet::new()
-            };
-            let dm_assistant = dl_community::dm_assistant::DmAssistant::new_with_ignore_users(
-                dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
-                    .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
-                Arc::new(modglue::DmGlue {
-                    adapter: adapter.clone(),
-                }),
-                concierge_dm_ignore,
-            );
-            dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
-        }
+        // Freitext-DMs beantwortet der Concierge. Der frühere KI-DM-Assistent
+        // startete nur, wenn der Concierge nicht für alle offen war, und ist
+        // seit DL_CONCIERGE_ENABLED=1 mit leerer Allowlist toter Code gewesen.
         // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
         // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
         // Python Reward-Rolle + Feedback-DM bekommen.

@@ -2099,19 +2099,6 @@ impl dl_community::faq::FaqPort for FaqGlue {
     }
 }
 
-// ── DM-Assistent-Anbindung ─────────────────────────────────────────────────
-
-pub struct DmGlue {
-    pub adapter: Arc<DiscordAdapter>,
-}
-
-#[async_trait::async_trait]
-impl dl_community::dm_assistant::DmPort for DmGlue {
-    async fn send_dm(&self, channel_id: u64, body: serde_json::Map<String, serde_json::Value>) {
-        let _ = self.adapter.send_raw_public(channel_id, &body).await;
-    }
-}
-
 // ── Voice-DM-Anbindung mit Concierge-Gedächtnis ───────────────────────────
 
 async fn record_concierge_system_dm(
