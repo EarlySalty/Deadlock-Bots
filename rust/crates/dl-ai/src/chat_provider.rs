@@ -152,6 +152,14 @@ pub enum LlmUseCase {
     ScrimLagebild,
     VerbinderMatch,
     VerbinderKritik,
+    AiOnboarding,
+    BrainAntwort,
+    CoachingAnfrage,
+    ModerationText,
+    ModerationVerify,
+    StreamerMatcher,
+    TurnierVorschlag,
+    VoiceHint,
 }
 
 impl LlmUseCase {
@@ -164,6 +172,14 @@ impl LlmUseCase {
             Self::ScrimLagebild,
             Self::VerbinderMatch,
             Self::VerbinderKritik,
+            Self::AiOnboarding,
+            Self::BrainAntwort,
+            Self::CoachingAnfrage,
+            Self::ModerationText,
+            Self::ModerationVerify,
+            Self::StreamerMatcher,
+            Self::TurnierVorschlag,
+            Self::VoiceHint,
         ]
     }
 
@@ -176,6 +192,14 @@ impl LlmUseCase {
             Self::ScrimLagebild => "SCRIM_LAGEBILD",
             Self::VerbinderMatch => "VERBINDER_MATCH",
             Self::VerbinderKritik => "VERBINDER_KRITIK",
+            Self::AiOnboarding => "AI_ONBOARDING",
+            Self::BrainAntwort => "BRAIN_ANTWORT",
+            Self::CoachingAnfrage => "COACHING_ANFRAGE",
+            Self::ModerationText => "MODERATION_TEXT",
+            Self::ModerationVerify => "MODERATION_VERIFY",
+            Self::StreamerMatcher => "STREAMER_MATCHER",
+            Self::TurnierVorschlag => "TURNIER_VORSCHLAG",
+            Self::VoiceHint => "VOICE_HINT",
         }
     }
 
@@ -188,6 +212,14 @@ impl LlmUseCase {
             Self::ScrimLagebild => "scrim_lagebild",
             Self::VerbinderMatch => "verbinder_match",
             Self::VerbinderKritik => "verbinder_kritik",
+            Self::AiOnboarding => "ai_onboarding",
+            Self::BrainAntwort => "brain_antwort",
+            Self::CoachingAnfrage => "coaching_anfrage",
+            Self::ModerationText => "moderation_text",
+            Self::ModerationVerify => "moderation_verify",
+            Self::StreamerMatcher => "streamer_matcher",
+            Self::TurnierVorschlag => "turnier_vorschlag",
+            Self::VoiceHint => "voice_hint",
         }
     }
 }
@@ -378,7 +410,9 @@ impl LlmProviderConfig {
         use_case: LlmUseCase,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Arc<dyn ChatProvider>, ChatProviderInitError> {
-        match self.provider_for(use_case, &lookup)? {
+        let provider = self.provider_for(use_case, &lookup)?;
+        let lookup = model_key_lookup(use_case, lookup);
+        match provider {
             LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Fireworks => OpenAiChatProvider::from_fireworks_env(lookup)
@@ -392,6 +426,24 @@ impl LlmProviderConfig {
     }
 }
 
+/// Schluessel, unter dem die Provider-Konstruktoren den Modellnamen erfragen.
+/// [`model_key_lookup`] uebersetzt ihn in den Schluessel des Anwendungsfalls,
+/// damit nicht ein einziger Wert das Modell aller Anwendungsfaelle setzt.
+const PROVIDER_MODEL_LOOKUP_KEY: &str = "DL_LLM_MODEL_BOT_PATE";
+
+fn model_key_lookup(
+    use_case: LlmUseCase,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> impl Fn(&str) -> Option<String> {
+    let model_key = format!("DL_LLM_MODEL_{}", use_case.env_suffix());
+    move |key: &str| {
+        if key == PROVIDER_MODEL_LOOKUP_KEY {
+            return lookup(&model_key);
+        }
+        lookup(key)
+    }
+}
+
 // KI-Compliance-Gate (§5.6): MiniMax darf nur per explizitem Dev-Override und
 // ausschliesslich mit synthetischen Daten genutzt werden.
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
@@ -402,6 +454,18 @@ fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
         }
         LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
         LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => LlmProviderKind::Fireworks,
+        // Frueher direkt an MiniMax verdrahtet: MiniMax ist fuer User-Content
+        // gesperrt, der Default wandert deshalb auf denselben Anbieter wie die
+        // uebrigen nutzerzugewandten Texte.
+        LlmUseCase::AiOnboarding
+        | LlmUseCase::CoachingAnfrage
+        | LlmUseCase::StreamerMatcher => LlmProviderKind::Mistral,
+        LlmUseCase::BrainAntwort | LlmUseCase::ModerationText => LlmProviderKind::Fireworks,
+        // Frueher OpenAI-Clients: Anbieter bleibt, nur der Weg fuehrt jetzt
+        // ueber das Gate.
+        LlmUseCase::ModerationVerify
+        | LlmUseCase::TurnierVorschlag
+        | LlmUseCase::VoiceHint => LlmProviderKind::OpenAi,
     }
 }
 
@@ -462,7 +526,7 @@ impl OpenAiChatProvider {
             })?;
         let base_url =
             read_env(&lookup, "OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.into());
-        let model = read_env(&lookup, "DL_LLM_MODEL_BOT_PATE")
+        let model = read_env(&lookup, PROVIDER_MODEL_LOOKUP_KEY)
             .or_else(|| read_env(&lookup, "OPENAI_MODEL"))
             .or_else(|| read_env(&lookup, "AI_OPENAI_MODEL"))
             .unwrap_or_else(|| DEFAULT_OPENAI_CHAT_MODEL.into());
@@ -488,7 +552,7 @@ impl OpenAiChatProvider {
         let base_url = read_env(&lookup, "FIREWORK_BASE_URL")
             .or_else(|| read_env(&lookup, "FIREWORKS_BASE_URL"))
             .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.into());
-        let model = read_env(&lookup, "DL_LLM_MODEL_BOT_PATE")
+        let model = read_env(&lookup, PROVIDER_MODEL_LOOKUP_KEY)
             .or_else(|| read_env(&lookup, "FIREWORK_MODEL"))
             .or_else(|| read_env(&lookup, "FIREWORKS_MODEL"))
             .unwrap_or_else(|| crate::DEFAULT_FIREWORKS_MODEL.into());
@@ -1294,6 +1358,15 @@ mod tests {
                 LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => {
                     LlmProviderKind::Fireworks
                 }
+                LlmUseCase::AiOnboarding
+                | LlmUseCase::CoachingAnfrage
+                | LlmUseCase::StreamerMatcher => LlmProviderKind::Mistral,
+                LlmUseCase::BrainAntwort | LlmUseCase::ModerationText => {
+                    LlmProviderKind::Fireworks
+                }
+                LlmUseCase::ModerationVerify
+                | LlmUseCase::TurnierVorschlag
+                | LlmUseCase::VoiceHint => LlmProviderKind::OpenAi,
             };
             assert_eq!(
                 defaults
@@ -1349,6 +1422,43 @@ mod tests {
         .expect("fireworks provider");
 
         assert_eq!(provider.default_model, "bot-pate-model");
+    }
+
+    #[test]
+    fn modell_env_gilt_je_anwendungsfall_und_nicht_ueber_alle_hinweg() {
+        let base = |key: &str| match key {
+            "OPENAI_API_KEY" => Some("openai-key".to_string()),
+            "DL_LLM_MODEL_BOT_PATE" => Some("bot-pate-model".to_string()),
+            "DL_LLM_MODEL_VOICE_HINT" => Some("voice-hint-model".to_string()),
+            _ => None,
+        };
+
+        let bot_pate = model_key_lookup(LlmUseCase::BotPate, base);
+        let voice_hint = model_key_lookup(LlmUseCase::VoiceHint, base);
+        let turnier = model_key_lookup(LlmUseCase::TurnierVorschlag, base);
+
+        assert_eq!(
+            bot_pate(PROVIDER_MODEL_LOOKUP_KEY).as_deref(),
+            Some("bot-pate-model")
+        );
+        assert_eq!(
+            voice_hint(PROVIDER_MODEL_LOOKUP_KEY).as_deref(),
+            Some("voice-hint-model")
+        );
+        assert_eq!(
+            turnier(PROVIDER_MODEL_LOOKUP_KEY),
+            None,
+            "ohne eigenen Schlüssel darf nicht das Bot-Paten-Modell einspringen"
+        );
+        assert_eq!(
+            voice_hint("OPENAI_API_KEY").as_deref(),
+            Some("openai-key"),
+            "andere Schlüssel müssen unverändert durchgereicht werden"
+        );
+
+        // Bis in den Konstruktor: der Anwendungsfall-Schluessel setzt das Modell.
+        let provider = OpenAiChatProvider::from_env(voice_hint).expect("openai provider");
+        assert_eq!(provider.default_model, "voice-hint-model");
     }
 
     #[test]

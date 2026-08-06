@@ -9,7 +9,6 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use dl_ai::TextGenerator;
 use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
@@ -314,16 +313,16 @@ fn brain_source_to_string(value: &Value) -> Option<String> {
 }
 
 pub struct BrainAiGlue {
-    pub client: Option<Arc<dl_ai::MiniMaxClient>>,
+    pub client: Option<Arc<dyn dl_ai::TextGenerator>>,
 }
 
 #[async_trait::async_trait]
 impl dl_brain::AiAnswerer for BrainAiGlue {
     async fn answer(&self, prompt: &str) -> Result<Option<String>, dl_brain::BrainError> {
         let Some(client) = &self.client else {
-            tracing::warn!("Brain-Antwort nicht möglich: MiniMax-Client fehlt");
+            tracing::warn!("Brain-Antwort nicht möglich: kein LLM-Anbieter verdrahtet");
             return Err(dl_brain::BrainError::Backend(
-                "missing minimax client".to_string(),
+                "missing llm provider".to_string(),
             ));
         };
         let prompt = brain_ai_prompt(prompt);
@@ -339,7 +338,7 @@ impl dl_brain::AiAnswerer for BrainAiGlue {
             .await
         else {
             return Err(dl_brain::BrainError::Backend(
-                "missing minimax response".to_string(),
+                "missing llm response".to_string(),
             ));
         };
         let cleaned = dl_ai::strip_think(&text);
