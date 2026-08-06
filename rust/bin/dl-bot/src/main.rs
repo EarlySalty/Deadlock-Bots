@@ -736,26 +736,36 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
 
     // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
-    // Scheduler und Outbox-Zustellung laufen nur hinter dem Opt-in-Flag.
+    // nur die Wellen-Planung läuft hinter dem Opt-in-Flag.
     let survey_pulse_config = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(env);
     let survey_pulse_handler =
         dl_activity::survey_pulse::SurveyPulseHandler::new(central_pool.clone());
     dl_activity::survey_pulse::register(&mut router, survey_pulse_handler);
+
+    // Outbox-Zustellung: eigener Lebenszyklus, läuft immer und an keinem Flag.
+    // Zugestellt wird ausschließlich, wofür hier ein Handler registriert ist —
+    // alles andere bleibt pending und wird pro Zyklus gezählt gemeldet.
+    let _outbox_dispatcher = dl_activity::outbox::spawn(
+        dl_activity::outbox::OutboxDispatcher::new(central_pool.clone()).register(
+            dl_activity::survey_pulse::SURVEY_PULSE_ACTION_TYPE,
+            dl_activity::survey_pulse::SurveyPulseOutboxHandler::new(adapter.clone()),
+        ),
+    );
+
     let _survey_pulse = if survey_pulse_config.enabled {
         let guild_id = i64::try_from(concierge_config.main_guild_id)
             .context("SURVEY_PULSE: Guild-ID außerhalb des BIGINT-Bereichs")?;
         tracing::info!(
             interval_days = survey_pulse_config.interval_days,
-            "Umfragen-Puls aktiviert"
+            "Umfragen-Puls-Wellen aktiviert"
         );
-        Some(dl_activity::survey_pulse::spawn(
+        Some(dl_activity::survey_pulse::spawn_scheduler(
             central_pool.clone(),
             guild_id,
             survey_pulse_config,
-            adapter.clone(),
         ))
     } else {
-        tracing::info!("Umfragen-Puls deaktiviert");
+        tracing::info!("Umfragen-Puls-Wellen deaktiviert, Outbox-Zustellung läuft weiter");
         None
     };
 
