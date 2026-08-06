@@ -146,7 +146,6 @@ pub trait ChatProvider: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LlmUseCase {
     BotPate,
-    CockpitVorschlag,
     Faq,
     LfgFreitext,
     ScrimLagebild,
@@ -158,7 +157,6 @@ impl LlmUseCase {
     pub fn all() -> &'static [Self] {
         &[
             Self::BotPate,
-            Self::CockpitVorschlag,
             Self::Faq,
             Self::LfgFreitext,
             Self::ScrimLagebild,
@@ -170,7 +168,6 @@ impl LlmUseCase {
     pub fn env_suffix(self) -> &'static str {
         match self {
             Self::BotPate => "BOT_PATE",
-            Self::CockpitVorschlag => "COCKPIT_VORSCHLAG",
             Self::Faq => "FAQ",
             Self::LfgFreitext => "LFG_FREITEXT",
             Self::ScrimLagebild => "SCRIM_LAGEBILD",
@@ -182,7 +179,6 @@ impl LlmUseCase {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BotPate => "bot_pate",
-            Self::CockpitVorschlag => "cockpit_vorschlag",
             Self::Faq => "faq",
             Self::LfgFreitext => "lfg_freitext",
             Self::ScrimLagebild => "scrim_lagebild",
@@ -397,9 +393,7 @@ impl LlmProviderConfig {
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
     match use_case {
         LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-        LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
-            LlmProviderKind::Mistral
-        }
+        LlmUseCase::Faq | LlmUseCase::LfgFreitext => LlmProviderKind::Mistral,
         LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
         LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => LlmProviderKind::Fireworks,
     }
@@ -1273,7 +1267,7 @@ mod tests {
             LlmProviderKind::Mock
         );
         assert_eq!(
-            cfg.provider_for(LlmUseCase::CockpitVorschlag, |_| None)
+            cfg.provider_for(LlmUseCase::LfgFreitext, |_| None)
                 .expect("provider"),
             LlmProviderKind::Mistral
         );
@@ -1287,9 +1281,7 @@ mod tests {
         for use_case in LlmUseCase::all() {
             let expected = match use_case {
                 LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-                LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
-                    LlmProviderKind::Mistral
-                }
+                LlmUseCase::Faq | LlmUseCase::LfgFreitext => LlmProviderKind::Mistral,
                 LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
                 LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => {
                     LlmProviderKind::Fireworks

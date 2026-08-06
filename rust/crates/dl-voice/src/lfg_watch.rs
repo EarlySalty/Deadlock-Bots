@@ -143,6 +143,25 @@ pub async fn armed_watches_for_match(
         .collect())
 }
 
+/// Gnadenfrist zwischen Ablauf und Loeschung. Defensiv gewaehlt: die Leseseite
+/// braucht abgelaufene Zeilen nicht mehr, aber eine Woche Puffer laesst Raum fuer
+/// Nachschau bei einer Fehlermeldung ("mein Watch hat nicht ausgeloest").
+pub const LFG_WATCH_CLEANUP_GRACE_DAYS: i64 = 7;
+
+/// Loescht abgelaufene Watches. `armed_watches_for_match` filtert auf
+/// `expires_at > now()`, ohne Cleanup blieben abgelaufene Zeilen fuer immer
+/// liegen. Gibt die Anzahl geloeschter Zeilen zurueck.
+pub async fn delete_expired_watches(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM activity.lfg_watches
+          WHERE expires_at < now() - ($1::text || ' days')::interval",
+    )
+    .bind(LFG_WATCH_CLEANUP_GRACE_DAYS.to_string())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn claim_watch(
     pool: &PgPool,
     watch_id: i64,
@@ -563,6 +582,62 @@ mod tests {
         .await
         .expect("watch count");
         assert_eq!(count, 0, "Opt-out darf LFG-Watch nicht neu anlegen");
+    }
+
+    #[tokio::test]
+    async fn cleanup_loescht_nur_watches_jenseits_der_gnadenfrist() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let egal = LfgRankRange {
+            min: None,
+            max: None,
+        };
+        let now = Utc::now();
+        // aktiv, frisch abgelaufen (in der Gnadenfrist), lange abgelaufen
+        for (user_id, expires_at) in [
+            (51_u64, now + chrono::Duration::hours(3)),
+            (
+                52,
+                now - chrono::Duration::days(LFG_WATCH_CLEANUP_GRACE_DAYS - 1),
+            ),
+            (
+                53,
+                now - chrono::Duration::days(LFG_WATCH_CLEANUP_GRACE_DAYS + 1),
+            ),
+        ] {
+            insert_or_replace_watch(
+                &pool,
+                7,
+                user_id,
+                "casual",
+                egal,
+                LfgWatchWindow::Now3h,
+                expires_at,
+            )
+            .await
+            .expect("seed watch");
+        }
+
+        let geloescht = delete_expired_watches(&pool).await.expect("cleanup");
+        assert_eq!(geloescht, 1, "nur der lange abgelaufene Watch darf fallen");
+
+        let verbliebene = sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM activity.lfg_watches WHERE guild_id = 7 ORDER BY user_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("verbliebene Watches");
+        assert_eq!(
+            verbliebene,
+            vec![51_i64, 52],
+            "aktiver und frisch abgelaufener Watch muessen bleiben"
+        );
+
+        let armed = armed_watches_for_match(&pool, 7, "casual", 0)
+            .await
+            .expect("armed");
+        assert_eq!(armed.len(), 1, "nur der aktive Watch bleibt scharf");
+        assert_eq!(armed[0].user_id, 51);
     }
 
     #[tokio::test]

@@ -3075,6 +3075,18 @@ impl LfgPanelInterface {
                 tracing::warn!(%err, "LFG-Reconcile: expired Posts konnten nicht geladen werden")
             }
         }
+
+        match crate::lfg_watch::delete_expired_watches(&self.pool).await {
+            Ok(0) => {}
+            Ok(geloescht) => tracing::info!(
+                geloescht,
+                gnadenfrist_tage = crate::lfg_watch::LFG_WATCH_CLEANUP_GRACE_DAYS,
+                "LFG-Reconcile: abgelaufene Watches geloescht"
+            ),
+            Err(err) => {
+                tracing::warn!(%err, "LFG-Reconcile: Cleanup abgelaufener Watches fehlgeschlagen")
+            }
+        }
     }
 }
 
