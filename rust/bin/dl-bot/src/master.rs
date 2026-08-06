@@ -41,7 +41,6 @@ pub const FEATURE_MODULES: &[&str] = &[
     "coaching_sync",
     "text_stats",
     "build_publisher",
-    "dm_assistant",
     "lfg",
     "adaptive_lanes",
     "voice_status",

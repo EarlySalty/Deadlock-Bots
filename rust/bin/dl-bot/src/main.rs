@@ -184,6 +184,93 @@ fn env_usize_default(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Einziger Weg vom Bot zum Sprachmodell: Anbieterwahl und Compliance-Gate aus
+/// dl-ai, danach die TextGenerator-Bruecke. Jeder Ausgang wird geloggt, damit
+/// ein stiller Ausfall nicht wie "Feature aus" aussieht.
+fn chat_text_generator(
+    use_case: dl_ai::LlmUseCase,
+    json_mode: bool,
+) -> Option<Arc<dyn dl_ai::TextGenerator>> {
+    chat_text_generator_with(use_case, json_mode, |key| std::env::var(key).ok())
+}
+
+fn chat_text_generator_with(
+    use_case: dl_ai::LlmUseCase,
+    json_mode: bool,
+    lookup: impl Fn(&str) -> Option<String> + Copy,
+) -> Option<Arc<dyn dl_ai::TextGenerator>> {
+    let config = match dl_ai::LlmProviderConfig::from_env(lookup) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                use_case = use_case.as_str(),
+                %error,
+                "LLM-Anbieterkonfiguration abgelehnt — Feature laeuft ohne KI"
+            );
+            return None;
+        }
+    };
+    match config.build_provider_for_env(use_case, lookup) {
+        Ok(provider) => {
+            tracing::info!(
+                use_case = use_case.as_str(),
+                json_mode,
+                "LLM ueber den geprueften Anbieterweg verdrahtet"
+            );
+            Some(if json_mode {
+                dl_ai::ChatTextGenerator::new_json(provider, use_case)
+                    as Arc<dyn dl_ai::TextGenerator>
+            } else {
+                dl_ai::ChatTextGenerator::new(provider, use_case) as Arc<dyn dl_ai::TextGenerator>
+            })
+        }
+        Err(error) => {
+            tracing::warn!(
+                use_case = use_case.as_str(),
+                %error,
+                "LLM-Anbieter nicht verfuegbar — Feature laeuft ohne KI"
+            );
+            None
+        }
+    }
+}
+
+/// Modellwahl aus der Umgebung. Der Anbieter kommt aus dem Gate, das Modell
+/// weiterhin aus der bisherigen Env — es wandert als `GenerateRequest::model`
+/// bis in die Anfrage.
+fn model_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+    key: &str,
+    default_model: &str,
+) -> String {
+    lookup(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_model.to_string())
+}
+
+/// Legacy-Anbieterwahl des Streamer-Matchers.
+///
+/// Gesetzt und bekannt: der Wert wandert als Gate-Schluessel weiter, das
+/// Compliance-Gate entscheidet darueber. Gesetzt und unbekannt (frueher der
+/// `_ => NoAi`-Zweig, etwa `gemini` oder `off`): kein KI-Scoring. Nicht
+/// gesetzt: es gilt der Standard aus `DL_LLM_PROVIDER_STREAMER_MATCHER`.
+enum MatcherProviderChoice {
+    Gate(Option<String>),
+    Off(String),
+}
+
+fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
+    let Some(raw) = raw.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    else {
+        return MatcherProviderChoice::Gate(None);
+    };
+    match raw.parse::<dl_ai::LlmProviderKind>() {
+        Ok(kind) => MatcherProviderChoice::Gate(Some(kind.as_str().to_string())),
+        Err(_) => MatcherProviderChoice::Off(raw),
+    }
+}
+
 fn openai_client_with_model_from_env(
     model_env: &str,
     default_model: &str,
@@ -430,10 +517,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
-    let (turnier_generator, turnier_model) =
-        openai_client_with_model_from_env("TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL)
-            .map(|(client, model)| (Some(client as Arc<dyn dl_ai::TextGenerator>), model))
-            .unwrap_or_else(|| (None, dl_ai::DEFAULT_OPENAI_MODEL.to_string()));
+    // Modellwahl bleibt bei TURNIER_AI_MODEL; der Weg zum Modell laeuft jetzt
+    // ueber das Compliance-Gate statt am Gate vorbei.
+    let turnier_model = model_from_lookup(env, "TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
+    let turnier_generator = chat_text_generator(dl_ai::LlmUseCase::TurnierVorschlag, false);
     let turnier_proposals = Arc::new(turnierglue::TurnierProposalService::from_env(
         adapter.clone(),
         turnier_generator,
@@ -483,23 +570,33 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 adapter: adapter.clone(),
                 notify_channel_id: matcher_config.notify_channel_id,
             });
-            // AI-Scoring: Provider wie Python via STREAMER_LINK_AI_PROVIDER.
+            // AI-Scoring: STREAMER_LINK_AI_PROVIDER waehlt weiter den Anbieter,
+            // aber ueber das Compliance-Gate statt ueber eigene Clients.
             let scorer: Arc<dyn dl_bridges::matcher::AiScorer> =
-                match matcher_config.ai_provider.as_str() {
-                    "minimax" => match dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()) {
-                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
-                        None => Arc::new(dl_bridges::matcher::NoAi),
-                    },
-                    "openai" => match dl_ai::OpenAiClient::text_from_env(|k| std::env::var(k).ok())
-                    {
-                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
-                        None => Arc::new(dl_bridges::matcher::NoAi),
-                    },
-                    "gemini" => match dl_ai::GeminiClient::from_env(|k| std::env::var(k).ok()) {
-                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
-                        None => Arc::new(dl_bridges::matcher::NoAi),
-                    },
-                    _ => Arc::new(dl_bridges::matcher::NoAi),
+                match matcher_provider_choice(env("STREAMER_LINK_AI_PROVIDER")) {
+                    MatcherProviderChoice::Off(raw) => {
+                        tracing::info!(
+                            provider = %raw,
+                            "Streamer-Matcher ohne KI-Scoring: STREAMER_LINK_AI_PROVIDER nennt keinen Anbieter des Gates"
+                        );
+                        Arc::new(dl_bridges::matcher::NoAi)
+                    }
+                    MatcherProviderChoice::Gate(override_provider) => {
+                        let generator = chat_text_generator_with(
+                            dl_ai::LlmUseCase::StreamerMatcher,
+                            false,
+                            |key| match (key, override_provider.as_deref()) {
+                                ("DL_LLM_PROVIDER_STREAMER_MATCHER", Some(provider)) => {
+                                    std::env::var(key).ok().or_else(|| Some(provider.to_string()))
+                                }
+                                _ => std::env::var(key).ok(),
+                            },
+                        );
+                        match generator {
+                            Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
+                            None => Arc::new(dl_bridges::matcher::NoAi),
+                        }
+                    }
                 };
             let matcher = dl_bridges::matcher::Matcher::new(
                 matcher_config,
@@ -736,26 +833,36 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
 
     // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
-    // Scheduler und Outbox-Zustellung laufen nur hinter dem Opt-in-Flag.
+    // nur die Wellen-Planung läuft hinter dem Opt-in-Flag.
     let survey_pulse_config = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(env);
     let survey_pulse_handler =
         dl_activity::survey_pulse::SurveyPulseHandler::new(central_pool.clone());
     dl_activity::survey_pulse::register(&mut router, survey_pulse_handler);
+
+    // Outbox-Zustellung: eigener Lebenszyklus, läuft immer und an keinem Flag.
+    // Zugestellt wird ausschließlich, wofür hier ein Handler registriert ist —
+    // alles andere bleibt pending und wird pro Zyklus gezählt gemeldet.
+    let _outbox_dispatcher = dl_activity::outbox::spawn(
+        dl_activity::outbox::OutboxDispatcher::new(central_pool.clone()).register(
+            dl_activity::survey_pulse::SURVEY_PULSE_ACTION_TYPE,
+            dl_activity::survey_pulse::SurveyPulseOutboxHandler::new(adapter.clone()),
+        ),
+    );
+
     let _survey_pulse = if survey_pulse_config.enabled {
         let guild_id = i64::try_from(concierge_config.main_guild_id)
             .context("SURVEY_PULSE: Guild-ID außerhalb des BIGINT-Bereichs")?;
         tracing::info!(
             interval_days = survey_pulse_config.interval_days,
-            "Umfragen-Puls aktiviert"
+            "Umfragen-Puls-Wellen aktiviert"
         );
-        Some(dl_activity::survey_pulse::spawn(
+        Some(dl_activity::survey_pulse::spawn_scheduler(
             central_pool.clone(),
             guild_id,
             survey_pulse_config,
-            adapter.clone(),
         ))
     } else {
-        tracing::info!("Umfragen-Puls deaktiviert");
+        tracing::info!("Umfragen-Puls-Wellen deaktiviert, Outbox-Zustellung läuft weiter");
         None
     };
 
@@ -771,14 +878,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let moderation_scan_channel_ids =
         dl_moderation::moderation_channel::scan_channel_ids_from_lookup(|k| std::env::var(k).ok());
 
+    // Text-Analyse und Verify-Text laufen ueber das Gate; die Bildpfade haengen
+    // am VisionGenerator, den der ChatProvider (noch) nicht kann, und bleiben
+    // deshalb am OpenAI-Client. Die Modell-Envs gelten unveraendert weiter.
     let moderation_text_analyze_client =
-        dl_ai::FireworksClient::from_env(|k| std::env::var(k).ok());
-    let moderation_text_analyze_model =
-        env("MOD_TEXT_ANALYZE_MODEL").unwrap_or_else(|| dl_ai::DEFAULT_FIREWORKS_MODEL.to_string());
+        chat_text_generator(dl_ai::LlmUseCase::ModerationText, true);
+    let moderation_text_analyze_model = model_from_lookup(
+        env,
+        "MOD_TEXT_ANALYZE_MODEL",
+        dl_ai::DEFAULT_FIREWORKS_MODEL,
+    );
     let moderation_image_analyze_client =
         openai_client_with_model_from_env("MOD_IMAGE_ANALYZE_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
-    let moderation_verify_client =
+    let moderation_verify_vision_client =
         openai_client_with_model_from_env("MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
+    let moderation_verify_text_client =
+        chat_text_generator(dl_ai::LlmUseCase::ModerationVerify, false);
     let our_guild_id = env("OUR_GUILD_ID")
         .or_else(|| env("MAIN_GUILD_ID"))
         .and_then(|v| v.parse::<u64>().ok())
@@ -823,8 +938,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(onboardglue::AiOnboardingGlue {
             adapter: adapter.clone(),
         }),
-        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
-            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        chat_text_generator(dl_ai::LlmUseCase::AiOnboarding, false),
         dl_community::ai_onboarding::AiOnboardingConfig::new(
             onboardglue::MAIN_GUILD_ID,
             onboardglue::ONBOARD_COMPLETE_ROLE_ID,
@@ -866,10 +980,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 );
             }
             channel_allowlist.map(|channel_allowlist| {
-                let client = dl_ai::MiniMaxClient::from_env(env);
+                let client = chat_text_generator(dl_ai::LlmUseCase::BrainAntwort, false);
                 if client.is_none() {
                     tracing::warn!(
-                        "Brain-Command registriert ohne MiniMax-Client; Antworten liefern Backend-Fehler"
+                        "Brain-Command registriert ohne LLM-Anbieter; Antworten liefern Backend-Fehler"
                     );
                 }
                 let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
@@ -915,8 +1029,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::CoachingReqGlue {
             adapter: adapter.clone(),
         }),
-        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
-            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        chat_text_generator(dl_ai::LlmUseCase::CoachingAnfrage, false),
         1289721245281292288,
         coaching_website
             .clone()
@@ -931,8 +1044,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
-        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
-            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        chat_text_generator(dl_ai::LlmUseCase::Faq, false),
     );
     dl_community::faq::register(&mut router, faq.clone());
 
@@ -1047,16 +1159,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let moderator = match (
         moderation_text_analyze_client.clone(),
         moderation_image_analyze_client.clone(),
-        moderation_verify_client.clone(),
+        moderation_verify_vision_client.clone(),
+        moderation_verify_text_client.clone(),
     ) {
         (
-            Some(text_analyze_client),
+            Some(analyze_text),
             Some((image_analyze_client, image_analyze_model)),
             Some((verify_client, verify_model)),
+            Some(verify_text),
         ) => {
-            let analyze_text: Arc<dyn dl_ai::TextGenerator> = text_analyze_client;
             let analyze_vision: Arc<dyn dl_ai::VisionGenerator> = image_analyze_client;
-            let verify_text: Arc<dyn dl_ai::TextGenerator> = verify_client.clone();
             let verify_vision: Arc<dyn dl_ai::VisionGenerator> = verify_client;
             let pipeline = dl_moderation::content_analyzer::ContentModerationPipeline::new(
                 dl_moderation::content_analyzer::ContentAnalyzer::new(
@@ -1560,8 +1672,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let voice_hint_enabled =
             dl_community::voice_change_hint::enabled_from_lookup(|k| std::env::var(k).ok());
         let voice_hint_classifier = if voice_hint_enabled {
-            dl_ai::OpenAiClient::text_from_env(|k| std::env::var(k).ok()).map(|client| {
-                let generator: Arc<dyn dl_ai::TextGenerator> = client;
+            chat_text_generator(dl_ai::LlmUseCase::VoiceHint, false).map(|generator| {
                 Arc::new(dl_community::voice_change_hint::OpenAiVoiceHintClassifier::new(generator))
                     as Arc<dyn dl_community::voice_change_hint::VoiceHintClassifier>
             })
@@ -1577,23 +1688,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         let _voice_change_hint_responder =
             dl_community::voice_change_hint::spawn(voice_hint_responder, &dispatcher);
-        // KI-DM-Assistent bleibt nur fuer Concierge-Testmodus/disabled aktiv; Open-Modus antwortet nativ.
-        if !concierge_config.open_for_all() {
-            let concierge_dm_ignore = if concierge_config.enabled {
-                concierge_config.test_user_allowlist.clone()
-            } else {
-                std::collections::HashSet::new()
-            };
-            let dm_assistant = dl_community::dm_assistant::DmAssistant::new_with_ignore_users(
-                dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
-                    .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
-                Arc::new(modglue::DmGlue {
-                    adapter: adapter.clone(),
-                }),
-                concierge_dm_ignore,
-            );
-            dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
-        }
+        // Freitext-DMs beantwortet der Concierge. Der frühere KI-DM-Assistent
+        // startete nur, wenn der Concierge nicht für alle offen war, und ist
+        // seit DL_CONCIERGE_ENABLED=1 mit leerer Allowlist toter Code gewesen.
         // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
         // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
         // Python Reward-Rolle + Feedback-DM bekommen.
@@ -1811,9 +1908,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::{
-        brain_channel_allowlist_from_value, legacy_lfg_responder_enabled, lfg_cutover_active,
-        lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
-        moderation_enforce_from_lookup, validate_voice_worker_token, warn_if_lagebild_token_empty,
+        brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
+        lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
+        matcher_provider_choice, model_from_lookup, moderation_enforce_from_lookup,
+        validate_voice_worker_token, warn_if_lagebild_token_empty, MatcherProviderChoice,
     };
     use std::{
         collections::HashMap,
@@ -1857,9 +1955,8 @@ mod tests {
         assert!(logs.contains("endpoint will reject every request with 401"));
     }
 
-    fn faq_constructor_uses_minimax_as_third_argument(source: &str) -> bool {
+    fn faq_constructor_third_argument_contains(source: &str, needle: &str) -> bool {
         let constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
-        let minimax_client = ["MiniMaxClient::", "from_env("].concat();
         let Some((_, arguments)) = source.split_once(&constructor) else {
             return false;
         };
@@ -1871,7 +1968,7 @@ mod tests {
                 '(' | '[' | '{' => depth += 1,
                 ')' if depth == 0 => {
                     return third_start
-                        .map(|start| arguments[start..index].contains(&minimax_client))
+                        .map(|start| arguments[start..index].contains(needle))
                         .unwrap_or(false);
                 }
                 ')' | ']' | '}' => depth -= 1,
@@ -1881,7 +1978,7 @@ mod tests {
                         third_start = Some(index + 1);
                     } else if separators == 3 {
                         return third_start
-                            .map(|start| arguments[start..index].contains(&minimax_client))
+                            .map(|start| arguments[start..index].contains(needle))
                             .unwrap_or(false);
                     }
                 }
@@ -1892,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn faq_produktionsblock_injiziert_minimax_generator() {
+    fn faq_produktionsblock_bezieht_den_generator_ueber_das_gate() {
         let source = include_str!("main.rs");
         let start = ["// FAQ-", "Chat (6)"].concat();
         let end = ["// Concierge-", "Onboarding Slice A"].concat();
@@ -1905,38 +2002,184 @@ mod tests {
             .expect("FAQ-Produktionsblock");
         let generator_constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
         let old_constructor = ["FaqChat::", "new("].concat();
-        let minimax_client = ["MiniMaxClient::", "from_env("].concat();
+        let gate_call = ["chat_text_", "generator(dl_ai::LlmUseCase::Faq"].concat();
 
         assert_eq!(
             block.matches(generator_constructor.as_str()).count(),
             1,
             "FAQ-Produktionsblock muss genau den Generator-Konstruktor verwenden"
         );
-        assert_eq!(
-            block.matches(minimax_client.as_str()).count(),
-            1,
-            "FAQ-Produktionsblock muss genau einen MiniMax-Client injizieren"
-        );
         assert!(
-            faq_constructor_uses_minimax_as_third_argument(block),
-            "MiniMax muss im tatsächlichen dritten Konstruktorargument stecken"
+            faq_constructor_third_argument_contains(block, &gate_call),
+            "der FAQ-Generator muss im dritten Konstruktorargument über das Compliance-Gate kommen"
         );
-        let synthetic_none = r#"
-            let generator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
-            let faq = dl_community::faq::FaqChat::new_with_ticket_generator(
-                central_pool.clone(),
-                port,
-                None,
-            );
-        "#;
+        let synthetic_none = [
+            "            let generator = ",
+            &gate_call,
+            ", false);\n",
+            "            let faq = dl_community::faq::FaqChat::new_with_ticket_",
+            "generator(\n",
+            "                central_pool.clone(),\n",
+            "                port,\n",
+            "                None,\n",
+            "            );\n",
+        ]
+        .concat();
         assert!(
-            !faq_constructor_uses_minimax_as_third_argument(synthetic_none),
-            "separates MiniMax bei drittem Argument None muss abgelehnt werden"
+            !faq_constructor_third_argument_contains(&synthetic_none, &gate_call),
+            "ein separat gebauter Generator bei drittem Argument None muss abgelehnt werden"
         );
         assert!(
             !block.contains(old_constructor.as_str()),
             "FAQ-Produktionsblock darf den alten Konstruktor nicht verwenden"
         );
+    }
+
+    /// Der zweite KI-Weg ist zu, solange keine Quelle einen LLM-Client selbst
+    /// aus der Umgebung baut. Gelesen wird das Verzeichnis, nicht eine Liste —
+    /// eine neue Datei kann den Waechter sonst umgehen.
+    #[test]
+    fn dl_bot_baut_keine_llm_clients_mehr_selbst() {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let forbidden = [
+            ["MiniMaxClient::", "from_env("].concat(),
+            ["FireworksClient::", "from_env("].concat(),
+            ["GeminiClient::", "from_env("].concat(),
+            ["OpenAiClient::text_", "from_env("].concat(),
+        ];
+        let entries = std::fs::read_dir(&src_dir).expect("dl-bot-Quellverzeichnis");
+        let mut checked = 0_usize;
+        for entry in entries {
+            let path = entry.expect("Verzeichniseintrag").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("Quelldatei lesbar");
+            for needle in &forbidden {
+                assert!(
+                    !source.contains(needle.as_str()),
+                    "{} baut noch einen LLM-Client direkt ({needle}) — der Weg muss über das Compliance-Gate laufen",
+                    path.display()
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 1, "es müssen mehrere Quelldateien geprüft werden");
+
+        // Ausnahme mit Grund: der Bildpfad der Moderation haengt am
+        // VisionGenerator, den der ChatProvider nicht anbietet.
+        let main_source = include_str!("main.rs");
+        let vision_client = ["OpenAiClient::", "new("].concat();
+        assert_eq!(
+            main_source.matches(vision_client.as_str()).count(),
+            1,
+            "nur der Vision-Pfad darf noch einen OpenAI-Client direkt bauen"
+        );
+    }
+
+    #[test]
+    fn gate_verweigert_minimax_fuer_nutzertexte_und_laesst_erlaubten_anbieter_durch() {
+        let gesperrt = HashMap::from([
+            ("DL_LLM_PROVIDER_FAQ".to_string(), "minimax".to_string()),
+            ("MINIMAX_API_KEY".to_string(), "geheim".to_string()),
+            ("MISTRAL_API_KEY".to_string(), "geheim".to_string()),
+        ]);
+        assert!(
+            chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| gesperrt
+                .get(key)
+                .cloned())
+            .is_none(),
+            "MiniMax muss für Nutzertexte am Gate scheitern"
+        );
+
+        let erlaubt = HashMap::from([
+            ("DL_LLM_PROVIDER_FAQ".to_string(), "mistral".to_string()),
+            ("MISTRAL_API_KEY".to_string(), "geheim".to_string()),
+        ]);
+        assert!(
+            chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| erlaubt
+                .get(key)
+                .cloned())
+            .is_some(),
+            "derselbe Anwendungsfall muss mit einem erlaubten Anbieter funktionieren"
+        );
+    }
+
+    #[test]
+    fn gate_erlaubt_minimax_nur_mit_dem_dev_schluessel() {
+        let mut vars = HashMap::from([
+            ("DL_LLM_PROVIDER_FAQ".to_string(), "minimax".to_string()),
+            ("MINIMAX_API_KEY".to_string(), "geheim".to_string()),
+        ]);
+        assert!(
+            chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| vars.get(key).cloned())
+                .is_none()
+        );
+
+        vars.insert(
+            "DL_LLM_ALLOW_MINIMAX_USER_CONTENT_DEV_ONLY".to_string(),
+            "ich-weiss-was-ich-tue".to_string(),
+        );
+        assert!(
+            chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| vars.get(key).cloned())
+                .is_some(),
+            "die Dev-Ausnahme muss weiterhin greifen"
+        );
+    }
+
+    #[test]
+    fn modellwahl_bleibt_an_der_bisherigen_env() {
+        let vars = HashMap::from([
+            (
+                "TURNIER_AI_MODEL".to_string(),
+                "gpt-eigenes-turniermodell".to_string(),
+            ),
+            ("MOD_TEXT_ANALYZE_MODEL".to_string(), "  ".to_string()),
+        ]);
+        let lookup = |key: &str| vars.get(key).cloned();
+
+        assert_eq!(
+            model_from_lookup(lookup, "TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL),
+            "gpt-eigenes-turniermodell"
+        );
+        assert_eq!(
+            model_from_lookup(
+                lookup,
+                "MOD_TEXT_ANALYZE_MODEL",
+                dl_ai::DEFAULT_FIREWORKS_MODEL
+            ),
+            dl_ai::DEFAULT_FIREWORKS_MODEL,
+            "leere Werte dürfen nicht als Modellname durchgehen"
+        );
+        assert_eq!(
+            model_from_lookup(lookup, "MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL),
+            dl_ai::DEFAULT_OPENAI_MODEL
+        );
+    }
+
+    #[test]
+    fn matcher_anbieterwahl_bleibt_an_streamer_link_ai_provider() {
+        assert!(matches!(
+            matcher_provider_choice(Some("openai".to_string())),
+            MatcherProviderChoice::Gate(Some(provider)) if provider == "openai"
+        ));
+        assert!(matches!(
+            matcher_provider_choice(Some("MiniMax".to_string())),
+            MatcherProviderChoice::Gate(Some(provider)) if provider == "minimax"
+        ));
+        assert!(matches!(
+            matcher_provider_choice(None),
+            MatcherProviderChoice::Gate(None)
+        ));
+        assert!(matches!(
+            matcher_provider_choice(Some("   ".to_string())),
+            MatcherProviderChoice::Gate(None)
+        ));
+        // gemini kennt das Gate nicht — frueher der `_ => NoAi`-Zweig.
+        assert!(matches!(
+            matcher_provider_choice(Some("gemini".to_string())),
+            MatcherProviderChoice::Off(raw) if raw == "gemini"
+        ));
     }
 
     #[test]

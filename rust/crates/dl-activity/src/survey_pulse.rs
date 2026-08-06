@@ -7,6 +7,8 @@ use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, Interaction
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
+use crate::outbox::{HandlerOutcome, OutboxError, OutboxHandler, OutboxRow};
+
 const VOICE_ACTIVE_DAYS: i64 = 14;
 const SURVEY_COOLDOWN_DAYS: i64 = 60;
 const EVENT_VALUES: [&str; 5] = [
@@ -58,8 +60,6 @@ pub enum SurveyPulseError {
     Database(#[from] sqlx::Error),
     #[error("ungültige Umfrage-Antwort")]
     InvalidAnswer,
-    #[error("ungültige Survey-Outbox-Zeile")]
-    InvalidOutbox,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,50 +504,34 @@ impl SurveyPulsePort for dl_discord::DiscordAdapter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchOutcome {
-    Empty,
-    Sent,
-    Suppressed,
-    Failed,
-}
+/// `action_type` der Umfragen-Puls-Zeilen in `bot.action_outbox`.
+pub const SURVEY_PULSE_ACTION_TYPE: &str = "survey_pulse";
 
-pub struct OutboxDispatcher {
-    pool: PgPool,
+/// Zustellung einer Umfragen-Puls-Einladung als Outbox-Handler.
+///
+/// Der Handler prüft das Proaktiv-DM-Gate direkt vor der Wirkung erneut,
+/// verschickt die DM und bucht den Ping. Den Statuswechsel der Outbox-Zeile
+/// schreibt der Dispatcher aus dem zurückgegebenen Urteil.
+pub struct SurveyPulseOutboxHandler {
     port: Arc<dyn SurveyPulsePort>,
 }
 
-impl OutboxDispatcher {
-    pub fn new(pool: PgPool, port: Arc<dyn SurveyPulsePort>) -> Self {
-        Self { pool, port }
+impl SurveyPulseOutboxHandler {
+    pub fn new(port: Arc<dyn SurveyPulsePort>) -> Arc<Self> {
+        Arc::new(Self { port })
     }
+}
 
-    pub async fn dispatch_one(
+#[async_trait::async_trait]
+impl OutboxHandler for SurveyPulseOutboxHandler {
+    async fn handle(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        row: &OutboxRow,
         now: DateTime<Utc>,
-    ) -> Result<DispatchOutcome, SurveyPulseError> {
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT id, user_id, guild_id, payload
-               FROM bot.action_outbox
-              WHERE action_type = 'survey_pulse'
-                AND status = 'pending'
-                AND scheduled_for <= $1
-              ORDER BY priority DESC, scheduled_for, id
-              FOR UPDATE SKIP LOCKED
-              LIMIT 1",
-        )
-        .bind(now)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(row) = row else {
-            tx.commit().await?;
-            return Ok(DispatchOutcome::Empty);
-        };
-        let id: i64 = row.try_get("id")?;
-        let user_id: i64 = row.try_get("user_id")?;
-        let guild_id: i64 = row.try_get("guild_id")?;
-        let payload: Value = row.try_get("payload")?;
+    ) -> Result<HandlerOutcome, OutboxError> {
+        let id = row.id;
+        let user_id = row.user_id;
         let eligibility = sqlx::query(
             "SELECT
                 COALESCE((
@@ -566,8 +550,8 @@ impl OutboxDispatcher {
                   WHERE patterns.user_id = $1), 0)::INTEGER AS ping_count_30d",
         )
         .bind(user_id)
-        .bind(guild_id)
-        .fetch_one(&mut *tx)
+        .bind(row.guild_id)
+        .fetch_one(&mut **tx)
         .await?;
         let gate = is_proactive_dm_allowed(
             ProactiveDmEligibility {
@@ -584,16 +568,6 @@ impl OutboxDispatcher {
                 ProactiveDmDenialReason::CooldownActive { .. } => "cooldown",
                 ProactiveDmDenialReason::MonthlyBudgetExhausted => "budget",
             };
-            sqlx::query(
-                "UPDATE bot.action_outbox
-                    SET status = 'suppressed', suppress_reason = $2
-                  WHERE id = $1",
-            )
-            .bind(id)
-            .bind(reason)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
             tracing::debug!(
                 id,
                 user_id,
@@ -601,46 +575,42 @@ impl OutboxDispatcher {
                 reason,
                 "Umfragen-Puls-Zustellung"
             );
-            return Ok(DispatchOutcome::Suppressed);
+            return Ok(HandlerOutcome::Suppressed {
+                reason: reason.to_string(),
+            });
         }
-        let Some(wave_id) = payload.get("wave_id").and_then(Value::as_i64) else {
-            sqlx::query(
-                "UPDATE bot.action_outbox SET status = 'failed', error = 'invalid wave_id'
-                  WHERE id = $1",
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            return Ok(DispatchOutcome::Failed);
+        let Some(wave_id) = row.payload.get("wave_id").and_then(Value::as_i64) else {
+            tracing::warn!(
+                id,
+                user_id,
+                decision = "fehlgeschlagen",
+                grund = "invalid wave_id",
+                "Umfragen-Puls-Zustellung"
+            );
+            return Ok(HandlerOutcome::Failed {
+                error: "invalid wave_id".to_string(),
+            });
         };
         let Ok(discord_user_id) = u64::try_from(user_id) else {
-            return Err(SurveyPulseError::InvalidOutbox);
+            tracing::warn!(
+                id,
+                user_id,
+                decision = "fehlgeschlagen",
+                grund = "invalid user_id",
+                "Umfragen-Puls-Zustellung"
+            );
+            return Ok(HandlerOutcome::Failed {
+                error: "invalid user_id".to_string(),
+            });
         };
         if let Err(error) = self
             .port
             .send_dm(discord_user_id, survey_dm_body(wave_id))
             .await
         {
-            let error: String = error.chars().take(1_000).collect();
-            sqlx::query("UPDATE bot.action_outbox SET status = 'failed', error = $2 WHERE id = $1")
-                .bind(id)
-                .bind(&error)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            tracing::warn!(id, user_id, %error, "Umfragen-Puls-DM fehlgeschlagen");
-            return Ok(DispatchOutcome::Failed);
+            tracing::warn!(id, user_id, grund = %error, "Umfragen-Puls-DM fehlgeschlagen");
+            return Ok(HandlerOutcome::Failed { error });
         }
-        sqlx::query(
-            "UPDATE bot.action_outbox
-                SET status = 'sent', sent_at = $2, error = NULL
-              WHERE id = $1",
-        )
-        .bind(id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
         sqlx::query(
             "INSERT INTO activity.user_activity_patterns(
                 user_id, last_pinged_at, ping_count_30d
@@ -655,9 +625,8 @@ impl OutboxDispatcher {
         )
         .bind(user_id)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         tracing::debug!(
             id,
             wave_id,
@@ -665,7 +634,7 @@ impl OutboxDispatcher {
             decision = "gesendet",
             "Umfragen-Puls-Zustellung"
         );
-        Ok(DispatchOutcome::Sent)
+        Ok(HandlerOutcome::Sent)
     }
 }
 
@@ -697,31 +666,23 @@ pub async fn run_due_wave(
     run_wave(pool, guild_id, config, now).await.map(Some)
 }
 
-pub fn spawn(
+/// Startet nur die Wellen-Planung.
+///
+/// Die Zustellung der erzeugten Zeilen macht der Outbox-Dispatcher, der einen
+/// eigenen Lebenszyklus hat. Dieser Task erzeugt lediglich neue Einladungen und
+/// hängt deshalb weiter an `SURVEY_PULSE_ENABLED`.
+pub fn spawn_scheduler(
     pool: PgPool,
     guild_id: i64,
     config: SurveyPulseConfig,
-    port: Arc<dyn SurveyPulsePort>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let dispatcher = OutboxDispatcher::new(pool.clone(), port);
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             timer.tick().await;
-            let now = Utc::now();
-            if let Err(error) = run_due_wave(&pool, guild_id, config, now).await {
+            if let Err(error) = run_due_wave(&pool, guild_id, config, Utc::now()).await {
                 tracing::warn!(%error, "Umfragen-Puls-Scheduler fehlgeschlagen");
-            }
-            loop {
-                match dispatcher.dispatch_one(Utc::now()).await {
-                    Ok(DispatchOutcome::Empty) => break,
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "Umfragen-Puls-Outbox fehlgeschlagen");
-                        break;
-                    }
-                }
             }
         }
     })
@@ -1181,15 +1142,18 @@ mod tests {
         .await
         .expect("opt out");
         let port = Arc::new(MockPort::default());
-        let dispatcher = OutboxDispatcher::new(pool.clone(), port.clone());
+        let dispatcher = crate::outbox::OutboxDispatcher::new(pool.clone()).register(
+            SURVEY_PULSE_ACTION_TYPE,
+            SurveyPulseOutboxHandler::new(port.clone()),
+        );
 
         assert_eq!(
             dispatcher.dispatch_one(now()).await.expect("first"),
-            DispatchOutcome::Sent
+            crate::outbox::DispatchOutcome::Sent
         );
         assert_eq!(
             dispatcher.dispatch_one(now()).await.expect("second"),
-            DispatchOutcome::Suppressed
+            crate::outbox::DispatchOutcome::Suppressed
         );
         assert_eq!(port.sent.lock().expect("sent").len(), 1);
         let statuses: Vec<(i64, String, Option<String>)> = sqlx::query_as(

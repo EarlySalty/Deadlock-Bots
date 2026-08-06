@@ -18,7 +18,9 @@ use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 
 mod chat_provider;
+mod chat_text;
 pub use chat_provider::*;
+pub use chat_text::*;
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
 pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash";
