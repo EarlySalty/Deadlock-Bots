@@ -952,17 +952,9 @@ dependencies = [
 name = "dl-brain-community"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
- "clap",
- "dl-central-db",
- "reqwest",
- "serde",
  "serde_json",
  "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
