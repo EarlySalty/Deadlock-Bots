@@ -27,6 +27,28 @@ const ROLE_FRISCHLING: &str = "Frischling";
 const ROLE_RANG_VERKNUEPFUNG: &str = "Rang-Verknüpfung";
 const ROLE_SERVER_TOUR: &str = "Server-Tour";
 const ROLE_STREAMS: &str = "Streams";
+/// Bezahltes Plus-Tier. Die Rolle ist bewusst rein kosmetisch und
+/// organisatorisch: eigene Farbe, eigene Gruppe in der Mitgliederliste,
+/// Zugang zu zwei exklusiven Kanaelen. Sie traegt **keine** zusaetzlichen
+/// Rechte ueber die @everyone-Basis hinaus — weder Moderations- noch
+/// Spielrechte. Bezahlung darf sichtbar sein, aber nichts daran aendern,
+/// was jemand auf dem Server oder im Spiel darf.
+const ROLE_PLUS: &str = "Plus";
+/// Gold aus dem Brand-Set (`0xC8A86B`).
+const ROLE_PLUS_COLOR: i32 = 0x00C8_A86B;
+/// Bot-Rolle der Guild. Discord vergibt eine Rolle nur, wenn sie unterhalb der
+/// eigenen hoechsten Rolle liegt; die Bot-Rolle ist damit die harte Obergrenze
+/// fuer jede Rolle, die der Bot spaeter selbst verteilen soll.
+const ROLE_DEADLOCK_BOT: &str = "Deadlock Bot";
+/// Override fuer Crates, die die Plus-Rolle vergeben. Eine harte ID gibt es
+/// hier nicht: die Rolle entsteht erst beim naechsten Apply. Ohne die Variable
+/// wird sie ueber den Namen aufgeloest (`plus_role_id_from_lookup`).
+const ROLE_PLUS_ID_ENV: &str = "PLUS_ROLE_ID";
+/// Rollen, neben denen Plus in der Hierarchie einsortiert wird. Nur als
+/// Positions-Anker gelesen — insbesondere `Server Unterstützer` bleibt sonst
+/// unangetastet (die Alt-Rolle wird ueber ihren Namen referenziert).
+const PLUS_POSITION_ANCHOR_ROLES: &[&str] =
+    &[ROLE_VIP, ROLE_SERVER_BOOSTER, ROLE_SERVER_UNTERSTUETZER];
 const CATEGORY_MODERATION: &str = "🛡️ ─ MODERATION ─";
 const CATEGORY_INFORMATION: &str = "🏛️ ─ INFORMATION ─";
 const CATEGORY_MEDIEN: &str = "📺 ─ MEDIEN ─";
@@ -40,6 +62,9 @@ const CATEGORY_RANKED: &str = "Ranked";
 const CATEGORY_NEUE_SPIELER: &str = "Neue Spieler";
 const CATEGORY_SUPPORT: &str = "🎟️ ─ SUPPORT ─";
 const CATEGORY_ARCHIV: &str = "📦 ─ ARCHIV ─";
+const CATEGORY_PLUS: &str = "✨ ─ PLUS ─";
+const CHANNEL_PLUS_LOUNGE: &str = "💬plus-lounge";
+const CHANNEL_PLUS_ABSTIMMUNGEN: &str = "🗳️plus-abstimmungen";
 const CHANNEL_KREATIV_ECKE: &str = "kreativ-ecke";
 const CHANNEL_LFG_FORUM: &str = "🎯mitspieler-suche";
 const CHANNEL_LFG_ARCHIVE: &str = "archiv-mitspieler-suche";
@@ -92,6 +117,7 @@ const EXPECTED_CATEGORIES: &[&str] = &[
     "AFK",
     CATEGORY_SUPPORT,
     CATEGORY_ARCHIV,
+    CATEGORY_PLUS,
 ];
 
 const USER_BAN_ONE_TO_ONE_EXCEPTION_IDS: &[DiscordId] = &[
@@ -302,6 +328,9 @@ pub fn derive_desired_model_with_options(
     apply_category_names(&mut desired, &mut ctx);
     apply_everyone_basis(&mut desired, &mut ctx);
     apply_welle2b_roles(&mut desired);
+    // Vor der Kategorie-Pruefung: `ensure_plus_tier` traegt seine Kategorie in
+    // `ctx.category_ids` nach, sonst warnt die Schleife unten sie als fehlend.
+    ensure_plus_tier(&mut desired, &mut ctx);
     ensure_welle3_static_channels(&mut desired, &mut ctx);
     apply_documented_structure_moves(&mut desired, &mut ctx);
     if options.lfg_forum_cutover_enabled {
@@ -573,6 +602,228 @@ fn apply_welle2b_roles(desired: &mut GuildModel) {
         position: next_position,
     };
     desired.roles.insert(role.role_id, role);
+}
+
+/// Legt das Plus-Tier deklarativ an: eine Rolle plus eine eigene Kategorie mit
+/// zwei Kanaelen, die ohne die Rolle unsichtbar sind.
+///
+/// Reihenfolge ist wichtig: ohne Rolle keine Kanaele. Kann die Rolle nicht
+/// sicher unterhalb der Bot-Rolle platziert werden, entsteht gar nichts — ein
+/// exklusiver Bereich ohne vergebbare Rolle waere ein toter Bereich.
+fn ensure_plus_tier(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
+    let Some(role_id) = ensure_plus_role(desired, ctx) else {
+        return;
+    };
+    let guild_id = desired.guild_id;
+    let category_id = ensure_plus_category(desired, ctx);
+    let overwrites = plus_visibility_overwrites(guild_id, category_id, role_id);
+    set_exact_overwrites(desired, ctx, category_id, overwrites);
+
+    // Topic wird in M9 gesetzt (TEXTE-BEDARF.md: channel.*.topic)
+    let lounge = ensure_plus_channel(desired, category_id, CHANNEL_PLUS_LOUNGE, ChannelKind::Text);
+    // Topic wird in M9 gesetzt (TEXTE-BEDARF.md: channel.*.topic)
+    let abstimmungen = ensure_plus_channel(
+        desired,
+        category_id,
+        CHANNEL_PLUS_ABSTIMMUNGEN,
+        ChannelKind::Text,
+    );
+
+    // Die Kategorie versteckt den Bereich bereits per Vererbung. Die Kanaele
+    // tragen dieselben Overwrites zusaetzlich, damit ein spaeter verschobener
+    // oder synchronisierter Kanal nicht still sichtbar wird — gleiches Muster
+    // wie `sync_channel_to_category_overwrites` bei `scrim-planung`.
+    for channel_id in [lounge, abstimmungen] {
+        sync_channel_to_category_overwrites(desired, category_id, channel_id);
+    }
+}
+
+/// @everyone sieht den Bereich nicht, Plus sieht ihn und darf in den Voice.
+fn plus_visibility_overwrites(
+    guild_id: DiscordId,
+    channel_id: DiscordId,
+    plus_role_id: DiscordId,
+) -> Vec<PermissionOverwriteSpec> {
+    vec![
+        everyone_overwrite(guild_id, channel_id, f_everyone_hidden_profile()),
+        // Die Plus-Rolle steht beim ersten Apply noch nicht im Ist-Modell,
+        // deshalb kommt die ID hier direkt aus dem Soll-Modell und nicht aus
+        // `ctx.role_id` (das kennt nur bestehende Rollen).
+        role_overwrite(
+            guild_id,
+            channel_id,
+            plus_role_id,
+            f_role_visibility_profile(),
+        ),
+    ]
+}
+
+/// Legt die Plus-Rolle an, falls sie fehlt, und haelt ihre kosmetischen Felder
+/// nach. Gibt die Rollen-ID zurueck, sonst `None`.
+fn ensure_plus_role(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) -> Option<DiscordId> {
+    if let Some(role) = desired
+        .roles
+        .values_mut()
+        .find(|role| role.name == ROLE_PLUS)
+    {
+        role.color = ROLE_PLUS_COLOR;
+        role.hoist = true;
+        role.mentionable = false;
+        role.permissions_bitmask = 0;
+        return Some(role.role_id);
+    }
+
+    let Some(position) = plus_role_position(desired) else {
+        // Kein stiller Verzicht: ohne belegte Hierarchie bleibt das Plus-Tier
+        // aus, und der Grund steht im Preview.
+        ctx.warn_once(
+            "missing_role",
+            ROLE_DEADLOCK_BOT,
+            format!(
+                "Bot-Rolle `{ROLE_DEADLOCK_BOT}` wurde im Ist-Modell nicht mit brauchbarer Position gefunden; `{ROLE_PLUS}` wird nicht angelegt, weil der Bot eine Rolle oberhalb der eigenen nicht vergeben koennte"
+            ),
+        );
+        return None;
+    };
+    let role = RoleSpec {
+        guild_id: desired.guild_id,
+        role_id: next_synthetic_role_id(desired),
+        name: ROLE_PLUS.to_string(),
+        color: ROLE_PLUS_COLOR,
+        // Eigene Gruppe in der Mitgliederliste — der einzige sichtbare Vorteil.
+        hoist: true,
+        mentionable: false,
+        managed: false,
+        // Keine Rechte ueber die @everyone-Basis hinaus, siehe `ROLE_PLUS`.
+        permissions_bitmask: 0,
+        position,
+    };
+    let role_id = role.role_id;
+    desired.roles.insert(role_id, role);
+    Some(role_id)
+}
+
+/// Position der Plus-Rolle.
+///
+/// `apply_welle2b_roles` haengt neue Rollen ans obere Ende (`max + 1`) — fuer
+/// eine Rolle, die ein Bot spaeter vergeben soll, ist das genau der falsche
+/// Platz: Discord verweigert das Vergeben jeder Rolle, die nicht unterhalb der
+/// eigenen hoechsten Rolle liegt (Fehler 50013). Deshalb hier zwei Schritte:
+/// 1. Anker: direkt ueber die bestehenden Perk-Rollen, damit Plus in der
+///    Mitgliederliste bei seinesgleichen steht.
+/// 2. Deckel: hart auf `Bot-Rolle - 1`.
+///
+/// Ohne auffindbare Bot-Rolle wird nichts angelegt, statt die Hierarchie zu
+/// raten.
+fn plus_role_position(desired: &GuildModel) -> Option<i32> {
+    let ceiling = role_by_normalized_name(desired, ROLE_DEADLOCK_BOT)?
+        .position
+        .checked_sub(1)?;
+    // Position 0 gehoert @everyone; darunter gibt es keinen Platz.
+    if ceiling < 1 {
+        return None;
+    }
+    let anchor = PLUS_POSITION_ANCHOR_ROLES
+        .iter()
+        .filter_map(|name| role_by_normalized_name(desired, name))
+        .map(|role| role.position)
+        .max()
+        .and_then(|position| position.checked_add(1))
+        .unwrap_or(1);
+    Some(anchor.clamp(1, ceiling))
+}
+
+/// Loest die Plus-Rollen-ID fuer andere Crates auf: `PLUS_ROLE_ID` gewinnt,
+/// sonst wird ueber den Rollennamen im Guild-Modell gesucht. Bewusst keine
+/// hartkodierte ID — die entsteht erst beim Apply.
+pub fn plus_role_id_from_lookup<F>(model: &GuildModel, lookup: F) -> Option<DiscordId>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup(ROLE_PLUS_ID_ENV)
+        .and_then(|value| value.trim().parse::<DiscordId>().ok())
+        .filter(|role_id| *role_id != 0)
+        .or_else(|| role_by_normalized_name(model, ROLE_PLUS).map(|role| role.role_id))
+}
+
+fn ensure_plus_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) -> DiscordId {
+    if let Some(category_id) = desired
+        .categories
+        .values()
+        .find(|category| category_matches_expected(&category.name, CATEGORY_PLUS))
+        .map(|category| category.category_id)
+    {
+        return category_id;
+    }
+
+    let category_id = next_synthetic_discord_id(desired);
+    let position = desired
+        .categories
+        .values()
+        .map(|category| category.position)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    desired.categories.insert(
+        category_id,
+        crate::model::CategorySpec {
+            guild_id: desired.guild_id,
+            category_id,
+            name: CATEGORY_PLUS.to_string(),
+            position,
+        },
+    );
+    ctx.category_ids
+        .insert(category_match_key(CATEGORY_PLUS), category_id);
+    category_id
+}
+
+/// Wie `ensure_text_channel`, aber mit Kanaltyp und ohne Topic: die
+/// user-sichtbaren Texte kommen spaeter, ein Platzhalter waere sofort live.
+fn ensure_plus_channel(
+    desired: &mut GuildModel,
+    parent_category_id: DiscordId,
+    desired_name: &str,
+    kind: ChannelKind,
+) -> DiscordId {
+    if let Some(channel) = desired
+        .channels
+        .values_mut()
+        .find(|channel| channel.kind == kind && channel_matches(&channel.name, &[desired_name]))
+    {
+        channel.name = desired_name.to_string();
+        channel.parent_category_id = Some(parent_category_id);
+        return channel.channel_id;
+    }
+
+    let channel_id = next_synthetic_discord_id(desired);
+    let position = desired
+        .channels
+        .values()
+        .filter(|channel| channel.parent_category_id == Some(parent_category_id))
+        .map(|channel| channel.position)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    desired.channels.insert(
+        channel_id,
+        crate::model::ChannelSpec {
+            guild_id: desired.guild_id,
+            channel_id,
+            name: desired_name.to_string(),
+            kind,
+            topic: None,
+            position,
+            parent_category_id: Some(parent_category_id),
+            nsfw: false,
+            bitrate: None,
+            user_limit: None,
+            rate_limit_per_user: None,
+            default_auto_archive_duration: None,
+            status: None,
+        },
+    );
+    channel_id
 }
 
 fn ping_role_template(model: &GuildModel) -> Option<&RoleSpec> {
@@ -2399,6 +2650,16 @@ mod tests {
     const GRIND_CUSTOM_PING_ROLE: u64 = 306;
     const COMMUNITY_MOD_ROLE: u64 = 307;
     const BOT_ROLE: u64 = 308;
+    const PLUS_VIP_ROLE: u64 = 320;
+    const PLUS_BOOSTER_ROLE: u64 = 321;
+    const PLUS_UNTERSTUETZER_ROLE: u64 = 322;
+    const PLUS_DEADLOCK_BOT_ROLE: u64 = 323;
+    // Live-Stand 2026-08-07 (Broker `discord/roles`): VIP 188, Server Booster 189,
+    // Server Unterstuetzer 190, Deadlock Bot 201.
+    const PLUS_VIP_POSITION: i32 = 188;
+    const PLUS_BOOSTER_POSITION: i32 = 189;
+    const PLUS_UNTERSTUETZER_POSITION: i32 = 190;
+    const PLUS_BOT_POSITION: i32 = 201;
 
     fn category(id: u64, name: &str) -> CategorySpec {
         CategorySpec {
@@ -4405,6 +4666,235 @@ mod tests {
                 serde_json::to_vec(actual.overwrites.get(&key).expect("actual"))?
             );
         }
+        Ok(())
+    }
+
+    /// Ist-Modell mit der Rollen-Hierarchie, die M8 vorfindet: Perk-Rollen
+    /// knapp unter 190, Bot-Rolle ganz oben auf 201.
+    fn plus_hierarchy_model() -> GuildModel {
+        let mut model = actual_model();
+        for (id, name, position) in [
+            (PLUS_VIP_ROLE, ROLE_VIP, PLUS_VIP_POSITION),
+            (
+                PLUS_BOOSTER_ROLE,
+                ROLE_SERVER_BOOSTER,
+                PLUS_BOOSTER_POSITION,
+            ),
+            (
+                PLUS_UNTERSTUETZER_ROLE,
+                ROLE_SERVER_UNTERSTUETZER,
+                PLUS_UNTERSTUETZER_POSITION,
+            ),
+            (PLUS_DEADLOCK_BOT_ROLE, ROLE_DEADLOCK_BOT, PLUS_BOT_POSITION),
+        ] {
+            model
+                .roles
+                .insert(id, role_with_flags(id, name, 0, 0, true, false, position));
+        }
+        model
+    }
+
+    fn plus_channel<'a>(model: &'a GuildModel, name: &str) -> Option<&'a ChannelSpec> {
+        model.channels.values().find(|channel| channel.name == name)
+    }
+
+    #[test]
+    fn plus_rolle_ist_gold_kosmetisch_und_liegt_unter_der_bot_rolle() -> anyhow::Result<()> {
+        let actual = plus_hierarchy_model();
+
+        let derived = derive_desired_model(&actual)?;
+
+        let plus = role_by_name(&derived.desired, ROLE_PLUS).expect("Plus-Rolle");
+        assert_eq!(plus.color, 0x00C8_A86B, "Gold 0xC8A86B");
+        assert!(plus.hoist, "Plus muss eine eigene Gruppe bilden");
+        assert!(!plus.mentionable);
+        assert!(!plus.managed);
+        assert_eq!(
+            plus.permissions_bitmask, 0,
+            "Plus darf keine Rechte ueber die @everyone-Basis hinaus tragen"
+        );
+        let bot = role_by_name(&derived.desired, ROLE_DEADLOCK_BOT).expect("Bot-Rolle");
+        assert!(
+            plus.position < bot.position,
+            "Plus {} muss unter der Bot-Rolle {} liegen, sonst kann der Bot sie nicht vergeben",
+            plus.position,
+            bot.position
+        );
+        assert!(plus.position > 0, "Position 0 gehoert @everyone");
+        Ok(())
+    }
+
+    #[test]
+    fn plus_kanaele_sind_ohne_plus_rolle_unsichtbar() -> anyhow::Result<()> {
+        let actual = plus_hierarchy_model();
+
+        let derived = derive_desired_model(&actual)?;
+
+        let plus_role_id = role_by_name(&derived.desired, ROLE_PLUS)
+            .expect("Plus-Rolle")
+            .role_id;
+        let lounge = plus_channel(&derived.desired, CHANNEL_PLUS_LOUNGE).expect("Plus Lounge");
+        let abstimmungen =
+            plus_channel(&derived.desired, CHANNEL_PLUS_ABSTIMMUNGEN).expect("Plus Abstimmungen");
+        // Beide Plus-Kanaele sind Text: das Briefing nennt `plus-lounge` und
+        // einen Abstimmungs-Kanal, ein Voice-Kanal waere eine Zutat.
+        assert_eq!(lounge.kind, ChannelKind::Text);
+        assert_eq!(abstimmungen.kind, ChannelKind::Text);
+        assert_eq!(lounge.topic, None, "Topic kommt erst in M9");
+        assert_eq!(abstimmungen.topic, None, "Topic kommt erst in M9");
+
+        let category_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category_matches_expected(&category.name, CATEGORY_PLUS))
+            .expect("Plus-Kategorie")
+            .category_id;
+        assert_eq!(lounge.parent_category_id, Some(category_id));
+        assert_eq!(abstimmungen.parent_category_id, Some(category_id));
+
+        for channel_id in [category_id, lounge.channel_id, abstimmungen.channel_id] {
+            let everyone = derived
+                .desired
+                .overwrites
+                .get(&OverwriteKey {
+                    channel_id,
+                    target_kind: TargetKind::Role,
+                    target_id: GUILD_ID,
+                })
+                .unwrap_or_else(|| panic!("@everyone-Overwrite fuer {channel_id}"));
+            assert!(
+                Permissions::from_bits_truncate(everyone.deny_bits)
+                    .contains(Permissions::VIEW_CHANNEL),
+                "{channel_id}: @everyone muss VIEW_CHANNEL verweigert bekommen, deny={}",
+                everyone.deny_bits
+            );
+
+            let plus = derived
+                .desired
+                .overwrites
+                .get(&OverwriteKey {
+                    channel_id,
+                    target_kind: TargetKind::Role,
+                    target_id: plus_role_id,
+                })
+                .unwrap_or_else(|| panic!("Plus-Overwrite fuer {channel_id}"));
+            assert!(
+                Permissions::from_bits_truncate(plus.allow_bits)
+                    .contains(Permissions::VIEW_CHANNEL),
+                "{channel_id}: Plus muss VIEW_CHANNEL erlaubt bekommen, allow={}",
+                plus.allow_bits
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plus_rolle_und_kanaele_stehen_als_create_im_diff() -> anyhow::Result<()> {
+        let actual = plus_hierarchy_model();
+
+        let derived = derive_desired_model(&actual)?;
+        let diff = diff_models(&derived.desired, &actual, &derived.dynamic_namespaces, &[])?;
+
+        let created_name = |kind: ObjectKind, name: &str| {
+            diff.changes.iter().any(|change| {
+                change.action == crate::diff::DiffAction::Create
+                    && change.object.kind == kind
+                    && change
+                        .desired
+                        .as_ref()
+                        .and_then(|value| value.get("name"))
+                        .and_then(|value| value.as_str())
+                        == Some(name)
+            })
+        };
+        for (kind, name) in [
+            (ObjectKind::Role, ROLE_PLUS),
+            (ObjectKind::Category, CATEGORY_PLUS),
+            (ObjectKind::Channel, CHANNEL_PLUS_LOUNGE),
+            (ObjectKind::Channel, CHANNEL_PLUS_ABSTIMMUNGEN),
+        ] {
+            assert!(
+                created_name(kind, name),
+                "Create fuer {kind:?} `{name}` fehlt im Diff: changes={:?} filtered={:?}",
+                diff.changes,
+                diff.filtered
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plus_tier_laesst_die_alt_rolle_server_unterstuetzer_unveraendert() -> anyhow::Result<()> {
+        let actual = plus_hierarchy_model();
+
+        let derived = derive_desired_model(&actual)?;
+
+        assert_eq!(
+            derived.desired.roles.get(&PLUS_UNTERSTUETZER_ROLE),
+            actual.roles.get(&PLUS_UNTERSTUETZER_ROLE),
+            "die namensreferenzierte Alt-Rolle darf sich in keinem Feld aendern"
+        );
+        assert_eq!(
+            derived
+                .desired
+                .roles
+                .values()
+                .filter(|role| role.name == ROLE_SERVER_UNTERSTUETZER)
+                .count(),
+            1,
+            "`{ROLE_SERVER_UNTERSTUETZER}` darf weder dupliziert noch ersetzt werden"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ohne_bot_rolle_entsteht_kein_plus_bereich() -> anyhow::Result<()> {
+        let mut actual = plus_hierarchy_model();
+        actual.roles.remove(&PLUS_DEADLOCK_BOT_ROLE);
+
+        let derived = derive_desired_model(&actual)?;
+
+        assert!(
+            role_by_name(&derived.desired, ROLE_PLUS).is_none(),
+            "ohne belegte Bot-Rolle darf keine unvergebbare Rolle entstehen"
+        );
+        assert!(plus_channel(&derived.desired, CHANNEL_PLUS_LOUNGE).is_none());
+        assert!(plus_channel(&derived.desired, CHANNEL_PLUS_ABSTIMMUNGEN).is_none());
+        assert!(
+            derived
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(ROLE_DEADLOCK_BOT) && warning.contains(ROLE_PLUS)),
+            "der Verzicht muss begruendet im Preview stehen, nicht still passieren: {:?}",
+            derived.warnings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plus_rollen_id_kommt_aus_env_und_faellt_auf_den_namen_zurueck() -> anyhow::Result<()> {
+        let actual = plus_hierarchy_model();
+        let derived = derive_desired_model(&actual)?;
+        let plus_role_id = role_by_name(&derived.desired, ROLE_PLUS)
+            .expect("Plus-Rolle")
+            .role_id;
+
+        assert_eq!(
+            plus_role_id_from_lookup(&derived.desired, |_| Some("4711".to_string())),
+            Some(4711),
+            "PLUS_ROLE_ID gewinnt"
+        );
+        assert_eq!(
+            plus_role_id_from_lookup(&derived.desired, |_| None),
+            Some(plus_role_id),
+            "ohne Env wird ueber den Namen aufgeloest"
+        );
+        assert_eq!(
+            plus_role_id_from_lookup(&actual, |_| Some("0".to_string())),
+            None,
+            "0 ist keine gueltige Rollen-ID und das Ist-Modell kennt Plus noch nicht"
+        );
         Ok(())
     }
 }

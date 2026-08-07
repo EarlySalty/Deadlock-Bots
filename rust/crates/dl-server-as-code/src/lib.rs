@@ -36,8 +36,8 @@ pub use model::{
 pub use rules::{
     derive_desired_model, derive_desired_model_with_options, everyone_basis_bits,
     f_everyone_hidden_profile, f_role_visibility_profile, p0_public_profile,
-    p1_announcement_profile, p2_panel_bot_profile, DesiredDerivation, DesiredModelOptions,
-    PermissionOverwriteProfile,
+    p1_announcement_profile, p2_panel_bot_profile, plus_role_id_from_lookup, DesiredDerivation,
+    DesiredModelOptions, PermissionOverwriteProfile,
 };
 
 pub const DEFAULT_GUILD_ID: u64 = 1_289_721_245_281_292_288;
