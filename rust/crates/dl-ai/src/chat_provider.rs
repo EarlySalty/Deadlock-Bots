@@ -408,7 +408,7 @@ impl LlmProviderConfig {
     ) -> Result<Arc<dyn ChatProvider>, ChatProviderInitError> {
         let provider = self.provider_for(use_case, &lookup)?;
         let lookup = model_key_lookup(use_case, lookup);
-        match provider {
+        let built = match provider {
             LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Fireworks => OpenAiChatProvider::from_fireworks_env(lookup)
@@ -418,6 +418,77 @@ impl LlmProviderConfig {
             LlmProviderKind::Mistral => MistralChatProvider::from_env(lookup)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Mock => Err(ChatProviderInitError::MockProviderMustBeInjected),
+        }?;
+        // Die einzige Fabrik ist auch die einzige Stelle, an der das
+        // Transparenz-Log haengt: damit ist jeder der vierzehn
+        // Anwendungsfaelle erfasst, ohne dass eine Aufrufstelle etwas tun
+        // muss. Ohne registrierte Senke reicht der Wrapper unveraendert durch.
+        Ok(crate::transparency::wrap_with_transparency(built, use_case))
+    }
+
+    /// Startinventar: baut jeden Anwendungsfall einmal probeweise auf.
+    ///
+    /// Nur der echte Bauweg zeigt, dass ein Pfad keinen Schluessel hat. Die
+    /// Aufrufer im Bot verschlucken dieses `Err` und laufen danach
+    /// kommentarlos auf Templates weiter — ohne diese Probe faellt der Ausfall
+    /// niemandem auf.
+    pub fn inventory(&self, lookup: impl Fn(&str) -> Option<String> + Copy) -> Vec<AiPathStatus> {
+        LlmUseCase::all()
+            .iter()
+            .map(|use_case| {
+                let provider = self.provider_for(*use_case, lookup).ok();
+                let error = self
+                    .build_provider_for_env(*use_case, lookup)
+                    .err()
+                    .map(|error| error.to_string());
+                AiPathStatus {
+                    use_case: *use_case,
+                    provider,
+                    error,
+                }
+            })
+            .collect()
+    }
+
+    /// Eine Zeile fuer das Startinventar: welcher Anbieter bedient welchen
+    /// Anwendungsfall? Ohne diese Zeile ist nach einem Restart aus dem Journal
+    /// nicht ablesbar, welche KI ueberhaupt scharf ist.
+    pub fn inventory_line(&self, lookup: impl Fn(&str) -> Option<String> + Copy) -> String {
+        let eintraege: Vec<String> = self
+            .inventory(lookup)
+            .into_iter()
+            .map(|status| format!("{}={}", status.use_case.as_str(), status.state_label()))
+            .collect();
+        format!("KI-Anbieter je Anwendungsfall: {}", eintraege.join(" "))
+    }
+}
+
+/// Zustand eines einzelnen KI-Pfads beim Start.
+#[derive(Debug, Clone)]
+pub struct AiPathStatus {
+    pub use_case: LlmUseCase,
+    pub provider: Option<LlmProviderKind>,
+    /// Grund, warum der Pfad keinen Provider bekommt. `None` = nutzbar.
+    pub error: Option<String>,
+}
+
+impl AiPathStatus {
+    pub fn usable(&self) -> bool {
+        self.error.is_none()
+    }
+
+    pub fn provider_label(&self) -> &'static str {
+        self.provider
+            .map(LlmProviderKind::as_str)
+            .unwrap_or("gesperrt")
+    }
+
+    /// Kurzform fuer die Inventarzeile: Anbieter, oder Anbieter plus Ausfall.
+    pub fn state_label(&self) -> String {
+        if self.usable() {
+            self.provider_label().to_string()
+        } else {
+            format!("{}(OHNE ZUGANG)", self.provider_label())
         }
     }
 }
@@ -442,26 +513,39 @@ fn model_key_lookup(
 
 // KI-Compliance-Gate (§5.6): MiniMax darf nur per explizitem Dev-Override und
 // ausschliesslich mit synthetischen Daten genutzt werden.
+//
+// Ein Default darf nur auf einen Anbieter zeigen, fuer den auch ein Zugang
+// hinterlegt ist. Fuenf Anwendungsfaelle standen auf Mistral, obwohl es keinen
+// Mistral-Schluessel gibt: FAQ, LFG-Freitext, AI-Onboarding, Coaching-Anfrage
+// und Streamer-Matcher liefen dadurch still ohne KI auf ihren Templates
+// weiter. Der Anbieter der uebrigen nutzerzugewandten Texte ist Fireworks
+// (deepseek-v4-flash), dorthin gehoeren sie.
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
     match use_case {
         LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-        LlmUseCase::Faq | LlmUseCase::LfgFreitext => LlmProviderKind::Mistral,
+        LlmUseCase::Faq | LlmUseCase::LfgFreitext => LlmProviderKind::Fireworks,
         LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
         LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => LlmProviderKind::Fireworks,
         // Frueher direkt an MiniMax verdrahtet: MiniMax ist fuer User-Content
-        // gesperrt, der Default wandert deshalb auf denselben Anbieter wie die
+        // gesperrt, der Default liegt deshalb auf demselben Anbieter wie die
         // uebrigen nutzerzugewandten Texte.
-        LlmUseCase::AiOnboarding
-        | LlmUseCase::CoachingAnfrage
-        | LlmUseCase::StreamerMatcher => LlmProviderKind::Mistral,
+        LlmUseCase::AiOnboarding | LlmUseCase::CoachingAnfrage | LlmUseCase::StreamerMatcher => {
+            LlmProviderKind::Fireworks
+        }
         LlmUseCase::BrainAntwort | LlmUseCase::ModerationText => LlmProviderKind::Fireworks,
         // Frueher OpenAI-Clients: Anbieter bleibt, nur der Weg fuehrt jetzt
         // ueber das Gate.
-        LlmUseCase::ModerationVerify
-        | LlmUseCase::TurnierVorschlag
-        | LlmUseCase::VoiceHint => LlmProviderKind::OpenAi,
+        LlmUseCase::ModerationVerify | LlmUseCase::TurnierVorschlag | LlmUseCase::VoiceHint => {
+            LlmProviderKind::OpenAi
+        }
     }
 }
+
+/// Anbieter, fuer die im Betrieb ein Zugang hinterlegt ist. Ein Default
+/// ausserhalb dieser Menge bedeutet: der Pfad bekommt keinen Provider und
+/// faellt kommentarlos auf sein Template zurueck.
+pub const PROVIDERS_WITH_CONFIGURED_ACCESS: &[LlmProviderKind] =
+    &[LlmProviderKind::Fireworks, LlmProviderKind::OpenAi];
 
 fn default_data_classes() -> HashMap<LlmUseCase, LlmDataClass> {
     LlmUseCase::all()
@@ -1343,32 +1427,97 @@ mod tests {
 
         let defaults = LlmProviderConfig::default();
         for use_case in LlmUseCase::all() {
-            let expected = match use_case {
-                LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-                LlmUseCase::Faq | LlmUseCase::LfgFreitext => LlmProviderKind::Mistral,
-                LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
-                LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => {
-                    LlmProviderKind::Fireworks
-                }
-                LlmUseCase::AiOnboarding
-                | LlmUseCase::CoachingAnfrage
-                | LlmUseCase::StreamerMatcher => LlmProviderKind::Mistral,
-                LlmUseCase::BrainAntwort | LlmUseCase::ModerationText => {
-                    LlmProviderKind::Fireworks
-                }
-                LlmUseCase::ModerationVerify
-                | LlmUseCase::TurnierVorschlag
-                | LlmUseCase::VoiceHint => LlmProviderKind::OpenAi,
-            };
             assert_eq!(
                 defaults
                     .provider_for(*use_case, |_| None)
                     .expect("default provider"),
-                expected
+                erwarteter_default(*use_case)
             );
             assert_eq!(
                 defaults.data_class_for(*use_case),
                 LlmDataClass::UserContent
+            );
+        }
+    }
+
+    /// Festgeschriebener Soll-Stand. Eine Aenderung hier ist eine bewusste
+    /// Entscheidung, kein Nebeneffekt eines Umbaus.
+    fn erwarteter_default(use_case: LlmUseCase) -> LlmProviderKind {
+        match use_case {
+            LlmUseCase::ModerationVerify | LlmUseCase::TurnierVorschlag | LlmUseCase::VoiceHint => {
+                LlmProviderKind::OpenAi
+            }
+            _ => LlmProviderKind::Fireworks,
+        }
+    }
+
+    #[test]
+    fn kein_default_zeigt_auf_einen_anbieter_ohne_zugang() {
+        // Der eigentliche Schaden ist still: ohne Schluessel liefert
+        // build_provider_for_env ein Err, die Aufrufer im Bot machen daraus
+        // ein None und laufen kommentarlos auf Templates weiter. FAQ,
+        // LFG-Freitext, AI-Onboarding, Coaching-Anfrage und Streamer-Matcher
+        // standen genau so monatelang ohne KI da.
+        for use_case in LlmUseCase::all() {
+            let provider = default_provider_for(*use_case);
+            assert!(
+                PROVIDERS_WITH_CONFIGURED_ACCESS.contains(&provider),
+                "{} liegt per Default auf {}, fuer den kein Zugang hinterlegt ist",
+                use_case.as_str(),
+                provider.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn inventar_meldet_pfade_ohne_zugang_mit_grund() {
+        let cfg = LlmProviderConfig::default();
+        // Nur der Fireworks-Schluessel liegt vor: die drei OpenAI-Pfade
+        // muessen als Ausfall auftauchen, nicht stillschweigend fehlen.
+        let inventory =
+            cfg.inventory(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()));
+        assert_eq!(inventory.len(), LlmUseCase::all().len());
+
+        let ohne_zugang: Vec<LlmUseCase> = inventory
+            .iter()
+            .filter(|status| !status.usable())
+            .map(|status| status.use_case)
+            .collect();
+        assert_eq!(
+            ohne_zugang,
+            vec![
+                LlmUseCase::ModerationVerify,
+                LlmUseCase::TurnierVorschlag,
+                LlmUseCase::VoiceHint
+            ]
+        );
+        for status in &inventory {
+            if !status.usable() {
+                let grund = status.error.clone().unwrap_or_default();
+                assert!(grund.contains("OPENAI_API_KEY"), "{grund}");
+                assert!(status.state_label().contains("OHNE ZUGANG"));
+            }
+        }
+
+        let line =
+            cfg.inventory_line(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()));
+        assert!(line.contains("faq=fireworks"), "{line}");
+        assert!(line.contains("voice_hint=openai(OHNE ZUGANG)"), "{line}");
+    }
+
+    #[test]
+    fn inventar_meldet_alle_pfade_nutzbar_wenn_beide_schluessel_liegen() {
+        let cfg = LlmProviderConfig::default();
+        let inventory = cfg.inventory(|key| match key {
+            "FIREWORK_API_KEY" | "OPENAI_API_KEY" => Some("key".to_string()),
+            _ => None,
+        });
+        for status in &inventory {
+            assert!(
+                status.usable(),
+                "{} ohne Provider: {:?}",
+                status.use_case.as_str(),
+                status.error
             );
         }
     }

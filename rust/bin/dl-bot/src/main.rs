@@ -6,6 +6,7 @@
 //! bis zum koordinierten Cutover hält der Python-Bot die Discord-Session,
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
+mod aiglue;
 mod build_publisher;
 mod journeyglue;
 mod master;
@@ -494,6 +495,21 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
         dl_server_as_code::DEFAULT_GUILD_ID,
     );
+    // KI-Transparenz-Log: jede Modellantwort wird im Transparenz-Kanal mitlesbar.
+    // Die Senke wird bei jedem chat()-Aufruf neu aufgeloest, deshalb ist es
+    // ungefaehrlich, sie hier vor dem Bau der Provider zu registrieren.
+    let transparency_config = dl_ai::TransparencyConfig::from_env(|k| std::env::var(k).ok());
+    let _transparency_log = transparency_config.enabled.then(|| {
+        let log = dl_ai::TransparencyLog::spawn(
+            Arc::new(aiglue::DiscordTransparencyMessenger {
+                adapter: adapter.clone(),
+            }),
+            transparency_config.clone(),
+        );
+        dl_ai::set_transparency_sink(log.sink());
+        log
+    });
+
     let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
     let owner_id = master::owner_id_from_lookup(env);
     if owner_id.is_none() {
@@ -630,6 +646,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
+
+    // Startinventar: nach dem Hochfahren steht im Journal, welcher Anbieter
+    // welchen KI-Pfad bedient und welcher Pfad still ohne Modell weiterlaeuft.
+    aiglue::log_ai_startup_inventory(
+        &dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok()),
+        |k| std::env::var(k).ok(),
+        &transparency_config,
+        &concierge_config,
+    );
 
     // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
     let nudge = dl_voice::nudge::VoiceNudge::new(
@@ -2075,6 +2100,42 @@ mod tests {
             1,
             "nur der Vision-Pfad darf noch einen OpenAI-Client direkt bauen"
         );
+    }
+
+    /// Der Kern des Transparenz-Logs lag einmal vollstaendig im Baum, ohne dass
+    /// `aiglue` in einem `mod` hing: alle Modultests waren gruen, und im
+    /// laufenden Bot wurde trotzdem nie eine Zeile in den Kanal geschrieben.
+    /// Dieser Test prueft deshalb nicht das Verhalten der Bausteine, sondern
+    /// dass der Start sie ueberhaupt anfasst.
+    #[test]
+    fn start_registriert_die_transparenz_senke_und_das_inventar() {
+        // Die Nadeln werden zusammengesetzt: stuenden sie hier am Stueck, faende
+        // der Test sich selbst im eingebetteten Quelltext und bliebe auch dann
+        // gruen, wenn der Start die Verdrahtung verloren hat.
+        let main_source = include_str!("main.rs");
+        for (needle, warum) in [
+            (
+                ["mod ", "aiglue;"].concat(),
+                "ohne Modul-Einbindung wird der Discord-Weg nie kompiliert",
+            ),
+            (
+                ["set_transparency", "_sink("].concat(),
+                "ohne registrierte Senke verwirft der Decorator jede Interaktion",
+            ),
+            (
+                ["TransparencyLog::", "spawn("].concat(),
+                "ohne laufenden Sender bleibt die Warteschlange stehen",
+            ),
+            (
+                ["log_ai_startup", "_inventory("].concat(),
+                "ohne Inventar faellt ein KI-Pfad ohne Anbieter still aus",
+            ),
+        ] {
+            assert!(
+                main_source.contains(needle.as_str()),
+                "dl-bot verdrahtet das KI-Transparenz-Log nicht mehr: `{needle}` fehlt — {warum}"
+            );
+        }
     }
 
     #[test]
