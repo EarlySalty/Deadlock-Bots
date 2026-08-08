@@ -52,6 +52,17 @@ pub const PANEL_CUSTOM_IDS: [&str; 7] = [
     "steam_link_panel:unlink:confirm",
 ];
 
+/// Präfix aller Plus-Panel-Buttons. Anders als beim Link-Panel steht hier
+/// keine feste Liste: `slot_add`/`slot_remove` tragen die SteamID64 im
+/// custom_id, die Menge ist also erst zur Laufzeit bekannt. Deshalb eine
+/// Präfix-Route.
+///
+/// Der Wert ist der Vertrag mit `steam_flows::plus::panel::CUSTOM_ID_PREFIX`
+/// im Steam-Bot-Repo; dort erkennt der Handler seine Aktionen am selben
+/// Präfix. Zwei Repos, eine Zeichenkette — wer sie hier ändert, muss sie dort
+/// mitändern, sonst laufen die Klicks ins Leere.
+pub const PLUS_CUSTOM_ID_PREFIX: &str = "steam_plus:";
+
 /// custom_ids, die lokal das Freundescode-Modal öffnen statt zu forwarden.
 const FRIEND_CODE_MODAL_IDS: [&str; 2] = ["steam_link_panel:friend_code", "linkpanel_friend_code"];
 const RANKCHECK_IDS: [&str; 2] = ["steam_link_panel:rankcheck", "linkpanel_rank_check"];
@@ -636,6 +647,12 @@ fn register_inner(
             client: client.clone(),
         }),
     );
+
+    // Plus-Panel: eine Präfix-Route statt einer Liste, weil slot_add und
+    // slot_remove die SteamID64 im custom_id tragen. Weitergeleitet wird
+    // unverändert; die Antwort baut `render` aus link_button und buttons, das
+    // Format ist dasselbe wie beim Link-Panel.
+    router.on_prefix(PLUS_CUSTOM_ID_PREFIX, forward.clone());
 
     let spec = |definition: Value| CommandSpec { definition };
     let forward_slash =
@@ -1296,6 +1313,38 @@ mod tests {
         }
         // 12 Routen, aber nur 9 Top-Level-Definitionen (steam-Gruppe dedupliziert)
         assert_eq!(router.command_definitions().len(), 9);
+    }
+
+    /// Die Plus-Buttons tragen die SteamID64 im custom_id, eine Liste fester
+    /// IDs würde `slot_add`/`slot_remove` also nie erwischen. Der Test fährt
+    /// deshalb beide Formen: die vier statischen Aktionen und zwei mit Suffix.
+    #[test]
+    fn plus_panel_buttons_werden_ueber_den_praefix_geroutet() {
+        let mut router = InteractionRouter::new();
+        register(&mut router, SteamBotClient::new("http://x", None));
+
+        for id in [
+            "steam_plus:open",
+            "steam_plus:subscribe",
+            "steam_plus:status",
+            "steam_plus:slots",
+            "steam_plus:slot_add:76561198000000001",
+            "steam_plus:slot_remove:76561198000000001",
+        ] {
+            assert!(
+                router.resolve_component(id).is_some(),
+                "{id} muss beim Steam-Bot landen"
+            );
+        }
+
+        // Der Präfix endet auf dem Doppelpunkt: eine ID, die nur zufällig so
+        // anfängt, darf nicht mitgefangen werden.
+        assert!(
+            router.resolve_component("steam_plusanderes").is_none(),
+            "Präfix greift zu weit"
+        );
+        // Und das Link-Panel bleibt bei seinen eigenen Handlern.
+        assert!(router.resolve_component("steam_link_panel:open").is_some());
     }
 
     #[test]
