@@ -99,7 +99,11 @@ impl TransparencyConfig {
         format!(
             "KI-Transparenz-Log: an, Kanal {}, Moderation gespiegelt: {}",
             self.channel_id,
-            if self.include_moderation { "ja" } else { "nein" }
+            if self.include_moderation {
+                "ja"
+            } else {
+                "nein"
+            }
         )
     }
 }
@@ -272,7 +276,10 @@ async fn run_worker(
         let missed = dropped.swap(0, Ordering::Relaxed);
         if missed > 0 {
             // Stille darf nie wie „keine KI-Aktivitaet" aussehen.
-            if let Err(error) = messenger.send(config.channel_id, &drop_notice(missed)).await {
+            if let Err(error) = messenger
+                .send(config.channel_id, &drop_notice(missed))
+                .await
+            {
                 tracing::warn!(%error, missed, "Hinweis auf verworfene KI-Eintraege nicht zustellbar");
                 dropped.fetch_add(missed, Ordering::Relaxed);
             }
@@ -570,7 +577,12 @@ mod tests {
         }
     }
 
-    fn interaktion(use_case: LlmUseCase, frage: &str, antwort: &str, trail: &[u64]) -> AiInteraction {
+    fn interaktion(
+        use_case: LlmUseCase,
+        frage: &str,
+        antwort: &str,
+        trail: &[u64],
+    ) -> AiInteraction {
         AiInteraction {
             use_case,
             prompt_excerpt: frage.to_string(),
@@ -627,12 +639,7 @@ mod tests {
         assert!(!sink.accepts(LlmUseCase::ModerationVerify));
         assert!(sink.accepts(LlmUseCase::Faq));
 
-        sink.record(interaktion(
-            LlmUseCase::ModerationText,
-            "wort",
-            "ok",
-            &[1],
-        ));
+        sink.record(interaktion(LlmUseCase::ModerationText, "wort", "ok", &[1]));
         sink.record(interaktion(LlmUseCase::Faq, "frage", "antwort", &[2]));
         assert!(warte_auf(|| messenger.sent().len() == 1).await);
 
@@ -688,20 +695,22 @@ mod tests {
         }
         gate.add_permits(100);
 
-        assert!(warte_auf(|| {
-            let sent = messenger.sent();
-            let gemeldet: u64 = sent
-                .iter()
-                .filter(|(_, text)| text.contains("wegen Überlast"))
-                .filter_map(|(_, text)| zahl_aus(text))
-                .sum();
-            let interaktionen = sent
-                .iter()
-                .filter(|(_, text)| text.contains("Auslöser:"))
-                .count() as u64;
-            gemeldet + interaktionen == gesamt
-        })
-        .await);
+        assert!(
+            warte_auf(|| {
+                let sent = messenger.sent();
+                let gemeldet: u64 = sent
+                    .iter()
+                    .filter(|(_, text)| text.contains("wegen Überlast"))
+                    .filter_map(|(_, text)| zahl_aus(text))
+                    .sum();
+                let interaktionen = sent
+                    .iter()
+                    .filter(|(_, text)| text.contains("Auslöser:"))
+                    .count() as u64;
+                gemeldet + interaktionen == gesamt
+            })
+            .await
+        );
 
         let sent = messenger.sent();
         let hinweise = sent
@@ -875,7 +884,10 @@ mod tests {
             "die Antwort muss vollstaendig bleiben"
         );
         assert!(!text.contains("Kontext:"), "der Kontext faellt zuerst weg");
-        assert!(text.contains("gekürzt"), "jede Kuerzung wird gekennzeichnet");
+        assert!(
+            text.contains("gekürzt"),
+            "jede Kuerzung wird gekennzeichnet"
+        );
     }
 
     #[test]
@@ -923,7 +935,11 @@ mod tests {
     fn thread_titel_bleibt_unter_der_discord_grenze() {
         let interaction = interaktion(LlmUseCase::CoachingAnfrage, &"W".repeat(400), "a", &[1]);
         let titel = thread_title(&interaction);
-        assert!(titel.chars().count() <= 100, "{} Zeichen", titel.chars().count());
+        assert!(
+            titel.chars().count() <= 100,
+            "{} Zeichen",
+            titel.chars().count()
+        );
         assert!(titel.starts_with("Coaching-Anfrage:"));
     }
 
@@ -937,6 +953,10 @@ mod tests {
             enabled: false,
             ..TransparencyConfig::default()
         };
-        assert!(aus.inventory_line().contains("aus"), "{}", aus.inventory_line());
+        assert!(
+            aus.inventory_line().contains("aus"),
+            "{}",
+            aus.inventory_line()
+        );
     }
 }

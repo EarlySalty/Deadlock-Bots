@@ -171,7 +171,9 @@ pub fn log_ai_startup_inventory(
 mod tests {
     use super::*;
 
-    fn concierge_config(lookup: impl Fn(&str) -> Option<String>) -> dl_community::concierge::ConciergeConfig {
+    fn concierge_config(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> dl_community::concierge::ConciergeConfig {
         dl_community::concierge::ConciergeConfig::from_env(lookup)
     }
 
@@ -230,7 +232,10 @@ mod tests {
             .collect();
         assert_eq!(warnungen.len(), 3, "{:?}", texte(&lines));
         for warnung in &warnungen {
-            assert!(warnung.text.contains("ohne nutzbaren Anbieter"), "{warnung:?}");
+            assert!(
+                warnung.text.contains("ohne nutzbaren Anbieter"),
+                "{warnung:?}"
+            );
             assert!(warnung.text.contains("OPENAI_API_KEY"), "{warnung:?}");
         }
         let text = texte(&lines);
@@ -279,10 +284,8 @@ mod tests {
         let lines =
             ai_startup_inventory(&config, lookup, &transparency, &concierge_config(|_| None));
         assert!(
-            lines
-                .iter()
-                .any(|line| line.level == InventoryLevel::Warn
-                    && line.text.contains("nirgends mitzulesen")),
+            lines.iter().any(|line| line.level == InventoryLevel::Warn
+                && line.text.contains("nirgends mitzulesen")),
             "{:?}",
             texte(&lines)
         );

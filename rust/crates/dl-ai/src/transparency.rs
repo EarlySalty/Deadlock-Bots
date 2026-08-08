@@ -285,14 +285,36 @@ const REDACTED: &str = "[redigiert]";
 
 /// Prefixe, an denen ein Zugangsschluessel eindeutig zu erkennen ist.
 const SECRET_PREFIXES: &[&str] = &[
-    "sk-", "sk_", "rk_", "fw_", "xoxb-", "xoxp-", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
-    "hf_", "AKIA", "AIza", "mfa.", "eyJhbGciOi",
+    "sk-",
+    "sk_",
+    "rk_",
+    "fw_",
+    "xoxb-",
+    "xoxp-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "hf_",
+    "AKIA",
+    "AIza",
+    "mfa.",
+    "eyJhbGciOi",
 ];
 
 /// Schluesselnamen, hinter denen ein `=` oder `:` nie in den Kanal darf.
 const SECRET_KEY_HINTS: &[&str] = &[
-    "token", "secret", "password", "passwort", "api_key", "apikey", "api-key", "private_key",
-    "dsn", "credential",
+    "token",
+    "secret",
+    "password",
+    "passwort",
+    "api_key",
+    "apikey",
+    "api-key",
+    "private_key",
+    "dsn",
+    "credential",
 ];
 
 /// Woerter, nach denen das *naechste* Wort der Schluessel ist.
@@ -581,7 +603,10 @@ mod tests {
 
         let records = sink.records();
         assert_eq!(records[0].conversation_trail.len(), 1);
-        assert!(!records[0].is_conversation(), "erste Runde ist Einzelschuss");
+        assert!(
+            !records[0].is_conversation(),
+            "erste Runde ist Einzelschuss"
+        );
         assert_eq!(records[1].conversation_trail.len(), 2);
         assert!(records[1].is_conversation());
         assert_eq!(

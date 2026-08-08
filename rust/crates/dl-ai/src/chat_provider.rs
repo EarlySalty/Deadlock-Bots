@@ -529,15 +529,15 @@ fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
         // Frueher direkt an MiniMax verdrahtet: MiniMax ist fuer User-Content
         // gesperrt, der Default liegt deshalb auf demselben Anbieter wie die
         // uebrigen nutzerzugewandten Texte.
-        LlmUseCase::AiOnboarding
-        | LlmUseCase::CoachingAnfrage
-        | LlmUseCase::StreamerMatcher => LlmProviderKind::Fireworks,
+        LlmUseCase::AiOnboarding | LlmUseCase::CoachingAnfrage | LlmUseCase::StreamerMatcher => {
+            LlmProviderKind::Fireworks
+        }
         LlmUseCase::BrainAntwort | LlmUseCase::ModerationText => LlmProviderKind::Fireworks,
         // Frueher OpenAI-Clients: Anbieter bleibt, nur der Weg fuehrt jetzt
         // ueber das Gate.
-        LlmUseCase::ModerationVerify
-        | LlmUseCase::TurnierVorschlag
-        | LlmUseCase::VoiceHint => LlmProviderKind::OpenAi,
+        LlmUseCase::ModerationVerify | LlmUseCase::TurnierVorschlag | LlmUseCase::VoiceHint => {
+            LlmProviderKind::OpenAi
+        }
     }
 }
 
@@ -1444,9 +1444,9 @@ mod tests {
     /// Entscheidung, kein Nebeneffekt eines Umbaus.
     fn erwarteter_default(use_case: LlmUseCase) -> LlmProviderKind {
         match use_case {
-            LlmUseCase::ModerationVerify
-            | LlmUseCase::TurnierVorschlag
-            | LlmUseCase::VoiceHint => LlmProviderKind::OpenAi,
+            LlmUseCase::ModerationVerify | LlmUseCase::TurnierVorschlag | LlmUseCase::VoiceHint => {
+                LlmProviderKind::OpenAi
+            }
             _ => LlmProviderKind::Fireworks,
         }
     }
@@ -1474,9 +1474,8 @@ mod tests {
         let cfg = LlmProviderConfig::default();
         // Nur der Fireworks-Schluessel liegt vor: die drei OpenAI-Pfade
         // muessen als Ausfall auftauchen, nicht stillschweigend fehlen.
-        let inventory = cfg.inventory(|key| {
-            (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string())
-        });
+        let inventory =
+            cfg.inventory(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()));
         assert_eq!(inventory.len(), LlmUseCase::all().len());
 
         let ohne_zugang: Vec<LlmUseCase> = inventory
@@ -1500,9 +1499,8 @@ mod tests {
             }
         }
 
-        let line = cfg.inventory_line(|key| {
-            (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string())
-        });
+        let line =
+            cfg.inventory_line(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()));
         assert!(line.contains("faq=fireworks"), "{line}");
         assert!(line.contains("voice_hint=openai(OHNE ZUGANG)"), "{line}");
     }
