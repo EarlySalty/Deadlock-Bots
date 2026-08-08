@@ -75,6 +75,10 @@ const TOPIC_WILLKOMMEN: &str =
 const TOPIC_KREATIV_ECKE: &str =
     "Alles Selbstgemachte rund um Deadlock: Art, Edits, Mods, Movement-Clips.";
 const TOPIC_SCRIM_PLANUNG: &str = "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread.";
+const TOPIC_PLUS_LOUNGE: &str =
+    "Der Raum für alle mit Plus. Fragen, Vorschläge, Vorabblicke auf das, was gerade gebaut wird.";
+const TOPIC_PLUS_ABSTIMMUNGEN: &str = "Hier entscheidet ihr mit, was als Nächstes gebaut wird. \
+     Abgestimmt wird über Organisatorisches und Kosmetik, nie über Vorteile im Spiel.";
 const LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION: i32 = 1440;
 const LFG_CHANNEL_ALIASES: &[&str] = &["spieler-suche", "mitspieler-suche"];
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
@@ -619,14 +623,19 @@ fn ensure_plus_tier(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
     let overwrites = plus_visibility_overwrites(guild_id, category_id, role_id);
     set_exact_overwrites(desired, ctx, category_id, overwrites);
 
-    // Topic wird in M9 gesetzt (TEXTE-BEDARF.md: channel.*.topic)
-    let lounge = ensure_plus_channel(desired, category_id, CHANNEL_PLUS_LOUNGE, ChannelKind::Text);
-    // Topic wird in M9 gesetzt (TEXTE-BEDARF.md: channel.*.topic)
+    let lounge = ensure_plus_channel(
+        desired,
+        category_id,
+        CHANNEL_PLUS_LOUNGE,
+        ChannelKind::Text,
+        Some(TOPIC_PLUS_LOUNGE),
+    );
     let abstimmungen = ensure_plus_channel(
         desired,
         category_id,
         CHANNEL_PLUS_ABSTIMMUNGEN,
         ChannelKind::Text,
+        Some(TOPIC_PLUS_ABSTIMMUNGEN),
     );
 
     // Die Kategorie versteckt den Bereich bereits per Vererbung. Die Kanaele
@@ -785,6 +794,7 @@ fn ensure_plus_channel(
     parent_category_id: DiscordId,
     desired_name: &str,
     kind: ChannelKind,
+    topic: Option<&str>,
 ) -> DiscordId {
     if let Some(channel) = desired
         .channels
@@ -793,6 +803,10 @@ fn ensure_plus_channel(
     {
         channel.name = desired_name.to_string();
         channel.parent_category_id = Some(parent_category_id);
+        // Auch am bestehenden Kanal, sonst behielte ein einmal ohne Topic
+        // angelegter Kanal ihn fuer immer — gleiches Muster wie
+        // `ensure_text_channel`.
+        channel.topic = topic.map(str::to_string);
         return channel.channel_id;
     }
 
@@ -812,7 +826,7 @@ fn ensure_plus_channel(
             channel_id,
             name: desired_name.to_string(),
             kind,
-            topic: None,
+            topic: topic.map(str::to_string),
             position,
             parent_category_id: Some(parent_category_id),
             nsfw: false,
@@ -4740,8 +4754,8 @@ mod tests {
         // einen Abstimmungs-Kanal, ein Voice-Kanal waere eine Zutat.
         assert_eq!(lounge.kind, ChannelKind::Text);
         assert_eq!(abstimmungen.kind, ChannelKind::Text);
-        assert_eq!(lounge.topic, None, "Topic kommt erst in M9");
-        assert_eq!(abstimmungen.topic, None, "Topic kommt erst in M9");
+        assert_eq!(lounge.topic.as_deref(), Some(TOPIC_PLUS_LOUNGE));
+        assert_eq!(abstimmungen.topic.as_deref(), Some(TOPIC_PLUS_ABSTIMMUNGEN));
 
         let category_id = derived
             .desired
@@ -4786,6 +4800,39 @@ mod tests {
                 plus.allow_bits
             );
         }
+        Ok(())
+    }
+
+    /// Die Kanaele der ersten Ausbaustufe wurden ohne Topic angelegt. Ein
+    /// Topic, das nur im Neuanlage-Zweig steht, waere fuer genau diese Kanaele
+    /// wirkungslos — deshalb wird der Bestandsfall eigens geprueft.
+    #[test]
+    fn bestehende_plus_kanaele_bekommen_ihr_topic_nachgetragen() -> anyhow::Result<()> {
+        const BESTEHENDE_LOUNGE: u64 = 411;
+        let mut actual = plus_hierarchy_model();
+        actual.channels.insert(
+            BESTEHENDE_LOUNGE,
+            channel(BESTEHENDE_LOUNGE, CHANNEL_PLUS_LOUNGE, None),
+        );
+
+        let derived = derive_desired_model(&actual)?;
+
+        let lounge = derived
+            .desired
+            .channels
+            .get(&BESTEHENDE_LOUNGE)
+            .expect("der bestehende Kanal bleibt derselbe");
+        assert_eq!(lounge.topic.as_deref(), Some(TOPIC_PLUS_LOUNGE));
+        assert_eq!(
+            derived
+                .desired
+                .channels
+                .values()
+                .filter(|channel| channel.name == CHANNEL_PLUS_LOUNGE)
+                .count(),
+            1,
+            "kein zweiter Kanal neben dem bestehenden"
+        );
         Ok(())
     }
 
