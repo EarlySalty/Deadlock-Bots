@@ -24,6 +24,8 @@ use dl_verbinder::{
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+mod transparenz;
+
 const DEFAULT_AKTE_PFAD: &str =
     "/home/naniadm/Documents/Deadlock-Bots/rust/bin/dl-verbinder/akte.md";
 const DEFAULT_GUILD_ID: i64 = 1289721245281292288;
@@ -60,11 +62,24 @@ async fn main() -> ExitCode {
         .init();
     let args = Args::parse();
 
+    // Am Prozessrand aufgebaut und abgebaut: ein `?` mitten im Lauf darf die
+    // Warteschlange nicht mitreissen, und der Prozess darf nicht enden, bevor
+    // der letzte Eintrag im Kanal steht.
+    let transparenz_log = transparenz::starte(
+        dl_ai::TransparencyConfig::from_env(|key| std::env::var(key).ok()),
+        transparenz::transparenz_token(|key| std::env::var(key).ok()),
+    );
+
     let ergebnis = match args.befehl.unwrap_or(Befehl::Lauf) {
         Befehl::Lauf => run(false).await,
         Befehl::Summary => run(true).await,
         Befehl::Auswertung => auswertung().await,
     };
+
+    if let Some(log) = transparenz_log {
+        log.shutdown().await;
+    }
+
     match ergebnis {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -909,5 +924,38 @@ async fn poste_staff(text: &str) {
         println!("{text}");
     } else {
         tracing::info!(gesamt, "Staff-Post gesendet");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Im dl-bot lag der Transparenz-Code einmal vollstaendig im Baum, ohne in
+    /// einem `mod` zu haengen: alle Modultests gruen, im Betrieb nie eine
+    /// Zeile im Kanal. Hier kaeme dasselbe dazu, dass ein kurzlebiger
+    /// Timer-Lauf ohne `shutdown` endet, bevor der letzte Post draussen ist.
+    #[test]
+    fn lauf_baut_das_transparenz_log_auf_und_wieder_ab() {
+        // Zusammengesetzt, damit der Test sich nicht selbst im eingebetteten
+        // Quelltext findet und auch ohne Verdrahtung gruen bliebe.
+        let quelle = include_str!("main.rs");
+        for (nadel, warum) in [
+            (
+                ["mod ", "transparenz;"].concat(),
+                "ohne Modul-Einbindung wird der Discord-Weg nie kompiliert",
+            ),
+            (
+                ["transparenz::", "starte("].concat(),
+                "ohne Start registriert der Verbinder keine Senke und der Decorator verwirft jedes Urteil",
+            ),
+            (
+                ["log.", "shutdown()"].concat(),
+                "ohne shutdown endet der Timer-Lauf vor dem letzten Post",
+            ),
+        ] {
+            assert!(
+                quelle.contains(nadel.as_str()),
+                "dl-verbinder haengt nicht mehr am KI-Transparenz-Log: `{nadel}` fehlt — {warum}"
+            );
+        }
     }
 }
