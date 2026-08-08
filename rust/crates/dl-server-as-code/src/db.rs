@@ -566,6 +566,22 @@ pub(crate) async fn record_created_object_id(
             .bind(new_id)
             .execute(&mut *tx)
             .await?;
+            // Kategorien tragen eigene Overwrites (der Plus-Bereich versteckt
+            // sich genau darueber). Die Spalte heisst `channel_id`, meint hier
+            // aber die Kategorie; ohne dieses Nachziehen zeigte das Sollmodell
+            // dauerhaft auf die synthetische ID und jeder weitere Lauf liefe
+            // erneut ins Leere.
+            sqlx::query(
+                "UPDATE server_config.desired_permission_overwrites
+                    SET channel_id = $3,
+                        updated_at = now()
+                  WHERE guild_id = $1 AND channel_id = $2",
+            )
+            .bind(guild_id)
+            .bind(old_id)
+            .bind(new_id)
+            .execute(&mut *tx)
+            .await?;
         }
         ObjectKind::Channel => {
             sqlx::query(

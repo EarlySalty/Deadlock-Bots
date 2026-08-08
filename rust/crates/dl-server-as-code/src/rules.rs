@@ -787,8 +787,8 @@ fn ensure_plus_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) -> 
     category_id
 }
 
-/// Wie `ensure_text_channel`, aber mit Kanaltyp und ohne Topic: die
-/// user-sichtbaren Texte kommen spaeter, ein Platzhalter waere sofort live.
+/// Wie `ensure_text_channel`, aber mit waehlbarem Kanaltyp: die Plus-Kategorie
+/// soll spaeter auch einen Voice-Kanal aufnehmen koennen.
 fn ensure_plus_channel(
     desired: &mut GuildModel,
     parent_category_id: DiscordId,

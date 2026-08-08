@@ -521,6 +521,17 @@ impl CreatedIdMap {
     fn role(&self, id: u64) -> u64 {
         self.roles.get(&id).copied().unwrap_or(id)
     }
+
+    /// Ein Overwrite haengt entweder an einem Kanal oder an einer Kategorie;
+    /// beide stehen im selben Feld `channel_id`. Kanaele zuerst, weil sie der
+    /// haeufigere Fall sind. Synthetische IDs werden fortlaufend vergeben
+    /// (`next_synthetic_discord_id`), eine ID steht also nie in beiden Karten.
+    fn channel_or_category(&self, id: u64) -> u64 {
+        match self.channels.get(&id) {
+            Some(mapped) => *mapped,
+            None => self.category(id),
+        }
+    }
 }
 
 fn remap_created_ids(change: &DiffChange, created_ids: &CreatedIdMap) -> Result<DiffChange> {
@@ -548,8 +559,10 @@ fn remap_object_ref(object: &ObjectRef, created_ids: &CreatedIdMap) -> ObjectRef
             mapped.object_id = created_ids.role(mapped.object_id);
         }
         ObjectKind::PermissionOverwrite => {
-            mapped.object_id = created_ids.channel(mapped.object_id);
-            mapped.channel_id = mapped.channel_id.map(|id| created_ids.channel(id));
+            mapped.object_id = created_ids.channel_or_category(mapped.object_id);
+            mapped.channel_id = mapped
+                .channel_id
+                .map(|id| created_ids.channel_or_category(id));
             if mapped.target_kind == Some(TargetKind::Role) {
                 mapped.target_id = mapped.target_id.map(|id| created_ids.role(id));
             }
@@ -586,7 +599,7 @@ fn remap_desired_value(
         }
         ObjectKind::PermissionOverwrite => {
             let mut spec: PermissionOverwriteSpec = serde_json::from_value(desired.clone())?;
-            spec.key.channel_id = created_ids.channel(spec.key.channel_id);
+            spec.key.channel_id = created_ids.channel_or_category(spec.key.channel_id);
             if spec.key.target_kind == TargetKind::Role {
                 spec.key.target_id = created_ids.role(spec.key.target_id);
             }
@@ -1077,6 +1090,104 @@ mod tests {
             target_kind: TargetKind::Role,
             target_id: CREATED_ROLE_ID,
         }));
+        Ok(())
+    }
+
+    /// Overwrites haengen nicht nur an Kanaelen: die Plus-Kategorie traegt
+    /// ihren @everyone-Deny selbst. Wurde die Kategorie im selben Lauf erst
+    /// angelegt, muss der Overwrite auf die echte Kategorie-ID umgeschrieben
+    /// werden. Ohne das ginge er an eine synthetische ID, Discord antwortet
+    /// 404, der Lauf meldet `skipped_target_gone` und die Kategorie stuende
+    /// ohne Deny da, also fuer alle sichtbar.
+    #[tokio::test]
+    #[ignore = "braucht CENTRAL_TEST_DSN/DATABASE_URL/DEADLOCK_CENTRAL_DSN"]
+    async fn create_apply_remappt_overwrites_auf_neu_angelegten_kategorien() -> anyhow::Result<()> {
+        let pool = test_pool().await?;
+        sqlx::query(
+            "INSERT INTO server_config.desired_categories (guild_id, category_id, name, position)
+             VALUES ($1, $2, 'Chat', 1)",
+        )
+        .bind(DEFAULT_GUILD_ID as i64)
+        .bind(CATEGORY_ID as i64)
+        .execute(&*pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO server_config.desired_roles
+             (guild_id, role_id, name, color, hoist, mentionable, managed, permissions_bitmask, position)
+             VALUES ($1, $2, 'Member', 0, false, false, false, 7, 1)",
+        )
+        .bind(DEFAULT_GUILD_ID as i64)
+        .bind(ROLE_ID as i64)
+        .execute(&*pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO server_config.desired_permission_overwrites
+             (guild_id, channel_id, target_type, target_id, allow_bits, deny_bits)
+             VALUES ($1, $2, 'role', $3, 1, 0)",
+        )
+        .bind(DEFAULT_GUILD_ID as i64)
+        .bind(CATEGORY_ID as i64)
+        .bind(ROLE_ID as i64)
+        .execute(&*pool)
+        .await?;
+
+        let mut desired = GuildModel::new(DEFAULT_GUILD_ID);
+        desired
+            .categories
+            .insert(CATEGORY_ID, category(CATEGORY_ID));
+        desired.roles.insert(ROLE_ID, role(ROLE_ID));
+        desired.overwrites.insert(
+            OverwriteKey {
+                channel_id: CATEGORY_ID,
+                target_kind: TargetKind::Role,
+                target_id: ROLE_ID,
+            },
+            overwrite(CATEGORY_ID, ROLE_ID),
+        );
+        let actual = GuildModel::new(DEFAULT_GUILD_ID);
+        let diff = diff_models(&desired, &actual, &[], &[])?;
+        let preview = db::persist_diff_preview(&pool, None, &diff, None).await?;
+        let port = MappingPort::default();
+
+        apply_preview_with_port(
+            &pool,
+            preview.preview_id,
+            &preview.diff_hash,
+            ApplyOptions {
+                dry_run: false,
+                requested_by_user_id: None,
+            },
+            &port,
+        )
+        .await?;
+
+        {
+            let seen = port.seen.lock().expect("seen lock");
+            let overwrite_create = seen
+                .iter()
+                .find(|change| change.object.kind == ObjectKind::PermissionOverwrite)
+                .expect("overwrite create");
+            let overwrite_spec: PermissionOverwriteSpec = serde_json::from_value(
+                overwrite_create.desired.clone().expect("overwrite desired"),
+            )?;
+            assert_eq!(overwrite_spec.key.channel_id, CREATED_CATEGORY_ID);
+            assert_eq!(
+                overwrite_create.object.object_id, CREATED_CATEGORY_ID,
+                "auch der ObjectRef muss auf die echte Kategorie zeigen"
+            );
+        }
+
+        let loaded = db::load_desired_model(&pool, DEFAULT_GUILD_ID).await?;
+        assert!(
+            loaded.overwrites.contains_key(&OverwriteKey {
+                channel_id: CREATED_CATEGORY_ID,
+                target_kind: TargetKind::Role,
+                target_id: CREATED_ROLE_ID,
+            }),
+            "das Sollmodell muss die echte Kategorie-ID tragen, sonst laeuft jeder \
+             weitere Lauf wieder gegen die synthetische: {:?}",
+            loaded.overwrites.keys().collect::<Vec<_>>()
+        );
         Ok(())
     }
 
