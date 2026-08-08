@@ -2102,6 +2102,42 @@ mod tests {
         );
     }
 
+    /// Der Kern des Transparenz-Logs lag einmal vollstaendig im Baum, ohne dass
+    /// `aiglue` in einem `mod` hing: alle Modultests waren gruen, und im
+    /// laufenden Bot wurde trotzdem nie eine Zeile in den Kanal geschrieben.
+    /// Dieser Test prueft deshalb nicht das Verhalten der Bausteine, sondern
+    /// dass der Start sie ueberhaupt anfasst.
+    #[test]
+    fn start_registriert_die_transparenz_senke_und_das_inventar() {
+        // Die Nadeln werden zusammengesetzt: stuenden sie hier am Stueck, faende
+        // der Test sich selbst im eingebetteten Quelltext und bliebe auch dann
+        // gruen, wenn der Start die Verdrahtung verloren hat.
+        let main_source = include_str!("main.rs");
+        for (needle, warum) in [
+            (
+                ["mod ", "aiglue;"].concat(),
+                "ohne Modul-Einbindung wird der Discord-Weg nie kompiliert",
+            ),
+            (
+                ["set_transparency", "_sink("].concat(),
+                "ohne registrierte Senke verwirft der Decorator jede Interaktion",
+            ),
+            (
+                ["TransparencyLog::", "spawn("].concat(),
+                "ohne laufenden Sender bleibt die Warteschlange stehen",
+            ),
+            (
+                ["log_ai_startup", "_inventory("].concat(),
+                "ohne Inventar faellt ein KI-Pfad ohne Anbieter still aus",
+            ),
+        ] {
+            assert!(
+                main_source.contains(needle.as_str()),
+                "dl-bot verdrahtet das KI-Transparenz-Log nicht mehr: `{needle}` fehlt — {warum}"
+            );
+        }
+    }
+
     #[test]
     fn gate_verweigert_minimax_fuer_nutzertexte_und_laesst_erlaubten_anbieter_durch() {
         let gesperrt = HashMap::from([
