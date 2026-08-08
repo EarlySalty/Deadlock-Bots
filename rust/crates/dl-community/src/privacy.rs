@@ -471,6 +471,24 @@ const USER_TABLES: &[TableSpec] = &[
         "discord_id",
         ColumnType::I64,
     ),
+    // Plus-Abo: Abozustand und Prio-Slots haengen beide am Discord-Konto und
+    // muessen deshalb in Auskunft und Loeschung auftauchen. Die Stripe-Seite
+    // (Kunde, Zahlungen) liegt bei Stripe und wird von dort geloescht, nicht
+    // von hier.
+    TableSpec::new(
+        "plus_subscriptions",
+        "discord_id",
+        "steam.plus_subscriptions",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "plus_priority_slots",
+        "discord_id",
+        "steam.plus_priority_slots",
+        "discord_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "steam_launch_tokens",
         "user_id",
