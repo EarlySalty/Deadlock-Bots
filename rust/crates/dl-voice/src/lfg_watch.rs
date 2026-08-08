@@ -593,17 +593,21 @@ mod tests {
             max: None,
         };
         let now = Utc::now();
+        // Die Tage sind bewusst hart gesetzt und nicht aus
+        // LFG_WATCH_CLEANUP_GRACE_DAYS abgeleitet: relativ gerechnete Testdaten
+        // wandern bei einer Aenderung der Konstante mit und halten den Test auch
+        // dann gruen, wenn die Frist versehentlich auf 0 oder 365 Tage springt.
+        // 6 und 8 rahmen die 7-Tage-Grenze ein; wer die Konstante bewusst
+        // aendert, muss diese Zahlen mitziehen.
+        assert_eq!(
+            LFG_WATCH_CLEANUP_GRACE_DAYS, 7,
+            "Gnadenfrist geaendert: Testdaten unten (6/8 Tage) mit anpassen"
+        );
         // aktiv, frisch abgelaufen (in der Gnadenfrist), lange abgelaufen
         for (user_id, expires_at) in [
             (51_u64, now + chrono::Duration::hours(3)),
-            (
-                52,
-                now - chrono::Duration::days(LFG_WATCH_CLEANUP_GRACE_DAYS - 1),
-            ),
-            (
-                53,
-                now - chrono::Duration::days(LFG_WATCH_CLEANUP_GRACE_DAYS + 1),
-            ),
+            (52, now - chrono::Duration::days(6)),
+            (53, now - chrono::Duration::days(8)),
         ] {
             insert_or_replace_watch(
                 &pool,
