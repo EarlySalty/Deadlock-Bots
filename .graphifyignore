@@ -1,0 +1,3 @@
+# Der Bot läuft vollständig in Rust. Die verbliebenen Python-Dateien sind
+# Hilfsskripte und gehören nicht in den Code-Graphen.
+*.py
