@@ -390,7 +390,7 @@ pub fn dm_body(mate_id: u64, channel_id: u64, seconds: i64) -> Value {
                 { "type": 10, "content": format!("## {} Kurz gefragt", emoji_tag(EMOJI_RANKED)) },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": format!(
-                    "Ihr wart gerade {} zusammen in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nSagst du Ja, setze ich euch öfter zusammen in eine Lane.\n\n-# Deine Antwort ist privat. <@{mate_id}> erfährt nie, was du hier klickst.",
+                    "Ihr wart gerade {} zusammen in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nSagst du Ja, setze ich euch öfter zusammen in eine Lane.\n\n🔒 **Deine Antwort bleibt privat.** <@{mate_id}> erfährt nie, was du hier klickst.",
                     minutes_label(seconds)
                 ) },
                 { "type": 1, "components": [
@@ -757,7 +757,7 @@ mod tests {
         assert!(text.contains("30 Minuten"));
         assert!(text.contains("Würdest du wieder mit"));
         assert!(
-            text.contains("Deine Antwort ist privat"),
+            text.contains("Deine Antwort bleibt privat"),
             "die Vertraulichkeit steht in einer eigenen, betonten Zeile"
         );
         assert!(text.contains("dl_ranked"), "Header nutzt die Server-Emojis");

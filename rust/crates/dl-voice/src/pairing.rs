@@ -1,11 +1,12 @@
 //! Lane-Pairing — zwei Leute, die je allein in ihrer eigenen Lane sitzen,
 //! werden gefragt, ob sie zusammen zocken wollen.
 //!
-//! Doppel-Opt-in: der Bot verschiebt niemanden, bevor beide zugesagt haben.
-//! Wer zuerst Ja klickt, hinterlässt eine Zusage (kv, mit Ablauf); klickt der
-//! andere innerhalb des Fensters auch Ja, zieht der zweite Zusager in die Lane
-//! des ersten um. Alles andere (Ablehnung, Ablauf, Lane verlassen) endet
-//! folgenlos, außer dass der Cooldown steht.
+//! Ein Ja genügt: wer zusagt, wird in die andere Lane gezogen, so wie er auch
+//! selbst hätte rüberklicken können. Die Gegenseite muss nichts bestätigen, sie
+//! bekommt nur Bescheid. Sitzt der Zusagende mit anderen in einer Lane, zieht
+//! seine Gruppe mit, denn gefragt wird der Owner, der auch sonst für die Lane
+//! entscheidet. Ablehnen, Ignorieren oder die Lane verlassen endet folgenlos,
+//! außer dass der Cooldown steht.
 //!
 //! Gefragt wird nur, wer seit [`MIN_ALONE`] allein in einer TempVoice-Lane
 //! desselben Modus sitzt, nicht per Privacy abgemeldet ist, den Opt-out nicht
@@ -20,7 +21,6 @@ use dl_central_db::kv;
 
 use crate::router::{MAX_LANE_MEMBERS, ROUTER_EMOJI_CASUAL};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
@@ -29,8 +29,6 @@ pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
 pub const LANE_CATEGORY_ID: u64 = 1289721245281292290;
 /// So lange muss jemand allein sitzen, bevor der Bot ihn anspricht.
 pub const MIN_ALONE: Duration = Duration::seconds(180);
-/// So lange gilt die Zusage des Ersten, bis sie verfällt.
-pub const ACCEPT_WINDOW: Duration = Duration::minutes(10);
 /// Pro User: so lange keine neue Pairing-Frage.
 pub const ASK_COOLDOWN: Duration = Duration::hours(2);
 /// Pro Paar: so lange nicht erneut dieselben zwei zusammenbringen wollen.
@@ -45,7 +43,6 @@ pub const LATER_RETRY: Duration = Duration::minutes(45);
 pub const NEVER_ASK_NS: &str = "voice_pair_never";
 pub const LAST_ASK_NS: &str = "voice_pair_last_ask";
 pub const PAIR_ASKED_NS: &str = "voice_pair_last_pair";
-pub const ACCEPT_NS: &str = "voice_pair_accept";
 
 pub const CUSTOM_ID_PREFIX: &str = "voice_pair:";
 pub const YES_ACTION: &str = "yes";
@@ -56,8 +53,6 @@ pub const NEVER_ACTION: &str = "never";
 pub const ACCENT_GOLD: u64 = 0xC8A86B;
 pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
 
-pub const WAITING_REPLY: &str =
-    "Stark, ich frag ihn. Sagt er auch Ja, zieh ich euch zusammen und ihr könnt loslegen.";
 pub const MOVED_REPLY: &str = "Ihr seid zusammen in einer Lane. Viel Spaß euch beiden.";
 pub const TOO_FULL_REPLY: &str =
     "Inzwischen seid ihr zusammen zu viele für eine Lane. Beim nächsten Mal klappt es.";
@@ -66,7 +61,8 @@ pub const MOVE_PARTIAL_REPLY: &str =
 pub const MOVE_FAILED_REPLY: &str =
     "Das Verschieben hat gerade nicht geklappt. Spring einfach selbst rüber, die Lane steht.";
 pub const GONE_REPLY: &str =
-    "Knapp verpasst, er ist schon weiter. Ich sag dir Bescheid, sobald wieder jemand allein sitzt.";
+    "Knapp verpasst, die Lane ist schon leer. Ich sag dir Bescheid, sobald wieder jemand allein sitzt.";
+pub const ALREADY_TOGETHER_REPLY: &str = "Ihr sitzt doch schon zusammen. Viel Spaß euch.";
 pub const NOT_IN_LANE_REPLY: &str =
     "Du sitzt gerade nicht mehr in deiner Lane. Spring wieder rein, dann klappt es.";
 pub const NO_REPLY: &str = "Alles gut, dann zockst du in Ruhe für dich. Viel Spaß.";
@@ -117,13 +113,6 @@ pub enum AskDecision {
     Unwanted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingAccept {
-    pub user_id: u64,
-    pub channel_id: u64,
-    pub created_at: i64,
-}
-
 /// Beobachtungsstand einer Lane. Ändert sich die Besetzung, läuft die
 /// Wartezeit neu: wer gerade erst Besuch bekommen hat, will nicht sofort
 /// gefragt werden.
@@ -148,9 +137,6 @@ pub trait PairingPort: Send + Sync {
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String>;
     /// Sperren so weit kürzen, dass bald wieder gefragt werden darf.
     async fn soften_cooldown(&self, user_id: u64, other_user: u64) -> Result<(), String>;
-    async fn load_accept(&self, pair_key: &str) -> Result<Option<PendingAccept>, String>;
-    async fn save_accept(&self, pair_key: &str, accept: &PendingAccept) -> Result<(), String>;
-    async fn clear_accept(&self, pair_key: &str) -> Result<(), String>;
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     /// Aktuelle Mitglieder eines Kanals (ohne Bots).
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64>;
@@ -316,7 +302,6 @@ impl LanePairing {
                     own_lane,
                     other_lane,
                     other_user,
-                    Utc::now(),
                 )
                 .await
             }
@@ -330,62 +315,40 @@ impl LanePairing {
         own_lane: u64,
         other_lane: u64,
         other_user: u64,
-        now: DateTime<Utc>,
     ) -> BridgeReply {
-        if self.port.member_voice_channel(guild_id, user_id).await != Some(own_lane) {
-            self.port
-                .log_decision(user_id, "verworfen", "nicht_mehr_in_lane");
-            return BridgeReply::ephemeral_text(NOT_IN_LANE_REPLY);
-        }
-        let key = pair_key(own_lane, other_lane);
-        let stored = self.port.load_accept(&key).await.unwrap_or(None);
-        let partner_ready = stored
-            .as_ref()
-            .filter(|accept| accept.user_id == other_user)
-            .filter(|accept| accept_is_fresh(accept, now))
-            .is_some();
-        if !partner_ready {
-            let accept = PendingAccept {
-                user_id,
-                channel_id: own_lane,
-                created_at: now.timestamp(),
-            };
-            if let Err(error) = self.port.save_accept(&key, &accept).await {
-                tracing::warn!(%error, user_id, "Lane-Pairing: Zusage nicht speicherbar");
+        match self.port.member_voice_channel(guild_id, user_id).await {
+            Some(current) if current == other_lane => {
+                return BridgeReply::ephemeral_text(ALREADY_TOGETHER_REPLY);
             }
-            self.port.log_decision(user_id, "zugesagt", "wartet_auf_2");
-            return BridgeReply::ephemeral_text(WAITING_REPLY);
+            Some(current) if current == own_lane => {}
+            _ => {
+                self.port
+                    .log_decision(user_id, "verworfen", "nicht_mehr_in_lane");
+                return BridgeReply::ephemeral_text(NOT_IN_LANE_REPLY);
+            }
         }
-        if self.port.member_voice_channel(guild_id, other_user).await != Some(other_lane) {
-            let _ = self.port.clear_accept(&key).await;
-            self.port.log_decision(user_id, "verworfen", "partner_weg");
+
+        let other_group = self.port.channel_members(guild_id, other_lane).await;
+        if other_group.is_empty() {
+            self.port.log_decision(user_id, "verworfen", "andere_leer");
             return BridgeReply::ephemeral_text(GONE_REPLY);
         }
-        let _ = self.port.clear_accept(&key).await;
-
-        // Beide Seiten können inzwischen gewachsen sein; nur zusammenlegen,
-        // wenn alle zusammen noch in eine Lane passen.
         let own_group = self.port.channel_members(guild_id, own_lane).await;
-        let other_group = self.port.channel_members(guild_id, other_lane).await;
         if own_group.len() + other_group.len() > MAX_LANE_MEMBERS {
             self.port.log_decision(user_id, "verworfen", "zu_voll");
             return BridgeReply::ephemeral_text(TOO_FULL_REPLY);
         }
-        // Die kleinere Gruppe zieht um, bei Gleichstand der Zweit-Zusager.
-        let (movers, target) = if joining_side(own_group.len(), other_group.len()) {
-            (own_group, other_lane)
-        } else {
-            (other_group, own_lane)
-        };
 
+        // Wer Ja sagt, geht rüber. Seine Lane zieht mit, denn gefragt wurde ihr
+        // Owner. Die andere Seite bekommt nur Besuch und bestätigt nichts.
         let mut moved = 0usize;
         let mut failed = 0usize;
-        for member in &movers {
-            match self.port.move_member(guild_id, *member, target).await {
+        for member in &own_group {
+            match self.port.move_member(guild_id, *member, other_lane).await {
                 Ok(()) => moved += 1,
                 Err(error) => {
                     failed += 1;
-                    tracing::warn!(%error, user_id = member, target, "Lane-Pairing: Move fehlgeschlagen");
+                    tracing::warn!(%error, user_id = member, other_lane, "Lane-Pairing: Move fehlgeschlagen");
                 }
             }
         }
@@ -394,9 +357,11 @@ impl LanePairing {
                 .log_decision(user_id, "move_fehlgeschlagen", "discord_fehler");
             return BridgeReply::ephemeral_text(MOVE_FAILED_REPLY);
         }
-        self.port
-            .log_decision(user_id, "zusammengelegt", "beide_zugesagt");
-        let _ = self.port.send_dm(other_user, merged_dm_body(target)).await;
+        self.port.log_decision(user_id, "zusammengelegt", "zusage");
+        let _ = self
+            .port
+            .send_dm(other_user, merged_dm_body(moved, other_lane))
+            .await;
         if failed > 0 {
             return BridgeReply::ephemeral_text(MOVE_PARTIAL_REPLY);
         }
@@ -427,12 +392,6 @@ pub fn pick_pair(seats: &[LaneSeat], now: DateTime<Utc>) -> Option<(LaneSeat, La
     None
 }
 
-/// Wer zieht um: die kleinere Gruppe wandert zur größeren, bei Gleichstand der
-/// Zweit-Zusager. So sind es immer möglichst wenige Umzüge.
-pub fn joining_side(own_size: usize, other_size: usize) -> bool {
-    own_size <= other_size
-}
-
 /// Paar-Schlüssel, unabhängig davon, wer zuerst klickt.
 pub fn pair_key(one: u64, other: u64) -> String {
     let (low, high) = if one <= other {
@@ -441,11 +400,6 @@ pub fn pair_key(one: u64, other: u64) -> String {
         (other, one)
     };
     format!("{low}:{high}")
-}
-
-pub fn accept_is_fresh(accept: &PendingAccept, now: DateTime<Utc>) -> bool {
-    DateTime::from_timestamp(accept.created_at, 0)
-        .is_some_and(|created_at| now - created_at < ACCEPT_WINDOW)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,41 +464,32 @@ fn emoji_tag((name, id): (&str, &str)) -> String {
     format!("<:{name}:{id}>")
 }
 
-fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "ranked" => "Ranked",
-        "street_brawl" => "Street Brawl",
-        _ => "Casual",
-    }
-}
-
 /// Wie der Bot die andere Seite benennt: eine Person mit Namen, mehrere als
-/// Gruppe. Der Angeschriebene soll sofort sehen, worum es geht.
+/// Gruppe. Immer grammatikalisch passend zur Anzahl.
 fn other_side_label(other: &LaneSeat) -> String {
     match other.size() {
         1 => format!("sitzt <@{}> auch allein", other.speaker_id),
-        2 => format!("sitzen <@{}> und noch jemand zu zweit", other.speaker_id),
-        size => format!("sitzen <@{}> und {} andere", other.speaker_id, size - 1),
+        2 => format!("sitzen <@{}> und noch jemand", other.speaker_id),
+        size => format!("sitzen <@{}> und {} weitere", other.speaker_id, size - 1),
     }
 }
 
 /// Vorschlags-DM. Erwähnungen bleiben stumm (`allowed_mentions.parse = []`),
 /// der Name wird trotzdem aufgelöst.
 pub fn dm_body(guild_id: u64, seat: &LaneSeat, other: &LaneSeat) -> Value {
-    let label = mode_label(&seat.mode);
     let headline = if seat.size() == 1 {
         "Du sitzt gerade allein"
     } else {
         "Ihr könntet mehr sein"
     };
-    let opener = if seat.size() == 1 {
+    let text = if seat.size() == 1 {
         format!(
-            "Hey, ein paar Kanäle weiter {} und will **{label}** spielen. Möchtet ihr zusammen spielen?",
+            "Hey, ein paar Kanäle weiter {}. Möchtet ihr zusammen spielen?",
             other_side_label(other)
         )
     } else {
         format!(
-            "Hey, ihr seid zu {} in eurer Lane, und ein paar Kanäle weiter {} und will **{label}** spielen. Zusammen wärt ihr {}. Möchtet ihr euch zusammentun?",
+            "Hey, ihr seid zu {} in eurer Lane, und ein paar Kanäle weiter {}. Zusammen wärt ihr zu {}. Wollt ihr euch zusammentun?",
             count_word(seat.size()),
             other_side_label(other),
             count_word(seat.size() + other.size())
@@ -559,9 +504,7 @@ pub fn dm_body(guild_id: u64, seat: &LaneSeat, other: &LaneSeat) -> Value {
             "components": [
                 { "type": 10, "content": format!("## {} {headline}", emoji_tag(ROUTER_EMOJI_CASUAL)) },
                 { "type": 14, "divider": true, "spacing": 2 },
-                { "type": 10, "content": format!(
-                    "{opener}\n\nSagt ihr beide Ja, hol ich euch in eine Lane. Sagt einer Nein, erfährt der andere nichts davon."
-                ) },
+                { "type": 10, "content": text },
                 { "type": 1, "components": [
                     { "type": 2, "style": 3, "label": "Ja", "custom_id": yes_custom_id(guild_id, seat.channel_id, other.channel_id, other.speaker_id) },
                     { "type": 2, "style": 2, "label": "Nein", "custom_id": no_custom_id(other.speaker_id) },
@@ -585,11 +528,16 @@ fn count_word(count: usize) -> &'static str {
     }
 }
 
-/// Bestätigung an den, der zuerst zugesagt hat.
-pub fn merged_dm_body(lane_id: u64) -> Value {
+/// Ankündigung an die Lane, die Besuch bekommt.
+pub fn merged_dm_body(joining: usize, lane_id: u64) -> Value {
+    let who = if joining == 1 {
+        "Da kommt jemand zu euch".to_string()
+    } else {
+        format!("Da kommen {joining} Leute zu euch")
+    };
     json!({
         "allowed_mentions": { "parse": [] },
-        "content": format!("Ihr seid zusammen in <#{lane_id}>. Viel Spaß euch."),
+        "content": format!("{who} in <#{lane_id}>. Viel Spaß zusammen."),
     })
 }
 
@@ -747,35 +695,6 @@ pub(crate) async fn set_never_ask_db(pool: &PgPool, user_id: u64) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn load_accept_db(
-    pool: &PgPool,
-    pair_key: &str,
-) -> Result<Option<PendingAccept>, String> {
-    let value = kv::get(pool, ACCEPT_NS, pair_key)
-        .await
-        .map_err(|error| error.to_string())?;
-    value
-        .map(|value| serde_json::from_str(&value).map_err(|error| error.to_string()))
-        .transpose()
-}
-
-pub(crate) async fn save_accept_db(
-    pool: &PgPool,
-    pair_key: &str,
-    accept: &PendingAccept,
-) -> Result<(), String> {
-    let value = serde_json::to_string(accept).map_err(|error| error.to_string())?;
-    kv::set(pool, ACCEPT_NS, pair_key, &value)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-pub(crate) async fn clear_accept_db(pool: &PgPool, pair_key: &str) -> Result<(), String> {
-    kv::delete(pool, ACCEPT_NS, pair_key)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 struct PairingHandler {
     pairing: Arc<LanePairing>,
 }
@@ -921,23 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn accept_verfaellt_nach_dem_fenster() {
-        let now = now();
-        let frisch = PendingAccept {
-            user_id: 1,
-            channel_id: 10,
-            created_at: (now - Duration::minutes(5)).timestamp(),
-        };
-        let alt = PendingAccept {
-            user_id: 1,
-            channel_id: 10,
-            created_at: (now - Duration::minutes(30)).timestamp(),
-        };
-        assert!(accept_is_fresh(&frisch, now));
-        assert!(!accept_is_fresh(&alt, now));
-    }
-
-    #[test]
     fn dm_body_traegt_beide_lanes_und_die_drei_buttons() {
         let now = now();
         let text = serde_json::to_string(&dm_body(
@@ -951,7 +853,6 @@ mod tests {
             "die eigene Lane muss nicht erwähnt werden"
         );
         assert!(text.contains("<@20>"));
-        assert!(text.contains("Casual"));
         assert!(
             text.contains("Möchtet ihr zusammen spielen?"),
             "der Vorschlag ist eine Frage, kein Statusbericht"
@@ -967,7 +868,6 @@ mod tests {
     struct TestState {
         lanes: Vec<LaneView>,
         dms: Vec<(u64, Value)>,
-        accepts: HashMap<String, PendingAccept>,
         moves: Vec<(u64, u64)>,
         voice: HashMap<u64, u64>,
         never: Vec<u64>,
@@ -993,7 +893,6 @@ mod tests {
             Self {
                 lanes: Vec::new(),
                 dms: Vec::new(),
-                accepts: HashMap::new(),
                 moves: Vec::new(),
                 voice: HashMap::new(),
                 never: Vec::new(),
@@ -1035,30 +934,6 @@ mod tests {
                 .expect("lock")
                 .softened
                 .push((user_id, other_user));
-            Ok(())
-        }
-
-        async fn load_accept(&self, pair_key: &str) -> Result<Option<PendingAccept>, String> {
-            Ok(self
-                .state
-                .lock()
-                .expect("lock")
-                .accepts
-                .get(pair_key)
-                .cloned())
-        }
-
-        async fn save_accept(&self, pair_key: &str, accept: &PendingAccept) -> Result<(), String> {
-            self.state
-                .lock()
-                .expect("lock")
-                .accepts
-                .insert(pair_key.to_string(), accept.clone());
-            Ok(())
-        }
-
-        async fn clear_accept(&self, pair_key: &str) -> Result<(), String> {
-            self.state.lock().expect("lock").accepts.remove(pair_key);
             Ok(())
         }
 
@@ -1156,49 +1031,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn erste_zusage_wartet_zweite_verschiebt() {
+    async fn ein_ja_genuegt_und_verschiebt_sofort() {
         let port = TestPort::new(TestState {
             voice: HashMap::from([(10, 100), (20, 200)]),
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
 
-        let first = pairing.handle_yes(10, 1, 100, 200, 20, now()).await;
-        assert_eq!(first.content.as_deref(), Some(WAITING_REPLY));
-        assert!(port.state.lock().expect("lock").moves.is_empty());
+        let reply = pairing.handle_yes(10, 1, 100, 200, 20).await;
 
-        let second = pairing.handle_yes(20, 1, 200, 100, 10, now()).await;
-        assert_eq!(second.content.as_deref(), Some(MOVED_REPLY));
+        assert_eq!(reply.content.as_deref(), Some(MOVED_REPLY));
         let state = port.state.lock().expect("lock");
         assert_eq!(
             state.moves,
-            vec![(20, 100)],
-            "bei gleicher Größe zieht der Zweit-Zusager"
+            vec![(10, 200)],
+            "der Zusagende geht rüber, ohne dass der andere bestätigt"
         );
-        assert!(state.accepts.is_empty(), "die Zusage wird verbraucht");
-        assert_eq!(
-            state.dms.len(),
-            1,
-            "der Erste erfährt, dass jemand rüberkommt"
-        );
+        assert_eq!(state.dms.len(), 1, "die andere Lane erfährt vom Besuch");
     }
 
     #[tokio::test]
-    async fn zusage_verfaellt_und_wird_nicht_zum_move() {
+    async fn zweite_zusage_meldet_dass_man_schon_zusammen_sitzt() {
         let port = TestPort::new(TestState {
             voice: HashMap::from([(10, 100), (20, 200)]),
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
-        let start = now();
+        pairing.handle_yes(10, 1, 100, 200, 20).await;
 
-        pairing.handle_yes(10, 1, 100, 200, 20, start).await;
-        let late = pairing
-            .handle_yes(20, 1, 200, 100, 10, start + Duration::minutes(30))
-            .await;
-
-        assert_eq!(late.content.as_deref(), Some(WAITING_REPLY));
-        assert!(port.state.lock().expect("lock").moves.is_empty());
+        // Der andere klickt danach auch noch Ja: sie sitzen längst zusammen.
+        let reply = pairing.handle_yes(20, 1, 200, 100, 10).await;
+        assert_eq!(reply.content.as_deref(), Some(GONE_REPLY));
     }
 
     #[tokio::test]
@@ -1208,25 +1071,21 @@ mod tests {
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
-        let reply = pairing.handle_yes(10, 1, 100, 200, 20, now()).await;
+        let reply = pairing.handle_yes(10, 1, 100, 200, 20).await;
         assert_eq!(reply.content.as_deref(), Some(NOT_IN_LANE_REPLY));
     }
 
     #[tokio::test]
-    async fn partner_weg_loest_keinen_move_aus() {
+    async fn leere_gegenseite_loest_keinen_move_aus() {
         let port = TestPort::new(TestState {
-            voice: HashMap::from([(10, 100), (20, 200)]),
+            voice: HashMap::from([(10, 100)]),
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
-        pairing.handle_yes(10, 1, 100, 200, 20, now()).await;
-        port.state.lock().expect("lock").voice.remove(&10);
 
-        let reply = pairing.handle_yes(20, 1, 200, 100, 10, now()).await;
+        let reply = pairing.handle_yes(10, 1, 100, 200, 20).await;
         assert_eq!(reply.content.as_deref(), Some(GONE_REPLY));
-        let state = port.state.lock().expect("lock");
-        assert!(state.moves.is_empty());
-        assert!(state.accepts.is_empty(), "die tote Zusage wird geräumt");
+        assert!(port.state.lock().expect("lock").moves.is_empty());
     }
 
     #[tokio::test]
@@ -1237,8 +1096,7 @@ mod tests {
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
-        pairing.handle_yes(10, 1, 100, 200, 20, now()).await;
-        let reply = pairing.handle_yes(20, 1, 200, 100, 10, now()).await;
+        let reply = pairing.handle_yes(10, 1, 100, 200, 20).await;
         assert_eq!(reply.content.as_deref(), Some(MOVE_FAILED_REPLY));
     }
 
@@ -1297,16 +1155,6 @@ mod tests {
         assert!(pick_pair(&seats, now).is_none());
     }
 
-    #[test]
-    fn die_kleinere_gruppe_zieht_um() {
-        assert!(joining_side(1, 2), "der Einzelne geht zu den zweien");
-        assert!(!joining_side(3, 1), "die drei bleiben sitzen");
-        assert!(
-            joining_side(2, 2),
-            "bei Gleichstand zieht der Zweit-Zusager"
-        );
-    }
-
     #[tokio::test]
     async fn ganze_gruppe_zieht_mit_um() {
         let port = TestPort::new(TestState {
@@ -1314,16 +1162,15 @@ mod tests {
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
-        // Der Einzelne sagt zuerst zu, dann der Sprecher der Zweiergruppe.
-        pairing.handle_yes(10, 1, 100, 200, 20, now()).await;
-        let reply = pairing.handle_yes(20, 1, 200, 100, 10, now()).await;
+        // Der Sprecher der Zweiergruppe sagt Ja: seine Lane zieht komplett um.
+        let reply = pairing.handle_yes(20, 1, 200, 100, 10).await;
 
         assert_eq!(reply.content.as_deref(), Some(MOVED_REPLY));
         let state = port.state.lock().expect("lock");
         assert_eq!(
             state.moves,
-            vec![(10, 200)],
-            "der Einzelne zieht zur Zweiergruppe, nicht umgekehrt"
+            vec![(20, 100), (21, 100)],
+            "die ganze Lane des Zusagenden zieht mit"
         );
     }
 
@@ -1343,8 +1190,7 @@ mod tests {
             ..TestState::default()
         });
         let pairing = LanePairing::new(port.clone());
-        pairing.handle_yes(1, 1, 100, 200, 4, now()).await;
-        let reply = pairing.handle_yes(4, 1, 200, 100, 1, now()).await;
+        let reply = pairing.handle_yes(1, 1, 100, 200, 4).await;
 
         assert_eq!(reply.content.as_deref(), Some(TOO_FULL_REPLY));
         assert!(port.state.lock().expect("lock").moves.is_empty());

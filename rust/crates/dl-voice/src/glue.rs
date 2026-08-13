@@ -2995,25 +2995,6 @@ impl crate::pairing::PairingPort for PairingGlue {
             .await
     }
 
-    async fn load_accept(
-        &self,
-        pair_key: &str,
-    ) -> Result<Option<crate::pairing::PendingAccept>, String> {
-        crate::pairing::load_accept_db(&self.pool, pair_key).await
-    }
-
-    async fn save_accept(
-        &self,
-        pair_key: &str,
-        accept: &crate::pairing::PendingAccept,
-    ) -> Result<(), String> {
-        crate::pairing::save_accept_db(&self.pool, pair_key, accept).await
-    }
-
-    async fn clear_accept(&self, pair_key: &str) -> Result<(), String> {
-        crate::pairing::clear_accept_db(&self.pool, pair_key).await
-    }
-
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
         self.adapter
             .cache()

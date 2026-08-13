@@ -1628,11 +1628,9 @@ pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
 /// Fertig-Button.
 pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
     let (headline, situation) = match lane_id {
-        Some(lane_id) => (
+        Some(_) => (
             "## <:dl_casual:1522518264088100995> Deine Lane steht".to_string(),
-            format!(
-                "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut und dich reingezogen: <#{lane_id}>."
-            ),
+            "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut und dich reingezogen. 🥰".to_string(),
         ),
         None => (
             "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router".to_string(),
@@ -1931,7 +1929,6 @@ mod tests {
         assert!(text.contains("tv_prefs_rank"));
         assert!(text.contains("router_dm_done"));
         // Kernbotschaft: die Lane steht schon, der Standard fehlt noch.
-        assert!(text.contains("<#4242>"));
         assert!(text.contains("Deine Lane steht"));
         assert!(text.contains("Was spielst du am liebsten"));
         // Der Abschluss ist ein Satz mit Link aufs Panel, keine Feature-Liste.
