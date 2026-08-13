@@ -56,6 +56,8 @@ pub const ROUTER_BANNER_DIR: &str = "assets/welcome-banners";
 pub const ROUTER_CREATE_BANNER_FILENAME: &str = "divider-lane-erstellen.png";
 pub const ROUTER_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
 pub const ROUTER_GUIDE_BANNER_FILENAME: &str = "divider-anleitung.png";
+/// Modus für die Lane, die ein Router-Join ohne gespeicherten Standard bekommt.
+pub const ROUTER_FALLBACK_MODE: &str = "casual";
 pub const ROUTER_FLOOD_WINDOW_SECS: u64 = 60;
 pub const ROUTER_FLOOD_MAX_CREATES: usize = 4;
 const ROUTER_INTRO_DM_TIMEOUT: Duration = Duration::from_secs(3);
@@ -968,9 +970,11 @@ impl LaneRouter {
         let default = match self.default_preset(user_id).await {
             Some(default) => default,
             None => {
-                // Erst-Join ohne Standard: einmalig die Onboarding-DM schicken,
-                // damit klar ist, dass man erst einen Modus wählen muss.
-                self.maybe_send_intro_dm(user_id).await;
+                // Erst-Join ohne Standard: niemand bleibt im Router hängen.
+                // Es gibt sofort eine Casual-Lane, die Onboarding-DM erklärt
+                // danach, wie man den eigenen Standard setzt.
+                self.spawn_fallback_lane_and_onboard(guild_id, user_id)
+                    .await;
                 return;
             }
         };
@@ -985,6 +989,31 @@ impl LaneRouter {
         {
             self.mark_spawn_created(user_id).await;
         }
+    }
+
+    /// Router-Join ohne gespeicherten Standard: erst die Fallback-Lane bauen
+    /// (Casual, damit der User nicht im Router sitzen bleibt), dann einmalig
+    /// die Onboarding-DM mit dem Link auf genau diese Lane. Der Standard wird
+    /// bewusst nicht gespeichert — den setzt der User selbst in der DM.
+    async fn spawn_fallback_lane_and_onboard(self: &Arc<Self>, guild_id: u64, user_id: u64) {
+        let lane_id = if self.flood_guard_allows(user_id).await {
+            let lane_id = self
+                .engine
+                .create_router_lane(guild_id, user_id, ROUTER_FALLBACK_MODE, ROUTER_VC_ID)
+                .await;
+            if lane_id.is_some() {
+                self.mark_spawn_created(user_id).await;
+            } else {
+                tracing::warn!(
+                    user_id,
+                    "Router: Fallback-Lane konnte nicht erstellt werden — DM bleibt der einzige Weg"
+                );
+            }
+            lane_id
+        } else {
+            None
+        };
+        self.maybe_send_intro_dm(user_id, lane_id).await;
     }
 
     async fn update_auto_move_timer(self: &Arc<Self>, event: &VoiceEvent) {
@@ -1146,8 +1175,9 @@ impl LaneRouter {
     }
 
     /// Einmalige Router-Onboarding-DM beim Erst-Join ohne gespeicherten Standard.
+    /// `lane_id` ist die eben gebaute Fallback-Lane (None, wenn das nicht klappte).
     /// Jede Entscheidung wird geloggt (Privacy / gesendet / schon gesendet / Marker-Fehler).
-    async fn maybe_send_intro_dm(&self, user_id: u64) {
+    async fn maybe_send_intro_dm(&self, user_id: u64, lane_id: Option<u64>) {
         let db_user_id = match u64_to_i64("core.user_privacy.user_id", user_id) {
             Ok(user_id) => user_id,
             Err(err) => {
@@ -1204,7 +1234,7 @@ impl LaneRouter {
                 let delivery = match tokio::time::timeout(
                     ROUTER_INTRO_DM_TIMEOUT,
                     self.port
-                        .send_dm_components(user_id, router_intro_dm_body()),
+                        .send_dm_components(user_id, router_intro_dm_body(lane_id)),
                 )
                 .await
                 {
@@ -1557,7 +1587,40 @@ pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
 /// Components-V2-Onboarding-DM für den Erst-Join ohne Standard. Bettet das
 /// echte Voreinstellungen-Panel (`tv_prefs_*`) plus den `router_dm_done`-Fertig-
 /// Button ein, damit der User seinen Modus direkt in der DM setzen kann.
-pub fn router_intro_dm_body() -> Value {
+///
+/// `lane_id` ist die beim Join automatisch gebaute Casual-Lane. Ohne sie (die
+/// Erstellung ist fehlgeschlagen) erklärt die DM stattdessen den Weg über den
+/// Fertig-Button.
+pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
+    let (headline, situation) = match lane_id {
+        Some(lane_id) => (
+            format!(
+                "## <:dl_casual:1522518264088100995> Deine Lane läuft: <#{lane_id}>\n-# Du bist schon drin. Der Rest hier dauert 10 Sekunden."
+            ),
+            format!(
+                "**Was gerade passiert ist**\nDu bist in den <#{ROUTER_VC_ID}> gekommen, und weil der Bot deinen Modus noch nicht kennt, hat er dir eine **Casual**-Lane gebaut und dich direkt reingezogen. Alles richtig gemacht, du liest das hier genau einmal."
+            ),
+        ),
+        None => (
+            "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router\n-# Modus wählen, Fertig klicken, fertig ist deine eigene Lane.".to_string(),
+            format!(
+                "**Was gerade passiert ist**\nDu bist in den <#{ROUTER_VC_ID}> gekommen, aber die automatische Lane hat diesmal nicht geklappt. Wähl unten deinen Modus und klick **Fertig**, dann baut der Bot sie dir sofort, solange du in einem Sprachkanal sitzt."
+            ),
+        ),
+    };
+    let closing = match lane_id {
+        Some(lane_id) => format!(
+            "**Die Lane gehört dir**\n<:dl_rename:1522518272497418250> Umbenennen, <:dl_limit:1522518268345192588> Limit, <:dl_crown:1522518265421631538> Owner, dazu Rang-Gate, Kick und Ban. Alles steuerst du in <#{ROUTER_TEXT_CHANNEL_ID}>, die Buttons wirken immer auf <#{lane_id}>."
+        ),
+        None => format!(
+            "**Die Lane gehört dir**\n<:dl_rename:1522518272497418250> Umbenennen, <:dl_limit:1522518268345192588> Limit, <:dl_crown:1522518265421631538> Owner, dazu Rang-Gate, Kick und Ban. Alles steuerst du jederzeit in <#{ROUTER_TEXT_CHANNEL_ID}>."
+        ),
+    };
+    let step_two = if lane_id.is_some() {
+        "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** stellt deine aktuelle Lane direkt auf den gewählten Modus um."
+    } else {
+        "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** baut dir deine Lane im gewählten Modus."
+    };
     json!({
         "flags": ROUTER_COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
@@ -1565,25 +1628,25 @@ pub fn router_intro_dm_body() -> Value {
             "type": 17,
             "accent_color": ROUTER_ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router\n-# Modus einstellen, Fertig klicken, sofort in deiner eigenen Lane." },
+                { "type": 10, "content": headline },
                 { "type": 14, "divider": true, "spacing": 2 },
-                { "type": 10, "content": "**Warum bist du noch nicht in einer eigenen Lane?**\nDer Bot kennt deinen Modus noch nicht. Stell ihn unten ein und klick **Fertig**, dann baut er dir sofort deine Lane und zieht dich rein. Kein Fehler, du machst das genau einmal. Ab dem nächsten Join in den <#1513468587195633674> läuft es automatisch." },
+                { "type": 10, "content": situation },
                 { "type": 14, "divider": true, "spacing": 2 },
-                { "type": 10, "content": "### <:dl_mode:1522518269456547962> Deine Voreinstellungen\nModus wählen, Name, Limit und Rang optional anpassen, dann **Fertig**. Alles wird als dein Standard gespeichert." },
+                { "type": 10, "content": "### 1. Deinen Standardmodus wählen\nDer Bot merkt sich die Wahl. Ab dem nächsten Join in den Router bekommst du sofort und ohne Nachfrage eine Lane im richtigen Modus." },
                 { "type": 1, "components": [
                     { "type": 2, "style": 2, "label": "Casual", "custom_id": "tv_prefs_mode_casual", "emoji": { "name": "dl_casual", "id": "1522518264088100995" } },
                     { "type": 2, "style": 2, "label": "Ranked", "custom_id": "tv_prefs_mode_ranked", "emoji": { "name": "dl_ranked", "id": "1522518271306366996" } },
                     { "type": 2, "style": 2, "label": "Street Brawl", "custom_id": "tv_prefs_mode_street_brawl", "emoji": { "name": "dl_brawl", "id": "1522518262708174928" } }
                 ]},
                 { "type": 14, "divider": false, "spacing": 2 },
-                { "type": 14, "divider": false, "spacing": 2 },
+                { "type": 10, "content": step_two },
                 { "type": 1, "components": [
                     { "type": 2, "style": 2, "label": "Name+Limit ändern", "custom_id": "tv_prefs_name_limit" },
                     { "type": 2, "style": 2, "label": "Rang ändern", "custom_id": "tv_prefs_rank" },
                     { "type": 2, "style": 3, "label": "Fertig", "custom_id": "router_dm_done", "emoji": { "name": "dl_crown", "id": "1522518265421631538" } }
                 ]},
                 { "type": 14, "divider": true, "spacing": 2 },
-                { "type": 10, "content": "Deine Lane gehört dir: <:dl_rename:1522518272497418250> Name, <:dl_limit:1522518268345192588> Limit, <:dl_crown:1522518265421631538> Owner, dazu Rang-Gate und Kick. Alles änderst du jederzeit auch im Panel: <#1513468476365209670>" }
+                { "type": 10, "content": closing }
             ]
         }]
     })
@@ -1663,6 +1726,30 @@ impl InteractionHandler for RouterPanelHandler {
                     &interaction.role_ids,
                 )
                 .await;
+            // Der User sitzt nach dem Router-Join schon in seiner Fallback-Lane.
+            // Fertig baut dann keine zweite, sondern stellt diese auf den
+            // gewählten Modus um.
+            if let RouterSpawnOutcome::AlreadyOwnLane { lane_id } = outcome {
+                let switch_error = self
+                    .router
+                    .engine
+                    .switch_lane_mode(guild_id, lane_id, interaction.user_id, &default.mode)
+                    .await;
+                if switch_error.is_none() {
+                    let label = router_mode(&default.mode)
+                        .map(|mode| mode.label)
+                        .unwrap_or(ROUTER_BUTTON_CASUAL);
+                    return router_dm_reply(format!(
+                        "Passt: <#{lane_id}> läuft jetzt als **{label}**, und das bleibt dein Standard. Viel Spaß."
+                    ));
+                }
+                tracing::warn!(
+                    user_id = interaction.user_id,
+                    lane_id,
+                    mode = %default.mode,
+                    "Router: Modus-Umstellung der Fallback-Lane fehlgeschlagen"
+                );
+            }
             return router_dm_done_reply(&outcome);
         }
         if let Some(mode) = interaction.custom_id.strip_prefix("router_spawn_") {
@@ -1802,7 +1889,7 @@ mod tests {
 
     #[test]
     fn intro_dm_body_ist_components_v2_mit_prefs_panel() {
-        let body = router_intro_dm_body();
+        let body = router_intro_dm_body(Some(4242));
         assert_eq!(body["flags"], json!(32768));
         let text = serde_json::to_string(&body).expect("json");
         // Enthält die echten Voreinstellungen-Buttons + den Fertig-Button.
@@ -1812,9 +1899,18 @@ mod tests {
         assert!(text.contains("tv_prefs_name_limit"));
         assert!(text.contains("tv_prefs_rank"));
         assert!(text.contains("router_dm_done"));
-        // Kernbotschaft für den User ohne Standard.
+        // Kernbotschaft: die Lane steht schon, der Standard fehlt noch.
+        assert!(text.contains("<#4242>"));
+        assert!(text.contains("Deine Lane läuft"));
+        assert!(text.contains("Standardmodus"));
+    }
+
+    #[test]
+    fn intro_dm_body_ohne_lane_erklaert_den_fertig_weg() {
+        let text = serde_json::to_string(&router_intro_dm_body(None)).expect("json");
         assert!(text.contains("Willkommen im Deadlock Router"));
-        assert!(text.contains("Warum bist du noch nicht in einer eigenen Lane"));
+        assert!(text.contains("nicht geklappt"));
+        assert!(text.contains("router_dm_done"));
     }
 
     #[test]
@@ -2969,7 +3065,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_join_ohne_default_sendet_intro_dm_genau_einmal() {
+    async fn router_join_ohne_default_baut_casual_lane_und_dm_genau_einmal() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -2988,9 +3084,15 @@ mod tests {
                 .await;
         }
 
-        assert!(engine.store.all_lanes().await.expect("lanes").is_empty());
+        // Niemand bleibt im Router hängen: der Join baut sofort eine Casual-Lane.
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert!(!lanes.is_empty(), "Fallback-Lane muss entstehen");
+        assert_eq!(lanes[0].category_id, mode_to_category(ROUTER_FALLBACK_MODE));
+        // Die Erklär-DM kommt trotzdem nur einmal.
         assert_eq!(port.dm_components.lock().expect("dm").len(), 1);
         assert!(engine.store.router_intro_dm_sent(42).await.expect("marker"));
+        // Der Standard bleibt leer, den setzt der User selbst in der DM.
+        assert!(router.default_preset(42).await.is_none());
     }
 
     #[tokio::test]

@@ -867,10 +867,19 @@ impl PanelHandler {
         }
     }
 
-    fn prefs_text(default: Option<&DefaultPresetRecord>) -> String {
+    fn prefs_text(default: Option<&DefaultPresetRecord>, is_dm: bool) -> String {
+        // In der DM steht statt „Default löschen" der Fertig-Button, deshalb
+        // gehört dort auch dazu, was er auslöst.
+        let footer = match (is_dm, default.is_some()) {
+            (true, true) => {
+                "\n\n-# Gespeichert. **Fertig** übernimmt den Modus auf deine Lane, sonst gilt er ab dem nächsten Router-Join."
+            }
+            (true, false) => "\n\n-# Wähl unten einen Modus, dann wird **Fertig** aktiv.",
+            (false, _) => "",
+        };
         match default {
             Some(default) => format!(
-                "## ⚙️ Voreinstellungen\n**Modus:** {}\n**Name:** {}\n**Limit:** {}\n**Rang:** {}",
+                "## ⚙️ Voreinstellungen\n**Modus:** {}\n**Name:** {}\n**Limit:** {}\n**Rang:** {}{footer}",
                 prefs_mode_label(&default.mode),
                 default.base_name,
                 default.limit,
@@ -881,8 +890,7 @@ impl PanelHandler {
                 }
             ),
             None => {
-                "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt — wähle unten einen Modus._"
-                    .to_string()
+                format!("## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt, wähle unten einen Modus._{footer}")
             }
         }
     }
@@ -963,7 +971,7 @@ impl PanelHandler {
             .flatten();
         let can_apply_lane = self.owned_lane_of(interaction).await.is_ok();
         Self::prefs_reply(
-            Self::prefs_text(default.as_ref()),
+            Self::prefs_text(default.as_ref(), interaction.guild_id == 0),
             Self::prefs_components(default.is_some(), can_apply_lane, interaction.guild_id == 0),
             interaction.guild_id == 0,
         )
@@ -1320,7 +1328,7 @@ impl InteractionHandler for PanelHandler {
                     .flatten()
                 else {
                     return Self::prefs_reply(
-                        Self::prefs_text(None),
+                        Self::prefs_text(None, interaction.guild_id == 0),
                         Self::prefs_components(false, false, interaction.guild_id == 0),
                         interaction.guild_id == 0,
                     );
@@ -2869,7 +2877,7 @@ mod tests {
         assert_eq!(reply.allowed_mentions, Some(json!({ "parse": [] })));
         assert_eq!(
             reply_prefs_text(&reply),
-            "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt — wähle unten einen Modus._"
+            "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt, wähle unten einen Modus._"
         );
         let container = reply_prefs_container(&reply);
         let container_components = container["components"]
@@ -3137,7 +3145,7 @@ mod tests {
 
         assert_eq!(
             reply_prefs_text(&reply),
-            "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt — wähle unten einen Modus._"
+            "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt, wähle unten einen Modus._"
         );
         assert!(handler
             .engine
