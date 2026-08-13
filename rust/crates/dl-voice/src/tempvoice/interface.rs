@@ -948,9 +948,9 @@ impl PanelHandler {
     }
 
     fn prefs_components(has_default: bool, can_apply_lane: bool, is_dm: bool) -> Value {
-        // In der DM fehlt „Default löschen": dort geht es ums Einrichten, nicht
-        // ums Aufräumen. Einen Bestätigen-Knopf braucht es nicht, die Moduswahl
-        // wirkt sofort auf die aktuelle Lane.
+        // In der DM ersetzt „Fertig" das „Default löschen": dort geht es ums
+        // Einrichten, nicht ums Aufräumen. Gespeichert ist die Moduswahl schon
+        // beim Klick, Fertig ist der sichtbare Abschluss.
         let (mode_row, second_row) = if is_dm {
             (
                 action_row(vec![
@@ -979,6 +979,13 @@ impl PanelHandler {
                 action_row(vec![
                     button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
                     button("Rang ändern", 2, "tv_prefs_rank"),
+                    emoji_button(
+                        "Fertig",
+                        3,
+                        "router_dm_done",
+                        "dl_crown",
+                        "1522518265421631538",
+                    ),
                 ]),
             )
         } else {
@@ -2343,13 +2350,13 @@ mod tests {
     }
 
     #[test]
-    fn prefs_components_dm_kommt_ohne_bestaetigen_knopf_aus() {
-        // Die Moduswahl wirkt sofort; ein Fertig-Knopf waere ein Zwischenschritt.
+    fn prefs_components_dm_behaelt_fertig_statt_loeschen() {
+        // Fertig bleibt der sichtbare Abschluss, gespeichert ist da laengst.
         let dm = serde_json::to_string(&PanelHandler::prefs_components(true, false, true))
             .expect("json");
         assert!(
-            !dm.contains("router_dm_done"),
-            "DM-Panel braucht keinen Bestätigen-Knopf"
+            dm.contains("router_dm_done"),
+            "DM-Panel behält den Abschluss-Knopf"
         );
         assert!(
             !dm.contains("tv_prefs_delete"),

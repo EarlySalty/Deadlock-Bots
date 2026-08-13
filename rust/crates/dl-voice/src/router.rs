@@ -1621,9 +1621,9 @@ pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
 
 /// Components-V2-Onboarding-DM für den Erst-Join ohne Standard. Bettet das
 /// echte Voreinstellungen-Panel (`tv_prefs_*`) ein: ein Klick auf einen Modus
-/// speichert ihn und stellt zugleich die Lane um, in der der User sitzt. Der
-/// frühere `router_dm_done`-Knopf bleibt nur als Handler bestehen, damit
-/// bereits verschickte DMs weiter funktionieren.
+/// speichert ihn und stellt zugleich die Lane um, in der der User sitzt.
+/// `router_dm_done` bleibt als Abschluss stehen, weil ein sichtbares Ende dem
+/// Ganzen die Form gibt; gespeichert ist zu dem Zeitpunkt längst alles.
 ///
 /// `lane_id` ist die beim Join automatisch gebaute Casual-Lane. Ohne sie (die
 /// Erstellung ist fehlgeschlagen) erklärt die DM stattdessen den Weg über den
@@ -1665,7 +1665,8 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
                 { "type": 10, "content": step_two },
                 { "type": 1, "components": [
                     { "type": 2, "style": 2, "label": "Name+Limit ändern", "custom_id": "tv_prefs_name_limit" },
-                    { "type": 2, "style": 2, "label": "Rang ändern", "custom_id": "tv_prefs_rank" }
+                    { "type": 2, "style": 2, "label": "Rang ändern", "custom_id": "tv_prefs_rank" },
+                    { "type": 2, "style": 3, "label": "Fertig", "custom_id": "router_dm_done", "emoji": { "name": "dl_crown", "id": "1522518265421631538" } }
                 ]},
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": closing }
@@ -1930,8 +1931,8 @@ mod tests {
         assert!(text.contains("tv_prefs_name_limit"));
         assert!(text.contains("tv_prefs_rank"));
         assert!(
-            !text.contains("router_dm_done"),
-            "die Moduswahl wirkt sofort, ein Bestätigen-Knopf waere ein Zwischenschritt"
+            text.contains("router_dm_done"),
+            "Fertig bleibt der Abschluss"
         );
         // Kernbotschaft: die Lane steht schon, der Standard fehlt noch.
         assert!(text.contains("Deine Lane steht"));
@@ -1947,6 +1948,7 @@ mod tests {
         assert!(text.contains("Willkommen im Deadlock Router"));
         assert!(text.contains("nicht geklappt"));
         assert!(text.contains("tv_prefs_mode_casual"));
+        assert!(text.contains("router_dm_done"));
     }
 
     #[test]
