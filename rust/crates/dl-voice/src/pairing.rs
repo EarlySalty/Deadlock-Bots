@@ -17,6 +17,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
 use dl_central_db::kv;
+
+use crate::router::{MAX_LANE_MEMBERS, ROUTER_EMOJI_CASUAL};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,6 +36,11 @@ pub const ASK_COOLDOWN: Duration = Duration::hours(2);
 /// Pro Paar: so lange nicht erneut dieselben zwei zusammenbringen wollen.
 pub const PAIR_COOLDOWN: Duration = Duration::hours(24);
 pub const TICK_INTERVAL: StdDuration = StdDuration::from_secs(20);
+/// Größte Gruppe, die noch einen Vorschlag bekommt (darüber ist die Lane voll
+/// genug). Zusammen dürfen beide Seiten [`MAX_LANE_MEMBERS`] nicht sprengen.
+pub const MAX_GROUP_SIZE: usize = 4;
+/// Nach „Später vielleicht" darf der Bot so bald wieder fragen.
+pub const LATER_RETRY: Duration = Duration::minutes(45);
 
 pub const NEVER_ASK_NS: &str = "voice_pair_never";
 pub const LAST_ASK_NS: &str = "voice_pair_last_ask";
@@ -43,6 +50,7 @@ pub const ACCEPT_NS: &str = "voice_pair_accept";
 pub const CUSTOM_ID_PREFIX: &str = "voice_pair:";
 pub const YES_ACTION: &str = "yes";
 pub const NO_ACTION: &str = "no";
+pub const LATER_ACTION: &str = "later";
 pub const NEVER_ACTION: &str = "never";
 
 pub const ACCENT_GOLD: u64 = 0xC8A86B;
@@ -51,6 +59,10 @@ pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const WAITING_REPLY: &str =
     "Stark, ich frag ihn. Sagt er auch Ja, zieh ich euch zusammen und ihr könnt loslegen.";
 pub const MOVED_REPLY: &str = "Ihr seid zusammen in einer Lane. Viel Spaß euch beiden.";
+pub const TOO_FULL_REPLY: &str =
+    "Inzwischen seid ihr zusammen zu viele für eine Lane. Beim nächsten Mal klappt es.";
+pub const MOVE_PARTIAL_REPLY: &str =
+    "Fast alle sind drüben, bei einem hat es nicht geklappt. Der kann einfach selbst rüberspringen.";
 pub const MOVE_FAILED_REPLY: &str =
     "Das Verschieben hat gerade nicht geklappt. Spring einfach selbst rüber, die Lane steht.";
 pub const GONE_REPLY: &str =
@@ -58,6 +70,7 @@ pub const GONE_REPLY: &str =
 pub const NOT_IN_LANE_REPLY: &str =
     "Du sitzt gerade nicht mehr in deiner Lane. Spring wieder rein, dann klappt es.";
 pub const NO_REPLY: &str = "Alles gut, dann zockst du in Ruhe für dich. Viel Spaß.";
+pub const LATER_REPLY: &str = "Passt, ich frag später nochmal.";
 pub const NEVER_REPLY: &str =
     "Erledigt, ich frag dich nicht mehr wegen Mitspielern. Über die Mitspieler-Suche findest du trotzdem jederzeit Leute.";
 pub const NEVER_FAILED_REPLY: &str =
@@ -71,15 +84,26 @@ pub struct LaneView {
     /// Router-Modus der Lane (`casual`, `ranked`, `street_brawl`).
     pub mode: String,
     pub members: Vec<u64>,
+    /// Owner der Lane, falls die Engine ihn kennt.
+    pub owner_id: Option<u64>,
 }
 
-/// Ein Einzelsitzer, den der Watcher schon eine Weile beobachtet.
+/// Eine kleine Lane, die der Watcher schon eine Weile beobachtet. `speaker_id`
+/// ist der Angesprochene: der Owner, sonst das erste Mitglied. Er entscheidet
+/// für seine Lane, so wie er sie auch umbenennen oder jemanden kicken darf.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SoloSeat {
-    pub user_id: u64,
+pub struct LaneSeat {
+    pub speaker_id: u64,
     pub channel_id: u64,
     pub mode: String,
+    pub members: Vec<u64>,
     pub since: DateTime<Utc>,
+}
+
+impl LaneSeat {
+    pub fn size(&self) -> usize {
+        self.members.len().max(1)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +124,12 @@ pub struct PendingAccept {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Beobachtungsstand einer Lane. Ändert sich die Besetzung, läuft die
+/// Wartezeit neu: wer gerade erst Besuch bekommen hat, will nicht sofort
+/// gefragt werden.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Watched {
-    channel_id: u64,
+    members: Vec<u64>,
     since: DateTime<Utc>,
 }
 
@@ -119,10 +146,14 @@ pub trait PairingPort: Send + Sync {
     ) -> Result<AskDecision, String>;
     async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String>;
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String>;
+    /// Sperren so weit kürzen, dass bald wieder gefragt werden darf.
+    async fn soften_cooldown(&self, user_id: u64, other_user: u64) -> Result<(), String>;
     async fn load_accept(&self, pair_key: &str) -> Result<Option<PendingAccept>, String>;
     async fn save_accept(&self, pair_key: &str, accept: &PendingAccept) -> Result<(), String>;
     async fn clear_accept(&self, pair_key: &str) -> Result<(), String>;
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
+    /// Aktuelle Mitglieder eines Kanals (ohne Bots).
+    async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64>;
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
         -> Result<(), String>;
     fn log_decision(&self, user_id: u64, decision: &'static str, reason: &'static str);
@@ -130,6 +161,7 @@ pub trait PairingPort: Send + Sync {
 
 pub struct LanePairing {
     port: Arc<dyn PairingPort>,
+    /// Lane-ID → seit wann diese Besetzung so sitzt.
     watched: tokio::sync::Mutex<HashMap<u64, Watched>>,
 }
 
@@ -150,7 +182,7 @@ impl LanePairing {
         };
         match self
             .port
-            .claim_ask(first.user_id, second.user_id, now)
+            .claim_ask(first.speaker_id, second.speaker_id, now)
             .await
         {
             Err(error) => {
@@ -158,23 +190,23 @@ impl LanePairing {
             }
             Ok(AskDecision::OptedOut) => {
                 self.port
-                    .log_decision(first.user_id, "verworfen", "privacy_opt_out");
+                    .log_decision(first.speaker_id, "verworfen", "privacy_opt_out");
             }
             Ok(AskDecision::NeverAsk) => {
                 self.port
-                    .log_decision(first.user_id, "verworfen", "nie_fragen");
+                    .log_decision(first.speaker_id, "verworfen", "nie_fragen");
             }
             Ok(AskDecision::UserCooldown) => {
                 self.port
-                    .log_decision(first.user_id, "verworfen", "user_cooldown");
+                    .log_decision(first.speaker_id, "verworfen", "user_cooldown");
             }
             Ok(AskDecision::PairCooldown) => {
                 self.port
-                    .log_decision(first.user_id, "verworfen", "paar_cooldown");
+                    .log_decision(first.speaker_id, "verworfen", "paar_cooldown");
             }
             Ok(AskDecision::Unwanted) => {
                 self.port
-                    .log_decision(first.user_id, "verworfen", "paarung_abgelehnt");
+                    .log_decision(first.speaker_id, "verworfen", "paarung_abgelehnt");
             }
             Ok(AskDecision::Ask) => {
                 self.ask(guild_id, &first, &second).await;
@@ -183,49 +215,60 @@ impl LanePairing {
         }
     }
 
-    async fn ask(&self, guild_id: u64, seat: &SoloSeat, other: &SoloSeat) {
+    async fn ask(&self, guild_id: u64, seat: &LaneSeat, other: &LaneSeat) {
         let body = dm_body(guild_id, seat, other);
-        match self.port.send_dm(seat.user_id, body).await {
+        match self.port.send_dm(seat.speaker_id, body).await {
             Ok(()) => self
                 .port
-                .log_decision(seat.user_id, "dm_zugestellt", "pairing_vorschlag"),
-            Err(_) => self
-                .port
-                .log_decision(seat.user_id, "dm_fehlgeschlagen", "discord_fehler"),
+                .log_decision(seat.speaker_id, "dm_zugestellt", "pairing_vorschlag"),
+            Err(_) => {
+                self.port
+                    .log_decision(seat.speaker_id, "dm_fehlgeschlagen", "discord_fehler")
+            }
         }
     }
 
-    /// Einzelsitzer-Zeitstempel fortschreiben und die reifen Sitze liefern.
-    async fn update_watched(&self, lanes: &[LaneView], now: DateTime<Utc>) -> Vec<SoloSeat> {
+    /// Beobachtungsstand je Lane fortschreiben und die Kandidaten liefern.
+    async fn update_watched(&self, lanes: &[LaneView], now: DateTime<Utc>) -> Vec<LaneSeat> {
         let mut watched = self.watched.lock().await;
         let mut seats = Vec::new();
-        let mut still_alone = Vec::new();
+        let mut seen = Vec::new();
         for lane in lanes {
-            let [user_id] = lane.members.as_slice() else {
+            if lane.members.is_empty() || lane.members.len() > MAX_GROUP_SIZE {
                 continue;
-            };
-            still_alone.push(*user_id);
-            let since = match watched.get(user_id) {
-                Some(state) if state.channel_id == lane.channel_id => state.since,
+            }
+            seen.push(lane.channel_id);
+            let mut members = lane.members.clone();
+            members.sort_unstable();
+            let since = match watched.get(&lane.channel_id) {
+                Some(state) if state.members == members => state.since,
                 _ => {
                     watched.insert(
-                        *user_id,
+                        lane.channel_id,
                         Watched {
-                            channel_id: lane.channel_id,
+                            members: members.clone(),
                             since: now,
                         },
                     );
                     now
                 }
             };
-            seats.push(SoloSeat {
-                user_id: *user_id,
+            let speaker_id = lane
+                .owner_id
+                .filter(|owner| members.contains(owner))
+                .or_else(|| members.first().copied());
+            let Some(speaker_id) = speaker_id else {
+                continue;
+            };
+            seats.push(LaneSeat {
+                speaker_id,
                 channel_id: lane.channel_id,
                 mode: lane.mode.clone(),
+                members,
                 since,
             });
         }
-        watched.retain(|user_id, _| still_alone.contains(user_id));
+        watched.retain(|channel_id, _| seen.contains(channel_id));
         seats
     }
 
@@ -244,8 +287,22 @@ impl LanePairing {
             },
             PairAction::No { .. } => {
                 self.port
-                    .log_decision(interaction.user_id, "abgelehnt", "nicht_jetzt_gewaehlt");
+                    .log_decision(interaction.user_id, "abgelehnt", "nein_gewaehlt");
                 BridgeReply::ephemeral_text(NO_REPLY)
+            }
+            PairAction::Later { other_user } => {
+                // Kein Nein: die Sperren werden verkürzt, damit der Bot es
+                // bald wieder versuchen darf.
+                if let Err(error) = self
+                    .port
+                    .soften_cooldown(interaction.user_id, other_user)
+                    .await
+                {
+                    tracing::warn!(%error, user_id = interaction.user_id, "Lane-Pairing: Cooldown nicht verkürzbar");
+                }
+                self.port
+                    .log_decision(interaction.user_id, "vertagt", "spaeter_gewaehlt");
+                BridgeReply::ephemeral_text(LATER_REPLY)
             }
             PairAction::Yes {
                 guild_id,
@@ -305,42 +362,75 @@ impl LanePairing {
             return BridgeReply::ephemeral_text(GONE_REPLY);
         }
         let _ = self.port.clear_accept(&key).await;
-        match self.port.move_member(guild_id, user_id, other_lane).await {
-            Ok(()) => {
-                self.port
-                    .log_decision(user_id, "zusammengelegt", "beide_zugesagt");
-                let _ = self
-                    .port
-                    .send_dm(other_user, merged_dm_body(user_id, other_lane))
-                    .await;
-                BridgeReply::ephemeral_text(MOVED_REPLY)
-            }
-            Err(error) => {
-                tracing::warn!(%error, user_id, other_lane, "Lane-Pairing: Move fehlgeschlagen");
-                self.port
-                    .log_decision(user_id, "move_fehlgeschlagen", "discord_fehler");
-                BridgeReply::ephemeral_text(MOVE_FAILED_REPLY)
+
+        // Beide Seiten können inzwischen gewachsen sein; nur zusammenlegen,
+        // wenn alle zusammen noch in eine Lane passen.
+        let own_group = self.port.channel_members(guild_id, own_lane).await;
+        let other_group = self.port.channel_members(guild_id, other_lane).await;
+        if own_group.len() + other_group.len() > MAX_LANE_MEMBERS {
+            self.port.log_decision(user_id, "verworfen", "zu_voll");
+            return BridgeReply::ephemeral_text(TOO_FULL_REPLY);
+        }
+        // Die kleinere Gruppe zieht um, bei Gleichstand der Zweit-Zusager.
+        let (movers, target) = if joining_side(own_group.len(), other_group.len()) {
+            (own_group, other_lane)
+        } else {
+            (other_group, own_lane)
+        };
+
+        let mut moved = 0usize;
+        let mut failed = 0usize;
+        for member in &movers {
+            match self.port.move_member(guild_id, *member, target).await {
+                Ok(()) => moved += 1,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(%error, user_id = member, target, "Lane-Pairing: Move fehlgeschlagen");
+                }
             }
         }
+        if moved == 0 {
+            self.port
+                .log_decision(user_id, "move_fehlgeschlagen", "discord_fehler");
+            return BridgeReply::ephemeral_text(MOVE_FAILED_REPLY);
+        }
+        self.port
+            .log_decision(user_id, "zusammengelegt", "beide_zugesagt");
+        let _ = self.port.send_dm(other_user, merged_dm_body(target)).await;
+        if failed > 0 {
+            return BridgeReply::ephemeral_text(MOVE_PARTIAL_REPLY);
+        }
+        BridgeReply::ephemeral_text(MOVED_REPLY)
     }
 }
 
-/// Höchstens ein Paar pro Durchlauf: die zwei am längsten Wartenden im selben
-/// Modus. Beide müssen [`MIN_ALONE`] voll haben.
-pub fn pick_pair(seats: &[SoloSeat], now: DateTime<Utc>) -> Option<(SoloSeat, SoloSeat)> {
-    let mut ripe: Vec<&SoloSeat> = seats
+/// Höchstens ein Paar pro Durchlauf: die zwei am längsten wartenden Lanes im
+/// selben Modus, die zusammen in eine Lane passen. Zwei Einzelne sind der
+/// häufigste Fall, aber zwei plus einer zählt genauso.
+pub fn pick_pair(seats: &[LaneSeat], now: DateTime<Utc>) -> Option<(LaneSeat, LaneSeat)> {
+    let mut ripe: Vec<&LaneSeat> = seats
         .iter()
         .filter(|seat| now - seat.since >= MIN_ALONE)
+        .filter(|seat| seat.size() <= MAX_GROUP_SIZE)
         .collect();
-    ripe.sort_by_key(|seat| (seat.since, seat.user_id));
+    ripe.sort_by_key(|seat| (seat.since, seat.channel_id));
     for (index, first) in ripe.iter().enumerate() {
         for second in ripe.iter().skip(index + 1) {
-            if first.mode == second.mode && first.channel_id != second.channel_id {
+            if first.mode == second.mode
+                && first.channel_id != second.channel_id
+                && first.size() + second.size() <= MAX_LANE_MEMBERS
+            {
                 return Some(((*first).clone(), (*second).clone()));
             }
         }
     }
     None
+}
+
+/// Wer zieht um: die kleinere Gruppe wandert zur größeren, bei Gleichstand der
+/// Zweit-Zusager. So sind es immer möglichst wenige Umzüge.
+pub fn joining_side(own_size: usize, other_size: usize) -> bool {
+    own_size <= other_size
 }
 
 /// Paar-Schlüssel, unabhängig davon, wer zuerst klickt.
@@ -369,6 +459,10 @@ pub enum PairAction {
     No {
         other_user: u64,
     },
+    /// Nicht jetzt, aber ruhig bald wieder fragen.
+    Later {
+        other_user: u64,
+    },
     Never,
 }
 
@@ -380,6 +474,9 @@ pub fn parse_custom_id(custom_id: &str) -> Option<PairAction> {
     match parts.next()? {
         NEVER_ACTION => Some(PairAction::Never),
         NO_ACTION => Some(PairAction::No {
+            other_user: parts.next()?.parse().ok()?,
+        }),
+        LATER_ACTION => Some(PairAction::Later {
             other_user: parts.next()?.parse().ok()?,
         }),
         YES_ACTION => Some(PairAction::Yes {
@@ -400,8 +497,17 @@ pub fn no_custom_id(other_user: u64) -> String {
     format!("{CUSTOM_ID_PREFIX}{NO_ACTION}:{other_user}")
 }
 
+pub fn later_custom_id(other_user: u64) -> String {
+    format!("{CUSTOM_ID_PREFIX}{LATER_ACTION}:{other_user}")
+}
+
 pub fn never_custom_id() -> String {
     format!("{CUSTOM_ID_PREFIX}{NEVER_ACTION}")
+}
+
+/// Server-Emoji als Discord-Tag (`<:name:id>`).
+fn emoji_tag((name, id): (&str, &str)) -> String {
+    format!("<:{name}:{id}>")
 }
 
 fn mode_label(mode: &str) -> &'static str {
@@ -412,10 +518,38 @@ fn mode_label(mode: &str) -> &'static str {
     }
 }
 
+/// Wie der Bot die andere Seite benennt: eine Person mit Namen, mehrere als
+/// Gruppe. Der Angeschriebene soll sofort sehen, worum es geht.
+fn other_side_label(other: &LaneSeat) -> String {
+    match other.size() {
+        1 => format!("sitzt <@{}> auch allein", other.speaker_id),
+        2 => format!("sitzen <@{}> und noch jemand zu zweit", other.speaker_id),
+        size => format!("sitzen <@{}> und {} andere", other.speaker_id, size - 1),
+    }
+}
+
 /// Vorschlags-DM. Erwähnungen bleiben stumm (`allowed_mentions.parse = []`),
 /// der Name wird trotzdem aufgelöst.
-pub fn dm_body(guild_id: u64, seat: &SoloSeat, other: &SoloSeat) -> Value {
+pub fn dm_body(guild_id: u64, seat: &LaneSeat, other: &LaneSeat) -> Value {
     let label = mode_label(&seat.mode);
+    let headline = if seat.size() == 1 {
+        "Du sitzt gerade allein"
+    } else {
+        "Ihr könntet mehr sein"
+    };
+    let opener = if seat.size() == 1 {
+        format!(
+            "Hey, ein paar Kanäle weiter {} und will **{label}** spielen. Möchtet ihr zusammen spielen?",
+            other_side_label(other)
+        )
+    } else {
+        format!(
+            "Hey, ihr seid zu {} in eurer Lane, und ein paar Kanäle weiter {} und will **{label}** spielen. Zusammen wärt ihr {}. Möchtet ihr euch zusammentun?",
+            count_word(seat.size()),
+            other_side_label(other),
+            count_word(seat.size() + other.size())
+        )
+    };
     json!({
         "flags": COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
@@ -423,15 +557,15 @@ pub fn dm_body(guild_id: u64, seat: &SoloSeat, other: &SoloSeat) -> Value {
             "type": 17,
             "accent_color": ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": "## 🤝 Lust auf Gesellschaft?" },
+                { "type": 10, "content": format!("## {} {headline}", emoji_tag(ROUTER_EMOJI_CASUAL)) },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": format!(
-                    "Du sitzt gerade allein in <#{}>, und ein paar Kanäle weiter geht es <@{}> genauso. Ihr habt beide **{label}** vor. Wäre doch schade, das getrennt zu spielen.\n\nSag einfach Ja, dann frag ich <@{}> auch. Wollt ihr beide, zieh ich euch in eine Lane und ihr könnt loslegen. Will einer nicht, bleibt alles wie es ist und der andere erfährt nichts davon.",
-                    seat.channel_id, other.user_id, other.user_id
+                    "{opener}\n\nSagt ihr beide Ja, hol ich euch in eine Lane. Sagt einer Nein, erfährt der andere nichts davon."
                 ) },
                 { "type": 1, "components": [
-                    { "type": 2, "style": 3, "label": "Ja, gerne", "custom_id": yes_custom_id(guild_id, seat.channel_id, other.channel_id, other.user_id) },
-                    { "type": 2, "style": 2, "label": "Lieber allein", "custom_id": no_custom_id(other.user_id) },
+                    { "type": 2, "style": 3, "label": "Ja", "custom_id": yes_custom_id(guild_id, seat.channel_id, other.channel_id, other.speaker_id) },
+                    { "type": 2, "style": 2, "label": "Nein", "custom_id": no_custom_id(other.speaker_id) },
+                    { "type": 2, "style": 2, "label": "Später vielleicht", "custom_id": later_custom_id(other.speaker_id) },
                     { "type": 2, "style": 2, "label": "Nicht mehr fragen", "custom_id": never_custom_id() }
                 ]}
             ]
@@ -439,11 +573,23 @@ pub fn dm_body(guild_id: u64, seat: &SoloSeat, other: &SoloSeat) -> Value {
     })
 }
 
+/// Kleine Zahlwörter, damit die DM nicht wie eine Tabelle klingt.
+fn count_word(count: usize) -> &'static str {
+    match count {
+        2 => "zweit",
+        3 => "dritt",
+        4 => "viert",
+        5 => "fünft",
+        6 => "sechst",
+        _ => "mehreren",
+    }
+}
+
 /// Bestätigung an den, der zuerst zugesagt hat.
-pub fn merged_dm_body(joining_user: u64, lane_id: u64) -> Value {
+pub fn merged_dm_body(lane_id: u64) -> Value {
     json!({
         "allowed_mentions": { "parse": [] },
-        "content": format!("<@{joining_user}> kommt zu dir in <#{lane_id}>. Viel Spaß euch."),
+        "content": format!("Ihr seid zusammen in <#{lane_id}>. Viel Spaß euch."),
     })
 }
 
@@ -565,6 +711,36 @@ async fn read_timestamp(
     Ok(DateTime::from_timestamp(timestamp, 0))
 }
 
+/// „Später vielleicht": beide Sperren so umschreiben, dass sie in
+/// [`LATER_RETRY`] ablaufen statt erst in Stunden.
+pub(crate) async fn soften_cooldown_db(
+    pool: &PgPool,
+    user_id: u64,
+    other_user: u64,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let pair = pair_key(user_id, other_user);
+    for (ns, key, window) in [
+        (LAST_ASK_NS, user_id.to_string(), ASK_COOLDOWN),
+        (LAST_ASK_NS, other_user.to_string(), ASK_COOLDOWN),
+        (PAIR_ASKED_NS, pair, PAIR_COOLDOWN),
+    ] {
+        let expires_in = (now - window + LATER_RETRY).timestamp();
+        sqlx::query(
+            "INSERT INTO bot.kv_store (ns, k, v)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (ns, k) DO UPDATE SET v = EXCLUDED.v",
+        )
+        .bind(ns)
+        .bind(&key)
+        .bind(expires_in.to_string())
+        .execute(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn set_never_ask_db(pool: &PgPool, user_id: u64) -> Result<(), String> {
     kv::set(pool, NEVER_ASK_NS, &user_id.to_string(), "true")
         .await
@@ -635,11 +811,16 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    fn seat(user_id: u64, channel_id: u64, mode: &str, since: DateTime<Utc>) -> SoloSeat {
-        SoloSeat {
-            user_id,
+    fn seat(user_id: u64, channel_id: u64, mode: &str, since: DateTime<Utc>) -> LaneSeat {
+        group(&[user_id], channel_id, mode, since)
+    }
+
+    fn group(members: &[u64], channel_id: u64, mode: &str, since: DateTime<Utc>) -> LaneSeat {
+        LaneSeat {
+            speaker_id: members[0],
             channel_id,
             mode: mode.to_string(),
+            members: members.to_vec(),
             since,
         }
     }
@@ -657,7 +838,7 @@ mod tests {
             seat(3, 12, "casual", now - Duration::minutes(7)),
         ];
         let (first, second) = pick_pair(&seats, now).expect("Paar");
-        assert_eq!((first.user_id, second.user_id), (1, 3));
+        assert_eq!((first.speaker_id, second.speaker_id), (1, 3));
     }
 
     #[test]
@@ -687,12 +868,23 @@ mod tests {
     #[ignore = "Hilfsausgabe: druckt den echten Pairing-Vorschlag zum Gegenlesen"]
     fn dump_pairing_dm() {
         let now = now();
+        // Solo trifft Solo
         println!(
             "{}",
             serde_json::to_string(&dm_body(
                 MAIN_GUILD_ID,
                 &seat(1, 1523272810825252944, "casual", now),
                 &seat(2, 1522769149208821881, "casual", now),
+            ))
+            .expect("json")
+        );
+        // Zweiergruppe trifft Einzelnen
+        println!(
+            "{}",
+            serde_json::to_string(&dm_body(
+                MAIN_GUILD_ID,
+                &group(&[1, 3], 1523272810825252944, "ranked", now),
+                &seat(2, 1522769149208821881, "ranked", now),
             ))
             .expect("json")
         );
@@ -718,6 +910,10 @@ mod tests {
         assert_eq!(
             parse_custom_id(&no_custom_id(7)),
             Some(PairAction::No { other_user: 7 })
+        );
+        assert_eq!(
+            parse_custom_id(&later_custom_id(7)),
+            Some(PairAction::Later { other_user: 7 })
         );
         assert_eq!(parse_custom_id(&never_custom_id()), Some(PairAction::Never));
         assert_eq!(parse_custom_id("voice_pair:quatsch"), None);
@@ -750,13 +946,17 @@ mod tests {
             &seat(20, 200, "casual", now),
         ))
         .expect("json");
-        assert!(text.contains("<#100>"), "die eigene Lane wird benannt");
+        assert!(
+            !text.contains("<#100>"),
+            "die eigene Lane muss nicht erwähnt werden"
+        );
         assert!(text.contains("<@20>"));
         assert!(text.contains("Casual"));
         assert!(
-            text.contains("Lust auf Gesellschaft"),
-            "der Vorschlag muss als Einladung lesbar sein"
+            text.contains("Möchtet ihr zusammen spielen?"),
+            "der Vorschlag ist eine Frage, kein Statusbericht"
         );
+        assert!(text.contains(&later_custom_id(20)));
         assert!(text.contains(&yes_custom_id(1, 100, 200, 20)));
         assert!(text.contains(&no_custom_id(20)));
         assert!(text.contains(&never_custom_id()));
@@ -771,6 +971,7 @@ mod tests {
         moves: Vec<(u64, u64)>,
         voice: HashMap<u64, u64>,
         never: Vec<u64>,
+        softened: Vec<(u64, u64)>,
         decision: AskDecision,
         move_fails: bool,
     }
@@ -796,6 +997,7 @@ mod tests {
                 moves: Vec::new(),
                 voice: HashMap::new(),
                 never: Vec::new(),
+                softened: Vec::new(),
                 decision: AskDecision::Ask,
                 move_fails: false,
             }
@@ -827,6 +1029,15 @@ mod tests {
             Ok(())
         }
 
+        async fn soften_cooldown(&self, user_id: u64, other_user: u64) -> Result<(), String> {
+            self.state
+                .lock()
+                .expect("lock")
+                .softened
+                .push((user_id, other_user));
+            Ok(())
+        }
+
         async fn load_accept(&self, pair_key: &str) -> Result<Option<PendingAccept>, String> {
             Ok(self
                 .state
@@ -849,6 +1060,18 @@ mod tests {
         async fn clear_accept(&self, pair_key: &str) -> Result<(), String> {
             self.state.lock().expect("lock").accepts.remove(pair_key);
             Ok(())
+        }
+
+        async fn channel_members(&self, _guild_id: u64, channel_id: u64) -> Vec<u64> {
+            let state = self.state.lock().expect("lock");
+            let mut members: Vec<u64> = state
+                .voice
+                .iter()
+                .filter(|(_, seat)| **seat == channel_id)
+                .map(|(user_id, _)| *user_id)
+                .collect();
+            members.sort_unstable();
+            members
         }
 
         async fn member_voice_channel(&self, _guild_id: u64, user_id: u64) -> Option<u64> {
@@ -883,6 +1106,7 @@ mod tests {
             channel_id,
             mode: mode.to_string(),
             members: members.to_vec(),
+            owner_id: members.first().copied(),
         }
     }
 
@@ -946,7 +1170,11 @@ mod tests {
         let second = pairing.handle_yes(20, 1, 200, 100, 10, now()).await;
         assert_eq!(second.content.as_deref(), Some(MOVED_REPLY));
         let state = port.state.lock().expect("lock");
-        assert_eq!(state.moves, vec![(20, 100)], "der Zweite zieht zum Ersten");
+        assert_eq!(
+            state.moves,
+            vec![(20, 100)],
+            "bei gleicher Größe zieht der Zweit-Zusager"
+        );
         assert!(state.accepts.is_empty(), "die Zusage wird verbraucht");
         assert_eq!(
             state.dms.len(),
@@ -1027,6 +1255,118 @@ mod tests {
             .await;
         assert_eq!(reply.content.as_deref(), Some(NEVER_REPLY));
         assert_eq!(port.state.lock().expect("lock").never, vec![10]);
+    }
+
+    #[test]
+    fn pick_pair_legt_auch_zweier_und_einzelgruppen_zusammen() {
+        let now = now();
+        let seats = vec![
+            group(&[1, 2], 10, "casual", now - Duration::minutes(9)),
+            seat(3, 11, "casual", now - Duration::minutes(8)),
+        ];
+        let (first, second) = pick_pair(&seats, now).expect("Paar");
+        assert_eq!((first.channel_id, second.channel_id), (10, 11));
+    }
+
+    #[test]
+    fn pick_pair_sprengt_die_lane_nicht() {
+        let now = now();
+        let voll = vec![
+            group(&[1, 2, 3, 4], 10, "casual", now - Duration::minutes(9)),
+            group(&[5, 6, 7], 11, "casual", now - Duration::minutes(8)),
+        ];
+        assert!(
+            pick_pair(&voll, now).is_none(),
+            "sieben passen nicht in eine Lane"
+        );
+
+        let passt = vec![
+            group(&[1, 2, 3, 4], 10, "casual", now - Duration::minutes(9)),
+            group(&[5, 6], 11, "casual", now - Duration::minutes(8)),
+        ];
+        assert!(pick_pair(&passt, now).is_some());
+    }
+
+    #[test]
+    fn grosse_gruppen_werden_nicht_mehr_gefragt() {
+        let now = now();
+        let seats = vec![
+            group(&[1, 2, 3, 4, 5], 10, "casual", now - Duration::minutes(9)),
+            seat(6, 11, "casual", now - Duration::minutes(8)),
+        ];
+        assert!(pick_pair(&seats, now).is_none());
+    }
+
+    #[test]
+    fn die_kleinere_gruppe_zieht_um() {
+        assert!(joining_side(1, 2), "der Einzelne geht zu den zweien");
+        assert!(!joining_side(3, 1), "die drei bleiben sitzen");
+        assert!(
+            joining_side(2, 2),
+            "bei Gleichstand zieht der Zweit-Zusager"
+        );
+    }
+
+    #[tokio::test]
+    async fn ganze_gruppe_zieht_mit_um() {
+        let port = TestPort::new(TestState {
+            voice: HashMap::from([(10, 100), (20, 200), (21, 200)]),
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+        // Der Einzelne sagt zuerst zu, dann der Sprecher der Zweiergruppe.
+        pairing.handle_yes(10, 1, 100, 200, 20, now()).await;
+        let reply = pairing.handle_yes(20, 1, 200, 100, 10, now()).await;
+
+        assert_eq!(reply.content.as_deref(), Some(MOVED_REPLY));
+        let state = port.state.lock().expect("lock");
+        assert_eq!(
+            state.moves,
+            vec![(10, 200)],
+            "der Einzelne zieht zur Zweiergruppe, nicht umgekehrt"
+        );
+    }
+
+    #[tokio::test]
+    async fn zu_volle_lanes_werden_nicht_zusammengelegt() {
+        let voice = HashMap::from([
+            (1, 100),
+            (2, 100),
+            (3, 100),
+            (4, 200),
+            (5, 200),
+            (6, 200),
+            (7, 200),
+        ]);
+        let port = TestPort::new(TestState {
+            voice,
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+        pairing.handle_yes(1, 1, 100, 200, 4, now()).await;
+        let reply = pairing.handle_yes(4, 1, 200, 100, 1, now()).await;
+
+        assert_eq!(reply.content.as_deref(), Some(TOO_FULL_REPLY));
+        assert!(port.state.lock().expect("lock").moves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spaeter_vielleicht_verkuerzt_die_sperre_statt_abzulehnen() {
+        let port = TestPort::new(TestState::default());
+        let pairing = LanePairing::new(port.clone());
+        let reply = pairing
+            .handle_interaction(BridgeInteraction {
+                custom_id: later_custom_id(20),
+                user_id: 10,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(reply.content.as_deref(), Some(LATER_REPLY));
+        assert_eq!(port.state.lock().expect("lock").softened, vec![(10, 20)]);
+        assert!(
+            port.state.lock().expect("lock").never.is_empty(),
+            "später ist kein Opt-out"
+        );
     }
 
     #[tokio::test]

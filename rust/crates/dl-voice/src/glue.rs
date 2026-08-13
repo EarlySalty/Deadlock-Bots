@@ -2954,6 +2954,7 @@ impl crate::pairing::PairingPort for PairingGlue {
             views.push(crate::pairing::LaneView {
                 channel_id,
                 mode: mode.to_string(),
+                owner_id: self.engine.lane_owner(channel_id).await,
                 members,
             });
         }
@@ -2989,6 +2990,11 @@ impl crate::pairing::PairingPort for PairingGlue {
         crate::pairing::set_never_ask_db(&self.pool, user_id).await
     }
 
+    async fn soften_cooldown(&self, user_id: u64, other_user: u64) -> Result<(), String> {
+        crate::pairing::soften_cooldown_db(&self.pool, user_id, other_user, chrono::Utc::now())
+            .await
+    }
+
     async fn load_accept(
         &self,
         pair_key: &str,
@@ -3016,6 +3022,25 @@ impl crate::pairing::PairingPort for PairingGlue {
             .get(&UserId::new(user_id))?
             .channel_id
             .map(|channel_id| channel_id.get())
+    }
+
+    async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .voice_states
+            .iter()
+            .filter(|(_, state)| state.channel_id == Some(ChannelId::new(channel_id)))
+            .filter(|(user_id, _)| {
+                guild
+                    .members
+                    .get(user_id)
+                    .map(|member| !member.user.bot)
+                    .unwrap_or(true)
+            })
+            .map(|(user_id, _)| user_id.get())
+            .collect()
     }
 
     async fn move_member(

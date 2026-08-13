@@ -1631,7 +1631,7 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
         Some(lane_id) => (
             "## <:dl_casual:1522518264088100995> Deine Lane steht".to_string(),
             format!(
-                "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut und dich reingezogen: <#{lane_id}>. Häng dich rein, der Rest hier dauert keine Minute."
+                "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut und dich reingezogen: <#{lane_id}>."
             ),
         ),
         None => (
@@ -1641,12 +1641,8 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
             ),
         ),
     };
-    let closing = "Dein Preset kannst du jederzeit hier ändern.".to_string();
-    let step_two = if lane_id.is_some() {
-        "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** stellt deine Lane direkt auf den gewählten Modus um."
-    } else {
-        "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** baut dir deine Lane im gewählten Modus."
-    };
+    let closing = format!("Dein Preset kannst du jederzeit in <#{ROUTER_TEXT_CHANNEL_ID}> ändern.");
+    let step_two = "### 2. Feinschliff, wenn du magst";
     json!({
         "flags": ROUTER_COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
@@ -1658,7 +1654,7 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": situation },
                 { "type": 14, "divider": true, "spacing": 2 },
-                { "type": 10, "content": "### 1. Was spielst du am liebsten?\nSag es mir einmal, dann merke ich es mir. Ab dem nächsten Join bekommst du sofort eine Lane im richtigen Modus, ganz ohne Nachfrage." },
+                { "type": 10, "content": "### 1. Was spielst du am liebsten?" },
                 { "type": 1, "components": [
                     { "type": 2, "style": 2, "label": "Casual", "custom_id": "tv_prefs_mode_casual", "emoji": { "name": "dl_casual", "id": "1522518264088100995" } },
                     { "type": 2, "style": 2, "label": "Ranked", "custom_id": "tv_prefs_mode_ranked", "emoji": { "name": "dl_ranked", "id": "1522518271306366996" } },
@@ -1938,8 +1934,9 @@ mod tests {
         assert!(text.contains("<#4242>"));
         assert!(text.contains("Deine Lane steht"));
         assert!(text.contains("Was spielst du am liebsten"));
-        // Der Abschluss ist ein Satz, keine Feature-Liste.
-        assert!(text.contains("Preset kannst du jederzeit hier ändern"));
+        // Der Abschluss ist ein Satz mit Link aufs Panel, keine Feature-Liste.
+        assert!(text.contains("Preset kannst du jederzeit in"));
+        assert!(text.contains(&format!("<#{ROUTER_TEXT_CHANNEL_ID}>")));
     }
 
     #[test]

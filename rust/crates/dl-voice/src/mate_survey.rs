@@ -36,6 +36,9 @@ pub const COMMENT_MODAL_ID: &str = "voice_mate_comment";
 pub const COMMENT_FIELD: &str = "comment";
 
 pub const ACCENT_GOLD: u64 = 0xC8A86B;
+/// Server-Emojis im Brand-Look, dieselben wie im Router-Panel.
+pub const EMOJI_RANKED: (&str, &str) = crate::router::ROUTER_EMOJI_RANKED;
+pub const EMOJI_CASUAL: (&str, &str) = crate::router::ROUTER_EMOJI_CASUAL;
 pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
 
 pub const RATING_AGAIN: &str = "again";
@@ -357,6 +360,11 @@ pub fn comment_modal(mate_id: u64) -> ModalSpec {
     }
 }
 
+/// Server-Emoji als Discord-Tag (`<:name:id>`).
+fn emoji_tag((name, id): (&str, &str)) -> String {
+    format!("<:{name}:{id}>")
+}
+
 fn minutes_label(seconds: i64) -> String {
     let minutes = (seconds / 60).max(1);
     if minutes >= 90 {
@@ -379,14 +387,14 @@ pub fn dm_body(mate_id: u64, channel_id: u64, seconds: i64) -> Value {
             "type": 17,
             "accent_color": ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": "## 🎮 Kurz gefragt\n-# Eine Frage, ein Klick. Deine Antwort bleibt beim Team." },
+                { "type": 10, "content": format!("## {} Kurz gefragt", emoji_tag(EMOJI_RANKED)) },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": format!(
-                    "Ihr wart gerade {} zusammen in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nEin Klick genügt, und ich weiß, mit wem es bei dir passt. Danach bringe ich euch eher wieder zusammen. <@{mate_id}> sieht davon nichts, das bleibt unter uns.",
+                    "Ihr wart gerade {} zusammen in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nSagst du Ja, setze ich euch öfter zusammen in eine Lane.\n\n-# Deine Antwort ist privat. <@{mate_id}> erfährt nie, was du hier klickst.",
                     minutes_label(seconds)
                 ) },
                 { "type": 1, "components": [
-                    { "type": 2, "style": 3, "label": "Gerne wieder", "custom_id": rate_custom_id(RATING_AGAIN, mate_id, channel_id, seconds) },
+                    { "type": 2, "style": 3, "label": "Gerne wieder", "custom_id": rate_custom_id(RATING_AGAIN, mate_id, channel_id, seconds), "emoji": { "name": EMOJI_CASUAL.0, "id": EMOJI_CASUAL.1 } },
                     { "type": 2, "style": 2, "label": "War okay", "custom_id": rate_custom_id(RATING_OK, mate_id, channel_id, seconds) },
                     { "type": 2, "style": 4, "label": "Lieber nicht", "custom_id": rate_custom_id(RATING_RATHER_NOT, mate_id, channel_id, seconds) }
                 ]},
@@ -748,6 +756,11 @@ mod tests {
         assert!(text.contains("<#99>"));
         assert!(text.contains("30 Minuten"));
         assert!(text.contains("Würdest du wieder mit"));
+        assert!(
+            text.contains("Deine Antwort ist privat"),
+            "die Vertraulichkeit steht in einer eigenen, betonten Zeile"
+        );
+        assert!(text.contains("dl_ranked"), "Header nutzt die Server-Emojis");
         assert!(text.contains(&rate_custom_id(RATING_AGAIN, 7, 99, 1800)));
         assert!(text.contains(&comment_custom_id(7)));
         assert!(text.contains(&never_custom_id()));
