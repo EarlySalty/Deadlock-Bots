@@ -1629,30 +1629,21 @@ pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
 pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
     let (headline, situation) = match lane_id {
         Some(lane_id) => (
+            "## <:dl_casual:1522518264088100995> Deine Lane steht".to_string(),
             format!(
-                "## <:dl_casual:1522518264088100995> Deine Lane läuft: <#{lane_id}>\n-# Du bist schon drin. Der Rest hier dauert 10 Sekunden."
-            ),
-            format!(
-                "**Was gerade passiert ist**\nDu bist in den <#{ROUTER_VC_ID}> gekommen, und weil der Bot deinen Modus noch nicht kennt, hat er dir eine **Casual**-Lane gebaut und dich direkt reingezogen. Alles richtig gemacht, du liest das hier genau einmal."
+                "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut und dich reingezogen: <#{lane_id}>. Häng dich rein, der Rest hier dauert keine Minute."
             ),
         ),
         None => (
-            "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router\n-# Modus wählen, Fertig klicken, fertig ist deine eigene Lane.".to_string(),
+            "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router".to_string(),
             format!(
-                "**Was gerade passiert ist**\nDu bist in den <#{ROUTER_VC_ID}> gekommen, aber die automatische Lane hat diesmal nicht geklappt. Wähl unten deinen Modus und klick **Fertig**, dann baut der Bot sie dir sofort, solange du in einem Sprachkanal sitzt."
+                "Schön, dass du da bist. Mit der Lane hat es gerade leider nicht geklappt. Sag mir unten, was du spielen willst, und klick auf **Fertig**: dann baue ich sie dir sofort, solange du in einem Sprachkanal sitzt. Einstieg ist immer <#{ROUTER_VC_ID}>."
             ),
         ),
     };
-    let closing = match lane_id {
-        Some(lane_id) => format!(
-            "**Die Lane gehört dir**\n<:dl_rename:1522518272497418250> Umbenennen, <:dl_limit:1522518268345192588> Limit, <:dl_crown:1522518265421631538> Owner, dazu Rang-Gate, Kick und Ban. Alles steuerst du in <#{ROUTER_TEXT_CHANNEL_ID}>, die Buttons wirken immer auf <#{lane_id}>."
-        ),
-        None => format!(
-            "**Die Lane gehört dir**\n<:dl_rename:1522518272497418250> Umbenennen, <:dl_limit:1522518268345192588> Limit, <:dl_crown:1522518265421631538> Owner, dazu Rang-Gate, Kick und Ban. Alles steuerst du jederzeit in <#{ROUTER_TEXT_CHANNEL_ID}>."
-        ),
-    };
+    let closing = "Dein Preset kannst du jederzeit hier ändern.".to_string();
     let step_two = if lane_id.is_some() {
-        "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** stellt deine aktuelle Lane direkt auf den gewählten Modus um."
+        "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** stellt deine Lane direkt auf den gewählten Modus um."
     } else {
         "### 2. Feinschliff, wenn du magst\nName, Limit und Rang für alle künftigen Lanes. Ein Klick auf **Fertig** baut dir deine Lane im gewählten Modus."
     };
@@ -1667,7 +1658,7 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": situation },
                 { "type": 14, "divider": true, "spacing": 2 },
-                { "type": 10, "content": "### 1. Deinen Standardmodus wählen\nDer Bot merkt sich die Wahl. Ab dem nächsten Join in den Router bekommst du sofort und ohne Nachfrage eine Lane im richtigen Modus." },
+                { "type": 10, "content": "### 1. Was spielst du am liebsten?\nSag es mir einmal, dann merke ich es mir. Ab dem nächsten Join bekommst du sofort eine Lane im richtigen Modus, ganz ohne Nachfrage." },
                 { "type": 1, "components": [
                     { "type": 2, "style": 2, "label": "Casual", "custom_id": "tv_prefs_mode_casual", "emoji": { "name": "dl_casual", "id": "1522518264088100995" } },
                     { "type": 2, "style": 2, "label": "Ranked", "custom_id": "tv_prefs_mode_ranked", "emoji": { "name": "dl_ranked", "id": "1522518271306366996" } },
@@ -1945,8 +1936,10 @@ mod tests {
         assert!(text.contains("router_dm_done"));
         // Kernbotschaft: die Lane steht schon, der Standard fehlt noch.
         assert!(text.contains("<#4242>"));
-        assert!(text.contains("Deine Lane läuft"));
-        assert!(text.contains("Standardmodus"));
+        assert!(text.contains("Deine Lane steht"));
+        assert!(text.contains("Was spielst du am liebsten"));
+        // Der Abschluss ist ein Satz, keine Feature-Liste.
+        assert!(text.contains("Preset kannst du jederzeit hier ändern"));
     }
 
     #[test]

@@ -49,15 +49,15 @@ pub const ACCENT_GOLD: u64 = 0xC8A86B;
 pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
 
 pub const WAITING_REPLY: &str =
-    "Alles klar, ich frag den anderen. Wenn er auch will, zieh ich euch zusammen.";
-pub const MOVED_REPLY: &str = "Passt, ihr seid jetzt zusammen in einer Lane. Viel Spaß.";
+    "Stark, ich frag ihn. Sagt er auch Ja, zieh ich euch zusammen und ihr könnt loslegen.";
+pub const MOVED_REPLY: &str = "Ihr seid zusammen in einer Lane. Viel Spaß euch beiden.";
 pub const MOVE_FAILED_REPLY: &str =
     "Das Verschieben hat gerade nicht geklappt. Spring einfach selbst rüber, die Lane steht.";
 pub const GONE_REPLY: &str =
-    "Zu spät, der andere sitzt da nicht mehr. Ich meld mich, wenn wieder jemand allein ist.";
+    "Knapp verpasst, er ist schon weiter. Ich sag dir Bescheid, sobald wieder jemand allein sitzt.";
 pub const NOT_IN_LANE_REPLY: &str =
-    "Du sitzt gerade nicht mehr in deiner Lane. Geh wieder rein, dann klappt es.";
-pub const NO_REPLY: &str = "Alles gut, dann nicht. Ich lass dich in Ruhe zocken.";
+    "Du sitzt gerade nicht mehr in deiner Lane. Spring wieder rein, dann klappt es.";
+pub const NO_REPLY: &str = "Alles gut, dann zockst du in Ruhe für dich. Viel Spaß.";
 pub const NEVER_REPLY: &str =
     "Erledigt, ich frag dich nicht mehr wegen Mitspielern. Über die Mitspieler-Suche findest du trotzdem jederzeit Leute.";
 pub const NEVER_FAILED_REPLY: &str =
@@ -423,15 +423,15 @@ pub fn dm_body(guild_id: u64, seat: &SoloSeat, other: &SoloSeat) -> Value {
             "type": 17,
             "accent_color": ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": "## 🎧 Da sitzt noch jemand allein\n-# Zwei einzelne Lanes, gleicher Modus. Zusammen macht es mehr Spaß." },
+                { "type": 10, "content": "## 🤝 Lust auf Gesellschaft?" },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": format!(
-                    "<@{}> sitzt gerade allein in <#{}>, du in <#{}>, beide auf **{label}**. Soll ich euch zusammenlegen?\n\nIch verschiebe niemanden von allein: erst wenn ihr beide zusagt, geht es los. Sagt der andere ab oder ist er weg, passiert einfach nichts.",
-                    other.user_id, other.channel_id, seat.channel_id
+                    "Du sitzt gerade allein in <#{}>, und ein paar Kanäle weiter geht es <@{}> genauso. Ihr habt beide **{label}** vor. Wäre doch schade, das getrennt zu spielen.\n\nSag einfach Ja, dann frag ich <@{}> auch. Wollt ihr beide, zieh ich euch in eine Lane und ihr könnt loslegen. Will einer nicht, bleibt alles wie es ist und der andere erfährt nichts davon.",
+                    seat.channel_id, other.user_id, other.user_id
                 ) },
                 { "type": 1, "components": [
-                    { "type": 2, "style": 3, "label": "Ja, zusammen zocken", "custom_id": yes_custom_id(guild_id, seat.channel_id, other.channel_id, other.user_id) },
-                    { "type": 2, "style": 2, "label": "Jetzt nicht", "custom_id": no_custom_id(other.user_id) },
+                    { "type": 2, "style": 3, "label": "Ja, gerne", "custom_id": yes_custom_id(guild_id, seat.channel_id, other.channel_id, other.user_id) },
+                    { "type": 2, "style": 2, "label": "Lieber allein", "custom_id": no_custom_id(other.user_id) },
                     { "type": 2, "style": 2, "label": "Nicht mehr fragen", "custom_id": never_custom_id() }
                 ]}
             ]
@@ -692,7 +692,7 @@ mod tests {
             serde_json::to_string(&dm_body(
                 MAIN_GUILD_ID,
                 &seat(1, 1523272810825252944, "casual", now),
-                &seat(2, 1513468587195633674, "casual", now),
+                &seat(2, 1522769149208821881, "casual", now),
             ))
             .expect("json")
         );
@@ -750,10 +750,13 @@ mod tests {
             &seat(20, 200, "casual", now),
         ))
         .expect("json");
-        assert!(text.contains("<#100>"));
-        assert!(text.contains("<#200>"));
+        assert!(text.contains("<#100>"), "die eigene Lane wird benannt");
         assert!(text.contains("<@20>"));
         assert!(text.contains("Casual"));
+        assert!(
+            text.contains("Lust auf Gesellschaft"),
+            "der Vorschlag muss als Einladung lesbar sein"
+        );
         assert!(text.contains(&yes_custom_id(1, 100, 200, 20)));
         assert!(text.contains(&no_custom_id(20)));
         assert!(text.contains(&never_custom_id()));

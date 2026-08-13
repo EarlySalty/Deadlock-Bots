@@ -379,10 +379,10 @@ pub fn dm_body(mate_id: u64, channel_id: u64, seconds: i64) -> Value {
             "type": 17,
             "accent_color": ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": "## 🎮 Kurz gefragt\n-# Eine Frage, ein Klick. Deine Antwort sieht nur das Team." },
+                { "type": 10, "content": "## 🎮 Kurz gefragt\n-# Eine Frage, ein Klick. Deine Antwort bleibt beim Team." },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": format!(
-                    "Du warst gerade {} mit <@{mate_id}> in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nIch nutze das nur dafür, wen ich euch künftig als Mitspieler vorschlage. Dein Mitspieler erfährt nie, was du geklickt hast.",
+                    "Ihr wart gerade {} zusammen in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nEin Klick genügt, und ich weiß, mit wem es bei dir passt. Danach bringe ich euch eher wieder zusammen. <@{mate_id}> sieht davon nichts, das bleibt unter uns.",
                     minutes_label(seconds)
                 ) },
                 { "type": 1, "components": [

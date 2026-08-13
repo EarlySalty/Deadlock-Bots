@@ -2943,8 +2943,11 @@ impl crate::pairing::PairingPort for PairingGlue {
         };
         let mut views = Vec::new();
         for (channel_id, members) in lanes {
-            // Nur echte Router-Lanes: der Einstiegs-VC und Fixkanäle haben
-            // keinen Modus und dürfen nie zusammengelegt werden.
+            // Nur echte Router-Lanes: Einstiegs-VC, Staging und die permanenten
+            // Kanäle dürfen nie als Ziel eines Vorschlags auftauchen.
+            if crate::router::NON_LANE_CHANNEL_IDS.contains(&channel_id) {
+                continue;
+            }
             let Some(mode) = self.engine.lane_mode(channel_id).await else {
                 continue;
             };
