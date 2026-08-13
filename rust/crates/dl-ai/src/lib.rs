@@ -1125,11 +1125,12 @@ pub fn strip_think(text: &str) -> String {
 /// AiScorer für den Streamer-Link-Matcher — Prompt wortgleich zum Original
 /// (temperature 0, JSON-only-System-Prompt).
 ///
-/// Token-Budget: 160 stammt aus der Python-Zeit mit reinen Antwortmodellen.
-/// Reasoning-Modelle (aktuell `deepseek-v4-flash`) verbrauchen das Budget im
-/// Denkteil, die Antwort kommt mit `finish_reason=length` zurück und der
-/// Provider meldet "response truncated (max_tokens)" — jeder zweite Scoring-
-/// Aufruf fiel dadurch auf die Heuristik zurück.
+/// Token-Budget: 160 stammt aus der Python-Zeit. Das aktuelle Modell
+/// (`deepseek-v4-flash`) schreibt eine ausführliche `reason`-Begründung und
+/// braucht für einen Standardfall gemessene 222 Completion-Tokens; bei 160
+/// bricht die Antwort mitten im JSON ab, kommt mit `finish_reason=length`
+/// zurück und der Provider meldet "response truncated (max_tokens)" — der
+/// Aufruf fällt dann auf die reine String-Heuristik zurück.
 pub struct MatcherScorer {
     pub generator: Arc<dyn TextGenerator>,
 }
