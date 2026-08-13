@@ -1630,7 +1630,7 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
     let (headline, situation) = match lane_id {
         Some(_) => (
             "## <:dl_casual:1522518264088100995> Deine Lane steht".to_string(),
-            "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut und dich reingezogen. 🥰".to_string(),
+            "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut. 🥰".to_string(),
         ),
         None => (
             "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router".to_string(),
