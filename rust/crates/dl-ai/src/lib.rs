@@ -1122,8 +1122,14 @@ pub fn strip_think(text: &str) -> String {
 
 // ── Matcher-Scoring (schließt die Phase-3c-Lücke) ──────────────────────────
 
-/// AiScorer für den Streamer-Link-Matcher — Prompt/Parameter wortgleich
-/// zum Original (temperature 0, max 160 Tokens, JSON-only-System-Prompt).
+/// AiScorer für den Streamer-Link-Matcher — Prompt wortgleich zum Original
+/// (temperature 0, JSON-only-System-Prompt).
+///
+/// Token-Budget: 160 stammt aus der Python-Zeit mit reinen Antwortmodellen.
+/// Reasoning-Modelle (aktuell `deepseek-v4-flash`) verbrauchen das Budget im
+/// Denkteil, die Antwort kommt mit `finish_reason=length` zurück und der
+/// Provider meldet "response truncated (max_tokens)" — jeder zweite Scoring-
+/// Aufruf fiel dadurch auf die Heuristik zurück.
 pub struct MatcherScorer {
     pub generator: Arc<dyn TextGenerator>,
 }
@@ -1158,7 +1164,7 @@ score ist die Wahrscheinlichkeit in Prozent. Kein weiterer Text.";
                 prompt,
                 system_prompt: Some(system.to_string()),
                 model: None,
-                max_output_tokens: Some(160),
+                max_output_tokens: Some(DEFAULT_MAX_OUTPUT_TOKENS),
                 reasoning_effort: None,
                 temperature: 0.0,
             })
