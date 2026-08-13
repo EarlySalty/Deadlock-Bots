@@ -2842,6 +2842,208 @@ fn lfg_edit_error_from_serenity(err: serenity::Error) -> crate::lfg_panel::LfgEd
     crate::lfg_panel::LfgEditError::Other(err.to_string())
 }
 
+pub struct MateSurveyGlue {
+    pub adapter: Arc<DiscordAdapter>,
+    pub pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl crate::mate_survey::MateSurveyPort for MateSurveyGlue {
+    async fn claim_ask(
+        &self,
+        rater_id: u64,
+        mate_id: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::mate_survey::AskDecision, String> {
+        crate::mate_survey::claim_ask_db(&self.pool, rater_id, mate_id, now).await
+    }
+
+    async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String> {
+        let body = body
+            .as_object()
+            .ok_or_else(|| "Umfrage-DM ist kein JSON-Objekt".to_string())?;
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(|error| error.to_string())?;
+        self.adapter
+            .send_raw_public(channel.id.get(), body)
+            .await
+            .map(|_| ())
+    }
+
+    async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
+        crate::mate_survey::set_never_ask_db(&self.pool, user_id).await
+    }
+
+    async fn save_rating(&self, rating: &crate::mate_survey::MateRating) -> Result<(), String> {
+        crate::mate_survey::save_rating_db(&self.pool, rating).await
+    }
+
+    async fn attach_comment(
+        &self,
+        rater_id: u64,
+        mate_id: u64,
+        comment: &str,
+    ) -> Result<(), String> {
+        crate::mate_survey::attach_comment_db(&self.pool, rater_id, mate_id, comment).await
+    }
+
+    fn log_decision(&self, user_id: u64, decision: &'static str, reason: &'static str) {
+        tracing::info!(
+            user_id,
+            entscheidung = decision,
+            grund = reason,
+            "Mitspieler-Umfrage-Entscheidung"
+        );
+    }
+}
+
+pub struct PairingGlue {
+    pub adapter: Arc<DiscordAdapter>,
+    pub pool: sqlx::PgPool,
+    pub engine: Arc<crate::tempvoice::TempVoiceEngine>,
+}
+
+#[async_trait::async_trait]
+impl crate::pairing::PairingPort for PairingGlue {
+    async fn lane_views(&self, guild_id: u64) -> Vec<crate::pairing::LaneView> {
+        // Der Cache-Ref ist nicht `Send` und muss vor dem ersten await weg sein.
+        let lanes: Vec<(u64, Vec<u64>)> = {
+            let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+                return Vec::new();
+            };
+            guild
+                .channels
+                .values()
+                .filter(|channel| {
+                    channel.kind == serenity::all::ChannelType::Voice
+                        && channel.parent_id
+                            == Some(ChannelId::new(crate::pairing::LANE_CATEGORY_ID))
+                })
+                .map(|channel| {
+                    let members = guild
+                        .voice_states
+                        .iter()
+                        .filter(|(_, state)| state.channel_id == Some(channel.id))
+                        .filter(|(user_id, _)| {
+                            guild
+                                .members
+                                .get(user_id)
+                                .map(|member| !member.user.bot)
+                                .unwrap_or(true)
+                        })
+                        .map(|(user_id, _)| user_id.get())
+                        .collect();
+                    (channel.id.get(), members)
+                })
+                .collect()
+        };
+        let mut views = Vec::new();
+        for (channel_id, members) in lanes {
+            // Nur echte Router-Lanes: der Einstiegs-VC und Fixkanäle haben
+            // keinen Modus und dürfen nie zusammengelegt werden.
+            let Some(mode) = self.engine.lane_mode(channel_id).await else {
+                continue;
+            };
+            views.push(crate::pairing::LaneView {
+                channel_id,
+                mode: mode.to_string(),
+                members,
+            });
+        }
+        views
+    }
+
+    async fn claim_ask(
+        &self,
+        first: u64,
+        second: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::pairing::AskDecision, String> {
+        crate::pairing::claim_ask_db(&self.pool, first, second, now).await
+    }
+
+    async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String> {
+        let body = body
+            .as_object()
+            .ok_or_else(|| "Pairing-DM ist kein JSON-Objekt".to_string())?;
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(|error| error.to_string())?;
+        self.adapter
+            .send_raw_public(channel.id.get(), body)
+            .await
+            .map(|_| ())
+    }
+
+    async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
+        crate::pairing::set_never_ask_db(&self.pool, user_id).await
+    }
+
+    async fn load_accept(
+        &self,
+        pair_key: &str,
+    ) -> Result<Option<crate::pairing::PendingAccept>, String> {
+        crate::pairing::load_accept_db(&self.pool, pair_key).await
+    }
+
+    async fn save_accept(
+        &self,
+        pair_key: &str,
+        accept: &crate::pairing::PendingAccept,
+    ) -> Result<(), String> {
+        crate::pairing::save_accept_db(&self.pool, pair_key, accept).await
+    }
+
+    async fn clear_accept(&self, pair_key: &str) -> Result<(), String> {
+        crate::pairing::clear_accept_db(&self.pool, pair_key).await
+    }
+
+    async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .voice_states
+            .get(&UserId::new(user_id))?
+            .channel_id
+            .map(|channel_id| channel_id.get())
+    }
+
+    async fn move_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": channel_id.to_string() }),
+                Some("Lane-Pairing: beide haben zugesagt"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn log_decision(&self, user_id: u64, decision: &'static str, reason: &'static str) {
+        tracing::info!(
+            user_id,
+            entscheidung = decision,
+            grund = reason,
+            "Lane-Pairing-Entscheidung"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};

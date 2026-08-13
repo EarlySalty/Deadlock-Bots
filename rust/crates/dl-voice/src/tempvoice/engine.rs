@@ -1346,6 +1346,17 @@ impl TempVoiceEngine {
             .map(|lane| (lane.base_name.clone(), lane.category_id.unwrap_or(0)))
     }
 
+    /// Router-Modus der Lane, sofern sie eine ist (`casual`/`ranked`/
+    /// `street_brawl`). Basis ist die Staging-Quelle, aus der sie entstand.
+    pub async fn lane_mode(&self, channel_id: u64) -> Option<&'static str> {
+        let state = self.state.lock().await;
+        state
+            .lanes
+            .get(&channel_id)
+            .and_then(|lane| lane.source_staging_id)
+            .and_then(mode_for_staging_id)
+    }
+
     pub async fn lane_is_ranked(&self, channel_id: u64) -> bool {
         let state = self.state.lock().await;
         let Some(lane) = state.lanes.get(&channel_id) else {

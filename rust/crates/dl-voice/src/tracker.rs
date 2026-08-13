@@ -161,6 +161,8 @@ pub struct VoiceTracker {
     state: tokio::sync::Mutex<TrackerState>,
     /// Feedback-DM-System (None = aus, wie Original mit VOICE_FEEDBACK_ENABLED=0).
     feedback: tokio::sync::RwLock<Option<Arc<crate::feedback::VoiceFeedback>>>,
+    /// Mitspieler-Umfrage nach gemeinsamen Sessions (None = aus).
+    mate_survey: tokio::sync::RwLock<Option<Arc<crate::mate_survey::MateSurvey>>>,
 }
 
 impl VoiceTracker {
@@ -170,11 +172,16 @@ impl VoiceTracker {
             snapshot,
             state: tokio::sync::Mutex::new(TrackerState::default()),
             feedback: tokio::sync::RwLock::new(None),
+            mate_survey: tokio::sync::RwLock::new(None),
         })
     }
 
     pub async fn set_feedback(&self, feedback: Arc<crate::feedback::VoiceFeedback>) {
         *self.feedback.write().await = Some(feedback);
+    }
+
+    pub async fn set_mate_survey(&self, survey: Arc<crate::mate_survey::MateSurvey>) {
+        *self.mate_survey.write().await = Some(survey);
     }
 
     /// Konfiguration pro Guild aus kv_store (ns voice_cfg) — Default wird
@@ -505,8 +512,10 @@ impl VoiceTracker {
         if let Err(err) = result {
             tracing::error!(%err, user_id = check_user, "Voice-Session-Persistierung fehlgeschlagen");
         }
+        let survey = self.mate_survey.read().await.clone();
         if let Some(feedback) = self.feedback.read().await.clone() {
-            let (guild_id, user_id, channel_id, channel_name, co_player_ids) = feedback_data;
+            let (guild_id, user_id, channel_id, channel_name, co_player_ids) =
+                feedback_data.clone();
             feedback
                 .on_session_end(
                     guild_id,
@@ -517,6 +526,14 @@ impl VoiceTracker {
                     seconds,
                     was_first_session,
                 )
+                .await;
+        }
+        // Mitspieler-Umfrage: eigene Cooldowns, deshalb unabhängig vom
+        // Produkt-Feedback und ohne Bezug zur ersten Session.
+        if let Some(survey) = survey {
+            let (_, user_id, channel_id, _, co_player_ids) = feedback_data;
+            survey
+                .on_session_end(user_id, channel_id, co_player_ids, seconds, Utc::now())
                 .await;
         }
     }

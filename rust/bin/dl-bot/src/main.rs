@@ -801,6 +801,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         },
     );
     dl_voice::router::register(&mut router, lane_router.clone());
+
+    // Lane-Pairing (Doppel-Opt-in): zwei Einzelsitzer werden gefragt, ob sie
+    // zusammen zocken wollen. Kill-Switch: DL_LANE_PAIRING_ENABLED=0.
+    let lane_pairing_enabled = env_bool_default("DL_LANE_PAIRING_ENABLED", true);
+    let lane_pairing = dl_voice::pairing::LanePairing::new(Arc::new(dl_voice::glue::PairingGlue {
+        adapter: adapter.clone(),
+        pool: central_pool.clone(),
+        engine: tempvoice.clone(),
+    }));
+    if lane_pairing_enabled {
+        dl_voice::pairing::register(&mut router, lane_pairing.clone());
+    }
+
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
     router_interface.ensure_panel().await;
@@ -858,6 +871,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
+
+    // Mitspieler-Umfrage nach gemeinsamen Sessions ("Wieder mit XY spielen?").
+    // Kill-Switch: DL_MATE_SURVEY_ENABLED=0.
+    let mate_survey_enabled = env_bool_default("DL_MATE_SURVEY_ENABLED", true);
+    let mate_survey =
+        dl_voice::mate_survey::MateSurvey::new(Arc::new(dl_voice::glue::MateSurveyGlue {
+            adapter: adapter.clone(),
+            pool: central_pool.clone(),
+        }));
+    if mate_survey_enabled {
+        dl_voice::mate_survey::register(&mut router, mate_survey.clone());
+    } else {
+        tracing::warn!("Mitspieler-Umfrage deaktiviert (DL_MATE_SURVEY_ENABLED=0)");
+    }
 
     // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
     // nur die Wellen-Planung läuft hinter dem Opt-in-Flag.
@@ -1454,6 +1481,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(central_pool.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
+        if mate_survey_enabled {
+            voice_tracker.set_mate_survey(mate_survey.clone()).await;
+        }
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
         // Rollen, Guild-Name). Bewusst ohne Admin-Gate (jeder darf abfragen).
@@ -1509,6 +1539,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
         dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());
         dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
+        if lane_pairing_enabled {
+            dl_voice::pairing::spawn(lane_pairing.clone());
+        } else {
+            tracing::warn!("Lane-Pairing deaktiviert (DL_LANE_PAIRING_ENABLED=0)");
+        }
         // Voice-Feedback: Freitext-Antworten auf Feedback-DMs.
         dl_voice::feedback::spawn_dm_responses(
             voice_feedback.clone(),

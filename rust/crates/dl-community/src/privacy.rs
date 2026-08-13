@@ -254,6 +254,23 @@ const USER_TABLES: &[TableSpec] = &[
         "user_id",
         ColumnType::I64,
     ),
+    // Mitspieler-Bewertungen sind für ZWEI Menschen personenbezogen: der
+    // Bewertende und der Bewertete. Beide Seiten löschen, sonst bliebe nach
+    // einem Opt-out die Aussage über die andere Person stehen.
+    TableSpec::new(
+        "voice_mate_ratings",
+        "rater_user_id",
+        "activity.voice_mate_ratings",
+        "rater_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "voice_mate_ratings_as_mate",
+        "mate_user_id",
+        "activity.voice_mate_ratings",
+        "mate_user_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "user_activity_patterns",
         "user_id",
