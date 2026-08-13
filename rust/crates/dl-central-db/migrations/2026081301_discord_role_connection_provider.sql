@@ -11,7 +11,10 @@
 -- passenden Unique-Index mehr und scheitert mit SQLSTATE 42P10 — die bereits
 -- live laufende Steam-Verknuepfung waere in diesem Fenster tot. Deshalb gilt:
 -- Backend-Binary mit Provider-Unterstuetzung bereitlegen, dann migrieren, dann
--- sofort neu starten. Ein Rollback auf das alte Binary ist ohne DB-Rueckbau
+-- sofort neu starten. Achtung: `dl-central-migrate` laeuft bei jedem Deploy
+-- DIESES Repos, der Consumer liegt aber im Repo Website. Ein Deadlock-Bots-Deploy
+-- zieht diese Migration also mit, ohne das Website-Binary zu tauschen — deshalb
+-- gehoert beides in denselben Deploy-Zug. Ein Rollback auf das alte Binary ist ohne DB-Rueckbau
 -- kaputt; sqlx hat keine Down-Migration.
 --
 -- RUECKWEG: rollbacks/2026081301_discord_role_connection_provider_rollback.sql
@@ -63,6 +66,14 @@ ALTER TABLE core.discord_role_connection_sync_state
 ALTER TABLE core.discord_role_connection_sync_state
     ADD CONSTRAINT discord_role_connection_sync_state_provider_check
     CHECK (provider IN ('steam', 'creator'));
+
+-- Falls diese Migration nach einem Rollback erneut laeuft: das Unique, das der
+-- Rueckweg als Ersatz angelegt hat, wird hier weggeraeumt. Sonst traegt die
+-- Tabelle dauerhaft zwei identische Unique-Indizes auf (discord_id, provider).
+ALTER TABLE core.discord_role_connection_tokens
+    DROP CONSTRAINT IF EXISTS discord_role_connection_tokens_discord_provider_key;
+ALTER TABLE core.discord_role_connection_sync_state
+    DROP CONSTRAINT IF EXISTS discord_role_connection_sync_state_discord_provider_key;
 
 -- Primaerschluessel auf (discord_id, provider) umstellen, sofern noch nicht getan.
 DO $$

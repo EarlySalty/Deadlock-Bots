@@ -927,7 +927,9 @@ async fn assert_role_connection_provider_contract(pool: &PgPool) {
         .bind(provider)
         .execute(pool)
         .await
-        .unwrap_or_else(|err| panic!("{provider}-Token muss neben dem anderen stehen koennen: {err}"));
+        .unwrap_or_else(|err| {
+            panic!("{provider}-Token muss neben dem anderen stehen koennen: {err}")
+        });
     }
 
     let providers: Vec<String> = sqlx::query_scalar(
@@ -1091,7 +1093,11 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
              deadlock_rank_name TEXT, deadlock_subrank INTEGER, \
              deadlock_rank_updated_at TIMESTAMPTZ, \
              PRIMARY KEY (discord_id, steam_id))",
-        // Vorzustand aus 2026070330: kein provider, Primaerschluessel allein auf
+        // Vorzustand nach 2026070330, auf die Spalten verkuerzt, die diese
+        // Migration anfasst oder die an ihr haengen (Schluessel, FK, NOT NULL).
+        // Reine Nutzlastspalten der Originaltabelle (invalidation_reason,
+        // last_refresh_at, last_push_at, last_push_error) fehlen absichtlich.
+        // Entscheidend ist: kein provider, Primaerschluessel allein auf
         // discord_id, FK auf meta_users, und der Schluessel unter einem Namen,
         // den die Migration nicht erraten kann.
         "CREATE TABLE core.discord_role_connection_tokens (\
@@ -1249,23 +1255,49 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
 
     // Und jetzt der Rueckweg. Er ist destruktiv und wird im Ernstfall unter
     // Druck ausgefuehrt — ungetestet waere er geraten.
-    sqlx::query(
+    // Beide Tabellen bekommen eine Creator-Zeile, damit DELETE und Sicherung im
+    // Rueckweg auf beiden Seiten wirklich etwas zu tun haben.
+    for statement in [
         "INSERT INTO core.discord_role_connection_tokens \
              (discord_id, provider, access_token, refresh_token, token_type, scope, expires_at) \
          VALUES (9960020, 'creator', '\\x01'::bytea, '\\x01'::bytea, 'Bearer', 'identify', \
                  now() + interval '1 hour')",
-    )
-    .execute(&pool)
-    .await
-    .expect("creator-zeile fuer den rueckweg");
+        "INSERT INTO core.discord_role_connection_sync_state (discord_id, provider, reason) \
+         VALUES (9960020, 'creator', 'creator_reconcile')",
+    ] {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            fehler.push(format!("creator-zeile fuer den rueckweg: {err}"));
+        }
+    }
 
-    if let Err(err) = sqlx::raw_sql(include_str!(
-        "../rollbacks/2026081301_discord_role_connection_provider_rollback.sql"
-    ))
-    .execute(&pool)
+    // Zweimal fahren: im Ernstfall wird ein Rueckweg wiederholt, weil der erste
+    // Lauf in einer anderen Sitzung haengen blieb oder weil zwischenzeitlich ein
+    // Migrator-Lauf dazwischenkam. Ein zweiter Lauf, der an 42P07 stirbt und die
+    // ganze Transaktion mitnimmt, ist um 03:00 kein Rueckweg.
+    for lauf in 1..=2 {
+        if let Err(err) = sqlx::raw_sql(include_str!(
+            "../rollbacks/2026081301_discord_role_connection_provider_rollback.sql"
+        ))
+        .execute(&pool)
+        .await
+        {
+            fehler.push(format!("Rueckweg (Lauf {lauf}): {err}"));
+        }
+    }
+
+    // Der Wiederanwendungsschutz muss stehen bleiben: waere die Zeile weg, wuerde
+    // der naechste Migrator-Lauf den Rollback still aufheben.
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM public._sqlx_migrations WHERE version = 2026081301",
+    )
+    .fetch_one(&pool)
     .await
     {
-        fehler.push(format!("Rueckweg: {err}"));
+        Ok(1) => {}
+        Ok(other) => fehler.push(format!(
+            "die Migrationszeile muss nach dem Rueckweg stehen bleiben, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("_sqlx_migrations nach dem Rueckweg: {err}")),
     }
 
     for tabelle in [
@@ -1302,41 +1334,55 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
     // nutzt ON CONFLICT (discord_id, provider), also muss der Rueckweg ein
     // Unique ueber genau diese Spalten stehen lassen. Sonst ist jeder
     // steam_links-Schreibvorgang ein 42P10 und die Steam-Verknuepfung tot.
-    if let Err(err) = sqlx::query(
-        "UPDATE core.steam_links SET deadlock_rank = 42 WHERE discord_id = 9960020",
-    )
-    .execute(&pool)
-    .await
+    if let Err(err) =
+        sqlx::query("UPDATE core.steam_links SET deadlock_rank = 42 WHERE discord_id = 9960020")
+            .execute(&pool)
+            .await
     {
         fehler.push(format!(
             "nach dem Rueckweg muss der Steam-Link-Trigger weiter schreiben: {err}"
         ));
     }
 
+    // Der zweite Trigger-Zweig: ein Wechsel der Discord-ID stellt zwei Zeilen in
+    // einem INSERT … SELECT ein und haengt am selben Unique.
+    if let Err(err) =
+        sqlx::query("UPDATE core.steam_links SET discord_id = 9960021 WHERE discord_id = 9960020")
+            .execute(&pool)
+            .await
+    {
+        fehler.push(format!(
+            "nach dem Rueckweg muss auch der Reassign-Zweig des Triggers schreiben: {err}"
+        ));
+    }
+
+    for tabelle in [
+        "discord_role_connection_tokens_rollback_backup",
+        "discord_role_connection_sync_state_rollback_backup",
+    ] {
+        match sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM core.{tabelle}"))
+            .fetch_one(&pool)
+            .await
+        {
+            Ok(1) => {}
+            Ok(other) => fehler.push(format!(
+                "{tabelle}: der Rueckweg muss die Creator-Zeile sichern, gefunden: {other}"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: {err}")),
+        }
+    }
+
     match sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM _sqlx_migrations WHERE version = 2026081301",
+        "SELECT count(*) FROM core.discord_role_connection_tokens WHERE provider <> 'steam'",
     )
     .fetch_one(&pool)
     .await
     {
         Ok(0) => {}
         Ok(other) => fehler.push(format!(
-            "der Rueckweg muss die Migrationszeile entfernen, gefunden: {other}"
+            "nach dem Rueckweg darf keine Fremd-Provider-Zeile stehen bleiben, gefunden: {other}"
         )),
-        Err(err) => fehler.push(format!("_sqlx_migrations nach dem Rueckweg: {err}")),
-    }
-
-    match sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM core.discord_role_connection_tokens_rollback_backup",
-    )
-    .fetch_one(&pool)
-    .await
-    {
-        Ok(1) => {}
-        Ok(other) => fehler.push(format!(
-            "der Rueckweg muss die Creator-Zeile sichern, gefunden: {other}"
-        )),
-        Err(err) => fehler.push(format!("Sicherungstabelle: {err}")),
+        Err(err) => fehler.push(format!("Restzeilen nach dem Rueckweg: {err}")),
     }
 
     // Erst aufraeumen, dann urteilen: sonst bleibt bei jedem Fehlschlag eine
@@ -1359,7 +1405,7 @@ async fn pk_spalten(pool: &PgPool, tabelle: &str) -> Vec<String> {
     ))
     .fetch_all(pool)
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|err| panic!("Primaerschluessel von core.{tabelle} lesen: {err}"))
 }
 
 #[tokio::test]

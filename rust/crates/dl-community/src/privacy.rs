@@ -380,6 +380,24 @@ const USER_TABLES: &[TableSpec] = &[
         "discord_id",
         ColumnType::I64,
     ),
+    // Existieren nur, solange ein Rollback von Migration 2026081301 nicht
+    // aufgeraeumt ist (rollbacks/2026081301_..._rollback.sql legt sie an). Sie
+    // tragen verschluesselte OAuth-Tokens, also muss ein Loeschantrag sie
+    // treffen; `relation_exists` ueberspringt sie, wenn es sie nicht gibt.
+    TableSpec::new(
+        "discord_role_connection_tokens_rollback_backup",
+        "user_id",
+        "core.discord_role_connection_tokens_rollback_backup",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "discord_role_connection_sync_state_rollback_backup",
+        "user_id",
+        "core.discord_role_connection_sync_state_rollback_backup",
+        "discord_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "steam_cleanup_poll_state",
         "user_id",
