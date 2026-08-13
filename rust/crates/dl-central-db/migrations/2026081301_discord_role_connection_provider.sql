@@ -12,14 +12,42 @@
 -- live laufende Steam-Verknuepfung waere in diesem Fenster tot. Deshalb gilt:
 -- Backend-Binary mit Provider-Unterstuetzung bereitlegen, dann migrieren, dann
 -- sofort neu starten. Ein Rollback auf das alte Binary ist ohne DB-Rueckbau
--- kaputt; sqlx hat keine Down-Migration. Rueckweg von Hand:
---   ALTER TABLE core.discord_role_connection_tokens
---       DROP CONSTRAINT discord_role_connection_tokens_pkey;
---   DELETE FROM core.discord_role_connection_tokens WHERE provider <> 'steam';
---   ALTER TABLE core.discord_role_connection_tokens
---       ADD CONSTRAINT discord_role_connection_tokens_pkey PRIMARY KEY (discord_id);
--- (analog fuer core.discord_role_connection_sync_state), danach die
--- Migrationszeile aus _sqlx_migrations entfernen.
+-- kaputt; sqlx hat keine Down-Migration.
+--
+-- RUECKWEG VON HAND. Er loescht Daten: alle Creator-OAuth-Tokens sind danach
+-- weg, jeder betroffene Nutzer muss die Creator-App neu autorisieren. Deshalb
+-- zuerst sichern, und zwar in derselben Transaktion, in der auch gedroppt wird.
+-- Drei Dinge muessen zurueck, nicht nur der Schluessel: der Default (sonst
+-- scheitert das alte Binary an 23502 statt an 42P10 — genauso tot), die
+-- Fremdzeilen und der Primaerschluessel. Der Constraint-Name wird gelesen, nicht
+-- geraten; genau dafuer stehen unten die DO-Bloecke.
+--
+--   BEGIN;
+--   CREATE TABLE core.discord_role_connection_tokens_rollback_backup AS
+--       SELECT * FROM core.discord_role_connection_tokens WHERE provider <> 'steam';
+--   CREATE TABLE core.discord_role_connection_sync_state_rollback_backup AS
+--       SELECT * FROM core.discord_role_connection_sync_state WHERE provider <> 'steam';
+--   DO $r$
+--   DECLARE t TEXT; n TEXT;
+--   BEGIN
+--       FOREACH t IN ARRAY ARRAY['discord_role_connection_tokens',
+--                                'discord_role_connection_sync_state'] LOOP
+--           SELECT con.conname INTO n FROM pg_constraint con
+--            WHERE con.conrelid = ('core.' || t)::regclass AND con.contype = 'p';
+--           IF n IS NOT NULL THEN
+--               EXECUTE format('ALTER TABLE core.%I DROP CONSTRAINT %I', t, n);
+--           END IF;
+--           EXECUTE format('DELETE FROM core.%I WHERE provider <> ''steam''', t);
+--           EXECUTE format('ALTER TABLE core.%I ALTER COLUMN provider SET DEFAULT ''steam''', t);
+--           EXECUTE format('ALTER TABLE core.%I ADD CONSTRAINT %I PRIMARY KEY (discord_id)',
+--                          t, t || '_pkey');
+--       END LOOP;
+--   END $r$;
+--   DELETE FROM _sqlx_migrations WHERE version = 2026081301;
+--   COMMIT;
+--
+-- Die Trigger-Funktion unten schreibt `provider` ausdruecklich und laeuft auch
+-- nach diesem Rueckbau weiter (die Spalte bleibt bestehen, nur mit Default).
 
 ALTER TABLE core.discord_role_connection_tokens
     ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'steam';
@@ -109,11 +137,21 @@ BEGIN
 END
 $$;
 
--- Der stuendliche Creator-Abgleich sucht genau diese Zeilen; der neue
--- Primaerschluessel hat provider an zweiter Stelle und hilft dabei nicht.
+-- Der stuendliche Creator-Abgleich sucht genau diese Zeilen und liest daraus nur
+-- die discord_id; der neue Primaerschluessel hat provider an zweiter Stelle und
+-- hilft dabei nicht. Beide Spalten im Index, damit der Sweep index-only laufen
+-- kann statt die Zeilen anzufassen.
 CREATE INDEX IF NOT EXISTS discord_role_connection_tokens_provider_active_idx
-    ON core.discord_role_connection_tokens (provider)
+    ON core.discord_role_connection_tokens (provider, discord_id)
  WHERE active;
+
+-- Die Sync-Tabelle traegt ab jetzt bis zu zwei Zeilen pro User, und jeder
+-- Update-Pfad des Backends filtert zusaetzlich auf provider. Der bestehende
+-- Faelligkeits-Index (pending, next_attempt_at, updated_at) kennt die Spalte
+-- nicht.
+CREATE INDEX IF NOT EXISTS discord_role_connection_sync_provider_pending_idx
+    ON core.discord_role_connection_sync_state (provider, next_attempt_at)
+ WHERE pending;
 
 -- Der Steam-Link-Trigger schreibt ab jetzt ausdruecklich Steam-Sync-Zeilen.
 -- Fuer den Creator-Provider liegen die Quelldaten in der Twitch-Datenbank; dort

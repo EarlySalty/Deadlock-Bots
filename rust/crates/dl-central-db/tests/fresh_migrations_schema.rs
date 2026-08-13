@@ -876,7 +876,7 @@ async fn assert_steam_link_reassign_enqueues_old_and_new_discord_ids(pool: &PgPo
         "SELECT discord_id, pending, reason, provider
            FROM core.discord_role_connection_sync_state
           WHERE discord_id IN ($1, $2)
-          ORDER BY discord_id",
+          ORDER BY discord_id, provider",
     )
     .bind(old_discord_id)
     .bind(new_discord_id)
@@ -940,33 +940,72 @@ async fn assert_role_connection_provider_contract(pool: &PgPool) {
     .expect("provider rows");
     assert_eq!(providers, vec!["creator".to_string(), "steam".to_string()]);
 
-    let fremd = sqlx::query(
-        "INSERT INTO core.discord_role_connection_tokens
-             (discord_id, provider, access_token, refresh_token, token_type, scope,
-              expires_at, active, updated_at)
-         VALUES ($1, 'youtube', '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify',
-                 now() + interval '1 hour', TRUE, now())",
-    )
-    .bind(discord_id)
-    .execute(pool)
-    .await;
-    assert!(
-        fremd.is_err(),
-        "CHECK muss Provider ausserhalb ('steam','creator') ablehnen"
-    );
+    // Beide Negativfaelle auf beiden Tabellen: CHECK und Pflichtfeld existieren
+    // je zweimal, und eine Haelfte kann still verschwinden. Geprueft wird der
+    // SQLSTATE, nicht nur "irgendein Fehler" — ein Tippfehler im Spaltennamen
+    // waere sonst ein gruener Test.
+    for (tabelle, spalten, werte) in [
+        (
+            "core.discord_role_connection_tokens",
+            "(discord_id, provider, access_token, refresh_token, token_type, scope, \
+              expires_at, active, updated_at)",
+            "($1, 'youtube', '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+              now() + interval '1 hour', TRUE, now())",
+        ),
+        (
+            "core.discord_role_connection_sync_state",
+            "(discord_id, provider, pending, reason, attempts, next_attempt_at, updated_at)",
+            "($1, 'youtube', TRUE, 'fremder-provider', 0, now(), now())",
+        ),
+    ] {
+        let fremd = sqlx::query(&format!("INSERT INTO {tabelle} {spalten} VALUES {werte}"))
+            .bind(discord_id)
+            .execute(pool)
+            .await;
+        assert_eq!(
+            fremd
+                .as_ref()
+                .err()
+                .and_then(|err| err.as_database_error())
+                .and_then(|err| err.code())
+                .map(|code| code.to_string())
+                .as_deref(),
+            Some("23514"),
+            "{tabelle}: CHECK muss Provider ausserhalb ('steam','creator') ablehnen"
+        );
+    }
 
-    let ohne_provider = sqlx::query(
-        "INSERT INTO core.discord_role_connection_sync_state
-             (discord_id, pending, reason, attempts, next_attempt_at, updated_at)
-         VALUES ($1, TRUE, 'kein-provider', 0, now(), now())",
-    )
-    .bind(discord_id)
-    .execute(pool)
-    .await;
-    assert!(
-        ohne_provider.is_err(),
-        "ohne provider darf keine Sync-Zeile entstehen — der Backfill-Default ist gedroppt"
-    );
+    for (tabelle, spalten, werte) in [
+        (
+            "core.discord_role_connection_tokens",
+            "(discord_id, access_token, refresh_token, token_type, scope, \
+              expires_at, active, updated_at)",
+            "($1, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+              now() + interval '1 hour', TRUE, now())",
+        ),
+        (
+            "core.discord_role_connection_sync_state",
+            "(discord_id, pending, reason, attempts, next_attempt_at, updated_at)",
+            "($1, TRUE, 'kein-provider', 0, now(), now())",
+        ),
+    ] {
+        let ohne_provider = sqlx::query(&format!("INSERT INTO {tabelle} {spalten} VALUES {werte}"))
+            .bind(discord_id)
+            .execute(pool)
+            .await;
+        assert_eq!(
+            ohne_provider
+                .as_ref()
+                .err()
+                .and_then(|err| err.as_database_error())
+                .and_then(|err| err.code())
+                .map(|code| code.to_string())
+                .as_deref(),
+            Some("23502"),
+            "{tabelle}: ohne provider darf keine Zeile entstehen — der Backfill-Default \
+             ist gedroppt, und NOT NULL muss greifen"
+        );
+    }
 }
 
 async fn migration_row_signature(pool: &PgPool, version: i64, description: &str) -> String {
@@ -1022,6 +1061,125 @@ fn run_migrator(dsn: &str, label: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+#[ignore = "braucht CENTRAL_TEST_DSN; via Test-Skript/CI laufen lassen"]
+async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
+    // Der Vertragstest laeuft gegen eine frische DB und fuehrt damit genau die
+    // Risikologik dieser Migration nie aus: es gibt keine Altzeilen zu
+    // backfillen, keinen alten Primaerschluessel zu ersetzen, und der
+    // Idempotenz-Lauf ueberspringt die Datei per _sqlx_migrations. Dieser Test
+    // baut den Vorzustand nach — bewusst mit einem abweichenden
+    // Constraint-Namen, denn genau dafuer liest die Migration conname aus
+    // pg_constraint statt ihn zu raten.
+    let admin_dsn = test_dsn();
+    let admin = connect_pool(&admin_dsn)
+        .await
+        .expect("connect admin database");
+    let dbname = fresh_db_name();
+    create_fresh_db(&admin, &dbname).await;
+    let db_dsn = swap_db(&admin_dsn, &dbname);
+    let pool = connect_pool(&db_dsn).await.expect("connect fresh database");
+
+    for statement in [
+        "CREATE SCHEMA IF NOT EXISTS core",
+        // Vorzustand: kein provider, Primaerschluessel allein auf discord_id und
+        // unter einem Namen, den die Migration nicht erraten kann.
+        "CREATE TABLE core.discord_role_connection_tokens (\
+             discord_id BIGINT NOT NULL, access_token BYTEA NOT NULL, \
+             refresh_token BYTEA NOT NULL, token_type TEXT NOT NULL, \
+             scope TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, \
+             active BOOLEAN NOT NULL DEFAULT TRUE, \
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             CONSTRAINT drc_tokens_eigener_alter_name PRIMARY KEY (discord_id))",
+        "CREATE TABLE core.discord_role_connection_sync_state (\
+             discord_id BIGINT NOT NULL, pending BOOLEAN NOT NULL DEFAULT TRUE, \
+             reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, \
+             next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             locked_at TIMESTAMPTZ, last_error TEXT, \
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             CONSTRAINT drc_sync_eigener_alter_name PRIMARY KEY (discord_id))",
+        "CREATE INDEX discord_role_connection_sync_due_idx \
+             ON core.discord_role_connection_sync_state (pending, next_attempt_at, updated_at)",
+        "INSERT INTO core.discord_role_connection_tokens \
+             (discord_id, access_token, refresh_token, token_type, scope, expires_at) \
+         VALUES (9960020, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour')",
+        "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason) \
+         VALUES (9960020, 'alt-zeile')",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|err| panic!("vorzustand: {statement} -> {err}"));
+    }
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/2026081301_discord_role_connection_provider.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("Migration muss auf dem alten Schema durchlaufen");
+
+    for tabelle in [
+        "discord_role_connection_tokens",
+        "discord_role_connection_sync_state",
+    ] {
+        let provider: String = sqlx::query_scalar(&format!(
+            "SELECT provider FROM core.{tabelle} WHERE discord_id = 9960020"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|err| panic!("{tabelle}: Altzeile nach dem Backfill: {err}"));
+        assert_eq!(
+            provider, "steam",
+            "{tabelle}: bestehende Zeilen muessen Steam-Zeilen werden"
+        );
+
+        let pk: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT att.attname::text
+               FROM pg_constraint con
+               JOIN pg_attribute att
+                 ON att.attrelid = con.conrelid
+                AND att.attnum = ANY (con.conkey)
+              WHERE con.conrelid = 'core.{tabelle}'::regclass
+                AND con.contype = 'p'
+              ORDER BY att.attname"
+        ))
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_else(|err| panic!("{tabelle}: Primaerschluessel: {err}"));
+        assert_eq!(
+            pk,
+            vec!["discord_id".to_string(), "provider".to_string()],
+            "{tabelle}: der alte Schluessel unter fremdem Namen muss ersetzt worden sein"
+        );
+
+        let default: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT column_default FROM information_schema.columns
+              WHERE table_schema='core' AND table_name='{tabelle}'
+                AND column_name='provider'"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|err| panic!("{tabelle}: Default: {err}"));
+        assert_eq!(
+            default, None,
+            "{tabelle}: der Backfill-Default darf nach dem Aufstieg nicht stehen bleiben"
+        );
+    }
+
+    // Zweiter Lauf derselben Datei: sie muss auf dem eigenen Ergebnis
+    // durchlaufen, sonst reisst jeder Wiederholungslauf des Migrators ab.
+    sqlx::raw_sql(include_str!(
+        "../migrations/2026081301_discord_role_connection_provider.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("Migration muss idempotent sein");
+
+    drop_db(&admin, &dbname).await;
 }
 
 #[tokio::test]
