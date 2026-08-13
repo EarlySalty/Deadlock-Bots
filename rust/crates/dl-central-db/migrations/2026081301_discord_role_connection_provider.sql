@@ -1,0 +1,154 @@
+-- Linked-Role-Provider-Dimension.
+--
+-- Bisher gab es genau eine Discord-Application als Linked-Role-Provider, also
+-- genau eine Token- und eine Sync-Zeile pro Discord-User. Ab jetzt tragen beide
+-- Tabellen zusaetzlich den Provider ('steam' = Steam-/Deadlock-App,
+-- 'creator' = Twitch-Creator-App). Bestehende Zeilen sind Steam-Zeilen.
+
+ALTER TABLE core.discord_role_connection_tokens
+    ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'steam';
+
+ALTER TABLE core.discord_role_connection_sync_state
+    ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'steam';
+
+ALTER TABLE core.discord_role_connection_tokens
+    DROP CONSTRAINT IF EXISTS discord_role_connection_tokens_provider_check;
+ALTER TABLE core.discord_role_connection_tokens
+    ADD CONSTRAINT discord_role_connection_tokens_provider_check
+    CHECK (provider IN ('steam', 'creator'));
+
+ALTER TABLE core.discord_role_connection_sync_state
+    DROP CONSTRAINT IF EXISTS discord_role_connection_sync_state_provider_check;
+ALTER TABLE core.discord_role_connection_sync_state
+    ADD CONSTRAINT discord_role_connection_sync_state_provider_check
+    CHECK (provider IN ('steam', 'creator'));
+
+-- Primaerschluessel auf (discord_id, provider) umstellen, sofern noch nicht getan.
+DO $$
+DECLARE
+    pk_columns TEXT[];
+BEGIN
+    SELECT array_agg(att.attname)
+      INTO pk_columns
+      FROM pg_constraint con
+      JOIN pg_attribute att
+        ON att.attrelid = con.conrelid
+       AND att.attnum = ANY (con.conkey)
+     WHERE con.conrelid = 'core.discord_role_connection_tokens'::regclass
+       AND con.contype = 'p';
+
+    IF pk_columns IS NULL OR NOT ('provider' = ANY (pk_columns)) THEN
+        ALTER TABLE core.discord_role_connection_tokens
+            DROP CONSTRAINT IF EXISTS discord_role_connection_tokens_pkey;
+        ALTER TABLE core.discord_role_connection_tokens
+            ADD CONSTRAINT discord_role_connection_tokens_pkey
+            PRIMARY KEY (discord_id, provider);
+    END IF;
+END
+$$;
+
+DO $$
+DECLARE
+    pk_columns TEXT[];
+BEGIN
+    SELECT array_agg(att.attname)
+      INTO pk_columns
+      FROM pg_constraint con
+      JOIN pg_attribute att
+        ON att.attrelid = con.conrelid
+       AND att.attnum = ANY (con.conkey)
+     WHERE con.conrelid = 'core.discord_role_connection_sync_state'::regclass
+       AND con.contype = 'p';
+
+    IF pk_columns IS NULL OR NOT ('provider' = ANY (pk_columns)) THEN
+        ALTER TABLE core.discord_role_connection_sync_state
+            DROP CONSTRAINT IF EXISTS discord_role_connection_sync_state_pkey;
+        ALTER TABLE core.discord_role_connection_sync_state
+            ADD CONSTRAINT discord_role_connection_sync_state_pkey
+            PRIMARY KEY (discord_id, provider);
+    END IF;
+END
+$$;
+
+-- Der Steam-Link-Trigger schreibt ab jetzt ausdruecklich Steam-Sync-Zeilen.
+-- Fuer den Creator-Provider liegen die Quelldaten in der Twitch-Datenbank; dort
+-- gibt es keinen Trigger, der Twitch-Bot meldet Aenderungen ueber
+-- POST /api/internal/discord-role-connections/sync (enqueue) mit provider=creator.
+CREATE OR REPLACE FUNCTION core.enqueue_discord_role_connection_sync()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    target_discord_id BIGINT;
+    sync_reason TEXT := 'steam_link_changed';
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        target_discord_id := OLD.discord_id;
+        sync_reason := 'steam_link_removed';
+    ELSIF TG_OP = 'UPDATE' AND NEW.discord_id IS DISTINCT FROM OLD.discord_id THEN
+        INSERT INTO core.discord_role_connection_sync_state (
+            discord_id, provider, pending, reason, attempts, next_attempt_at,
+            locked_at, last_error, updated_at
+        )
+        SELECT target.target_discord_id, 'steam', TRUE, target.sync_reason, 0, now(),
+               NULL, NULL, now()
+          FROM (
+              VALUES
+                  (OLD.discord_id, 'steam_link_removed'::TEXT),
+                  (NEW.discord_id, 'steam_link_changed'::TEXT)
+          ) AS target(target_discord_id, sync_reason)
+         WHERE target.target_discord_id IS NOT NULL
+           AND target.target_discord_id <> 0
+        ON CONFLICT (discord_id, provider) DO UPDATE SET
+            pending = TRUE,
+            reason = EXCLUDED.reason,
+            attempts = 0,
+            next_attempt_at = now(),
+            locked_at = NULL,
+            last_error = NULL,
+            updated_at = now();
+
+        RETURN NEW;
+    ELSE
+        target_discord_id := NEW.discord_id;
+        IF TG_OP = 'UPDATE'
+           AND (
+               COALESCE(NEW.deadlock_badge_level, NEW.deadlock_rank, 0)
+                   IS DISTINCT FROM COALESCE(OLD.deadlock_badge_level, OLD.deadlock_rank, 0)
+               OR NEW.deadlock_rank_name IS DISTINCT FROM OLD.deadlock_rank_name
+               OR NEW.deadlock_subrank IS DISTINCT FROM OLD.deadlock_subrank
+               OR NEW.deadlock_rank_updated_at IS DISTINCT FROM OLD.deadlock_rank_updated_at
+           ) THEN
+            sync_reason := 'rank_changed';
+        END IF;
+    END IF;
+
+    IF target_discord_id IS NULL OR target_discord_id = 0 THEN
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    INSERT INTO core.discord_role_connection_sync_state (
+        discord_id, provider, pending, reason, attempts, next_attempt_at,
+        locked_at, last_error, updated_at
+    )
+    VALUES (
+        target_discord_id, 'steam', TRUE, sync_reason, 0, now(), NULL, NULL, now()
+    )
+    ON CONFLICT (discord_id, provider) DO UPDATE SET
+        pending = TRUE,
+        reason = EXCLUDED.reason,
+        attempts = 0,
+        next_attempt_at = now(),
+        locked_at = NULL,
+        last_error = NULL,
+        updated_at = now();
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;

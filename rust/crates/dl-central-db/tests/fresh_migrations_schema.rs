@@ -2239,12 +2239,13 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "last_push_at",
             "last_push_error",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "provider"
         ]
     );
     assert_eq!(
         primary_key_columns(&pool, "discord_role_connection_tokens").await,
-        vec!["discord_id"]
+        vec!["discord_id", "provider"]
     );
     assert_column(
         &pool,
@@ -2298,12 +2299,13 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "locked_at",
             "last_error",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "provider"
         ]
     );
     assert_eq!(
         primary_key_columns(&pool, "discord_role_connection_sync_state").await,
-        vec!["discord_id"]
+        vec!["discord_id", "provider"]
     );
     assert_column(
         &pool,
