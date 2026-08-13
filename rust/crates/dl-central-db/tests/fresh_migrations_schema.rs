@@ -47,10 +47,61 @@ async fn create_fresh_db(admin: &PgPool, dbname: &str) {
         .execute(admin)
         .await
         .ok();
-    sqlx::query(&format!("CREATE DATABASE {dbname}"))
-        .execute(admin)
-        .await
-        .expect("create fresh database");
+    // Mit Wiederholung, aber nur bei genau einem Fehler: laufen zwei Tests dieser
+    // Datei parallel, kollidieren die CREATE-DATABASE-Anweisungen auf template1
+    // (SQLSTATE 55006, "is being accessed by other users"). Das ist ein Rennen der
+    // Testumgebung. Alles andere — fehlendes Recht, falsches DSN, voller
+    // Datentraeger — schlaegt sofort fehl; blind zu wiederholen wuerde einen echten
+    // Fehler in eine Sekunde Wartezeit und dieselbe Meldung verwandeln.
+    let mut letzter_fehler = None;
+    for versuch in 1..=5 {
+        match sqlx::query(&format!("CREATE DATABASE {dbname}"))
+            .execute(admin)
+            .await
+        {
+            Ok(_) => return,
+            Err(err) => {
+                let rennen = err
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::code)
+                    .is_some_and(|code| code == "55006");
+                letzter_fehler = Some(err);
+                if !rennen || versuch == 5 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200 * versuch)).await;
+            }
+        }
+    }
+    panic!(
+        "create fresh database: {}",
+        letzter_fehler.expect("mindestens ein Fehlversuch")
+    );
+}
+
+/// Verbindet und baut den Vorzustand auf. Scheitert etwas davon, wird die
+/// Wegwerf-Datenbank vorher weggeraeumt: ein Panic im Vorzustandsblock liess sie
+/// bisher stehen — genau die Leckage, die der Kommentar am Testende vermeidet.
+async fn vorzustand_aufbauen(
+    admin: &PgPool,
+    dbname: &str,
+    db_dsn: &str,
+    statements: &[&str],
+) -> PgPool {
+    let pool = match connect_pool(db_dsn).await {
+        Ok(pool) => pool,
+        Err(err) => {
+            drop_db(admin, dbname).await;
+            panic!("connect fresh database: {err}");
+        }
+    };
+    for statement in statements {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            drop_db(admin, dbname).await;
+            panic!("vorzustand: {statement} -> {err}");
+        }
+    }
+    pool
 }
 
 async fn drop_db(admin: &PgPool, dbname: &str) {
@@ -869,11 +920,14 @@ async fn assert_steam_link_reassign_enqueues_old_and_new_discord_ids(pool: &PgPo
     .await
     .expect("reassign steam link");
 
-    let rows: Vec<(i64, bool, String)> = sqlx::query_as(
-        "SELECT discord_id, pending, reason
+    // provider mitlesen: der Trigger gehoert ausschliesslich zur Steam-App. Ohne
+    // diese Spalte im SELECT bliebe der Test gruen, selbst wenn er
+    // Creator-Zeilen einstellt.
+    let rows: Vec<(i64, bool, String, String)> = sqlx::query_as(
+        "SELECT discord_id, pending, reason, provider
            FROM core.discord_role_connection_sync_state
           WHERE discord_id IN ($1, $2)
-          ORDER BY discord_id",
+          ORDER BY discord_id, provider",
     )
     .bind(old_discord_id)
     .bind(new_discord_id)
@@ -884,11 +938,199 @@ async fn assert_steam_link_reassign_enqueues_old_and_new_discord_ids(pool: &PgPo
     assert_eq!(
         rows,
         vec![
-            (old_discord_id, true, "steam_link_removed".to_string()),
-            (new_discord_id, true, "steam_link_changed".to_string())
+            (
+                old_discord_id,
+                true,
+                "steam_link_removed".to_string(),
+                "steam".to_string()
+            ),
+            (
+                new_discord_id,
+                true,
+                "steam_link_changed".to_string(),
+                "steam".to_string()
+            )
         ],
         "steam_links.discord_id reassignment enqueues old and new linked-role sync targets"
     );
+}
+
+/// Der eigentliche Vertrag der Provider-Dimension: beide Provider koexistieren
+/// pro Discord-ID, ein Fremdwert wird abgelehnt, und der Provider ist Pflicht
+/// (kein Default, der still Steam-Zeilen erzeugt).
+async fn assert_role_connection_provider_contract(pool: &PgPool) {
+    let discord_id = 9_960_010_i64;
+    sqlx::query("INSERT INTO core.meta_users(id, username, role) VALUES ($1, 'provider-contract', 'user') ON CONFLICT (id) DO NOTHING")
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .expect("seed meta user");
+
+    for provider in ["steam", "creator"] {
+        sqlx::query(
+            "INSERT INTO core.discord_role_connection_tokens
+                 (discord_id, provider, access_token, refresh_token, token_type, scope,
+                  expires_at, active, updated_at)
+             VALUES ($1, $2, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify',
+                     now() + interval '1 hour', TRUE, now())",
+        )
+        .bind(discord_id)
+        .bind(provider)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| {
+            panic!("{provider}-Token muss neben dem anderen stehen koennen: {err}")
+        });
+    }
+
+    let providers: Vec<String> = sqlx::query_scalar(
+        "SELECT provider FROM core.discord_role_connection_tokens
+          WHERE discord_id=$1 ORDER BY provider",
+    )
+    .bind(discord_id)
+    .fetch_all(pool)
+    .await
+    .expect("provider rows");
+    assert_eq!(providers, vec!["creator".to_string(), "steam".to_string()]);
+
+    // Die eigentliche Zusage der Provider-Dimension: der Steam-Link-Trigger
+    // gehoert der Steam-App und darf die Creator-Sync-Zeile nicht anfassen. Ein
+    // ON CONFLICT (discord_id) im Trigger wuerde sie ueberschreiben und dabei
+    // gruen durchlaufen — dieser Block ist die einzige Stelle, die das merkt.
+    for (provider, reason) in [("steam", "alt-steam"), ("creator", "creator_reconcile")] {
+        sqlx::query(
+            "INSERT INTO core.discord_role_connection_sync_state
+                 (discord_id, provider, pending, reason, attempts, next_attempt_at, updated_at)
+             VALUES ($1, $2, FALSE, $3, 7, now(), now())
+             ON CONFLICT (discord_id, provider) DO UPDATE
+                SET pending = FALSE, reason = EXCLUDED.reason, attempts = 7",
+        )
+        .bind(discord_id)
+        .bind(provider)
+        .bind(reason)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("{provider}-Sync-Zeile: {err}"));
+    }
+
+    sqlx::query("INSERT INTO core.users (discord_id) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .expect("core-user fuer den steam-link");
+    sqlx::query("DELETE FROM core.steam_links WHERE discord_id = $1")
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .expect("steam-link vorher raeumen");
+    sqlx::query(
+        "INSERT INTO core.steam_links
+             (discord_id, steam_id, steam_id64, verified, primary_account, updated_at)
+         VALUES ($1, '76561199000009960', 76561199000009960, TRUE, TRUE, now())",
+    )
+    .bind(discord_id)
+    .execute(pool)
+    .await
+    .expect("steam-link fuer den trigger");
+
+    let creator_zeile: (bool, String, i32) = sqlx::query_as(
+        "SELECT pending, reason, attempts FROM core.discord_role_connection_sync_state
+          WHERE discord_id = $1 AND provider = 'creator'",
+    )
+    .bind(discord_id)
+    .fetch_one(pool)
+    .await
+    .expect("creator-sync-zeile nach dem steam-trigger");
+    assert_eq!(
+        creator_zeile,
+        (false, "creator_reconcile".to_string(), 7),
+        "der Steam-Link-Trigger darf die Creator-Sync-Zeile nicht anfassen"
+    );
+
+    let steam_zeile: (bool, String) = sqlx::query_as(
+        "SELECT pending, reason FROM core.discord_role_connection_sync_state
+          WHERE discord_id = $1 AND provider = 'steam'",
+    )
+    .bind(discord_id)
+    .fetch_one(pool)
+    .await
+    .expect("steam-sync-zeile nach dem trigger");
+    assert!(
+        steam_zeile.0,
+        "die Steam-Zeile muss der Trigger dagegen einstellen"
+    );
+    assert!(
+        steam_zeile.1.starts_with("steam_link"),
+        "erwartet einen steam_link-Grund, gefunden {}",
+        steam_zeile.1
+    );
+
+    // Beide Negativfaelle auf beiden Tabellen: CHECK und Pflichtfeld existieren
+    // je zweimal, und eine Haelfte kann still verschwinden. Geprueft wird der
+    // SQLSTATE, nicht nur "irgendein Fehler" — ein Tippfehler im Spaltennamen
+    // waere sonst ein gruener Test.
+    for (tabelle, spalten, werte) in [
+        (
+            "core.discord_role_connection_tokens",
+            "(discord_id, provider, access_token, refresh_token, token_type, scope, \
+              expires_at, active, updated_at)",
+            "($1, 'youtube', '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+              now() + interval '1 hour', TRUE, now())",
+        ),
+        (
+            "core.discord_role_connection_sync_state",
+            "(discord_id, provider, pending, reason, attempts, next_attempt_at, updated_at)",
+            "($1, 'youtube', TRUE, 'fremder-provider', 0, now(), now())",
+        ),
+    ] {
+        let fremd = sqlx::query(&format!("INSERT INTO {tabelle} {spalten} VALUES {werte}"))
+            .bind(discord_id)
+            .execute(pool)
+            .await;
+        assert_eq!(
+            fremd
+                .as_ref()
+                .err()
+                .and_then(|err| err.as_database_error())
+                .and_then(|err| err.code())
+                .map(|code| code.to_string())
+                .as_deref(),
+            Some("23514"),
+            "{tabelle}: CHECK muss Provider ausserhalb ('steam','creator') ablehnen"
+        );
+    }
+
+    for (tabelle, spalten, werte) in [
+        (
+            "core.discord_role_connection_tokens",
+            "(discord_id, access_token, refresh_token, token_type, scope, \
+              expires_at, active, updated_at)",
+            "($1, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+              now() + interval '1 hour', TRUE, now())",
+        ),
+        (
+            "core.discord_role_connection_sync_state",
+            "(discord_id, pending, reason, attempts, next_attempt_at, updated_at)",
+            "($1, TRUE, 'kein-provider', 0, now(), now())",
+        ),
+    ] {
+        let ohne_provider = sqlx::query(&format!("INSERT INTO {tabelle} {spalten} VALUES {werte}"))
+            .bind(discord_id)
+            .execute(pool)
+            .await;
+        assert_eq!(
+            ohne_provider
+                .as_ref()
+                .err()
+                .and_then(|err| err.as_database_error())
+                .and_then(|err| err.code())
+                .map(|code| code.to_string())
+                .as_deref(),
+            Some("23502"),
+            "{tabelle}: ohne provider darf keine Zeile entstehen — der Backfill-Default \
+             ist gedroppt, und NOT NULL muss greifen"
+        );
+    }
 }
 
 async fn migration_row_signature(pool: &PgPool, version: i64, description: &str) -> String {
@@ -944,6 +1186,584 @@ fn run_migrator(dsn: &str, label: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+#[ignore = "braucht CENTRAL_TEST_DSN; via Test-Skript/CI laufen lassen"]
+async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
+    // Der Vertragstest laeuft gegen eine frische DB und fuehrt die Risikologik
+    // dieser Migration deshalb nie aus: es gibt keine Altzeilen zu backfillen,
+    // keinen alten Primaerschluessel zu ersetzen, und der Idempotenz-Lauf
+    // ueberspringt die Datei per _sqlx_migrations. Dieser Test baut den
+    // Vorzustand nach — bewusst mit abweichenden Constraint-Namen, denn genau
+    // dafuer liest die Migration conname aus pg_constraint statt ihn zu raten —
+    // und fuehrt danach den dokumentierten Rueckweg mit aus.
+    let admin_dsn = test_dsn();
+    let admin = connect_pool(&admin_dsn)
+        .await
+        .expect("connect admin database");
+    let dbname = fresh_db_name();
+    create_fresh_db(&admin, &dbname).await;
+    let db_dsn = swap_db(&admin_dsn, &dbname);
+    let pool = vorzustand_aufbauen(
+        &admin,
+        &dbname,
+        &db_dsn,
+        &[
+            "CREATE SCHEMA IF NOT EXISTS core",
+            "CREATE TABLE core.meta_users (id BIGINT PRIMARY KEY, username TEXT NOT NULL)",
+            "CREATE TABLE core.steam_links (\
+             discord_id BIGINT NOT NULL, steam_id BIGINT NOT NULL, \
+             deadlock_badge_level INTEGER, deadlock_rank INTEGER, \
+             deadlock_rank_name TEXT, deadlock_subrank INTEGER, \
+             deadlock_rank_updated_at TIMESTAMPTZ, \
+             PRIMARY KEY (discord_id, steam_id))",
+            // Vorzustand nach 2026070330, auf die Spalten verkuerzt, die diese
+            // Migration anfasst oder die an ihr haengen (Schluessel, FK, NOT NULL).
+            // Reine Nutzlastspalten der Originaltabelle (invalidation_reason,
+            // last_refresh_at, last_push_at, last_push_error) fehlen absichtlich.
+            // Entscheidend ist: kein provider, Primaerschluessel allein auf
+            // discord_id, FK auf meta_users, und der Schluessel unter einem Namen,
+            // den die Migration nicht erraten kann.
+            "CREATE TABLE core.discord_role_connection_tokens (\
+             discord_id BIGINT NOT NULL REFERENCES core.meta_users(id) ON DELETE CASCADE, \
+             access_token BYTEA NOT NULL, refresh_token BYTEA NOT NULL, \
+             token_type TEXT NOT NULL, scope TEXT NOT NULL, \
+             expires_at TIMESTAMPTZ NOT NULL, token_version INTEGER NOT NULL DEFAULT 1, \
+             invalidated_at TIMESTAMPTZ, active BOOLEAN NOT NULL DEFAULT TRUE, \
+             created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             CONSTRAINT drc_tokens_eigener_alter_name PRIMARY KEY (discord_id))",
+            "CREATE TABLE core.discord_role_connection_sync_state (\
+             discord_id BIGINT NOT NULL, pending BOOLEAN NOT NULL DEFAULT TRUE, \
+             reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, \
+             next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             locked_at TIMESTAMPTZ, last_error TEXT, \
+             created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             CONSTRAINT drc_sync_eigener_alter_name PRIMARY KEY (discord_id))",
+            "CREATE INDEX discord_role_connection_sync_due_idx \
+             ON core.discord_role_connection_sync_state (pending, next_attempt_at, updated_at)",
+            "INSERT INTO core.meta_users (id, username) VALUES (9960020, 'aufstieg')",
+            "INSERT INTO core.discord_role_connection_tokens \
+             (discord_id, access_token, refresh_token, token_type, scope, expires_at) \
+         VALUES (9960020, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour')",
+            "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason) \
+         VALUES (9960020, 'alt-zeile')",
+            // Die Buchfuehrung von sqlx: im Ernstfall existiert sie, und der
+            // Rueckweg muss die Zeile ausdruecklich STEHEN lassen (sonst wendet der
+            // naechste Migrator-Lauf die Migration erneut an). Der Rueckweg fasst
+            // _sqlx_migrations heute mit keiner Anweisung an — die Pruefung unten ist
+            // deshalb kein Nachweis ueber den aktuellen Stand, sondern eine Sperre
+            // gegen ein spaeteres, gut gemeintes DELETE.
+            "CREATE TABLE _sqlx_migrations (\
+             version BIGINT PRIMARY KEY, description TEXT NOT NULL, \
+             installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, \
+             execution_time BIGINT NOT NULL)",
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+         VALUES (2026081301, 'discord role connection provider', TRUE, \
+                 '\\x00'::bytea, 1)",
+        ],
+    )
+    .await;
+
+    // Der Trigger auf steam_links kommt aus 2026070330 und wird von dieser
+    // Migration ersetzt. Hier haengt ein kombinierter Trigger statt der drei
+    // produktiven (die auf einzelne Spalten hoeren) — geprueft wird die Funktion
+    // der Trigger-Funktion, nicht die produktive Triggerdefinition. Nach der
+    // Migration und nach dem Rueckweg muss ein steam_links-Schreibvorgang
+    // durchlaufen, sonst ist die Steam-Verknuepfung tot.
+    let mut fehler: Vec<String> = Vec::new();
+
+    if let Err(err) = sqlx::raw_sql(include_str!(
+        "../migrations/2026081301_discord_role_connection_provider.sql"
+    ))
+    .execute(&pool)
+    .await
+    {
+        fehler.push(format!("Migration auf dem alten Schema: {err}"));
+    }
+
+    for statement in [
+        "CREATE TRIGGER discord_role_connection_sync_trigger \
+             AFTER INSERT OR UPDATE OR DELETE ON core.steam_links \
+             FOR EACH ROW EXECUTE FUNCTION core.enqueue_discord_role_connection_sync()",
+        "INSERT INTO core.steam_links (discord_id, steam_id) VALUES (9960020, 77001)",
+    ] {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            fehler.push(format!("nach der Migration: {statement} -> {err}"));
+        }
+    }
+
+    for tabelle in [
+        "discord_role_connection_tokens",
+        "discord_role_connection_sync_state",
+    ] {
+        // Alle Zeilen lesen, nicht eine: eine faelschlich zusaetzlich entstandene
+        // Creator-Zeile bliebe bei fetch_one unentdeckt.
+        match sqlx::query_scalar::<_, String>(&format!(
+            "SELECT provider FROM core.{tabelle} WHERE discord_id = 9960020 ORDER BY provider"
+        ))
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(provider) if provider == vec!["steam".to_string()] => {}
+            Ok(provider) => fehler.push(format!(
+                "{tabelle}: erwartet genau eine Steam-Zeile, gefunden {provider:?}"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Altzeile nach dem Backfill: {err}")),
+        }
+
+        match pk_spalten(&pool, tabelle).await {
+            Ok(pk) if pk == vec!["discord_id".to_string(), "provider".to_string()] => {}
+            Ok(pk) => fehler.push(format!(
+                "{tabelle}: Primaerschluessel ist {pk:?}, erwartet [discord_id, provider] — \
+                 der alte Schluessel unter fremdem Namen wurde nicht ersetzt, oder die \
+                 Spaltenreihenfolge stimmt nicht"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Primaerschluessel lesen: {err}")),
+        }
+
+        match sqlx::query_scalar::<_, Option<String>>(&format!(
+            "SELECT column_default FROM information_schema.columns
+              WHERE table_schema='core' AND table_name='{tabelle}'
+                AND column_name='provider'"
+        ))
+        .fetch_one(&pool)
+        .await
+        {
+            Ok(None) => {}
+            Ok(Some(default)) => fehler.push(format!(
+                "{tabelle}: Backfill-Default {default} steht nach dem Aufstieg noch"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Default: {err}")),
+        }
+
+        match sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT attnotnull FROM pg_attribute
+              WHERE attrelid = 'core.{tabelle}'::regclass AND attname = 'provider'"
+        ))
+        .fetch_one(&pool)
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => fehler.push(format!("{tabelle}: provider ist nullable")),
+            Err(err) => fehler.push(format!("{tabelle}: Nullability: {err}")),
+        }
+    }
+
+    // Die beiden neuen Indizes tragen den Reconcile-Sweep und die
+    // Faelligkeitssuche; ohne Pruefung koennen sie ersatzlos verschwinden.
+    for index in [
+        "discord_role_connection_tokens_provider_active_idx",
+        "discord_role_connection_sync_provider_pending_idx",
+    ] {
+        match sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_indexes WHERE schemaname='core' AND indexname=$1",
+        )
+        .bind(index)
+        .fetch_one(&pool)
+        .await
+        {
+            Ok(1) => {}
+            Ok(other) => fehler.push(format!("Index {index}: {other} Treffer, erwartet 1")),
+            Err(err) => fehler.push(format!("Index {index}: {err}")),
+        }
+    }
+
+    // Zweiter Lauf derselben Datei: sie muss auf dem eigenen Ergebnis
+    // durchlaufen, sonst reisst jeder Wiederholungslauf des Migrators ab.
+    if let Err(err) = sqlx::raw_sql(include_str!(
+        "../migrations/2026081301_discord_role_connection_provider.sql"
+    ))
+    .execute(&pool)
+    .await
+    {
+        fehler.push(format!("zweiter Lauf (Idempotenz): {err}"));
+    }
+
+    // Und jetzt der Rueckweg. Er ist destruktiv und wird im Ernstfall unter
+    // Druck ausgefuehrt — ungetestet waere er geraten.
+    // Beide Tabellen bekommen eine Creator-Zeile, damit DELETE und Sicherung im
+    // Rueckweg auf beiden Seiten wirklich etwas zu tun haben.
+    for statement in [
+        "INSERT INTO core.discord_role_connection_tokens \
+             (discord_id, provider, access_token, refresh_token, token_type, scope, expires_at) \
+         VALUES (9960020, 'creator', '\\x01'::bytea, '\\x01'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour')",
+        "INSERT INTO core.discord_role_connection_sync_state (discord_id, provider, reason) \
+         VALUES (9960020, 'creator', 'creator_reconcile')",
+    ] {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            fehler.push(format!("creator-zeile fuer den rueckweg: {err}"));
+        }
+    }
+
+    // Zweimal fahren: im Ernstfall wird ein Rueckweg wiederholt, weil der erste
+    // Lauf in einer anderen Sitzung haengen blieb oder weil zwischenzeitlich ein
+    // Migrator-Lauf dazwischenkam. Ein zweiter Lauf, der an 42P07 stirbt und die
+    // ganze Transaktion mitnimmt, ist um 03:00 kein Rueckweg.
+    for lauf in 1..=2 {
+        if let Err(err) = sqlx::raw_sql(include_str!(
+            "../rollbacks/2026081301_discord_role_connection_provider_rollback.sql"
+        ))
+        .execute(&pool)
+        .await
+        {
+            fehler.push(format!("Rueckweg (Lauf {lauf}): {err}"));
+        }
+
+        if lauf == 1 {
+            // Das realistische Szenario fuer einen zweiten Rueckweg: jemand hat
+            // zwischendurch wieder vorwaerts migriert (die Zeile in
+            // _sqlx_migrations steht, aber die Datei laesst sich von Hand fahren),
+            // neue Creator-Zeilen sind entstanden. Der zweite Lauf muss sie
+            // loeschen UND sichern — sonst ueberschreibt das alte Binary sie
+            // spaeter per ON CONFLICT (discord_id) DO UPDATE mit Steam-Daten.
+            if let Err(err) = sqlx::raw_sql(include_str!(
+                "../migrations/2026081301_discord_role_connection_provider.sql"
+            ))
+            .execute(&pool)
+            .await
+            {
+                fehler.push(format!("Vorwaertslauf zwischen den Rueckwegen: {err}"));
+            }
+            for statement in [
+                "INSERT INTO core.discord_role_connection_tokens \
+                     (discord_id, provider, access_token, refresh_token, token_type, scope, \
+                      expires_at) \
+                 VALUES (9960020, 'creator', '\\x02'::bytea, '\\x02'::bytea, 'Bearer', \
+                         'identify', now() + interval '1 hour')",
+                "INSERT INTO core.discord_role_connection_sync_state \
+                     (discord_id, provider, reason) \
+                 VALUES (9960020, 'creator', 'creator_reconcile_nach_rollback')",
+            ] {
+                if let Err(err) = sqlx::query(statement).execute(&pool).await {
+                    fehler.push(format!("Zwischenzeile nach Lauf 1: {err}"));
+                }
+            }
+        }
+    }
+
+    // Der Wiederanwendungsschutz muss stehen bleiben: waere die Zeile weg, wuerde
+    // der naechste Migrator-Lauf den Rollback still aufheben.
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM public._sqlx_migrations WHERE version = 2026081301",
+    )
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(1) => {}
+        Ok(other) => fehler.push(format!(
+            "die Migrationszeile muss nach dem Rueckweg stehen bleiben, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("_sqlx_migrations nach dem Rueckweg: {err}")),
+    }
+
+    for tabelle in [
+        "discord_role_connection_tokens",
+        "discord_role_connection_sync_state",
+    ] {
+        match pk_spalten(&pool, tabelle).await {
+            Ok(pk) if pk == vec!["discord_id".to_string()] => {}
+            Ok(pk) => fehler.push(format!(
+                "{tabelle}: nach dem Rueckweg ist der Primaerschluessel {pk:?}, \
+                 erwartet [discord_id]"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Primaerschluessel lesen: {err}")),
+        }
+    }
+
+    // Das eigentliche Versprechen des Rueckwegs: das alte Binary kann wieder
+    // schreiben. Es nennt provider in keinem INSERT (Default muss zurueck sein)
+    // und nutzt ON CONFLICT (discord_id) (Primaerschluessel muss passen).
+    if let Err(err) = sqlx::query(
+        "INSERT INTO core.discord_role_connection_sync_state \
+             (discord_id, pending, reason, attempts, next_attempt_at, updated_at) \
+         VALUES (9960020, TRUE, 'alt-binary', 0, now(), now()) \
+         ON CONFLICT (discord_id) DO UPDATE SET reason='alt-binary', updated_at=now()",
+    )
+    .execute(&pool)
+    .await
+    {
+        fehler.push(format!(
+            "nach dem Rueckweg muss das alte Binary wieder schreiben koennen: {err}"
+        ));
+    }
+
+    // Und der Trigger, den diese Migration installiert hat, laeuft weiter: er
+    // nutzt ON CONFLICT (discord_id, provider), also muss der Rueckweg ein
+    // Unique ueber genau diese Spalten stehen lassen. Sonst ist jeder
+    // steam_links-Schreibvorgang ein 42P10 und die Steam-Verknuepfung tot.
+    if let Err(err) =
+        sqlx::query("UPDATE core.steam_links SET deadlock_rank = 42 WHERE discord_id = 9960020")
+            .execute(&pool)
+            .await
+    {
+        fehler.push(format!(
+            "nach dem Rueckweg muss der Steam-Link-Trigger weiter schreiben: {err}"
+        ));
+    }
+
+    // Der zweite Trigger-Zweig: ein Wechsel der Discord-ID stellt zwei Zeilen in
+    // einem INSERT … SELECT ein und haengt am selben Unique.
+    if let Err(err) =
+        sqlx::query("UPDATE core.steam_links SET discord_id = 9960021 WHERE discord_id = 9960020")
+            .execute(&pool)
+            .await
+    {
+        fehler.push(format!(
+            "nach dem Rueckweg muss auch der Reassign-Zweig des Triggers schreiben: {err}"
+        ));
+    }
+
+    for tabelle in [
+        "discord_role_connection_tokens_rollback_backup",
+        "discord_role_connection_sync_state_rollback_backup",
+    ] {
+        match sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM core.{tabelle}"))
+            .fetch_one(&pool)
+            .await
+        {
+            Ok(2) => {}
+            Ok(other) => fehler.push(format!(
+                "{tabelle}: der Rueckweg muss beide Creator-Zeilen sichern (die vor Lauf 1 \
+                 und die zwischen den Laeufen entstandene), gefunden: {other}"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: {err}")),
+        }
+    }
+
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM core.discord_role_connection_tokens WHERE provider <> 'steam'",
+    )
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(0) => {}
+        Ok(other) => fehler.push(format!(
+            "nach dem Rueckweg darf keine Fremd-Provider-Zeile stehen bleiben, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("Restzeilen nach dem Rueckweg: {err}")),
+    }
+
+    // Der zweite Weg, auf dem eine Fremd-Provider-Zeile ueberlebt: eine
+    // Discord-ID, die gar keine Steam-Zeile hat. Bei PK (discord_id) passt sie
+    // problemlos hinein, und ein Rueckweg, der nur im PK-Tausch-Zweig loescht,
+    // laesst sie stehen — das alte Binary ueberschreibt sie spaeter per
+    // ON CONFLICT (discord_id) DO UPDATE mit Steam-Daten.
+    for statement in [
+        "INSERT INTO core.meta_users (id, username) VALUES (9960023, 'nur-creator')",
+        "INSERT INTO core.discord_role_connection_tokens \
+             (discord_id, provider, access_token, refresh_token, token_type, scope, expires_at) \
+         VALUES (9960023, 'creator', '\\x03'::bytea, '\\x03'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour')",
+    ] {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            fehler.push(format!("Creator-Zeile ohne Steam-Zeile: {err}"));
+        }
+    }
+
+    if let Err(err) = sqlx::raw_sql(include_str!(
+        "../rollbacks/2026081301_discord_role_connection_provider_rollback.sql"
+    ))
+    .execute(&pool)
+    .await
+    {
+        fehler.push(format!("Rueckweg (Lauf 3, ohne PK-Tausch): {err}"));
+    }
+
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM core.discord_role_connection_tokens WHERE discord_id = 9960023",
+    )
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(0) => {}
+        Ok(other) => fehler.push(format!(
+            "eine Creator-Zeile ohne Steam-Zeile muss der Rueckweg auch ohne PK-Tausch \
+             loeschen, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("Creator-Zeile ohne Steam-Zeile nachher: {err}")),
+    }
+
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM core.discord_role_connection_tokens_rollback_backup \
+          WHERE discord_id = 9960023",
+    )
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(1) => {}
+        Ok(other) => fehler.push(format!(
+            "und sie muss dabei gesichert werden, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("Sicherung der Zeile ohne Steam-Zeile: {err}")),
+    }
+
+    // Erst aufraeumen, dann urteilen: sonst bleibt bei jedem Fehlschlag eine
+    // Wegwerf-Datenbank stehen.
+    drop_db(&admin, &dbname).await;
+    assert!(fehler.is_empty(), "{}", fehler.join("\n"));
+}
+
+#[tokio::test]
+#[ignore = "braucht CENTRAL_TEST_DSN; via Test-Skript/CI laufen lassen"]
+async fn provider_migration_zieht_eine_handgepatchte_nullable_spalte_nach() {
+    // Der zweite Vorzustand, den die Migration ausdruecklich abfaengt: provider
+    // existiert schon, aber nullable und mit NULL-Zeilen — von Hand angelegt, um
+    // ein Backend zu retten. `ADD COLUMN IF NOT EXISTS` ueberspringt die Spalte
+    // dann still; nur Backfill und SET NOT NULL machen den Pflichtfeld-Vertrag
+    // gueltig, und die Reihenfolge ist nicht tauschbar (SET NOT NULL vor dem
+    // Backfill scheitert an 23502, der PK-Tausch danach an einer nullable Spalte).
+    let admin_dsn = test_dsn();
+    let admin = connect_pool(&admin_dsn)
+        .await
+        .expect("connect admin database");
+    let dbname = fresh_db_name();
+    create_fresh_db(&admin, &dbname).await;
+    let db_dsn = swap_db(&admin_dsn, &dbname);
+    let pool = vorzustand_aufbauen(
+        &admin,
+        &dbname,
+        &db_dsn,
+        &[
+            "CREATE SCHEMA IF NOT EXISTS core",
+            "CREATE TABLE core.meta_users (id BIGINT PRIMARY KEY, username TEXT NOT NULL)",
+            "CREATE TABLE core.steam_links (\
+             discord_id BIGINT NOT NULL, steam_id BIGINT NOT NULL, \
+             PRIMARY KEY (discord_id, steam_id))",
+            "CREATE TABLE core.discord_role_connection_tokens (\
+             discord_id BIGINT NOT NULL REFERENCES core.meta_users(id) ON DELETE CASCADE, \
+             access_token BYTEA NOT NULL, refresh_token BYTEA NOT NULL, \
+             token_type TEXT NOT NULL, scope TEXT NOT NULL, \
+             expires_at TIMESTAMPTZ NOT NULL, token_version INTEGER NOT NULL DEFAULT 1, \
+             invalidated_at TIMESTAMPTZ, active BOOLEAN NOT NULL DEFAULT TRUE, \
+             created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             provider TEXT, \
+             PRIMARY KEY (discord_id))",
+            "CREATE TABLE core.discord_role_connection_sync_state (\
+             discord_id BIGINT NOT NULL, pending BOOLEAN NOT NULL DEFAULT TRUE, \
+             reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, \
+             next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             locked_at TIMESTAMPTZ, last_error TEXT, \
+             created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+             provider TEXT, \
+             PRIMARY KEY (discord_id))",
+            "INSERT INTO core.meta_users (id, username) VALUES (9960030, 'ohne-provider'), \
+             (9960031, 'mit-creator')",
+            // Eine Zeile ohne Provider und eine, die schon 'creator' traegt: ein
+            // Backfill ohne `WHERE provider IS NULL` wuerde die zweite zur Steam-Zeile
+            // umschreiben und damit ein Creator-Token unter falschem Provider fuehren.
+            "INSERT INTO core.discord_role_connection_tokens \
+             (discord_id, access_token, refresh_token, token_type, scope, expires_at, provider) \
+         VALUES (9960030, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour', NULL), \
+                (9960031, '\\x01'::bytea, '\\x01'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour', 'creator')",
+            "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason, provider) \
+         VALUES (9960030, 'alt-zeile', NULL), (9960031, 'creator_reconcile', 'creator')",
+        ],
+    )
+    .await;
+
+    let mut fehler: Vec<String> = Vec::new();
+
+    if let Err(err) = sqlx::raw_sql(include_str!(
+        "../migrations/2026081301_discord_role_connection_provider.sql"
+    ))
+    .execute(&pool)
+    .await
+    {
+        fehler.push(format!("Migration auf der nullable Spalte: {err}"));
+    }
+
+    for tabelle in [
+        "discord_role_connection_tokens",
+        "discord_role_connection_sync_state",
+    ] {
+        match sqlx::query_scalar::<_, String>(&format!(
+            "SELECT COALESCE(provider, '<null>') FROM core.{tabelle} \
+              ORDER BY discord_id"
+        ))
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(provider) if provider == vec!["steam".to_string(), "creator".to_string()] => {}
+            Ok(provider) => fehler.push(format!(
+                "{tabelle}: erwartet [steam, creator] nach dem Backfill, gefunden {provider:?}"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Provider nach dem Backfill: {err}")),
+        }
+
+        match sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT attnotnull FROM pg_attribute
+              WHERE attrelid = 'core.{tabelle}'::regclass AND attname = 'provider'"
+        ))
+        .fetch_one(&pool)
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => fehler.push(format!(
+                "{tabelle}: provider blieb nullable — die handgepatchte Spalte wurde nicht \
+                 nachgezogen"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Nullability: {err}")),
+        }
+
+        match sqlx::query_scalar::<_, Option<String>>(&format!(
+            "SELECT column_default FROM information_schema.columns
+              WHERE table_schema='core' AND table_name='{tabelle}'
+                AND column_name='provider'"
+        ))
+        .fetch_one(&pool)
+        .await
+        {
+            Ok(None) => {}
+            Ok(Some(default)) => fehler.push(format!(
+                "{tabelle}: Backfill-Default {default} steht noch — jedes INSERT ohne provider \
+                 wuerde still eine Steam-Zeile erzeugen"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Default: {err}")),
+        }
+
+        match pk_spalten(&pool, tabelle).await {
+            Ok(pk) if pk == vec!["discord_id".to_string(), "provider".to_string()] => {}
+            Ok(pk) => fehler.push(format!("{tabelle}: Primaerschluessel ist {pk:?}")),
+            Err(err) => fehler.push(format!("{tabelle}: Primaerschluessel lesen: {err}")),
+        }
+    }
+
+    drop_db(&admin, &dbname).await;
+    assert!(fehler.is_empty(), "{}", fehler.join("\n"));
+}
+
+/// Spaltennamen des Primaerschluessels in der Reihenfolge des Schluessels.
+///
+/// Die Reihenfolge ist der Punkt: `(provider, discord_id)` traegt dieselben
+/// Namen wie `(discord_id, provider)`, hilft aber keinem `WHERE discord_id = $1`.
+/// Deshalb ueber die Position in `conkey` sortiert und nicht alphabetisch. Fehler
+/// werden zurueckgegeben statt geworfen, damit der Aufrufer die Wegwerf-Datenbank
+/// noch aufraeumen kann.
+async fn pk_spalten(pool: &PgPool, tabelle: &str) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(&format!(
+        "SELECT att.attname::text
+           FROM pg_constraint con
+           JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+           JOIN pg_attribute att
+             ON att.attrelid = con.conrelid
+            AND att.attnum = k.attnum
+          WHERE con.conrelid = 'core.{tabelle}'::regclass
+            AND con.contype = 'p'
+          ORDER BY k.ord"
+    ))
+    .fetch_all(pool)
+    .await
 }
 
 #[tokio::test]
@@ -1052,6 +1872,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070330, "discord role connections").await;
     let migration_2026070335_signature_after_first =
         migration_row_signature(&pool, 2026070335, "lfg post ids").await;
+    // Die Provider-Migration ist auf der Produktions-DB schon angewendet: aendert
+    // sich ihre Pruefsumme, bricht dort der naechste Migrator-Lauf ab, nicht der
+    // Test. Deshalb steht ihre Zeile hier mit in der Signaturpruefung.
+    let migration_2026081301_signature_after_first =
+        migration_row_signature(&pool, 2026081301, "discord role connection provider").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -1156,6 +1981,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070335, "lfg post ids").await,
         migration_2026070335_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070335"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026081301, "discord role connection provider").await,
+        migration_2026081301_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026081301"
     );
 
     let schema_count = scalar_i64(
@@ -1903,6 +2733,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "linked-role sync update trigger must fire on discord_id changes"
     );
     assert_steam_link_reassign_enqueues_old_and_new_discord_ids(&pool).await;
+    assert_role_connection_provider_contract(&pool).await;
 
     assert_eq!(
         trigger_names(&pool, "users").await,
