@@ -14,46 +14,32 @@
 -- sofort neu starten. Ein Rollback auf das alte Binary ist ohne DB-Rueckbau
 -- kaputt; sqlx hat keine Down-Migration.
 --
--- RUECKWEG VON HAND. Er loescht Daten: alle Creator-OAuth-Tokens sind danach
--- weg, jeder betroffene Nutzer muss die Creator-App neu autorisieren. Deshalb
--- zuerst sichern, und zwar in derselben Transaktion, in der auch gedroppt wird.
--- Drei Dinge muessen zurueck, nicht nur der Schluessel: der Default (sonst
--- scheitert das alte Binary an 23502 statt an 42P10 — genauso tot), die
--- Fremdzeilen und der Primaerschluessel. Der Constraint-Name wird gelesen, nicht
--- geraten; genau dafuer stehen unten die DO-Bloecke.
---
---   BEGIN;
---   CREATE TABLE core.discord_role_connection_tokens_rollback_backup AS
---       SELECT * FROM core.discord_role_connection_tokens WHERE provider <> 'steam';
---   CREATE TABLE core.discord_role_connection_sync_state_rollback_backup AS
---       SELECT * FROM core.discord_role_connection_sync_state WHERE provider <> 'steam';
---   DO $r$
---   DECLARE t TEXT; n TEXT;
---   BEGIN
---       FOREACH t IN ARRAY ARRAY['discord_role_connection_tokens',
---                                'discord_role_connection_sync_state'] LOOP
---           SELECT con.conname INTO n FROM pg_constraint con
---            WHERE con.conrelid = ('core.' || t)::regclass AND con.contype = 'p';
---           IF n IS NOT NULL THEN
---               EXECUTE format('ALTER TABLE core.%I DROP CONSTRAINT %I', t, n);
---           END IF;
---           EXECUTE format('DELETE FROM core.%I WHERE provider <> ''steam''', t);
---           EXECUTE format('ALTER TABLE core.%I ALTER COLUMN provider SET DEFAULT ''steam''', t);
---           EXECUTE format('ALTER TABLE core.%I ADD CONSTRAINT %I PRIMARY KEY (discord_id)',
---                          t, t || '_pkey');
---       END LOOP;
---   END $r$;
---   DELETE FROM _sqlx_migrations WHERE version = 2026081301;
---   COMMIT;
---
--- Die Trigger-Funktion unten schreibt `provider` ausdruecklich und laeuft auch
--- nach diesem Rueckbau weiter (die Spalte bleibt bestehen, nur mit Default).
+-- RUECKWEG: rollbacks/2026081301_discord_role_connection_provider_rollback.sql
+-- im selben Crate. Er liegt als ausfuehrbare Datei dort und nicht als Kommentar
+-- hier, weil tests/fresh_migrations_schema.rs ihn mitfaehrt — ein Rueckweg, der
+-- nie laeuft, ist nicht getestet, sondern geraten. Er loescht Daten (alle
+-- Creator-OAuth-Tokens) und sichert sie vorher; Einzelheiten stehen im Kopf der
+-- Datei.
 
 ALTER TABLE core.discord_role_connection_tokens
     ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'steam';
 
 ALTER TABLE core.discord_role_connection_sync_state
     ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'steam';
+
+-- ADD COLUMN IF NOT EXISTS ueberspringt still, wenn die Spalte schon existiert —
+-- in einer handgepatchten Umgebung womoeglich als nullable. Dann waere der ganze
+-- Pflichtfeld-Vertrag dort nicht gueltig, und der Start-Guard des Backends prueft
+-- nur Spalte und Unique-Key. Deshalb Nullability ausdruecklich nachziehen; die
+-- Backfill-Zuweisung davor stellt sicher, dass das gelingt.
+UPDATE core.discord_role_connection_tokens SET provider = 'steam' WHERE provider IS NULL;
+UPDATE core.discord_role_connection_sync_state SET provider = 'steam' WHERE provider IS NULL;
+
+ALTER TABLE core.discord_role_connection_tokens
+    ALTER COLUMN provider SET NOT NULL;
+
+ALTER TABLE core.discord_role_connection_sync_state
+    ALTER COLUMN provider SET NOT NULL;
 
 -- Der Default hat nur die bestehenden Zeilen als Steam-Zeilen markiert. Bleibt er
 -- stehen, erzeugt jedes INSERT, das provider vergisst, still eine Steam-Zeile —
