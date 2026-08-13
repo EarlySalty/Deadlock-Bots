@@ -72,8 +72,11 @@ $$;
 
 -- Der Steam-Link-Trigger schreibt ab jetzt ausdruecklich Steam-Sync-Zeilen.
 -- Fuer den Creator-Provider liegen die Quelldaten in der Twitch-Datenbank; dort
--- gibt es keinen Trigger, der Twitch-Bot meldet Aenderungen ueber
--- POST /api/internal/discord-role-connections/sync (enqueue) mit provider=creator.
+-- gibt es keinen Trigger. Diese Zeilen stellt der Sync-Worker des Website-Backends
+-- selbst ein (Reason 'creator_reconcile', Abstand
+-- DISCORD_ROLE_CONNECTION_CREATOR_RECONCILE_SECONDS, Standard eine Stunde).
+-- Zusaetzlich kann jeder Dienst POST /api/internal/discord-role-connections/sync
+-- mit provider=creator und enqueue=true aufrufen, um sofort abzugleichen.
 CREATE OR REPLACE FUNCTION core.enqueue_discord_role_connection_sync()
 RETURNS trigger
 LANGUAGE plpgsql
