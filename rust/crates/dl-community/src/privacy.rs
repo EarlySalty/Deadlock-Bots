@@ -384,6 +384,12 @@ const USER_TABLES: &[TableSpec] = &[
     // aufgeraeumt ist (rollbacks/2026081301_..._rollback.sql legt sie an). Sie
     // tragen verschluesselte OAuth-Tokens, also muss ein Loeschantrag sie
     // treffen; `relation_exists` ueberspringt sie, wenn es sie nicht gibt.
+    //
+    // Dieselbe Konstante treibt den Auskunftspfad (`select_rows_lookup`, SELECT *):
+    // nach einem Rollback gibt eine Datenauskunft die verschluesselten Tokens ein
+    // zweites Mal heraus. Das ist gewollt und deckungsgleich mit der Live-Tabelle,
+    // die dort seit 2026070330 drinsteht — die Kopie darf nur nicht die Luecke
+    // sein, durch die Daten dem Antrag entgehen.
     TableSpec::new(
         "discord_role_connection_tokens_rollback_backup",
         "user_id",
@@ -1496,6 +1502,10 @@ const ROLE_CONNECTION_ROLLBACK_BACKUP_RELS: [&str; 2] = [
     "core.discord_role_connection_tokens_rollback_backup",
     "core.discord_role_connection_sync_state_rollback_backup",
 ];
+/// Spalte, an der die Aufbewahrungsfrist der Kopien haengt. Steht hier einmal,
+/// damit der Name im SQL nicht dreimal ausgeschrieben wird — und weil ein Test
+/// ihn gegen die Rueckweg-Datei haelt.
+const ROLE_CONNECTION_ROLLBACK_EXPIRY_COL: &str = "rollback_expires_at";
 const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
 
 #[derive(Debug, Default, Clone)]
@@ -3376,24 +3386,41 @@ pub async fn purge_expired_server_sync_rollback_exports(
 pub async fn purge_expired_role_connection_rollback_backups(
     pool: &PgPool,
     now: chrono::DateTime<chrono::Utc>,
-) -> CommunityDbResult<Vec<(&'static str, i64)>> {
-    let mut deleted = Vec::new();
+) -> Vec<(&'static str, CommunityDbResult<i64>)> {
+    let mut ergebnisse = Vec::new();
     for relation in ROLE_CONNECTION_ROLLBACK_BACKUP_RELS {
-        if !relation_exists(pool, relation).await? {
-            continue;
+        // Kein `?` ueber die Schleife: bricht die erste Tabelle ab, muss die
+        // zweite trotzdem geraeumt werden. Sonst waechst die eine Halde weiter,
+        // waehrend ein einziger warn! nur von "der Retention" spricht.
+        match purge_expired_role_connection_rollback_backup(pool, relation, now).await {
+            Ok(None) => {}
+            Ok(Some(count)) => ergebnisse.push((relation, Ok(count))),
+            Err(err) => ergebnisse.push((relation, Err(err))),
         }
-        // `rollback_expires_at`, nicht `expires_at`: letzteres traegt in der
-        // Tokens-Kopie den OAuth-Ablauf des Tokens und wuerde die Sicherung
-        // binnen Tagen loeschen.
-        let result = sqlx::query(&format!(
-            "DELETE FROM {relation} WHERE rollback_expires_at <= $1"
-        ))
-        .bind(now)
-        .execute(pool)
-        .await?;
-        deleted.push((relation, rows_to_i64(result.rows_affected())));
     }
-    Ok(deleted)
+    ergebnisse
+}
+
+/// `Ok(None)`, wenn die Tabelle nicht existiert — der Normalbetrieb.
+async fn purge_expired_role_connection_rollback_backup(
+    pool: &PgPool,
+    relation: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CommunityDbResult<Option<i64>> {
+    if !relation_exists(pool, relation).await? {
+        return Ok(None);
+    }
+    // `rollback_expires_at`, nicht `expires_at`: letzteres traegt in der
+    // Tokens-Kopie den OAuth-Ablauf des Tokens und wuerde die Sicherung
+    // binnen Tagen loeschen. Der Name haengt am Rueckweg-SQL; dass beide
+    // denselben tragen, prueft `frist_spalte_haengt_am_rueckweg_sql`.
+    let result = sqlx::query(&format!(
+        "DELETE FROM {relation} WHERE {ROLE_CONNECTION_ROLLBACK_EXPIRY_COL} <= $1"
+    ))
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(Some(rows_to_i64(result.rows_affected())))
 }
 
 async fn purge_expired_server_sync_rollback_exports_tx(
@@ -3459,7 +3486,11 @@ pub async fn anonymize_expired_moderation_content(
     Ok(cases + ragebait_hits + security_incidents)
 }
 
-pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task::JoinHandle<()> {
+/// Raeumt beide Sorten Rollback-Artefakt im selben Takt: die Server-Sync-Exporte
+/// und die Kopien, die der Rueckweg von 2026081301 hinterlaesst. Der Name nennt
+/// beide, weil `..._server_sync_rollback_export_...` ueber die Haelfte der Arbeit
+/// gelogen hat.
+pub fn spawn_rollback_artifact_retention(pool: PgPool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match purge_expired_server_sync_rollback_exports(&pool, chrono::Utc::now()).await {
@@ -3477,20 +3508,25 @@ pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task:
             }
             // Im selben Takt, weil es dieselbe Sorte Artefakt ist: eine Kopie mit
             // Tokens, die nach einem Rollback liegen bleibt.
-            match purge_expired_role_connection_rollback_backups(&pool, chrono::Utc::now()).await {
-                Ok(deleted) => {
-                    // Je Tabelle getrennt: eine Summe wuerde verstecken, dass die
-                    // Token-Kopien verschwunden sind und die Sync-Kopien nicht.
-                    for (relation, count) in deleted.iter().filter(|(_, count)| *count > 0) {
-                        tracing::info!(
-                            relation,
-                            deleted = count,
-                            "Linked-Role-Rollback-Kopien nach Fristablauf geraeumt"
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(%err, "Linked-Role-Rollback-Retention fehlgeschlagen");
+            // Je Tabelle getrennt, im Erfolg wie im Fehler: eine Summe wuerde
+            // verstecken, dass die Token-Kopien verschwunden sind und die
+            // Sync-Kopien nicht, und ein gemeinsames warn! wuerde verstecken,
+            // welche der beiden Halden weiterwaechst.
+            for (relation, ergebnis) in
+                purge_expired_role_connection_rollback_backups(&pool, chrono::Utc::now()).await
+            {
+                match ergebnis {
+                    Ok(0) => {}
+                    Ok(deleted) => tracing::info!(
+                        relation,
+                        deleted,
+                        "Linked-Role-Rollback-Kopien nach Fristablauf geraeumt"
+                    ),
+                    Err(err) => tracing::warn!(
+                        relation,
+                        %err,
+                        "Linked-Role-Rollback-Retention fehlgeschlagen"
+                    ),
                 }
             }
             tokio::time::sleep(PRIVACY_RETENTION_JOB_INTERVAL).await;
@@ -7715,7 +7751,7 @@ mod tests {
             .expect("kopie anlegen");
             sqlx::query(&format!(
                 "ALTER TABLE core.{tabelle}_rollback_backup
-                 ADD COLUMN rollback_expires_at TIMESTAMPTZ NOT NULL
+                 ADD COLUMN {ROLE_CONNECTION_ROLLBACK_EXPIRY_COL} TIMESTAMPTZ NOT NULL
                  DEFAULT (now() + INTERVAL '180 days')"
             ))
             .execute(pool)
@@ -7731,10 +7767,12 @@ mod tests {
 
         // Fehlen die Kopien — der Normalfall ohne Rollback —, darf der Job nicht
         // an einer fehlenden Relation scheitern und nichts melden.
-        let ohne_kopien = purge_expired_role_connection_rollback_backups(db.pool(), now)
-            .await
-            .expect("purge ohne kopien");
-        assert!(ohne_kopien.is_empty(), "{ohne_kopien:?}");
+        let ohne_kopien = purge_expired_role_connection_rollback_backups(db.pool(), now).await;
+        assert!(
+            ohne_kopien.is_empty(),
+            "{:?}",
+            zaehlung_je_tabelle(&ohne_kopien)
+        );
 
         lege_rollback_kopien_an(db.pool()).await;
 
@@ -7781,11 +7819,9 @@ mod tests {
         .await
         .expect("sync-kopien");
 
-        let deleted = purge_expired_role_connection_rollback_backups(db.pool(), now)
-            .await
-            .expect("purge");
+        let deleted = purge_expired_role_connection_rollback_backups(db.pool(), now).await;
         assert_eq!(
-            deleted,
+            zaehlung_je_tabelle(&deleted),
             vec![
                 ("core.discord_role_connection_tokens_rollback_backup", 1),
                 ("core.discord_role_connection_sync_state_rollback_backup", 1),
@@ -7805,16 +7841,71 @@ mod tests {
 
         // Zweiter Lauf ohne neue Frist: nichts mehr faellig, aber die Meldung
         // bleibt je Tabelle bestehen (0), damit der Job nicht stumm aussetzt.
-        let zweiter = purge_expired_role_connection_rollback_backups(db.pool(), now)
-            .await
-            .expect("zweiter purge");
+        let zweiter = purge_expired_role_connection_rollback_backups(db.pool(), now).await;
         assert_eq!(
-            zweiter,
+            zaehlung_je_tabelle(&zweiter),
             vec![
                 ("core.discord_role_connection_tokens_rollback_backup", 0),
                 ("core.discord_role_connection_sync_state_rollback_backup", 0),
             ]
         );
+    }
+
+    /// Erfolgszaehlung je Tabelle; ein Fehler an einer Tabelle wird zum Panic mit
+    /// Tabellennamen, weil der Test genau das nicht erwarten darf.
+    fn zaehlung_je_tabelle(
+        ergebnisse: &[(&'static str, CommunityDbResult<i64>)],
+    ) -> Vec<(&'static str, i64)> {
+        ergebnisse
+            .iter()
+            .map(|(relation, ergebnis)| match ergebnis {
+                Ok(count) => (*relation, *count),
+                Err(err) => panic!("{relation}: {err}"),
+            })
+            .collect()
+    }
+
+    /// Der Spaltenname der Frist lebt an zwei Orten: in der Rueckweg-SQL, die sie
+    /// anlegt, und in dieser Datei, die sie abfragt. Ohne diese Bindung laesst
+    /// eine Umbenennung im SQL beide Suiten gruen, waehrend der Live-Job an 42703
+    /// in ein `warn!` laeuft und die Token-Halde unbefristet stehen bleibt.
+    #[test]
+    fn frist_spalte_haengt_am_rueckweg_sql() {
+        let rueckweg = include_str!(
+            "../../dl-central-db/rollbacks/\
+             2026081301_discord_role_connection_provider_rollback.sql"
+        );
+        for relation in ROLE_CONNECTION_ROLLBACK_BACKUP_RELS {
+            let tabelle = relation
+                .strip_prefix("core.")
+                .expect("Relationsnamen tragen ihr Schema");
+            assert!(
+                rueckweg.contains(&format!("CREATE TABLE IF NOT EXISTS core.{tabelle}")),
+                "{relation} wird vom Rueckweg nicht angelegt"
+            );
+        }
+        let anlagen = rueckweg
+            .matches(&format!(
+                "ADD COLUMN IF NOT EXISTS {ROLE_CONNECTION_ROLLBACK_EXPIRY_COL} TIMESTAMPTZ"
+            ))
+            .count();
+        assert_eq!(
+            anlagen,
+            ROLE_CONNECTION_ROLLBACK_BACKUP_RELS.len(),
+            "der Rueckweg muss {ROLE_CONNECTION_ROLLBACK_EXPIRY_COL} auf jeder Kopie anlegen"
+        );
+    }
+
+    /// Beide Kopien muessen in `USER_TABLES` stehen, sonst entgehen die Tokens dem
+    /// Loeschantrag. Zwei Listen ohne Verbindung waeren ein stummer Tippfehler.
+    #[test]
+    fn rollback_kopien_stehen_in_der_loeschregistratur() {
+        for relation in ROLE_CONNECTION_ROLLBACK_BACKUP_RELS {
+            assert!(
+                USER_TABLES.iter().any(|spec| spec.relation == relation),
+                "{relation} fehlt in USER_TABLES"
+            );
+        }
     }
 
     #[tokio::test]

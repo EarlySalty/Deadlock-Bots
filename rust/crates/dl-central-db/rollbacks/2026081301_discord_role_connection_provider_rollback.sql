@@ -70,6 +70,14 @@ ALTER TABLE core.discord_role_connection_sync_state_rollback_backup
     ADD COLUMN IF NOT EXISTS rollback_expires_at TIMESTAMPTZ NOT NULL
     DEFAULT (now() + INTERVAL '180 days');
 
+-- Index auf die Frist wie bei server_config.rollback_exports: der Retention-Job
+-- fragt genau diese Spalte ab. Bei ein paar hundert Zeilen egal, aber die
+-- Begruendung "wie bei rollback_exports" soll ganz stimmen und nicht halb.
+CREATE INDEX IF NOT EXISTS discord_role_connection_tokens_rollback_expires_idx
+    ON core.discord_role_connection_tokens_rollback_backup (rollback_expires_at);
+CREATE INDEX IF NOT EXISTS discord_role_connection_sync_rollback_expires_idx
+    ON core.discord_role_connection_sync_state_rollback_backup (rollback_expires_at);
+
 -- Spaltenliste aus dem Katalog, und zwar als Schnittmenge von Quelle und Kopie:
 -- rollback_expires_at wird so per DEFAULT gefuellt, und eine Kopie aus einem
 -- frueheren Lauf, der eine inzwischen dazugekommene Spalte fehlt, bricht nicht
@@ -98,8 +106,14 @@ BEGIN
                   AND NOT kopie.attisdropped
            );
 
+        -- IS DISTINCT FROM statt <>: auf einer handgepatchten nullable Spalte
+        -- (den Vorzustand behandelt fresh_migrations_schema.rs als real) waere
+        -- eine Creator-Zeile mit provider IS NULL sonst weder gesichert noch
+        -- geloescht — sie ueberlebt und wird vom alten Binary per
+        -- ON CONFLICT (discord_id) DO UPDATE mit Steam-Daten ueberschrieben.
         EXECUTE format(
-            'INSERT INTO core.%I (%s) SELECT %s FROM core.%I WHERE provider <> ''steam''',
+            'INSERT INTO core.%I (%s) SELECT %s FROM core.%I '
+            'WHERE provider IS DISTINCT FROM ''steam''',
             tabelle || '_rollback_backup', spalten, spalten, tabelle
         );
     END LOOP;
@@ -156,7 +170,10 @@ BEGIN
         -- provider-faehiges Binary kann also zwischen zwei Laeufen neue Zeilen
         -- geschrieben haben. Blieben sie liegen, wuerde das alte Binary sie per
         -- ON CONFLICT (discord_id) DO UPDATE mit Steam-Daten ueberschreiben.
-        EXECUTE format('DELETE FROM core.%I WHERE provider <> ''steam''', tabelle);
+        EXECUTE format(
+            'DELETE FROM core.%I WHERE provider IS DISTINCT FROM ''steam''',
+            tabelle
+        );
 
         -- Primaerschluessel nur tauschen, wenn er noch provider traegt.
         IF pk_spalten IS NULL OR 'provider' = ANY (pk_spalten) THEN

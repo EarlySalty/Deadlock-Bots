@@ -8,7 +8,15 @@ nicht getestet, sondern geraten.
 ## 2026081301 — Linked-Role-Provider-Dimension
 
 **Zustand:** am 2026-08-13 auf der zentralen Produktions-DB angewendet
-(`_sqlx_migrations` trägt Version `2026081301`).
+(`_sqlx_migrations` trägt Version `2026081301`, `success=true`, und sie ist dort
+die höchste Version). Die Prüfsumme dort beginnt mit `c1176f3d59aac719` —
+identisch mit `sha384sum` über die Datei in diesem Baum. Nachprüfbar mit:
+
+```bash
+sha384sum migrations/2026081301_discord_role_connection_provider.sql
+psql "$DEADLOCK_CENTRAL_DSN" -Atq \
+  -c "SELECT encode(checksum,'hex') FROM _sqlx_migrations WHERE version=2026081301"
+```
 
 **Die Migrationsdatei ist damit eingefroren.** Jede Änderung an
 `migrations/2026081301_discord_role_connection_provider.sql` — auch ein
@@ -26,11 +34,25 @@ gehören in eine neue Migration, nicht in diese Datei.
 
 Beide Richtungen sind eng: das Backend prüft die `provider`-Spalte beim Start
 und bricht ohne sie ab (sonst schriebe es stumm falsche Zeilen). Umgekehrt läuft
-das **alte** Binary nach der Migration nicht mehr — `ON CONFLICT (discord_id)`
-findet keinen passenden Index und wirft SQLSTATE 42P10. Ein Rollback per
-Binary-Swap allein reicht deshalb nicht; dafür ist die SQL-Datei hier.
+das **alte** Binary nach der Migration nicht mehr, und zwar aus zwei Gründen —
+`ON CONFLICT (discord_id)` findet keinen passenden Index (SQLSTATE 42P10), und
+jedes `INSERT`, das `provider` nicht nennt, scheitert nach dem `DROP DEFAULT` an
+`23502`. Der Kopf der Migrationsdatei nennt nur 42P10; wer beim Vorfall dort
+zuerst liest, sucht sonst den falschen Fehler. Ein Rollback per Binary-Swap
+allein reicht nicht; dafür ist die SQL-Datei hier.
 
-### Rückweg fahren
+### Rückweg fahren — Reihenfolge umgekehrt zum Ausrollen
+
+1. **Erst das Website-Binary zurückrollen** (alte Fassung, Dienst neu starten).
+2. Dann die SQL-Datei fahren.
+3. Der Caddy-Block kann stehen bleiben; er schadet nicht, und ohne ihn läuft
+   der Callback in einen 404.
+
+Andersherum ist der Zwischenzustand schlimmer als der, aus dem man rollt: das
+noch laufende provider-fähige Binary schreibt Creator-Tokens gegen eine Tabelle
+ohne `(discord_id, provider)`-Unique auf `tokens` → 42P10 bei jedem Write, und
+die zwischenzeitlich entstandenen Creator-Sync-Zeilen sind gerade gelöscht
+worden.
 
 ```bash
 psql "$DEADLOCK_CENTRAL_DSN" -f 2026081301_discord_role_connection_provider_rollback.sql

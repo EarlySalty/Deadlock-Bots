@@ -66,7 +66,7 @@ async fn create_fresh_db(admin: &PgPool, dbname: &str) {
                     .and_then(sqlx::error::DatabaseError::code)
                     .is_some_and(|code| code == "55006");
                 letzter_fehler = Some(err);
-                if !rennen {
+                if !rennen || versuch == 5 {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200 * versuch)).await;
@@ -77,6 +77,31 @@ async fn create_fresh_db(admin: &PgPool, dbname: &str) {
         "create fresh database: {}",
         letzter_fehler.expect("mindestens ein Fehlversuch")
     );
+}
+
+/// Verbindet und baut den Vorzustand auf. Scheitert etwas davon, wird die
+/// Wegwerf-Datenbank vorher weggeraeumt: ein Panic im Vorzustandsblock liess sie
+/// bisher stehen — genau die Leckage, die der Kommentar am Testende vermeidet.
+async fn vorzustand_aufbauen(
+    admin: &PgPool,
+    dbname: &str,
+    db_dsn: &str,
+    statements: &[&str],
+) -> PgPool {
+    let pool = match connect_pool(db_dsn).await {
+        Ok(pool) => pool,
+        Err(err) => {
+            drop_db(admin, dbname).await;
+            panic!("connect fresh database: {err}");
+        }
+    };
+    for statement in statements {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            drop_db(admin, dbname).await;
+            panic!("vorzustand: {statement} -> {err}");
+        }
+    }
+    pool
 }
 
 async fn drop_db(admin: &PgPool, dbname: &str) {
@@ -1180,25 +1205,27 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
     let dbname = fresh_db_name();
     create_fresh_db(&admin, &dbname).await;
     let db_dsn = swap_db(&admin_dsn, &dbname);
-    let pool = connect_pool(&db_dsn).await.expect("connect fresh database");
-
-    for statement in [
-        "CREATE SCHEMA IF NOT EXISTS core",
-        "CREATE TABLE core.meta_users (id BIGINT PRIMARY KEY, username TEXT NOT NULL)",
-        "CREATE TABLE core.steam_links (\
+    let pool = vorzustand_aufbauen(
+        &admin,
+        &dbname,
+        &db_dsn,
+        &[
+            "CREATE SCHEMA IF NOT EXISTS core",
+            "CREATE TABLE core.meta_users (id BIGINT PRIMARY KEY, username TEXT NOT NULL)",
+            "CREATE TABLE core.steam_links (\
              discord_id BIGINT NOT NULL, steam_id BIGINT NOT NULL, \
              deadlock_badge_level INTEGER, deadlock_rank INTEGER, \
              deadlock_rank_name TEXT, deadlock_subrank INTEGER, \
              deadlock_rank_updated_at TIMESTAMPTZ, \
              PRIMARY KEY (discord_id, steam_id))",
-        // Vorzustand nach 2026070330, auf die Spalten verkuerzt, die diese
-        // Migration anfasst oder die an ihr haengen (Schluessel, FK, NOT NULL).
-        // Reine Nutzlastspalten der Originaltabelle (invalidation_reason,
-        // last_refresh_at, last_push_at, last_push_error) fehlen absichtlich.
-        // Entscheidend ist: kein provider, Primaerschluessel allein auf
-        // discord_id, FK auf meta_users, und der Schluessel unter einem Namen,
-        // den die Migration nicht erraten kann.
-        "CREATE TABLE core.discord_role_connection_tokens (\
+            // Vorzustand nach 2026070330, auf die Spalten verkuerzt, die diese
+            // Migration anfasst oder die an ihr haengen (Schluessel, FK, NOT NULL).
+            // Reine Nutzlastspalten der Originaltabelle (invalidation_reason,
+            // last_refresh_at, last_push_at, last_push_error) fehlen absichtlich.
+            // Entscheidend ist: kein provider, Primaerschluessel allein auf
+            // discord_id, FK auf meta_users, und der Schluessel unter einem Namen,
+            // den die Migration nicht erraten kann.
+            "CREATE TABLE core.discord_role_connection_tokens (\
              discord_id BIGINT NOT NULL REFERENCES core.meta_users(id) ON DELETE CASCADE, \
              access_token BYTEA NOT NULL, refresh_token BYTEA NOT NULL, \
              token_type TEXT NOT NULL, scope TEXT NOT NULL, \
@@ -1207,7 +1234,7 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
              created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
              updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
              CONSTRAINT drc_tokens_eigener_alter_name PRIMARY KEY (discord_id))",
-        "CREATE TABLE core.discord_role_connection_sync_state (\
+            "CREATE TABLE core.discord_role_connection_sync_state (\
              discord_id BIGINT NOT NULL, pending BOOLEAN NOT NULL DEFAULT TRUE, \
              reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, \
              next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
@@ -1215,34 +1242,33 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
              created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
              updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
              CONSTRAINT drc_sync_eigener_alter_name PRIMARY KEY (discord_id))",
-        "CREATE INDEX discord_role_connection_sync_due_idx \
+            "CREATE INDEX discord_role_connection_sync_due_idx \
              ON core.discord_role_connection_sync_state (pending, next_attempt_at, updated_at)",
-        "INSERT INTO core.meta_users (id, username) VALUES (9960020, 'aufstieg')",
-        "INSERT INTO core.discord_role_connection_tokens \
+            "INSERT INTO core.meta_users (id, username) VALUES (9960020, 'aufstieg')",
+            "INSERT INTO core.discord_role_connection_tokens \
              (discord_id, access_token, refresh_token, token_type, scope, expires_at) \
          VALUES (9960020, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
                  now() + interval '1 hour')",
-        "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason) \
+            "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason) \
          VALUES (9960020, 'alt-zeile')",
-        // Die Buchfuehrung von sqlx: im Ernstfall existiert sie, und der
-        // Rueckweg muss die Zeile ausdruecklich STEHEN lassen (sonst wendet der
-        // naechste Migrator-Lauf die Migration erneut an). Genau das prueft der
-        // Test weiter unten.
-        "CREATE TABLE _sqlx_migrations (\
+            // Die Buchfuehrung von sqlx: im Ernstfall existiert sie, und der
+            // Rueckweg muss die Zeile ausdruecklich STEHEN lassen (sonst wendet der
+            // naechste Migrator-Lauf die Migration erneut an). Der Rueckweg fasst
+            // _sqlx_migrations heute mit keiner Anweisung an — die Pruefung unten ist
+            // deshalb kein Nachweis ueber den aktuellen Stand, sondern eine Sperre
+            // gegen ein spaeteres, gut gemeintes DELETE.
+            "CREATE TABLE _sqlx_migrations (\
              version BIGINT PRIMARY KEY, description TEXT NOT NULL, \
              installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), \
              success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, \
              execution_time BIGINT NOT NULL)",
-        "INSERT INTO _sqlx_migrations \
+            "INSERT INTO _sqlx_migrations \
              (version, description, success, checksum, execution_time) \
          VALUES (2026081301, 'discord role connection provider', TRUE, \
                  '\\x00'::bytea, 1)",
-    ] {
-        sqlx::query(statement)
-            .execute(&pool)
-            .await
-            .unwrap_or_else(|err| panic!("vorzustand: {statement} -> {err}"));
-    }
+        ],
+    )
+    .await;
 
     // Der Trigger auf steam_links kommt aus 2026070330 und wird von dieser
     // Migration ersetzt. Hier haengt ein kombinierter Trigger statt der drei
@@ -1600,15 +1626,17 @@ async fn provider_migration_zieht_eine_handgepatchte_nullable_spalte_nach() {
     let dbname = fresh_db_name();
     create_fresh_db(&admin, &dbname).await;
     let db_dsn = swap_db(&admin_dsn, &dbname);
-    let pool = connect_pool(&db_dsn).await.expect("connect fresh database");
-
-    for statement in [
-        "CREATE SCHEMA IF NOT EXISTS core",
-        "CREATE TABLE core.meta_users (id BIGINT PRIMARY KEY, username TEXT NOT NULL)",
-        "CREATE TABLE core.steam_links (\
+    let pool = vorzustand_aufbauen(
+        &admin,
+        &dbname,
+        &db_dsn,
+        &[
+            "CREATE SCHEMA IF NOT EXISTS core",
+            "CREATE TABLE core.meta_users (id BIGINT PRIMARY KEY, username TEXT NOT NULL)",
+            "CREATE TABLE core.steam_links (\
              discord_id BIGINT NOT NULL, steam_id BIGINT NOT NULL, \
              PRIMARY KEY (discord_id, steam_id))",
-        "CREATE TABLE core.discord_role_connection_tokens (\
+            "CREATE TABLE core.discord_role_connection_tokens (\
              discord_id BIGINT NOT NULL REFERENCES core.meta_users(id) ON DELETE CASCADE, \
              access_token BYTEA NOT NULL, refresh_token BYTEA NOT NULL, \
              token_type TEXT NOT NULL, scope TEXT NOT NULL, \
@@ -1618,7 +1646,7 @@ async fn provider_migration_zieht_eine_handgepatchte_nullable_spalte_nach() {
              updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
              provider TEXT, \
              PRIMARY KEY (discord_id))",
-        "CREATE TABLE core.discord_role_connection_sync_state (\
+            "CREATE TABLE core.discord_role_connection_sync_state (\
              discord_id BIGINT NOT NULL, pending BOOLEAN NOT NULL DEFAULT TRUE, \
              reason TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, \
              next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
@@ -1627,25 +1655,22 @@ async fn provider_migration_zieht_eine_handgepatchte_nullable_spalte_nach() {
              updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
              provider TEXT, \
              PRIMARY KEY (discord_id))",
-        "INSERT INTO core.meta_users (id, username) VALUES (9960030, 'ohne-provider'), \
+            "INSERT INTO core.meta_users (id, username) VALUES (9960030, 'ohne-provider'), \
              (9960031, 'mit-creator')",
-        // Eine Zeile ohne Provider und eine, die schon 'creator' traegt: ein
-        // Backfill ohne `WHERE provider IS NULL` wuerde die zweite zur Steam-Zeile
-        // umschreiben und damit ein Creator-Token unter falschem Provider fuehren.
-        "INSERT INTO core.discord_role_connection_tokens \
+            // Eine Zeile ohne Provider und eine, die schon 'creator' traegt: ein
+            // Backfill ohne `WHERE provider IS NULL` wuerde die zweite zur Steam-Zeile
+            // umschreiben und damit ein Creator-Token unter falschem Provider fuehren.
+            "INSERT INTO core.discord_role_connection_tokens \
              (discord_id, access_token, refresh_token, token_type, scope, expires_at, provider) \
          VALUES (9960030, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify', \
                  now() + interval '1 hour', NULL), \
                 (9960031, '\\x01'::bytea, '\\x01'::bytea, 'Bearer', 'identify', \
                  now() + interval '1 hour', 'creator')",
-        "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason, provider) \
+            "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason, provider) \
          VALUES (9960030, 'alt-zeile', NULL), (9960031, 'creator_reconcile', 'creator')",
-    ] {
-        sqlx::query(statement)
-            .execute(&pool)
-            .await
-            .unwrap_or_else(|err| panic!("vorzustand: {statement} -> {err}"));
-    }
+        ],
+    )
+    .await;
 
     let mut fehler: Vec<String> = Vec::new();
 

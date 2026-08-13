@@ -262,7 +262,9 @@ enum MatcherProviderChoice {
 }
 
 fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
-    let Some(raw) = raw.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    let Some(raw) = raw
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
     else {
         return MatcherProviderChoice::Gate(None);
     };
@@ -588,32 +590,35 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             });
             // AI-Scoring: STREAMER_LINK_AI_PROVIDER waehlt weiter den Anbieter,
             // aber ueber das Compliance-Gate statt ueber eigene Clients.
-            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> =
-                match matcher_provider_choice(env("STREAMER_LINK_AI_PROVIDER")) {
-                    MatcherProviderChoice::Off(raw) => {
-                        tracing::info!(
-                            provider = %raw,
-                            "Streamer-Matcher ohne KI-Scoring: STREAMER_LINK_AI_PROVIDER nennt keinen Anbieter des Gates"
-                        );
-                        Arc::new(dl_bridges::matcher::NoAi)
+            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> = match matcher_provider_choice(env(
+                "STREAMER_LINK_AI_PROVIDER",
+            )) {
+                MatcherProviderChoice::Off(raw) => {
+                    tracing::info!(
+                        provider = %raw,
+                        "Streamer-Matcher ohne KI-Scoring: STREAMER_LINK_AI_PROVIDER nennt keinen Anbieter des Gates"
+                    );
+                    Arc::new(dl_bridges::matcher::NoAi)
+                }
+                MatcherProviderChoice::Gate(override_provider) => {
+                    let generator = chat_text_generator_with(
+                        dl_ai::LlmUseCase::StreamerMatcher,
+                        false,
+                        |key| match (key, override_provider.as_deref()) {
+                            ("DL_LLM_PROVIDER_STREAMER_MATCHER", Some(provider)) => {
+                                std::env::var(key)
+                                    .ok()
+                                    .or_else(|| Some(provider.to_string()))
+                            }
+                            _ => std::env::var(key).ok(),
+                        },
+                    );
+                    match generator {
+                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
+                        None => Arc::new(dl_bridges::matcher::NoAi),
                     }
-                    MatcherProviderChoice::Gate(override_provider) => {
-                        let generator = chat_text_generator_with(
-                            dl_ai::LlmUseCase::StreamerMatcher,
-                            false,
-                            |key| match (key, override_provider.as_deref()) {
-                                ("DL_LLM_PROVIDER_STREAMER_MATCHER", Some(provider)) => {
-                                    std::env::var(key).ok().or_else(|| Some(provider.to_string()))
-                                }
-                                _ => std::env::var(key).ok(),
-                            },
-                        );
-                        match generator {
-                            Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
-                            None => Arc::new(dl_bridges::matcher::NoAi),
-                        }
-                    }
-                };
+                }
+            };
             let matcher = dl_bridges::matcher::Matcher::new(
                 matcher_config,
                 twitch_client.clone(),
@@ -721,12 +726,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tokio::fs::create_dir_all(&recording_base_dir)
         .await
         .context("Scrim-Record-Basisverzeichnis erstellen")?;
-    tokio::fs::set_permissions(
-        &recording_base_dir,
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .await
-    .context("Scrim-Record-Basisverzeichnis absichern")?;
+    tokio::fs::set_permissions(&recording_base_dir, std::fs::Permissions::from_mode(0o700))
+        .await
+        .context("Scrim-Record-Basisverzeichnis absichern")?;
     let recording_temp_dir = recording_base_dir.join("scrim-recordings");
     dl_voice::scrim_record::prepare_recording_temp_dir(&recording_temp_dir)
         .await
@@ -1626,10 +1628,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _journey_ingestion =
             dl_activity::journey::spawn_ingestion(central_pool.clone(), &dispatcher);
         let _journey_retention = dl_activity::journey::spawn_retention(central_pool.clone());
-        let _server_sync_rollback_retention =
-            dl_community::privacy::spawn_server_sync_rollback_export_retention(
-                central_pool.clone(),
-            );
+        let _rollback_artifact_retention =
+            dl_community::privacy::spawn_rollback_artifact_retention(central_pool.clone());
         let _moderation_content_retention =
             dl_community::privacy::spawn_moderation_content_retention(central_pool.clone());
         let _journey_role_events =
