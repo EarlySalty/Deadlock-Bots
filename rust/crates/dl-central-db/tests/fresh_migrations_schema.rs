@@ -869,8 +869,11 @@ async fn assert_steam_link_reassign_enqueues_old_and_new_discord_ids(pool: &PgPo
     .await
     .expect("reassign steam link");
 
-    let rows: Vec<(i64, bool, String)> = sqlx::query_as(
-        "SELECT discord_id, pending, reason
+    // provider mitlesen: der Trigger gehoert ausschliesslich zur Steam-App. Ohne
+    // diese Spalte im SELECT bliebe der Test gruen, selbst wenn er
+    // Creator-Zeilen einstellt.
+    let rows: Vec<(i64, bool, String, String)> = sqlx::query_as(
+        "SELECT discord_id, pending, reason, provider
            FROM core.discord_role_connection_sync_state
           WHERE discord_id IN ($1, $2)
           ORDER BY discord_id",
@@ -884,10 +887,85 @@ async fn assert_steam_link_reassign_enqueues_old_and_new_discord_ids(pool: &PgPo
     assert_eq!(
         rows,
         vec![
-            (old_discord_id, true, "steam_link_removed".to_string()),
-            (new_discord_id, true, "steam_link_changed".to_string())
+            (
+                old_discord_id,
+                true,
+                "steam_link_removed".to_string(),
+                "steam".to_string()
+            ),
+            (
+                new_discord_id,
+                true,
+                "steam_link_changed".to_string(),
+                "steam".to_string()
+            )
         ],
         "steam_links.discord_id reassignment enqueues old and new linked-role sync targets"
+    );
+}
+
+/// Der eigentliche Vertrag der Provider-Dimension: beide Provider koexistieren
+/// pro Discord-ID, ein Fremdwert wird abgelehnt, und der Provider ist Pflicht
+/// (kein Default, der still Steam-Zeilen erzeugt).
+async fn assert_role_connection_provider_contract(pool: &PgPool) {
+    let discord_id = 9_960_010_i64;
+    sqlx::query("INSERT INTO core.meta_users(id, username, role) VALUES ($1, 'provider-contract', 'user') ON CONFLICT (id) DO NOTHING")
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .expect("seed meta user");
+
+    for provider in ["steam", "creator"] {
+        sqlx::query(
+            "INSERT INTO core.discord_role_connection_tokens
+                 (discord_id, provider, access_token, refresh_token, token_type, scope,
+                  expires_at, active, updated_at)
+             VALUES ($1, $2, '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify',
+                     now() + interval '1 hour', TRUE, now())",
+        )
+        .bind(discord_id)
+        .bind(provider)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("{provider}-Token muss neben dem anderen stehen koennen: {err}"));
+    }
+
+    let providers: Vec<String> = sqlx::query_scalar(
+        "SELECT provider FROM core.discord_role_connection_tokens
+          WHERE discord_id=$1 ORDER BY provider",
+    )
+    .bind(discord_id)
+    .fetch_all(pool)
+    .await
+    .expect("provider rows");
+    assert_eq!(providers, vec!["creator".to_string(), "steam".to_string()]);
+
+    let fremd = sqlx::query(
+        "INSERT INTO core.discord_role_connection_tokens
+             (discord_id, provider, access_token, refresh_token, token_type, scope,
+              expires_at, active, updated_at)
+         VALUES ($1, 'youtube', '\\x00'::bytea, '\\x00'::bytea, 'Bearer', 'identify',
+                 now() + interval '1 hour', TRUE, now())",
+    )
+    .bind(discord_id)
+    .execute(pool)
+    .await;
+    assert!(
+        fremd.is_err(),
+        "CHECK muss Provider ausserhalb ('steam','creator') ablehnen"
+    );
+
+    let ohne_provider = sqlx::query(
+        "INSERT INTO core.discord_role_connection_sync_state
+             (discord_id, pending, reason, attempts, next_attempt_at, updated_at)
+         VALUES ($1, TRUE, 'kein-provider', 0, now(), now())",
+    )
+    .bind(discord_id)
+    .execute(pool)
+    .await;
+    assert!(
+        ohne_provider.is_err(),
+        "ohne provider darf keine Sync-Zeile entstehen — der Backfill-Default ist gedroppt"
     );
 }
 
@@ -1903,6 +1981,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "linked-role sync update trigger must fire on discord_id changes"
     );
     assert_steam_link_reassign_enqueues_old_and_new_discord_ids(&pool).await;
+    assert_role_connection_provider_contract(&pool).await;
 
     assert_eq!(
         trigger_names(&pool, "users").await,
