@@ -1483,6 +1483,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         voice_tracker.set_feedback(voice_feedback.clone()).await;
         if mate_survey_enabled {
             voice_tracker.set_mate_survey(mate_survey.clone()).await;
+            tracing::info!(
+                min_sekunden = dl_voice::mate_survey::MIN_SECONDS,
+                "Mitspieler-Umfrage aktiv"
+            );
         }
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,

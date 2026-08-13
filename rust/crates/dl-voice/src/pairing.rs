@@ -617,6 +617,11 @@ pub fn register(router: &mut InteractionRouter, pairing: Arc<LanePairing>) {
 
 pub fn spawn(pairing: Arc<LanePairing>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        tracing::info!(
+            takt_sekunden = TICK_INTERVAL.as_secs(),
+            allein_ab_sekunden = MIN_ALONE.num_seconds(),
+            "Lane-Pairing aktiv"
+        );
         let mut ticker = tokio::time::interval(TICK_INTERVAL);
         loop {
             ticker.tick().await;
