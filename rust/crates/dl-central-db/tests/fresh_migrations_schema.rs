@@ -47,10 +47,26 @@ async fn create_fresh_db(admin: &PgPool, dbname: &str) {
         .execute(admin)
         .await
         .ok();
-    sqlx::query(&format!("CREATE DATABASE {dbname}"))
-        .execute(admin)
-        .await
-        .expect("create fresh database");
+    // Mit Wiederholung: laufen zwei Tests dieser Datei parallel, kollidieren die
+    // CREATE-DATABASE-Anweisungen auf template1 ("is being accessed by other
+    // users"). Das ist ein Rennen der Testumgebung, kein Befund.
+    let mut letzter_fehler = None;
+    for versuch in 1..=5 {
+        match sqlx::query(&format!("CREATE DATABASE {dbname}"))
+            .execute(admin)
+            .await
+        {
+            Ok(_) => return,
+            Err(err) => {
+                letzter_fehler = Some(err);
+                tokio::time::sleep(std::time::Duration::from_millis(200 * versuch)).await;
+            }
+        }
+    }
+    panic!(
+        "create fresh database: {}",
+        letzter_fehler.expect("mindestens ein Fehlversuch")
+    );
 }
 
 async fn drop_db(admin: &PgPool, dbname: &str) {
@@ -942,6 +958,78 @@ async fn assert_role_connection_provider_contract(pool: &PgPool) {
     .expect("provider rows");
     assert_eq!(providers, vec!["creator".to_string(), "steam".to_string()]);
 
+    // Die eigentliche Zusage der Provider-Dimension: der Steam-Link-Trigger
+    // gehoert der Steam-App und darf die Creator-Sync-Zeile nicht anfassen. Ein
+    // ON CONFLICT (discord_id) im Trigger wuerde sie ueberschreiben und dabei
+    // gruen durchlaufen — dieser Block ist die einzige Stelle, die das merkt.
+    for (provider, reason) in [("steam", "alt-steam"), ("creator", "creator_reconcile")] {
+        sqlx::query(
+            "INSERT INTO core.discord_role_connection_sync_state
+                 (discord_id, provider, pending, reason, attempts, next_attempt_at, updated_at)
+             VALUES ($1, $2, FALSE, $3, 7, now(), now())
+             ON CONFLICT (discord_id, provider) DO UPDATE
+                SET pending = FALSE, reason = EXCLUDED.reason, attempts = 7",
+        )
+        .bind(discord_id)
+        .bind(provider)
+        .bind(reason)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("{provider}-Sync-Zeile: {err}"));
+    }
+
+    sqlx::query("INSERT INTO core.users (discord_id) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .expect("core-user fuer den steam-link");
+    sqlx::query("DELETE FROM core.steam_links WHERE discord_id = $1")
+        .bind(discord_id)
+        .execute(pool)
+        .await
+        .expect("steam-link vorher raeumen");
+    sqlx::query(
+        "INSERT INTO core.steam_links
+             (discord_id, steam_id, steam_id64, verified, primary_account, updated_at)
+         VALUES ($1, '76561199000009960', 76561199000009960, TRUE, TRUE, now())",
+    )
+    .bind(discord_id)
+    .execute(pool)
+    .await
+    .expect("steam-link fuer den trigger");
+
+    let creator_zeile: (bool, String, i32) = sqlx::query_as(
+        "SELECT pending, reason, attempts FROM core.discord_role_connection_sync_state
+          WHERE discord_id = $1 AND provider = 'creator'",
+    )
+    .bind(discord_id)
+    .fetch_one(pool)
+    .await
+    .expect("creator-sync-zeile nach dem steam-trigger");
+    assert_eq!(
+        creator_zeile,
+        (false, "creator_reconcile".to_string(), 7),
+        "der Steam-Link-Trigger darf die Creator-Sync-Zeile nicht anfassen"
+    );
+
+    let steam_zeile: (bool, String) = sqlx::query_as(
+        "SELECT pending, reason FROM core.discord_role_connection_sync_state
+          WHERE discord_id = $1 AND provider = 'steam'",
+    )
+    .bind(discord_id)
+    .fetch_one(pool)
+    .await
+    .expect("steam-sync-zeile nach dem trigger");
+    assert_eq!(
+        steam_zeile.0, true,
+        "die Steam-Zeile muss der Trigger dagegen einstellen"
+    );
+    assert!(
+        steam_zeile.1.starts_with("steam_link"),
+        "erwartet einen steam_link-Grund, gefunden {}",
+        steam_zeile.1
+    );
+
     // Beide Negativfaelle auf beiden Tabellen: CHECK und Pflichtfeld existieren
     // je zweimal, und eine Haelfte kann still verschwinden. Geprueft wird der
     // SQLSTATE, nicht nur "irgendein Fehler" — ein Tippfehler im Spaltennamen
@@ -1126,8 +1214,10 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
                  now() + interval '1 hour')",
         "INSERT INTO core.discord_role_connection_sync_state (discord_id, reason) \
          VALUES (9960020, 'alt-zeile')",
-        // Die Buchfuehrung von sqlx, damit der Rueckweg seine Zeile auch
-        // wirklich entfernen kann — im Ernstfall existiert sie.
+        // Die Buchfuehrung von sqlx: im Ernstfall existiert sie, und der
+        // Rueckweg muss die Zeile ausdruecklich STEHEN lassen (sonst wendet der
+        // naechste Migrator-Lauf die Migration erneut an). Genau das prueft der
+        // Test weiter unten.
         "CREATE TABLE _sqlx_migrations (\
              version BIGINT PRIMARY KEY, description TEXT NOT NULL, \
              installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), \
@@ -1145,7 +1235,9 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
     }
 
     // Der Trigger auf steam_links kommt aus 2026070330 und wird von dieser
-    // Migration ersetzt. Fuer den Test genuegt es, ihn hier zu haengen: nach der
+    // Migration ersetzt. Hier haengt ein kombinierter Trigger statt der drei
+    // produktiven (die auf einzelne Spalten hoeren) — geprueft wird die Funktion
+    // der Trigger-Funktion, nicht die produktive Triggerdefinition. Nach der
     // Migration und nach dem Rueckweg muss ein steam_links-Schreibvorgang
     // durchlaufen, sonst ist die Steam-Verknuepfung tot.
     let mut fehler: Vec<String> = Vec::new();
@@ -1174,25 +1266,29 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
         "discord_role_connection_tokens",
         "discord_role_connection_sync_state",
     ] {
+        // Alle Zeilen lesen, nicht eine: eine faelschlich zusaetzlich entstandene
+        // Creator-Zeile bliebe bei fetch_one unentdeckt.
         match sqlx::query_scalar::<_, String>(&format!(
-            "SELECT provider FROM core.{tabelle} WHERE discord_id = 9960020"
+            "SELECT provider FROM core.{tabelle} WHERE discord_id = 9960020 ORDER BY provider"
         ))
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await
         {
-            Ok(provider) if provider == "steam" => {}
+            Ok(provider) if provider == vec!["steam".to_string()] => {}
             Ok(provider) => fehler.push(format!(
-                "{tabelle}: bestehende Zeile hat provider={provider}, erwartet steam"
+                "{tabelle}: erwartet genau eine Steam-Zeile, gefunden {provider:?}"
             )),
             Err(err) => fehler.push(format!("{tabelle}: Altzeile nach dem Backfill: {err}")),
         }
 
-        let pk = pk_spalten(&pool, tabelle).await;
-        if pk != vec!["discord_id".to_string(), "provider".to_string()] {
-            fehler.push(format!(
+        match pk_spalten(&pool, tabelle).await {
+            Ok(pk) if pk == vec!["discord_id".to_string(), "provider".to_string()] => {}
+            Ok(pk) => fehler.push(format!(
                 "{tabelle}: Primaerschluessel ist {pk:?}, erwartet [discord_id, provider] — \
-                 der alte Schluessel unter fremdem Namen wurde nicht ersetzt"
-            ));
+                 der alte Schluessel unter fremdem Namen wurde nicht ersetzt, oder die \
+                 Spaltenreihenfolge stimmt nicht"
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Primaerschluessel lesen: {err}")),
         }
 
         match sqlx::query_scalar::<_, Option<String>>(&format!(
@@ -1283,6 +1379,37 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
         {
             fehler.push(format!("Rueckweg (Lauf {lauf}): {err}"));
         }
+
+        if lauf == 1 {
+            // Das realistische Szenario fuer einen zweiten Rueckweg: jemand hat
+            // zwischendurch wieder vorwaerts migriert (die Zeile in
+            // _sqlx_migrations steht, aber die Datei laesst sich von Hand fahren),
+            // neue Creator-Zeilen sind entstanden. Der zweite Lauf muss sie
+            // loeschen UND sichern — sonst ueberschreibt das alte Binary sie
+            // spaeter per ON CONFLICT (discord_id) DO UPDATE mit Steam-Daten.
+            if let Err(err) = sqlx::raw_sql(include_str!(
+                "../migrations/2026081301_discord_role_connection_provider.sql"
+            ))
+            .execute(&pool)
+            .await
+            {
+                fehler.push(format!("Vorwaertslauf zwischen den Rueckwegen: {err}"));
+            }
+            for statement in [
+                "INSERT INTO core.discord_role_connection_tokens \
+                     (discord_id, provider, access_token, refresh_token, token_type, scope, \
+                      expires_at) \
+                 VALUES (9960020, 'creator', '\\x02'::bytea, '\\x02'::bytea, 'Bearer', \
+                         'identify', now() + interval '1 hour')",
+                "INSERT INTO core.discord_role_connection_sync_state \
+                     (discord_id, provider, reason) \
+                 VALUES (9960020, 'creator', 'creator_reconcile_nach_rollback')",
+            ] {
+                if let Err(err) = sqlx::query(statement).execute(&pool).await {
+                    fehler.push(format!("Zwischenzeile nach Lauf 1: {err}"));
+                }
+            }
+        }
     }
 
     // Der Wiederanwendungsschutz muss stehen bleiben: waere die Zeile weg, wuerde
@@ -1304,12 +1431,13 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
         "discord_role_connection_tokens",
         "discord_role_connection_sync_state",
     ] {
-        let pk = pk_spalten(&pool, tabelle).await;
-        if pk != vec!["discord_id".to_string()] {
-            fehler.push(format!(
+        match pk_spalten(&pool, tabelle).await {
+            Ok(pk) if pk == vec!["discord_id".to_string()] => {}
+            Ok(pk) => fehler.push(format!(
                 "{tabelle}: nach dem Rueckweg ist der Primaerschluessel {pk:?}, \
                  erwartet [discord_id]"
-            ));
+            )),
+            Err(err) => fehler.push(format!("{tabelle}: Primaerschluessel lesen: {err}")),
         }
     }
 
@@ -1364,9 +1492,10 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
             .fetch_one(&pool)
             .await
         {
-            Ok(1) => {}
+            Ok(2) => {}
             Ok(other) => fehler.push(format!(
-                "{tabelle}: der Rueckweg muss die Creator-Zeile sichern, gefunden: {other}"
+                "{tabelle}: der Rueckweg muss beide Creator-Zeilen sichern (die vor Lauf 1 \
+                 und die zwischen den Laeufen entstandene), gefunden: {other}"
             )),
             Err(err) => fehler.push(format!("{tabelle}: {err}")),
         }
@@ -1385,27 +1514,87 @@ async fn provider_migration_haelt_den_aufstiegspfad_aus_dem_alten_schema() {
         Err(err) => fehler.push(format!("Restzeilen nach dem Rueckweg: {err}")),
     }
 
+    // Der zweite Weg, auf dem eine Fremd-Provider-Zeile ueberlebt: eine
+    // Discord-ID, die gar keine Steam-Zeile hat. Bei PK (discord_id) passt sie
+    // problemlos hinein, und ein Rueckweg, der nur im PK-Tausch-Zweig loescht,
+    // laesst sie stehen — das alte Binary ueberschreibt sie spaeter per
+    // ON CONFLICT (discord_id) DO UPDATE mit Steam-Daten.
+    for statement in [
+        "INSERT INTO core.meta_users (id, username) VALUES (9960023, 'nur-creator')",
+        "INSERT INTO core.discord_role_connection_tokens \
+             (discord_id, provider, access_token, refresh_token, token_type, scope, expires_at) \
+         VALUES (9960023, 'creator', '\\x03'::bytea, '\\x03'::bytea, 'Bearer', 'identify', \
+                 now() + interval '1 hour')",
+    ] {
+        if let Err(err) = sqlx::query(statement).execute(&pool).await {
+            fehler.push(format!("Creator-Zeile ohne Steam-Zeile: {err}"));
+        }
+    }
+
+    if let Err(err) = sqlx::raw_sql(include_str!(
+        "../rollbacks/2026081301_discord_role_connection_provider_rollback.sql"
+    ))
+    .execute(&pool)
+    .await
+    {
+        fehler.push(format!("Rueckweg (Lauf 3, ohne PK-Tausch): {err}"));
+    }
+
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM core.discord_role_connection_tokens WHERE discord_id = 9960023",
+    )
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(0) => {}
+        Ok(other) => fehler.push(format!(
+            "eine Creator-Zeile ohne Steam-Zeile muss der Rueckweg auch ohne PK-Tausch \
+             loeschen, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("Creator-Zeile ohne Steam-Zeile nachher: {err}")),
+    }
+
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM core.discord_role_connection_tokens_rollback_backup \
+          WHERE discord_id = 9960023",
+    )
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(1) => {}
+        Ok(other) => fehler.push(format!(
+            "und sie muss dabei gesichert werden, gefunden: {other}"
+        )),
+        Err(err) => fehler.push(format!("Sicherung der Zeile ohne Steam-Zeile: {err}")),
+    }
+
     // Erst aufraeumen, dann urteilen: sonst bleibt bei jedem Fehlschlag eine
     // Wegwerf-Datenbank stehen.
     drop_db(&admin, &dbname).await;
     assert!(fehler.is_empty(), "{}", fehler.join("\n"));
 }
 
-/// Spaltennamen des Primaerschluessels, alphabetisch.
-async fn pk_spalten(pool: &PgPool, tabelle: &str) -> Vec<String> {
+/// Spaltennamen des Primaerschluessels in der Reihenfolge des Schluessels.
+///
+/// Die Reihenfolge ist der Punkt: `(provider, discord_id)` traegt dieselben
+/// Namen wie `(discord_id, provider)`, hilft aber keinem `WHERE discord_id = $1`.
+/// Deshalb ueber die Position in `conkey` sortiert und nicht alphabetisch. Fehler
+/// werden zurueckgegeben statt geworfen, damit der Aufrufer die Wegwerf-Datenbank
+/// noch aufraeumen kann.
+async fn pk_spalten(pool: &PgPool, tabelle: &str) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar(&format!(
         "SELECT att.attname::text
            FROM pg_constraint con
+           JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
            JOIN pg_attribute att
              ON att.attrelid = con.conrelid
-            AND att.attnum = ANY (con.conkey)
+            AND att.attnum = k.attnum
           WHERE con.conrelid = 'core.{tabelle}'::regclass
             AND con.contype = 'p'
-          ORDER BY att.attname"
+          ORDER BY k.ord"
     ))
     .fetch_all(pool)
     .await
-    .unwrap_or_else(|err| panic!("Primaerschluessel von core.{tabelle} lesen: {err}"))
 }
 
 #[tokio::test]

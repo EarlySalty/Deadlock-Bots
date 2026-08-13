@@ -1485,6 +1485,15 @@ const TEXT_USER_REF_COLUMNS: &[TextUserRefColumnSpec] = &[
     ),
 ];
 const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
+
+/// Kopien, die der Rueckweg von Migration 2026081301 anlegt
+/// (dl-central-db/rollbacks/). Sie tragen verschluesselte OAuth-Tokens und
+/// existieren nur nach einem Rollback; `expires_at` steht dort auf 180 Tagen wie
+/// bei den Server-Sync-Exporten.
+const ROLE_CONNECTION_ROLLBACK_BACKUP_RELS: [&str; 2] = [
+    "core.discord_role_connection_tokens_rollback_backup",
+    "core.discord_role_connection_sync_state_rollback_backup",
+];
 const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
 
 #[derive(Debug, Default, Clone)]
@@ -3359,6 +3368,27 @@ pub async fn purge_expired_server_sync_rollback_exports(
     Ok(rows_to_i64(result.rows_affected()))
 }
 
+/// Raeumt die Rollback-Kopien der Linked-Role-Tabellen nach Fristablauf.
+/// Vergessenes Aufraeumen waere eine unbefristete Token-Halde neben der
+/// Live-Tabelle; die Tabellen fehlen im Normalbetrieb, deshalb der Existenztest.
+pub async fn purge_expired_role_connection_rollback_backups(
+    pool: &PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CommunityDbResult<i64> {
+    let mut deleted = 0_i64;
+    for relation in ROLE_CONNECTION_ROLLBACK_BACKUP_RELS {
+        if !relation_exists(pool, relation).await? {
+            continue;
+        }
+        let result = sqlx::query(&format!("DELETE FROM {relation} WHERE expires_at <= $1"))
+            .bind(now)
+            .execute(pool)
+            .await?;
+        deleted += rows_to_i64(result.rows_affected());
+    }
+    Ok(deleted)
+}
+
 async fn purge_expired_server_sync_rollback_exports_tx(
     tx: &mut Transaction<'_, Postgres>,
     now: chrono::DateTime<chrono::Utc>,
@@ -3436,6 +3466,21 @@ pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task:
                 }
                 Err(err) => {
                     tracing::warn!(%err, "Server-Sync-Rollback-Export-Retention fehlgeschlagen");
+                }
+            }
+            // Im selben Takt, weil es dieselbe Sorte Artefakt ist: eine Kopie mit
+            // Tokens, die nach einem Rollback liegen bleibt.
+            match purge_expired_role_connection_rollback_backups(&pool, chrono::Utc::now()).await {
+                Ok(deleted) => {
+                    if deleted > 0 {
+                        tracing::info!(
+                            deleted,
+                            "Linked-Role-Rollback-Kopien nach Fristablauf geraeumt"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Linked-Role-Rollback-Retention fehlgeschlagen");
                 }
             }
             tokio::time::sleep(PRIVACY_RETENTION_JOB_INTERVAL).await;
