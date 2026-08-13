@@ -1620,8 +1620,10 @@ pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
 }
 
 /// Components-V2-Onboarding-DM für den Erst-Join ohne Standard. Bettet das
-/// echte Voreinstellungen-Panel (`tv_prefs_*`) plus den `router_dm_done`-Fertig-
-/// Button ein, damit der User seinen Modus direkt in der DM setzen kann.
+/// echte Voreinstellungen-Panel (`tv_prefs_*`) ein: ein Klick auf einen Modus
+/// speichert ihn und stellt zugleich die Lane um, in der der User sitzt. Der
+/// frühere `router_dm_done`-Knopf bleibt nur als Handler bestehen, damit
+/// bereits verschickte DMs weiter funktionieren.
 ///
 /// `lane_id` ist die beim Join automatisch gebaute Casual-Lane. Ohne sie (die
 /// Erstellung ist fehlgeschlagen) erklärt die DM stattdessen den Weg über den
@@ -1635,12 +1637,13 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
         None => (
             "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router".to_string(),
             format!(
-                "Schön, dass du da bist. Mit der Lane hat es gerade leider nicht geklappt. Sag mir unten, was du spielen willst, und klick auf **Fertig**: dann baue ich sie dir sofort, solange du in einem Sprachkanal sitzt. Einstieg ist immer <#{ROUTER_VC_ID}>."
+                "Schön, dass du da bist. Mit der Lane hat es gerade leider nicht geklappt. Sag mir unten, was du spielen willst, dann baue ich sie dir sofort, solange du im <#{ROUTER_VC_ID}> sitzt."
             ),
         ),
     };
     let closing = format!("Dein Preset kannst du jederzeit in <#{ROUTER_TEXT_CHANNEL_ID}> ändern.");
     let step_two = "### 2. Feinschliff, wenn du magst";
+
     json!({
         "flags": ROUTER_COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
@@ -1662,8 +1665,7 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
                 { "type": 10, "content": step_two },
                 { "type": 1, "components": [
                     { "type": 2, "style": 2, "label": "Name+Limit ändern", "custom_id": "tv_prefs_name_limit" },
-                    { "type": 2, "style": 2, "label": "Rang ändern", "custom_id": "tv_prefs_rank" },
-                    { "type": 2, "style": 3, "label": "Fertig", "custom_id": "router_dm_done", "emoji": { "name": "dl_crown", "id": "1522518265421631538" } }
+                    { "type": 2, "style": 2, "label": "Rang ändern", "custom_id": "tv_prefs_rank" }
                 ]},
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": closing }
@@ -1927,7 +1929,10 @@ mod tests {
         assert!(text.contains("tv_prefs_mode_street_brawl"));
         assert!(text.contains("tv_prefs_name_limit"));
         assert!(text.contains("tv_prefs_rank"));
-        assert!(text.contains("router_dm_done"));
+        assert!(
+            !text.contains("router_dm_done"),
+            "die Moduswahl wirkt sofort, ein Bestätigen-Knopf waere ein Zwischenschritt"
+        );
         // Kernbotschaft: die Lane steht schon, der Standard fehlt noch.
         assert!(text.contains("Deine Lane steht"));
         assert!(text.contains("Was spielst du am liebsten"));
@@ -1941,7 +1946,7 @@ mod tests {
         let text = serde_json::to_string(&router_intro_dm_body(None)).expect("json");
         assert!(text.contains("Willkommen im Deadlock Router"));
         assert!(text.contains("nicht geklappt"));
-        assert!(text.contains("router_dm_done"));
+        assert!(text.contains("tv_prefs_mode_casual"));
     }
 
     #[test]

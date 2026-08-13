@@ -704,6 +704,58 @@ impl PanelHandler {
         Some(channel_id)
     }
 
+    /// Guild der Interaktion. In einer DM steht dort 0, gemeint ist die
+    /// Haupt-Guild mit den Lanes.
+    fn guild_or_main(interaction: &BridgeInteraction) -> u64 {
+        if interaction.guild_id == 0 {
+            crate::router::ROUTER_GUILD_ID
+        } else {
+            interaction.guild_id
+        }
+    }
+
+    /// Die Moduswahl auf die Lane anwenden, in der der User gerade sitzt:
+    /// eigene Lane umstellen, im Router-Einstieg eine neue bauen. Wer nirgends
+    /// sitzt oder fremd zu Gast ist, ändert nur seinen Standard.
+    async fn apply_mode_to_current_lane(&self, interaction: &BridgeInteraction, mode: &str) {
+        let guild_id = Self::guild_or_main(interaction);
+        let Some(channel_id) = self
+            .engine
+            .port
+            .member_voice_channel(guild_id, interaction.user_id)
+            .await
+        else {
+            return;
+        };
+        if channel_id == crate::router::ROUTER_VC_ID
+            || self.engine.config.staging_channels.contains(&channel_id)
+        {
+            self.engine
+                .create_router_lane(guild_id, interaction.user_id, mode, channel_id)
+                .await;
+            return;
+        }
+        if self.engine.config.fixed_lane_ids.contains(&channel_id) {
+            return;
+        }
+        if self.engine.lane_owner(channel_id).await != Some(interaction.user_id) {
+            return;
+        }
+        if let Some(error) = self
+            .engine
+            .switch_lane_mode(guild_id, channel_id, interaction.user_id, mode)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                user_id = interaction.user_id,
+                channel_id,
+                mode,
+                "TempVoice: Moduswahl konnte die Lane nicht umstellen"
+            );
+        }
+    }
+
     async fn owned_lane_of(&self, interaction: &BridgeInteraction) -> Result<u64, BridgeReply> {
         let Some(lane) = self.lane_of(interaction).await else {
             return Err(BridgeReply::ephemeral_text(NOT_IN_LANE));
@@ -872,9 +924,9 @@ impl PanelHandler {
         // gehört dort auch dazu, was er auslöst.
         let footer = match (is_dm, default.is_some()) {
             (true, true) => {
-                "\n\n-# Gespeichert. **Fertig** übernimmt den Modus auf deine Lane, sonst gilt er ab dem nächsten Router-Join."
+                "\n\n-# Gespeichert. Sitzt du gerade in deiner Lane, läuft sie ab sofort so."
             }
-            (true, false) => "\n\n-# Wähl unten einen Modus, dann wird **Fertig** aktiv.",
+            (true, false) => "\n\n-# Wähl unten einen Modus, alles andere passiert von selbst.",
             (false, _) => "",
         };
         match default {
@@ -896,9 +948,9 @@ impl PanelHandler {
     }
 
     fn prefs_components(has_default: bool, can_apply_lane: bool, is_dm: bool) -> Value {
-        // In der DM ersetzt „Fertig" (router_dm_done) das „Default löschen", damit
-        // der User nach der Moduswahl direkt seine Lane bauen kann und der Button
-        // bei jedem In-place-Update des Panels erhalten bleibt.
+        // In der DM fehlt „Default löschen": dort geht es ums Einrichten, nicht
+        // ums Aufräumen. Einen Bestätigen-Knopf braucht es nicht, die Moduswahl
+        // wirkt sofort auf die aktuelle Lane.
         let (mode_row, second_row) = if is_dm {
             (
                 action_row(vec![
@@ -927,13 +979,6 @@ impl PanelHandler {
                 action_row(vec![
                     button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
                     button("Rang ändern", 2, "tv_prefs_rank"),
-                    emoji_button(
-                        "Fertig",
-                        3,
-                        "router_dm_done",
-                        "dl_crown",
-                        "1522518265421631538",
-                    ),
                 ]),
             )
         } else {
@@ -1155,6 +1200,9 @@ impl InteractionHandler for PanelHandler {
                 let record = self
                     .current_or_new_default(interaction.user_id, Some(&mode))
                     .await;
+                // Ohne Bestätigen-Knopf: die Wahl gilt sofort, auch für die
+                // Lane, in der der User gerade sitzt.
+                self.apply_mode_to_current_lane(&interaction, &mode).await;
                 self.save_default_and_show(&interaction, record).await
             }
             "tv_prefs_name_limit" => BridgeReply {
@@ -2295,18 +2343,20 @@ mod tests {
     }
 
     #[test]
-    fn prefs_components_dm_behaelt_fertig_statt_loeschen() {
-        // Re-Render nach Modus-Klick in der DM MUSS Fertig behalten (Regression).
+    fn prefs_components_dm_kommt_ohne_bestaetigen_knopf_aus() {
+        // Die Moduswahl wirkt sofort; ein Fertig-Knopf waere ein Zwischenschritt.
         let dm = serde_json::to_string(&PanelHandler::prefs_components(true, false, true))
             .expect("json");
         assert!(
-            dm.contains("router_dm_done"),
-            "DM-Panel muss Fertig behalten"
+            !dm.contains("router_dm_done"),
+            "DM-Panel braucht keinen Bestätigen-Knopf"
         );
         assert!(
             !dm.contains("tv_prefs_delete"),
             "DM-Panel zeigt kein Default löschen"
         );
+        assert!(dm.contains("tv_prefs_mode_casual"));
+        assert!(dm.contains("tv_prefs_name_limit"));
         // Guild-Panel unverändert: Default löschen, kein Fertig.
         let guild = serde_json::to_string(&PanelHandler::prefs_components(true, false, false))
             .expect("json");
