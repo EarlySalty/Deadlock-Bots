@@ -107,6 +107,36 @@ pub const ROUTER_EMOJI_BAN: (&str, &str) = ("dl_ban", "1522518261290369034");
 pub const ROUTER_EMOJI_UNBAN: (&str, &str) = ("dl_unban", "1522518273827143751");
 pub const ROUTER_EMOJI_MODE: (&str, &str) = ("dl_mode", "1522518269456547962");
 
+/// Alle Bot-DMs sollen gleich breit sein. Discord skaliert einen
+/// Components-V2-Container nach seinem breitesten Element und kennt keine
+/// Breitenangabe. Zeichen taugen nicht als Anker, weil ihre Breite von Schrift
+/// und Zeilenart abhaengt; ein Bild dagegen hat feste Pixel. Der Trenner ist
+/// deshalb ein 1100 Pixel breiter Streifen in Markengold, der die Breite
+/// festnagelt und obendrein als Kopfleiste taugt.
+pub const DM_WIDTH_IMAGE: &str = "dm-breite.png";
+/// Der Streifen wandert ins Binary: 211 Byte, dafür kein Pfad, der beim
+/// Aufräumen eines Deploy-Baums verschwinden und die DMs mitnehmen könnte.
+pub const DM_WIDTH_IMAGE_BYTES: &[u8] =
+    include_bytes!("../../../../assets/welcome-banners/dm-breite.png");
+
+/// Media-Element für den Container-Anfang.
+pub fn dm_width_divider() -> Value {
+    json!({
+        "type": 12,
+        "items": [{ "media": { "url": format!("attachment://{DM_WIDTH_IMAGE}") } }],
+    })
+}
+
+/// Attachment-Deklaration für den Nachrichten-Rumpf.
+pub fn dm_width_attachments() -> Value {
+    json!([{ "id": 0, "filename": DM_WIDTH_IMAGE }])
+}
+
+/// Kopfzeile einer Bot-DM: Server-Emoji plus Titel.
+pub fn dm_headline((emoji_name, emoji_id): (&str, &str), title: &str) -> String {
+    format!("## <:{emoji_name}:{emoji_id}> {title}")
+}
+
 pub const ROUTER_PANEL_MODE_HINT: &str = "-# Ranked ist offen; Rang-Gates setzt der Lane-Owner.";
 pub const ROUTER_PANEL_LANE_CAPTION: &str = "-# Deine Lane";
 pub const ROUTER_PANEL_MOD_CAPTION: &str = "-# Moderation";
@@ -1631,11 +1661,11 @@ pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
 pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
     let (headline, situation) = match lane_id {
         Some(_) => (
-            "## <:dl_casual:1522518264088100995> Deine Lane steht".to_string(),
+            dm_headline(ROUTER_EMOJI_CASUAL, "Deine Lane steht"),
             "Schön, dass du da bist. Deinen Lieblingsmodus kenne ich noch nicht, also hab ich dir kurzerhand eine **Casual**-Lane gebaut. 🥰".to_string(),
         ),
         None => (
-            "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router".to_string(),
+            dm_headline(ROUTER_EMOJI_MODE, "Willkommen im Deadlock Router"),
             format!(
                 "Schön, dass du da bist. Mit der Lane hat es gerade leider nicht geklappt. Sag mir unten, was du spielen willst, dann baue ich sie dir sofort, solange du im <#{ROUTER_VC_ID}> sitzt."
             ),
@@ -1647,10 +1677,12 @@ pub fn router_intro_dm_body(lane_id: Option<u64>) -> Value {
     json!({
         "flags": ROUTER_COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
+        "attachments": dm_width_attachments(),
         "components": [{
             "type": 17,
             "accent_color": ROUTER_ACCENT_GOLD,
             "components": [
+                dm_width_divider(),
                 { "type": 10, "content": headline },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": situation },
@@ -1911,6 +1943,24 @@ mod tests {
             "{}",
             serde_json::to_string(&router_intro_dm_body(Some(1523272810825252944))).expect("json")
         );
+    }
+
+    #[test]
+    fn dm_breite_haengt_am_bild_anker() {
+        // Zeichen taugen nicht als Breitenanker, ein Bild schon: es steht als
+        // erstes im Container und ist im Rumpf deklariert.
+        let body = router_intro_dm_body(Some(4242));
+        assert_eq!(body["attachments"][0]["filename"], json!(DM_WIDTH_IMAGE));
+        let first = &body["components"][0]["components"][0];
+        assert_eq!(first["type"], json!(12));
+        assert_eq!(
+            first["items"][0]["media"]["url"],
+            json!(format!("attachment://{DM_WIDTH_IMAGE}"))
+        );
+        // Die Kopfzeile bleibt sauber, ohne Fuellzeichen.
+        assert!(!serde_json::to_string(&body)
+            .expect("json")
+            .contains('\u{2800}'));
     }
 
     #[test]

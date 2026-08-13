@@ -459,11 +459,6 @@ pub fn never_custom_id() -> String {
     format!("{CUSTOM_ID_PREFIX}{NEVER_ACTION}")
 }
 
-/// Server-Emoji als Discord-Tag (`<:name:id>`).
-fn emoji_tag((name, id): (&str, &str)) -> String {
-    format!("<:{name}:{id}>")
-}
-
 /// Wie der Bot die andere Seite benennt: eine Person mit Namen, mehrere als
 /// Gruppe. Immer grammatikalisch passend zur Anzahl.
 fn other_side_label(other: &LaneSeat) -> String {
@@ -498,11 +493,13 @@ pub fn dm_body(guild_id: u64, seat: &LaneSeat, other: &LaneSeat) -> Value {
     json!({
         "flags": COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
+        "attachments": crate::router::dm_width_attachments(),
         "components": [{
             "type": 17,
             "accent_color": ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": format!("## {} {headline}", emoji_tag(ROUTER_EMOJI_CASUAL)) },
+                crate::router::dm_width_divider(),
+                { "type": 10, "content": crate::router::dm_headline(ROUTER_EMOJI_CASUAL, headline) },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": text },
                 { "type": 1, "components": [

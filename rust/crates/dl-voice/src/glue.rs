@@ -372,6 +372,50 @@ fn router_file_part_name(id: u8) -> String {
     format!("files[{id}]")
 }
 
+/// DM senden und dabei den Breiten-Trenner mitschicken, sobald der Body ihn
+/// referenziert. Ohne die Datei bliebe die Media-Komponente leer und Discord
+/// wiese die Nachricht ab.
+async fn send_dm_body(
+    adapter: &DiscordAdapter,
+    user_id: u64,
+    body: &Map<String, Value>,
+) -> Result<(u64, u64), String> {
+    let channel = adapter
+        .http
+        .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+        .await
+        .map_err(|err| err.to_string())?;
+    let channel_id = channel.id.get();
+
+    let needs_divider = serde_json::to_string(body)
+        .map(|text| text.contains(crate::router::DM_WIDTH_IMAGE))
+        .unwrap_or(false);
+    if !needs_divider {
+        let message_id = adapter
+            .send_raw_public(channel_id, body)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok((channel_id, message_id));
+    }
+
+    let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+    let response = send_router_message_payload(
+        adapter,
+        "POST",
+        url,
+        body.clone(),
+        vec![RouterPanelFile {
+            id: 0,
+            filename: crate::router::DM_WIDTH_IMAGE.to_string(),
+            bytes: crate::router::DM_WIDTH_IMAGE_BYTES.to_vec(),
+        }],
+    )
+    .await?;
+    let message: DiscordMessageWriteResponse = router_discord_json_response(response, "POST")?;
+    let message_id = parse_router_message_id(&message.id)?;
+    Ok((channel_id, message_id))
+}
+
 fn router_panel_files(
     attachments: &[crate::router::RouterPanelAttachment],
 ) -> Result<Vec<RouterPanelFile>, String> {
@@ -2300,18 +2344,7 @@ impl crate::router::RouterPort for RouterGlue {
         let map = body
             .as_object()
             .ok_or_else(|| "Router: Intro-DM-Body ist kein JSON-Objekt".to_string())?;
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|err| err.to_string())?;
-        let message_id = self
-            .adapter
-            .send_raw_public(channel.id.get(), map)
-            .await
-            .map_err(|err| err.to_string())?;
-        Ok((channel.id.get(), message_id))
+        send_dm_body(&self.adapter, user_id, map).await
     }
 
     async fn delete_dm_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
@@ -2862,16 +2895,7 @@ impl crate::mate_survey::MateSurveyPort for MateSurveyGlue {
         let body = body
             .as_object()
             .ok_or_else(|| "Umfrage-DM ist kein JSON-Objekt".to_string())?;
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|error| error.to_string())?;
-        self.adapter
-            .send_raw_public(channel.id.get(), body)
-            .await
-            .map(|_| ())
+        send_dm_body(&self.adapter, user_id, body).await.map(|_| ())
     }
 
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
@@ -2974,16 +2998,7 @@ impl crate::pairing::PairingPort for PairingGlue {
         let body = body
             .as_object()
             .ok_or_else(|| "Pairing-DM ist kein JSON-Objekt".to_string())?;
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|error| error.to_string())?;
-        self.adapter
-            .send_raw_public(channel.id.get(), body)
-            .await
-            .map(|_| ())
+        send_dm_body(&self.adapter, user_id, body).await.map(|_| ())
     }
 
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {

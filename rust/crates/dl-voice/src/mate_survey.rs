@@ -360,11 +360,6 @@ pub fn comment_modal(mate_id: u64) -> ModalSpec {
     }
 }
 
-/// Server-Emoji als Discord-Tag (`<:name:id>`).
-fn emoji_tag((name, id): (&str, &str)) -> String {
-    format!("<:{name}:{id}>")
-}
-
 fn minutes_label(seconds: i64) -> String {
     let minutes = (seconds / 60).max(1);
     if minutes >= 90 {
@@ -383,11 +378,13 @@ pub fn dm_body(mate_id: u64, channel_id: u64, seconds: i64) -> Value {
     json!({
         "flags": COMPONENTS_V2_FLAG,
         "allowed_mentions": { "parse": [] },
+        "attachments": crate::router::dm_width_attachments(),
         "components": [{
             "type": 17,
             "accent_color": ACCENT_GOLD,
             "components": [
-                { "type": 10, "content": format!("## {} Kurz gefragt", emoji_tag(EMOJI_RANKED)) },
+                crate::router::dm_width_divider(),
+                { "type": 10, "content": crate::router::dm_headline(EMOJI_RANKED, "Kurz gefragt") },
                 { "type": 14, "divider": true, "spacing": 2 },
                 { "type": 10, "content": format!(
                     "Ihr wart gerade {} zusammen in <#{channel_id}> unterwegs.\n\n**Würdest du wieder mit <@{mate_id}> spielen?**\nSagst du Ja, setze ich euch öfter zusammen in eine Lane.\n\n🔒 **Deine Antwort bleibt privat.** <@{mate_id}> erfährt nie, was du hier klickst.",
