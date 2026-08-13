@@ -684,6 +684,21 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Hilfsausgabe: druckt den echten Pairing-Vorschlag zum Gegenlesen"]
+    fn dump_pairing_dm() {
+        let now = now();
+        println!(
+            "{}",
+            serde_json::to_string(&dm_body(
+                MAIN_GUILD_ID,
+                &seat(1, 1523272810825252944, "casual", now),
+                &seat(2, 1513468587195633674, "casual", now),
+            ))
+            .expect("json")
+        );
+    }
+
+    #[test]
     fn pair_key_ist_richtungsunabhaengig() {
         assert_eq!(pair_key(10, 20), pair_key(20, 10));
         assert_eq!(pair_key(10, 20), "10:20");

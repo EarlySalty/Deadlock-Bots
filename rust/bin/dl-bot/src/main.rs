@@ -1878,6 +1878,21 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .await;
             tempvoice_interface_ready.refresh_all_interfaces().await;
         });
+        // Wer beim Neustart schon im Router-VC saß, bekommt kein Join-Event
+        // mehr; ohne diesen Anstoß wartet er dort ewig.
+        let mut auto_move_cache_ready = dispatcher.subscribe_gateway();
+        let router_after_restart = lane_router.clone();
+        tokio::spawn(async move {
+            wait_for_gateway_cache_ready(
+                &mut auto_move_cache_ready,
+                dl_voice::router::ROUTER_GUILD_ID,
+                "router_auto_move",
+            )
+            .await;
+            router_after_restart
+                .prime_auto_move(dl_voice::router::ROUTER_GUILD_ID)
+                .await;
+        });
         dl_bridges::steam::spawn_panel_restore(
             steam_client.clone(),
             central_pool.clone(),

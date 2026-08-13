@@ -725,6 +725,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Hilfsausgabe: druckt die echte Umfrage-DM zum Gegenlesen"]
+    fn dump_survey_dm() {
+        println!(
+            "{}",
+            serde_json::to_string(&dm_body(2, 1523272810825252944, 2700)).expect("json")
+        );
+    }
+
+    #[test]
     fn minuten_label_bleibt_lesbar() {
         assert_eq!(minutes_label(1200), "20 Minuten");
         assert_eq!(minutes_label(30), "1 Minuten");

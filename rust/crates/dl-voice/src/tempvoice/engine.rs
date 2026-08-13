@@ -250,13 +250,9 @@ impl TempVoiceConfig {
         Self {
             guild_id_hint: 1289721245281292288,
             staging_channels: HashSet::from([staging_casual, staging_street_brawl, staging_comp]),
-            fixed_lane_ids: HashSet::from([
-                crate::router::ROUTER_VC_ID, // Router-Einstieg liegt in Chill, ist keine Lane
-                1493690350580138114,         // permanenter Chill-Voice
-                1411391356278018245,
-                1470126503252721845,
-                1505618194017161267,
-            ]),
+            // Eine Quelle für „das ist keine Lane": der Router filtert dieselbe
+            // Liste beim Routing, sonst landet jemand im Einstiegskanal.
+            fixed_lane_ids: HashSet::from(crate::router::NON_LANE_CHANNEL_IDS),
             tempvoice_categories: HashSet::from([
                 category_chill,
                 category_comp,

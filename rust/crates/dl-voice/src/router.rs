@@ -40,6 +40,17 @@ pub const ROUTER_CATEGORY_CHILL: u64 = 1289721245281292290;
 pub const ROUTER_CATEGORY_RANKED_LEGACY: u64 = 1412804540994162789;
 pub const ROUTER_CATEGORY_STREET_BRAWL_LEGACY: u64 = 1357422957017698478;
 pub const MAX_LANE_MEMBERS: usize = 6;
+/// Voice-Kanäle in den Lane-Kategorien, die KEINE Lane sind: der Router-Einstieg
+/// selbst und die permanenten Kanäle. Sie dürfen nie Ziel eines Routings werden,
+/// sonst „verschiebt" der Bot jemanden in den Kanal, in dem er schon sitzt.
+/// Einzige Quelle für die Fixkanäle der TempVoice-Engine.
+pub const NON_LANE_CHANNEL_IDS: [u64; 5] = [
+    ROUTER_VC_ID,
+    1493690350580138114, // permanenter Chill-Voice
+    1411391356278018245, // Off-Topic-Anker
+    1470126503252721845, // Neue-Spieler-Anker
+    1505618194017161267,
+];
 pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
 pub const ROUTER_PANEL_MESSAGE_KEY: &str = "components_v2_message_id";
 pub const ROUTER_LEGACY_GUIDE_MESSAGE_KEY: &str = "guide_message_id";
@@ -269,6 +280,7 @@ pub fn pick_lane(
         .iter()
         .filter(|(channel_id, members)| {
             !STAGING_IDS.contains(channel_id)
+                && !NON_LANE_CHANNEL_IDS.contains(channel_id)
                 && !members.is_empty()
                 && members.len() < MAX_LANE_MEMBERS
         })
@@ -1016,6 +1028,59 @@ impl LaneRouter {
         self.maybe_send_intro_dm(user_id, lane_id).await;
     }
 
+    /// Auto-Move-Uhr für jemanden starten, der im Router-VC sitzt.
+    async fn arm_auto_move(self: &Arc<Self>, guild_id: u64, user_id: u64) {
+        if !self.auto_move.enabled {
+            log_auto_move_decision(guild_id, user_id, None, "skipped", "disabled");
+            return;
+        }
+        let entered_at = Instant::now();
+        self.auto_move_entries
+            .lock()
+            .await
+            .insert((guild_id, user_id), entered_at);
+        let router = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(router.auto_move.delay).await;
+            let is_current = router
+                .auto_move_entries
+                .lock()
+                .await
+                .get(&(guild_id, user_id))
+                .is_some_and(|current| *current == entered_at);
+            if !is_current {
+                log_auto_move_decision(guild_id, user_id, None, "skipped", "left_or_rejoined");
+                return;
+            }
+            router.run_auto_move(guild_id, user_id).await;
+            let mut entries = router.auto_move_entries.lock().await;
+            if entries
+                .get(&(guild_id, user_id))
+                .is_some_and(|current| *current == entered_at)
+            {
+                entries.remove(&(guild_id, user_id));
+            }
+        });
+    }
+
+    /// Nach einem Neustart gibt es für alle, die schon im Router-VC sitzen, nie
+    /// wieder ein Join-Event. Ohne diesen Anstoß säßen sie dort bis zum
+    /// nächsten eigenen Kanalwechsel fest.
+    pub async fn prime_auto_move(self: &Arc<Self>, guild_id: u64) {
+        let waiting = self.port.channel_members(guild_id, ROUTER_VC_ID).await;
+        if waiting.is_empty() {
+            return;
+        }
+        tracing::info!(
+            guild_id,
+            wartende = waiting.len(),
+            "Router: Auto-Move nach Neustart nachgezogen"
+        );
+        for user_id in waiting {
+            self.arm_auto_move(guild_id, user_id).await;
+        }
+    }
+
     async fn update_auto_move_timer(self: &Arc<Self>, event: &VoiceEvent) {
         let entered = match event {
             VoiceEvent::Join {
@@ -1032,37 +1097,7 @@ impl LaneRouter {
             _ => None,
         };
         if let Some((guild_id, user_id)) = entered {
-            if !self.auto_move.enabled {
-                log_auto_move_decision(guild_id, user_id, None, "skipped", "disabled");
-                return;
-            }
-            let entered_at = Instant::now();
-            self.auto_move_entries
-                .lock()
-                .await
-                .insert((guild_id, user_id), entered_at);
-            let router = self.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(router.auto_move.delay).await;
-                let is_current = router
-                    .auto_move_entries
-                    .lock()
-                    .await
-                    .get(&(guild_id, user_id))
-                    .is_some_and(|current| *current == entered_at);
-                if !is_current {
-                    log_auto_move_decision(guild_id, user_id, None, "skipped", "left_or_rejoined");
-                    return;
-                }
-                router.run_auto_move(guild_id, user_id).await;
-                let mut entries = router.auto_move_entries.lock().await;
-                if entries
-                    .get(&(guild_id, user_id))
-                    .is_some_and(|current| *current == entered_at)
-                {
-                    entries.remove(&(guild_id, user_id));
-                }
-            });
+            self.arm_auto_move(guild_id, user_id).await;
             return;
         }
 
@@ -1882,6 +1917,15 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     #[test]
+    #[ignore = "Hilfsausgabe: druckt die echte Onboarding-DM zum Gegenlesen"]
+    fn dump_intro_dm() {
+        println!(
+            "{}",
+            serde_json::to_string(&router_intro_dm_body(Some(1523272810825252944))).expect("json")
+        );
+    }
+
+    #[test]
     fn intro_dm_decision_sendet_nur_beim_ersten_mal() {
         assert_eq!(intro_dm_decision(false), IntroDmDecision::Send);
         assert_eq!(intro_dm_decision(true), IntroDmDecision::SkipAlreadySent);
@@ -1935,6 +1979,41 @@ mod tests {
         let text = not_in_voice.content.clone().expect("content");
         assert!(text.contains(&ROUTER_VC_ID.to_string()));
         assert!(text.contains("Standard ist gespeichert"));
+    }
+
+    #[test]
+    fn lane_wahl_ignoriert_den_router_vc_und_fixkanaele() {
+        // Der Router-VC liegt selbst in der Chill-Kategorie und kam damit als
+        // „passende Lane" zurück: der Bot verschob Leute in den Kanal, in dem
+        // sie schon saßen, und der Auto-Move lief ins Leere.
+        let lanes = vec![(ROUTER_VC_ID, vec![7]), (NON_LANE_CHANNEL_IDS[1], vec![8])];
+        assert_eq!(pick_lane(&lanes, &Default::default()), None);
+
+        let co: std::collections::HashSet<u64> = [7].into_iter().collect();
+        assert_eq!(
+            pick_lane(&lanes, &co),
+            None,
+            "auch ein Co-Spieler im Router-VC macht ihn nicht zur Lane"
+        );
+
+        let mit_echter_lane = vec![(ROUTER_VC_ID, vec![7]), (42, vec![8])];
+        assert_eq!(pick_lane(&mit_echter_lane, &Default::default()), Some(42));
+    }
+
+    #[test]
+    fn auto_move_baut_eine_lane_statt_in_den_router_zu_schieben() {
+        // Genau der Live-Fall: allein im Router, und die einzige „Lane" in der
+        // Kategorie ist der Router-VC selbst.
+        assert_eq!(
+            decide_auto_move(
+                true,
+                7,
+                Some(ROUTER_VC_ID),
+                &[7],
+                &[(ROUTER_VC_ID, vec![7])]
+            ),
+            AutoMoveDecision::CreateCasual
+        );
     }
 
     #[test]
