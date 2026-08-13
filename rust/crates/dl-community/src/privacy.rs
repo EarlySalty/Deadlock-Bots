@@ -1488,8 +1488,10 @@ const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
 
 /// Kopien, die der Rueckweg von Migration 2026081301 anlegt
 /// (dl-central-db/rollbacks/). Sie tragen verschluesselte OAuth-Tokens und
-/// existieren nur nach einem Rollback; `expires_at` steht dort auf 180 Tagen wie
-/// bei den Server-Sync-Exporten.
+/// existieren nur nach einem Rollback; `rollback_expires_at` steht dort auf 180
+/// Tagen wie `expires_at` bei den Server-Sync-Exporten. Der eigene Name ist
+/// Absicht: die Tokens-Kopie hat schon ein `expires_at`, und das ist der
+/// OAuth-Ablauf des Tokens.
 const ROLE_CONNECTION_ROLLBACK_BACKUP_RELS: [&str; 2] = [
     "core.discord_role_connection_tokens_rollback_backup",
     "core.discord_role_connection_sync_state_rollback_backup",
@@ -3374,17 +3376,22 @@ pub async fn purge_expired_server_sync_rollback_exports(
 pub async fn purge_expired_role_connection_rollback_backups(
     pool: &PgPool,
     now: chrono::DateTime<chrono::Utc>,
-) -> CommunityDbResult<i64> {
-    let mut deleted = 0_i64;
+) -> CommunityDbResult<Vec<(&'static str, i64)>> {
+    let mut deleted = Vec::new();
     for relation in ROLE_CONNECTION_ROLLBACK_BACKUP_RELS {
         if !relation_exists(pool, relation).await? {
             continue;
         }
-        let result = sqlx::query(&format!("DELETE FROM {relation} WHERE expires_at <= $1"))
-            .bind(now)
-            .execute(pool)
-            .await?;
-        deleted += rows_to_i64(result.rows_affected());
+        // `rollback_expires_at`, nicht `expires_at`: letzteres traegt in der
+        // Tokens-Kopie den OAuth-Ablauf des Tokens und wuerde die Sicherung
+        // binnen Tagen loeschen.
+        let result = sqlx::query(&format!(
+            "DELETE FROM {relation} WHERE rollback_expires_at <= $1"
+        ))
+        .bind(now)
+        .execute(pool)
+        .await?;
+        deleted.push((relation, rows_to_i64(result.rows_affected())));
     }
     Ok(deleted)
 }
@@ -3472,9 +3479,12 @@ pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task:
             // Tokens, die nach einem Rollback liegen bleibt.
             match purge_expired_role_connection_rollback_backups(&pool, chrono::Utc::now()).await {
                 Ok(deleted) => {
-                    if deleted > 0 {
+                    // Je Tabelle getrennt: eine Summe wuerde verstecken, dass die
+                    // Token-Kopien verschwunden sind und die Sync-Kopien nicht.
+                    for (relation, count) in deleted.iter().filter(|(_, count)| *count > 0) {
                         tracing::info!(
-                            deleted,
+                            relation,
+                            deleted = count,
                             "Linked-Role-Rollback-Kopien nach Fristablauf geraeumt"
                         );
                     }
@@ -7685,6 +7695,126 @@ mod tests {
                 .expect("hash");
         assert_eq!(remaining, 1);
         assert_eq!(newest_hash, "new");
+    }
+
+    /// Legt die Kopien so an, wie der Rueckweg von Migration 2026081301 sie
+    /// hinterlaesst: `LIKE` auf die Live-Tabelle plus die Frist-Spalte. `LIKE`
+    /// ohne `INCLUDING DEFAULTS` uebernimmt keine Defaults — deshalb nennen die
+    /// Inserts unten jede NOT-NULL-Spalte. Die echte Anlage steht in
+    /// dl-central-db/rollbacks/ und wird von fresh_migrations_schema.rs gefahren.
+    async fn lege_rollback_kopien_an(pool: &PgPool) {
+        for tabelle in [
+            "discord_role_connection_tokens",
+            "discord_role_connection_sync_state",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TABLE core.{tabelle}_rollback_backup (LIKE core.{tabelle})"
+            ))
+            .execute(pool)
+            .await
+            .expect("kopie anlegen");
+            sqlx::query(&format!(
+                "ALTER TABLE core.{tabelle}_rollback_backup
+                 ADD COLUMN rollback_expires_at TIMESTAMPTZ NOT NULL
+                 DEFAULT (now() + INTERVAL '180 days')"
+            ))
+            .execute(pool)
+            .await
+            .expect("frist-spalte");
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_kopien_retention_raeumt_nur_die_abgelaufene_zeile_je_tabelle() {
+        let db = mk_db().await;
+        let now = Utc::now();
+
+        // Fehlen die Kopien — der Normalfall ohne Rollback —, darf der Job nicht
+        // an einer fehlenden Relation scheitern und nichts melden.
+        let ohne_kopien = purge_expired_role_connection_rollback_backups(db.pool(), now)
+            .await
+            .expect("purge ohne kopien");
+        assert!(ohne_kopien.is_empty(), "{ohne_kopien:?}");
+
+        lege_rollback_kopien_an(db.pool()).await;
+
+        // Die zweite Zeile ist die Falle: ihr OAuth-`expires_at` liegt Jahre in
+        // der Vergangenheit (invalidiertes Token), die Aufbewahrungsfrist aber
+        // nicht. Haengt die Retention am falschen Spaltennamen, loescht sie hier
+        // die einzige Kopie der Creator-Tokens.
+        sqlx::query(
+            r#"
+            INSERT INTO core.discord_role_connection_tokens_rollback_backup(
+                discord_id, access_token, refresh_token, token_type, scope, expires_at,
+                token_version, active, created_at, updated_at, provider, rollback_expires_at
+            )
+            VALUES
+              (9970001, '\x01'::bytea, '\x02'::bytea, 'Bearer', 'identify', $1, 1, TRUE, $1, $1,
+               'creator', $2),
+              (9970002, '\x03'::bytea, '\x04'::bytea, 'Bearer', 'identify', $3, 1, TRUE, $1, $1,
+               'creator', $4)
+            "#,
+        )
+        .bind(now)
+        .bind(now - Duration::seconds(1))
+        .bind(now - Duration::days(900))
+        .bind(now + Duration::days(180))
+        .execute(db.pool())
+        .await
+        .expect("token-kopien");
+
+        sqlx::query(
+            r#"
+            INSERT INTO core.discord_role_connection_sync_state_rollback_backup(
+                discord_id, pending, reason, attempts, next_attempt_at, created_at, updated_at,
+                provider, rollback_expires_at
+            )
+            VALUES
+              (9970001, TRUE, 'creator_reconcile', 0, $1, $1, $1, 'creator', $2),
+              (9970002, TRUE, 'creator_reconcile', 0, $1, $1, $1, 'creator', $3)
+            "#,
+        )
+        .bind(now)
+        .bind(now - Duration::seconds(1))
+        .bind(now + Duration::days(180))
+        .execute(db.pool())
+        .await
+        .expect("sync-kopien");
+
+        let deleted = purge_expired_role_connection_rollback_backups(db.pool(), now)
+            .await
+            .expect("purge");
+        assert_eq!(
+            deleted,
+            vec![
+                ("core.discord_role_connection_tokens_rollback_backup", 1),
+                ("core.discord_role_connection_sync_state_rollback_backup", 1),
+            ],
+            "Zaehlung je Tabelle getrennt, in der Reihenfolge der Konstante"
+        );
+
+        for relation in ROLE_CONNECTION_ROLLBACK_BACKUP_RELS {
+            let uebrig: Vec<i64> = sqlx::query_scalar(&format!(
+                "SELECT discord_id FROM {relation} ORDER BY discord_id"
+            ))
+            .fetch_all(db.pool())
+            .await
+            .expect("uebrige zeilen");
+            assert_eq!(uebrig, vec![9970002], "{relation}");
+        }
+
+        // Zweiter Lauf ohne neue Frist: nichts mehr faellig, aber die Meldung
+        // bleibt je Tabelle bestehen (0), damit der Job nicht stumm aussetzt.
+        let zweiter = purge_expired_role_connection_rollback_backups(db.pool(), now)
+            .await
+            .expect("zweiter purge");
+        assert_eq!(
+            zweiter,
+            vec![
+                ("core.discord_role_connection_tokens_rollback_backup", 0),
+                ("core.discord_role_connection_sync_state_rollback_backup", 0),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -56,15 +56,25 @@ CREATE TABLE IF NOT EXISTS core.discord_role_connection_sync_state_rollback_back
 -- Kopien tragen verschluesselte OAuth-Tokens und duerfen nicht unbefristet neben
 -- der Live-Tabelle liegen. Der Retention-Job in dl-community/src/privacy.rs
 -- raeumt sie ab; `ADD COLUMN IF NOT EXISTS`, damit ein zweiter Lauf durchlaeuft.
+--
+-- Der Name ist bewusst `rollback_expires_at` und nicht `expires_at`: die
+-- Tokens-Tabelle hat schon ein `expires_at`, und das ist der OAuth-Ablauf des
+-- Tokens (Tage, bei invalidierten Tokens Vergangenheit). Waere die Frist an
+-- diesen Namen gehaengt, haette `ADD COLUMN IF NOT EXISTS` still nichts getan
+-- und der Retention-Job die einzige Kopie beim naechsten Tick geloescht — das
+-- Netz gegen Datenverlust haette sich selbst aufgeloest.
 ALTER TABLE core.discord_role_connection_tokens_rollback_backup
-    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL
+    ADD COLUMN IF NOT EXISTS rollback_expires_at TIMESTAMPTZ NOT NULL
     DEFAULT (now() + INTERVAL '180 days');
 ALTER TABLE core.discord_role_connection_sync_state_rollback_backup
-    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL
+    ADD COLUMN IF NOT EXISTS rollback_expires_at TIMESTAMPTZ NOT NULL
     DEFAULT (now() + INTERVAL '180 days');
 
--- Spaltenliste aus dem Katalog, damit expires_at per DEFAULT gefuellt wird und
--- die Anweisung nicht bricht, wenn die Live-Tabelle spaeter Spalten dazubekommt.
+-- Spaltenliste aus dem Katalog, und zwar als Schnittmenge von Quelle und Kopie:
+-- rollback_expires_at wird so per DEFAULT gefuellt, und eine Kopie aus einem
+-- frueheren Lauf, der eine inzwischen dazugekommene Spalte fehlt, bricht nicht
+-- an 42703 (was die ganze Transaktion mitnehmen wuerde). Die fehlende Spalte
+-- fehlt dann in der Sicherung — sichtbar, aber nicht toedlich.
 DO $sicherung$
 DECLARE
     tabelle TEXT;
@@ -74,12 +84,19 @@ BEGIN
         'discord_role_connection_tokens',
         'discord_role_connection_sync_state'
     ] LOOP
-        SELECT string_agg(quote_ident(att.attname), ', ' ORDER BY att.attnum)
+        SELECT string_agg(quote_ident(quelle.attname), ', ' ORDER BY quelle.attnum)
           INTO spalten
-          FROM pg_attribute att
-         WHERE att.attrelid = ('core.' || tabelle)::regclass
-           AND att.attnum > 0
-           AND NOT att.attisdropped;
+          FROM pg_attribute quelle
+         WHERE quelle.attrelid = ('core.' || tabelle)::regclass
+           AND quelle.attnum > 0
+           AND NOT quelle.attisdropped
+           AND EXISTS (
+               SELECT 1 FROM pg_attribute kopie
+                WHERE kopie.attrelid = ('core.' || tabelle || '_rollback_backup')::regclass
+                  AND kopie.attname = quelle.attname
+                  AND kopie.attnum > 0
+                  AND NOT kopie.attisdropped
+           );
 
         EXECUTE format(
             'INSERT INTO core.%I (%s) SELECT %s FROM core.%I WHERE provider <> ''steam''',
@@ -102,12 +119,18 @@ BEGIN
     ] LOOP
         unique_name := tabelle || '_discord_provider_key';
 
-        -- Zuerst der Unique-Ersatz, dann der PK-Tausch: zwischen DROP und ADD
-        -- darf kein Moment ohne Index auf (discord_id, provider) liegen, sonst
-        -- kann in dieser Transaktion kein Trigger mehr schreiben. Postgres kennt
-        -- kein ADD CONSTRAINT IF NOT EXISTS, deshalb die Abfrage — ein zweiter
-        -- Lauf soll nicht an 42P07 sterben und die ganze Transaktion mitnehmen.
-        IF NOT EXISTS (
+        -- Der Unique-Ersatz nur dort, wo er gebraucht wird: die Trigger-Funktion
+        -- schreibt ausschliesslich sync_state mit
+        -- ON CONFLICT (discord_id, provider). Auf tokens waere er ein dauerhaft
+        -- redundanter Index — das alte Binary nutzt dort ON CONFLICT (discord_id)
+        -- und kommt mit dem Primaerschluessel aus.
+        --
+        -- Zuerst der Ersatz, dann der PK-Tausch: zwischen DROP und ADD darf kein
+        -- Moment ohne Index auf (discord_id, provider) liegen, sonst kann in
+        -- dieser Transaktion kein Trigger mehr schreiben. Postgres kennt kein
+        -- ADD CONSTRAINT IF NOT EXISTS, deshalb die Abfrage — ein zweiter Lauf
+        -- soll nicht an 42P07 sterben und die Transaktion mitnehmen.
+        IF tabelle = 'discord_role_connection_sync_state' AND NOT EXISTS (
             SELECT 1 FROM pg_constraint
              WHERE conrelid = ('core.' || tabelle)::regclass
                AND conname = unique_name
@@ -156,7 +179,7 @@ $rollback$;
 
 COMMIT;
 
--- Die Kopien laufen nach 180 Tagen von selbst ab (expires_at, geraeumt vom
+-- Die Kopien laufen nach 180 Tagen von selbst ab (rollback_expires_at, geraeumt vom
 -- Retention-Job in dl-community/src/privacy.rs). Wer frueher fertig ist:
 --   DROP TABLE core.discord_role_connection_tokens_rollback_backup;
 --   DROP TABLE core.discord_role_connection_sync_state_rollback_backup;
