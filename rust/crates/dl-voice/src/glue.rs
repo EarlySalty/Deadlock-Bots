@@ -551,6 +551,62 @@ fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
     }
 }
 
+/// Liest das Bitrate-Limit aus Discords Formular-Fehler
+/// ("bitrate: int32 value should be less than or equal to 128000.").
+fn bitrate_limit_from_error(err: &str) -> Option<u64> {
+    err.split("bitrate:")
+        .nth(1)?
+        .split("less than or equal to")
+        .nth(1)?
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// Erstellt einen Voice-Kanal und faengt die eine Absage ab, die Discord nach
+/// einem Boost-Verlust liefert: die gewuenschte Bitrate liegt ueber dem
+/// aktuellen Guild-Limit. Sowohl das Premium-Tier aus dem Gateway-Cache als
+/// auch die von Anker-Kanaelen geerbte Bitrate koennen dann veraltet sein
+/// (bestehende Kanaele behalten ihre alte Bitrate), und ohne Nachlegen faellt
+/// die komplette Lane aus.
+async fn create_voice_channel_with_bitrate_fallback(
+    adapter: &DiscordAdapter,
+    guild_id: u64,
+    body: &Map<String, Value>,
+    audit_reason: &str,
+) -> Result<u64, String> {
+    let err = match adapter
+        .http
+        .create_channel(GuildId::new(guild_id), body, Some(audit_reason))
+        .await
+    {
+        Ok(channel) => return Ok(channel.id.get()),
+        Err(err) => err.to_string(),
+    };
+    if !body.contains_key("bitrate") {
+        return Err(err);
+    }
+    let Some(limit) = bitrate_limit_from_error(&err) else {
+        return Err(err);
+    };
+    tracing::warn!(
+        guild_id,
+        limit,
+        "Voice-Create: Bitrate ueber dem Guild-Limit, Kanal wird mit dem Limit angelegt"
+    );
+    let mut retry = body.clone();
+    retry.insert("bitrate".into(), json!(limit));
+    adapter
+        .http
+        .create_channel(GuildId::new(guild_id), &retry, Some(audit_reason))
+        .await
+        .map(|channel| channel.id.get())
+        .map_err(|err| err.to_string())
+}
+
 fn count_scrim_record_humans(
     target_channel_id: u64,
     states: impl IntoIterator<Item = (Option<u64>, Option<bool>)>,
@@ -774,12 +830,13 @@ impl LanePort for CacheSnapshot {
             inherit_category_overwrites(&mut body, guild_id, category, &overwrites);
             body.insert("bitrate".into(), json!(bitrate));
         }
-        self.adapter
-            .http
-            .create_channel(GuildId::new(guild_id), &body, Some("TempVoice: Auto-Lane"))
-            .await
-            .map(|c| c.id.get())
-            .map_err(|e| e.to_string())
+        create_voice_channel_with_bitrate_fallback(
+            &self.adapter,
+            guild_id,
+            &body,
+            "TempVoice: Auto-Lane",
+        )
+        .await
     }
 
     async fn create_restricted_voice_channel(
@@ -803,28 +860,27 @@ impl LanePort for CacheSnapshot {
             .guild(GuildId::new(guild_id))
             .map(|guild| guild_voice_bitrate_limit(guild.premium_tier))
             .unwrap_or(96_000);
-        let body = json!({
-            "name": name,
-            "type": 2,
-            "parent_id": category_id.to_string(),
-            "user_limit": 0,
-            "bitrate": bitrate,
-            "permission_overwrites": restricted_voice_overwrites(
+        let mut body = Map::new();
+        body.insert("name".into(), json!(name));
+        body.insert("type".into(), json!(2));
+        body.insert("parent_id".into(), json!(category_id.to_string()));
+        body.insert("user_limit".into(), json!(0));
+        body.insert("bitrate".into(), json!(bitrate));
+        body.insert(
+            "permission_overwrites".into(),
+            json!(restricted_voice_overwrites(
                 guild_id,
                 bot_user_id,
                 connect_user_ids.iter().copied(),
-            ),
-        });
-        self.adapter
-            .http
-            .create_channel(
-                GuildId::new(guild_id),
-                &body,
-                Some("Scrim: sichtbaren Team-Voice erstellen"),
-            )
-            .await
-            .map(|channel| channel.id.get())
-            .map_err(|err| err.to_string())
+            )),
+        );
+        create_voice_channel_with_bitrate_fallback(
+            &self.adapter,
+            guild_id,
+            &body,
+            "Scrim: sichtbaren Team-Voice erstellen",
+        )
+        .await
     }
 
     async fn delete_channel(&self, channel_id: u64, reason: &str) -> Result<(), String> {
@@ -2763,16 +2819,13 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
         if let Some(bitrate) = bitrate {
             body.insert("bitrate".into(), json!(bitrate));
         }
-        self.adapter
-            .http
-            .create_channel(
-                GuildId::new(guild_id),
-                &body,
-                Some("Adaptive Lanes: Lane nachgelegt"),
-            )
-            .await
-            .map(|c| c.id.get())
-            .map_err(|e| e.to_string())
+        create_voice_channel_with_bitrate_fallback(
+            &self.adapter,
+            guild_id,
+            &body,
+            "Adaptive Lanes: Lane nachgelegt",
+        )
+        .await
     }
 
     async fn set_channel_position(&self, channel_id: u64, position: i64) -> Result<(), String> {
@@ -3077,6 +3130,21 @@ mod tests {
     use serenity::http::HttpBuilder;
 
     use super::*;
+
+    #[test]
+    fn bitrate_limit_wird_aus_der_discord_absage_gelesen() {
+        assert_eq!(
+            bitrate_limit_from_error(
+                "Invalid Form Body (bitrate: int32 value should be less than or equal to 128000.)"
+            ),
+            Some(128_000)
+        );
+        assert_eq!(bitrate_limit_from_error("Missing Permissions"), None);
+        assert_eq!(
+            bitrate_limit_from_error("Invalid Form Body (bitrate: muss eine Zahl sein)"),
+            None
+        );
+    }
 
     #[test]
     fn scrim_record_count_excludes_known_bots_and_foreign_channels() {
