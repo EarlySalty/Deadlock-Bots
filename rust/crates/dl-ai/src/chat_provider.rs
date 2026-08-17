@@ -9,6 +9,13 @@ use thiserror::Error;
 use tokio::time::sleep;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+/// Der Concierge wartet als einziger Anwendungsfall mit einem Menschen am
+/// anderen Ende, der die Verzoegerung sieht und darueber informiert wird. Sein
+/// Zeitlimit liegt bei 100 Sekunden, der HTTP-Versuch muss darueber liegen,
+/// sonst schneidet er eine Antwort ab, die der Anbieter noch liefert. Alle
+/// anderen Anwendungsfaelle laufen im Hintergrund und bleiben bei 45 Sekunden,
+/// damit ein haengender Anbieter dort nicht laenger blockiert als noetig.
+const BOT_PATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(110);
 const DEFAULT_MAX_RETRIES: usize = 2;
 const DEFAULT_BACKOFF: Duration = Duration::from_millis(250);
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -408,14 +415,15 @@ impl LlmProviderConfig {
     ) -> Result<Arc<dyn ChatProvider>, ChatProviderInitError> {
         let provider = self.provider_for(use_case, &lookup)?;
         let lookup = model_key_lookup(use_case, lookup);
+        let retry = retry_for_use_case(use_case);
         let built = match provider {
-            LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup)
+            LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup, retry)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
-            LlmProviderKind::Fireworks => OpenAiChatProvider::from_fireworks_env(lookup)
+            LlmProviderKind::Fireworks => OpenAiChatProvider::from_fireworks_env(lookup, retry)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
-            LlmProviderKind::MiniMax => MiniMaxChatProvider::from_env(lookup)
+            LlmProviderKind::MiniMax => MiniMaxChatProvider::from_env(lookup, retry)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
-            LlmProviderKind::Mistral => MistralChatProvider::from_env(lookup)
+            LlmProviderKind::Mistral => MistralChatProvider::from_env(lookup, retry)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Mock => Err(ChatProviderInitError::MockProviderMustBeInjected),
         }?;
@@ -497,6 +505,18 @@ impl AiPathStatus {
 /// [`model_key_lookup`] uebersetzt ihn in den Schluessel des Anwendungsfalls,
 /// damit nicht ein einziger Wert das Modell aller Anwendungsfaelle setzt.
 const PROVIDER_MODEL_LOOKUP_KEY: &str = "DL_LLM_MODEL_BOT_PATE";
+
+/// Wie lange ein einzelner HTTP-Versuch dauern darf, siehe
+/// [`BOT_PATE_REQUEST_TIMEOUT`].
+fn retry_for_use_case(use_case: LlmUseCase) -> RetryConfig {
+    RetryConfig {
+        request_timeout: match use_case {
+            LlmUseCase::BotPate => BOT_PATE_REQUEST_TIMEOUT,
+            _ => DEFAULT_REQUEST_TIMEOUT,
+        },
+        ..RetryConfig::default()
+    }
+}
 
 fn model_key_lookup(
     use_case: LlmUseCase,
@@ -595,6 +615,7 @@ pub struct OpenAiChatProvider {
 impl OpenAiChatProvider {
     pub fn from_env(
         lookup: impl Fn(&str) -> Option<String>,
+        retry: RetryConfig,
     ) -> Result<Arc<Self>, ChatProviderInitError> {
         let api_key = read_env(&lookup, "OPENAI_API_KEY")
             .or_else(|| read_env(&lookup, "DEADLOCK_OPENAI_KEY"))
@@ -609,17 +630,12 @@ impl OpenAiChatProvider {
             .or_else(|| read_env(&lookup, "AI_OPENAI_MODEL"))
             .unwrap_or_else(|| DEFAULT_OPENAI_CHAT_MODEL.into());
         tracing::info!(provider = "openai", %model, "LLM-Chat-Provider initialisiert");
-        Ok(Self::new_labeled(
-            base_url,
-            api_key,
-            model,
-            RetryConfig::default(),
-            "openai",
-        ))
+        Ok(Self::new_labeled(base_url, api_key, model, retry, "openai"))
     }
 
     pub fn from_fireworks_env(
         lookup: impl Fn(&str) -> Option<String>,
+        retry: RetryConfig,
     ) -> Result<Arc<Self>, ChatProviderInitError> {
         let api_key = read_env(&lookup, "FIREWORK_API_KEY")
             .or_else(|| read_env(&lookup, "FIREWORKS_API_KEY"))
@@ -639,7 +655,7 @@ impl OpenAiChatProvider {
             base_url,
             api_key,
             model,
-            RetryConfig::default(),
+            retry,
             "fireworks",
         ))
     }
@@ -742,6 +758,7 @@ fn openai_uses_reasoning_parameters(model: &str) -> bool {
 impl MistralChatProvider {
     pub fn from_env(
         lookup: impl Fn(&str) -> Option<String>,
+        retry: RetryConfig,
     ) -> Result<Arc<Self>, ChatProviderInitError> {
         let api_key =
             read_env(&lookup, "MISTRAL_API_KEY").ok_or(ChatProviderInitError::MissingApiKey {
@@ -753,7 +770,7 @@ impl MistralChatProvider {
         let model =
             read_env(&lookup, "MISTRAL_MODEL").unwrap_or_else(|| DEFAULT_MISTRAL_MODEL.into());
         tracing::info!(provider = "mistral", %model, "LLM-Chat-Provider initialisiert");
-        Ok(Self::new(base_url, api_key, model))
+        Ok(Self::new_with_retry(base_url, api_key, model, retry))
     }
 
     pub fn new(
@@ -825,6 +842,7 @@ pub struct MiniMaxChatProvider {
 impl MiniMaxChatProvider {
     pub fn from_env(
         lookup: impl Fn(&str) -> Option<String>,
+        retry: RetryConfig,
     ) -> Result<Arc<Self>, ChatProviderInitError> {
         let token_plan_key = read_env(&lookup, "MINIMAX_TOKEN_PLAN_KEY");
         let api_key = token_plan_key
@@ -850,7 +868,9 @@ impl MiniMaxChatProvider {
             %model,
             "LLM-Chat-Provider initialisiert"
         );
-        Ok(Self::new(base_url, api_key, token_plan, model))
+        Ok(Self::new_with_retry(
+            base_url, api_key, token_plan, model, retry,
+        ))
     }
 
     pub fn new(
@@ -1400,6 +1420,33 @@ mod tests {
     }
 
     #[test]
+    fn bot_pate_bekommt_mehr_zeit_als_der_concierge_selbst_wartet() {
+        // Der Concierge bricht nach 100 Sekunden ab. Liegt der HTTP-Versuch
+        // darunter, schneidet er eine Antwort ab, die Fireworks noch liefert,
+        // und der User bekommt den Luecken-Text statt seiner Antwort.
+        let concierge_timeout = Duration::from_secs(100);
+        assert!(
+            retry_for_use_case(LlmUseCase::BotPate).request_timeout > concierge_timeout,
+            "der HTTP-Versuch muss die Notbremse des Concierge ueberleben"
+        );
+    }
+
+    #[test]
+    fn hintergrund_anwendungsfaelle_bleiben_beim_kurzen_zeitlimit() {
+        for use_case in [
+            LlmUseCase::ModerationText,
+            LlmUseCase::Faq,
+            LlmUseCase::ScrimLagebild,
+        ] {
+            assert_eq!(
+                retry_for_use_case(use_case).request_timeout,
+                DEFAULT_REQUEST_TIMEOUT,
+                "{use_case:?} wartet ohne Menschen davor unnoetig lange"
+            );
+        }
+    }
+
+    #[test]
     fn config_default_ist_fireworks_fuer_bot_pate_und_env_override_pro_use_case() {
         let cfg = LlmProviderConfig::from_env(|key| match key {
             "DL_LLM_PROVIDER_DEFAULT" => Some("mistral".to_string()),
@@ -1542,10 +1589,13 @@ mod tests {
 
     #[test]
     fn fireworks_from_env_nutzt_singular_keys_und_provider_default() {
-        let provider = OpenAiChatProvider::from_fireworks_env(|key| match key {
-            "FIREWORK_API_KEY" => Some("fw-key".to_string()),
-            _ => None,
-        })
+        let provider = OpenAiChatProvider::from_fireworks_env(
+            |key| match key {
+                "FIREWORK_API_KEY" => Some("fw-key".to_string()),
+                _ => None,
+            },
+            RetryConfig::default(),
+        )
         .expect("fireworks provider");
 
         assert_eq!(provider.base_url, DEFAULT_FIREWORKS_BASE_URL);
@@ -1554,12 +1604,15 @@ mod tests {
 
     #[test]
     fn fireworks_from_env_nimmt_bot_pate_model_vor_fireworks_model() {
-        let provider = OpenAiChatProvider::from_fireworks_env(|key| match key {
-            "FIREWORKS_API_KEY" => Some("fw-key".to_string()),
-            "DL_LLM_MODEL_BOT_PATE" => Some("bot-pate-model".to_string()),
-            "FIREWORK_MODEL" => Some("fireworks-model".to_string()),
-            _ => None,
-        })
+        let provider = OpenAiChatProvider::from_fireworks_env(
+            |key| match key {
+                "FIREWORKS_API_KEY" => Some("fw-key".to_string()),
+                "DL_LLM_MODEL_BOT_PATE" => Some("bot-pate-model".to_string()),
+                "FIREWORK_MODEL" => Some("fireworks-model".to_string()),
+                _ => None,
+            },
+            RetryConfig::default(),
+        )
         .expect("fireworks provider");
 
         assert_eq!(provider.default_model, "bot-pate-model");
@@ -1598,7 +1651,8 @@ mod tests {
         );
 
         // Bis in den Konstruktor: der Anwendungsfall-Schluessel setzt das Modell.
-        let provider = OpenAiChatProvider::from_env(voice_hint).expect("openai provider");
+        let provider = OpenAiChatProvider::from_env(voice_hint, RetryConfig::default())
+            .expect("openai provider");
         assert_eq!(provider.default_model, "voice-hint-model");
     }
 
@@ -1684,15 +1738,17 @@ mod tests {
         // Fireworks teilt sich den Client mit OpenAI. Ohne eigenes Label laufen
         // die Lagebild-Requests unter provider="openai" durchs Journal und die
         // Fehlersuche landet beim falschen Anbieter.
-        let fireworks = OpenAiChatProvider::from_fireworks_env(|key| {
-            (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string())
-        })
+        let fireworks = OpenAiChatProvider::from_fireworks_env(
+            |key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()),
+            RetryConfig::default(),
+        )
         .expect("fireworks provider");
         assert_eq!(fireworks.provider_label, "fireworks");
 
-        let openai = OpenAiChatProvider::from_env(|key| {
-            (key == "OPENAI_API_KEY").then(|| "oa-key".to_string())
-        })
+        let openai = OpenAiChatProvider::from_env(
+            |key| (key == "OPENAI_API_KEY").then(|| "oa-key".to_string()),
+            RetryConfig::default(),
+        )
         .expect("openai provider");
         assert_eq!(openai.provider_label, "openai");
 
