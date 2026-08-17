@@ -64,6 +64,7 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
         Some(&session_id),
     )
     .await;
+    allow_downloads(&mut ws, &mut next_id, &session_id).await;
 
     let mut dumps = Vec::new();
     for (stem, url) in pages {
@@ -77,9 +78,16 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
         .await?;
         wait_for_charts(&mut ws, &mut next_id, &session_id).await?;
         let dump = evaluate_dump(&mut ws, &mut next_id, &session_id).await?;
+        let confirm = tokio::spawn(async {
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let _ = tokio::task::spawn_blocking(crate::allow::confirm_download).await;
+            }
+        });
         let official = evaluate_official_csvs(&mut ws, &mut next_id, &session_id)
             .await
             .unwrap_or_default();
+        confirm.abort();
         dumps.push(BraveDump {
             stem,
             json: dump,
@@ -423,6 +431,32 @@ async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     }
 }
 
+async fn allow_downloads(ws: &mut Ws, next_id: &mut u64, session_id: &str) {
+    let path = "/tmp/dl-insights-downloads";
+    let _ = std::fs::create_dir_all(path);
+    let params = json!({
+        "behavior": "allow",
+        "downloadPath": path,
+        "eventsEnabled": true
+    });
+    let _ = call(
+        ws,
+        next_id,
+        "Browser.setDownloadBehavior",
+        params.clone(),
+        None,
+    )
+    .await;
+    let _ = call(
+        ws,
+        next_id,
+        "Page.setDownloadBehavior",
+        params,
+        Some(session_id),
+    )
+    .await;
+}
+
 async fn create_page(ws: &mut Ws, next_id: &mut u64, url: &str) -> Result<String> {
     let created = call(
         ws,
@@ -530,20 +564,25 @@ async fn evaluate_official_csvs(
 ) -> Result<Vec<(String, String)>> {
     let expr = r#"(async function(){
       var files = [];
+      function captureAnchor(el) {
+        if (!el.href || String(el.href).indexOf('data:') !== 0) {
+          return;
+        }
+        var s = String(el.href);
+        var comma = s.indexOf(',');
+        var raw = comma >= 0 ? s.slice(comma + 1) : s;
+        var text = raw;
+        try { text = decodeURIComponent(raw); } catch (e) {}
+        files.push({ download: el.download || '', text: text });
+      }
       var origCreate = document.createElement.bind(document);
       document.createElement = function(tag) {
         var el = origCreate(tag);
         if (String(tag).toLowerCase() === 'a') {
-          setTimeout(function(){
-            if (el.href && String(el.href).indexOf('data:') === 0) {
-              var s = String(el.href);
-              var comma = s.indexOf(',');
-              var raw = comma >= 0 ? s.slice(comma + 1) : s;
-              var text = raw;
-              try { text = decodeURIComponent(raw); } catch (e) {}
-              files.push({ download: el.download || '', text: text });
-            }
-          }, 0);
+          el.click = function() {
+            captureAnchor(el);
+          };
+          setTimeout(function(){ captureAnchor(el); }, 0);
         }
         return el;
       };

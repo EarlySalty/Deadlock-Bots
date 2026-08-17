@@ -59,6 +59,11 @@ pub fn open_inspect_tab() -> Result<()> {
 /// Allow sitzt am Fenster, nicht an einem bestimmten Tab.
 /// Allow ist oft der Default (Return reicht). Nach einem Klick ist
 /// Cancel umrandet, dann Tab und Return.
+/// Brave-Downloadleiste: „Behalten“ / „Zulassen“ ist oft der Default.
+pub fn confirm_download() -> Result<()> {
+    confirm_allow(&["Return"])
+}
+
 pub fn confirm_allow(keys: &[&str]) -> Result<()> {
     let disp = display();
     let id = main_brave_window()?;
