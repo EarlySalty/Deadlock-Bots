@@ -158,6 +158,22 @@ pub async fn import_csv_dir(
             Err(err) => report.skipped.push(format!("{name}: {err}")),
         }
     }
+    sqlx::query(
+        r#"
+        DELETE FROM activity.insights_imports
+        WHERE import_kind = 'engagement'
+          AND dimension NOT IN (
+            'visitors',
+            'pct_communicated',
+            'messages',
+            'messages_per_communicator',
+            'speaking_minutes'
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|err| err.to_string())?;
     Ok(report)
 }
 

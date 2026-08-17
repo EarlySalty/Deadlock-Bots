@@ -1128,6 +1128,20 @@ pub async fn import_csv_text(
     let headers = rows[0].clone();
     let spec = detect_import(&headers)
         .ok_or_else(|| format!("Export-Typ nicht erkannt, Spalten: {}", headers.join(", ")))?;
+    if spec.kind == "joins_by_source" {
+        sqlx::query(
+            r#"
+            DELETE FROM activity.insights_imports
+            WHERE guild_id = $1
+              AND import_kind = $2
+            "#,
+        )
+        .bind(guild_id)
+        .bind(spec.kind)
+        .execute(pool)
+        .await
+        .map_err(|err| err.to_string())?;
+    }
     let mut file_rows = 0usize;
     for row in rows.iter().skip(1) {
         if row.iter().all(|cell| cell.trim().is_empty()) {
@@ -1297,6 +1311,10 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
         "activation"
     } else if joined.contains("membership") && !joined.contains("new_members") {
         "membership"
+    } else if joined.contains("listener") {
+        "popular_voice"
+    } else if joined.contains("reader") || joined.contains("chatter") {
+        "popular_text"
     } else if joined.contains("visitor")
         || joined.contains("contributor")
         || joined.contains("communicator")
@@ -1308,10 +1326,6 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
         "leavers"
     } else if joined.contains("muter") {
         "muters"
-    } else if joined.contains("listener") {
-        "popular_voice"
-    } else if joined.contains("reader") || joined.contains("chatter") {
-        "popular_text"
     } else if joined.contains("source") || joined.contains("join") {
         "joins_by_source"
     } else {

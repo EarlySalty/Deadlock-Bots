@@ -12,7 +12,7 @@
 mod allow;
 mod brave_cdp;
 
-use dl_dashboard::insights_sync::{archive_readme, brave_dumps_to_csv_dir, import_csv_dir};
+use dl_dashboard::insights_sync::{archive_readme, import_csv_dir};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -79,10 +79,12 @@ async fn main() -> anyhow::Result<()> {
             });
         let dumps = brave_cdp::dump_insights_pages(guild_id).await?;
         let dump_dir = archive.join("dumps");
-        let dump_paths = brave_cdp::write_dumps(&dumps, &dump_dir)?;
+        let _ = brave_cdp::write_dumps(&dumps, &dump_dir)?;
         let official = brave_cdp::write_official_csvs(&dumps, &archive)?;
         if official.is_empty() {
-            brave_dumps_to_csv_dir(&dump_paths, &archive).map_err(|err| anyhow::anyhow!(err))?;
+            anyhow::bail!(
+                "keine offizielle CSV vom Button „CSV exportieren“. Highcharts-Rekonstruktion ist abgeschaltet."
+            );
         }
         let readme = archive.join("README.md");
         if !readme.exists() {
