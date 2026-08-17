@@ -11,10 +11,16 @@ use tokio::time::sleep;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 /// Der Concierge wartet als einziger Anwendungsfall mit einem Menschen am
 /// anderen Ende, der die Verzoegerung sieht und darueber informiert wird. Sein
-/// Zeitlimit liegt bei 100 Sekunden, der HTTP-Versuch muss darueber liegen,
-/// sonst schneidet er eine Antwort ab, die der Anbieter noch liefert. Alle
-/// anderen Anwendungsfaelle laufen im Hintergrund und bleiben bei 45 Sekunden,
-/// damit ein haengender Anbieter dort nicht laenger blockiert als noetig.
+/// Zeitlimit liegt bei 100 Sekunden. Bliebe der HTTP-Versuch bei 45, waere nach
+/// 45 Sekunden Schluss: ein Timeout loest in [`send_json_with_retry`] bewusst
+/// keinen zweiten Versuch aus, sondern gibt sofort auf. Die restlichen 55
+/// Sekunden waeren verschenkt, obwohl der Anbieter noch antwortet.
+///
+/// Der Preis ist bekannt und gewollt: ein einziger Versuch nutzt das ganze
+/// Fenster, ein Nachfassen gibt es fuer diesen Anwendungsfall nicht. Retries
+/// greifen ohnehin nur bei 429 und 5xx, und die kommen in Millisekunden zurueck,
+/// passen also weiterhin in die 100 Sekunden. Alle anderen Anwendungsfaelle
+/// laufen im Hintergrund und bleiben bei 45 Sekunden.
 const BOT_PATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(110);
 const DEFAULT_MAX_RETRIES: usize = 2;
 const DEFAULT_BACKOFF: Duration = Duration::from_millis(250);
@@ -1422,8 +1428,9 @@ mod tests {
     #[test]
     fn bot_pate_bekommt_mehr_zeit_als_der_concierge_selbst_wartet() {
         // Der Concierge bricht nach 100 Sekunden ab. Liegt der HTTP-Versuch
-        // darunter, schneidet er eine Antwort ab, die Fireworks noch liefert,
-        // und der User bekommt den Luecken-Text statt seiner Antwort.
+        // darunter, gibt `send_json_with_retry` beim Timeout sofort auf, ohne
+        // zweiten Versuch: der User bekaeme den Luecken-Text, obwohl Fireworks
+        // die Antwort noch liefert und der Concierge noch warten wuerde.
         let concierge_timeout = Duration::from_secs(100);
         assert!(
             retry_for_use_case(LlmUseCase::BotPate).request_timeout > concierge_timeout,

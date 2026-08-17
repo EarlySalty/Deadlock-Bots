@@ -90,9 +90,11 @@ const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3)
 /// keinen Versuch abschneidet, den der Anbieter noch beantworten wuerde.
 const CONCIERGE_AI_TIMEOUT_DEFAULT_SECS: u64 = 100;
 /// Nach dieser Wartezeit sagt der Concierge einmal Bescheid, dass es dauert.
-/// Frueher als der Discord-Nutzer die Geduld verliert, spaeter als eine normale
-/// Antwort braucht: unterhalb dieser Schwelle liegt der Median klar.
-const AI_GEDULD_HINWEIS_NACH: StdDuration = StdDuration::from_secs(8);
+/// Der Wert liegt ueber dem p90 der Messung (10,7 s), nicht knapp ueber dem
+/// Median: bei 8 Sekunden haette rund ein Drittel aller Antworten einen Hinweis
+/// ausgeloest und waere eine Sekunde spaeter ohnehin gekommen. Wer ihn sieht,
+/// wartet also wirklich.
+const AI_GEDULD_HINWEIS_NACH: StdDuration = StdDuration::from_secs(15);
 const SCHEDULER_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 
 pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server, ich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten Weg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich erstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nWas du mir schreibst, merke ich mir nur, damit ich im Gespräch nicht bei null anfange. Wenn du \"stopp\" schreibst, setzt das deinen globalen Datenschutz-Opt-out: Ich speichere dann keinen neuen Gesprächsverlauf mehr und melde mich nicht mehr von selbst, direkte Fragen beantworte ich weiter, nur eben ohne Verlauf. Mit /datenschutz-optin erlaubst du die Speicherung später jederzeit wieder.";
@@ -155,7 +157,7 @@ pub const COOLDOWN_TEXT: &str = "Immer mit der Ruhe, ich bin noch bei deiner let
 /// Zwischenruf, wenn der LLM-Aufruf laenger braucht als `AI_GEDULD_HINWEIS_NACH`.
 /// Er ersetzt keine Antwort und beendet den Zug nicht, die echte Antwort kommt
 /// danach in derselben Unterhaltung.
-pub const AI_GEDULD_TEXT: &str = "Einen Moment noch, ich bin dran. Das kann diesmal bis zu einer Minute dauern, ich melde mich, sobald ich es habe.";
+pub const AI_GEDULD_TEXT: &str = "Einen Moment noch, ich bin dran. Das kann diesmal ein bis zwei Minuten dauern, ich melde mich, sobald ich es habe.";
 pub const PATE_CLAIM_FALLBACK_LINE: &str = "Wer Zeit und Lust hat, drückt auf Übernehmen.";
 pub const PATE_CLAIM_BUTTON_LABEL: &str = "Ich übernehme";
 pub const PATE_ROLE_RESERVED_TEXT: &str = "Der Knopf ist für unsere Paten reserviert. Wenn du selbst Pate werden willst, meld dich bei den Mods, wir freuen uns über jeden.";
@@ -7227,7 +7229,6 @@ mod tests {
         json!({ "reply": "Hier entlang", "intent": "mates", "pate_request": false }).to_string()
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn geduldshinweis_kommt_genau_einmal_wenn_das_modell_langsam_ist() {
         let gate = Arc::new(tokio::sync::Notify::new());
@@ -7693,7 +7694,9 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "testing")]
+    /// Bewusst ohne `cfg(feature = "testing")`: der Geduldshinweis-Test braucht
+    /// keine Datenbank und soll deshalb auch im Lauf ohne das Feature
+    /// mitlaufen.
     fn block_next_port_call(
         port: &MockConciergePort,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
