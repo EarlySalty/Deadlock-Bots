@@ -62,10 +62,12 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
   Remote Debugging bleibt unter `brave://inspect` an. Läuft Brave nicht, startet
   der Job das Default-Profil mit `--remote-debugging-port` und
   `--remote-allow-origins=*`. Das Overlay „Allow remote debugging?“ klickt der
-  Job selbst weg (Inspect-Seite, dann Return bzw. Tab+Return). Ein zweiter
-  DevTools-Client (MCP) blockiert den Handshake trotzdem; der Timer versucht
-  es montags 06:15 und 07:15. Manueller Probe: `INSIGHTS_CDP_SMOKE=1
-  dl-insights-sync`. User-Token-Pfad bleibt ungenutzt.
+  Job selbst weg: immer ein neuer Inspect-Tab (`--new-tab`), dann Return bzw.
+  Tab+Return. Welcher Tab vorher aktiv war, ist egal. Die vom Job geöffneten
+  Tabs gehen danach wieder zu. Ein zweiter DevTools-Client (MCP) blockiert den
+  Handshake trotzdem; der Timer versucht es montags 06:15 und 07:15. Manueller
+  Probe: `INSIGHTS_CDP_SMOKE=1 dl-insights-sync`. User-Token-Pfad bleibt
+  ungenutzt.
 - Manueller Nachzug: Portal → CSVs → Dropzone auf `/insights`.
 - Grenzen: Länder/Geräte/Referrer liefert die API nicht (nur via CSV-Import);
   Besucher ist eine Presence-Näherung, nicht Discords Kanal-View-Definition;

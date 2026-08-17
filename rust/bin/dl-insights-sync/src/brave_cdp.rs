@@ -34,7 +34,6 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
     let mut ws = connect_browser().await?;
     let mut next_id = 1u64;
 
-    let targets = call(&mut ws, &mut next_id, "Target.getTargets", json!({}), None).await?;
     let start = chrono::Utc::now() - chrono::Duration::days(119);
     let end = chrono::Utc::now();
     let start_s = start.format("%Y-%m-%d");
@@ -54,7 +53,7 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
         ),
     ];
     let first_url = pages[0].1.as_str();
-    let target_id = find_or_create_page(&mut ws, &mut next_id, &targets, first_url).await?;
+    let target_id = create_page(&mut ws, &mut next_id, first_url).await?;
     let session_id = attach(&mut ws, &mut next_id, &target_id).await?;
     let _ = call(
         &mut ws,
@@ -79,6 +78,15 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
         let dump = evaluate_dump(&mut ws, &mut next_id, &session_id).await?;
         dumps.push(BraveDump { stem, json: dump });
     }
+    let _ = call(
+        &mut ws,
+        &mut next_id,
+        "Target.closeTarget",
+        json!({ "targetId": target_id }),
+        None,
+    )
+    .await;
+    close_inspect_tabs(&mut ws, &mut next_id).await;
     Ok(dumps)
 }
 
@@ -335,9 +343,13 @@ async fn connect_browser() -> Result<Ws> {
     let endpoint = browser_ws_endpoint()?;
     tracing::info!(%endpoint, "Brave CDP");
     if port_from_env_or_file().and_then(json_version_ws).is_none() {
-        let _ = tokio::task::spawn_blocking(crate::allow::ensure_inspect_page)
+        if let Err(err) = tokio::task::spawn_blocking(crate::allow::open_inspect_tab)
             .await
-            .ok();
+            .map_err(|err| anyhow!("Inspect-Tab Task: {err}"))
+            .and_then(|r| r)
+        {
+            tracing::warn!(error = %err, "Inspect-Tab öffnen fehlgeschlagen");
+        }
     }
     match handshake_with_keys(&endpoint, &["Return"]).await {
         Ok(ws) => Ok(ws),
@@ -352,15 +364,18 @@ async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     let request = ws_request(endpoint)?;
     let keys = keys.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let click = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(450)).await;
-        let _ = tokio::task::spawn_blocking(move || {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let clicked = tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
             crate::allow::confirm_allow(&refs)
         })
         .await;
+        if let Ok(Err(err)) = clicked {
+            tracing::warn!(error = %err, "Allow-Klick fehlgeschlagen");
+        }
     });
     let result = tokio::time::timeout(
-        Duration::from_secs(8),
+        Duration::from_secs(10),
         tokio_tungstenite::connect_async(request),
     )
     .await;
@@ -376,28 +391,7 @@ async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     }
 }
 
-async fn find_or_create_page(
-    ws: &mut Ws,
-    next_id: &mut u64,
-    existing: &Value,
-    url: &str,
-) -> Result<String> {
-    if let Some(id) = existing
-        .pointer("/result/targetInfos")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|t| {
-            t.get("type").and_then(Value::as_str) == Some("page")
-                && t.get("url")
-                    .and_then(Value::as_str)
-                    .is_some_and(|u| u.contains("/analytics/"))
-        })
-        .and_then(|t| t.get("targetId"))
-        .and_then(Value::as_str)
-    {
-        return Ok(id.to_string());
-    }
+async fn create_page(ws: &mut Ws, next_id: &mut u64, url: &str) -> Result<String> {
     let created = call(
         ws,
         next_id,
@@ -411,6 +405,33 @@ async fn find_or_create_page(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("Target.createTarget ohne targetId"))
+}
+
+async fn close_inspect_tabs(ws: &mut Ws, next_id: &mut u64) {
+    let Ok(now) = call(ws, next_id, "Target.getTargets", json!({}), None).await else {
+        return;
+    };
+    for target in now
+        .pointer("/result/targetInfos")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = target.get("targetId").and_then(Value::as_str) else {
+            continue;
+        };
+        let url = target.get("url").and_then(Value::as_str).unwrap_or("");
+        if url.contains("://inspect") {
+            let _ = call(
+                ws,
+                next_id,
+                "Target.closeTarget",
+                json!({ "targetId": id }),
+                None,
+            )
+            .await;
+        }
+    }
 }
 
 async fn attach(ws: &mut Ws, next_id: &mut u64, target_id: &str) -> Result<String> {
