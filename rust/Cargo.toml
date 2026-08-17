@@ -28,6 +28,7 @@ members = [
     "bin/dl-web",
     "bin/dl-twitch-invite-sync",
     "bin/dl-repostats",
+    "bin/dl-insights-sync",
     "bin/dl-brain-community",
     "bin/dl-brain-feeder",
     "bin/dl-verbinder",

@@ -52,6 +52,14 @@ fn monday(date: NaiveDate) -> NaiveDate {
 
 fn parse_date(raw: &str) -> Option<NaiveDate> {
     let raw = raw.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.date_naive());
+    }
+    if raw.len() >= 10 {
+        if let Ok(date) = NaiveDate::parse_from_str(&raw[..10], "%Y-%m-%d") {
+            return Some(date);
+        }
+    }
     ["%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y"]
         .iter()
         .find_map(|fmt| NaiveDate::parse_from_str(raw, fmt).ok())
@@ -1069,64 +1077,30 @@ pub async fn import(
                     json!({ "file": filename }),
                 ),
             };
-        let rows = match parse_csv(text) {
-            Some(rows) if !rows.is_empty() => rows,
-            _ => return import_error_json(400, "CSV ist leer", json!({ "file": filename })),
-        };
-        let headers = rows[0].clone();
-        let Some(spec) = detect_import(&headers) else {
-            return import_error_json(
-                400,
-                "Export-Typ nicht erkannt — die gefundenen Spalten stehen unten, wir ergänzen die Erkennung dann",
-                json!({ "file": filename, "headers": headers }),
-            );
-        };
-        let mut file_rows = 0usize;
-        for row in rows.iter().skip(1) {
-            if row.iter().all(|cell| cell.trim().is_empty()) {
-                continue;
-            }
-            let Some(period_start) = row.get(spec.date_col).and_then(|s| parse_date(s)) else {
-                continue;
-            };
-            for &value_col in &spec.value_cols {
-                let Some(value) = row.get(value_col).and_then(|s| parse_number(s)) else {
-                    continue;
-                };
-                let dimension = spec
-                    .dimension_col
-                    .and_then(|idx| row.get(idx))
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| {
-                        headers
-                            .get(value_col)
-                            .map(String::as_str)
-                            .unwrap_or("value")
-                    });
-                if let Err(err) = upsert_import(
-                    app.pool(),
-                    guild_id,
-                    spec.kind,
-                    period_start,
-                    dimension,
-                    value,
+        let (kind, file_rows) = match import_csv_text(app.pool(), guild_id, text).await {
+            Ok(result) => result,
+            Err(err) if err.starts_with("Export-Typ nicht erkannt") => {
+                return import_error_json(
+                    400,
+                    "Export-Typ nicht erkannt — die gefundenen Spalten stehen unten, wir ergänzen die Erkennung dann",
+                    json!({ "file": filename, "detail": err }),
                 )
-                .await
-                {
-                    tracing::error!(%err, "Insights-Import fehlgeschlagen");
-                    return import_error_json(
-                        500,
-                        "Import konnte nicht gespeichert werden — Details stehen im Server-Log",
-                        json!({ "file": filename }),
-                    );
-                }
-                file_rows += 1;
             }
-        }
+            Err(err) if err.contains("leer") => {
+                return import_error_json(400, "CSV ist leer", json!({ "file": filename }))
+            }
+            Err(err) => {
+                tracing::error!(%err, "Insights-Import fehlgeschlagen");
+                return import_error_json(
+                    500,
+                    "Import konnte nicht gespeichert werden — Details stehen im Server-Log",
+                    json!({ "file": filename }),
+                );
+            }
+        };
         files += 1;
         imported_rows += file_rows;
-        results.push(json!({ "file": filename, "import_kind": spec.kind, "rows": file_rows }));
+        results.push(json!({ "file": filename, "import_kind": kind, "rows": file_rows }));
     }
     if files == 0 {
         return import_error_json(400, "Keine CSV-Dateien im Upload", json!({}));
@@ -1140,6 +1114,50 @@ fn import_error_json(status: u16, message: &str, extra: Value) -> Response {
         Json(json!({ "error": message, "details": extra })),
     )
         .into_response()
+}
+
+/// Importiert einen Discord-Insights-CSV-Text in `activity.insights_imports`.
+pub async fn import_csv_text(
+    pool: &PgPool,
+    guild_id: i64,
+    text: &str,
+) -> Result<(&'static str, usize), String> {
+    let rows = parse_csv(text)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| "CSV ist leer oder nicht parsebar".to_string())?;
+    let headers = rows[0].clone();
+    let spec = detect_import(&headers)
+        .ok_or_else(|| format!("Export-Typ nicht erkannt, Spalten: {}", headers.join(", ")))?;
+    let mut file_rows = 0usize;
+    for row in rows.iter().skip(1) {
+        if row.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        let Some(period_start) = row.get(spec.date_col).and_then(|s| parse_date(s)) else {
+            continue;
+        };
+        for &value_col in &spec.value_cols {
+            let Some(value) = row.get(value_col).and_then(|s| parse_number(s)) else {
+                continue;
+            };
+            let dimension = spec
+                .dimension_col
+                .and_then(|idx| row.get(idx))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    headers
+                        .get(value_col)
+                        .map(String::as_str)
+                        .unwrap_or("value")
+                });
+            upsert_import(pool, guild_id, spec.kind, period_start, dimension, value)
+                .await
+                .map_err(|err| err.to_string())?;
+            file_rows += 1;
+        }
+    }
+    Ok((spec.kind, file_rows))
 }
 
 async fn upsert_import(
@@ -1194,7 +1212,15 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
             .iter()
             .position(|h| needles.iter().any(|needle| h.contains(needle)))
     };
-    let date_col = find(&["date", "day", "week", "period", "cohort"])?;
+    let date_col = find(&[
+        "date",
+        "day",
+        "week",
+        "period",
+        "cohort",
+        "interval",
+        "timestamp",
+    ])?;
     let value_cols = normalized
         .iter()
         .enumerate()
@@ -1205,12 +1231,19 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
                     "leavers",
                     "leaves",
                     "retention",
+                    "retained",
                     "activated",
                     "activation",
                     "visitors",
                     "contributors",
+                    "communicators",
+                    "communicated",
                     "messages",
                     "minutes",
+                    "speaking",
+                    "members",
+                    "membership",
+                    "opened",
                     "count",
                     "value",
                 ]
@@ -1226,24 +1259,44 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
         "source",
         "referrer",
         "duration",
+        "days_in",
         "invite",
         "code",
+        "link",
         "bucket",
         "dimension",
+        "channel",
+        "domain",
     ])
     .filter(|idx| *idx != date_col && !value_cols.contains(idx));
     let joined = normalized.join("|");
-    let kind = if joined.contains("invite") && joined.contains("code") {
+    let kind = if (joined.contains("invite")
+        && (joined.contains("code") || joined.contains("link")))
+        || joined.contains("einladungslink")
+    {
         "top_invites"
     } else if joined.contains("referrer") {
         "referrer"
-    } else if joined.contains("retention") || joined.contains("cohort") {
+    } else if joined.contains("retained")
+        || joined.contains("retention")
+        || joined.contains("cohort")
+    {
         "retention"
-    } else if joined.contains("activation") || joined.contains("activated") {
+    } else if joined.contains("opened")
+        || (joined.contains("communicated")
+            && joined.contains("new_members")
+            && !joined.contains("visitor"))
+        || joined.contains("activation")
+        || joined.contains("activated")
+    {
         "activation"
+    } else if joined.contains("membership") && !joined.contains("new_members") {
+        "membership"
     } else if joined.contains("visitor")
         || joined.contains("contributor")
+        || joined.contains("communicator")
         || joined.contains("message")
+        || joined.contains("speaking")
     {
         "engagement"
     } else if joined.contains("leave") || joined.contains("leaver") {
@@ -1331,6 +1384,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_date_akzeptiert_discord_iso_stempel() {
+        assert_eq!(
+            parse_date("2026-03-31T00:00:00+00:00"),
+            NaiveDate::from_ymd_opt(2026, 3, 31)
+        );
+        assert_eq!(
+            parse_date("2026-08-17"),
+            NaiveDate::from_ymd_opt(2026, 8, 17)
+        );
+    }
+
+    #[test]
     fn csv_parser_handles_quoted_commas() {
         let rows = parse_csv("Date,Source,Joins\n2026-06-01,\"Vanity, Link\",12\n")
             .expect("csv fixture parses");
@@ -1348,6 +1413,49 @@ mod tests {
         assert_eq!(spec.kind, "joins_by_source");
         assert_eq!(spec.dimension_col, Some(1));
         assert_eq!(spec.value_cols, vec![2]);
+    }
+
+    #[test]
+    fn import_detection_erkennt_offizielle_discord_csvs() {
+        let cases = [
+            (
+                "day_pt,new_members,pct_communicated,pct_opened_channels,interval_start_timestamp",
+                "activation",
+            ),
+            (
+                "interval_start_timestamp,visitors,pct_communicated",
+                "engagement",
+            ),
+            (
+                "day_pt,discovery_joins,invites,vanity_joins,other_joins,total_joins,interval_start_timestamp",
+                "joins_by_source",
+            ),
+            (
+                "day_pt,days_in_guild,leavers,interval_start_timestamp",
+                "leavers",
+            ),
+            (
+                "interval_start_timestamp,messages,messages_per_communicator",
+                "engagement",
+            ),
+            (
+                "day_pt,new_members,pct_retained,interval_start_timestamp",
+                "retention",
+            ),
+            (
+                "day_pt,total_membership,interval_start_timestamp",
+                "membership",
+            ),
+        ];
+        for (header_line, kind) in cases {
+            let headers = header_line
+                .split(',')
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let spec = detect_import(&headers)
+                .unwrap_or_else(|| panic!("official header not recognized: {header_line}"));
+            assert_eq!(spec.kind, kind, "header {header_line}");
+        }
     }
 
     #[test]

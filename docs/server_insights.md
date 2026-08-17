@@ -56,8 +56,12 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
 
 - Migration `2026070610_server_insights_backend.sql` (additiv) via dl-central-migrate.
 - Bot-Service braucht `DL_ENABLE_PRESENCE_INTENT=1` für Besucher-Zahlen.
-- Monatliche Routine: Portal → alle CSVs exportieren → auf `/insights` in die
-  Dropzone werfen.
+- Wöchentlicher Sync: `dl-insights-sync` (Timer `dl-insights-sync.timer`,
+  Montag 06:15) holt die Portal-API als CSV, legt sie unter
+  `docs/insights/discord/YYYY-MM-DD/` ab und upsertet nach
+  `activity.insights_imports`. Env: `DISCORD_INSIGHTS_USER_TOKEN` (User-Konto
+  mit Recht „Server-Einblicke ansehen“, kein Bot-Token).
+- Manueller Nachzug bleibt: Portal → CSVs → Dropzone auf `/insights`.
 - Grenzen: Länder/Geräte/Referrer liefert die API nicht (nur via CSV-Import);
   Besucher ist eine Presence-Näherung, nicht Discords Kanal-View-Definition;
   Retention-Rohdaten reichen 180 Tage zurück.

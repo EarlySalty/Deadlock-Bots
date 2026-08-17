@@ -1,0 +1,16 @@
+[package]
+name = "dl-insights-sync"
+version = "0.1.0"
+edition = "2021"
+description = "Wöchentlicher Discord-Insights-CSV-Sync ins Dashboard."
+
+[dependencies]
+dl-central-db.workspace = true
+dl-dashboard.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
