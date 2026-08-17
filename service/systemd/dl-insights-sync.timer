@@ -3,6 +3,7 @@ Description=Deadlock Discord Insights CSV-Sync jeden Montag
 
 [Timer]
 OnCalendar=Mon *-*-* 06:15:00
+OnCalendar=Mon *-*-* 07:15:00
 Persistent=true
 
 [Install]

@@ -1,14 +1,17 @@
 //! Spielt Discord Server-Insights in `activity.insights_imports` ein.
 //!
 //! Reihenfolge:
-//! 1. `INSIGHTS_IMPORT_DIR` — fertige CSVs
-//! 2. `INSIGHTS_BRAVE_DUMP_DIR` — Highcharts-Dumps aus der Brave-Sitzung
-//! 3. sonst Portal-API mit `DISCORD_INSIGHTS_USER_TOKEN` (optional, nicht empfohlen)
+//! 1. `INSIGHTS_CDP_SMOKE=1` — nur Handshake gegen Brave
+//! 2. `INSIGHTS_IMPORT_DIR` — fertige CSVs
+//! 3. `INSIGHTS_BRAVE_DUMP_DIR` — vorhandene Highcharts-Dumps
+//! 4. eingeloggte Brave-Sitzung über CDP (`DevToolsActivePort`)
 //!
 //! Env: `DEADLOCK_CENTRAL_DSN`, `DISCORD_INSIGHTS_GUILD_ID`,
-//! `INSIGHTS_ARCHIVE_DIR`.
+//! `INSIGHTS_ARCHIVE_DIR`, `INSIGHTS_BRAVE_PORT_FILE`.
 
-use dl_dashboard::insights_sync::{archive_readme, sync_insights, SyncConfig};
+mod brave_cdp;
+
+use dl_dashboard::insights_sync::{archive_readme, brave_dumps_to_csv_dir, import_csv_dir};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,6 +21,15 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    if matches!(
+        std::env::var("INSIGHTS_CDP_SMOKE").as_deref(),
+        Ok("1") | Ok("true")
+    ) {
+        let product = brave_cdp::smoke().await?;
+        println!("insights-sync: CDP smoke ok ({product})");
+        return Ok(());
+    }
 
     let dsn = dl_central_db::dsn_from_env()?;
     let pool = dl_central_db::connect_pool(&dsn).await?;
@@ -55,19 +67,26 @@ async fn main() -> anyhow::Result<()> {
         dl_dashboard::insights_sync::import_csv_dir(&pool, guild_id, &archive)
             .await
             .map_err(|err| anyhow::anyhow!(err))?
-    } else if std::env::var("DISCORD_INSIGHTS_USER_TOKEN").is_err() {
-        println!("kein Brave-Dump und kein Token: nichts zu tun");
-        return Ok(());
     } else {
-        let cfg = SyncConfig::from_env().map_err(|err| anyhow::anyhow!(err))?;
-        let report = sync_insights(&pool, &cfg)
-            .await
-            .map_err(|err| anyhow::anyhow!(err))?;
-        let readme = cfg.archive_dir.join("README.md");
+        let archive = std::env::var("INSIGHTS_ARCHIVE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(format!(
+                    "/home/nathanael/repos/Deadlock-Bots/docs/insights/discord/{}",
+                    chrono::Utc::now().date_naive()
+                ))
+            });
+        let dumps = brave_cdp::dump_insights_pages(guild_id).await?;
+        let dump_dir = archive.join("dumps");
+        let dump_paths = brave_cdp::write_dumps(&dumps, &dump_dir)?;
+        brave_dumps_to_csv_dir(&dump_paths, &archive).map_err(|err| anyhow::anyhow!(err))?;
+        let readme = archive.join("README.md");
         if !readme.exists() {
-            std::fs::write(&readme, archive_readme(&cfg.archive_dir))?;
+            std::fs::write(&readme, archive_readme(&archive))?;
         }
-        report
+        import_csv_dir(&pool, guild_id, &archive)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?
     };
     println!(
         "insights-sync: {} Dateien, {} Zeilen nach {}",

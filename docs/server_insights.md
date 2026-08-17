@@ -56,10 +56,14 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
 
 - Migration `2026070610_server_insights_backend.sql` (additiv) via dl-central-migrate.
 - Bot-Service braucht `DL_ENABLE_PRESENCE_INTENT=1` für Besucher-Zahlen.
-- Wöchentlicher Sync über die **eingeloggte Brave-Sitzung**: Highcharts-Dump
-  aus dem Developer-Portal (kein gespeichertes User-Token). Danach
-  `INSIGHTS_BRAVE_DUMP_DIR=... dl-insights-sync`. Timer montags 06:15 importiert
-  nur, wenn Dumps liegen. User-Token-Pfad bleibt ungenutzt.
+- Wöchentlicher Sync über die **eingeloggte Brave-Sitzung**: `dl-insights-sync`
+  hängt sich per CDP an (`DevToolsActivePort`), dumpt Highcharts aus dem
+  Developer-Portal und spielt die CSVs ein. Kein gespeichertes User-Token.
+  Remote Debugging bleibt unter `brave://inspect` an. Läuft Brave nicht, startet
+  der Job das Default-Profil mit `--remote-debugging-port` und
+  `--remote-allow-origins=*`. Ein zweiter DevTools-Client (MCP) blockiert den
+  Handshake; der Timer versucht es montags 06:15 und 07:15. Manueller Probe:
+  `INSIGHTS_CDP_SMOKE=1 dl-insights-sync`. User-Token-Pfad bleibt ungenutzt.
 - Manueller Nachzug: Portal → CSVs → Dropzone auf `/insights`.
 - Grenzen: Länder/Geräte/Referrer liefert die API nicht (nur via CSV-Import);
   Besucher ist eine Presence-Näherung, nicht Discords Kanal-View-Definition;

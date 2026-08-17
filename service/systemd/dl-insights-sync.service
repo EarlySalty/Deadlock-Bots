@@ -5,8 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+KillMode=process
 WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots
 LoadCredential=infisical-token:/home/naniadm/.config/infisical-tokens/infisical-token-bots
+Environment=DISPLAY=:10
+Environment=XAUTHORITY=/home/nathanael/.Xauthority
+Environment=INSIGHTS_BRAVE_START=1
 ExecStartPre=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/wait_for_infisical.sh'
 ExecStart=/usr/bin/bash -lc '/home/naniadm/.local/bin/dl-infisical-env --profile all -- /home/naniadm/Documents/Deadlock-Bots/rust/target/release/dl-insights-sync'
 Nice=10
