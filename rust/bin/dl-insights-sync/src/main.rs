@@ -9,6 +9,7 @@
 //! Env: `DEADLOCK_CENTRAL_DSN`, `DISCORD_INSIGHTS_GUILD_ID`,
 //! `INSIGHTS_ARCHIVE_DIR`, `INSIGHTS_BRAVE_PORT_FILE`.
 
+mod allow;
 mod brave_cdp;
 
 use dl_dashboard::insights_sync::{archive_readme, brave_dumps_to_csv_dir, import_csv_dir};

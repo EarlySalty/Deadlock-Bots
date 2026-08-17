@@ -334,13 +334,44 @@ fn ws_request(endpoint: &str) -> Result<tokio_tungstenite::tungstenite::http::Re
 async fn connect_browser() -> Result<Ws> {
     let endpoint = browser_ws_endpoint()?;
     tracing::info!(%endpoint, "Brave CDP");
-    let request = ws_request(&endpoint)?;
-    let connect = tokio_tungstenite::connect_async(request);
-    match tokio::time::timeout(Duration::from_secs(8), connect).await {
+    if port_from_env_or_file().and_then(json_version_ws).is_none() {
+        let _ = tokio::task::spawn_blocking(crate::allow::ensure_inspect_page)
+            .await
+            .ok();
+    }
+    match handshake_with_keys(&endpoint, &["Return"]).await {
+        Ok(ws) => Ok(ws),
+        Err(first) => {
+            tracing::info!(error = %first, "erster Allow-Versuch, jetzt Tab+Return");
+            handshake_with_keys(&endpoint, &["Tab", "Return"]).await
+        }
+    }
+}
+
+async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
+    let request = ws_request(endpoint)?;
+    let keys = keys.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    let click = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+            crate::allow::confirm_allow(&refs)
+        })
+        .await;
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await;
+    click.abort();
+    match result {
         Ok(Ok((ws, _))) => Ok(ws),
-        Ok(Err(err)) => Err(err).with_context(|| format!("Brave nicht erreichbar unter {endpoint}")),
+        Ok(Err(err)) => {
+            Err(err).with_context(|| format!("Brave nicht erreichbar unter {endpoint}"))
+        }
         Err(_) => Err(anyhow!(
-            "CDP-Handshake Timeout unter {endpoint}. Ein anderer DevTools-Client (MCP) haelt den Socket, oder Brave wartet auf Freigabe unter brave://inspect."
+            "CDP-Handshake Timeout unter {endpoint}. Allow-Klick hat nicht gegriffen oder ein anderer DevTools-Client haelt den Socket."
         )),
     }
 }
