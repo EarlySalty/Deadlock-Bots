@@ -300,6 +300,179 @@ fn csv_row(cells: &[String]) -> String {
         .join(",")
 }
 
+/// Liest Highcharts-Dumps aus der eingeloggten Brave-Sitzung und schreibt CSVs.
+pub fn brave_dumps_to_csv_dir(
+    dump_paths: &[PathBuf],
+    out_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    std::fs::create_dir_all(out_dir).map_err(|err| err.to_string())?;
+    let mut written = Vec::new();
+    let mut csvs: Vec<(String, String)> = Vec::new();
+    for path in dump_paths {
+        let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+        let json: Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
+        csvs.extend(charts_dump_to_csvs(&json));
+    }
+    for (stem, csv) in csvs {
+        let dest = out_dir.join(stem);
+        std::fs::write(&dest, csv).map_err(|err| err.to_string())?;
+        written.push(dest);
+    }
+    Ok(written)
+}
+
+fn charts_dump_to_csvs(dump: &Value) -> Vec<(String, String)> {
+    let Some(charts) = dump.get("dumped").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for chart in charts {
+        let Some(series) = chart.get("series").and_then(Value::as_array) else {
+            continue;
+        };
+        let names: Vec<String> = series
+            .iter()
+            .filter_map(|s| s.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let joined = names.join("|").to_ascii_lowercase();
+        if joined.contains("besucher") {
+            if let Some(csv) = series_wide_csv(
+                series,
+                &[
+                    ("Besucher", "visitors"),
+                    ("% Beiträger", "pct_communicated"),
+                    ("Beiträger", "pct_communicated"),
+                ],
+            ) {
+                out.push(("guild-communicators.csv".into(), csv));
+            }
+        } else if joined.contains("gesendete nachrichten") {
+            if let Some(csv) = series_wide_csv(
+                series,
+                &[
+                    ("Gesendete Nachrichten", "messages"),
+                    ("Nachrichten pro Beiträger", "messages_per_communicator"),
+                ],
+            ) {
+                out.push(("guild-message-activity.csv".into(), csv));
+            }
+        } else if joined.contains("sprechzeit") {
+            if let Some(csv) = series_wide_csv(series, &[("Sprechzeit", "speaking_minutes")]) {
+                out.push(("guild-speaking-minutes.csv".into(), csv));
+            }
+        } else if joined.contains("bindung") {
+            if let Some(csv) = series_wide_csv(
+                series,
+                &[
+                    ("Neue Mitglieder", "new_members"),
+                    ("Woche-1-Bindung", "pct_retained"),
+                ],
+            ) {
+                out.push(("guild-retention.csv".into(), csv));
+            }
+        } else if joined.contains("vanity") || joined.contains("entdecken") {
+            if let Some(csv) = series_wide_csv(
+                series,
+                &[
+                    ("Andere", "other_joins"),
+                    ("Server entdecken", "discovery_joins"),
+                    ("Vanity-URL", "vanity_joins"),
+                    ("Einladen", "invites"),
+                ],
+            ) {
+                out.push(("guild-joins-by-source.csv".into(), csv));
+            }
+        } else if names.len() == 1 && names[0] == "Mitglieder" {
+            if let Some(csv) = series_wide_csv(series, &[("Mitglieder", "total_membership")]) {
+                out.push(("guild-total-membership.csv".into(), csv));
+            }
+        } else if joined.contains("1 month") {
+            if let Some(csv) = leavers_csv(series) {
+                out.push(("guild-leavers.csv".into(), csv));
+            }
+        } else if joined.contains("unterhalten") || joined.contains("kanäle") {
+            if let Some(csv) = series_wide_csv(
+                series,
+                &[
+                    ("Neue Mitglieder", "new_members"),
+                    ("unterhalten", "pct_communicated"),
+                    ("Kanäle", "pct_opened_channels"),
+                ],
+            ) {
+                out.push(("guild-activation.csv".into(), csv));
+            }
+        }
+    }
+    out
+}
+
+fn series_points(series: &Value) -> Vec<(String, f64)> {
+    series
+        .get("points")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(|p| {
+                    let x = p.get("x")?.as_str()?.to_string();
+                    let y = p.get("y")?.as_f64()?;
+                    Some((x, y))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn series_wide_csv(series: &[Value], mapping: &[(&str, &str)]) -> Option<String> {
+    let mut columns: Vec<(String, Vec<(String, f64)>)> = Vec::new();
+    for series_item in series {
+        let name = series_item.get("name")?.as_str()?;
+        let Some((_, header)) = mapping.iter().find(|(needle, _)| name.contains(needle)) else {
+            continue;
+        };
+        columns.push(((*header).to_string(), series_points(series_item)));
+    }
+    if columns.is_empty() {
+        return None;
+    }
+    let mut dates = columns[0]
+        .1
+        .iter()
+        .map(|(d, _)| d.clone())
+        .collect::<Vec<_>>();
+    dates.sort();
+    dates.dedup();
+    let mut header = vec!["day_pt".to_string()];
+    header.extend(columns.iter().map(|(h, _)| h.clone()));
+    let mut lines = vec![header.join(",")];
+    for date in dates {
+        let mut row = vec![date.clone()];
+        for (_, points) in &columns {
+            let val = points
+                .iter()
+                .find(|(d, _)| d == &date)
+                .map(|(_, y)| y.to_string())
+                .unwrap_or_default();
+            row.push(val);
+        }
+        lines.push(row.join(","));
+    }
+    Some(lines.join("\n"))
+}
+
+fn leavers_csv(series: &[Value]) -> Option<String> {
+    let mut lines = vec!["day_pt,days_in_guild,leavers".to_string()];
+    let mut any = false;
+    for series_item in series {
+        let name = series_item.get("name")?.as_str()?;
+        for (date, y) in series_points(series_item) {
+            lines.push(format!("{date},{name},{y}"));
+            any = true;
+        }
+    }
+    any.then(|| lines.join("\n"))
+}
+
 pub fn archive_readme(dir: &Path) -> String {
     format!(
         "# Discord Insights {}\n\nAutomatischer Wochenexport aus der Portal-API.\n",
@@ -325,6 +498,22 @@ mod tests {
         assert!(header.contains("pct_communicated"));
         assert!(csv.contains("2026-08-01"));
         assert!(csv.contains("517"));
+    }
+
+    #[test]
+    fn brave_dump_erkennt_besucher_als_communicators() {
+        let dump = json!({
+            "dumped": [{
+                "series": [
+                    {"name": "Besucher", "points": [{"x": "2026-08-15T00:00:00.000Z", "y": 500}]},
+                    {"name": "% Beiträger", "points": [{"x": "2026-08-15T00:00:00.000Z", "y": 23.2}]}
+                ]
+            }]
+        });
+        let csvs = charts_dump_to_csvs(&dump);
+        assert_eq!(csvs[0].0, "guild-communicators.csv");
+        assert!(csvs[0].1.contains("visitors"));
+        assert!(csvs[0].1.contains("500"));
     }
 
     #[test]

@@ -56,12 +56,11 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
 
 - Migration `2026070610_server_insights_backend.sql` (additiv) via dl-central-migrate.
 - Bot-Service braucht `DL_ENABLE_PRESENCE_INTENT=1` für Besucher-Zahlen.
-- Wöchentlicher Sync: `dl-insights-sync` (Timer `dl-insights-sync.timer`,
-  Montag 06:15) holt die Portal-API als CSV, legt sie unter
-  `docs/insights/discord/YYYY-MM-DD/` ab und upsertet nach
-  `activity.insights_imports`. Env: `DISCORD_INSIGHTS_USER_TOKEN` (User-Konto
-  mit Recht „Server-Einblicke ansehen“, kein Bot-Token).
-- Manueller Nachzug bleibt: Portal → CSVs → Dropzone auf `/insights`.
+- Wöchentlicher Sync über die **eingeloggte Brave-Sitzung**: Highcharts-Dump
+  aus dem Developer-Portal (kein gespeichertes User-Token). Danach
+  `INSIGHTS_BRAVE_DUMP_DIR=... dl-insights-sync`. Timer montags 06:15 importiert
+  nur, wenn Dumps liegen. User-Token-Pfad bleibt ungenutzt.
+- Manueller Nachzug: Portal → CSVs → Dropzone auf `/insights`.
 - Grenzen: Länder/Geräte/Referrer liefert die API nicht (nur via CSV-Import);
   Besucher ist eine Presence-Näherung, nicht Discords Kanal-View-Definition;
   Retention-Rohdaten reichen 180 Tage zurück.

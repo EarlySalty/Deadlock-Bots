@@ -1,12 +1,12 @@
-//! Holt Discord Server-Insights als CSV (Portal-API) und spielt sie in
-//! `activity.insights_imports` ein.
+//! Spielt Discord Server-Insights in `activity.insights_imports` ein.
 //!
-//! Env:
-//! - `DISCORD_INSIGHTS_USER_TOKEN` (Pflicht) — User-Token mit Recht
-//!   „Server-Einblicke ansehen“. Kein Bot-Token.
-//! - `DISCORD_INSIGHTS_GUILD_ID` (Default Community-Guild).
-//! - `DEADLOCK_CENTRAL_DSN` (Pflicht).
-//! - `INSIGHTS_ARCHIVE_DIR` (Default `docs/insights/discord/YYYY-MM-DD`).
+//! Reihenfolge:
+//! 1. `INSIGHTS_IMPORT_DIR` — fertige CSVs
+//! 2. `INSIGHTS_BRAVE_DUMP_DIR` — Highcharts-Dumps aus der Brave-Sitzung
+//! 3. sonst Portal-API mit `DISCORD_INSIGHTS_USER_TOKEN` (optional, nicht empfohlen)
+//!
+//! Env: `DEADLOCK_CENTRAL_DSN`, `DISCORD_INSIGHTS_GUILD_ID`,
+//! `INSIGHTS_ARCHIVE_DIR`.
 
 use dl_dashboard::insights_sync::{archive_readme, sync_insights, SyncConfig};
 
@@ -21,14 +21,43 @@ async fn main() -> anyhow::Result<()> {
 
     let dsn = dl_central_db::dsn_from_env()?;
     let pool = dl_central_db::connect_pool(&dsn).await?;
+    let guild_id = std::env::var("DISCORD_INSIGHTS_GUILD_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(dl_dashboard::insights_sync::DEFAULT_GUILD_ID);
     let report = if let Ok(dir) = std::env::var("INSIGHTS_IMPORT_DIR") {
-        let guild_id = std::env::var("DISCORD_INSIGHTS_GUILD_ID")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(dl_dashboard::insights_sync::DEFAULT_GUILD_ID);
         dl_dashboard::insights_sync::import_csv_dir(&pool, guild_id, dir.as_ref())
             .await
             .map_err(|err| anyhow::anyhow!(err))?
+    } else if let Ok(dump_dir) = std::env::var("INSIGHTS_BRAVE_DUMP_DIR") {
+        let archive = std::env::var("INSIGHTS_ARCHIVE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(format!(
+                    "/home/nathanael/repos/Deadlock-Bots/docs/insights/discord/{}",
+                    chrono::Utc::now().date_naive()
+                ))
+            });
+        let mut dumps = Vec::new();
+        for entry in std::fs::read_dir(&dump_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                dumps.push(path);
+            }
+        }
+        dumps.sort();
+        dl_dashboard::insights_sync::brave_dumps_to_csv_dir(&dumps, &archive)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        let readme = archive.join("README.md");
+        if !readme.exists() {
+            std::fs::write(&readme, archive_readme(&archive))?;
+        }
+        dl_dashboard::insights_sync::import_csv_dir(&pool, guild_id, &archive)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?
+    } else if std::env::var("DISCORD_INSIGHTS_USER_TOKEN").is_err() {
+        println!("kein Brave-Dump und kein Token: nichts zu tun");
+        return Ok(());
     } else {
         let cfg = SyncConfig::from_env().map_err(|err| anyhow::anyhow!(err))?;
         let report = sync_insights(&pool, &cfg)
