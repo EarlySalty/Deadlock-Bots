@@ -1246,6 +1246,10 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
                     "opened",
                     "count",
                     "value",
+                    "muters",
+                    "readers",
+                    "chatters",
+                    "listeners",
                 ]
                 .iter()
                 .any(|needle| h.contains(needle)))
@@ -1275,7 +1279,7 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
         || joined.contains("einladungslink")
     {
         "top_invites"
-    } else if joined.contains("referrer") {
+    } else if joined.contains("referrer") || joined.contains("referring") {
         "referrer"
     } else if joined.contains("retained")
         || joined.contains("retention")
@@ -1301,6 +1305,12 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
         "engagement"
     } else if joined.contains("leave") || joined.contains("leaver") {
         "leavers"
+    } else if joined.contains("muter") {
+        "muters"
+    } else if joined.contains("listener") {
+        "popular_voice"
+    } else if joined.contains("reader") || joined.contains("chatter") {
+        "popular_text"
     } else if joined.contains("source") || joined.contains("join") {
         "joins_by_source"
     } else {

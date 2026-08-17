@@ -63,8 +63,10 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
   der Job das Default-Profil mit `--remote-debugging-port` und
   `--remote-allow-origins=*`. Das Overlay „Allow remote debugging?“ klickt der
   Job selbst weg: immer ein neuer Inspect-Tab (`--new-tab`), dann Return bzw.
-  Tab+Return. Welcher Tab vorher aktiv war, ist egal. Die vom Job geöffneten
-  Tabs gehen danach wieder zu. Ein zweiter DevTools-Client (MCP) blockiert den
+  Tab+Return. Welcher Tab vorher aktiv war, ist egal. Danach klickt der Job
+  die Buttons „CSV exportieren“ und spielt genau diese offiziellen Dateien
+  ein, nicht die Highcharts-Rekonstruktion. Die vom Job geöffneten Tabs
+  gehen danach wieder zu. Ein zweiter DevTools-Client (MCP) blockiert den
   Handshake trotzdem; der Timer versucht es montags 06:15 und 07:15. Manueller
   Probe: `INSIGHTS_CDP_SMOKE=1 dl-insights-sync`. User-Token-Pfad bleibt
   ungenutzt.

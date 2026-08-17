@@ -27,6 +27,7 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub struct BraveDump {
     pub stem: &'static str,
     pub json: Value,
+    pub official: Vec<(String, String)>,
 }
 
 pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
@@ -76,7 +77,14 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
         .await?;
         wait_for_charts(&mut ws, &mut next_id, &session_id).await?;
         let dump = evaluate_dump(&mut ws, &mut next_id, &session_id).await?;
-        dumps.push(BraveDump { stem, json: dump });
+        let official = evaluate_official_csvs(&mut ws, &mut next_id, &session_id)
+            .await
+            .unwrap_or_default();
+        dumps.push(BraveDump {
+            stem,
+            json: dump,
+            official,
+        });
     }
     let _ = call(
         &mut ws,
@@ -110,6 +118,30 @@ pub fn write_dumps(dumps: &[BraveDump], dir: &Path) -> Result<Vec<PathBuf>> {
         let path = dir.join(format!("{}.json", dump.stem));
         std::fs::write(&path, serde_json::to_vec_pretty(&dump.json)?)?;
         paths.push(path);
+    }
+    Ok(paths)
+}
+
+pub fn write_official_csvs(dumps: &[BraveDump], dir: &Path) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(dir)?;
+    let mut paths = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for dump in dumps {
+        for (name, text) in &dump.official {
+            let mut file_name = name.clone();
+            if file_name == "popular-text-channels.csv" && text.contains("listeners") {
+                file_name = "popular-voice-channels.csv".to_string();
+            }
+            let n = seen.entry(file_name.clone()).or_insert(0);
+            *n += 1;
+            if *n > 1 {
+                let stem = file_name.trim_end_matches(".csv");
+                file_name = format!("{stem}-{n}.csv");
+            }
+            let path = dir.join(file_name);
+            std::fs::write(&path, text.replace('\r', ""))?;
+            paths.push(path);
+        }
     }
     Ok(paths)
 }
@@ -491,11 +523,82 @@ async fn evaluate_dump(ws: &mut Ws, next_id: &mut u64, session_id: &str) -> Resu
     evaluate(ws, next_id, session_id, expr).await
 }
 
+async fn evaluate_official_csvs(
+    ws: &mut Ws,
+    next_id: &mut u64,
+    session_id: &str,
+) -> Result<Vec<(String, String)>> {
+    let expr = r#"(async function(){
+      var files = [];
+      var origCreate = document.createElement.bind(document);
+      document.createElement = function(tag) {
+        var el = origCreate(tag);
+        if (String(tag).toLowerCase() === 'a') {
+          setTimeout(function(){
+            if (el.href && String(el.href).indexOf('data:') === 0) {
+              var s = String(el.href);
+              var comma = s.indexOf(',');
+              var raw = comma >= 0 ? s.slice(comma + 1) : s;
+              var text = raw;
+              try { text = decodeURIComponent(raw); } catch (e) {}
+              files.push({ download: el.download || '', text: text });
+            }
+          }, 0);
+        }
+        return el;
+      };
+      var btns = Array.prototype.filter.call(document.querySelectorAll('button'), function(b){
+        return (b.innerText || '').indexOf('CSV') >= 0;
+      });
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].click();
+        await new Promise(function(r){ setTimeout(r, 350); });
+      }
+      await new Promise(function(r){ setTimeout(r, 700); });
+      document.createElement = origCreate;
+      return files;
+    })()"#;
+    let value = evaluate_await(ws, next_id, session_id, expr).await?;
+    let Some(items) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("download").and_then(Value::as_str)?;
+            let text = item.get("text").and_then(Value::as_str)?;
+            if name.is_empty() || text.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), text.to_string()))
+        })
+        .collect())
+}
+
 async fn evaluate(
     ws: &mut Ws,
     next_id: &mut u64,
     session_id: &str,
     expression: &str,
+) -> Result<Value> {
+    evaluate_inner(ws, next_id, session_id, expression, false).await
+}
+
+async fn evaluate_await(
+    ws: &mut Ws,
+    next_id: &mut u64,
+    session_id: &str,
+    expression: &str,
+) -> Result<Value> {
+    evaluate_inner(ws, next_id, session_id, expression, true).await
+}
+
+async fn evaluate_inner(
+    ws: &mut Ws,
+    next_id: &mut u64,
+    session_id: &str,
+    expression: &str,
+    await_promise: bool,
 ) -> Result<Value> {
     let result = call(
         ws,
@@ -504,7 +607,7 @@ async fn evaluate(
         json!({
             "expression": expression,
             "returnByValue": true,
-            "awaitPromise": false
+            "awaitPromise": await_promise
         }),
         Some(session_id),
     )
@@ -534,7 +637,7 @@ async fn call(
     ws.send(Message::Text(msg.to_string().into()))
         .await
         .context("CDP senden")?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
     loop {
         let leftover = deadline.saturating_duration_since(tokio::time::Instant::now());
         if leftover.is_zero() {

@@ -80,7 +80,10 @@ async fn main() -> anyhow::Result<()> {
         let dumps = brave_cdp::dump_insights_pages(guild_id).await?;
         let dump_dir = archive.join("dumps");
         let dump_paths = brave_cdp::write_dumps(&dumps, &dump_dir)?;
-        brave_dumps_to_csv_dir(&dump_paths, &archive).map_err(|err| anyhow::anyhow!(err))?;
+        let official = brave_cdp::write_official_csvs(&dumps, &archive)?;
+        if official.is_empty() {
+            brave_dumps_to_csv_dir(&dump_paths, &archive).map_err(|err| anyhow::anyhow!(err))?;
+        }
         let readme = archive.join("README.md");
         if !readme.exists() {
             std::fs::write(&readme, archive_readme(&archive))?;
