@@ -1724,12 +1724,41 @@ impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
         crate::solo_watch::set_never_ask_db(&self.pool, user_id).await
     }
 
-    async fn post_lfg(&self, channel_id: u64, content: String) -> Result<u64, String> {
-        let body = serde_json::Map::from_iter([
-            ("content".to_string(), json!(content)),
-            ("allowed_mentions".to_string(), json!({ "parse": [] })),
-        ]);
+    async fn post_lfg(&self, channel_id: u64, body: Value) -> Result<u64, String> {
+        let body = body
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "Solo-LFG-Post ist kein JSON-Objekt".to_string())?;
         self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .voice_states
+            .get(&UserId::new(user_id))?
+            .channel_id
+            .map(|channel| channel.get())
+    }
+
+    async fn move_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": channel_id.to_string() }),
+                Some("Solo-LFG: Beitreten-Knopf"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 
     async fn load_active_posts(&self) -> Result<Vec<crate::solo_watch::PersistedPost>, String> {

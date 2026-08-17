@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+// Marken-Look und Emojis kommen aus dem Router — eine Quelle für alle Panels.
+use crate::router::{
+    ROUTER_ACCENT_GOLD, ROUTER_COMPONENTS_V2_FLAG, ROUTER_EMOJI_BRAWL, ROUTER_EMOJI_CASUAL,
+    ROUTER_EMOJI_RANKED,
+};
+
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
 pub const NEW_PLAYER_CATEGORY_ID: u64 = 1465839366634209361;
 pub const LFG_CHANNEL_ID: u64 = 1376335502919335936;
@@ -27,6 +33,7 @@ pub const ENTER_CUSTOM_ID: &str = "solo_lfg:enter";
 pub const LATER_CUSTOM_ID: &str = "solo_lfg:later";
 pub const NEVER_CUSTOM_ID: &str = "solo_lfg:never";
 pub const MODAL_CUSTOM_ID: &str = "solo_lfg:modal";
+pub const JOIN_CUSTOM_ID: &str = "solo_lfg:join";
 
 pub const DM_TITLE: &str = "Du sitzt gerade allein";
 pub const MODAL_TITLE: &str = "Eintrag in die Mitspieler-Suche";
@@ -39,6 +46,17 @@ pub const INVALID_REPLY: &str =
     "Das ist schon abgelaufen. Wenn du noch allein sitzt, meld ich mich gleich nochmal.";
 pub const POST_ERROR_REPLY: &str = "Da ist beim Posten was schiefgelaufen, tut mir leid. Probier es gleich nochmal, oder schreib direkt in <#1376335502919335936>.";
 pub const DAILY_SUMMARY_PREFIX: &str = "🎙️ Solo-LFG — Tagesbilanz";
+
+pub const JOIN_BUTTON_LABEL: &str = "Beitreten";
+pub const LANE_LINK_LABEL: &str = "Lane öffnen";
+pub const JOIN_MOVED_REPLY: &str = "Ab in die Lane mit dir — viel Spaß!";
+pub const JOIN_NOT_IN_VOICE_REPLY: &str =
+    "Geh in irgendeinen Sprachkanal, dann zieh ich dich rüber. Oder klick die Lane oben direkt an.";
+pub const JOIN_LANE_GONE_REPLY: &str = "Die Lane gibt es nicht mehr.";
+pub const JOIN_FULL_REPLY: &str = "Die Lane ist gerade voll.";
+pub const JOIN_ALREADY_REPLY: &str = "Du bist schon drin.";
+pub const JOIN_FAILED_REPLY: &str =
+    "Konnte dich nicht verschieben — probier es nochmal oder klick die Lane oben direkt an.";
 
 pub const HARD_EXCLUDED_CATEGORY_IDS: [u64; 8] = [
     1326983313549820035,
@@ -88,7 +106,12 @@ pub trait SoloWatchPort: Send + Sync {
     async fn verified_rank(&self, user_id: u64) -> Result<Option<String>, String>;
     async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String>;
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String>;
-    async fn post_lfg(&self, channel_id: u64, content: String) -> Result<u64, String>;
+    async fn post_lfg(&self, channel_id: u64, body: Value) -> Result<u64, String>;
+    /// Sprachkanal, in dem das Mitglied gerade sitzt — Discord verschiebt nur,
+    /// wer schon irgendwo verbunden ist.
+    async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
+    async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
+        -> Result<(), String>;
     async fn load_active_posts(&self) -> Result<Vec<PersistedPost>, String>;
     async fn save_active_post(&self, post: &PersistedPost) -> Result<(), String>;
     async fn remove_active_post(&self, user_id: u64) -> Result<(), String>;
@@ -127,6 +150,7 @@ struct DailyCounters {
     checked: u64,
     prompted: u64,
     registered: u64,
+    joined: u64,
     rejected: u64,
     dm_errors: u64,
 }
@@ -505,6 +529,13 @@ impl SoloWatch {
             return self.handle_never(interaction.user_id).await;
         }
         if let Some((guild_id, channel_id)) =
+            custom_id_context(&interaction.custom_id, JOIN_CUSTOM_ID)
+        {
+            return self
+                .handle_join(interaction.user_id, guild_id, channel_id)
+                .await;
+        }
+        if let Some((guild_id, channel_id)) =
             custom_id_context(&interaction.custom_id, MODAL_CUSTOM_ID)
         {
             return self.handle_modal(interaction, guild_id, channel_id).await;
@@ -538,6 +569,47 @@ impl SoloWatch {
         BridgeReply {
             modal: Some(solo_modal(guild_id, channel_id, rank)),
             ..BridgeReply::default()
+        }
+    }
+
+    /// Beitreten-Knopf unter dem Post: zieht den Klickenden in die Lane, statt
+    /// ihn auf einen Kanal-Link zu schicken, den er selbst noch anklicken muss.
+    async fn handle_join(&self, user_id: u64, guild_id: u64, channel_id: u64) -> BridgeReply {
+        let Some(lane) = self.port.lane_snapshot(guild_id, channel_id).await else {
+            self.decision(user_id, "beitritt_verworfen", "lane_weg", None);
+            return BridgeReply::ephemeral_text(JOIN_LANE_GONE_REPLY);
+        };
+        if lane.non_bot_members.contains(&user_id) {
+            return BridgeReply::ephemeral_text(JOIN_ALREADY_REPLY);
+        }
+        if free_slots(&lane) == Some(0) {
+            self.decision(user_id, "beitritt_verworfen", "lane_voll", None);
+            return BridgeReply::ephemeral_text(JOIN_FULL_REPLY);
+        }
+        if self
+            .port
+            .member_voice_channel(guild_id, user_id)
+            .await
+            .is_none()
+        {
+            self.decision(user_id, "beitritt_verworfen", "nicht_im_voice", None);
+            return BridgeReply::ephemeral_text(JOIN_NOT_IN_VOICE_REPLY);
+        }
+        match self.port.move_member(guild_id, user_id, channel_id).await {
+            Ok(()) => {
+                self.daily.lock().await.joined += 1;
+                self.decision(user_id, "beigetreten", "post_button", None);
+                BridgeReply::ephemeral_text(JOIN_MOVED_REPLY)
+            }
+            Err(error) => {
+                self.decision(
+                    user_id,
+                    "beitritt_fehlgeschlagen",
+                    "move_fehler",
+                    Some(&error),
+                );
+                BridgeReply::ephemeral_text(JOIN_FAILED_REPLY)
+            }
         }
     }
 
@@ -583,7 +655,7 @@ impl SoloWatch {
                 .unwrap_or_default()
                 .trim()
         };
-        let content = lfg_post(
+        let body = lfg_post(
             user_id,
             guild_id,
             channel_id,
@@ -592,7 +664,7 @@ impl SoloWatch {
             value("rank"),
             value("note"),
         );
-        let message_id = match self.port.post_lfg(LFG_CHANNEL_ID, content).await {
+        let message_id = match self.port.post_lfg(LFG_CHANNEL_ID, body).await {
             Ok(message_id) => message_id,
             Err(error) => {
                 self.decision(
@@ -663,10 +735,11 @@ impl SoloWatch {
     pub async fn flush_daily_summary(&self) {
         let counters = std::mem::take(&mut *self.daily.lock().await);
         let text = format!(
-            "{DAILY_SUMMARY_PREFIX}\ngeprüft: {} · angesprochen: {} · eingetragen: {} · abgelehnt: {} · DM-Fehler: {}",
+            "{DAILY_SUMMARY_PREFIX}\ngeprüft: {} · angesprochen: {} · eingetragen: {} · beigetreten: {} · abgelehnt: {} · DM-Fehler: {}",
             counters.checked,
             counters.prompted,
             counters.registered,
+            counters.joined,
             counters.rejected,
             counters.dm_errors
         );
@@ -692,11 +765,15 @@ fn post_cleanup_reason(user_id: u64, lane: &LaneSnapshot) -> Option<&'static str
 }
 
 fn mode_for_category(category_id: u64) -> &'static str {
+    mode_and_emoji(category_id).0
+}
+
+fn mode_and_emoji(category_id: u64) -> (&'static str, (&'static str, &'static str)) {
     match category_id {
-        1412804540994162789 => "Ranked",
-        1357422957017698478 => "Street Brawl",
-        NEW_PLAYER_CATEGORY_ID => "New Player",
-        _ => "Casual",
+        1412804540994162789 => ("Ranked", ROUTER_EMOJI_RANKED),
+        1357422957017698478 => ("Street Brawl", ROUTER_EMOJI_BRAWL),
+        NEW_PLAYER_CATEGORY_ID => ("New Player", ROUTER_EMOJI_CASUAL),
+        _ => ("Casual", ROUTER_EMOJI_CASUAL),
     }
 }
 
@@ -794,6 +871,8 @@ fn solo_modal(guild_id: u64, channel_id: u64, rank: Option<String>) -> ModalSpec
     }
 }
 
+/// Gold-Karte statt Rohtext: Der Beitreten-Knopf zieht den Klickenden direkt in
+/// die Lane, der Link daneben bleibt für alle, die lieber selbst klicken.
 fn lfg_post(
     user_id: u64,
     guild_id: u64,
@@ -802,26 +881,57 @@ fn lfg_post(
     time: &str,
     rank: &str,
     note: &str,
-) -> String {
-    let mut lines = vec![format!("<@{user_id}>")];
-    let mode = mode_for_category(lane.category_id);
-    if rank.is_empty() {
-        lines.push(format!("**{mode}**"));
-    } else {
-        lines.push(format!("**{mode}** — {rank}"));
+) -> Value {
+    let (mode, (emoji_name, emoji_id)) = mode_and_emoji(lane.category_id);
+    let mut headline = format!("## <:{emoji_name}:{emoji_id}> {mode}");
+    if !rank.is_empty() {
+        headline.push_str(&format!(" · {rank}"));
     }
-    if let Some(free) = free_slots(lane) {
-        lines.push(format!("Sitzt gerade in {}, {free} Plätze frei", lane.name));
+    let mut lines = vec![
+        headline,
+        match free_slots(lane) {
+            Some(free) => format!("<@{user_id}> sitzt in <#{channel_id}> — noch **{free}** frei"),
+            None => format!("<@{user_id}> sitzt in <#{channel_id}>"),
+        },
+    ];
+    let mut details = Vec::new();
+    if !time.is_empty() {
+        details.push(time.to_string());
     }
-    lines.push(format!("⏱️ {time}"));
     if !note.is_empty() {
-        lines.push(format!("\"{note}\""));
+        details.push(format!("„{note}“"));
     }
-    lines.push(String::new());
-    lines.push(format!(
-        "→ Beitreten: https://discord.com/channels/{guild_id}/{channel_id}"
-    ));
-    lines.join("\n")
+    if !details.is_empty() {
+        lines.push(format!("-# {}", details.join(" · ")));
+    }
+
+    json!({
+        "flags": ROUTER_COMPONENTS_V2_FLAG,
+        // Stumm: Der Suchende steht im Post, gepingt wird niemand.
+        "allowed_mentions": { "parse": [] },
+        "components": [{
+            "type": 17,
+            "accent_color": ROUTER_ACCENT_GOLD,
+            "components": [
+                { "type": 10, "content": lines.join("\n") },
+                { "type": 14, "divider": true, "spacing": 1 },
+                { "type": 1, "components": [
+                    {
+                        "type": 2,
+                        "style": 1,
+                        "label": JOIN_BUTTON_LABEL,
+                        "custom_id": format!("{JOIN_CUSTOM_ID}:{guild_id}:{channel_id}"),
+                    },
+                    {
+                        "type": 2,
+                        "style": 5,
+                        "label": LANE_LINK_LABEL,
+                        "url": format!("https://discord.com/channels/{guild_id}/{channel_id}"),
+                    }
+                ]}
+            ]
+        }]
+    })
 }
 
 fn free_slots(lane: &LaneSnapshot) -> Option<usize> {
@@ -1041,8 +1151,10 @@ mod tests {
         last_prompt_at: Option<DateTime<Utc>>,
         persisted_posts: HashMap<u64, (u64, u64, DateTime<Utc>)>,
         dms: Vec<(u64, Value)>,
-        posts: Vec<(u64, String)>,
+        posts: Vec<(u64, Value)>,
         deletes: Vec<(u64, u64, String)>,
+        voice_channels: HashMap<u64, u64>,
+        moves: Vec<(u64, u64)>,
         logs: Vec<String>,
     }
 
@@ -1063,6 +1175,14 @@ mod tests {
 
         fn dms(&self) -> usize {
             self.state.lock().expect("lock").dms.len()
+        }
+
+        fn set_voice_channel(&self, user_id: u64, channel_id: u64) {
+            self.state
+                .lock()
+                .expect("lock")
+                .voice_channels
+                .insert(user_id, channel_id);
         }
     }
 
@@ -1111,10 +1231,33 @@ mod tests {
             Ok(())
         }
 
-        async fn post_lfg(&self, channel_id: u64, content: String) -> Result<u64, String> {
+        async fn post_lfg(&self, channel_id: u64, body: Value) -> Result<u64, String> {
             let mut state = self.state.lock().expect("lock");
-            state.posts.push((channel_id, content));
+            state.posts.push((channel_id, body));
             Ok(700 + state.posts.len() as u64)
+        }
+
+        async fn member_voice_channel(&self, _guild_id: u64, user_id: u64) -> Option<u64> {
+            self.state
+                .lock()
+                .expect("lock")
+                .voice_channels
+                .get(&user_id)
+                .copied()
+        }
+
+        async fn move_member(
+            &self,
+            _guild_id: u64,
+            user_id: u64,
+            channel_id: u64,
+        ) -> Result<(), String> {
+            self.state
+                .lock()
+                .expect("lock")
+                .moves
+                .push((user_id, channel_id));
+            Ok(())
         }
 
         async fn load_active_posts(&self) -> Result<Vec<PersistedPost>, String> {
@@ -1211,6 +1354,14 @@ mod tests {
                 now(),
             )
             .await;
+    }
+
+    fn join_click(user_id: u64) -> BridgeInteraction {
+        BridgeInteraction {
+            custom_id: format!("{JOIN_CUSTOM_ID}:{GUILD}:{CHANNEL}"),
+            user_id,
+            ..BridgeInteraction::default()
+        }
     }
 
     async fn prompt(watch: &Arc<SoloWatch>, port: &MockPort) {
@@ -1398,10 +1549,120 @@ mod tests {
         let state = port.state.lock().expect("lock");
         assert_eq!(state.posts.len(), 1);
         assert_eq!(state.posts[0].0, LFG_CHANNEL_ID);
-        assert_eq!(
-            state.posts[0].1,
-            "<@42>\n**Casual** — Ascendant 2\nSitzt gerade in Lobby 1, 5 Plätze frei\n⏱️ eine Runde\n\"chill, kein Sweat\"\n\n→ Beitreten: https://discord.com/channels/1289721245281292288/99"
+    }
+
+    fn container(body: &Value) -> &Value {
+        &body["components"][0]
+    }
+
+    fn post_text(body: &Value) -> String {
+        container(body)["components"][0]["content"]
+            .as_str()
+            .expect("Textblock")
+            .to_string()
+    }
+
+    fn post_buttons(body: &Value) -> &Vec<Value> {
+        container(body)["components"]
+            .as_array()
+            .expect("Container-Bloecke")
+            .iter()
+            .find(|block| block["type"] == 1)
+            .expect("Button-Zeile")["components"]
+            .as_array()
+            .expect("Buttons")
+    }
+
+    #[tokio::test]
+    async fn post_ist_gold_karte_mit_beitreten_knopf() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        create_post(&watch, &port).await;
+
+        let state = port.state.lock().expect("lock");
+        let body = &state.posts[0].1;
+        assert_eq!(body["flags"], ROUTER_COMPONENTS_V2_FLAG);
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        assert_eq!(container(body)["type"], 17);
+        assert_eq!(container(body)["accent_color"], ROUTER_ACCENT_GOLD);
+
+        let text = post_text(body);
+        assert!(
+            text.contains(ROUTER_EMOJI_CASUAL.0),
+            "Modus-Emoji fehlt: {text}"
         );
+        assert!(text.contains("Casual · Ascendant 2"), "Kopfzeile: {text}");
+        assert!(text.contains("<@42>") && text.contains("<#99>"), "{text}");
+        assert!(text.contains("noch **5** frei"), "Platzstand fehlt: {text}");
+        assert!(
+            text.contains("eine Runde") && text.contains("chill, kein Sweat"),
+            "{text}"
+        );
+
+        let buttons = post_buttons(body);
+        assert_eq!(
+            buttons[0]["custom_id"],
+            format!("{JOIN_CUSTOM_ID}:{GUILD}:{CHANNEL}")
+        );
+        assert_eq!(buttons[0]["label"], JOIN_BUTTON_LABEL);
+        assert_eq!(
+            buttons[1]["url"],
+            format!("https://discord.com/channels/{GUILD}/{CHANNEL}")
+        );
+    }
+
+    #[tokio::test]
+    async fn beitreten_knopf_zieht_klickenden_in_die_lane() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        create_post(&watch, &port).await;
+        port.set_voice_channel(43, 1234);
+
+        let reply = watch.handle_interaction(join_click(43)).await;
+
+        assert_eq!(reply.content.as_deref(), Some(JOIN_MOVED_REPLY));
+        assert_eq!(
+            port.state.lock().expect("lock").moves.as_slice(),
+            [(43, CHANNEL)]
+        );
+    }
+
+    #[tokio::test]
+    async fn beitreten_ohne_voice_verschiebt_niemanden() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        create_post(&watch, &port).await;
+
+        let reply = watch.handle_interaction(join_click(43)).await;
+
+        assert_eq!(reply.content.as_deref(), Some(JOIN_NOT_IN_VOICE_REPLY));
+        assert!(port.state.lock().expect("lock").moves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn beitreten_in_volle_lane_wird_abgelehnt() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        create_post(&watch, &port).await;
+        port.set_lane(CHILL, &[USER, 44, 45, 46, 47, 48]);
+        port.set_voice_channel(43, 1234);
+
+        let reply = watch.handle_interaction(join_click(43)).await;
+
+        assert_eq!(reply.content.as_deref(), Some(JOIN_FULL_REPLY));
+        assert!(port.state.lock().expect("lock").moves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn beitreten_ohne_lane_meldet_lane_weg() {
+        let port = Arc::new(MockPort::default());
+        let watch = SoloWatch::new(port.clone());
+        port.set_voice_channel(43, 1234);
+
+        let reply = watch.handle_interaction(join_click(43)).await;
+
+        assert_eq!(reply.content.as_deref(), Some(JOIN_LANE_GONE_REPLY));
+        assert!(port.state.lock().expect("lock").moves.is_empty());
     }
 
     #[tokio::test]
