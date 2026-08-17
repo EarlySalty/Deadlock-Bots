@@ -1,5 +1,6 @@
-//! Holt Discord-Server-Insights aus derselben Portal-API wie die CSV-Buttons
-//! und spielt sie über [`crate::insights::import_csv_text`] ein.
+//! Holt Discords anonyme Portal-CSVs und spielt sie in `insights_imports` ein.
+//! Die nutzerspezifische Live-Sammlung (Messages, Voice, Presence, Journey)
+//! bleibt unangetastet. APIs liefern beides getrennt (`live` vs. `imported`).
 //!
 //! Kein HTML-Scraper: `GET /api/v9/guilds/{id}/analytics/...`.
 //! Auth ist ein User-Token mit Recht „Server-Einblicke ansehen“, kein Bot-Token.

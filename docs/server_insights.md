@@ -6,12 +6,15 @@ statisches Frontend `service/static/insights.html`, Daten über `/api/insights/*
 
 ## Datenpfade
 
-Zwei bewusst getrennte Welten:
+Drei bewusst getrennte Welten. Keine darf die andere ersetzen:
 
-| Pfad | Quelle | Historie | genutzt von |
+| Pfad | Quelle | Was sie kann | genutzt von |
 |---|---|---|---|
-| Journey/Ingestion | `activity.message_metadata_events`, `voice_metadata_events`, `interaction_events`, `presence_daily_seen`, `journey_user_state` + Tagesaggregate | ab 2026-07 (180-Tage-Rohdaten, danach anonyme Aggregate) | alle `/api/insights/*` |
-| Legacy-Sessions | `activity.voice_session_log`, `activity.message_activity` | seit Tracking-Beginn, mit Punkten/Peak/Kanalnamen | `/api/voice-history`, `/api/server-stats` (unverändert) |
+| Live / nutzerspezifisch | `activity.message_metadata_events`, `voice_metadata_events`, `interaction_events`, `presence_daily_seen`, `journey_user_state` + Tagesaggregate | User, Kanal, Zeitpunkt. Unsere Auswertungen. | alle `/api/insights/*` unter `live` |
+| Discord-CSV / anonym | `activity.insights_imports` aus den Portal-Buttons „CSV exportieren“ | Offizielle Discord-Zahlen, ohne User. Abgleich und Historie über 120 Tage hinaus. | dieselben Endpunkte unter `imported` |
+| Legacy-Sessions | `activity.voice_session_log`, `activity.message_activity` | Punkte/Peak/Kanalnamen seit Tracking-Beginn | `/api/voice-history`, `/api/server-stats` |
+
+Der Wochenjob schreibt nur in `insights_imports`. Er löscht und überschreibt niemals die Live-Tabellen.
 
 Ältere Zeiträume für Insights kommen über den CSV-Import (unten), nicht aus dem Legacy-Pfad.
 

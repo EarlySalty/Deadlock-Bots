@@ -1,4 +1,5 @@
-//! Spielt Discord Server-Insights in `activity.insights_imports` ein.
+//! Spielt Discords anonyme Portal-CSVs in `activity.insights_imports` ein.
+//! Nicht die Live-User-Daten. Die bleiben in den Event-Tabellen.
 //!
 //! Reihenfolge:
 //! 1. `INSIGHTS_CDP_SMOKE=1` — nur Handshake gegen Brave
