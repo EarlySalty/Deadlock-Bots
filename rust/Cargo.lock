@@ -1183,6 +1183,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-insights-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dl-central-db",
+ "dl-dashboard",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dl-knowledge"
 version = "0.1.0"
 dependencies = [
