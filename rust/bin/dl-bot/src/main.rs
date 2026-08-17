@@ -13,8 +13,6 @@ mod master;
 mod mcp;
 mod modglue;
 mod onboardglue;
-mod onboardingbridgeglue;
-mod onboardingtourglue;
 mod scrim_adapter;
 mod scrimglue;
 mod serversync;
@@ -968,48 +966,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
-    // Onboarding-Wizard (7): rp:panel:start + Thread-Schritte
-    let wizard =
-        dl_community::onboarding::OnboardingWizard::new(Arc::new(onboardglue::WizardGlue {
-            adapter: adapter.clone(),
-            tags: tag_service.clone(),
-            steam: steam_client.clone(),
-            pool: central_pool.clone(),
-        }));
-    // Verifikations-Abschluss: RoleEvent::Gained(Verified) → Abschluss-Nachricht.
-    dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
-    dl_community::onboarding::register(&mut router, wizard);
-
-    // AI-Onboarding (H6): legacy `aiob:*` buttons, modal submit, MiniMax tour.
-    // This complements the static wizard; it does not replace or restart the
-    // disabled old Welcome-DM step flow.
-    let ai_onboarding_tokens = env("DEADLOCK_ONBOARD_TOKENS")
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .filter(|tokens| *tokens > 0)
-        .unwrap_or(dl_community::ai_onboarding::AI_ONBOARDING_DEFAULT_MAX_OUTPUT_TOKENS);
-    let ai_onboarding = dl_community::ai_onboarding::AiOnboarding::new(
-        central_pool.clone(),
-        Arc::new(onboardglue::AiOnboardingGlue {
-            adapter: adapter.clone(),
-        }),
-        chat_text_generator(dl_ai::LlmUseCase::AiOnboarding, false),
-        dl_community::ai_onboarding::AiOnboardingConfig::new(
-            onboardglue::MAIN_GUILD_ID,
-            onboardglue::ONBOARD_COMPLETE_ROLE_ID,
-        )
-        .with_max_output_tokens(ai_onboarding_tokens),
-    );
-    match ai_onboarding.restore_persistent_views().await {
-        Ok(report) => tracing::info!(
-            scanned = report.scanned,
-            restored = report.restored,
-            removed_invalid = report.removed_invalid,
-            "AI onboarding views restored"
-        ),
-        Err(err) => tracing::warn!(%err, "AI onboarding views could not be loaded"),
-    }
-    dl_community::ai_onboarding::register(&mut router, ai_onboarding);
-
     // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
     // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).
     let brain_handler = {
@@ -1128,34 +1084,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_config.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
-    let onboarding_tour_runtime = onboardingtourglue::tour_opt_in_role_id_from_lookup(|key| {
-        std::env::var(key).ok()
-    })
-    .and_then(|marker_role_id| {
-        match onboardingtourglue::OnboardingTourGlue::new(
-            adapter.clone(),
-            central_pool.clone(),
-            concierge.clone(),
-            discord_token.clone(),
-        ) {
-            Ok(glue) => {
-                let runtime = onboardingtourglue::OnboardingTourRuntime::new(
-                    glue,
-                    onboardglue::MAIN_GUILD_ID,
-                    marker_role_id,
-                );
-                Some(runtime)
-            }
-            Err(error) => {
-                tracing::error!(%error, "Onboarding-Tour HTTP-Client konnte nicht gebaut werden");
-                None
-            }
-        }
-    });
-    if onboarding_tour_runtime.is_none() {
-        tracing::info!("Onboarding-Tour deaktiviert (TOUR_OPT_IN_ROLE_ID fehlt oder ist 0)");
-    }
-    onboardingtourglue::register(&mut router, onboarding_tour_runtime.clone());
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
     dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
@@ -1201,10 +1129,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         });
     dl_community::retention::register(&mut router, central_pool.clone(), retention_port.clone());
 
-    // Onboarding-Buttons (7): Regelbestätigung + Steam-Login + DM-Hinweise
+    // Alt-Buttons bleiben klickbar (kein Rollen-Grant). Steam-Login bleibt.
     onboardglue::register(
         &mut router,
-        adapter.clone(),
         dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
     );
 
@@ -1679,19 +1606,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             &dispatcher,
             onboardglue::MAIN_GUILD_ID,
         );
-        let _onboarding_bridge = onboardingbridgeglue::spawn(
-            central_pool.clone(),
-            adapter.clone(),
-            &dispatcher,
-            onboardglue::MAIN_GUILD_ID,
-        );
-        let _concierge_tasks = if onboarding_tour_runtime.is_some() {
-            dl_community::concierge::spawn_without_message_loop(concierge.clone(), &dispatcher)
-        } else {
-            dl_community::concierge::spawn(concierge.clone(), &dispatcher)
-        };
-        let _onboarding_tour_tasks =
-            onboardingtourglue::spawn_if_enabled(onboarding_tour_runtime.clone(), &dispatcher);
+        let _concierge_tasks = dl_community::concierge::spawn(concierge.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(
             central_pool.clone(),
             tag_service.clone(),

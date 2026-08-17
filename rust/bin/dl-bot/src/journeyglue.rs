@@ -129,24 +129,24 @@ impl NativeOnboardingLookup for SerenityNativeOnboardingLookup {
 
 const WEICHE_ROLE_CHOICES: &[(u64, &str)] = &[
     (
-        dl_community::ai_onboarding::ROLE_STREAMER_ONBOARD_ID,
+        dl_community::onboarding::ROLE_STREAMER_ONBOARD_ID,
         "streamer_onboarding",
     ),
     (
-        dl_community::ai_onboarding::ROLE_STREAMER_PARTNER_ID,
+        dl_community::onboarding::ROLE_STREAMER_PARTNER_ID,
         "streamer_partner",
     ),
-    (dl_community::ai_onboarding::ROLE_LFG_PING_ID, "lfg_ping"),
+    (dl_community::onboarding::ROLE_LFG_PING_ID, "lfg_ping"),
     (
-        dl_community::ai_onboarding::ROLE_CUSTOM_GAMES_PING_ID,
+        dl_community::onboarding::ROLE_CUSTOM_GAMES_PING_ID,
         "custom_games_ping",
     ),
     (
-        dl_community::ai_onboarding::ROLE_PATCHNOTES_PING_ID,
+        dl_community::onboarding::ROLE_PATCHNOTES_PING_ID,
         "patchnotes_ping",
     ),
-    (dl_community::ai_onboarding::ROLE_RANKED_ID, "ranked"),
-    (dl_community::ai_onboarding::ROLE_CASUAL_ID, "casual"),
+    (dl_community::onboarding::ROLE_RANKED_ID, "ranked"),
+    (dl_community::onboarding::ROLE_CASUAL_ID, "casual"),
 ];
 
 fn weiche_choice_for_role(role_id: u64) -> Option<&'static str> {

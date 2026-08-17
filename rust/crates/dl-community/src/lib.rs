@@ -1,10 +1,9 @@
 //! dl-community — Phase 6/7-Dienste.
 //!
 //! - [`tags`] — Tag-System (Single Source of Truth für User-/Mod-Tags);
-//!   versorgt TempVoice-Tag-Filter, Moderation (Ragebaiter) und Onboarding.
+//!   versorgt TempVoice-Tag-Filter, Moderation (Ragebaiter) und Concierge.
 //! - FAQ, Clips, Leave-Survey, Bug-Reporter folgen.
 
-pub mod ai_onboarding;
 pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
@@ -17,8 +16,6 @@ pub mod invites;
 mod knowledge_client;
 pub mod leave_survey;
 pub mod onboarding;
-pub mod onboarding_bridge;
-pub mod onboarding_tour;
 pub mod privacy;
 pub mod privacy_ui;
 pub mod reaction_roles;
