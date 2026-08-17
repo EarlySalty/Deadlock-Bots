@@ -1226,33 +1226,34 @@ fn detect_import(headers: &[String]) -> Option<ImportSpec> {
         .enumerate()
         .filter_map(|(idx, h)| {
             (idx != date_col
-                && [
-                    "joins",
-                    "leavers",
-                    "leaves",
-                    "retention",
-                    "retained",
-                    "activated",
-                    "activation",
-                    "visitors",
-                    "contributors",
-                    "communicators",
-                    "communicated",
-                    "messages",
-                    "minutes",
-                    "speaking",
-                    "members",
-                    "membership",
-                    "opened",
-                    "count",
-                    "value",
-                    "muters",
-                    "readers",
-                    "chatters",
-                    "listeners",
-                ]
-                .iter()
-                .any(|needle| h.contains(needle)))
+                && (h == "invites"
+                    || [
+                        "joins",
+                        "leavers",
+                        "leaves",
+                        "retention",
+                        "retained",
+                        "activated",
+                        "activation",
+                        "visitors",
+                        "contributors",
+                        "communicators",
+                        "communicated",
+                        "messages",
+                        "minutes",
+                        "speaking",
+                        "members",
+                        "membership",
+                        "opened",
+                        "count",
+                        "value",
+                        "muters",
+                        "readers",
+                        "chatters",
+                        "listeners",
+                    ]
+                    .iter()
+                    .any(|needle| h.contains(*needle))))
             .then_some(idx)
         })
         .collect::<Vec<_>>();
@@ -1465,6 +1466,16 @@ mod tests {
             let spec = detect_import(&headers)
                 .unwrap_or_else(|| panic!("official header not recognized: {header_line}"));
             assert_eq!(spec.kind, kind, "header {header_line}");
+            if kind == "joins_by_source" && headers.iter().any(|h| h == "invites") {
+                assert_eq!(
+                    spec.dimension_col, None,
+                    "invites ist Wert, keine Dimension"
+                );
+                assert!(
+                    spec.value_cols.iter().any(|&i| headers[i] == "invites"),
+                    "Spalte invites muss importiert werden"
+                );
+            }
         }
     }
 
