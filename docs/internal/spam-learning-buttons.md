@@ -1,13 +1,14 @@
 # Twitch-Spam-Lernbuttons
 
 ## Zweck
-Verdächtige Twitch-Spam-Alerts im Discord bekommen zwei Betreiber-Buttons:
-`Spam lernen` und `Harmlos lernen`. Damit kann ein Mod ein gemeldetes Muster direkt als
-positives oder negatives Beispiel speichern, ohne in die Datenbank zu gehen.
+Verdächtige Twitch-Spam-Alerts im Discord bekommen je nach AI-Urteil einen
+Betreiber-Button: Bei einem Spam-Urteil kann der Fall als Spam korrigiert werden;
+bei einem Harmlos-Urteil kann menschliches `clean`-Feedback bestätigt werden.
 
 Der Button-Flow ist bewusst klein: Der Discord-Bot entscheidet nichts selbst, sondern leitet
-den bestätigten Fall an die interne Twitch-API weiter. Dort wird in die bestehenden
-Spam-/Safe-Lernlisten geschrieben.
+den bestätigten Fall an die interne Twitch-API weiter. Spam-Korrekturen schreiben in die
+bestehende Spam-Lernliste; Harmlos-Bestätigungen landen als `clean`-Feedback im Review-Log
+und verändern den aktiven Filter nicht.
 
 ## Cross-Repo-Vertrag
 Der Twitch-Bot hängt an direkte Alert-Posts ein Feld `spam_learning`:
@@ -18,7 +19,8 @@ Der Twitch-Bot hängt an direkte Alert-Posts ein Feld `spam_learning`:
   "pattern_type": "phrase",
   "source_message": "@MiracleGhost9 aha, so sammelt man also viewer Kappa",
   "source_channel": "miracleghost9",
-  "reason": "Score 1: viewer + name"
+  "reason": "Score 1: viewer + name",
+  "safe_feedback_pattern": null
 }
 ```
 
@@ -29,6 +31,11 @@ POST http://127.0.0.1:8776/internal/twitch/v1/spam-learning
 Header: X-Internal-Token: <token>
 Body: {"verdict":"spam|safe", ...}
 ```
+
+Bei einem AI-Urteil `safe` nutzt der Button `POST …/spam-learning/safe` mit
+`{"pattern":"...","reason":"Manuelle Harmlos-Bestätigung (Discord)"}`.
+Das schreibt eine `clean`-Zeile in `twitch_spam_review_decisions`, aber kein
+Safe-Pattern in den aktiven Spam-Filter.
 
 Token-Auflösung: `TWITCH_INTERNAL_API_TOKEN` → `MASTER_BROKER_TOKEN` →
 `MAIN_BOT_INTERNAL_TOKEN`. Tokens werden nie geloggt.
@@ -43,9 +50,9 @@ entscheidend ist der Rust-Bot.
 
 ## Bedienung
 - `Spam lernen`: Muster wird als Spam gespeichert.
-- `Harmlos lernen`: Muster wird als Safe-Muster gespeichert.
+- `Als harmlos bestätigen`: menschliches `clean`-Feedback wird im Review-Log gespeichert.
 - Nur Nutzer mit Moderations-/Adminrechten dürfen klicken.
-- Bei Erfolg werden beide Buttons deaktiviert und auf `Gelernt` gesetzt.
+- Bei Erfolg wird der geklickte Button deaktiviert und der gespeicherte Status angezeigt.
 
 ## Tests
 - `cargo test -p dl-changelog spam_learning --lib` prüft Payload-Parsing und Button-Aufbau.

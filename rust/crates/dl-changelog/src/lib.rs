@@ -96,7 +96,7 @@ pub struct LearnedSpamRef {
 
 /// `spam_learning`-Payload v2 des Twitch-Bots. Der Judge lernt selbst; die
 /// Buttons korrigieren ihn nur. Alle Button-Daten (Row-ID bzw. Lern-Muster)
-/// reisen in der custom_id — kein serverseitiger Zustand, Restarts egal.
+/// reisen in der custom_id, ohne serverseitigen Zustand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpamLearningV2 {
     /// "spam" | "safe" | "error" | "skipped"
@@ -106,6 +106,8 @@ pub struct SpamLearningV2 {
     /// Muster-Vorschlag für „Als Spam korrigieren" (≤ 78 Zeichen, vom
     /// Twitch-Bot mention-bereinigt) — None, wenn zu kurz.
     pub learn_pattern: Option<String>,
+    /// Muster-Vorschlag für menschliches Safe-Feedback bei `verdict=safe`.
+    pub safe_feedback_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,11 +172,14 @@ pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningV2> {
     }
     let learn_pattern =
         Some(trim_text(obj.get("learn_pattern"), 78)).filter(|p| p.chars().count() >= 4);
+    let safe_feedback_pattern =
+        Some(trim_text(obj.get("safe_feedback_pattern"), 78)).filter(|p| p.chars().count() >= 4);
     Some(SpamLearningV2 {
         verdict: trim_text(obj.get("verdict"), 20),
         ai_reason: trim_text(obj.get("ai_reason"), 200),
         learned,
         learn_pattern,
+        safe_feedback_pattern,
     })
 }
 
@@ -223,7 +228,15 @@ fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
             "spam_learning: mehrere gelernte Muster gemeldet — nur das erste bekommt einen Button"
         );
     }
-    let button = if let Some(learned) = payload.learned.first() {
+    let button = if payload.verdict == "safe" {
+        let pattern = payload.safe_feedback_pattern.as_ref()?;
+        json!({
+            "type": 2,
+            "style": 3,
+            "label": "Als harmlos bestätigen",
+            "custom_id": format!("spam-learning:safe:{pattern}"),
+        })
+    } else if let Some(learned) = payload.learned.first() {
         // Rückgängig-Button (Row-ID in der custom_id).
         json!({
             "type": 2,
@@ -1069,7 +1082,8 @@ mod tests {
                     "verdict": "safe",
                     "ai_reason": "normales Gespräch",
                     "learned": [],
-                    "learn_pattern": "aha, so sammelt man also viewer Kappa",
+                    "learn_pattern": null,
+                    "safe_feedback_pattern": "aha, so sammelt man also viewer Kappa",
                 },
             }),
         )
@@ -1079,10 +1093,10 @@ mod tests {
         let sent = mock.sent.lock().expect("lock");
         let components = sent[0].3.as_ref().expect("components");
         let button = &components[0]["components"][0];
-        assert_eq!(button["label"], "Als Spam korrigieren");
+        assert_eq!(button["label"], "Als harmlos bestätigen");
         assert_eq!(
             button["custom_id"],
-            "spam-learning:learn:aha, so sammelt man also viewer Kappa"
+            "spam-learning:safe:aha, so sammelt man also viewer Kappa"
         );
     }
 

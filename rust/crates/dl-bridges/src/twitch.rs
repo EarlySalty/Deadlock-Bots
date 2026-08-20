@@ -357,6 +357,33 @@ impl TwitchApiClient {
         })
     }
 
+    /// „Als harmlos bestätigen": legt menschliches Clean-Feedback im
+    /// Twitch-Review-Log ab, ohne ein aktives Safe-Muster zu erzeugen.
+    pub async fn record_safe_spam_feedback(
+        &self,
+        pattern: &str,
+        reason: &str,
+    ) -> Result<bool, TwitchBridgeError> {
+        let body = self
+            .request(
+                reqwest::Method::POST,
+                "/spam-learning/safe",
+                Some(&json!({
+                    "verdict": "clean",
+                    "pattern": pattern,
+                    "sourceChannel": "discord-correction",
+                    "reason": reason,
+                })),
+                None,
+            )
+            .await?;
+        body.get("recorded")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                TwitchBridgeError::Api("Antwort ohne recorded-Feld (API-Version?)".to_string())
+            })
+    }
+
     /// „Als harmlos korrigieren": löscht ein vom Judge gelerntes Spam-Muster.
     /// `Ok(None)` = Zeile existiert nicht mehr (bereits korrigiert).
     pub async fn correct_spam_pattern(
@@ -637,6 +664,8 @@ struct CrewBanHandler {
 enum SpamLearningAction<'a> {
     /// `spam-learning:correct:<table>:<id>` — gelerntes Muster löschen.
     Correct { table: &'a str, id: i64 },
+    /// `spam-learning:safe:<pattern>` — menschliches Clean-Feedback speichern.
+    Safe { pattern: &'a str },
     /// `spam-learning:learn:<pattern>` — Muster als Spam nachlernen.
     Learn { pattern: &'a str },
     /// Token-basierte v1-Buttons aus alten Nachrichten (Store abgeschafft).
@@ -652,6 +681,10 @@ fn parse_spam_learning_custom_id(custom_id: &str) -> Option<SpamLearningAction<'
         }
         let id: i64 = id.parse().ok()?;
         return (id > 0).then_some(SpamLearningAction::Correct { table, id });
+    }
+    if let Some(pattern) = rest.strip_prefix("safe:") {
+        return (pattern.trim().chars().count() >= 4)
+            .then_some(SpamLearningAction::Safe { pattern });
     }
     if let Some(pattern) = rest.strip_prefix("learn:") {
         return (pattern.trim().chars().count() >= 4)
@@ -712,6 +745,28 @@ impl InteractionHandler for SpamLearningHandler {
                     Err(err) => {
                         tracing::error!(%err, table, id, "Spam-Korrektur fehlgeschlagen");
                         BridgeReply::ephemeral_text("Korrektur fehlgeschlagen.")
+                    }
+                }
+            }
+            Some(SpamLearningAction::Safe { pattern }) => {
+                match self
+                    .client
+                    .record_safe_spam_feedback(pattern, "Manuelle Harmlos-Bestätigung (Discord)")
+                    .await
+                {
+                    Ok(true) => BridgeReply {
+                        components: Some(corrected_components(
+                            "Gespeichert: als harmlos bestätigt",
+                        )),
+                        update_message: true,
+                        ..BridgeReply::default()
+                    },
+                    Ok(false) => {
+                        BridgeReply::ephemeral_text("Harmlos-Feedback wurde nicht gespeichert.")
+                    }
+                    Err(err) => {
+                        tracing::error!(%err, pattern, "Harmlos-Feedback fehlgeschlagen");
+                        BridgeReply::ephemeral_text("Harmlos-Feedback fehlgeschlagen.")
                     }
                 }
             }
@@ -916,7 +971,8 @@ mod tests {
         (format!("http://{addr}"), received, handle)
     }
 
-    /// Mock des Twitch-Bots: /spam-learning (learn) + /spam-learning/correct.
+    /// Mock des Twitch-Bots: /spam-learning, /spam-learning/safe und
+    /// /spam-learning/correct.
     /// `correct_status` steuert die Antwort des correct-Endpoints (200/404).
     async fn mock_spam_learning_bot(
         learned: bool,
@@ -928,6 +984,7 @@ mod tests {
     ) {
         let received: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
         let rec_learn = received.clone();
+        let rec_safe = received.clone();
         let rec_correct = received.clone();
         let app = axum::Router::new()
             .route(
@@ -940,6 +997,16 @@ mod tests {
                             .expect("lock")
                             .push(("learn".into(), body.0));
                         axum::Json(json!({"ok": true, "learned": learned}))
+                    }
+                }),
+            )
+            .route(
+                "/internal/twitch/v1/spam-learning/safe",
+                axum::routing::post(move |body: axum::Json<Value>| {
+                    let received = rec_safe.clone();
+                    async move {
+                        received.lock().expect("lock").push(("safe".into(), body.0));
+                        axum::Json(json!({"ok": true, "recorded": true}))
                     }
                 }),
             )
@@ -1060,11 +1127,18 @@ mod tests {
                 pattern: "https://eballo.com"
             })
         );
+        assert_eq!(
+            parse_spam_learning_custom_id("spam-learning:safe:aha, so sammelt man viewer"),
+            Some(SpamLearningAction::Safe {
+                pattern: "aha, so sammelt man viewer"
+            })
+        );
         // Kaputte IDs / fremde Tabellen / zu kurze Muster → None
         assert!(parse_spam_learning_custom_id("spam-learning:correct:spam:abc").is_none());
         assert!(parse_spam_learning_custom_id("spam-learning:correct:spam:0").is_none());
         assert!(parse_spam_learning_custom_id("spam-learning:correct:spam:-5").is_none());
         assert!(parse_spam_learning_custom_id("spam-learning:correct:safe:12").is_none());
+        assert!(parse_spam_learning_custom_id("spam-learning:safe:ab").is_none());
         assert!(parse_spam_learning_custom_id("spam-learning:learn:ab").is_none());
         // Alte v1-Buttons → Legacy (freundliche Antwort statt Crash)
         assert_eq!(
@@ -1269,6 +1343,35 @@ mod tests {
 
         assert!(reply.ephemeral);
         assert!(reply.content.expect("text").contains("zu generisch"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn harmlos_klick_speichert_feedback_und_deaktiviert_button() {
+        let (url, received, server) = mock_spam_learning_bot(true, 200).await;
+        let client = TwitchApiClient::new(url, "tok", Duration::from_secs(5));
+
+        let handler = SpamLearningHandler { client };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "spam-learning:safe:aha, so sammelt man viewer".to_string(),
+                author_can_manage_messages: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.update_message);
+        let components = reply.components.expect("components");
+        assert_eq!(
+            components[0]["components"][0]["label"],
+            "Gespeichert: als harmlos bestätigt"
+        );
+        assert_eq!(components[0]["components"][0]["disabled"], true);
+        let sent = received.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "safe");
+        assert_eq!(sent[0].1["pattern"], "aha, so sammelt man viewer");
+        assert_eq!(sent[0].1["verdict"], "clean");
         server.abort();
     }
 
