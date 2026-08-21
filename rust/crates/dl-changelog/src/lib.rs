@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub const DEV_UPDATES_CHANNEL_ID: u64 = 1492910851483504821;
 pub const TWITCH_BOT_CHANNEL_ID: u64 = 1318329964713611385;
@@ -94,9 +94,9 @@ pub struct LearnedSpamRef {
     pub pattern: String,
 }
 
-/// `spam_learning`-Payload v2 des Twitch-Bots. Der Judge lernt selbst; die
-/// Buttons korrigieren ihn nur. Alle Button-Daten (Row-ID bzw. Lern-Muster)
-/// reisen in der custom_id, ohne serverseitigen Zustand.
+/// `spam_learning`-Payload v2 des Twitch-Bots. Der Judge entscheidet und lernt
+/// selbst; die Buttons korrigieren nur in die Gegenrichtung. Die Row-ID bzw.
+/// das kurze Fallback-Muster reist in der custom_id, ohne serverseitigen Zustand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpamLearningV2 {
     /// "spam" | "safe" | "error" | "skipped"
@@ -106,7 +106,9 @@ pub struct SpamLearningV2 {
     /// Muster-Vorschlag für „Als Spam korrigieren" (≤ 78 Zeichen, vom
     /// Twitch-Bot mention-bereinigt) — None, wenn zu kurz.
     pub learn_pattern: Option<String>,
-    /// Muster-Vorschlag für menschliches Safe-Feedback bei `verdict=safe`.
+    /// Kanonischer Volltext-Fallback für „Als harmlos korrigieren" bei
+    /// `verdict=spam`, wenn die AI-Spam-Row keine ID besitzt. Nur gesetzt,
+    /// wenn der vollständige Text in die Discord-custom_id passt.
     pub safe_feedback_pattern: Option<String>,
 }
 
@@ -172,8 +174,14 @@ pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningV2> {
     }
     let learn_pattern =
         Some(trim_text(obj.get("learn_pattern"), 78)).filter(|p| p.chars().count() >= 4);
-    let safe_feedback_pattern =
-        Some(trim_text(obj.get("safe_feedback_pattern"), 78)).filter(|p| p.chars().count() >= 4);
+    let safe_feedback_pattern = match obj.get("safe_feedback_pattern") {
+        Some(Value::String(value)) => {
+            let value = value.replace(['\r', '\n'], " ").trim().to_string();
+            (value.chars().count() >= 4 && value.chars().count() <= 78).then_some(value)
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => None,
+    };
     Some(SpamLearningV2 {
         verdict: trim_text(obj.get("verdict"), 20),
         ai_reason: trim_text(obj.get("ai_reason"), 200),
@@ -228,33 +236,38 @@ fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
             "spam_learning: mehrere gelernte Muster gemeldet — nur das erste bekommt einen Button"
         );
     }
-    let button = if payload.verdict == "safe" {
-        let pattern = payload.safe_feedback_pattern.as_ref()?;
-        json!({
-            "type": 2,
-            "style": 3,
-            "label": "Als harmlos bestätigen",
-            "custom_id": format!("spam-learning:safe:{pattern}"),
-        })
-    } else if let Some(learned) = payload.learned.first() {
-        // Rückgängig-Button (Row-ID in der custom_id).
-        json!({
-            "type": 2,
-            "style": 3,
-            "label": "Als harmlos korrigieren",
-            "custom_id": format!("spam-learning:correct:spam:{}", learned.id),
-        })
-    } else if let Some(pattern) = &payload.learn_pattern {
-        // Nichts gelernt (Harmlos-/Fehler-/Cooldown-Urteil oder
-        // Gate-Ablehnung): Muster aus der custom_id als Spam nachlernen.
+    let button = if payload.verdict == "spam" {
+        if let Some(learned) = payload.learned.first() {
+            // AI-Spam rückgängig korrigieren: Die Twitch-API holt über die
+            // Row-ID die vollständige Originalnachricht und lernt sie safe.
+            json!({
+                "type": 2,
+                "style": 3,
+                "label": "Als harmlos korrigieren",
+                "custom_id": format!("spam-learning:correct:spam:{}", learned.id),
+            })
+        } else {
+            let pattern = payload.safe_feedback_pattern.as_ref()?;
+            json!({
+                "type": 2,
+                "style": 3,
+                "label": "Als harmlos korrigieren",
+                "custom_id": format!("spam-learning:safe:{pattern}"),
+            })
+        }
+    } else {
+        let pattern = payload
+            .learn_pattern
+            .as_ref()
+            .or(payload.safe_feedback_pattern.as_ref())?;
+        // AI harmlos/Review nicht verfügbar: menschlicher Gegen-Override als
+        // Spam lernen.
         json!({
             "type": 2,
             "style": 4,
             "label": "Als Spam korrigieren",
             "custom_id": format!("spam-learning:learn:{pattern}"),
         })
-    } else {
-        return None;
     };
     Some(json!([{ "type": 1, "components": [button] }]))
 }
@@ -1067,7 +1080,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spam_learning_v2_harmlos_baut_lern_button_aus_custom_id() {
+    async fn spam_learning_v2_harmlos_baut_spam_korrektur_button() {
         let (app, mock) = test_app();
         let (status, _) = post_json(
             app,
@@ -1082,8 +1095,8 @@ mod tests {
                     "verdict": "safe",
                     "ai_reason": "normales Gespräch",
                     "learned": [],
-                    "learn_pattern": null,
-                    "safe_feedback_pattern": "aha, so sammelt man also viewer Kappa",
+                    "learn_pattern": "aha, so sammelt man also viewer Kappa",
+                    "safe_feedback_pattern": null,
                 },
             }),
         )
@@ -1093,11 +1106,72 @@ mod tests {
         let sent = mock.sent.lock().expect("lock");
         let components = sent[0].3.as_ref().expect("components");
         let button = &components[0]["components"][0];
-        assert_eq!(button["label"], "Als harmlos bestätigen");
+        assert_eq!(button["label"], "Als Spam korrigieren");
         assert_eq!(
             button["custom_id"],
-            "spam-learning:safe:aha, so sammelt man also viewer Kappa"
+            "spam-learning:learn:aha, so sammelt man also viewer Kappa"
         );
+    }
+
+    #[tokio::test]
+    async fn spam_learning_v2_spam_ohne_row_nutzt_exakten_safe_fallback() {
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Verdächtige Nachricht",
+                "content": "x",
+                "spam_learning": {
+                    "v": 2,
+                    "verdict": "spam",
+                    "learned": [],
+                    "learn_pattern": null,
+                    "safe_feedback_pattern": "@user viewer kappa x",
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        let components = sent[0].3.as_ref().expect("components");
+        let button = &components[0]["components"][0];
+        assert_eq!(button["label"], "Als harmlos korrigieren");
+        assert_eq!(
+            button["custom_id"],
+            "spam-learning:safe:@user viewer kappa x"
+        );
+    }
+
+    #[tokio::test]
+    async fn spam_learning_v2_zu_langer_safe_fallback_baut_keinen_button() {
+        let (app, mock) = test_app();
+        let overlong = "x".repeat(79);
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Verdächtige Nachricht",
+                "content": "x",
+                "spam_learning": {
+                    "v": 2,
+                    "verdict": "spam",
+                    "learned": [],
+                    "learn_pattern": null,
+                    "safe_feedback_pattern": overlong,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        assert!(sent[0].3.is_none(), "kein gekürzter Safe-Button erwartet");
     }
 
     #[tokio::test]

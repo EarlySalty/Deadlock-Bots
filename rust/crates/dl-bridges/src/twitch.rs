@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use reqwest::Url;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 pub const TWITCH_INTERNAL_API_BASE_PATH: &str = "/internal/twitch/v1";
@@ -357,8 +357,8 @@ impl TwitchApiClient {
         })
     }
 
-    /// „Als harmlos bestätigen": legt menschliches Clean-Feedback im
-    /// Twitch-Review-Log ab, ohne ein aktives Safe-Muster zu erzeugen.
+    /// Fallback für „Als harmlos korrigieren": legt die Nachricht als
+    /// manuelles aktives Safe-Pattern plus Clean-Audit ab.
     pub async fn record_safe_spam_feedback(
         &self,
         pattern: &str,
@@ -384,7 +384,8 @@ impl TwitchApiClient {
             })
     }
 
-    /// „Als harmlos korrigieren": löscht ein vom Judge gelerntes Spam-Muster.
+    /// „Als harmlos korrigieren": schreibt die Originalnachricht als Safe-
+    /// Pattern und entfernt das vom Judge gelernte Spam-Muster.
     /// `Ok(None)` = Zeile existiert nicht mehr (bereits korrigiert).
     pub async fn correct_spam_pattern(
         &self,
@@ -664,7 +665,7 @@ struct CrewBanHandler {
 enum SpamLearningAction<'a> {
     /// `spam-learning:correct:<table>:<id>` — gelerntes Muster löschen.
     Correct { table: &'a str, id: i64 },
-    /// `spam-learning:safe:<pattern>` — menschliches Clean-Feedback speichern.
+    /// `spam-learning:safe:<pattern>` — manuelles Safe-Pattern als Fallback speichern.
     Safe { pattern: &'a str },
     /// `spam-learning:learn:<pattern>` — Muster als Spam nachlernen.
     Learn { pattern: &'a str },
@@ -735,7 +736,7 @@ impl InteractionHandler for SpamLearningHandler {
             Some(SpamLearningAction::Correct { table, id }) => {
                 match self.client.correct_spam_pattern(table, id).await {
                     Ok(Some(_pattern)) => BridgeReply {
-                        components: Some(corrected_components("Korrigiert — Muster entfernt")),
+                        components: Some(corrected_components("Korrigiert — als harmlos gelernt")),
                         update_message: true,
                         ..BridgeReply::default()
                     },
@@ -751,13 +752,11 @@ impl InteractionHandler for SpamLearningHandler {
             Some(SpamLearningAction::Safe { pattern }) => {
                 match self
                     .client
-                    .record_safe_spam_feedback(pattern, "Manuelle Harmlos-Bestätigung (Discord)")
+                    .record_safe_spam_feedback(pattern, "Manuelle Harmlos-Korrektur (Discord)")
                     .await
                 {
                     Ok(true) => BridgeReply {
-                        components: Some(corrected_components(
-                            "Gespeichert: als harmlos bestätigt",
-                        )),
+                        components: Some(corrected_components("Korrigiert — als harmlos gelernt")),
                         update_message: true,
                         ..BridgeReply::default()
                     },
@@ -1264,7 +1263,7 @@ mod tests {
         let components = reply.components.expect("components");
         assert_eq!(
             components[0]["components"][0]["label"],
-            "Korrigiert — Muster entfernt"
+            "Korrigiert — als harmlos gelernt"
         );
         assert_eq!(components[0]["components"][0]["disabled"], true);
         let sent = received.lock().expect("lock");
@@ -1364,7 +1363,7 @@ mod tests {
         let components = reply.components.expect("components");
         assert_eq!(
             components[0]["components"][0]["label"],
-            "Gespeichert: als harmlos bestätigt"
+            "Korrigiert — als harmlos gelernt"
         );
         assert_eq!(components[0]["components"][0]["disabled"], true);
         let sent = received.lock().expect("lock");
