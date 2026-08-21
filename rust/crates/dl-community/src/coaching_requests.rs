@@ -757,13 +757,19 @@ impl CoachingRequests {
                     map.insert("website_request_id".into(), json!(website_request_id));
                 }
             }
-            if let (Some(coach_id), Some(session_status)) =
-                (opts.coach_discord_id, opts.session_status.as_ref())
-            {
+            // Getrennte Gates: session_status muss auch ohne aufgeloeste
+            // Coach-Discord-ID raus (Reconcile-Pfad kennt den Coach oft
+            // nicht), sonst erfaehrt die Website nie, dass eine Anfrage zu
+            // ist, deren Coach nicht aufgeloest werden konnte.
+            if let Some(session_status) = opts.session_status.as_ref() {
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("session_status".into(), json!(session_status));
+                }
+            }
+            if let Some(coach_id) = opts.coach_discord_id {
                 if let Some(map) = payload.as_object_mut() {
                     map.insert("coach_discord_id".into(), json!(coach_id));
                     map.insert("coach_username".into(), json!(opts.coach_username));
-                    map.insert("session_status".into(), json!(session_status));
                 }
             }
             if let Some(session_id) = opts.bot_session_id {
@@ -1513,6 +1519,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             r#"
             SELECT DISTINCT ON (r.bot_request_id)
                    r.bot_request_id AS bot_request_id,
+                   r.discord_user_id AS discord_user_id,
                    s.id AS session_id,
                    s.status AS session_status,
                    {COACH_DISCORD_ID_SQL} AS coach_discord_id
@@ -1569,11 +1576,17 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 .ok()
                 .flatten()
                 .and_then(|value| pg_i64_to_u64(value, "coach_discord_id").ok());
+            let user_id = row
+                .try_get::<Option<i64>, _>("discord_user_id")
+                .ok()
+                .flatten()
+                .and_then(|value| pg_i64_to_u64(value, "discord_user_id").ok());
             self.sync_request_to_session_terminal(
                 request_id,
                 &session_status,
                 coach_id,
                 session_id.as_deref(),
+                user_id,
             )
             .await;
         }
@@ -1585,6 +1598,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         session_status: &str,
         coach_id: Option<u64>,
         session_id: Option<&str>,
+        user_id: Option<u64>,
     ) {
         let now = chrono::Utc::now();
         let (request_status, headline, status_line, accent) = if session_status == "cancelled" {
@@ -1602,6 +1616,20 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 COACHING_ACCENT_DONE,
             )
         };
+        // Aktiv-Rolle wirklich entfernen, nicht nur role_removed_at setzen:
+        // complete_session raeumt die Rolle vor genau diesem Aufruf weg, der
+        // Reconcile-Pfad (Session endete ausserhalb des Claim-Buttons) hatte
+        // dafuer keinen User-Kontext und liess die Rolle stehen, wodurch
+        // expire_roles sie nie wieder sah (Filter role_removed_at IS NULL).
+        if let Some(user_id) = user_id {
+            self.remove_role_if_present(
+                self.guild_id,
+                user_id,
+                COACHING_ACTIVE_ROLE_ID,
+                "Coaching-Anfrage automatisch geschlossen",
+            )
+            .await;
+        }
         if let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") {
             let _ = sqlx::query(
                 r#"
@@ -1837,6 +1865,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             "completed",
             Some(coach_id),
             Some(session.id.as_str()),
+            Some(session.user_id),
         )
         .await;
         true
@@ -4099,6 +4128,113 @@ mod pg_tests {
         assert_eq!(payload["website_request_id"], "web-stale-open");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["session_status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn reconcile_entfernt_die_rolle_und_meldet_status_ohne_aufloesbaren_coach() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        // Nutzer traegt die Aktiv-Rolle noch, wie waehrend einer laufenden
+        // Session — der Reconcile-Pfad muss sie wirklich abnehmen, nicht nur
+        // role_removed_at setzen (sonst sieht expire_roles den Nutzer nie
+        // wieder, Filter role_removed_at IS NULL).
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((901, vec![COACHING_ACTIVE_ROLE_ID]));
+        let website = Arc::new(MockWebsiteSync::default());
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-stale-open-2', 5, 'web-stale-open-2', 901,
+                'Player901', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                'abends', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8805, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        // coach_id bleibt NULL: der Coach ist nicht aufloesbar (z. B. Session
+        // ausserhalb des Claim-Buttons beendet) — genau der Fall, in dem
+        // mirror_to_website vorher session_status stillschweigend verschluckt
+        // hat, weil es an coach_discord_id gekoppelt war.
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-stale-open-2', 5, 'web-stale-open-2', NULL, 901, 'Player901',
+                    500, 'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        coaching.scan_survey_sessions().await;
+
+        let request_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 5",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request status");
+        assert_eq!(request_status, "completed");
+
+        let removed = port.removed_roles.lock().expect("removed_roles lock").clone();
+        assert!(
+            removed
+                .iter()
+                .any(|(guild_id, user_id, role_id, _reason)| *guild_id == 1
+                    && *user_id == 901
+                    && *role_id == COACHING_ACTIVE_ROLE_ID),
+            "Aktiv-Rolle wurde nicht entfernt: {removed:?}"
+        );
+
+        let payload = {
+            let mut found = None;
+            for _ in 0..20 {
+                found = website
+                    .payloads
+                    .lock()
+                    .expect("website payloads lock")
+                    .first()
+                    .cloned();
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            found.expect("website payload")
+        };
+        assert_eq!(payload["website_request_id"], "web-stale-open-2");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["session_status"], "completed");
+        assert!(
+            payload.get("coach_discord_id").is_none(),
+            "kein aufloesbarer Coach, darf nicht erfunden werden: {payload:?}"
+        );
     }
 
     #[tokio::test]
