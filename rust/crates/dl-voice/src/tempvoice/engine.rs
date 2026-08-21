@@ -2048,16 +2048,6 @@ impl TempVoiceEngine {
     /// Name aktualisieren — nur im Create-Fenster (45s) außer prefix_from_rank;
     /// nie bei LiveMatch-Suffix.
     async fn refresh_name(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
-        self.refresh_name_inner(guild_id, channel_id, false).await;
-    }
-
-    /// Wie `refresh_name`, aber ohne das 45-Sekunden-Fenster. Claim und
-    /// Preset-Apply müssen den Namen auch an einer alten Lane setzen.
-    async fn refresh_name_forced(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
-        self.refresh_name_inner(guild_id, channel_id, true).await;
-    }
-
-    async fn refresh_name_inner(self: &Arc<Self>, guild_id: u64, channel_id: u64, force: bool) {
         let Some(current) = self.port.channel_name(guild_id, channel_id).await else {
             return;
         };
@@ -2070,7 +2060,7 @@ impl TempVoiceEngine {
         };
         let Some(lane) = lane else { return };
 
-        if !force && !lane.prefix_from_rank {
+        if !lane.prefix_from_rank {
             let age = self
                 .port
                 .channel_created_at(channel_id)
@@ -2127,23 +2117,24 @@ impl TempVoiceEngine {
         channel_id: u64,
         owner_id: u64,
     ) {
-        let saved = self.store.get_default_preset(owner_id).await.ok().flatten();
-        let saved_mode = saved.as_ref().map(|preset| preset.mode.clone());
-        let mode = saved_mode
-            .as_deref()
-            .or(self.lane_mode(channel_id).await)
-            .unwrap_or("casual");
-        let default =
-            saved.unwrap_or_else(|| crate::router::default_preset_for_mode(owner_id, mode));
-        let apply_name = if default.base_name.trim().is_empty()
-            || default.base_name == "Ranked"
-            || default.base_name == "Chill Lane"
-            || default.base_name == "Street Brawl"
-        {
-            self.claimed_owner_lane_name(guild_id, channel_id, owner_id, &default.mode)
-                .await
-        } else {
-            default.base_name.clone()
+        let Some(default) = self.store.get_default_preset(owner_id).await.ok().flatten() else {
+            // Kein gespeichertes Preset: Modus, Limit und Rang-Gate bleiben
+            // unangetastet — nur der Name folgt dem neuen Owner und seinem
+            // Rang, auch wenn die Lane schon aelter als das 45s-Fenster ist.
+            // Fixes #409, ohne fremden Lane-Zustand zu ueberschreiben (vorher
+            // wurde hier ein synthetisches Preset erfunden und der volle
+            // Preset-Apply-Pfad gefahren, was Limit und Rang-Gate der Lane
+            // fuer jeden Owner ohne gespeichertes Preset zurueckgesetzt hat).
+            let mode = self.lane_mode(channel_id).await.unwrap_or("casual");
+            let name = self
+                .claimed_owner_lane_name(guild_id, channel_id, owner_id, mode)
+                .await;
+            let _ = self
+                .port
+                .rename_channel(channel_id, &name, "TempVoice: Claim-Name")
+                .await;
+            self.set_base_name(channel_id, &name).await;
+            return;
         };
         if let Some(err) = self
             .switch_lane_mode(guild_id, channel_id, owner_id, &default.mode)
@@ -2152,9 +2143,8 @@ impl TempVoiceEngine {
             tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Modus nicht angewendet");
             return;
         }
-        let base_name = apply_name;
         if let Err(err) = self
-            .set_lane_template(guild_id, channel_id, &base_name, default.limit)
+            .set_lane_template(guild_id, channel_id, &default.base_name, default.limit)
             .await
         {
             tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Template nicht angewendet");
@@ -2167,7 +2157,6 @@ impl TempVoiceEngine {
                 tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Rang nicht angewendet");
             }
         }
-        self.refresh_name_forced(guild_id, channel_id).await;
     }
 
     /// Name wie beim normalen Lane-Apply: Modus plus Rang des neuen Owners,

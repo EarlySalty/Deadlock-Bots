@@ -1528,9 +1528,23 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
              WHERE r.bot_request_id IS NOT NULL
                AND COALESCE(r.status, '') NOT IN ('completed', 'cancelled', 'invalid')
                AND s.status IN ('completed', 'cancelled')
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM coaching.sessions s2
+                    WHERE (
+                        s2.bot_request_id = r.bot_request_id
+                        OR (
+                            s2.website_request_id IS NOT NULL
+                            AND r.website_request_id IS NOT NULL
+                            AND s2.website_request_id = r.website_request_id
+                        )
+                    )
+                    AND s2.status = 'active'
+               )
              ORDER BY r.bot_request_id,
                       s.completed_at DESC NULLS LAST,
                       s.created_at DESC NULLS LAST
+             LIMIT 25
             "#
         ))
         .fetch_all(&self.pool)
