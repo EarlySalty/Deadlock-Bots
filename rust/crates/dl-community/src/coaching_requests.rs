@@ -1621,14 +1621,48 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         // Reconcile-Pfad (Session endete ausserhalb des Claim-Buttons) hatte
         // dafuer keinen User-Kontext und liess die Rolle stehen, wodurch
         // expire_roles sie nie wieder sah (Filter role_removed_at IS NULL).
+        // Die Rolle ist global pro Guild, kein Per-Request-Objekt: erst
+        // pruefen, ob derselbe Nutzer noch eine andere offene Anfrage oder
+        // aktive Session hat, sonst reisst der 60s-Reconcile-Tick einer alten
+        // Anfrage die Rolle mitten aus einer neuen, laufenden Session.
         if let Some(user_id) = user_id {
-            self.remove_role_if_present(
-                self.guild_id,
-                user_id,
-                COACHING_ACTIVE_ROLE_ID,
-                "Coaching-Anfrage automatisch geschlossen",
-            )
-            .await;
+            let still_has_open_activity = match (
+                u64_to_i64(user_id, "discord_user_id"),
+                i64_to_i32(request_id, "request_id"),
+            ) {
+                (Ok(user_id_i64), Ok(request_id_i32)) => sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                          FROM coaching.requests
+                         WHERE discord_user_id = $1
+                           AND bot_request_id != $2
+                           AND COALESCE(status, '') NOT IN ('completed', 'cancelled', 'invalid')
+                    ) OR EXISTS (
+                        SELECT 1
+                          FROM coaching.sessions
+                         WHERE discord_user_id = $1
+                           AND status = 'active'
+                           AND bot_request_id != $2
+                    )
+                    "#,
+                )
+                .bind(user_id_i64)
+                .bind(request_id_i32)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(true), // im Zweifel Rolle stehen lassen, nicht faelschlich abnehmen
+                _ => true,
+            };
+            if !still_has_open_activity {
+                self.remove_role_if_present(
+                    self.guild_id,
+                    user_id,
+                    COACHING_ACTIVE_ROLE_ID,
+                    "Coaching-Anfrage automatisch geschlossen",
+                )
+                .await;
+            }
         }
         if let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") {
             let _ = sqlx::query(
@@ -4234,6 +4268,99 @@ mod pg_tests {
         assert!(
             payload.get("coach_discord_id").is_none(),
             "kein aufloesbarer Coach, darf nicht erfunden werden: {payload:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_entfernt_die_rolle_nicht_bei_weiterer_offener_anfrage() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        // Nutzer 902 hat zwei Anfragen: die alte (6) ist fertig und haengt in
+        // der Tabelle, die neue (7) laeuft noch. Die globale Aktiv-Rolle darf
+        // nicht weg, solange Anfrage 7 offen ist — sonst reisst der
+        // Reconcile-Tick der alten Anfrage die Rolle mitten aus der neuen
+        // Session.
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((902, vec![COACHING_ACTIVE_ROLE_ID]));
+        let website = Arc::new(MockWebsiteSync::default());
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        for (bot_request_id, website_request_id, status, message_id) in [
+            (6i32, "web-stale-old", "matched", 8806i64),
+            (7i32, "web-stale-new", "matched", 8807i64),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO coaching.requests(
+                    request_uid, bot_request_id, website_request_id, discord_user_id,
+                    discord_username, rank, subrank, hero, games_played, hours_played,
+                    availability, current_problems, ai_summary, status, created_at, updated_at,
+                    message_id, channel_id
+                )
+                VALUES (
+                    $1, $2, $3, 902,
+                    'Player902', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                    'abends', 'Laning', '**Analyse:** Tempo', $4, $5, $5,
+                    $6, $7
+                )
+                "#,
+            )
+            .bind(format!("website:{website_request_id}"))
+            .bind(bot_request_id)
+            .bind(website_request_id)
+            .bind(status)
+            .bind(now)
+            .bind(message_id)
+            .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+            .execute(db.pool())
+            .await
+            .expect("request insert");
+        }
+        // Nur die alte Anfrage (6) hat eine abgeschlossene Session, die neue
+        // (7) laeuft ohne Session-Zeile weiter (z. B. noch nicht gematcht).
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-stale-old', 6, 'web-stale-old', NULL, 902, 'Player902',
+                    500, 'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        coaching.scan_survey_sessions().await;
+
+        let old_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 6",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("old request status");
+        assert_eq!(
+            old_status, "completed",
+            "die alte Anfrage schliesst trotzdem ab"
+        );
+
+        let removed = port.removed_roles.lock().expect("removed_roles lock").clone();
+        assert!(
+            removed
+                .iter()
+                .all(|(_, user_id, role_id, _)| !(*user_id == 902 && *role_id == COACHING_ACTIVE_ROLE_ID)),
+            "Rolle haette wegen Anfrage 7 nicht entfernt werden duerfen: {removed:?}"
         );
     }
 
