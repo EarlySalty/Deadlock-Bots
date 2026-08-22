@@ -72,7 +72,17 @@ pub const DEFAULT_ROUTER_VOICE_ID: u64 = 1513468587195633674;
 const KNOWLEDGE_TIMEOUT: StdDuration = StdDuration::from_secs(8);
 const CONCIERGE_DISCORD_IO_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3);
-const CONCIERGE_AI_TIMEOUT: StdDuration = StdDuration::from_secs(8);
+/// Notbremse fuer den LLM-Aufruf, kein Qualitaetsziel. Der alte Wert von 8 Sekunden
+/// lag unter der normalen Antwortzeit: mit Systemprompt und JSON-Modus braucht
+/// deepseek-v4-flash-0731 gemessen 6,6 Sekunden im Median, 10,7 im p90 und 11,9 im
+/// Maximum, ein eingeschlafenes Modell 15 bis 60. Damit starb rund ein Drittel der
+/// Antworten als `llm_error_gap`, obwohl der Anbieter gesund war.
+///
+/// 45 Sekunden ist zugleich das Zeitlimit, das der HTTP-Client in
+/// `dl_ai::chat_provider` pro Versuch setzt. Beide Ebenen liegen damit gleichauf:
+/// die Notbremse schneidet keinen laufenden Versuch ab, den der Anbieter noch
+/// beantworten wuerde. Ueber `DL_CONCIERGE_AI_TIMEOUT_SECS` anpassbar.
+const CONCIERGE_AI_TIMEOUT_DEFAULT_SECS: u64 = 45;
 const SCHEDULER_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 
 pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server, ich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten Weg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich erstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nWas du mir schreibst, merke ich mir nur, damit ich im Gespräch nicht bei null anfange. Wenn du \"stopp\" schreibst, setzt das deinen globalen Datenschutz-Opt-out: Ich speichere dann keinen neuen Gesprächsverlauf mehr und melde mich nicht mehr von selbst, direkte Fragen beantworte ich weiter, nur eben ohne Verlauf. Mit /datenschutz-optin erlaubst du die Speicherung später jederzeit wieder.";
@@ -229,6 +239,8 @@ pub struct ConciergeConfig {
     pub brand_emoji: Option<String>,
     pub knowledge_url: String,
     pub model: Option<String>,
+    /// Notbremse fuer den LLM-Aufruf, siehe `CONCIERGE_AI_TIMEOUT_DEFAULT_SECS`.
+    pub ai_timeout: StdDuration,
     pub free_voice: bool,
     /// Proaktive DMs (Begrüßung beim Join, Gratulation, T2/T7-Nudges).
     /// Aus per Default: der Concierge schickt nichts von selbst und antwortet nur,
@@ -264,6 +276,11 @@ impl ConciergeConfig {
             model: lookup("DL_CONCIERGE_MODEL")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            ai_timeout: StdDuration::from_secs(
+                env_u64(&lookup, "DL_CONCIERGE_AI_TIMEOUT_SECS")
+                    .filter(|secs| *secs > 0)
+                    .unwrap_or(CONCIERGE_AI_TIMEOUT_DEFAULT_SECS),
+            ),
             free_voice: env_bool(&lookup, "CONCIERGE_FREE_VOICE", true),
             proactive: env_bool(&lookup, "DL_CONCIERGE_PROACTIVE", false),
         }
@@ -4500,7 +4517,7 @@ impl Concierge {
             temperature: 0.2,
             system_prompt: None,
         };
-        match tokio::time::timeout(CONCIERGE_AI_TIMEOUT, ai.chat(&messages, params)).await {
+        match tokio::time::timeout(self.config.ai_timeout, ai.chat(&messages, params)).await {
             Ok(Ok(response)) => {
                 let answer = parse_llm_answer(&response.content);
                 if answer.reply.is_some() {
@@ -4516,7 +4533,7 @@ impl Concierge {
             }
             Err(_) => {
                 tracing::warn!(
-                    timeout_secs = CONCIERGE_AI_TIMEOUT.as_secs(),
+                    timeout_secs = self.config.ai_timeout.as_secs(),
                     "Concierge: LLM-Antwort hat Zeitlimit ueberschritten"
                 );
                 LlmLookup::Timeout
@@ -5279,7 +5296,7 @@ impl Concierge {
         }));
         let draft = if let Some(ai) = &self.ai {
             tokio::time::timeout(
-                CONCIERGE_AI_TIMEOUT,
+                self.config.ai_timeout,
                 ai.chat(
                     &messages,
                     ChatParams {
@@ -7061,6 +7078,40 @@ mod tests {
     #[test]
     fn knowledge_timeout_ist_acht_sekunden() {
         assert_eq!(KNOWLEDGE_TIMEOUT, StdDuration::from_secs(8));
+    }
+
+    #[test]
+    fn ai_timeout_laesst_einem_llm_aufruf_genug_luft() {
+        // Gemessen fuer deepseek-v4-flash-0731 mit Systemprompt und JSON-Modus:
+        // Median 6,6 s, p90 10,7 s, Maximum 11,9 s. Der Default muss klar
+        // darueber liegen und darf den HTTP-Versuch darunter nicht abschneiden.
+        let config = test_config(true, &[]);
+        assert_eq!(config.ai_timeout, StdDuration::from_secs(45));
+        assert!(config.ai_timeout > StdDuration::from_secs(12));
+    }
+
+    #[test]
+    fn ai_timeout_ist_per_env_einstellbar() {
+        let config = ConciergeConfig::from_env(|key| match key {
+            "DL_CONCIERGE_AI_TIMEOUT_SECS" => Some("45".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.ai_timeout, StdDuration::from_secs(45));
+    }
+
+    #[test]
+    fn ai_timeout_ignoriert_unbrauchbare_env_werte() {
+        for wert in ["0", "", "abc"] {
+            let config = ConciergeConfig::from_env(|key| match key {
+                "DL_CONCIERGE_AI_TIMEOUT_SECS" => Some(wert.to_string()),
+                _ => None,
+            });
+            assert_eq!(
+                config.ai_timeout,
+                StdDuration::from_secs(45),
+                "Wert {wert:?} haette auf den Default zurueckfallen muessen"
+            );
+        }
     }
 
     #[test]
