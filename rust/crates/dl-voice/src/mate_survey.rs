@@ -6,16 +6,17 @@
 //! Antworten landen in `activity.voice_mate_ratings` und sind die Grundlage
 //! dafür, wen der Bot künftig zusammenbringt und wen bewusst nicht.
 //!
-//! Zurückhaltung ist eingebaut: gefragt wird nur zur Erstbegegnung eines Paares
-//! (Vorgeschichte aus `activity.user_co_players`, siehe
-//! [`FIRST_MEETING_SLACK_MINUTES`]), erst ab [`MIN_SECONDS`] gemeinsamer Zeit,
-//! höchstens einmal pro [`ASK_COOLDOWN`] je Person, pro Paarung nur alle
-//! [`PAIR_COOLDOWN`], nie bei Privacy-Opt-out und nie wieder nach dem
-//! Nicht-mehr-fragen-Knopf. Wer schon öfter zusammen im Voice saß, wird zu
-//! diesem Mitspieler nie wieder gefragt: die Antwort steht ja bereits im
-//! Verhalten. Die Antwort sieht nur das Team, nie der Bewertete.
+//! Zurückhaltung ist eingebaut: gefragt wird nur zur Erstbegegnung eines
+//! Paares, erst ab [`MIN_SECONDS`] Session, höchstens einmal pro
+//! [`ASK_COOLDOWN`] je Person, pro Paarung nur alle [`PAIR_COOLDOWN`], nie bei
+//! Privacy-Opt-out und nie wieder nach dem Nicht-mehr-fragen-Knopf. Wer schon
+//! einmal mit demselben Menschen in einer Voice-Session saß, wird zu ihm nie
+//! wieder gefragt: die Antwort steht dann bereits im Verhalten. Grundlage ist
+//! `activity.voice_session_log`, die Sessionhistorie mit Zeitstempel, nicht die
+//! aufaddierten Minuten aus `user_co_players`. Die Antwort sieht nur das Team,
+//! nie der Bewertete.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -31,11 +32,10 @@ pub const MIN_SECONDS: i64 = 20 * 60;
 pub const ASK_COOLDOWN: Duration = Duration::hours(48);
 /// Dieselbe Paarung nicht öfter als einmal im Monat.
 pub const PAIR_COOLDOWN: Duration = Duration::days(30);
-/// So viel gemeinsame Voice-Zeit VOR dieser Session gilt noch als Erstbegegnung.
-/// Der Co-Player-Tracker schreibt alle 10 Minuten einen Tick auf ein festes
-/// Raster, trifft die Sessiongrenzen also nicht exakt; drei Ticks Spielraum
-/// fangen das ab, ohne echte Stammpaarungen durchzulassen.
-pub const FIRST_MEETING_SLACK_MINUTES: i64 = 30;
+/// Sicherheitsabstand vor dem Start der eben beendeten Session. Er hält die
+/// gerade selbst geschriebene Zeile sicher aus der Vorgeschichte heraus, auch
+/// wenn Sessiondauer und Zeitstempel um ein paar Sekunden auseinanderlaufen.
+pub const HISTORY_GUARD: Duration = Duration::seconds(60);
 
 pub const NEVER_ASK_NS: &str = "voice_mate_survey_never";
 pub const LAST_ASK_NS: &str = "voice_mate_survey_last_ask";
@@ -99,13 +99,14 @@ pub trait MateSurveyPort: Send + Sync {
         mate_id: u64,
         now: DateTime<Utc>,
     ) -> Result<AskDecision, String>;
-    /// Bisher gemeinsam verbrachte Voice-Minuten je Kandidat, inklusive der
-    /// gerade beendeten Session.
-    async fn shared_minutes(
+    /// Welche der Kandidaten schon vor `before` mit dem Fragenden in einer
+    /// Voice-Session saßen. Alles, was hier fehlt, ist eine Erstbegegnung.
+    async fn previous_mates(
         &self,
         rater_id: u64,
         candidates: &[u64],
-    ) -> Result<HashMap<u64, i64>, String>;
+        before: DateTime<Utc>,
+    ) -> Result<HashSet<u64>, String>;
     async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String>;
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String>;
     async fn save_rating(&self, rating: &MateRating) -> Result<(), String>;
@@ -143,14 +144,19 @@ impl MateSurvey {
         if candidates.is_empty() {
             return;
         }
-        let shared = match self.port.shared_minutes(user_id, &candidates).await {
-            Ok(shared) => shared,
+        let before = now - Duration::seconds(seconds) - HISTORY_GUARD;
+        let known = match self
+            .port
+            .previous_mates(user_id, &candidates, before)
+            .await
+        {
+            Ok(known) => known,
             Err(error) => {
                 tracing::warn!(%error, user_id, "Mitspieler-Umfrage: Vorgeschichte nicht lesbar");
                 return;
             }
         };
-        let Some(mate_id) = pick_first_meeting_mate(&candidates, &shared, seconds) else {
+        let Some(mate_id) = pick_first_meeting_mate(&candidates, &known) else {
             self.port
                 .log_decision(user_id, "verworfen", "kein_erstkontakt");
             return;
@@ -299,25 +305,14 @@ pub fn mate_candidates(user_id: u64, co_player_ids: &[u64]) -> Vec<u64> {
     candidates
 }
 
-/// Der Mitspieler, nach dem gefragt wird: der erste, den der Nutzer vor dieser
-/// Session noch nicht kannte. Sitzt niemand Neues dabei, wird nicht gefragt.
-///
-/// `shared` enthält die gesamte gemeinsame Zeit inklusive der eben beendeten
-/// Session, deren Minuten deshalb abgezogen werden.
-pub fn pick_first_meeting_mate(
-    candidates: &[u64],
-    shared: &HashMap<u64, i64>,
-    session_seconds: i64,
-) -> Option<u64> {
-    let session_minutes = session_seconds / 60;
+/// Der Mitspieler, nach dem gefragt wird: der erste, mit dem der Nutzer vor
+/// dieser Session noch nie in einer Voice-Session saß. Sitzt niemand Neues
+/// dabei, wird nicht gefragt.
+pub fn pick_first_meeting_mate(candidates: &[u64], known: &HashSet<u64>) -> Option<u64> {
     candidates
         .iter()
         .copied()
-        .find(|mate| minutes_before_session(shared, *mate, session_minutes) <= FIRST_MEETING_SLACK_MINUTES)
-}
-
-fn minutes_before_session(shared: &HashMap<u64, i64>, mate: u64, session_minutes: i64) -> i64 {
-    shared.get(&mate).copied().unwrap_or(0) - session_minutes
+        .find(|mate| !known.contains(mate))
 }
 
 fn rating_thanks(rating: &str) -> &'static str {
@@ -594,15 +589,17 @@ async fn read_timestamp(
     Ok(DateTime::from_timestamp(timestamp, 0))
 }
 
-/// Bisher gemeinsam verbrachte Voice-Minuten aus dem Co-Player-Tracker. Die
-/// Tabelle steht bidirektional, die Zeile `(rater, mate)` genügt.
-pub(crate) async fn shared_minutes_db(
+/// Kandidaten, mit denen es vor `before` schon eine gemeinsame Voice-Session
+/// gab. `activity.voice_session_log` hält je Session die Mitspielerliste als
+/// JSON; der Index auf `(user_id, started_at)` trägt die Abfrage.
+pub(crate) async fn previous_mates_db(
     pool: &PgPool,
     rater_id: u64,
     candidates: &[u64],
-) -> Result<HashMap<u64, i64>, String> {
+    before: DateTime<Utc>,
+) -> Result<HashSet<u64>, String> {
     if candidates.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(HashSet::new());
     }
     let rater = i64::try_from(rater_id).map_err(|error| error.to_string())?;
     let ids: Vec<i64> = candidates
@@ -611,20 +608,23 @@ pub(crate) async fn shared_minutes_db(
         .map(i64::try_from)
         .collect::<Result<_, _>>()
         .map_err(|error: std::num::TryFromIntError| error.to_string())?;
-    let rows: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT co_player_id, COALESCE(total_minutes_together, 0)::BIGINT
-           FROM activity.user_co_players
-          WHERE user_id = $1
-            AND co_player_id = ANY($2)",
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT DISTINCT (mate.value)::BIGINT
+           FROM activity.voice_session_log AS log,
+                LATERAL jsonb_array_elements_text(log.co_player_ids) AS mate
+          WHERE log.user_id = $1
+            AND log.started_at < $2
+            AND (mate.value)::BIGINT = ANY($3)",
     )
     .bind(rater)
+    .bind(before)
     .bind(&ids)
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
     Ok(rows
         .into_iter()
-        .filter_map(|(id, minutes)| u64::try_from(id).ok().map(|id| (id, minutes)))
+        .filter_map(|(id,)| u64::try_from(id).ok())
         .collect())
 }
 
@@ -752,9 +752,11 @@ mod tests {
 
     struct TestState {
         decision: AskDecision,
-        /// Gemeinsame Minuten je Mitspieler, inklusive der laufenden Session.
-        shared: HashMap<u64, i64>,
-        shared_fails: bool,
+        /// Mitspieler, mit denen der Fragende schon vorher zusammen saß.
+        known: HashSet<u64>,
+        known_fails: bool,
+        /// Zeitgrenze, mit der `previous_mates` aufgerufen wurde.
+        asked_before: Option<DateTime<Utc>>,
         dms: Vec<(u64, Value)>,
         ratings: Vec<MateRating>,
         comments: Vec<(u64, u64, String)>,
@@ -766,8 +768,9 @@ mod tests {
         fn default() -> Self {
             Self {
                 decision: AskDecision::Ask,
-                shared: HashMap::new(),
-                shared_fails: false,
+                known: HashSet::new(),
+                known_fails: false,
+                asked_before: None,
                 dms: Vec::new(),
                 ratings: Vec::new(),
                 comments: Vec::new(),
@@ -800,18 +803,21 @@ mod tests {
             Ok(self.state.lock().expect("lock").decision)
         }
 
-        async fn shared_minutes(
+        async fn previous_mates(
             &self,
             _rater_id: u64,
             candidates: &[u64],
-        ) -> Result<HashMap<u64, i64>, String> {
-            let state = self.state.lock().expect("lock");
-            if state.shared_fails {
+            before: DateTime<Utc>,
+        ) -> Result<HashSet<u64>, String> {
+            let mut state = self.state.lock().expect("lock");
+            state.asked_before = Some(before);
+            if state.known_fails {
                 return Err("db kaputt".to_string());
             }
             Ok(candidates
                 .iter()
-                .map(|mate| (*mate, state.shared.get(mate).copied().unwrap_or(0)))
+                .copied()
+                .filter(|mate| state.known.contains(mate))
                 .collect())
         }
 
@@ -860,38 +866,19 @@ mod tests {
 
     #[test]
     fn erstkontakt_gewinnt_gegen_den_bekannten_mitspieler() {
-        let candidates = vec![2, 3];
-        // 2 saß schon 40 Stunden vor dieser Session mit dabei, 3 ist neu.
-        let shared = HashMap::from([(2u64, 2400i64 + 60), (3u64, 60i64)]);
-        assert_eq!(
-            pick_first_meeting_mate(&candidates, &shared, 3600),
-            Some(3)
-        );
+        let known = HashSet::from([2u64]);
+        assert_eq!(pick_first_meeting_mate(&[2, 3], &known), Some(3));
     }
 
     #[test]
     fn ohne_neuen_mitspieler_wird_niemand_gewaehlt() {
-        let candidates = vec![2, 3];
-        let shared = HashMap::from([(2u64, 500i64), (3u64, 900i64)]);
-        assert_eq!(pick_first_meeting_mate(&candidates, &shared, 3600), None);
+        let known = HashSet::from([2u64, 3u64]);
+        assert_eq!(pick_first_meeting_mate(&[2, 3], &known), None);
     }
 
     #[test]
-    fn tick_raster_des_trackers_kippt_die_erstbegegnung_nicht() {
-        // 60-Minuten-Session, der 10-min-Tracker hat zwei Ticks zu viel erwischt.
-        let shared = HashMap::from([(2u64, 80i64)]);
-        assert_eq!(pick_first_meeting_mate(&[2], &shared, 3600), Some(2));
-        // Eine ganze frühere Stunde ist dagegen kein Erstkontakt mehr.
-        let shared = HashMap::from([(2u64, 120i64)]);
-        assert_eq!(pick_first_meeting_mate(&[2], &shared, 3600), None);
-    }
-
-    #[test]
-    fn fehlende_vorgeschichte_zaehlt_als_erstkontakt() {
-        assert_eq!(
-            pick_first_meeting_mate(&[2, 3], &HashMap::new(), 3600),
-            Some(2)
-        );
+    fn ohne_vorgeschichte_ist_jeder_ein_erstkontakt() {
+        assert_eq!(pick_first_meeting_mate(&[2, 3], &HashSet::new()), Some(2));
     }
 
     #[test]
@@ -990,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn bekannte_paarung_wird_nicht_mehr_gefragt() {
         let port = TestPort::new(TestState {
-            shared: HashMap::from([(2u64, 5000i64), (3u64, 5000i64)]),
+            known: HashSet::from([2u64, 3u64]),
             ..TestState::default()
         });
         let survey = MateSurvey::new(port.clone());
@@ -1007,7 +994,7 @@ mod tests {
     async fn gefragt_wird_nach_dem_neuen_gesicht_in_der_runde() {
         let port = TestPort::new(TestState {
             // 2 ist ein alter Bekannter, 3 sitzt zum ersten Mal dabei.
-            shared: HashMap::from([(2u64, 5000i64), (3u64, 60i64)]),
+            known: HashSet::from([2u64]),
             ..TestState::default()
         });
         let survey = MateSurvey::new(port.clone());
@@ -1020,9 +1007,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn die_vorgeschichte_endet_vor_der_eigenen_session() {
+        let port = TestPort::new(TestState::default());
+        let survey = MateSurvey::new(port.clone());
+        let seconds = 3 * 3600;
+        survey.on_session_end(1, 99, vec![2], seconds, now()).await;
+        let before = port.state.lock().expect("lock").asked_before.expect("gefragt");
+        assert_eq!(before, now() - Duration::seconds(seconds) - HISTORY_GUARD);
+        assert!(
+            before < now() - Duration::seconds(seconds),
+            "die gerade geschriebene Zeile darf nicht als Vorgeschichte zählen"
+        );
+    }
+
+    /// Der eigentliche Filter steckt im SQL, deshalb hier gegen echte Zeilen.
+    #[tokio::test]
+    async fn previous_mates_db_sieht_nur_die_zeit_vor_der_session() {
+        let db = dl_central_db::testing::test_pool().await.expect("test_pool");
+        let pool = db.pool();
+        let rater = 4001i64;
+        let alter_bekannter = 4002i64;
+        let neuer = 4003i64;
+        let session_start = now() - Duration::hours(4);
+        // Vorgeschichte: eine gemeinsame Session vor drei Tagen.
+        insert_session(pool, 1, rater, now() - Duration::days(3), &[alter_bekannter]).await;
+        // Die eben beendete Session, in der beide dabei waren.
+        insert_session(pool, 2, rater, session_start, &[alter_bekannter, neuer]).await;
+
+        let known = previous_mates_db(
+            pool,
+            rater as u64,
+            &[alter_bekannter as u64, neuer as u64],
+            session_start - HISTORY_GUARD,
+        )
+        .await
+        .expect("previous_mates");
+        assert_eq!(
+            known,
+            HashSet::from([alter_bekannter as u64]),
+            "die laufende Session darf sich nicht selbst zur Vorgeschichte machen"
+        );
+    }
+
+    async fn insert_session(
+        pool: &PgPool,
+        id: i64,
+        user_id: i64,
+        started_at: DateTime<Utc>,
+        mates: &[i64],
+    ) {
+        let mates = serde_json::to_value(mates).expect("json");
+        sqlx::query(
+            "INSERT INTO activity.voice_session_log
+                (id, user_id, guild_id, channel_id, started_at, ended_at,
+                 duration_seconds, points, co_player_ids)
+             VALUES ($1, $2, 1, 1, $3, $3 + interval '1 hour', 3600, 1, $4)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(started_at)
+        .bind(&mates)
+        .execute(pool)
+        .await
+        .expect("insert voice_session_log");
+    }
+
+    #[tokio::test]
     async fn unlesbare_vorgeschichte_fragt_lieber_nicht() {
         let port = TestPort::new(TestState {
-            shared_fails: true,
+            known_fails: true,
             ..TestState::default()
         });
         let survey = MateSurvey::new(port.clone());

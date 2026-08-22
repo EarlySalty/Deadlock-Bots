@@ -2944,12 +2944,13 @@ impl crate::mate_survey::MateSurveyPort for MateSurveyGlue {
         crate::mate_survey::claim_ask_db(&self.pool, rater_id, mate_id, now).await
     }
 
-    async fn shared_minutes(
+    async fn previous_mates(
         &self,
         rater_id: u64,
         candidates: &[u64],
-    ) -> Result<std::collections::HashMap<u64, i64>, String> {
-        crate::mate_survey::shared_minutes_db(&self.pool, rater_id, candidates).await
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<std::collections::HashSet<u64>, String> {
+        crate::mate_survey::previous_mates_db(&self.pool, rater_id, candidates, before).await
     }
 
     async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String> {
