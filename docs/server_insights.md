@@ -16,6 +16,14 @@ Drei bewusst getrennte Welten. Keine darf die andere ersetzen:
 
 Der Wochenjob schreibt nur in `insights_imports`. Er löscht und überschreibt niemals die Live-Tabellen.
 
+Innerhalb von `insights_imports` gilt: jeder Import überschreibt seine eigenen
+Zeilen (`guild_id`, `import_kind`, `period_start`, `dimension`) und sonst nichts.
+Einzige Ausnahme sind die Quellen-Exporte (`joins_by_source`): dort kann eine
+Quelle aus der Liste verschwinden, deshalb wird der Zeitraum ersetzt, den die
+Datei abdeckt, von ihrem frühesten bis zu ihrem spätesten Datum. Ältere Wochen
+bleiben stehen. Import und Ersetzen laufen in einer Transaktion, ein Abbruch
+mittendrin lässt also keinen halb geleerten Zeitraum zurück.
+
 Ältere Zeiträume für Insights kommen über den CSV-Import (unten), nicht aus dem Legacy-Pfad.
 
 ## Neue Bausteine
@@ -68,8 +76,9 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
   Job selbst weg: immer ein neuer Inspect-Tab (`--new-tab`), dann Return bzw.
   Tab+Return. Welcher Tab vorher aktiv war, ist egal. Danach klickt der Job
   die Buttons „CSV exportieren“, bestätigt die Download-Leiste und spielt
-  genau diese offiziellen Dateien ein. Ohne offizielle CSV bricht der Job ab,
-  eine Highcharts-Rekonstruktion gibt es nicht mehr. Timer montags 06:15 und
+  genau diese offiziellen Dateien ein. Ohne offizielle CSV bricht der Job ab;
+  der Highcharts-Weg läuft nur noch, wenn man ihn über `INSIGHTS_BRAVE_DUMP_DIR`
+  ausdrücklich anstößt, nie im regulären Lauf. Timer montags 06:15 und
   07:15, Persistenz an, User-Linger an. Die vom Job geöffneten Tabs
   gehen danach wieder zu. Ein zweiter DevTools-Client (MCP) blockiert den
   Handshake trotzdem; der Timer versucht es montags 06:15 und 07:15. Manueller

@@ -159,22 +159,11 @@ pub async fn import_csv_dir(
             Err(err) => report.skipped.push(format!("{name}: {err}")),
         }
     }
-    sqlx::query(
-        r#"
-        DELETE FROM activity.insights_imports
-        WHERE import_kind = 'engagement'
-          AND dimension NOT IN (
-            'visitors',
-            'pct_communicated',
-            'messages',
-            'messages_per_communicator',
-            'speaking_minutes'
-          )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(|err| err.to_string())?;
+    // Hier stand ein DELETE ueber alle Guilds und alle Zeitraeume, das jede
+    // engagement-Dimension ausserhalb einer festen Fuenfer-Liste entfernte, auch
+    // die, die derselbe Import gerade geschrieben hatte (`contributors` steht in
+    // der Erkennung, nicht in der Liste). Ein Wochenjob raeumt keine Historie
+    // ab, die er nicht wiederherstellen kann.
     Ok(report)
 }
 

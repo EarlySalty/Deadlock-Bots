@@ -55,8 +55,10 @@ fn parse_date(raw: &str) -> Option<NaiveDate> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Some(dt.date_naive());
     }
-    if raw.len() >= 10 {
-        if let Ok(date) = NaiveDate::parse_from_str(&raw[..10], "%Y-%m-%d") {
+    // Nach Bytes schneiden, nicht nach Zeichen: `get` liefert bei einer
+    // Mehrbyte-Grenze None statt zu paniken. Der Text kommt aus fremden CSVs.
+    if let Some(head) = raw.get(..10) {
+        if let Ok(date) = NaiveDate::parse_from_str(head, "%Y-%m-%d") {
             return Some(date);
         }
     }
@@ -1128,21 +1130,9 @@ pub async fn import_csv_text(
     let headers = rows[0].clone();
     let spec = detect_import(&headers)
         .ok_or_else(|| format!("Export-Typ nicht erkannt, Spalten: {}", headers.join(", ")))?;
-    if spec.kind == "joins_by_source" {
-        sqlx::query(
-            r#"
-            DELETE FROM activity.insights_imports
-            WHERE guild_id = $1
-              AND import_kind = $2
-            "#,
-        )
-        .bind(guild_id)
-        .bind(spec.kind)
-        .execute(pool)
-        .await
-        .map_err(|err| err.to_string())?;
-    }
-    let mut file_rows = 0usize;
+    // Erst vollstaendig parsen, dann schreiben. Sonst kann ein Fehler mitten in
+    // der Datei eine halb geleerte Tabelle hinterlassen.
+    let mut parsed: Vec<(NaiveDate, String, f64)> = Vec::new();
     for row in rows.iter().skip(1) {
         if row.iter().all(|cell| cell.trim().is_empty()) {
             continue;
@@ -1165,17 +1155,49 @@ pub async fn import_csv_text(
                         .map(String::as_str)
                         .unwrap_or("value")
                 });
-            upsert_import(pool, guild_id, spec.kind, period_start, dimension, value)
-                .await
-                .map_err(|err| err.to_string())?;
-            file_rows += 1;
+            parsed.push((period_start, dimension.to_string(), value));
         }
     }
+
+    let mut tx = pool.begin().await.map_err(|err| err.to_string())?;
+    // Bei den Quellen-Exporten kann eine Quelle aus der Liste verschwinden, ein
+    // reines Upsert liesse sie als Karteileiche stehen. Ersetzt wird deshalb der
+    // Zeitraum, den diese Datei abdeckt, und nur der: aeltere Wochen sind
+    // Historie, die kein Wochenlauf anfassen darf.
+    if spec.kind == "joins_by_source" {
+        if let (Some(von), Some(bis)) = (
+            parsed.iter().map(|(date, _, _)| *date).min(),
+            parsed.iter().map(|(date, _, _)| *date).max(),
+        ) {
+            sqlx::query(
+                r#"
+                DELETE FROM activity.insights_imports
+                WHERE guild_id = $1
+                  AND import_kind = $2
+                  AND period_start BETWEEN $3 AND $4
+                "#,
+            )
+            .bind(guild_id)
+            .bind(spec.kind)
+            .bind(von)
+            .bind(bis)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| err.to_string())?;
+        }
+    }
+    let file_rows = parsed.len();
+    for (period_start, dimension, value) in &parsed {
+        upsert_import(&mut tx, guild_id, spec.kind, *period_start, dimension, *value)
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    tx.commit().await.map_err(|err| err.to_string())?;
     Ok((spec.kind, file_rows))
 }
 
 async fn upsert_import(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     guild_id: i64,
     kind: &str,
     period_start: NaiveDate,
@@ -1198,7 +1220,7 @@ async fn upsert_import(
     .bind(period_start)
     .bind(dimension)
     .bind(value.to_string())
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -1421,10 +1443,98 @@ mod tests {
     }
 
     #[test]
+    fn parse_date_paniked_nicht_an_einer_mehrbyte_grenze() {
+        // In "Zeitraum über 4 Wochen" beginnt das ü bei Byte 9 und reicht bis
+        // Byte 10: ein Slice `[..10]` schneidet mitten hinein und reisst den
+        // ganzen Import ab. Der Text kommt aus fremden CSVs, ist also beliebig.
+        assert_eq!(parse_date("Zeitraum über 4 Wochen"), None);
+        assert_eq!(parse_date("äöüäöüäöüäöü"), None);
+        assert_eq!(parse_date(""), None);
+        assert_eq!(parse_date("kurz"), None);
+    }
+
+    #[test]
     fn csv_parser_handles_quoted_commas() {
         let rows = parse_csv("Date,Source,Joins\n2026-06-01,\"Vanity, Link\",12\n")
             .expect("csv fixture parses");
         assert_eq!(rows[1][1], "Vanity, Link");
+    }
+
+    /// Der Wochenjob darf nur seinen eigenen Zeitraum ersetzen. Frueher loeschte
+    /// er die komplette joins_by_source-Historie der Guild.
+    #[tokio::test]
+    async fn joins_by_source_import_laesst_aeltere_wochen_stehen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let guild = 7001i64;
+
+        import_csv_text(
+            pool,
+            guild,
+            "Week,Join Source,Joins\n2026-01-05,Vanity,5\n",
+        )
+        .await?;
+        import_csv_text(
+            pool,
+            guild,
+            "Week,Join Source,Joins\n2026-06-01,Vanity,12\n2026-06-01,Discovery,3\n",
+        )
+        .await?;
+
+        let vorher = insights_rows(pool, guild).await?;
+        assert_eq!(
+            vorher,
+            vec![
+                ("2026-01-05".to_string(), "Vanity".to_string(), 5.0),
+                ("2026-06-01".to_string(), "Discovery".to_string(), 3.0),
+                ("2026-06-01".to_string(), "Vanity".to_string(), 12.0),
+            ]
+        );
+
+        // Neuer Export derselben Woche, Discovery ist verschwunden: die Woche
+        // wird ersetzt, die Januar-Zeile bleibt unberuehrt.
+        import_csv_text(
+            pool,
+            guild,
+            "Week,Join Source,Joins\n2026-06-01,Vanity,20\n",
+        )
+        .await?;
+        let nachher = insights_rows(pool, guild).await?;
+        assert_eq!(
+            nachher,
+            vec![
+                ("2026-01-05".to_string(), "Vanity".to_string(), 5.0),
+                ("2026-06-01".to_string(), "Vanity".to_string(), 20.0),
+            ],
+            "aeltere Wochen sind Historie und ueberleben den naechsten Import"
+        );
+        Ok(())
+    }
+
+    async fn insights_rows(
+        pool: &PgPool,
+        guild_id: i64,
+    ) -> Result<Vec<(String, String, f64)>, sqlx::Error> {
+        let rows: Vec<(NaiveDate, String, String)> = sqlx::query_as(
+            "SELECT period_start, dimension, value::text
+               FROM activity.insights_imports
+              WHERE guild_id = $1 AND import_kind = 'joins_by_source'
+              ORDER BY period_start, dimension",
+        )
+        .bind(guild_id)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(period, dimension, value)| {
+                (
+                    period.to_string(),
+                    dimension,
+                    value.parse::<f64>().unwrap_or_default(),
+                )
+            })
+            .collect())
     }
 
     #[test]
