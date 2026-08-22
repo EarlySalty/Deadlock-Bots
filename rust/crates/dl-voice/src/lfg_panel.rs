@@ -124,7 +124,8 @@ pub const LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT: &str = "Zu dem Gesuch läuft schon
 pub const LFG_BTN_PUBLISH_LANE: &str = "🔎 Mitspieler suchen";
 pub const LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT: &str =
     "Für diese Lane läuft schon ein Gesuch.";
-pub const LFG_PRESETS_SUBMENU_TEXT: &str = "Was willst du mit deinen Presets machen?";
+pub const LFG_PRESETS_SUBMENU_TEXT: &str =
+    "Speichern merkt sich Name, Plätze und Rang der Lane, in der du sitzt.\nLaden legt genau diesen Stand später wieder drauf.";
 pub const LFG_PRESETS_BTN_SAVE: &str = "💾 Preset speichern";
 pub const LFG_PRESETS_BTN_LOAD: &str = "📂 Preset laden";
 pub const LFG_WATCH_BUILDER_TEXT: &str = "🔔 **Ich sag dir Bescheid.** Sag mir, wonach du suchst — ich schicke dir eine DM, sobald ein passendes Gesuch auftaucht.";

@@ -2514,6 +2514,13 @@ mod tests {
             reply.content.as_deref(),
             Some(crate::lfg_panel::LFG_PRESETS_SUBMENU_TEXT)
         );
+        let text = crate::lfg_panel::LFG_PRESETS_SUBMENU_TEXT;
+        assert!(text.contains("Speichern"));
+        assert!(text.contains("Laden"));
+        assert!(
+            text.chars().count() < 200,
+            "kurze Erklärung, keine Textwand"
+        );
         let custom_ids: Vec<&str> = reply.components.as_ref().expect("components")[0]["components"]
             .as_array()
             .expect("buttons")

@@ -757,13 +757,19 @@ impl CoachingRequests {
                     map.insert("website_request_id".into(), json!(website_request_id));
                 }
             }
-            if let (Some(coach_id), Some(session_status)) =
-                (opts.coach_discord_id, opts.session_status.as_ref())
-            {
+            // Getrennte Gates: session_status muss auch ohne aufgeloeste
+            // Coach-Discord-ID raus (Reconcile-Pfad kennt den Coach oft
+            // nicht), sonst erfaehrt die Website nie, dass eine Anfrage zu
+            // ist, deren Coach nicht aufgeloest werden konnte.
+            if let Some(session_status) = opts.session_status.as_ref() {
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("session_status".into(), json!(session_status));
+                }
+            }
+            if let Some(coach_id) = opts.coach_discord_id {
                 if let Some(map) = payload.as_object_mut() {
                     map.insert("coach_discord_id".into(), json!(coach_id));
                     map.insert("coach_username".into(), json!(opts.coach_username));
-                    map.insert("session_status".into(), json!(session_status));
                 }
             }
             if let Some(session_id) = opts.bot_session_id {
@@ -1498,10 +1504,221 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     /// Survey-Poll (Python `_scan_active_sessions`, 60-s-Loop): alle aktiven
     /// Sessions ohne gesendete Umfrage prüfen.
     pub async fn scan_survey_sessions(&self) {
+        self.reconcile_terminal_requests().await;
         for session in self.load_survey_sessions(None).await {
             self.process_survey_session(session, SurveyTrigger::Poll)
                 .await;
         }
+    }
+
+    /// Offene Anfragen nachziehen, deren Session schon fertig ist.
+    /// Der Dienst schliesst den Zustand selbst, statt ihn in der Tabelle
+    /// hängen zu lassen.
+    pub async fn reconcile_terminal_requests(&self) {
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT DISTINCT ON (r.bot_request_id)
+                   r.bot_request_id AS bot_request_id,
+                   r.discord_user_id AS discord_user_id,
+                   s.id AS session_id,
+                   s.status AS session_status,
+                   {COACH_DISCORD_ID_SQL} AS coach_discord_id
+              FROM coaching.requests r
+              JOIN coaching.sessions s
+                ON s.bot_request_id = r.bot_request_id
+                OR (
+                    s.website_request_id IS NOT NULL
+                    AND r.website_request_id IS NOT NULL
+                    AND s.website_request_id = r.website_request_id
+                )
+              LEFT JOIN coaching.coaches c ON c.id = s.coach_id
+             WHERE r.bot_request_id IS NOT NULL
+               AND COALESCE(r.status, '') NOT IN ('completed', 'cancelled', 'invalid')
+               AND s.status IN ('completed', 'cancelled')
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM coaching.sessions s2
+                    WHERE (
+                        s2.bot_request_id = r.bot_request_id
+                        OR (
+                            s2.website_request_id IS NOT NULL
+                            AND r.website_request_id IS NOT NULL
+                            AND s2.website_request_id = r.website_request_id
+                        )
+                    )
+                    AND s2.status = 'active'
+               )
+             ORDER BY r.bot_request_id,
+                      s.completed_at DESC NULLS LAST,
+                      s.created_at DESC NULLS LAST
+             LIMIT 25
+            "#
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+
+        for row in rows {
+            let Some(request_id) = row
+                .try_get::<Option<i32>, _>("bot_request_id")
+                .ok()
+                .flatten()
+                .map(i64::from)
+            else {
+                continue;
+            };
+            let session_status = row
+                .try_get::<String, _>("session_status")
+                .unwrap_or_else(|_| "completed".to_string());
+            let session_id = row.try_get::<String, _>("session_id").ok();
+            let coach_id = row
+                .try_get::<Option<i64>, _>("coach_discord_id")
+                .ok()
+                .flatten()
+                .and_then(|value| pg_i64_to_u64(value, "coach_discord_id").ok());
+            let user_id = row
+                .try_get::<Option<i64>, _>("discord_user_id")
+                .ok()
+                .flatten()
+                .and_then(|value| pg_i64_to_u64(value, "discord_user_id").ok());
+            self.sync_request_to_session_terminal(
+                request_id,
+                &session_status,
+                coach_id,
+                session_id.as_deref(),
+                user_id,
+                false,
+            )
+            .await;
+        }
+    }
+
+    async fn sync_request_to_session_terminal(
+        &self,
+        request_id: i64,
+        session_status: &str,
+        coach_id: Option<u64>,
+        session_id: Option<&str>,
+        user_id: Option<u64>,
+        role_already_removed: bool,
+    ) {
+        let now = chrono::Utc::now();
+        let (request_status, headline, status_line, accent) = if session_status == "cancelled" {
+            (
+                "cancelled",
+                "🚫 Coaching abgebrochen",
+                "🚫 abgebrochen",
+                COACHING_ACCENT_CANCELLED,
+            )
+        } else {
+            (
+                "completed",
+                "✅ Coaching abgeschlossen",
+                "✅ abgeschlossen",
+                COACHING_ACCENT_DONE,
+            )
+        };
+        // Aktiv-Rolle wirklich entfernen, nicht nur role_removed_at setzen:
+        // complete_session raeumt die Rolle vor genau diesem Aufruf weg (und
+        // meldet das ueber role_already_removed durch, statt hier ein
+        // zweites Mal zu pruefen — die Rolle ist zu diesem Zeitpunkt schon
+        // weg, der Guard unten wuerde sie sonst faelschlich stehen lassen und
+        // role_removed_at nie setzen). Der Reconcile-Pfad (Session endete
+        // ausserhalb des Claim-Buttons) hatte weder Vorab-Entfernung noch
+        // User-Kontext und liess die Rolle stehen, wodurch expire_roles sie
+        // nie wieder sah (Filter role_removed_at IS NULL).
+        // Die Rolle ist global pro Guild, kein Per-Request-Objekt: fuer den
+        // Reconcile-Fall erst pruefen, ob derselbe Nutzer noch eine andere
+        // offene Anfrage oder aktive Session hat, sonst reisst der
+        // 60s-Reconcile-Tick einer alten Anfrage die Rolle mitten aus einer
+        // neuen, laufenden Session.
+        let mut role_actually_removed = role_already_removed;
+        if !role_already_removed {
+            if let Some(user_id) = user_id {
+                // IS DISTINCT FROM statt !=: bot_request_id ist in beiden
+                // Tabellen nullable (websiteseitige Requests/Sessions werden vor
+                // dem Matching nur ueber website_request_id verknuepft). Mit !=
+                // liefert eine NULL-Zeile SQL-NULL statt TRUE und faellt aus
+                // beiden EXISTS heraus — genau die andere offene Aktivitaet, vor
+                // der dieser Guard schuetzen soll, waere dann unsichtbar.
+                let still_has_open_activity = match (
+                    u64_to_i64(user_id, "discord_user_id"),
+                    i64_to_i32(request_id, "request_id"),
+                ) {
+                    (Ok(user_id_i64), Ok(request_id_i32)) => sqlx::query_scalar::<_, bool>(
+                        r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                          FROM coaching.requests
+                         WHERE discord_user_id = $1
+                           AND bot_request_id IS DISTINCT FROM $2
+                           AND COALESCE(status, '') NOT IN ('completed', 'cancelled', 'invalid')
+                    ) OR EXISTS (
+                        SELECT 1
+                          FROM coaching.sessions
+                         WHERE discord_user_id = $1
+                           AND status = 'active'
+                           AND bot_request_id IS DISTINCT FROM $2
+                    )
+                    "#,
+                    )
+                    .bind(user_id_i64)
+                    .bind(request_id_i32)
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap_or(true), // im Zweifel Rolle stehen lassen, nicht faelschlich abnehmen
+                    _ => true,
+                };
+                if !still_has_open_activity {
+                    self.remove_role_if_present(
+                        self.guild_id,
+                        user_id,
+                        COACHING_ACTIVE_ROLE_ID,
+                        "Coaching-Anfrage automatisch geschlossen",
+                    )
+                    .await;
+                    role_actually_removed = true;
+                }
+            }
+        }
+        if let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") {
+            // role_removed_at nur setzen, wenn die Rolle wirklich weg ist —
+            // sonst behauptet die Spalte eine Entfernung, die der obige Guard
+            // bewusst uebersprungen hat, und expire_roles (Filter
+            // role_removed_at IS NULL) sieht diese Anfrage nie wieder, obwohl
+            // die Rolle noch am Nutzer haengt.
+            let role_removed_value = role_actually_removed.then_some(now);
+            let _ = sqlx::query(
+                r#"
+                UPDATE coaching.requests
+                   SET status = $1,
+                       role_removed_at = COALESCE(role_removed_at, $2),
+                       updated_at = $3
+                 WHERE bot_request_id = $4
+                   AND COALESCE(status, '') NOT IN ('completed', 'cancelled', 'invalid')
+                "#,
+            )
+            .bind(request_status)
+            .bind(role_removed_value)
+            .bind(now)
+            .bind(request_id_i32)
+            .execute(&self.pool)
+            .await;
+        }
+        self.update_request_message_terminal(request_id, headline, status_line, accent)
+            .await;
+        let coach_name = match coach_id {
+            Some(coach_id) => self.port.member_display_name(self.guild_id, coach_id).await,
+            None => String::new(),
+        };
+        self.mirror_to_website(MirrorOpts {
+            request_id,
+            coach_discord_id: coach_id,
+            coach_username: (!coach_name.is_empty()).then_some(coach_name),
+            session_status: Some(request_status.to_string()),
+            bot_session_id: session_id.map(str::to_string),
+            ..MirrorOpts::default()
+        });
     }
 
     /// Voice-getriggerte Prüfung (Python `on_voice_state_update`): nur die
@@ -1523,10 +1740,19 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         // findet ein Voice-Event des Coaches seine eigene Website-Session nicht.
         let rows = sqlx::query(&format!(
             r#"
-            SELECT s.id, {COACH_DISCORD_ID_SQL} AS coach_discord_id,
-                   s.discord_user_id, s.voice_started_at, s.bot_request_id
+            SELECT DISTINCT ON (s.id)
+                   s.id, {COACH_DISCORD_ID_SQL} AS coach_discord_id,
+                   s.discord_user_id, s.voice_started_at,
+                   COALESCE(s.bot_request_id, r.bot_request_id) AS bot_request_id
               FROM coaching.sessions s
               LEFT JOIN coaching.coaches c ON c.id = s.coach_id
+              LEFT JOIN coaching.requests r
+                ON r.bot_request_id = s.bot_request_id
+                OR (
+                    s.website_request_id IS NOT NULL
+                    AND r.website_request_id IS NOT NULL
+                    AND s.website_request_id = r.website_request_id
+                )
              WHERE s.status = 'active'
                AND s.survey_sent_at IS NULL
                AND (
@@ -1534,6 +1760,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                     OR s.discord_user_id = $1
                     OR {COACH_DISCORD_ID_SQL} = $1
                )
+             ORDER BY s.id
             "#
         ))
         .bind(member_i64)
@@ -1691,38 +1918,23 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         }
 
         let rid = session.request_id;
-        if let Ok(rid_i32) = i64_to_i32(rid, "request_id") {
-            let _ = sqlx::query!(
-                r#"
-                UPDATE coaching.requests
-                   SET status = 'completed',
-                       role_removed_at = $1,
-                       updated_at = $1
-                 WHERE bot_request_id = $2
-                "#,
-                now,
-                rid_i32,
-            )
-            .execute(&self.pool)
-            .await;
-        }
-        self.update_request_message_terminal(
+        // role_already_removed=true: die Rolle ist gerade eben schon per
+        // remove_role_if_present oben in diesem Aufruf entfernt worden. Ohne
+        // dieses Flag wuerde der interne Guard in
+        // sync_request_to_session_terminal (der auf offene Zweitanfragen
+        // prueft) role_removed_at faelschlich NULL lassen, wenn derselbe
+        // Nutzer noch eine andere Anfrage offen hat — obwohl die Rolle real
+        // schon weg ist. expire_roles haette die Zeile 48h spaeter erneut
+        // aufgegriffen und der Rolle mitten in einer neuen Session gezogen.
+        self.sync_request_to_session_terminal(
             rid,
-            "✅ Coaching abgeschlossen",
-            "✅ abgeschlossen",
-            COACHING_ACCENT_DONE,
+            "completed",
+            Some(coach_id),
+            Some(session.id.as_str()),
+            Some(session.user_id),
+            true,
         )
         .await;
-        // Website-Mirror (Python `coaching_survey.py`:311): Session als
-        // 'completed' spiegeln, inkl. bot_session_id.
-        self.mirror_to_website(MirrorOpts {
-            request_id: rid,
-            coach_discord_id: Some(coach_id),
-            coach_username: Some(coach_name),
-            session_status: Some("completed".to_string()),
-            bot_session_id: Some(session.id.clone()),
-            ..MirrorOpts::default()
-        });
         true
     }
 
@@ -3886,6 +4098,522 @@ mod pg_tests {
         assert!(
             container_buttons(body).is_empty(),
             "Endzustand ohne Buttons"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_schliesst_offene_anfrage_wenn_session_schon_fertig_ist() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        let website = Arc::new(MockWebsiteSync::default());
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-stale-open', 4, 'web-stale-open', 900,
+                'Player900', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                'abends', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8804, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-stale-open', 4, 'web-stale-open', '12345', 900, 'Player900',
+                    500, 'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        coaching.scan_survey_sessions().await;
+
+        let request_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 4",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request status");
+        assert_eq!(request_status, "completed");
+
+        let edits = port
+            .request_edits
+            .lock()
+            .expect("request_edits lock")
+            .clone();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].message_id, 8804);
+        let body = &edits[0].body;
+        assert!(container_text(body).contains("## ✅ Coaching abgeschlossen"));
+        assert_eq!(container_accent(body), COACHING_ACCENT_DONE);
+        assert!(
+            container_buttons(body).is_empty(),
+            "Endzustand ohne Buttons"
+        );
+
+        let payload = {
+            let mut found = None;
+            for _ in 0..20 {
+                found = website
+                    .payloads
+                    .lock()
+                    .expect("website payloads lock")
+                    .first()
+                    .cloned();
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            found.expect("website payload")
+        };
+        assert_eq!(payload["website_request_id"], "web-stale-open");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["session_status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn reconcile_entfernt_die_rolle_und_meldet_status_ohne_aufloesbaren_coach() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        // Nutzer traegt die Aktiv-Rolle noch, wie waehrend einer laufenden
+        // Session — der Reconcile-Pfad muss sie wirklich abnehmen, nicht nur
+        // role_removed_at setzen (sonst sieht expire_roles den Nutzer nie
+        // wieder, Filter role_removed_at IS NULL).
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((901, vec![COACHING_ACTIVE_ROLE_ID]));
+        let website = Arc::new(MockWebsiteSync::default());
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-stale-open-2', 5, 'web-stale-open-2', 901,
+                'Player901', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                'abends', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8805, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        // coach_id bleibt NULL: der Coach ist nicht aufloesbar (z. B. Session
+        // ausserhalb des Claim-Buttons beendet) — genau der Fall, in dem
+        // mirror_to_website vorher session_status stillschweigend verschluckt
+        // hat, weil es an coach_discord_id gekoppelt war.
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-stale-open-2', 5, 'web-stale-open-2', NULL, 901, 'Player901',
+                    500, 'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        coaching.scan_survey_sessions().await;
+
+        let request_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 5",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request status");
+        assert_eq!(request_status, "completed");
+
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
+        assert!(
+            removed
+                .iter()
+                .any(|(guild_id, user_id, role_id, _reason)| *guild_id == 1
+                    && *user_id == 901
+                    && *role_id == COACHING_ACTIVE_ROLE_ID),
+            "Aktiv-Rolle wurde nicht entfernt: {removed:?}"
+        );
+
+        let payload = {
+            let mut found = None;
+            for _ in 0..20 {
+                found = website
+                    .payloads
+                    .lock()
+                    .expect("website payloads lock")
+                    .first()
+                    .cloned();
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            found.expect("website payload")
+        };
+        assert_eq!(payload["website_request_id"], "web-stale-open-2");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["session_status"], "completed");
+        assert!(
+            payload.get("coach_discord_id").is_none(),
+            "kein aufloesbarer Coach, darf nicht erfunden werden: {payload:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_entfernt_die_rolle_nicht_bei_weiterer_offener_anfrage() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        // Nutzer 902 hat zwei Anfragen: die alte (6) ist fertig und haengt in
+        // der Tabelle, die neue (7) laeuft noch. Die globale Aktiv-Rolle darf
+        // nicht weg, solange Anfrage 7 offen ist — sonst reisst der
+        // Reconcile-Tick der alten Anfrage die Rolle mitten aus der neuen
+        // Session.
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((902, vec![COACHING_ACTIVE_ROLE_ID]));
+        let website = Arc::new(MockWebsiteSync::default());
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        for (bot_request_id, website_request_id, status, message_id) in [
+            (6i32, "web-stale-old", "matched", 8806i64),
+            (7i32, "web-stale-new", "matched", 8807i64),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO coaching.requests(
+                    request_uid, bot_request_id, website_request_id, discord_user_id,
+                    discord_username, rank, subrank, hero, games_played, hours_played,
+                    availability, current_problems, ai_summary, status, created_at, updated_at,
+                    message_id, channel_id
+                )
+                VALUES (
+                    $1, $2, $3, 902,
+                    'Player902', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                    'abends', 'Laning', '**Analyse:** Tempo', $4, $5, $5,
+                    $6, $7
+                )
+                "#,
+            )
+            .bind(format!("website:{website_request_id}"))
+            .bind(bot_request_id)
+            .bind(website_request_id)
+            .bind(status)
+            .bind(now)
+            .bind(message_id)
+            .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+            .execute(db.pool())
+            .await
+            .expect("request insert");
+        }
+        // Nur die alte Anfrage (6) hat eine abgeschlossene Session, die neue
+        // (7) laeuft ohne Session-Zeile weiter (z. B. noch nicht gematcht).
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-stale-old', 6, 'web-stale-old', NULL, 902, 'Player902',
+                    500, 'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        coaching.scan_survey_sessions().await;
+
+        let old_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 6",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("old request status");
+        assert_eq!(
+            old_status, "completed",
+            "die alte Anfrage schliesst trotzdem ab"
+        );
+
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
+        assert!(
+            removed
+                .iter()
+                .all(|(_, user_id, role_id, _)| !(*user_id == 902
+                    && *role_id == COACHING_ACTIVE_ROLE_ID)),
+            "Rolle haette wegen Anfrage 7 nicht entfernt werden duerfen: {removed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_findet_offene_session_ohne_bot_request_id() {
+        // bot_request_id ist in coaching.requests UND coaching.sessions
+        // nullable (websiteseitige Sessions werden vor dem Matching nur ueber
+        // website_request_id verknuepft). Ein Vergleich mit != statt IS
+        // DISTINCT FROM liefert fuer diese Zeile SQL-NULL statt TRUE und
+        // faellt aus dem EXISTS heraus — der Guard saehe die offene Session
+        // nie und die Rolle wuerde faelschlich entfernt.
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((903, vec![COACHING_ACTIVE_ROLE_ID]));
+        let website = Arc::new(MockWebsiteSync::default());
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-stale-old-2', 8, 'web-stale-old-2', 903,
+                'Player903', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                'abends', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8808, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, completed_at, created_at
+            )
+            VALUES ('sess-stale-old-2', 8, 'web-stale-old-2', NULL, 903, 'Player903',
+                    500, 'completed', $1, $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("old session insert");
+        // Zweite, aktive Session desselben Nutzers ohne bot_request_id — noch
+        // rein websiteseitig, noch nicht mit einer Bot-Anfrage verknuepft.
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, created_at
+            )
+            VALUES ('sess-website-only', NULL, NULL, NULL, 903, 'Player903',
+                    NULL, 'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("website-only session insert");
+
+        coaching.scan_survey_sessions().await;
+
+        let old_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 8",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("old request status");
+        assert_eq!(
+            old_status, "completed",
+            "die alte Anfrage schliesst trotzdem ab"
+        );
+
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
+        assert!(
+            removed
+                .iter()
+                .all(|(_, user_id, role_id, _)| !(*user_id == 903 && *role_id == COACHING_ACTIVE_ROLE_ID)),
+            "Rolle haette wegen der aktiven website-only Session nicht entfernt werden duerfen: {removed:?}"
+        );
+
+        let role_removed_at = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT role_removed_at FROM coaching.requests WHERE bot_request_id = 8",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("role_removed_at");
+        assert!(
+            role_removed_at.is_none(),
+            "role_removed_at darf nicht gesetzt sein, die Rolle haengt noch am Nutzer"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_session_setzt_role_removed_at_trotz_zweiter_offener_anfrage() {
+        // complete_session entfernt die Rolle direkt und unbedingt, BEVOR es
+        // sync_request_to_session_terminal aufruft. Haette der interne
+        // Aktivitaets-Guard dort (der fuer den Reconcile-Pfad gebaut wurde)
+        // auch diesen Aufruf blockiert, waere role_removed_at trotz real
+        // entfernter Rolle NULL geblieben — expire_roles haette die Zeile
+        // 48h spaeter erneut aufgegriffen und der Rolle mitten in einer
+        // inzwischen neuen Session gezogen. role_already_removed muss das
+        // verhindern.
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((904, vec![COACHING_ACTIVE_ROLE_ID]));
+        let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
+        let now = chrono::Utc::now();
+
+        for (bot_request_id, website_request_id, message_id) in
+            [(9i32, "web-complete-1", 8809i64), (10i32, "web-complete-2", 8810i64)]
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO coaching.requests(
+                    request_uid, bot_request_id, website_request_id, discord_user_id,
+                    discord_username, rank, subrank, hero, games_played, hours_played,
+                    availability, current_problems, ai_summary, status, created_at, updated_at,
+                    message_id, channel_id
+                )
+                VALUES (
+                    $1, $2, $3, 904,
+                    'Player904', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                    'abends', 'Laning', '**Analyse:** Tempo', 'matched', $4, $4,
+                    $5, $6
+                )
+                "#,
+            )
+            .bind(format!("website:{website_request_id}"))
+            .bind(bot_request_id)
+            .bind(website_request_id)
+            .bind(now)
+            .bind(message_id)
+            .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+            .execute(db.pool())
+            .await
+            .expect("request insert");
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, created_at
+            )
+            VALUES ('sess-complete-1', 9, 'web-complete-1', '12345', 904, 'Player904',
+                    500, 'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let session = SurveySession {
+            id: "sess-complete-1".to_string(),
+            coach_id: Some(12345),
+            user_id: 904,
+            voice_started_at: Some(now.timestamp() - 600),
+            request_id: 9,
+        };
+        let completed = coaching.complete_session(session, 12345).await;
+        assert!(completed, "complete_session sollte greifen");
+
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
+        assert!(
+            removed
+                .iter()
+                .any(|(_, user_id, role_id, _)| *user_id == 904 && *role_id == COACHING_ACTIVE_ROLE_ID),
+            "complete_session haette die Rolle direkt entfernen muessen: {removed:?}"
+        );
+
+        let role_removed_at = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT role_removed_at FROM coaching.requests WHERE bot_request_id = 9",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("role_removed_at");
+        assert!(
+            role_removed_at.is_some(),
+            "role_removed_at muss gesetzt sein, die Rolle wurde real entfernt, \
+             auch wenn Anfrage 10 fuer denselben Nutzer noch offen ist"
         );
     }
 

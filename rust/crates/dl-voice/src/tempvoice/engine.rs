@@ -2118,6 +2118,49 @@ impl TempVoiceEngine {
         owner_id: u64,
     ) {
         let Some(default) = self.store.get_default_preset(owner_id).await.ok().flatten() else {
+            // Kein gespeichertes Preset: Modus, Limit und Rang-Gate bleiben
+            // unangetastet — nur der Name folgt dem neuen Owner und seinem
+            // Rang, auch wenn die Lane schon aelter als das 45s-Fenster ist.
+            // Fixes #409, ohne fremden Lane-Zustand zu ueberschreiben (vorher
+            // wurde hier ein synthetisches Preset erfunden und der volle
+            // Preset-Apply-Pfad gefahren, was Limit und Rang-Gate der Lane
+            // fuer jeden Owner ohne gespeichertes Preset zurueckgesetzt hat).
+            // Baut wie set_lane_template ausschliesslich auf lane.base_name
+            // auf, nie auf dem live angezeigten Channel-Namen: der kann einen
+            // LiveMatch-Suffix tragen, den strip_suffixes nicht kennt, sonst
+            // landet "· 3/6 Im Match" mitten im neuen Namen und wird als
+            // Basis persistiert. Das Rang-Gate-Suffix haengt compose_name
+            // wieder an, statt es beim Claim stillschweigend zu verlieren
+            // (lane.min_rank bleibt unveraendert aktiv, nur die Anzeige hatte
+            // es vorher verloren).
+            let mode = self.lane_mode(channel_id).await.unwrap_or("casual");
+            let lane = {
+                let state = self.state.lock().await;
+                state.lanes.get(&channel_id).cloned()
+            };
+            let Some(lane) = lane else { return };
+            let base = self
+                .claimed_owner_lane_base(guild_id, owner_id, &lane.base_name, mode)
+                .await;
+            self.set_base_name(channel_id, &base).await;
+            let current = self.port.channel_name(guild_id, channel_id).await;
+            if current.as_deref().is_some_and(logic::has_live_suffix) {
+                // Nie ueber ein laufendes Match renamen (wie refresh_name /
+                // set_lane_template); base_name ist schon persistiert und
+                // greift, sobald der naechste Refresh nach Matchende laeuft.
+                return;
+            }
+            let in_minrank = lane
+                .category_id
+                .map(|c| self.config.minrank_categories.contains(&c))
+                .unwrap_or(false);
+            let desired = logic::compose_name(&base, &lane.min_rank, in_minrank);
+            if current.as_deref() != Some(desired.as_str()) {
+                let _ = self
+                    .port
+                    .rename_channel(channel_id, &desired, "TempVoice: Claim-Name")
+                    .await;
+            }
             return;
         };
         if let Some(err) = self
@@ -2139,6 +2182,53 @@ impl TempVoiceEngine {
                 .await
             {
                 tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Rang nicht angewendet");
+            }
+        }
+    }
+
+    /// Basis-Name wie beim normalen Lane-Apply: Modus plus Rang des neuen
+    /// Owners, bestehende Nummer bleibt. Baut auf lane.base_name auf, nie
+    /// auf dem live angezeigten Channel-Namen; das Rang-Gate-Suffix haengt
+    /// der Aufrufer ueber compose_name an.
+    async fn claimed_owner_lane_base(
+        &self,
+        guild_id: u64,
+        owner_id: u64,
+        lane_base: &str,
+        mode: &str,
+    ) -> String {
+        let number = logic::extract_lane_number(lane_base);
+        match mode {
+            "ranked" => {
+                let prefix = self
+                    .owner_rank_anchor(guild_id, owner_id)
+                    .await
+                    .map(|rank| format!("Ranked {rank}"))
+                    .unwrap_or_else(|| "Ranked".to_string());
+                match number {
+                    Some(number) => format!("{prefix} {number}"),
+                    None => prefix,
+                }
+            }
+            "street_brawl" => match number {
+                Some(number) => format!("Street Brawl {number}"),
+                None => "Street Brawl".to_string(),
+            },
+            _ => {
+                let name = match lane_base.find(" · ") {
+                    Some(idx) => lane_base[..idx].trim().to_string(),
+                    None => {
+                        if lane_base.trim().is_empty() {
+                            "Chill Lane".to_string()
+                        } else {
+                            lane_base.to_string()
+                        }
+                    }
+                };
+                match self.owner_rank_anchor(guild_id, owner_id).await {
+                    Some(rank) => format!("{name} · {rank}"),
+                    None => name,
+                }
             }
         }
     }
@@ -3261,6 +3351,190 @@ mod tests {
         assert_eq!(
             port.limits.lock().expect("lock").last().copied(),
             Some((lane_id, 3))
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_claim_setzt_name_und_rang_wie_beim_apply() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4243;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: 1,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Alte Lane".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: Some(CASUAL_STAGING),
+            })
+            .await
+            .expect("lane");
+        engine
+            .store
+            .set_rank_pref(200, "phantom", 3)
+            .await
+            .expect("rank pref");
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Alte Lane".to_string());
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(lane_id, CASUAL_CATEGORY);
+        engine.rehydrate().await;
+
+        engine.claim_owner(1, lane_id, 200).await;
+
+        assert_eq!(engine.lane_owner(lane_id).await, Some(200));
+        assert_eq!(
+            port.names.lock().expect("lock").get(&lane_id).cloned(),
+            Some("Alte Lane · Phantom 3".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_claim_setzt_ranked_name_auf_rang_des_neuen_owners() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4244;
+        let ranked_staging = 1412804671432818890;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: 1,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Ranked Initiate".to_string(),
+                category_id: TEMPVOICE_ONE_CATEGORY_ID,
+                source_staging_id: Some(ranked_staging),
+            })
+            .await
+            .expect("lane");
+        engine
+            .store
+            .set_rank_pref(200, "phantom", 3)
+            .await
+            .expect("rank pref");
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Ranked Initiate".to_string());
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(lane_id, TEMPVOICE_ONE_CATEGORY_ID);
+        engine.rehydrate().await;
+
+        engine.claim_owner(1, lane_id, 200).await;
+
+        assert_eq!(engine.lane_owner(lane_id).await, Some(200));
+        assert_eq!(
+            port.names.lock().expect("lock").get(&lane_id).cloned(),
+            Some("Ranked Phantom 3".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_claim_laesst_live_match_suffix_unangetastet_und_persistiert_base() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4245;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: 1,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Alte Lane".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: Some(CASUAL_STAGING),
+            })
+            .await
+            .expect("lane");
+        engine
+            .store
+            .set_rank_pref(200, "phantom", 3)
+            .await
+            .expect("rank pref");
+        let live_name = "Alte Lane • 3/6 Im Match".to_string();
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, live_name.clone());
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(lane_id, CASUAL_CATEGORY);
+        engine.rehydrate().await;
+
+        engine.claim_owner(1, lane_id, 200).await;
+
+        assert_eq!(engine.lane_owner(lane_id).await, Some(200));
+        // Waehrend des laufenden Matches bleibt der live angezeigte Name
+        // unangetastet (wie refresh_name / set_lane_template): kein Rename
+        // baut auf dem Live-Suffix auf und persistiert Muell als base_name.
+        assert_eq!(
+            port.names.lock().expect("lock").get(&lane_id).cloned(),
+            Some(live_name)
+        );
+        // Die neue Basis ist trotzdem gespeichert, greift beim naechsten
+        // Refresh nach Matchende.
+        let snapshot = engine.lane_preset_snapshot(lane_id).await;
+        assert_eq!(
+            snapshot.map(|(base, _, _)| base),
+            Some("Alte Lane · Phantom 3".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_claim_behaelt_rang_gate_suffix_der_lane() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4246;
+        let ranked_staging = 1412804671432818890;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: 1,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Ranked Initiate".to_string(),
+                category_id: RANKED_CATEGORY,
+                source_staging_id: Some(ranked_staging),
+            })
+            .await
+            .expect("lane");
+        engine
+            .store
+            .set_rank_pref(200, "phantom", 3)
+            .await
+            .expect("rank pref");
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Ranked Initiate".to_string());
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(lane_id, RANKED_CATEGORY);
+        engine.rehydrate().await;
+        engine
+            .set_min_rank(1, lane_id, "emissary")
+            .await
+            .expect("min rank");
+
+        engine.claim_owner(1, lane_id, 200).await;
+
+        assert_eq!(engine.lane_owner(lane_id).await, Some(200));
+        // Das Rang-Gate (lane.min_rank) bleibt aktiv und muss auch nach dem
+        // Claim ohne gespeichertes Preset im Namen sichtbar bleiben, sonst
+        // greift ein unsichtbares Gate, das der User nicht mehr erkennt.
+        assert_eq!(
+            port.names.lock().expect("lock").get(&lane_id).cloned(),
+            Some("Ranked Phantom 3 • ab Emissary".to_string())
         );
     }
 
