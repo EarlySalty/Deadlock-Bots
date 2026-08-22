@@ -5259,6 +5259,12 @@ impl Concierge {
         now: DateTime<Utc>,
     ) -> CommunityDbResult<Option<(String, SteckbriefRoute)>> {
         let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+        // Erste Transaktion: nur lesen. Sie endet vor dem LLM-Aufruf, denn
+        // begin_privacy_action haelt ein Row-Lock auf user_privacy. Bliebe sie
+        // ueber den Aufruf offen, haengt jeder parallele Loeschauftrag oder
+        // Opt-out desselben Nutzers bis zum Zeitlimit, und Migrationen mit
+        // lock_timeout = 2s brechen ab. Gespeichert wird unten in einer zweiten
+        // Transaktion, die den Zugang erneut prueft.
         let Some((db_user_id, mut tx)) = self.store.begin_privacy_action(user_id).await? else {
             return Ok(None);
         };
@@ -5301,6 +5307,8 @@ impl Concierge {
                 _ => None,
             }
         }));
+        // Lock weg, bevor der LLM-Aufruf startet. Gelesen ist alles.
+        tx.commit().await?;
         let draft = if let Some(ai) = &self.ai {
             tokio::time::timeout(
                 self.config.ai_timeout,
@@ -5329,6 +5337,17 @@ impl Concierge {
             route.channel_id(),
             "concierge_profiles.pending_steckbrief_channel_id",
         )?;
+        // Zweite Transaktion, kurz und ohne Netzaufruf darin. Der Zugang wird
+        // erneut geprueft: wer waehrend des LLM-Aufrufs geloescht oder
+        // widersprochen hat, bekommt hier kein Lock mehr und nichts wird
+        // gespeichert.
+        let Some((db_user_id_jetzt, mut tx)) = self.store.begin_privacy_action(user_id).await?
+        else {
+            return Ok(None);
+        };
+        if db_user_id_jetzt != db_user_id {
+            return Ok(None);
+        }
         if !save_pending_steckbrief_tx(&mut tx, db_user_id, &draft, channel_id, false, now).await? {
             return Err(sqlx::Error::RowNotFound.into());
         }

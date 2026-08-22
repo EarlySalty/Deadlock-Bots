@@ -464,7 +464,14 @@ fn pair_abschluss_reply(text: &str) -> BridgeReply {
         components: Some(json!([{
             "type": 17,
             "accent_color": ACCENT_GOLD,
-            "components": [{ "type": 10, "content": text }],
+            // Der Breiten-Streifen bleibt drin: die Ursprungs-DM haengt ihn als
+            // Anhang an, ein Update ohne `attachments`-Feld laesst ihn stehen,
+            // und Discord weist eine Components-V2-Nachricht mit einem nicht
+            // referenzierten Anhang mit 400 zurueck.
+            "components": [
+                crate::router::dm_width_divider(),
+                { "type": 10, "content": text }
+            ],
         }])),
         update_message: true,
         message_flags: Some(COMPONENTS_V2_FLAG),
@@ -1131,6 +1138,14 @@ mod tests {
         assert!(karte.contains(NEVER_REPLY));
         assert!(reply.update_message);
         assert!(!karte.contains(&never_custom_id()));
+        // Die Frage-DM haengt den Breiten-Streifen als Anhang an. Ein Update
+        // ohne `attachments`-Feld laesst ihn stehen, und eine
+        // Components-V2-Nachricht mit unreferenziertem Anhang weist Discord mit
+        // 400 zurueck: dann bliebe die alte Karte samt Buttons stehen.
+        assert!(
+            karte.contains(&format!("attachment://{}", crate::router::DM_WIDTH_IMAGE)),
+            "Ersatzkarte referenziert den Anhang nicht: {karte}"
+        );
         assert_eq!(port.state.lock().expect("lock").never, vec![10]);
     }
 

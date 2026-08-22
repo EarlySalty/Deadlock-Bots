@@ -385,7 +385,16 @@ fn minutes_label(seconds: i64) -> String {
 /// `kommentar_zu` hängt den Kommentar-Knopf wieder an, wenn nach einer
 /// Bewertung noch Freitext sinnvoll ist.
 fn abschluss_reply(text: &str, kommentar_zu: Option<u64>) -> BridgeReply {
-    let mut inhalt = vec![json!({ "type": 10, "content": text })];
+    // Der Breiten-Streifen muss mit: die Ursprungs-DM haengt ihn als Anhang an
+    // (`dm_body`), und ein Update ohne `attachments`-Feld laesst ihn an der
+    // Nachricht. Eine Components-V2-Nachricht mit einem Anhang, den keine
+    // Komponente referenziert, weist Discord mit 400 zurueck. Ohne diese Zeile
+    // scheitert also der Kartentausch, der Nutzer sieht "Interaktion
+    // fehlgeschlagen" und die alte Karte mit allen Buttons bleibt stehen.
+    let mut inhalt = vec![
+        crate::router::dm_width_divider(),
+        json!({ "type": 10, "content": text }),
+    ];
     if let Some(mate_id) = kommentar_zu {
         inhalt.push(json!({ "type": 14, "divider": false, "spacing": 1 }));
         inhalt.push(json!({ "type": 1, "components": [
@@ -1004,6 +1013,36 @@ mod tests {
             !text.contains(&rate_custom_id(RATING_AGAIN, 2, 3, 600)),
             "die Bewertungs-Knoepfe muessen verschwinden: {text}"
         );
+    }
+
+    /// Die Ursprungs-DM haengt den Breiten-Streifen als Anhang an, und ein
+    /// Update ohne `attachments`-Feld laesst ihn an der Nachricht. Referenziert
+    /// die neue Karte ihn nicht, antwortet Discord mit 400 und der Tausch
+    /// findet nie statt.
+    #[tokio::test]
+    async fn die_ersatzkarte_referenziert_den_breiten_anhang() {
+        let port = TestPort::new(TestState::default());
+        let survey = MateSurvey::new(port.clone());
+        for interaktion in [
+            BridgeInteraction {
+                custom_id: never_custom_id(),
+                user_id: 1,
+                ..BridgeInteraction::default()
+            },
+            BridgeInteraction {
+                custom_id: rate_custom_id(RATING_OK, 2, 3, 600),
+                user_id: 1,
+                ..BridgeInteraction::default()
+            },
+        ] {
+            let custom_id = interaktion.custom_id.clone();
+            let reply = survey.handle_interaction(interaktion).await;
+            let text = serde_json::to_string(&reply.components).expect("components");
+            assert!(
+                text.contains(&format!("attachment://{}", crate::router::DM_WIDTH_IMAGE)),
+                "Ersatzkarte fuer {custom_id} referenziert den Anhang nicht: {text}"
+            );
+        }
     }
 
     /// Der sichtbare Text steckt nach dem Klick in der Components-V2-Karte,
