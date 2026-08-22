@@ -267,14 +267,16 @@ impl LanePairing {
                 Ok(()) => {
                     self.port
                         .log_decision(interaction.user_id, "abgelehnt", "nie_fragen_gewaehlt");
-                    BridgeReply::ephemeral_text(NEVER_REPLY)
+                    // Karte ersetzen statt antworten: sonst bleiben die Buttons
+                    // stehen und jeder weitere Klick bringt eine neue Nachricht.
+                    pair_abschluss_reply(NEVER_REPLY)
                 }
                 Err(_) => BridgeReply::ephemeral_text(NEVER_FAILED_REPLY),
             },
             PairAction::No { .. } => {
                 self.port
                     .log_decision(interaction.user_id, "abgelehnt", "nein_gewaehlt");
-                BridgeReply::ephemeral_text(NO_REPLY)
+                pair_abschluss_reply(NO_REPLY)
             }
             PairAction::Later { other_user } => {
                 // Kein Nein: die Sperren werden verkürzt, damit der Bot es
@@ -453,6 +455,22 @@ pub fn no_custom_id(other_user: u64) -> String {
 
 pub fn later_custom_id(other_user: u64) -> String {
     format!("{CUSTOM_ID_PREFIX}{LATER_ACTION}:{other_user}")
+}
+
+/// Ersetzt die Frage-Karte durch das Ergebnis, ohne Buttons. Danach ist ein
+/// zweiter Klick auf dieselbe Karte gar nicht mehr möglich.
+fn pair_abschluss_reply(text: &str) -> BridgeReply {
+    BridgeReply {
+        components: Some(json!([{
+            "type": 17,
+            "accent_color": ACCENT_GOLD,
+            "components": [{ "type": 10, "content": text }],
+        }])),
+        update_message: true,
+        message_flags: Some(COMPONENTS_V2_FLAG),
+        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+        ..BridgeReply::default()
+    }
 }
 
 pub fn never_custom_id() -> String {
@@ -1108,7 +1126,11 @@ mod tests {
                 ..BridgeInteraction::default()
             })
             .await;
-        assert_eq!(reply.content.as_deref(), Some(NEVER_REPLY));
+        // Der Text steckt jetzt in der ersetzten Karte, die Buttons sind weg.
+        let karte = serde_json::to_string(&reply.components).expect("components");
+        assert!(karte.contains(NEVER_REPLY));
+        assert!(reply.update_message);
+        assert!(!karte.contains(&never_custom_id()));
         assert_eq!(port.state.lock().expect("lock").never, vec![10]);
     }
 

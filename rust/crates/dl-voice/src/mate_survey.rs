@@ -170,7 +170,9 @@ impl MateSurvey {
                 Ok(()) => {
                     self.port
                         .log_decision(interaction.user_id, "abgelehnt", "nie_fragen_gewaehlt");
-                    BridgeReply::ephemeral_text(NEVER_REPLY)
+                    // Karte ersetzen statt antworten: sonst bleiben die Buttons
+                    // stehen und jeder weitere Klick bringt eine neue Nachricht.
+                    abschluss_reply(NEVER_REPLY, None)
                 }
                 Err(_) => BridgeReply::ephemeral_text(SAVE_FAILED_REPLY),
             },
@@ -199,7 +201,10 @@ impl MateSurvey {
                             "bewertet",
                             rating_reason(rating),
                         );
-                        BridgeReply::ephemeral_text(rating_thanks(rating))
+                        // Bewertungs-Buttons verschwinden, der Kommentar-Knopf
+                        // bleibt: danach ist die Frage beantwortet, aber wer
+                        // noch etwas sagen will, kann das.
+                        abschluss_reply(rating_thanks(rating), Some(mate_id))
                     }
                     Err(error) => {
                         tracing::warn!(%error, user_id = interaction.user_id, "Mitspieler-Umfrage: Bewertung nicht speicherbar");
@@ -371,6 +376,33 @@ fn minutes_label(seconds: i64) -> String {
         return format!("{hours} Stunden und {rest} Minuten");
     }
     format!("{minutes} Minuten")
+}
+
+/// Ersetzt die Umfrage-Karte durch das Ergebnis. Ohne Buttons ist die Frage
+/// erledigt; ein zweiter Klick auf dieselbe Karte ist damit gar nicht erst
+/// möglich.
+///
+/// `kommentar_zu` hängt den Kommentar-Knopf wieder an, wenn nach einer
+/// Bewertung noch Freitext sinnvoll ist.
+fn abschluss_reply(text: &str, kommentar_zu: Option<u64>) -> BridgeReply {
+    let mut inhalt = vec![json!({ "type": 10, "content": text })];
+    if let Some(mate_id) = kommentar_zu {
+        inhalt.push(json!({ "type": 14, "divider": false, "spacing": 1 }));
+        inhalt.push(json!({ "type": 1, "components": [
+            { "type": 2, "style": 2, "label": "Kommentar dazu", "custom_id": comment_custom_id(mate_id) }
+        ]}));
+    }
+    BridgeReply {
+        components: Some(json!([{
+            "type": 17,
+            "accent_color": ACCENT_GOLD,
+            "components": inhalt,
+        }])),
+        update_message: true,
+        message_flags: Some(COMPONENTS_V2_FLAG),
+        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+        ..BridgeReply::default()
+    }
 }
 
 /// Die Umfrage-DM. Erwähnungen bleiben stumm, gepingt wird niemand.
@@ -823,7 +855,11 @@ mod tests {
                 ..BridgeInteraction::default()
             })
             .await;
-        assert_eq!(reply.content.as_deref(), Some(THANKS_AGAIN));
+        assert!(karte_enthaelt(&reply, THANKS_AGAIN));
+        // Nach der Wahl bleibt nur der Kommentar-Knopf stehen.
+        let karte = serde_json::to_string(&reply.components).expect("components");
+        assert!(karte.contains(&comment_custom_id(2)));
+        assert!(!karte.contains(&rate_custom_id(RATING_AGAIN, 2, 99, 1800)));
         let ratings = port.state.lock().expect("lock").ratings.clone();
         assert_eq!(ratings.len(), 1);
         assert_eq!(ratings[0].rater_id, 1);
@@ -843,7 +879,8 @@ mod tests {
                 ..BridgeInteraction::default()
             })
             .await;
-        assert_eq!(reply.content.as_deref(), Some(THANKS_RATHER_NOT));
+        assert!(karte_enthaelt(&reply, THANKS_RATHER_NOT));
+        assert!(reply.update_message, "Karte wird ersetzt, nicht ergänzt");
     }
 
     #[tokio::test]
@@ -916,7 +953,34 @@ mod tests {
                 ..BridgeInteraction::default()
             })
             .await;
-        assert_eq!(reply.content.as_deref(), Some(NEVER_REPLY));
+        assert!(karte_enthaelt(&reply, NEVER_REPLY));
         assert_eq!(port.state.lock().expect("lock").never, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn nach_dem_klick_bleiben_keine_ablehn_buttons_stehen() {
+        let port = TestPort::new(TestState::default());
+        let survey = MateSurvey::new(port.clone());
+        let reply = survey
+            .handle_interaction(BridgeInteraction {
+                custom_id: never_custom_id(),
+                user_id: 1,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert!(reply.update_message, "die Karte wird ersetzt");
+        let text = serde_json::to_string(&reply.components).expect("components");
+        assert!(
+            !text.contains(&never_custom_id()),
+            "kein zweiter Klick möglich: {text}"
+        );
+    }
+
+    /// Der sichtbare Text steckt nach dem Klick in der Components-V2-Karte,
+    /// nicht mehr in `content`.
+    fn karte_enthaelt(reply: &BridgeReply, text: &str) -> bool {
+        serde_json::to_string(&reply.components)
+            .unwrap_or_default()
+            .contains(text)
     }
 }
