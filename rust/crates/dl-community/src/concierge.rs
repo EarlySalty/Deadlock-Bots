@@ -79,10 +79,16 @@ const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3)
 /// Antworten als `llm_error_gap`, obwohl der Anbieter gesund war.
 ///
 /// 45 Sekunden ist zugleich das Zeitlimit, das der HTTP-Client in
-/// `dl_ai::chat_provider` pro Versuch setzt. Beide Ebenen liegen damit gleichauf:
-/// die Notbremse schneidet keinen laufenden Versuch ab, den der Anbieter noch
-/// beantworten wuerde. Ueber `DL_CONCIERGE_AI_TIMEOUT_SECS` anpassbar.
+/// `dl_ai::chat_provider` pro Versuch setzt. Der erste Versuch laeuft damit ganz
+/// durch, die Notbremse schneidet ihn nicht ab. Die Wiederholungen darunter
+/// (`DEFAULT_MAX_RETRIES = 2`) erreicht sie nicht mehr: wer sie braucht, setzt
+/// `DL_CONCIERGE_AI_TIMEOUT_SECS` ueber die Retry-Leiter, etwa auf 100.
+/// Werte oberhalb von `CONCIERGE_AI_TIMEOUT_MAX_SECS` werden gedeckelt, damit
+/// ein Tippfehler die Notbremse nicht lautlos abschaltet.
 const CONCIERGE_AI_TIMEOUT_DEFAULT_SECS: u64 = 45;
+/// Obergrenze fuer `DL_CONCIERGE_AI_TIMEOUT_SECS`: drei Minuten decken die volle
+/// Retry-Leiter ab, alles darueber waere keine Notbremse mehr.
+const CONCIERGE_AI_TIMEOUT_MAX_SECS: u64 = 180;
 const SCHEDULER_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 
 pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server, ich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten Weg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich erstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nWas du mir schreibst, merke ich mir nur, damit ich im Gespräch nicht bei null anfange. Wenn du \"stopp\" schreibst, setzt das deinen globalen Datenschutz-Opt-out: Ich speichere dann keinen neuen Gesprächsverlauf mehr und melde mich nicht mehr von selbst, direkte Fragen beantworte ich weiter, nur eben ohne Verlauf. Mit /datenschutz-optin erlaubst du die Speicherung später jederzeit wieder.";
@@ -279,6 +285,7 @@ impl ConciergeConfig {
             ai_timeout: StdDuration::from_secs(
                 env_u64(&lookup, "DL_CONCIERGE_AI_TIMEOUT_SECS")
                     .filter(|secs| *secs > 0)
+                    .map(|secs| secs.min(CONCIERGE_AI_TIMEOUT_MAX_SECS))
                     .unwrap_or(CONCIERGE_AI_TIMEOUT_DEFAULT_SECS),
             ),
             free_voice: env_bool(&lookup, "CONCIERGE_FREE_VOICE", true),
@@ -7093,10 +7100,26 @@ mod tests {
     #[test]
     fn ai_timeout_ist_per_env_einstellbar() {
         let config = ConciergeConfig::from_env(|key| match key {
-            "DL_CONCIERGE_AI_TIMEOUT_SECS" => Some("45".to_string()),
+            "DL_CONCIERGE_AI_TIMEOUT_SECS" => Some("90".to_string()),
             _ => None,
         });
-        assert_eq!(config.ai_timeout, StdDuration::from_secs(45));
+        assert_eq!(config.ai_timeout, StdDuration::from_secs(90));
+        assert_ne!(
+            config.ai_timeout,
+            StdDuration::from_secs(CONCIERGE_AI_TIMEOUT_DEFAULT_SECS)
+        );
+    }
+
+    #[test]
+    fn ai_timeout_deckelt_absurde_env_werte() {
+        let config = ConciergeConfig::from_env(|key| match key {
+            "DL_CONCIERGE_AI_TIMEOUT_SECS" => Some("99999999".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            config.ai_timeout,
+            StdDuration::from_secs(CONCIERGE_AI_TIMEOUT_MAX_SECS)
+        );
     }
 
     #[test]

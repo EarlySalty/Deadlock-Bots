@@ -389,7 +389,8 @@ fn abschluss_reply(text: &str, kommentar_zu: Option<u64>) -> BridgeReply {
     if let Some(mate_id) = kommentar_zu {
         inhalt.push(json!({ "type": 14, "divider": false, "spacing": 1 }));
         inhalt.push(json!({ "type": 1, "components": [
-            { "type": 2, "style": 2, "label": "Kommentar dazu", "custom_id": comment_custom_id(mate_id) }
+            { "type": 2, "style": 2, "label": "Kommentar dazu", "custom_id": comment_custom_id(mate_id) },
+            { "type": 2, "style": 2, "label": "Nicht mehr fragen", "custom_id": never_custom_id() }
         ]}));
     }
     BridgeReply {
@@ -973,6 +974,35 @@ mod tests {
         assert!(
             !text.contains(&never_custom_id()),
             "kein zweiter Klick möglich: {text}"
+        );
+    }
+
+    /// Wer bewertet, ist kooperativ. Genau dieser Person den schnellsten Weg zu
+    /// "frag mich nie wieder" aus der Karte zu nehmen, waere ein stiller
+    /// Verlust einer Datenschutz-Wahl.
+    #[tokio::test]
+    async fn nach_der_bewertung_bleibt_der_opt_out_erreichbar() {
+        let port = TestPort::new(TestState::default());
+        let survey = MateSurvey::new(port.clone());
+        let reply = survey
+            .handle_interaction(BridgeInteraction {
+                custom_id: rate_custom_id(RATING_AGAIN, 2, 3, 600),
+                user_id: 1,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        let text = serde_json::to_string(&reply.components).expect("components");
+        assert!(
+            text.contains(&never_custom_id()),
+            "Opt-out fehlt nach der Bewertung: {text}"
+        );
+        assert!(
+            text.contains(&comment_custom_id(2)),
+            "Kommentar-Knopf fehlt nach der Bewertung: {text}"
+        );
+        assert!(
+            !text.contains(&rate_custom_id(RATING_AGAIN, 2, 3, 600)),
+            "die Bewertungs-Knoepfe muessen verschwinden: {text}"
         );
     }
 
