@@ -65,7 +65,7 @@ pub const REGELWERK_SECTION_SPIELKONTEXT: &str = r#"**🎮 Im Spielkontext erlau
 Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay — solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein" — dann ist gut."#;
 pub const REGELWERK_SECTION_MODERATION: &str = "**🛡️ Moderation & Konsequenzen**\nProbleme oder Streit? Ping @Moderator oder @Owner — oder mach ein Ticket in <#1459628609705738539> auf, wenn's diskreter sein soll.\nKonsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann.";
 pub const REGELWERK_SECTION_WEGWEISER: &str = "**🧭 Schnell zurechtfinden**\n- <#1398021105339334666> — Steam verknüpfen, Rang eintragen\n- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n- <#1491953161747955853> — Fragen über Server, Bots und Concierge\n- <#1426220702054355077> — Community-Fragen und Deadlock-Invite\n- <#1522769149208821881> — Mitspieler finden";
-pub const REGELWERK_SECTION_DATENSCHUTZ: &str = "**🔒 Datenschutz & KI-Moderation**\n\n**Moderation & KI**\nNachrichten in moderierten Kanälen werden automatisch auf Regelverstöße geprüft. Dazu wird der Nachrichtentext an externe KI-Dienstleister (u. a. Fireworks AI) übermittelt. Diese verarbeiten die Inhalte nur zur Analyse in unserem Auftrag und trainieren damit keine KI-Modelle.\n\n**Speicherung**\nNormale Nachrichten werden nicht gespeichert, nur im Moment geprüft. Nur bei einem Verstoß speichern wir einen Moderationsfall (Inhalt, User-ID, Zeitpunkt, Ergebnis). Der Nachrichteninhalt wird nach 90 Tagen automatisch gelöscht.\n\n**Rechte, Discord-ToS & Kontakt**\nAuskunft, Löschung und Opt-out jederzeit über /datenschutz oder einen Moderator/Owner. Zusätzlich gelten die Discord-Nutzungsbedingungen (https://discord.com/terms) und Community-Richtlinien (https://discord.com/guidelines). Fragen: <#1459628609705738539> oder an einen Moderator/Owner.";
+pub const REGELWERK_SECTION_DATENSCHUTZ: &str = "**🔒 Datenschutz & KI-Moderation**\n\n**Moderation & KI**\nNachrichten in moderierten Kanälen werden automatisch auf Regelverstöße geprüft. Dazu wird der Nachrichtentext an externe KI-Dienstleister (u. a. Fireworks AI) übermittelt. Diese verarbeiten die Inhalte nur zur Analyse in unserem Auftrag und trainieren damit keine KI-Modelle.\n\n**Speicherung**\nNormale Nachrichten werden nicht gespeichert, nur im Moment geprüft. Nur bei einem Verstoß speichern wir einen Moderationsfall (Inhalt, User-ID, Zeitpunkt, Ergebnis). Der Nachrichteninhalt wird nach 90 Tagen automatisch gelöscht.\n\n**Rechte, Discord-ToS & Kontakt**\nAuskunft, Löschung und Opt-out jederzeit über /datenschutz oder einen Moderator/Owner. Zusätzlich gelten die Discord-Nutzungsbedingungen (https://discord.com/terms) und Community-Richtlinien (https://discord.com/guidelines). Fragen: <#1459628609705738539> oder an einen Moderator/Owner.\n\n**Unterlagen zum Nachlesen**\nDie Auftragsverarbeitung unseres KI-Dienstleisters kannst du direkt im Browser öffnen: [Fireworks AI (PDF)](https://deutsche-deadlock-community.de/dokus/datenschutz/fireworks-ai-auftragsverarbeitung.pdf).";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegelwerkPublishOutput {
@@ -1013,6 +1013,13 @@ moderation = "Runtime Moderation"
             fallback.embeds[0]["description"],
             REGELWERK_SECTION_MODERATION
         );
+    }
+
+    #[test]
+    fn datenschutz_sektion_verlinkt_avv_pdf_im_browser() {
+        assert!(REGELWERK_SECTION_DATENSCHUTZ.contains(
+            "https://deutsche-deadlock-community.de/dokus/datenschutz/fireworks-ai-auftragsverarbeitung.pdf"
+        ));
     }
 
     #[test]
