@@ -1587,6 +1587,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 coach_id,
                 session_id.as_deref(),
                 user_id,
+                false,
             )
             .await;
         }
@@ -1599,6 +1600,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         coach_id: Option<u64>,
         session_id: Option<&str>,
         user_id: Option<u64>,
+        role_already_removed: bool,
     ) {
         let now = chrono::Utc::now();
         let (request_status, headline, status_line, accent) = if session_status == "cancelled" {
@@ -1617,28 +1619,34 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             )
         };
         // Aktiv-Rolle wirklich entfernen, nicht nur role_removed_at setzen:
-        // complete_session raeumt die Rolle vor genau diesem Aufruf weg, der
-        // Reconcile-Pfad (Session endete ausserhalb des Claim-Buttons) hatte
-        // dafuer keinen User-Kontext und liess die Rolle stehen, wodurch
-        // expire_roles sie nie wieder sah (Filter role_removed_at IS NULL).
-        // Die Rolle ist global pro Guild, kein Per-Request-Objekt: erst
-        // pruefen, ob derselbe Nutzer noch eine andere offene Anfrage oder
-        // aktive Session hat, sonst reisst der 60s-Reconcile-Tick einer alten
-        // Anfrage die Rolle mitten aus einer neuen, laufenden Session.
-        let mut role_actually_removed = false;
-        if let Some(user_id) = user_id {
-            // IS DISTINCT FROM statt !=: bot_request_id ist in beiden
-            // Tabellen nullable (websiteseitige Requests/Sessions werden vor
-            // dem Matching nur ueber website_request_id verknuepft). Mit !=
-            // liefert eine NULL-Zeile SQL-NULL statt TRUE und faellt aus
-            // beiden EXISTS heraus — genau die andere offene Aktivitaet, vor
-            // der dieser Guard schuetzen soll, waere dann unsichtbar.
-            let still_has_open_activity = match (
-                u64_to_i64(user_id, "discord_user_id"),
-                i64_to_i32(request_id, "request_id"),
-            ) {
-                (Ok(user_id_i64), Ok(request_id_i32)) => sqlx::query_scalar::<_, bool>(
-                    r#"
+        // complete_session raeumt die Rolle vor genau diesem Aufruf weg (und
+        // meldet das ueber role_already_removed durch, statt hier ein
+        // zweites Mal zu pruefen — die Rolle ist zu diesem Zeitpunkt schon
+        // weg, der Guard unten wuerde sie sonst faelschlich stehen lassen und
+        // role_removed_at nie setzen). Der Reconcile-Pfad (Session endete
+        // ausserhalb des Claim-Buttons) hatte weder Vorab-Entfernung noch
+        // User-Kontext und liess die Rolle stehen, wodurch expire_roles sie
+        // nie wieder sah (Filter role_removed_at IS NULL).
+        // Die Rolle ist global pro Guild, kein Per-Request-Objekt: fuer den
+        // Reconcile-Fall erst pruefen, ob derselbe Nutzer noch eine andere
+        // offene Anfrage oder aktive Session hat, sonst reisst der
+        // 60s-Reconcile-Tick einer alten Anfrage die Rolle mitten aus einer
+        // neuen, laufenden Session.
+        let mut role_actually_removed = role_already_removed;
+        if !role_already_removed {
+            if let Some(user_id) = user_id {
+                // IS DISTINCT FROM statt !=: bot_request_id ist in beiden
+                // Tabellen nullable (websiteseitige Requests/Sessions werden vor
+                // dem Matching nur ueber website_request_id verknuepft). Mit !=
+                // liefert eine NULL-Zeile SQL-NULL statt TRUE und faellt aus
+                // beiden EXISTS heraus — genau die andere offene Aktivitaet, vor
+                // der dieser Guard schuetzen soll, waere dann unsichtbar.
+                let still_has_open_activity = match (
+                    u64_to_i64(user_id, "discord_user_id"),
+                    i64_to_i32(request_id, "request_id"),
+                ) {
+                    (Ok(user_id_i64), Ok(request_id_i32)) => sqlx::query_scalar::<_, bool>(
+                        r#"
                     SELECT EXISTS (
                         SELECT 1
                           FROM coaching.requests
@@ -1653,23 +1661,24 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                            AND bot_request_id IS DISTINCT FROM $2
                     )
                     "#,
-                )
-                .bind(user_id_i64)
-                .bind(request_id_i32)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(true), // im Zweifel Rolle stehen lassen, nicht faelschlich abnehmen
-                _ => true,
-            };
-            if !still_has_open_activity {
-                self.remove_role_if_present(
-                    self.guild_id,
-                    user_id,
-                    COACHING_ACTIVE_ROLE_ID,
-                    "Coaching-Anfrage automatisch geschlossen",
-                )
-                .await;
-                role_actually_removed = true;
+                    )
+                    .bind(user_id_i64)
+                    .bind(request_id_i32)
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap_or(true), // im Zweifel Rolle stehen lassen, nicht faelschlich abnehmen
+                    _ => true,
+                };
+                if !still_has_open_activity {
+                    self.remove_role_if_present(
+                        self.guild_id,
+                        user_id,
+                        COACHING_ACTIVE_ROLE_ID,
+                        "Coaching-Anfrage automatisch geschlossen",
+                    )
+                    .await;
+                    role_actually_removed = true;
+                }
             }
         }
         if let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") {
@@ -1909,12 +1918,21 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         }
 
         let rid = session.request_id;
+        // role_already_removed=true: die Rolle ist gerade eben schon per
+        // remove_role_if_present oben in diesem Aufruf entfernt worden. Ohne
+        // dieses Flag wuerde der interne Guard in
+        // sync_request_to_session_terminal (der auf offene Zweitanfragen
+        // prueft) role_removed_at faelschlich NULL lassen, wenn derselbe
+        // Nutzer noch eine andere Anfrage offen hat — obwohl die Rolle real
+        // schon weg ist. expire_roles haette die Zeile 48h spaeter erneut
+        // aufgegriffen und der Rolle mitten in einer neuen Session gezogen.
         self.sync_request_to_session_terminal(
             rid,
             "completed",
             Some(coach_id),
             Some(session.id.as_str()),
             Some(session.user_id),
+            true,
         )
         .await;
         true
@@ -4251,7 +4269,11 @@ mod pg_tests {
         .expect("request status");
         assert_eq!(request_status, "completed");
 
-        let removed = port.removed_roles.lock().expect("removed_roles lock").clone();
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
         assert!(
             removed
                 .iter()
@@ -4370,11 +4392,16 @@ mod pg_tests {
             "die alte Anfrage schliesst trotzdem ab"
         );
 
-        let removed = port.removed_roles.lock().expect("removed_roles lock").clone();
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
         assert!(
             removed
                 .iter()
-                .all(|(_, user_id, role_id, _)| !(*user_id == 902 && *role_id == COACHING_ACTIVE_ROLE_ID)),
+                .all(|(_, user_id, role_id, _)| !(*user_id == 902
+                    && *role_id == COACHING_ACTIVE_ROLE_ID)),
             "Rolle haette wegen Anfrage 7 nicht entfernt werden duerfen: {removed:?}"
         );
     }
@@ -4468,7 +4495,11 @@ mod pg_tests {
             "die alte Anfrage schliesst trotzdem ab"
         );
 
-        let removed = port.removed_roles.lock().expect("removed_roles lock").clone();
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
         assert!(
             removed
                 .iter()
@@ -4485,6 +4516,104 @@ mod pg_tests {
         assert!(
             role_removed_at.is_none(),
             "role_removed_at darf nicht gesetzt sein, die Rolle haengt noch am Nutzer"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_session_setzt_role_removed_at_trotz_zweiter_offener_anfrage() {
+        // complete_session entfernt die Rolle direkt und unbedingt, BEVOR es
+        // sync_request_to_session_terminal aufruft. Haette der interne
+        // Aktivitaets-Guard dort (der fuer den Reconcile-Pfad gebaut wurde)
+        // auch diesen Aufruf blockiert, waere role_removed_at trotz real
+        // entfernter Rolle NULL geblieben — expire_roles haette die Zeile
+        // 48h spaeter erneut aufgegriffen und der Rolle mitten in einer
+        // inzwischen neuen Session gezogen. role_already_removed muss das
+        // verhindern.
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((904, vec![COACHING_ACTIVE_ROLE_ID]));
+        let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
+        let now = chrono::Utc::now();
+
+        for (bot_request_id, website_request_id, message_id) in
+            [(9i32, "web-complete-1", 8809i64), (10i32, "web-complete-2", 8810i64)]
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO coaching.requests(
+                    request_uid, bot_request_id, website_request_id, discord_user_id,
+                    discord_username, rank, subrank, hero, games_played, hours_played,
+                    availability, current_problems, ai_summary, status, created_at, updated_at,
+                    message_id, channel_id
+                )
+                VALUES (
+                    $1, $2, $3, 904,
+                    'Player904', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                    'abends', 'Laning', '**Analyse:** Tempo', 'matched', $4, $4,
+                    $5, $6
+                )
+                "#,
+            )
+            .bind(format!("website:{website_request_id}"))
+            .bind(bot_request_id)
+            .bind(website_request_id)
+            .bind(now)
+            .bind(message_id)
+            .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+            .execute(db.pool())
+            .await
+            .expect("request insert");
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, website_request_id, coach_id, discord_user_id,
+                discord_username, discord_channel_id, status, created_at
+            )
+            VALUES ('sess-complete-1', 9, 'web-complete-1', '12345', 904, 'Player904',
+                    500, 'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let session = SurveySession {
+            id: "sess-complete-1".to_string(),
+            coach_id: Some(12345),
+            user_id: 904,
+            voice_started_at: Some(now.timestamp() - 600),
+            request_id: 9,
+        };
+        let completed = coaching.complete_session(session, 12345).await;
+        assert!(completed, "complete_session sollte greifen");
+
+        let removed = port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .clone();
+        assert!(
+            removed
+                .iter()
+                .any(|(_, user_id, role_id, _)| *user_id == 904 && *role_id == COACHING_ACTIVE_ROLE_ID),
+            "complete_session haette die Rolle direkt entfernen muessen: {removed:?}"
+        );
+
+        let role_removed_at = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT role_removed_at FROM coaching.requests WHERE bot_request_id = 9",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("role_removed_at");
+        assert!(
+            role_removed_at.is_some(),
+            "role_removed_at muss gesetzt sein, die Rolle wurde real entfernt, \
+             auch wenn Anfrage 10 fuer denselben Nutzer noch offen ist"
         );
     }
 
