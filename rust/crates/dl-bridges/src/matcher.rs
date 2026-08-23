@@ -375,6 +375,22 @@ impl MatcherConfig {
 type ExactIndex<'m> = HashMap<String, Vec<&'m MemberLite>>;
 type BucketIndex<'m> = HashMap<String, Vec<(String, &'m MemberLite)>>;
 
+/// Was der Scan mit einem erstmals gesehenen Streamer gemacht hat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanOutcome {
+    AutoLinked { discord_user_id: u64 },
+    Review { discord_user_id: u64 },
+    NoMatch,
+    Failed,
+}
+
+/// Ein in diesem Lauf erstmals geprüfter Streamer samt Ergebnis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanEntryResult {
+    pub login: String,
+    pub outcome: ScanOutcome,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ScanStats {
     pub checked: u64,
@@ -383,8 +399,8 @@ pub struct ScanStats {
     pub skipped: u64,
     pub errors: u64,
     pub ai_calls: u64,
-    /// Alle in diesem Lauf erstmals geprüften Logins (für das Summary-Embed).
-    pub new_logins: Vec<String>,
+    /// Alle in diesem Lauf erstmals geprüften Streamer mit Ausgang (Summary-Embed).
+    pub new_streamers: Vec<ScanEntryResult>,
 }
 
 pub struct Matcher {
@@ -464,6 +480,16 @@ impl Matcher {
     }
 
     pub async fn run_scan(self: &Arc<Self>, trigger: &str) -> ScanStats {
+        self.run_scan_inner(trigger, false).await
+    }
+
+    /// Wie [`Self::run_scan`], schweigt aber bei einem Lauf ohne neuen Streamer
+    /// und ohne Fehler (der 6h-Loop soll den Kanal nicht mit Nullen fluten).
+    pub async fn run_scan_quiet(self: &Arc<Self>, trigger: &str) -> ScanStats {
+        self.run_scan_inner(trigger, true).await
+    }
+
+    async fn run_scan_inner(self: &Arc<Self>, trigger: &str, quiet_when_empty: bool) -> ScanStats {
         let _guard = self.scan_lock.lock().await;
         let mut stats = ScanStats::default();
         if !self.config.enabled {
@@ -516,7 +542,11 @@ impl Matcher {
                 }
             }
             stats.checked += 1;
-            stats.new_logins.push(login.clone());
+            let entry_idx = stats.new_streamers.len();
+            stats.new_streamers.push(ScanEntryResult {
+                login: login.clone(),
+                outcome: ScanOutcome::NoMatch,
+            });
             let is_monitored = entry
                 .get("is_monitored_only")
                 .and_then(Value::as_bool)
@@ -554,6 +584,7 @@ impl Matcher {
 
             if ai_available && stats.ai_calls >= self.config.max_ai_per_scan {
                 stats.checked = stats.checked.saturating_sub(1);
+                stats.new_streamers.pop();
                 break;
             }
 
@@ -582,14 +613,21 @@ impl Matcher {
                 if self.auto_link(&login, member, score, &reason).await {
                     used_member_ids.insert(member.user_id);
                     stats.auto += 1;
+                    stats.new_streamers[entry_idx].outcome = ScanOutcome::AutoLinked {
+                        discord_user_id: member.user_id,
+                    };
                 } else {
                     stats.errors += 1;
+                    stats.new_streamers[entry_idx].outcome = ScanOutcome::Failed;
                 }
             } else if score >= self.config.review_threshold {
                 self.post_review(&login, entry, member, score, &reason, is_monitored)
                     .await;
                 used_member_ids.insert(member.user_id);
                 stats.review += 1;
+                stats.new_streamers[entry_idx].outcome = ScanOutcome::Review {
+                    discord_user_id: member.user_id,
+                };
             } else {
                 self.mark(
                     &login,
@@ -606,9 +644,12 @@ impl Matcher {
             let state = self.state.lock().await;
             state.save();
         }
-        self.notifier
-            .notify(summary_embed(&stats, trigger), None)
-            .await;
+        let nothing_happened = stats.new_streamers.is_empty() && stats.errors == 0;
+        if !(quiet_when_empty && nothing_happened) {
+            self.notifier
+                .notify(summary_embed(&stats, trigger), None)
+                .await;
+        }
         stats
     }
 
@@ -964,28 +1005,39 @@ impl Matcher {
     }
 }
 
+/// Ein Zeile je neuem Streamer: wer es ist, wo er sendet, was der Scan entschied.
+fn new_streamers_text(stats: &ScanStats) -> String {
+    if stats.new_streamers.is_empty() {
+        return String::new();
+    }
+    const MAX_SHOWN: usize = 10;
+    let mut lines: Vec<String> = stats
+        .new_streamers
+        .iter()
+        .take(MAX_SHOWN)
+        .map(|entry| {
+            let link = format!("[{}](https://twitch.tv/{})", entry.login, entry.login);
+            match &entry.outcome {
+                ScanOutcome::AutoLinked { discord_user_id } => {
+                    format!("✅ {link} → <@{discord_user_id}>")
+                }
+                ScanOutcome::Review { discord_user_id } => {
+                    format!("❓ {link} → <@{discord_user_id}> (Vorschlag, bitte bestätigen)")
+                }
+                ScanOutcome::NoMatch => format!("❌ {link} (kein Discord-Treffer)"),
+                ScanOutcome::Failed => format!("⚠️ {link} (Verknüpfung fehlgeschlagen)"),
+            }
+        })
+        .collect();
+    let rest = stats.new_streamers.len().saturating_sub(MAX_SHOWN);
+    if rest > 0 {
+        lines.push(format!("… +{rest} weitere"));
+    }
+    format!("\n\n**Neue Streamer:**\n{}", lines.join("\n"))
+}
+
 fn summary_embed(stats: &ScanStats, trigger: &str) -> Value {
-    let logins_text = if stats.new_logins.is_empty() {
-        String::new()
-    } else {
-        let shown: Vec<&str> = stats
-            .new_logins
-            .iter()
-            .map(String::as_str)
-            .take(10)
-            .collect();
-        let rest = stats.new_logins.len().saturating_sub(10);
-        let names = shown
-            .iter()
-            .map(|l| format!("`{l}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if rest > 0 {
-            format!("\n**Neu:** {names} +{rest} weitere")
-        } else {
-            format!("\n**Neu:** {names}")
-        }
-    };
+    let logins_text = new_streamers_text(stats);
     json!({
         "title": "📊 Streamer-Abgleich gelaufen",
         "description": format!(
@@ -1072,7 +1124,7 @@ pub fn spawn_scan_loop(matcher: Arc<Matcher>) -> tokio::task::JoinHandle<()> {
         let interval = std::time::Duration::from_secs(hours * 3600);
         loop {
             tokio::time::sleep(interval).await;
-            let _ = matcher.run_scan("Auto-Scan (neue Streamer)").await;
+            let _ = matcher.run_scan_quiet("Auto-Scan (neue Streamer)").await;
         }
     })
 }
@@ -1248,6 +1300,48 @@ mod tests {
         let desc = embed["description"].as_str().expect("description");
         assert!(desc.contains("**AI-Aufrufe:** 2"));
         assert!(desc.contains("**Fehler:** 1"));
+    }
+
+    #[test]
+    fn summary_nennt_neue_streamer_mit_namen_und_ausgang() {
+        let stats = ScanStats {
+            checked: 3,
+            auto: 1,
+            review: 1,
+            skipped: 1,
+            new_streamers: vec![
+                ScanEntryResult {
+                    login: "neuerstreamer".into(),
+                    outcome: ScanOutcome::AutoLinked {
+                        discord_user_id: 42,
+                    },
+                },
+                ScanEntryResult {
+                    login: "unklar".into(),
+                    outcome: ScanOutcome::Review {
+                        discord_user_id: 43,
+                    },
+                },
+                ScanEntryResult {
+                    login: "ohnetreffer".into(),
+                    outcome: ScanOutcome::NoMatch,
+                },
+            ],
+            ..ScanStats::default()
+        };
+        let embed = summary_embed(&stats, "Test");
+        let desc = embed["description"].as_str().expect("description");
+        assert!(desc.contains("**Neue Streamer:**"));
+        assert!(desc.contains("✅ [neuerstreamer](https://twitch.tv/neuerstreamer) → <@42>"));
+        assert!(desc.contains("❓ [unklar](https://twitch.tv/unklar) → <@43>"));
+        assert!(desc.contains("❌ [ohnetreffer](https://twitch.tv/ohnetreffer)"));
+    }
+
+    #[test]
+    fn summary_ohne_neue_streamer_bleibt_ohne_liste() {
+        let embed = summary_embed(&ScanStats::default(), "Test");
+        let desc = embed["description"].as_str().expect("description");
+        assert!(!desc.contains("Neue Streamer"));
     }
 
     struct MockGuild {
