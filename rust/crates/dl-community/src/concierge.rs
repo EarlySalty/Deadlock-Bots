@@ -91,9 +91,13 @@ const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3)
 /// bewusst etwas mehr (`BOT_PATE_REQUEST_TIMEOUT`), damit die Notbremse hier
 /// keinen Versuch abschneidet, den der Anbieter noch beantworten wuerde.
 const CONCIERGE_AI_TIMEOUT_DEFAULT_SECS: u64 = 100;
-/// Obergrenze fuer `DL_CONCIERGE_AI_TIMEOUT_SECS`: drei Minuten decken die volle
-/// Retry-Leiter ab, alles darueber waere keine Notbremse mehr.
-const CONCIERGE_AI_TIMEOUT_MAX_SECS: u64 = 180;
+/// Obergrenze fuer `DL_CONCIERGE_AI_TIMEOUT_SECS`. Sie liegt bewusst auf dem
+/// Zeitlimit, das `dl_ai::chat_provider` dem Anwendungsfall `BotPate` pro
+/// Versuch gibt (`BOT_PATE_REQUEST_TIMEOUT`, 110 s). Ein hoeherer Wert bringt
+/// nichts: der HTTP-Client bricht vorher ab, und der Concierge sieht dann einen
+/// `LlmLookup::Error` statt eines sauberen `Timeout` — also genau die
+/// `llm_error_gap`, gegen die die Notbremse ueberhaupt gebaut wurde.
+const CONCIERGE_AI_TIMEOUT_MAX_SECS: u64 = 110;
 /// Nach dieser Wartezeit sagt der Concierge einmal Bescheid, dass es dauert.
 /// Der Wert liegt ueber dem p90 der Messung (10,7 s), nicht knapp ueber dem
 /// Median: bei 8 Sekunden haette rund ein Drittel aller Antworten einen Hinweis
@@ -162,7 +166,7 @@ pub const COOLDOWN_TEXT: &str = "Immer mit der Ruhe, ich bin noch bei deiner let
 /// Zwischenruf, wenn der LLM-Aufruf laenger braucht als `AI_GEDULD_HINWEIS_NACH`.
 /// Er ersetzt keine Antwort und beendet den Zug nicht, die echte Antwort kommt
 /// danach in derselben Unterhaltung.
-pub const AI_GEDULD_TEXT: &str = "Einen Moment noch, ich bin dran. Das kann diesmal ein bis zwei Minuten dauern, ich melde mich, sobald ich es habe.";
+pub const AI_GEDULD_TEXT: &str = "Einen Moment noch, ich bin dran. Das kann diesmal gut eine Minute dauern, ich melde mich, sobald ich es habe.";
 pub const PATE_CLAIM_FALLBACK_LINE: &str = "Wer Zeit und Lust hat, drückt auf Übernehmen.";
 pub const PATE_CLAIM_BUTTON_LABEL: &str = "Ich übernehme";
 pub const PATE_ROLE_RESERVED_TEXT: &str = "Der Knopf ist für unsere Paten reserviert. Wenn du selbst Pate werden willst, meld dich bei den Mods, wir freuen uns über jeden.";
