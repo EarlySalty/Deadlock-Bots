@@ -183,8 +183,18 @@ mod tests {
         );
     }
 
+    /// Die Transparenz-Senke ist prozessweit (`dl_ai::set_transparency_sink`
+    /// schreibt in ein `static`). libtest faehrt die Tests dieses Binaries
+    /// parallel, also muessen sich alle Senken-Tests seriell abwechseln.
+    static SENKE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn senke_exklusiv() -> std::sync::MutexGuard<'static, ()> {
+        SENKE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[tokio::test]
     async fn ohne_token_wird_nichts_gestartet_und_keine_senke_registriert() {
+        let _guard = senke_exklusiv();
         dl_ai::clear_transparency_sink();
         let log = starte(dl_ai::TransparencyConfig::default(), None);
         assert!(log.is_none(), "ohne Token darf kein Log laufen");
@@ -196,6 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn abgeschaltete_konfiguration_startet_nichts() {
+        let _guard = senke_exklusiv();
         dl_ai::clear_transparency_sink();
         let config = dl_ai::TransparencyConfig {
             enabled: false,
@@ -207,6 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn mit_token_laeuft_das_log_und_die_senke_steht() {
+        let _guard = senke_exklusiv();
         dl_ai::clear_transparency_sink();
         let log = starte(
             dl_ai::TransparencyConfig::default(),

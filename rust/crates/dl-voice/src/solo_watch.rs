@@ -899,6 +899,13 @@ fn lfg_post(
         details.push(time.to_string());
     }
     if !note.is_empty() {
+        // Die Notiz kommt aus einem mehrzeiligen Modalfeld. Zeilenumbrueche
+        // wuerden die `-#`-Subtext-Zeile aufbrechen und den Rest als normalen
+        // Markdown rendern, deshalb faltet sie hier auf eine Zeile.
+        let note = note
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         details.push(format!("„{note}“"));
     }
     if !details.is_empty() {
