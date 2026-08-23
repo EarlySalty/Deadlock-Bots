@@ -2383,7 +2383,10 @@ mod tests {
         let cases = load_golden_cases(&golden_dir, &docs_path)?;
         let client = reqwest::Client::new();
 
-        for case in cases {
+        for (index, case) in cases.into_iter().enumerate() {
+            if index > 0 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             let response = client
                 .post(&url)
                 .json(&json!({ "question": case.question }))
