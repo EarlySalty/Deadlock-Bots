@@ -56,8 +56,8 @@ impl AccessOutcome {
 }
 
 /// Reine Zugriffsentscheidung — Reihenfolge wie im Original:
-/// Owner → Admin-Permission → Moderator-Rolle (alle Voll-Zugriff) → sonst
-/// kein Zugriff.
+/// Owner → Admin-Permission → Moderator-Rolle → Dashboard-Zugriffsrollen
+/// (alle Voll-Zugriff) → sonst kein Zugriff.
 pub fn decide_access(
     cfg: &DashboardConfig,
     user_id: u64,
@@ -71,6 +71,13 @@ pub fn decide_access(
     }
     if info.role_ids.contains(&cfg.moderator_role_id) {
         return AccessOutcome::granted(AccessLevel::Full, "moderator_role");
+    }
+    if info
+        .role_ids
+        .iter()
+        .any(|role| cfg.access_role_ids.contains(role))
+    {
+        return AccessOutcome::granted(AccessLevel::Full, "dashboard_access_role");
     }
     AccessOutcome {
         level: None,
@@ -181,6 +188,16 @@ mod tests {
         let out = decide_access(&cfg, 999, &info(false, &[cfg.moderator_role_id]));
         assert_eq!(out.level, Some(AccessLevel::Full));
         assert_eq!(out.reason, "moderator_role");
+    }
+
+    #[test]
+    fn dashboard_zugriffsrolle_bekommt_voll_ohne_moderator() {
+        let cfg = cfg();
+        for role in &cfg.access_role_ids {
+            let out = decide_access(&cfg, 999, &info(false, &[*role]));
+            assert_eq!(out.level, Some(AccessLevel::Full), "Rolle {role}");
+            assert_eq!(out.reason, "dashboard_access_role");
+        }
     }
 
     #[test]
