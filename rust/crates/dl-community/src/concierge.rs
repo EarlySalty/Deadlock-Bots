@@ -75,20 +75,31 @@ const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3)
 /// Notbremse fuer den LLM-Aufruf, kein Qualitaetsziel. Der alte Wert von 8 Sekunden
 /// lag unter der normalen Antwortzeit: mit Systemprompt und JSON-Modus braucht
 /// deepseek-v4-flash-0731 gemessen 6,6 Sekunden im Median, 10,7 im p90 und 11,9 im
-/// Maximum, ein eingeschlafenes Modell 15 bis 60. Damit starb rund ein Drittel der
-/// Antworten als `llm_error_gap`, obwohl der Anbieter gesund war.
+/// Maximum. Damit starb rund ein Drittel der Antworten als `llm_error_gap`,
+/// obwohl der Anbieter gesund war.
 ///
-/// 45 Sekunden ist zugleich das Zeitlimit, das der HTTP-Client in
-/// `dl_ai::chat_provider` pro Versuch setzt. Der erste Versuch laeuft damit ganz
-/// durch, die Notbremse schneidet ihn nicht ab. Die Wiederholungen darunter
-/// (`DEFAULT_MAX_RETRIES = 2`) erreicht sie nicht mehr: wer sie braucht, setzt
-/// `DL_CONCIERGE_AI_TIMEOUT_SECS` ueber die Retry-Leiter, etwa auf 100.
-/// Werte oberhalb von `CONCIERGE_AI_TIMEOUT_MAX_SECS` werden gedeckelt, damit
-/// ein Tippfehler die Notbremse nicht lautlos abschaltet.
-const CONCIERGE_AI_TIMEOUT_DEFAULT_SECS: u64 = 45;
+/// Die Wartezeit entsteht nicht beim Rechnen, sondern in der Warteschlange des
+/// geteilten Serverless-Pools bei Fireworks: gemessen am 17.08.2026 lag die Zeit
+/// bis zum ersten Token beim selben Request zwischen 0,4 und 11,5 Sekunden, in
+/// Lastspitzen bis 40. Deshalb 100 Sekunden, nicht 45: eine spaete Antwort ist
+/// besser als eine abgeschnittene, der User weiss ueber `AI_GEDULD_TEXT`
+/// Bescheid. Ueber `DL_CONCIERGE_AI_TIMEOUT_SECS` anpassbar, Werte oberhalb von
+/// `CONCIERGE_AI_TIMEOUT_MAX_SECS` werden gedeckelt, damit ein Tippfehler die
+/// Notbremse nicht lautlos abschaltet.
+///
+/// Der HTTP-Client in `dl_ai::chat_provider` gibt dem Anwendungsfall `BotPate`
+/// bewusst etwas mehr (`BOT_PATE_REQUEST_TIMEOUT`), damit die Notbremse hier
+/// keinen Versuch abschneidet, den der Anbieter noch beantworten wuerde.
+const CONCIERGE_AI_TIMEOUT_DEFAULT_SECS: u64 = 100;
 /// Obergrenze fuer `DL_CONCIERGE_AI_TIMEOUT_SECS`: drei Minuten decken die volle
 /// Retry-Leiter ab, alles darueber waere keine Notbremse mehr.
 const CONCIERGE_AI_TIMEOUT_MAX_SECS: u64 = 180;
+/// Nach dieser Wartezeit sagt der Concierge einmal Bescheid, dass es dauert.
+/// Der Wert liegt ueber dem p90 der Messung (10,7 s), nicht knapp ueber dem
+/// Median: bei 8 Sekunden haette rund ein Drittel aller Antworten einen Hinweis
+/// ausgeloest und waere eine Sekunde spaeter ohnehin gekommen. Wer ihn sieht,
+/// wartet also wirklich.
+const AI_GEDULD_HINWEIS_NACH: StdDuration = StdDuration::from_secs(15);
 const SCHEDULER_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 
 pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server, ich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten Weg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich erstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nWas du mir schreibst, merke ich mir nur, damit ich im Gespräch nicht bei null anfange. Wenn du \"stopp\" schreibst, setzt das deinen globalen Datenschutz-Opt-out: Ich speichere dann keinen neuen Gesprächsverlauf mehr und melde mich nicht mehr von selbst, direkte Fragen beantworte ich weiter, nur eben ohne Verlauf. Mit /datenschutz-optin erlaubst du die Speicherung später jederzeit wieder.";
@@ -148,6 +159,10 @@ pub const FORGET_TEXT: &str = "Erledigt: Die zusätzliche Gesprächskopie in mei
 pub const FORGET_PERSIST_ERROR_TEXT: &str = "Wir konnten die Löschung gerade nicht bestätigen. Ob deine Daten noch da sind oder schon weg, lässt sich im Moment nicht sicher sagen. Probier es bitte nochmal, und wenn es dabei bleibt, öffne ein Ticket in <#1459628609705738539>.";
 pub const ANSWER_UNCERTAIN_TEXT: &str = "Die Antwort von eben steht vielleicht noch oben im Verlauf, verlass dich aber nicht drauf. Auf unserer Seite ist beim Speichern etwas schiefgelaufen, der Gesprächsstand ist also nicht sicher abgelegt. Frag später einfach nochmal nach oder mach ein Ticket in <#1459628609705738539> auf.";
 pub const COOLDOWN_TEXT: &str = "Immer mit der Ruhe, ich bin noch bei deiner letzten Nachricht. Gib mir einen kleinen Moment, dann bin ich wieder ganz für dich da.";
+/// Zwischenruf, wenn der LLM-Aufruf laenger braucht als `AI_GEDULD_HINWEIS_NACH`.
+/// Er ersetzt keine Antwort und beendet den Zug nicht, die echte Antwort kommt
+/// danach in derselben Unterhaltung.
+pub const AI_GEDULD_TEXT: &str = "Einen Moment noch, ich bin dran. Das kann diesmal ein bis zwei Minuten dauern, ich melde mich, sobald ich es habe.";
 pub const PATE_CLAIM_FALLBACK_LINE: &str = "Wer Zeit und Lust hat, drückt auf Übernehmen.";
 pub const PATE_CLAIM_BUTTON_LABEL: &str = "Ich übernehme";
 pub const PATE_ROLE_RESERVED_TEXT: &str = "Der Knopf ist für unsere Paten reserviert. Wenn du selbst Pate werden willst, meld dich bei den Mods, wir freuen uns über jeden.";
@@ -4130,7 +4145,13 @@ impl Concierge {
             }
         };
         let answer = self
-            .answer_decision(trimmed, Some(&history), Some(&conversation), route)
+            .answer_decision(
+                trimmed,
+                Some(&history),
+                Some(&conversation),
+                route,
+                Some(channel_id),
+            )
             .await;
         let source = answer.source;
         let knowledge_hit = answer.knowledge_hit;
@@ -4358,12 +4379,16 @@ impl Concierge {
             .await
     }
 
+    /// `patience_channel` ist der Kanal, in dem der Concierge Bescheid sagt, wenn
+    /// der LLM-Aufruf laenger braucht als `AI_GEDULD_HINWEIS_NACH`. `None` heisst
+    /// stumm warten, etwa wenn niemand auf eine Antwort wartet.
     async fn answer_decision(
         &self,
         question: &str,
         history: Option<&[String]>,
         conversation: Option<&[ChatMessage]>,
         route: AnswerRoute,
+        patience_channel: Option<u64>,
     ) -> AnswerDecision {
         let stateful = history.is_some();
         if let Some(answer) = local_conversational_answer(question, self.config.free_voice) {
@@ -4429,7 +4454,14 @@ impl Concierge {
             || GAP_GUIDANCE.to_string(),
             |answer| format!("Wissenskontext aus dl-knowledge:\n{answer}"),
         );
-        let llm = self.llm_answer(question, &extra_system, conversation).await;
+        let llm = self
+            .llm_answer_with_patience(
+                question,
+                &extra_system,
+                conversation,
+                patience_channel.map(|channel_id| (channel_id, AI_GEDULD_HINWEIS_NACH)),
+            )
+            .await;
         let (answer, source, outcome) = match llm {
             LlmLookup::Answer(answer) => (
                 answer,
@@ -4500,6 +4532,60 @@ impl Concierge {
         };
         log_concierge_answer_decision(route, &decision, question, stateful);
         decision
+    }
+
+    /// Wartet auf die LLM-Antwort und sagt dem User einmal Bescheid, wenn es
+    /// laenger dauert. Ohne diesen Zwischenruf sieht eine Wartezeit im
+    /// Serverless-Pool von Fireworks fuer den User aus wie ein toter Bot: der
+    /// Zeitraum bis zum ersten Token schwankt dort zwischen unter einer Sekunde
+    /// und rund vierzig, ohne dass in Discord irgendetwas passiert.
+    ///
+    /// Der Hinweis geht in denselben Kanal wie die Antwort und ersetzt sie
+    /// nicht: er wird nicht als Antwort gezaehlt, nicht in den Verlauf
+    /// geschrieben und beendet den Zug nicht.
+    async fn llm_answer_with_patience(
+        &self,
+        question: &str,
+        extra_system: &str,
+        conversation: Option<&[ChatMessage]>,
+        patience: Option<(u64, StdDuration)>,
+    ) -> LlmLookup {
+        let answer = self.llm_answer(question, extra_system, conversation);
+        let Some((channel_id, notice_after)) = patience else {
+            return answer.await;
+        };
+        let mut answer = std::pin::pin!(answer);
+        tokio::select! {
+            lookup = &mut answer => lookup,
+            () = tokio::time::sleep(notice_after) => {
+                self.send_patience_notice(channel_id).await;
+                answer.await
+            }
+        }
+    }
+
+    /// Zustellfehler beim Zwischenruf bleiben folgenlos: die eigentliche Antwort
+    /// laeuft weiter, ein zweiter Anlauf wuerde den User nur doppelt anschreiben.
+    async fn send_patience_notice(&self, channel_id: u64) {
+        match tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port
+                .send_channel_v2(channel_id, v2_body(AI_GEDULD_TEXT, Vec::new())),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(%err, channel_id, "Concierge: Geduldshinweis nicht zugestellt");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id,
+                    timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
+                    "Concierge: Geduldshinweis hat Zeitlimit ueberschritten"
+                );
+            }
+        }
     }
 
     async fn llm_answer(
@@ -4611,7 +4697,9 @@ impl Concierge {
         route: AnswerRoute,
         response_components: Option<&Value>,
     ) -> AnswerTerminal {
-        let decision = self.answer_decision(question, None, None, route).await;
+        let decision = self
+            .answer_decision(question, None, None, route, Some(channel_id))
+            .await;
         let source = decision.source;
         let knowledge_hit = decision.knowledge_hit;
         let outcome = decision.outcome;
@@ -7109,11 +7197,13 @@ mod tests {
     #[test]
     fn ai_timeout_laesst_einem_llm_aufruf_genug_luft() {
         // Gemessen fuer deepseek-v4-flash-0731 mit Systemprompt und JSON-Modus:
-        // Median 6,6 s, p90 10,7 s, Maximum 11,9 s. Der Default muss klar
-        // darueber liegen und darf den HTTP-Versuch darunter nicht abschneiden.
+        // Median 6,6 s, p90 10,7 s, Maximum 11,9 s. Dazu kommt die Warteschlange
+        // des Serverless-Pools, die denselben Request zwischen 0,4 und 11,5 s
+        // bis zum ersten Token haengen laesst, in Lastspitzen bis 40. Der Default
+        // muss darueber liegen und darf den HTTP-Versuch nicht abschneiden.
         let config = test_config(true, &[]);
-        assert_eq!(config.ai_timeout, StdDuration::from_secs(45));
-        assert!(config.ai_timeout > StdDuration::from_secs(12));
+        assert_eq!(config.ai_timeout, StdDuration::from_secs(100));
+        assert!(config.ai_timeout > StdDuration::from_secs(40));
     }
 
     #[test]
@@ -7150,10 +7240,110 @@ mod tests {
             });
             assert_eq!(
                 config.ai_timeout,
-                StdDuration::from_secs(45),
+                StdDuration::from_secs(100),
                 "Wert {wert:?} haette auf den Default zurueckfallen muessen"
             );
         }
+    }
+
+    /// Haelt die Antwort so lange zurueck, bis der Test sie freigibt. Das
+    /// ersetzt echte Wartezeit im Test: der Concierge haengt genauso wie an
+    /// einem langsamen Serverless-Pool, nur ohne Wall-Clock.
+    struct GatedChatProvider {
+        gate: Arc<tokio::sync::Notify>,
+        content: String,
+    }
+
+    #[async_trait]
+    impl ChatProvider for GatedChatProvider {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _params: ChatParams,
+        ) -> Result<dl_ai::ChatResponse, dl_ai::ChatProviderError> {
+            self.gate.notified().await;
+            Ok(dl_ai::ChatResponse::text(self.content.clone()))
+        }
+    }
+
+    fn llm_json_reply() -> String {
+        json!({ "reply": "Hier entlang", "intent": "mates", "pate_request": false }).to_string()
+    }
+
+    #[tokio::test]
+    async fn geduldshinweis_kommt_genau_einmal_wenn_das_modell_langsam_ist() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let ai: Arc<dyn ChatProvider> = Arc::new(GatedChatProvider {
+            gate: gate.clone(),
+            content: llm_json_reply(),
+        });
+        let port = mock_port();
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), test_config(true, &[]));
+        let (hinweis_gesendet, hinweis_freigeben) = block_next_port_call(&port);
+
+        let task = {
+            let concierge = concierge.clone();
+            tokio::spawn(async move {
+                concierge
+                    .llm_answer_with_patience(
+                        "Wo finde ich Mitspieler?",
+                        "Kontext",
+                        None,
+                        Some((4242, StdDuration::ZERO)),
+                    )
+                    .await
+            })
+        };
+
+        // Zeitlimit nur fuer den Fehlerfall: bleibt der Hinweis aus, soll der
+        // Test das sagen und nicht haengen.
+        tokio::time::timeout(StdDuration::from_secs(5), hinweis_gesendet.notified())
+            .await
+            .expect("Geduldshinweis blieb aus");
+        hinweis_freigeben.notify_one();
+        gate.notify_one();
+        let lookup = task.await.expect("patience task");
+
+        assert!(matches!(lookup, LlmLookup::Answer(_)));
+        let sent = port.sent_channel_v2.lock().expect("sent channel v2");
+        let hinweise = sent
+            .iter()
+            .filter(|body| sent_v2_content(body) == AI_GEDULD_TEXT)
+            .count();
+        assert_eq!(hinweise, 1, "genau ein Hinweis, keine Salve");
+        assert_eq!(
+            port.sent_channel_ids
+                .lock()
+                .expect("channel ids")
+                .as_slice(),
+            &[4242],
+            "der Hinweis geht in denselben Kanal wie die Antwort"
+        );
+    }
+
+    #[tokio::test]
+    async fn schnelle_antwort_bleibt_ohne_geduldshinweis() {
+        let ai: Arc<dyn ChatProvider> = dl_ai::MockChatProvider::single(llm_json_reply());
+        let port = mock_port();
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), test_config(true, &[]));
+
+        let lookup = concierge
+            .llm_answer_with_patience(
+                "Wo finde ich Mitspieler?",
+                "Kontext",
+                None,
+                Some((4242, StdDuration::from_secs(30))),
+            )
+            .await;
+
+        assert!(matches!(lookup, LlmLookup::Answer(_)));
+        assert!(
+            port.sent_channel_v2
+                .lock()
+                .expect("sent channel v2")
+                .is_empty(),
+            "unter der Schwelle darf der Concierge nichts schicken"
+        );
     }
 
     #[test]
@@ -7545,7 +7735,9 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "testing")]
+    /// Bewusst ohne `cfg(feature = "testing")`: der Geduldshinweis-Test braucht
+    /// keine Datenbank und soll deshalb auch im Lauf ohne das Feature
+    /// mitlaufen.
     fn block_next_port_call(
         port: &MockConciergePort,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
@@ -7881,7 +8073,7 @@ mod tests {
         let concierge = Concierge::new(lazy_pool(), mock_port(), Some(ai), config);
         let task = tokio::spawn(async move {
             concierge
-                .answer_decision("Timeout", None, None, AnswerRoute::OnboardingTour)
+                .answer_decision("Timeout", None, None, AnswerRoute::OnboardingTour, None)
                 .await
                 .outcome
         });
@@ -10452,6 +10644,7 @@ mod tests {
                 Some(&history),
                 None,
                 AnswerRoute::Concierge,
+                None,
             )
             .await
             .answer;
