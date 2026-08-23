@@ -13,6 +13,11 @@
 pub const DEFAULT_OWNER_USER_ID: u64 = 662995601738170389;
 /// Moderator-Rolle → Voll-Zugriff (DEFAULT_DASHBOARD_MODERATOR_ROLE_ID).
 pub const DEFAULT_MODERATOR_ROLE_ID: u64 = 1337518124647579661;
+/// Zusätzliche Discord-Rollen mit Voll-Zugriff auf das Admin-Dashboard, ohne
+/// dass Moderator- oder Administrator-Rechte nötig sind.
+/// - `1541055918811250799` = "DC Admin Dashboard" (Zugriffsrolle)
+/// - `1524268805424025651` = "Scrim Match Leiter"
+pub const DASHBOARD_ACCESS_ROLE_IDS: &[u64] = &[1541055918811250799, 1524268805424025651];
 pub const DEFAULT_AUDIT_BOT_USER_ID: u64 = 1_355_078_189_894_078_597;
 
 const DEFAULT_SESSION_TTL_SECONDS: i64 = 1_209_600; // 14 Tage
@@ -49,6 +54,8 @@ pub struct DashboardConfig {
     pub discord_redirect_uri: String,
     pub owner_user_id: u64,
     pub moderator_role_id: u64,
+    /// Weitere Rollen mit Voll-Zugriff (siehe [`DASHBOARD_ACCESS_ROLE_IDS`]).
+    pub access_role_ids: Vec<u64>,
     pub audit_bot_user_id: u64,
     /// Gilden, in denen Admin-/Rollen-Status geprüft wird. Leer = alle
     /// Bot-Gilden (Broker entscheidet).
@@ -121,6 +128,7 @@ impl DashboardConfig {
             moderator_role_id: get("MASTER_DASHBOARD_MODERATOR_ROLE_ID")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_MODERATOR_ROLE_ID),
+            access_role_ids: DASHBOARD_ACCESS_ROLE_IDS.to_vec(),
             audit_bot_user_id: get("DISCORD_BOT_USER_ID")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_AUDIT_BOT_USER_ID),

@@ -929,7 +929,7 @@ async fn own_login_complete(
         return err_text(
             403,
             "Kein Zugriff auf das Admin-Dashboard. Benötigt: Administrator-Recht, \
-             Moderator-Rolle oder Community-Moderator-Rolle.",
+             Moderator-Rolle oder die Rolle \"DC Admin Dashboard\".",
         );
     };
 
