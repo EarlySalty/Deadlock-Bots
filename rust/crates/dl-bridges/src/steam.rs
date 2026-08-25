@@ -755,7 +755,7 @@ fn register_inner(
             "default_member_permissions": "8",
             "options": [
                 {"type": 3, "name": "freundescode", "description": "Steam-Freundescode, nur Ziffern, zum Beispiel 1852752823", "required": true},
-                {"type": 6, "name": "user", "description": "Das Discord-Mitglied dazu, damit die Einladung in der Historie steht", "required": false}
+                {"type": 6, "name": "user", "description": "Das Discord-Mitglied, das den Playtest bekommt", "required": true}
             ],
         })),
         forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT_SECS),
@@ -1370,7 +1370,7 @@ mod tests {
             shape,
             vec![
                 (&json!(3), &json!("freundescode"), &json!(true)),
-                (&json!(6), &json!("user"), &json!(false)),
+                (&json!(6), &json!("user"), &json!(true)),
             ]
         );
 
