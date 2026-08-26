@@ -1558,20 +1558,37 @@ mod tests {
         // Logstelle, ob ueberhaupt jemand zuhoert, und andere Tests treffen
         // dieselbe Stelle zuerst. Also am Quelltext geprueft, wie im Test zum
         // Anbieter-Label darueber.
+        //
+        // Geprueft wird JEDES Vorkommen, nicht das erste: sonst haengt der
+        // Test daran, dass es genau eine Logstelle gibt und dass sie im
+        // Quelltext oberhalb dieses Testmoduls steht. Eine zweite `warn!`-
+        // Stelle mit demselben Literal weiter oben, oder ein verschobenes
+        // Testmodul, und der Test prueft einen fremden Block.
+        //
+        // Das Suchmuster wird zur Laufzeit zusammengesetzt, damit dieser Test
+        // sich nicht selbst als Fundstelle sieht: im Quelltext steht hier
+        // `{q}LLM-...{q}` und nicht das Literal mit Anfuehrungszeichen.
         let source = include_str!("chat_provider.rs");
-        let stelle = source
-            .split("\"LLM-Provider-API-Fehler\"")
-            .next()
-            .expect("Logstelle");
-        let block = stelle
-            .rsplit("tracing::warn!(")
-            .next()
-            .expect("warn-Aufruf der Logstelle");
+        let marker = format!("{q}LLM-Provider-API-Fehler{q}", q = '"');
+        let vorkommen: Vec<usize> = source
+            .match_indices(marker.as_str())
+            .map(|(pos, _)| pos)
+            .collect();
         assert!(
-            block.contains("hinweis = %statusteil(&hinweis)"),
-            "die Logstelle muss kuerzen, sonst steht Anbieter- und damit \
-             Nutzertext im Anwendungslog: {block}"
+            !vorkommen.is_empty(),
+            "die Logstelle heisst nicht mehr LLM-Provider-API-Fehler, Test anpassen"
         );
+        for pos in vorkommen {
+            let block = source[..pos]
+                .rsplit("tracing::warn!(")
+                .next()
+                .expect("warn-Aufruf der Logstelle");
+            assert!(
+                block.contains("hinweis = %statusteil(&hinweis)"),
+                "die Logstelle muss kuerzen, sonst steht Anbieter- und damit \
+                 Nutzertext im Anwendungslog: {block}"
+            );
+        }
     }
 
     #[test]

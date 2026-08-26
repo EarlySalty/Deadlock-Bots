@@ -27,8 +27,16 @@ pub use transparency::*;
 pub use transparency_log::*;
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
-/// Die datierte Variante ist die einzige, die es bei Fireworks gibt: der
-/// undatierte Name `deepseek-v4-flash` antwortet mit 404 "Model not found".
+/// Belegt ist der Stand vom 2026-08-26. Ein echter Aufruf gegen
+/// `api.fireworks.ai/inference/v1/chat/completions` antwortete fuer
+/// `accounts/fireworks/models/deepseek-v4-flash` mit HTTP 404 "Model not
+/// found, inaccessible, and/or not deployed" und fuer die datierte Variante
+/// `...-0731` mit HTTP 412 "Account ... is suspended".
+///
+/// Der 404 belegt nur, dass der undatierte Name unter diesem Konto nicht
+/// ansprechbar war. Der 412 sagt ueberhaupt nichts ueber das Modell, sondern
+/// nur ueber das gesperrte Konto: ob `-0731` bei Fireworks wirklich
+/// ausgeliefert wird, ist erst wieder pruefbar, wenn das Konto offen ist.
 /// Freigegeben ist genau dieses Modell, teurere Varianten (Pro) nie ohne
 /// ausdrueckliche Freigabe des Owners.
 pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
