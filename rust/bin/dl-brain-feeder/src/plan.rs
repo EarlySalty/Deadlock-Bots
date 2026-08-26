@@ -6,9 +6,12 @@ use sha2::{Digest, Sha256};
 
 use crate::scrub_snowflakes;
 
-/// Am 2026-07-16 per Fireworks-Modellliste und JSON-Smoke-Test verifiziert:
-/// stärkstes verfügbares Reasoning-Modell (1M Kontext) vor Kimi K2.6 und GPT-OSS 120B.
-pub const DEFAULT_PLAN_MODEL: &str = "accounts/fireworks/models/deepseek-v4-pro";
+/// 2026-08-26: zurück auf Flash. Das vorher gesetzte `deepseek-v4-pro` hat den
+/// Wochenplan am 16.08. und am 23.08. nicht geliefert — der Antwortlauf blieb
+/// beide Male über dem 60-Sekunden-Limit des HTTP-Clients hängen, der Digest
+/// erschien ohne Plan. Ein Modell, das nie antwortet, ist keine Reasoning-Klasse,
+/// sondern nur eine Rechnung. Flash ist ausserdem der Repo-Default.
+pub const DEFAULT_PLAN_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
 
 pub const PLAN_SYSTEM_PROMPT: &str = r#"Du bist der Betriebsleiter der Deutschen Deadlock Community — einer Discord-Community
 mit angeschlossenem Twitch-Bot, Steam-Bot, Turnier-System und Website. Du bekommst
