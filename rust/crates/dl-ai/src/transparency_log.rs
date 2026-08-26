@@ -362,11 +362,7 @@ async fn run_worker(
     let mut router = ConversationRouter::default();
     let mut errors = ErrorThrottle::default();
     while let Some(interaction) = rx.recv().await {
-        let suppressed = match errors.decide(&interaction, config.error_repeat_window, Instant::now())
-        {
-            ErrorDecision::Suppress => continue,
-            ErrorDecision::Show(count) => count,
-        };
+        let decision = errors.decide(&interaction, config.error_repeat_window, Instant::now());
         let missed = dropped.swap(0, Ordering::Relaxed);
         if missed > 0 {
             // Stille darf nie wie „keine KI-Aktivitaet" aussehen.
@@ -380,7 +376,15 @@ async fn run_worker(
             throttle(&config).await;
         }
 
+        // Auch unterdrueckte Eintraege laufen durch den Router: er haelt die
+        // Fingerprints des Gespraechs frisch und zaehlt die Runde weiter. Ohne
+        // das reisst eine laengere Fehlerserie den Thread ab und die naechste
+        // gezeigte Meldung traegt eine zu niedrige Rundennummer.
         let id = router.resolve(&interaction);
+        let suppressed = match decision {
+            ErrorDecision::Suppress => continue,
+            ErrorDecision::Show(count) => count,
+        };
         deliver(
             &mut router,
             id,
@@ -760,6 +764,39 @@ mod tests {
             sent[1].1.contains("Davor 2 mal derselbe Fehler"),
             "die Anzahl muss mitkommen: {}",
             sent[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn unterdrueckte_runden_zaehlen_im_gespraech_weiter() {
+        let messenger = FakeMessenger::arc(true);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        let mut fehler = fehler_interaktion(LlmUseCase::BotPate, "runde 1", "HTTP 412");
+        fehler.conversation_trail = vec![1];
+        sink.record(fehler);
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+
+        let mut wiederholung = fehler_interaktion(LlmUseCase::BotPate, "runde 2", "HTTP 412");
+        wiederholung.conversation_trail = vec![1, 2];
+        sink.record(wiederholung);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(messenger.sent().len(), 1, "Runde 2 bleibt stumm");
+
+        sink.record(interaktion(LlmUseCase::BotPate, "runde 3", "endlich eine Antwort", &[2, 3]));
+        assert!(warte_auf(|| messenger.sent().len() == 2).await);
+
+        let sent = messenger.sent();
+        assert!(
+            sent[1].1.contains("Runde 3"),
+            "die unterdrueckte Runde zaehlt mit: {}",
+            sent[1].1
+        );
+        assert_eq!(
+            messenger.threads().len(),
+            1,
+            "das Gespraech behaelt seinen Thread"
         );
     }
 
