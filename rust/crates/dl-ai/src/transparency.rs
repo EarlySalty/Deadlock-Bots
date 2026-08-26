@@ -157,6 +157,10 @@ impl TransparencyProvider {
 
 #[async_trait]
 impl ChatProvider for TransparencyProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        self.inner.effective_model(params)
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -170,7 +174,20 @@ impl ChatProvider for TransparencyProvider {
         let system_excerpt = system_excerpt(messages, params.system_prompt.as_deref())
             .map(|text| redact_secrets(&text));
         let conversation_trail = conversation_trail(self.use_case, messages);
-        let fallback_model = params.model.clone();
+        // Eine Quelle fuer beide Zweige.
+        //
+        // Frueher stand im Erfolgsfall das Modell aus dem Antwort-Body und im
+        // Fehlerfall `params.model`. Weil fast jeder Aufrufer
+        // `ChatParams::default()` benutzt, hiess das: Erfolg `Some(...)`,
+        // Fehler `None`. Die Entprellung im Transparenz-Log schluesselt aber
+        // ueber genau dieses Feld, also hat eine geglueckte Antwort die Serie
+        // desselben Anbieters nie wiedergefunden und nie beendet: das Backoff
+        // lief bis zum Deckel und blieb dort.
+        //
+        // Der Body bleibt deshalb aussen vor. Er kommt im Fehlerfall nicht an
+        // und kann die Symmetrie darum nicht tragen; `effective_model` kann
+        // sie, weil der Provider sie vor dem Aufruf kennt.
+        let effective_model = self.inner.effective_model(&params);
 
         let started = Instant::now();
         let result = self.inner.chat(messages, params).await;
@@ -183,7 +200,7 @@ impl ChatProvider for TransparencyProvider {
                 system_excerpt,
                 response: Some(redact_secrets(&response.content)),
                 error: None,
-                model: response.model.clone().or(fallback_model),
+                model: effective_model,
                 latency_ms,
                 conversation_trail,
             },
@@ -192,8 +209,14 @@ impl ChatProvider for TransparencyProvider {
                 prompt_excerpt,
                 system_excerpt,
                 response: None,
-                error: Some(error.to_string()),
-                model: fallback_model,
+                // Der Fehlertext des Anbieters ist das einzige Feld, das frueher
+                // ungefiltert in den Kanal ging. Manche Anbieter spiegeln bei
+                // 400 den beanstandeten Nachrichteninhalt zurueck; schreibt ein
+                // Nutzer seinen Schluessel in den Chat, stand er im `Fehler:`
+                // im Klartext, waehrend im `Ausloeser:` sauber `[redigiert]`
+                // stand.
+                error: Some(redact_secrets(&error.to_string())),
+                model: effective_model,
                 latency_ms,
                 conversation_trail,
             },
@@ -438,6 +461,18 @@ mod tests {
 
     #[async_trait]
     impl ChatProvider for FixedProvider {
+        /// Wie jeder echte Provider: er kennt sein Modell, auch wenn der
+        /// Aufrufer keins gesetzt hat. Ohne das prueft der Test einen
+        /// Zustand, den es in der Verdrahtung nicht gibt.
+        fn effective_model(&self, params: &ChatParams) -> Option<String> {
+            Some(
+                params
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "test-modell".to_string()),
+            )
+        }
+
         async fn chat(
             &self,
             _messages: &[ChatMessage],

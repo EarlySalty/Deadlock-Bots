@@ -154,6 +154,23 @@ pub trait ChatProvider: Send + Sync {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<ChatResponse, ChatProviderError>;
+
+    /// Das Modell, unter dem dieser Aufruf tatsaechlich laeuft, bevor er
+    /// laeuft.
+    ///
+    /// `ChatParams::model` ist bei fast allen Aufrufern `None`; welches Modell
+    /// dann wirklich auf die Leitung geht, weiss nur der Provider (sein
+    /// `default_model`). Der Erfolgsfall erfaehrt es hinterher aus dem
+    /// Antwort-Body, der Fehlerfall nie: bei 401, 412 oder Timeout gibt es
+    /// keinen Body. Ohne diese Methode traegt derselbe Ausfall im
+    /// Transparenz-Log ein anderes Modell als die geglueckte Antwort daneben,
+    /// und die Entprellung findet ihre eigene Serie nicht wieder.
+    ///
+    /// Default ist das, was der Aufrufer gesetzt hat. Jeder Provider mit einem
+    /// eigenen Default ueberschreibt das, und Wrapper reichen es durch.
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        params.model.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -703,6 +720,15 @@ impl OpenAiChatProvider {
 
 #[async_trait]
 impl ChatProvider for OpenAiChatProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        Some(
+            params
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+        )
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -805,6 +831,15 @@ impl MistralChatProvider {
 
 #[async_trait]
 impl ChatProvider for MistralChatProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        Some(
+            params
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+        )
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -922,6 +957,15 @@ impl MiniMaxChatProvider {
 
 #[async_trait]
 impl ChatProvider for MiniMaxChatProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        Some(Self::normalize_model(
+            params
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+        ))
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],

@@ -344,9 +344,11 @@ impl ConversationRouter {
 /// wiedererkennt.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ErrorKey {
-    /// Das Modell, unter dem die Serie lief. `None` heisst „nicht bekannt";
-    /// der Fehlerpfad traegt oft kein Modell, weil der Aufrufer keins gesetzt
-    /// hat und der Anbieter im Fehlerfall keins zurueckmeldet.
+    /// Das Modell, unter dem die Serie lief. `None` heisst „nicht bekannt".
+    /// Der Fehler- und der Erfolgspfad beziehen es aus derselben Quelle
+    /// ([`crate::chat_provider::ChatProvider::effective_model`]), sonst faende
+    /// eine geglueckte Antwort ihre eigene Serie nicht wieder. `None` bleibt
+    /// nur fuer Provider ohne eigenen Default uebrig.
     model: Option<String>,
     /// Der entstoerte Fehlertext, siehe [`fehler_schluessel`].
     text: String,
@@ -496,9 +498,14 @@ enum ErrorDecision {
 /// bekanntem Modell raeumt also nie eine Serie ab, deren Modell unbekannt
 /// blieb: wir wissen dann schlicht nicht, ob es dieselbe Strecke war, und ein
 /// zu grosszuegiges Abraeumen ist genau der Spam, den die Entprellung
-/// verhindern soll. Die verbleibende Unschaerfe (unbekannt raeumt unbekannt ab)
-/// ist eng: eine geglueckte Antwort traegt das Modell des Anbieters fast immer
-/// mit, nur der Fehlerpfad hat oft keins.
+/// verhindern soll.
+///
+/// Der Vergleich traegt nur, weil beide Seiten dasselbe Feld aus derselben
+/// Quelle fuellen: [`crate::chat_provider::ChatProvider::effective_model`],
+/// vor dem Aufruf, unabhaengig davon, ob eine Antwort kommt. Solange der
+/// Erfolg sein Modell aus dem Antwort-Body zog und der Fehler aus
+/// `ChatParams::model`, war die Gleichheit im Regelfall (`ChatParams::default()`)
+/// nie erfuellt und keine Serie wurde je beendet.
 fn passt_zum_modell(key: &ErrorKey, model: Option<&str>) -> bool {
     key.model.as_deref() == model
 }
@@ -1028,7 +1035,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::chat_provider::{ChatMessage, ChatParams, ChatProvider, ChatResponse};
+    use crate::chat_provider::{
+        anbieter_hinweis, ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse,
+    };
     use crate::transparency::TransparencyProvider;
 
     #[derive(Default)]
@@ -1122,9 +1131,9 @@ mod tests {
         fehler_interaktion_mit_modell(use_case, frage, fehler, None)
     }
 
-    /// Wie [`fehler_interaktion`], nur mit bekanntem Modell. Der Fehlerpfad
-    /// traegt in der Praxis oft keins, die Entprellung muss aber beide Faelle
-    /// auseinanderhalten.
+    /// Wie [`fehler_interaktion`], nur mit bekanntem Modell. Beides muss die
+    /// Entprellung auseinanderhalten: `None` kommt von Providern ohne eigenen
+    /// Default, alles andere von [`ChatProvider::effective_model`].
     fn fehler_interaktion_mit_modell(
         use_case: LlmUseCase,
         frage: &str,
@@ -1547,6 +1556,12 @@ mod tests {
 
     #[test]
     fn ein_erfolg_beendet_die_serie_und_traegt_die_anzahl() {
+        // Was dieser Test leistet und was nicht: er prueft die Mechanik von
+        // `ErrorThrottle` an von Hand gebauten Records. Er sagt nichts
+        // darueber, ob die Verdrahtung im `TransparencyProvider` ueberhaupt
+        // ein Paar mit gleichem Modell erzeugt; das kann nur ein Test ueber
+        // den echten Weg, siehe
+        // `ein_erfolg_beendet_die_serie_ueber_den_echten_weg`.
         let mut throttle = ErrorThrottle::default();
         let jetzt = Instant::now();
         let fenster = Duration::from_secs(900);
@@ -2062,6 +2077,151 @@ mod tests {
             "50 Aufrufe mit klemmender Senke brauchten {dauer:?} — record() blockiert"
         );
         gate.add_permits(100);
+    }
+
+    /// Anbieter, der ein festes Skript abspielt und sein Modell kennt, so wie
+    /// jeder echte Provider es tut.
+    struct Skript {
+        modell: &'static str,
+        antworten: Mutex<Vec<Result<ChatResponse, ChatProviderError>>>,
+    }
+
+    impl Skript {
+        fn arc(
+            modell: &'static str,
+            antworten: Vec<Result<ChatResponse, ChatProviderError>>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                modell,
+                antworten: Mutex::new(antworten),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for Skript {
+        fn effective_model(&self, params: &ChatParams) -> Option<String> {
+            Some(
+                params
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.modell.to_string()),
+            )
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _params: ChatParams,
+        ) -> Result<ChatResponse, ChatProviderError> {
+            let mut antworten = self.antworten.lock().expect("skript lock");
+            if antworten.is_empty() {
+                return Err(ChatProviderError::Provider("skript leer".to_string()));
+            }
+            antworten.remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn ein_schluessel_im_anbieter_body_erreicht_den_kanal_nicht() {
+        // Der Vorfall: ein Nutzer schreibt seinen Schluessel in den Chat, der
+        // Anbieter antwortet 400 und spiegelt den beanstandeten Inhalt
+        // zurueck. Der Ausloeser war redigiert, der Fehlertext nicht: er war
+        // das einzige Feld, das nie durch `redact_secrets` lief.
+        const SCHLUESSEL: &str = "fw_liveGEHEIM1234ABCD";
+        let body = format!(r#"{{"error":{{"message":"invalid content: {SCHLUESSEL}"}}}}"#);
+        let inner = Skript::arc(
+            "fireworks/deepseek",
+            vec![Err(ChatProviderError::Provider(anbieter_hinweis(
+                400, &body,
+            )))],
+        );
+
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let provider = TransparencyProvider::new(inner, log.sink(), LlmUseCase::Faq);
+
+        let _ = provider
+            .chat(
+                &[ChatMessage::user(format!("mein token={SCHLUESSEL}"))],
+                ChatParams::default(),
+            )
+            .await;
+
+        assert!(warte_auf(|| !messenger.sent().is_empty()).await);
+        let sent = messenger.sent();
+        let text = &sent[0].1;
+        assert!(
+            !text.contains(SCHLUESSEL),
+            "der Schluessel darf den Kanal nie erreichen: {text}"
+        );
+        assert!(
+            text.contains("Fehler: ") && text.contains("HTTP 400"),
+            "die Deutung des Fehlers muss erhalten bleiben: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ein_erfolg_beendet_die_serie_ueber_den_echten_weg() {
+        // Ueber `TransparencyProvider` statt ueber von Hand gebaute Records,
+        // und mit `ChatParams::default()`, weil fast jeder Aufrufer das
+        // benutzt. Genau dort lag der Bruch: der Fehlerfall trug
+        // `params.model` (also `None`), der Erfolgsfall das Modell aus dem
+        // Antwort-Body. Die Entprellung hat ihre eigene Serie damit nie
+        // wiedergefunden.
+        const MODELL: &str = "fireworks/deepseek";
+        let fehler = || {
+            Err(ChatProviderError::Provider(
+                "HTTP 412: Anbieter-Konto gesperrt".to_string(),
+            ))
+        };
+        let erfolg = || {
+            Ok(ChatResponse {
+                content: "geht wieder".to_string(),
+                // Der Body meldet sein eigenes Modell. Frueher war genau das
+                // die zweite, abweichende Quelle.
+                model: Some(format!("accounts/{MODELL}")),
+                usage: crate::chat_provider::TokenUsage::default(),
+            })
+        };
+        let inner = Skript::arc(
+            MODELL,
+            vec![fehler(), fehler(), fehler(), erfolg(), fehler()],
+        );
+
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let provider = TransparencyProvider::new(inner, log.sink(), LlmUseCase::ScrimLagebild);
+
+        for runde in 0..5 {
+            let _ = provider
+                .chat(
+                    &[ChatMessage::user(format!("lagebild {runde}"))],
+                    ChatParams::default(),
+                )
+                .await;
+        }
+
+        assert!(warte_auf(|| messenger.sent().len() == 3).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sent = messenger.sent();
+        assert_eq!(
+            sent.len(),
+            3,
+            "Erstmeldung, Erfolg, und danach wieder eine Erstmeldung: {sent:?}"
+        );
+        assert!(sent[0].1.contains("HTTP 412"), "{}", sent[0].1);
+        assert!(
+            sent[1].1.contains("Davor 2 mal derselbe Fehler"),
+            "der Erfolg muss die gezaehlte Anzahl mittragen: {}",
+            sent[1].1
+        );
+        assert!(
+            sent[2].1.contains("HTTP 412"),
+            "nach dem Erfolg faengt das Backoff bei null an, der naechste \
+             Ausfall ist sofort wieder sichtbar: {}",
+            sent[2].1
+        );
     }
 
     #[tokio::test]
