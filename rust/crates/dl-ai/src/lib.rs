@@ -1138,7 +1138,8 @@ pub fn strip_think(text: &str) -> String {
 /// (temperature 0, JSON-only-System-Prompt).
 ///
 /// Token-Budget: 160 stammt aus der Python-Zeit. Das aktuelle Modell
-/// (`deepseek-v4-flash`) schreibt eine ausführliche `reason`-Begründung und
+/// ([`DEFAULT_FIREWORKS_MODEL`], der undatierte Name war unter diesem Konto
+/// nicht ansprechbar) schreibt eine ausführliche `reason`-Begründung und
 /// braucht für einen Standardfall gemessene 222 Completion-Tokens; bei 160
 /// bricht die Antwort mitten im JSON ab, kommt mit `finish_reason=length`
 /// zurück und der Provider meldet "response truncated (max_tokens)" — der

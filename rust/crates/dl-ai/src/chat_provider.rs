@@ -143,8 +143,36 @@ pub enum ChatProviderError {
     RateLimit,
     #[error("LLM provider authentication failed")]
     Auth,
-    #[error("LLM provider error: {0}")]
+    /// Der volle Hinweis, Wortlaut des Anbieters eingeschlossen. `Display`
+    /// gibt davon nur den Statusteil her, siehe unten; an den Wortlaut kommt
+    /// ausschliesslich [`ChatProviderError::transparenz_wortlaut`].
+    #[error("LLM provider error: {}", statusteil(.0))]
     Provider(String),
+}
+
+impl ChatProviderError {
+    /// Der volle Wortlaut, Anbieter-Echo eingeschlossen. Nur fuer den
+    /// Transparenz-Kanal.
+    ///
+    /// `Display` zeigt bewusst nur den Statusteil: die Anwendungslogs
+    /// schreiben den Fehler mit `%error` oder `error.to_string()`, und manche
+    /// Anbieter spiegeln bei 400 den beanstandeten Nachrichteninhalt zurueck.
+    /// Schreibt ein Nutzer seinen Schluessel in einen LFG-Text oder eine
+    /// Concierge-DM, stuende er sonst im Klartext im Anwendungslog. Statt an
+    /// jeder einzelnen Logstelle zu filtern (heute vier, morgen fuenf), gibt
+    /// die Fehlerart den Wortlaut nur noch auf ausdrueckliche Nachfrage her.
+    ///
+    /// Warum kein eigenes Enum-Feld: `ChatProviderError::Provider(String)`
+    /// wird ausserhalb von `dl-ai` gebaut und gematcht (z. B.
+    /// `dl-squads/src/lagebild.rs`). Eine Struct-Variante haette Aenderungen
+    /// in fremden Crates erzwungen, ohne am Ergebnis etwas zu verbessern: der
+    /// Wortlaut ist auch so nur ueber diesen einen Weg erreichbar.
+    pub fn transparenz_wortlaut(&self) -> String {
+        match self {
+            Self::Provider(hinweis) => format!("LLM provider error: {hinweis}"),
+            andere => andere.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -1550,6 +1578,47 @@ mod tests {
         );
         assert!(kurz.contains("400"), "der Status muss bleiben: {kurz}");
         assert_eq!(statusteil("HTTP 418"), "HTTP 418");
+    }
+
+    #[test]
+    fn display_traegt_den_anbieter_wortlaut_nicht() {
+        // Der Kern-Fix: jede Logstelle, die den Fehler mit `%error` oder
+        // `error.to_string()` schreibt, bekommt nur den Statusteil. Ohne das
+        // muesste jede einzelne Stelle selbst filtern, und die naechste neue
+        // Stelle vergisst es wieder.
+        let hinweis =
+            anbieter_hinweis(400, r#"{"error":{"message":"verbotenes wort: sk-geheim"}}"#);
+        assert!(
+            hinweis.contains("sk-geheim"),
+            "der Hinweis selbst traegt den Wortlaut weiter"
+        );
+        let fehler = ChatProviderError::Provider(hinweis);
+
+        let gelogged = fehler.to_string();
+        assert!(!gelogged.contains("sk-geheim"), "{gelogged}");
+        assert!(!gelogged.contains(ANBIETER_MARKER.trim()), "{gelogged}");
+        assert_eq!(
+            gelogged,
+            "LLM provider error: HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter."
+        );
+
+        let fuer_den_kanal = fehler.transparenz_wortlaut();
+        assert!(
+            fuer_den_kanal.contains("sk-geheim"),
+            "der Transparenz-Pfad braucht den Wortlaut: {fuer_den_kanal}"
+        );
+        assert!(fuer_den_kanal.starts_with("LLM provider error: HTTP 400"));
+    }
+
+    #[test]
+    fn transparenz_wortlaut_bleibt_bei_den_uebrigen_varianten_gleich() {
+        for fehler in [
+            ChatProviderError::Timeout,
+            ChatProviderError::RateLimit,
+            ChatProviderError::Auth,
+        ] {
+            assert_eq!(fehler.transparenz_wortlaut(), fehler.to_string());
+        }
     }
 
     #[test]

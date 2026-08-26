@@ -49,7 +49,16 @@ pub struct AiInteraction {
     /// Die KI-Antwort im Wortlaut; `None`, wenn der Aufruf fehlschlug.
     pub response: Option<String>,
     pub error: Option<String>,
+    /// Das Modell, unter dem der Aufruf angefragt wurde
+    /// ([`ChatProvider::effective_model`]). Zugleich der Schluessel, an dem
+    /// die Entprellung im Transparenz-Log ihre Serien wiedererkennt: er muss
+    /// im Erfolgs- und im Fehlerfall aus derselben Quelle kommen.
     pub model: Option<String>,
+    /// Das Modell, das laut Antwort-Body wirklich geantwortet hat. `None` im
+    /// Fehlerfall und bei Anbietern, die es nicht zurueckmelden. Nur zur
+    /// Anzeige, nie als Schluessel: sonst faende eine geglueckte Antwort die
+    /// Serie ihres eigenen Ausfalls nicht wieder.
+    pub antwort_modell: Option<String>,
     pub latency_ms: u64,
     /// Fingerabdrücke aller Nutzer-Nachrichten des übergebenen Verlaufs,
     /// älteste zuerst. Ein Verlauf mit mehr als einem Eintrag ist eine
@@ -200,6 +209,11 @@ impl ChatProvider for TransparencyProvider {
                 system_excerpt,
                 response: Some(redact_secrets(&response.content)),
                 error: None,
+                // Das angefragte Modell bleibt der Schluessel (siehe oben).
+                // Was tatsaechlich geantwortet hat, steht daneben: loest der
+                // Anbieter einen Alias auf ein anderes Modell auf, ist genau
+                // das die Information, wegen der es den Kanal gibt.
+                antwort_modell: response.model.clone(),
                 model: effective_model,
                 latency_ms,
                 conversation_trail,
@@ -215,7 +229,14 @@ impl ChatProvider for TransparencyProvider {
                 // Nutzer seinen Schluessel in den Chat, stand er im `Fehler:`
                 // im Klartext, waehrend im `Ausloeser:` sauber `[redigiert]`
                 // stand.
-                error: Some(redact_secrets(&error.to_string())),
+                //
+                // Dies ist der einzige Pfad, der den vollen Wortlaut lesen
+                // darf: `Display` liefert nur den Statusteil, siehe
+                // [`ChatProviderError::transparenz_wortlaut`].
+                error: Some(redact_secrets(&error.transparenz_wortlaut())),
+                // Im Fehlerfall gibt es keinen Antwort-Body und damit kein
+                // geantwortetes Modell.
+                antwort_modell: None,
                 model: effective_model,
                 latency_ms,
                 conversation_trail,
@@ -561,6 +582,65 @@ mod tests {
         assert_eq!(
             records[0].error.as_deref(),
             Some("LLM provider request timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn nur_der_transparenz_pfad_sieht_den_anbieter_wortlaut() {
+        // Der Kern des Funds: `Display` gibt den Wortlaut des Anbieters nicht
+        // mehr her, damit ihn keine Logstelle mit `%error` versehentlich ins
+        // Anwendungslog schreibt. Der Kanal braucht ihn und holt ihn sich
+        // ueber den einen erlaubten Weg.
+        let hinweis = crate::chat_provider::anbieter_hinweis(
+            400,
+            r#"{"error":{"message":"verbotenes wort: sk-geheim-123"}}"#,
+        );
+        let fehler = ChatProviderError::Provider(hinweis);
+        assert!(
+            !fehler.to_string().contains("verbotenes wort"),
+            "Display darf den Wortlaut nicht tragen: {fehler}"
+        );
+
+        let inner = Arc::new(FixedProvider(Err(fehler)));
+        let sink = RecordingSink::arc();
+        let provider = TransparencyProvider::new(inner, sink.clone(), LlmUseCase::Faq);
+
+        let _ = provider
+            .chat(&[ChatMessage::user("Frage")], ChatParams::default())
+            .await;
+
+        let records = sink.records();
+        let text = records[0].error.as_deref().expect("Fehlertext");
+        assert!(
+            text.contains("verbotenes wort"),
+            "der Kanal braucht den vollen Wortlaut: {text}"
+        );
+        assert!(
+            text.contains("HTTP 400"),
+            "der Statusteil bleibt vorne: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn der_record_traegt_das_modell_aus_dem_antwort_body() {
+        // `model` bleibt der Schluessel (angefragtes Modell), `antwort_modell`
+        // zeigt, was wirklich geantwortet hat.
+        let mut response = antwort("ok");
+        response.model = Some("aufgeloestes-modell".to_string());
+        let inner = Arc::new(FixedProvider(Ok(response)));
+        let sink = RecordingSink::arc();
+        let provider = TransparencyProvider::new(inner, sink.clone(), LlmUseCase::Faq);
+
+        provider
+            .chat(&[ChatMessage::user("Frage")], ChatParams::default())
+            .await
+            .expect("Antwort");
+
+        let records = sink.records();
+        assert_eq!(records[0].model.as_deref(), Some("test-modell"));
+        assert_eq!(
+            records[0].antwort_modell.as_deref(),
+            Some("aufgeloestes-modell")
         );
     }
 
