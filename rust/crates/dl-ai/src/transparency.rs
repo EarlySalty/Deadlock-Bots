@@ -12,8 +12,11 @@
 //!   der Implementierung sofort zurueckkehren.
 //! - Ein KI-Ausfall ist selbst ein Befund, den der Kanal zeigen soll. Der
 //!   Fehlerfall erzeugt darum genauso einen Record wie der Erfolg.
-//! - Vollstaendigkeit schlaegt Sparsamkeit: kein Sampling, keine Aggregation.
-//!   Jede Interaktion wird einzeln sichtbar.
+//! - Kein Sampling: jede erfolgreiche Antwort wird einzeln sichtbar. Nur
+//!   wiederholte identische Fehler fasst die Senke zusammen, und auch dann
+//!   wird jeder Fehler mindestens einmal einzeln gezeigt und jede
+//!   Wiederholung als Anzahl ausgewiesen. Siehe
+//!   [`crate::transparency_log`].
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

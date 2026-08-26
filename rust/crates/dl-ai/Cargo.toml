@@ -18,6 +18,9 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# test-util: pausierte Uhr fuer die Zeitfenster im Transparenz-Log, damit die
+# Tests nicht gegen die echte Uhr laufen.
+tokio = { workspace = true, features = ["test-util"] }
 axum.workspace = true
 tracing-subscriber.workspace = true
 tower.workspace = true
