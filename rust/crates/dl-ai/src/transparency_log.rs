@@ -18,7 +18,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -50,6 +50,16 @@ const DEFAULT_MIN_SEND_INTERVAL: Duration = Duration::from_millis(1_100);
 /// So viele Gespraeche behaelt die Thread-Zuordnung im Gedaechtnis.
 const CONVERSATION_MEMORY: usize = 2_000;
 
+/// Ein kaputter Provider liefert denselben Fehler bei jedem Versuch. Einmal
+/// muss der Owner ihn sehen, danach reicht die Anzahl: innerhalb dieses
+/// Fensters wird derselbe Fehler im selben Anwendungsfall nur gezaehlt.
+/// Erfolgreiche Antworten bleiben davon unberuehrt, dort gilt weiter
+/// Vollstaendigkeit vor Sparsamkeit.
+const DEFAULT_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// So viele verschiedene Fehlerarten behaelt die Entprellung im Gedaechtnis.
+const ERROR_MEMORY: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransparencyConfig {
     pub enabled: bool,
@@ -59,6 +69,9 @@ pub struct TransparencyConfig {
     pub include_moderation: bool,
     pub queue_capacity: usize,
     pub min_send_interval: Duration,
+    /// Wie lange derselbe Fehler nach der ersten Meldung nur gezaehlt wird.
+    /// `Duration::ZERO` schaltet die Entprellung ab.
+    pub error_repeat_window: Duration,
 }
 
 impl Default for TransparencyConfig {
@@ -69,6 +82,7 @@ impl Default for TransparencyConfig {
             include_moderation: false,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             min_send_interval: DEFAULT_MIN_SEND_INTERVAL,
+            error_repeat_window: DEFAULT_ERROR_REPEAT_WINDOW,
         }
     }
 }
@@ -265,6 +279,80 @@ impl ConversationRouter {
     }
 }
 
+/// Entprellt Wiederholungen desselben Fehlers.
+///
+/// Der Schluessel ist (Anwendungsfall, Fehlertext). Die erste Meldung geht
+/// durch, jede weitere im Fenster wird gezaehlt und beim naechsten Durchlass
+/// als Anzahl mitgeschickt. Nichts geht still verloren.
+#[derive(Default)]
+struct ErrorThrottle {
+    streaks: HashMap<(LlmUseCase, String), ErrorStreak>,
+    order: VecDeque<(LlmUseCase, String)>,
+}
+
+struct ErrorStreak {
+    last_posted: Instant,
+    suppressed: u64,
+}
+
+/// `Show(n)`: senden, `n` unterdrueckte Wiederholungen davor.
+enum ErrorDecision {
+    Show(u64),
+    Suppress,
+}
+
+impl ErrorThrottle {
+    fn decide(
+        &mut self,
+        interaction: &AiInteraction,
+        window: Duration,
+        now: Instant,
+    ) -> ErrorDecision {
+        let Some(error) = interaction.error.as_deref() else {
+            return ErrorDecision::Show(0);
+        };
+        if window.is_zero() {
+            return ErrorDecision::Show(0);
+        }
+        let key = (interaction.use_case, error.to_string());
+        if let Some(streak) = self.streaks.get_mut(&key) {
+            if now.duration_since(streak.last_posted) < window {
+                streak.suppressed += 1;
+                return ErrorDecision::Suppress;
+            }
+            let carried = streak.suppressed;
+            streak.last_posted = now;
+            streak.suppressed = 0;
+            return ErrorDecision::Show(carried);
+        }
+        self.streaks.insert(
+            key.clone(),
+            ErrorStreak {
+                last_posted: now,
+                suppressed: 0,
+            },
+        );
+        self.order.push_back(key);
+        while self.order.len() > ERROR_MEMORY {
+            if let Some(old) = self.order.pop_front() {
+                self.streaks.remove(&old);
+            }
+        }
+        ErrorDecision::Show(0)
+    }
+}
+
+/// Haengt die Anzahl der unterdrueckten Wiederholungen an die Meldung.
+fn with_repeat_notice(content: String, suppressed: u64) -> String {
+    if suppressed == 0 {
+        return content;
+    }
+    let notice =
+        format!("\n_Davor {suppressed} mal derselbe Fehler, nicht einzeln angezeigt._");
+    let room = DISCORD_CONTENT_LIMIT.saturating_sub(notice.chars().count());
+    format!("{}{notice}", cut(&content, room))
+}
+
 async fn run_worker(
     mut rx: mpsc::Receiver<AiInteraction>,
     messenger: Arc<dyn TransparencyMessenger>,
@@ -272,7 +360,13 @@ async fn run_worker(
     dropped: Arc<AtomicU64>,
 ) {
     let mut router = ConversationRouter::default();
+    let mut errors = ErrorThrottle::default();
     while let Some(interaction) = rx.recv().await {
+        let suppressed = match errors.decide(&interaction, config.error_repeat_window, Instant::now())
+        {
+            ErrorDecision::Suppress => continue,
+            ErrorDecision::Show(count) => count,
+        };
         let missed = dropped.swap(0, Ordering::Relaxed);
         if missed > 0 {
             // Stille darf nie wie „keine KI-Aktivitaet" aussehen.
@@ -287,7 +381,15 @@ async fn run_worker(
         }
 
         let id = router.resolve(&interaction);
-        deliver(&mut router, id, &interaction, messenger.as_ref(), &config).await;
+        deliver(
+            &mut router,
+            id,
+            &interaction,
+            suppressed,
+            messenger.as_ref(),
+            &config,
+        )
+        .await;
         throttle(&config).await;
     }
 }
@@ -302,6 +404,7 @@ async fn deliver(
     router: &mut ConversationRouter,
     id: u64,
     interaction: &AiInteraction,
+    suppressed: u64,
     messenger: &dyn TransparencyMessenger,
     config: &TransparencyConfig,
 ) {
@@ -330,7 +433,10 @@ async fn deliver(
         }
     }
 
-    let content = render_interaction(interaction, turn, thread_id.is_none());
+    let content = with_repeat_notice(
+        render_interaction(interaction, turn, thread_id.is_none()),
+        suppressed,
+    );
     let target = thread_id.unwrap_or(config.channel_id);
     let sent = messenger.send(target, &content).await;
     let sent = match sent {
@@ -340,7 +446,7 @@ async fn deliver(
             // verschwinden: dann eben in den Kanal.
             tracing::warn!(%error, thread_id = target, "KI-Transparenz-Thread nicht erreichbar, Rueckfall auf den Kanal");
             thread_id = None;
-            let fallback = render_interaction(interaction, turn, true);
+            let fallback = with_repeat_notice(render_interaction(interaction, turn, true), suppressed);
             match messenger.send(config.channel_id, &fallback).await {
                 Ok(message_id) => Some(message_id),
                 Err(error) => {
@@ -568,6 +674,101 @@ mod tests {
                 Err("Threads hier nicht moeglich".to_string())
             }
         }
+    }
+
+    fn fehler_interaktion(use_case: LlmUseCase, frage: &str, fehler: &str) -> AiInteraction {
+        AiInteraction {
+            use_case,
+            prompt_excerpt: frage.to_string(),
+            system_excerpt: None,
+            response: None,
+            error: Some(fehler.to_string()),
+            model: None,
+            latency_ms: 4,
+            conversation_trail: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn derselbe_fehler_wird_einmal_gezeigt_und_danach_nur_gezaehlt() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for index in 0..5 {
+            sink.record(fehler_interaktion(
+                LlmUseCase::ScrimLagebild,
+                &format!("team {index}"),
+                "LLM provider error: HTTP 412",
+            ));
+        }
+        // Ein anderer Fehler muss trotzdem durchkommen.
+        sink.record(fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            "team 9",
+            "LLM provider error: HTTP 404",
+        ));
+        assert!(warte_auf(|| messenger.sent().len() == 2).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let sent = messenger.sent();
+        assert_eq!(sent.len(), 2, "vier Wiederholungen bleiben stumm: {sent:?}");
+        assert!(sent[0].1.contains("HTTP 412"), "{}", sent[0].1);
+        assert!(sent[1].1.contains("HTTP 404"), "{}", sent[1].1);
+    }
+
+    #[tokio::test]
+    async fn erfolgreiche_antworten_werden_nie_entprellt() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for index in 0..4_u64 {
+            sink.record(interaktion(LlmUseCase::Faq, "gleiche frage", "gleiche antwort", &[index]));
+        }
+        assert!(warte_auf(|| messenger.sent().len() == 4).await);
+    }
+
+    #[tokio::test]
+    async fn nach_dem_fenster_meldet_der_fehler_die_unterdrueckte_anzahl() {
+        let messenger = FakeMessenger::arc(false);
+        let config = TransparencyConfig {
+            error_repeat_window: Duration::from_millis(120),
+            ..testkonfig()
+        };
+        let log = TransparencyLog::spawn(messenger.clone(), config);
+        let sink = log.sink();
+
+        for _ in 0..3 {
+            sink.record(fehler_interaktion(
+                LlmUseCase::ScrimLagebild,
+                "team 1",
+                "LLM provider error: HTTP 412",
+            ));
+        }
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        sink.record(fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "LLM provider error: HTTP 412",
+        ));
+        assert!(warte_auf(|| messenger.sent().len() == 2).await);
+
+        let sent = messenger.sent();
+        assert!(
+            sent[1].1.contains("Davor 2 mal derselbe Fehler"),
+            "die Anzahl muss mitkommen: {}",
+            sent[1].1
+        );
+    }
+
+    #[test]
+    fn die_anzahl_sprengt_das_zeichenlimit_nicht() {
+        let lang = "X".repeat(DISCORD_CONTENT_LIMIT);
+        let text = with_repeat_notice(lang, 7);
+        assert!(text.chars().count() <= DISCORD_CONTENT_LIMIT, "{}", text.chars().count());
+        assert!(text.contains("Davor 7 mal derselbe Fehler"));
     }
 
     fn testkonfig() -> TransparencyConfig {
