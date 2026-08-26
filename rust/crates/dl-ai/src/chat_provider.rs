@@ -143,8 +143,36 @@ pub enum ChatProviderError {
     RateLimit,
     #[error("LLM provider authentication failed")]
     Auth,
-    #[error("LLM provider error: {0}")]
+    /// Der volle Hinweis, Wortlaut des Anbieters eingeschlossen. `Display`
+    /// gibt davon nur den Statusteil her, siehe unten; an den Wortlaut kommt
+    /// ausschliesslich [`ChatProviderError::transparenz_wortlaut`].
+    #[error("LLM provider error: {}", statusteil(.0))]
     Provider(String),
+}
+
+impl ChatProviderError {
+    /// Der volle Wortlaut, Anbieter-Echo eingeschlossen. Nur fuer den
+    /// Transparenz-Kanal.
+    ///
+    /// `Display` zeigt bewusst nur den Statusteil: die Anwendungslogs
+    /// schreiben den Fehler mit `%error` oder `error.to_string()`, und manche
+    /// Anbieter spiegeln bei 400 den beanstandeten Nachrichteninhalt zurueck.
+    /// Schreibt ein Nutzer seinen Schluessel in einen LFG-Text oder eine
+    /// Concierge-DM, stuende er sonst im Klartext im Anwendungslog. Statt an
+    /// jeder einzelnen Logstelle zu filtern (heute vier, morgen fuenf), gibt
+    /// die Fehlerart den Wortlaut nur noch auf ausdrueckliche Nachfrage her.
+    ///
+    /// Warum kein eigenes Enum-Feld: `ChatProviderError::Provider(String)`
+    /// wird ausserhalb von `dl-ai` gebaut und gematcht (z. B.
+    /// `dl-squads/src/lagebild.rs`). Eine Struct-Variante haette Aenderungen
+    /// in fremden Crates erzwungen, ohne am Ergebnis etwas zu verbessern: der
+    /// Wortlaut ist auch so nur ueber diesen einen Weg erreichbar.
+    pub fn transparenz_wortlaut(&self) -> String {
+        match self {
+            Self::Provider(hinweis) => format!("LLM provider error: {hinweis}"),
+            andere => andere.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -154,6 +182,23 @@ pub trait ChatProvider: Send + Sync {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<ChatResponse, ChatProviderError>;
+
+    /// Das Modell, unter dem dieser Aufruf tatsaechlich laeuft, bevor er
+    /// laeuft.
+    ///
+    /// `ChatParams::model` ist bei fast allen Aufrufern `None`; welches Modell
+    /// dann wirklich auf die Leitung geht, weiss nur der Provider (sein
+    /// `default_model`). Der Erfolgsfall erfaehrt es hinterher aus dem
+    /// Antwort-Body, der Fehlerfall nie: bei 401, 412 oder Timeout gibt es
+    /// keinen Body. Ohne diese Methode traegt derselbe Ausfall im
+    /// Transparenz-Log ein anderes Modell als die geglueckte Antwort daneben,
+    /// und die Entprellung findet ihre eigene Serie nicht wieder.
+    ///
+    /// Default ist das, was der Aufrufer gesetzt hat. Jeder Provider mit einem
+    /// eigenen Default ueberschreibt das, und Wrapper reichen es durch.
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        params.model.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -703,6 +748,15 @@ impl OpenAiChatProvider {
 
 #[async_trait]
 impl ChatProvider for OpenAiChatProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        Some(
+            params
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+        )
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -805,6 +859,15 @@ impl MistralChatProvider {
 
 #[async_trait]
 impl ChatProvider for MistralChatProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        Some(
+            params
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+        )
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -922,6 +985,15 @@ impl MiniMaxChatProvider {
 
 #[async_trait]
 impl ChatProvider for MiniMaxChatProvider {
+    fn effective_model(&self, params: &ChatParams) -> Option<String> {
+        Some(Self::normalize_model(
+            params
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+        ))
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -1089,23 +1161,31 @@ async fn send_json_with_retry(
             return if status == StatusCode::TOO_MANY_REQUESTS {
                 Err(ChatProviderError::RateLimit)
             } else {
-                Err(ChatProviderError::Provider(format!(
-                    "HTTP {}",
-                    status.as_u16()
+                let rohtext = response.text().await.unwrap_or_default();
+                Err(ChatProviderError::Provider(anbieter_hinweis(
+                    status.as_u16(),
+                    &rohtext,
                 )))
             };
         }
         if !status.is_success() {
+            // Der Fehlertext landet im Transparenz-Kanal. "HTTP 412" schickt
+            // den Leser auf die Suche, obwohl der Anbieter im Body genau
+            // sagt, was los ist.
+            let rohtext = response.text().await.unwrap_or_default();
+            let hinweis = anbieter_hinweis(status.as_u16(), &rohtext);
             tracing::warn!(
                 provider = provider,
                 status = status.as_u16(),
                 elapsed_ms = started.elapsed().as_millis(),
+                // Nur die Deutung, nie der Wortlaut des Anbieters: manche
+                // spiegeln bei 400 den beanstandeten Nachrichteninhalt
+                // zurueck, und Nutzertext gehoert nicht ins Anwendungslog.
+                // Den vollen Wortlaut bekommt der Transparenz-Kanal.
+                hinweis = %statusteil(&hinweis),
                 "LLM-Provider-API-Fehler"
             );
-            return Err(ChatProviderError::Provider(format!(
-                "HTTP {}",
-                status.as_u16()
-            )));
+            return Err(ChatProviderError::Provider(hinweis));
         }
         let body = response
             .json::<Value>()
@@ -1121,6 +1201,81 @@ async fn send_json_with_retry(
     Err(ChatProviderError::Provider(
         "retry loop exhausted unexpectedly".to_string(),
     ))
+}
+
+/// Trennt den Teil, den wir selbst formulieren, vom Wortlaut des Anbieters.
+///
+/// Die Entprellung im Transparenz-Log dedupliziert am Text davor: der Wortlaut
+/// dahinter kann eine Request-ID tragen und waere je Aufruf verschieden.
+pub const ANBIETER_MARKER: &str = " Anbieter sagt: ";
+
+/// Der Teil des Hinweises, den wir selbst formulieren: Status und Deutung,
+/// ohne den Wortlaut des Anbieters. Fuer Logs, die kein Nutzertext erreichen
+/// darf.
+pub fn statusteil(hinweis: &str) -> &str {
+    match hinweis.find(ANBIETER_MARKER) {
+        Some(pos) => hinweis[..pos].trim_end_matches(':'),
+        None => hinweis,
+    }
+}
+
+/// Uebersetzt eine Fehlerantwort des Anbieters in einen Satz, mit dem man
+/// etwas anfangen kann.
+///
+/// Der Text geht in den Transparenz-Kanal und in die Logs. "HTTP 412" sagt
+/// niemandem, dass das Fireworks-Konto wegen einer offenen Rechnung gesperrt
+/// ist; genau das stand aber im Body, den vorher niemand gelesen hat.
+pub fn anbieter_hinweis(status: u16, rohtext: &str) -> String {
+    let meldung = anbieter_meldung(rohtext);
+    let deutung = match status {
+        400 => Some("Anfrage abgelehnt, meist ein ungueltiger Parameter"),
+        402 | 412 => {
+            Some("Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen")
+        }
+        404 => Some("Modell oder Endpunkt gibt es dort nicht, Modellnamen pruefen"),
+        413 => Some("Anfrage zu gross"),
+        _ => None,
+    };
+    match (deutung, meldung) {
+        (Some(d), Some(m)) => format!("HTTP {status}: {d}.{ANBIETER_MARKER}{m}"),
+        (Some(d), None) => format!("HTTP {status}: {d}"),
+        (None, Some(m)) => format!("HTTP {status}:{ANBIETER_MARKER}{m}"),
+        (None, None) => format!("HTTP {status}"),
+    }
+}
+
+/// Zieht die Klartextmeldung aus einer Fehlerantwort, egal ob sie unter
+/// `error.message`, `error` oder `message` liegt. Gekuerzt, weil der Text in
+/// eine Discord-Nachricht passen muss.
+fn anbieter_meldung(rohtext: &str) -> Option<String> {
+    let text = rohtext.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // Bevorzugt die uebliche Textmeldung. Findet sich keine, bleibt der
+    // Rohtext: ein Body wie `{"detail":"quota exceeded"}` traegt die Antwort
+    // auf die Frage, warum der Aufruf scheiterte, und darf nicht zugunsten
+    // eines nackten "HTTP 400" weggeworfen werden.
+    let gefunden = match serde_json::from_str::<Value>(text) {
+        Ok(wert) => wert
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .or_else(|| wert.get("error"))
+            .or_else(|| wert.get("message"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| text.to_string()),
+        Err(_) => text.to_string(),
+    };
+    let sauber = gefunden.trim();
+    if sauber.is_empty() {
+        return None;
+    }
+    Some(if sauber.chars().count() > 300 {
+        format!("{}…", sauber.chars().take(300).collect::<String>())
+    } else {
+        sauber.to_string()
+    })
 }
 
 fn request_error_kind(err: &reqwest::Error) -> String {
@@ -1349,6 +1504,179 @@ impl ChatProvider for MockChatProvider {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn gesperrtes_konto_wird_im_klartext_gemeldet() {
+        // Wortlaut aus einer echten Fireworks-Antwort vom 2026-08-26.
+        let body = r#"{"error":{"message":"Account mail-01rvneuz61yq is suspended, possibly due to reaching the monthly spending limit or failure to pay past invoices.","code":"PRECONDITION_FAILED"}}"#;
+        let hinweis = anbieter_hinweis(412, body);
+        assert!(hinweis.contains("412"), "{hinweis}");
+        assert!(hinweis.contains("gesperrt"), "die Deutung fehlt: {hinweis}");
+        assert!(
+            hinweis.contains("is suspended"),
+            "der Anbieter-Wortlaut fehlt: {hinweis}"
+        );
+    }
+
+    #[test]
+    fn unbekanntes_modell_zeigt_auf_den_modellnamen() {
+        let body = r#"{"error":{"message":"Model not found, inaccessible, and/or not deployed","code":"NOT_FOUND"}}"#;
+        let hinweis = anbieter_hinweis(404, body);
+        assert!(hinweis.contains("Modellnamen pruefen"), "{hinweis}");
+        assert!(hinweis.contains("Model not found"), "{hinweis}");
+    }
+
+    #[test]
+    fn ohne_verwertbaren_body_bleibt_der_status_uebrig() {
+        assert_eq!(anbieter_hinweis(418, ""), "HTTP 418");
+        assert_eq!(anbieter_hinweis(418, "   "), "HTTP 418");
+    }
+
+    #[test]
+    fn kein_json_wird_trotzdem_durchgereicht() {
+        let hinweis = anbieter_hinweis(500, "upstream connect error");
+        assert!(hinweis.contains("upstream connect error"), "{hinweis}");
+    }
+
+    #[test]
+    fn ein_langer_anbietertext_wird_gekuerzt_und_gekennzeichnet() {
+        let lang = "x".repeat(2_000);
+        let hinweis = anbieter_hinweis(400, &lang);
+        assert!(hinweis.chars().count() < 400, "{}", hinweis.chars().count());
+        assert!(hinweis.contains('…'), "die Kuerzung muss sichtbar sein");
+    }
+
+    #[test]
+    fn ein_json_ohne_bekanntes_meldefeld_verliert_den_wortlaut_nicht() {
+        // `{"detail": ...}` kennt der Parser nicht. Frueher endete die Suche
+        // damit bei `None` und uebrig blieb ein nacktes "HTTP 400".
+        let hinweis = anbieter_hinweis(400, r#"{"detail":"quota exceeded"}"#);
+        assert!(
+            hinweis.contains("quota exceeded"),
+            "der Rohtext ist die einzige Spur: {hinweis}"
+        );
+
+        // Auch hier gilt das Zeichenlimit.
+        let lang = format!(r#"{{"detail":"{}"}}"#, "y".repeat(2_000));
+        let gekuerzt = anbieter_hinweis(400, &lang);
+        assert!(
+            gekuerzt.chars().count() < 400,
+            "{}",
+            gekuerzt.chars().count()
+        );
+        assert!(gekuerzt.contains('…'), "die Kuerzung muss sichtbar sein");
+    }
+
+    #[test]
+    fn der_statusteil_traegt_den_anbieter_wortlaut_nicht() {
+        let hinweis = anbieter_hinweis(400, r#"{"error":{"message":"verbotenes wort: hallo"}}"#);
+        assert!(hinweis.contains("verbotenes wort"), "{hinweis}");
+        let kurz = statusteil(&hinweis);
+        assert!(
+            !kurz.contains("verbotenes wort"),
+            "Nutzertext gehoert nicht ins Anwendungslog: {kurz}"
+        );
+        assert!(kurz.contains("400"), "der Status muss bleiben: {kurz}");
+        assert_eq!(statusteil("HTTP 418"), "HTTP 418");
+    }
+
+    #[test]
+    fn display_traegt_den_anbieter_wortlaut_nicht() {
+        // Der Kern-Fix: jede Logstelle, die den Fehler mit `%error` oder
+        // `error.to_string()` schreibt, bekommt nur den Statusteil. Ohne das
+        // muesste jede einzelne Stelle selbst filtern, und die naechste neue
+        // Stelle vergisst es wieder.
+        let hinweis =
+            anbieter_hinweis(400, r#"{"error":{"message":"verbotenes wort: sk-geheim"}}"#);
+        assert!(
+            hinweis.contains("sk-geheim"),
+            "der Hinweis selbst traegt den Wortlaut weiter"
+        );
+        let fehler = ChatProviderError::Provider(hinweis);
+
+        let gelogged = fehler.to_string();
+        assert!(!gelogged.contains("sk-geheim"), "{gelogged}");
+        assert!(!gelogged.contains(ANBIETER_MARKER.trim()), "{gelogged}");
+        assert_eq!(
+            gelogged,
+            "LLM provider error: HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter."
+        );
+
+        let fuer_den_kanal = fehler.transparenz_wortlaut();
+        assert!(
+            fuer_den_kanal.contains("sk-geheim"),
+            "der Transparenz-Pfad braucht den Wortlaut: {fuer_den_kanal}"
+        );
+        assert!(fuer_den_kanal.starts_with("LLM provider error: HTTP 400"));
+    }
+
+    #[test]
+    fn transparenz_wortlaut_bleibt_bei_den_uebrigen_varianten_gleich() {
+        for fehler in [
+            ChatProviderError::Timeout,
+            ChatProviderError::RateLimit,
+            ChatProviderError::Auth,
+        ] {
+            assert_eq!(fehler.transparenz_wortlaut(), fehler.to_string());
+        }
+    }
+
+    #[test]
+    fn die_logstelle_schreibt_nur_den_statusteil() {
+        // Ein Laufzeittest waere hier unzuverlaessig: `tracing` merkt sich je
+        // Logstelle, ob ueberhaupt jemand zuhoert, und andere Tests treffen
+        // dieselbe Stelle zuerst. Also am Quelltext geprueft, wie im Test zum
+        // Anbieter-Label darueber.
+        //
+        // Geprueft wird JEDES Vorkommen, nicht das erste: sonst haengt der
+        // Test daran, dass es genau eine Logstelle gibt und dass sie im
+        // Quelltext oberhalb dieses Testmoduls steht. Eine zweite `warn!`-
+        // Stelle mit demselben Literal weiter oben, oder ein verschobenes
+        // Testmodul, und der Test prueft einen fremden Block.
+        //
+        // Das Suchmuster wird zur Laufzeit zusammengesetzt, damit dieser Test
+        // sich nicht selbst als Fundstelle sieht: im Quelltext steht hier
+        // `{q}LLM-...{q}` und nicht das Literal mit Anfuehrungszeichen.
+        let source = include_str!("chat_provider.rs");
+        let marker = format!("{q}LLM-Provider-API-Fehler{q}", q = '"');
+        let vorkommen: Vec<usize> = source
+            .match_indices(marker.as_str())
+            .map(|(pos, _)| pos)
+            .collect();
+        assert!(
+            !vorkommen.is_empty(),
+            "die Logstelle heisst nicht mehr LLM-Provider-API-Fehler, Test anpassen"
+        );
+        for pos in vorkommen {
+            let block = source[..pos]
+                .rsplit("tracing::warn!(")
+                .next()
+                .expect("warn-Aufruf der Logstelle");
+            assert!(
+                block.contains("hinweis = %statusteil(&hinweis)"),
+                "die Logstelle muss kuerzen, sonst steht Anbieter- und damit \
+                 Nutzertext im Anwendungslog: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn der_fireworks_default_ist_das_freigegebene_modell() {
+        // Der undatierte Name antwortete mit 404; die Freigabe gilt fuer die
+        // datierte Variante.
+        //
+        // Was dieser Test leistet und was nicht: er haelt die Konstante an
+        // ihrem freigegebenen Wert fest, damit ein Zurueckdrehen auf den
+        // undatierten Namen im Diff und im Testlauf auffaellt. Er beweist
+        // nicht, dass es das Modell bei Fireworks gibt. Ein Live-Aufruf
+        // koennte das, ist aber nicht moeglich, solange das Konto gesperrt
+        // ist.
+        assert_eq!(
+            crate::DEFAULT_FIREWORKS_MODEL,
+            "accounts/fireworks/models/deepseek-v4-flash-0731"
+        );
+    }
+
     use super::*;
 
     #[derive(Clone, Default)]
@@ -2077,7 +2405,10 @@ mod tests {
             .await
             .expect_err("server error");
 
-        assert_eq!(err, ChatProviderError::Provider("HTTP 500".to_string()));
+        assert_eq!(
+            err,
+            ChatProviderError::Provider("HTTP 500: Anbieter sagt: server".to_string())
+        );
         assert_eq!(*attempts.lock().expect("lock"), 3);
     }
 
@@ -2109,9 +2440,15 @@ mod tests {
 
         let (bad_request, bad_request_attempts) =
             error_for_status(axum::http::StatusCode::BAD_REQUEST).await;
+        // Der Body traegt keine Textmeldung, nur `{"error":400}`. Er wird
+        // trotzdem angehaengt: was der Anbieter geschickt hat, ist die einzige
+        // Spur, und lieber ein karger Body im Kanal als ein nacktes "HTTP 400".
         assert_eq!(
             bad_request,
-            ChatProviderError::Provider("HTTP 400".to_string())
+            ChatProviderError::Provider(format!(
+                "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter.\
+                 {ANBIETER_MARKER}{{\"error\":400}}"
+            ))
         );
         assert_eq!(bad_request_attempts, 1);
 

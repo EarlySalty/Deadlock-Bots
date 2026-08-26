@@ -9,10 +9,17 @@
 //! - Erfolgreiche Antworten werden einzeln sichtbar, kein Sampling.
 //! - Fehler werden mindestens einmal einzeln sichtbar. Wiederholt derselbe
 //!   Provider denselben Fehler, zeigt der Kanal ihn einmal und danach nur noch
-//!   die Anzahl. Keine unterdrueckte Wiederholung verschwindet ohne Zahl: die
-//!   Anzahl kommt entweder an der naechsten gezeigten Meldung mit, als
-//!   Nachtrag, sobald die Fehlerserie zur Ruhe kommt, oder spaetestens beim
+//!   die Anzahl. Die Anzahl kommt an der naechsten gezeigten Meldung derselben
+//!   Fehlerart mit, an der naechsten geglueckten Antwort, die diese Serie
+//!   beendet, beim Verdraengen aus dem Gedaechtnis oder spaetestens beim
 //!   geordneten Herunterfahren.
+//! - Bekannte Grenze: der Nachtrag als eigene Nachricht ist per Default aus
+//!   ([`DEFAULT_ERROR_FOLLOWUP_QUIET`] ist `ZERO`), weil er selbst der Spam
+//!   war, ueber den sich der Owner beschwert hat. Eine Fehlerserie, die
+//!   einfach nicht mehr aufgerufen wird, behaelt ihren Zaehler deshalb, bis
+//!   sie aus dem Gedaechtnis faellt ([`ERROR_MEMORY`] Fehlerarten) oder der
+//!   Prozess geordnet endet. Das ist bewusst so: eine Zahl ohne Anlass ist
+//!   dem Owner weniger wert als ein ruhiger Kanal.
 //! - Bei Lastspitzen lieber verzoegern als verwerfen: die Queue ist gross, die
 //!   Drossel ist eine Warteschlange und kein Filter. Verwerfen ist der letzte
 //!   Ausweg und wird dann mit Anzahl ausgewiesen.
@@ -60,17 +67,27 @@ const CONVERSATION_MEMORY: usize = 2_000;
 
 /// Ein kaputter Provider liefert denselben Fehler bei jedem Versuch. Einmal
 /// muss der Owner ihn sehen, danach reicht die Anzahl: innerhalb dieses
-/// Fensters wird derselbe Fehler im selben Anwendungsfall nur gezaehlt und
-/// beim naechsten Durchlass als Anzahl mitgeschickt. 15 Minuten, damit ein
-/// laenger laufender Ausfall den Owner regelmaessig wieder erreicht — ein
-/// Fenster von Stunden waere praktisch ein Stummschalter.
-/// Erfolgreiche Antworten bleiben davon unberuehrt.
-const DEFAULT_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Fensters wird derselbe Fehler nur gezaehlt und beim naechsten Durchlass als
+/// Anzahl mitgeschickt.
+///
+/// 24 Stunden, weil der Owner es so vorgegeben hat: er liest die erste Meldung
+/// und weiss danach Bescheid. Jede Wiederholung am selben Tag ist Laerm und
+/// keine neue Information. Danach greift das Backoff aus
+/// [`fenster_mit_backoff`]. Erfolgreiche Antworten bleiben davon unberuehrt.
+const DEFAULT_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Kommt eine Fehlerserie so lange nicht mehr vor, geht die gezaehlte Anzahl
-/// als Nachtrag in den Kanal. Ohne das erfaehrt der Owner die Anzahl nie,
-/// wenn der Ausfall vorbei ist, bevor das Wiederholungsfenster ablaeuft.
-const DEFAULT_ERROR_FOLLOWUP_QUIET: Duration = Duration::from_secs(2 * 60);
+/// Obergrenze des Backoffs. Mit der Verdopplung ergibt das fuer einen
+/// Dauerausfall Tag 0, Tag 1, Tag 3, Tag 7: eine Meldung am ersten Tag und
+/// danach hoechstens zwei pro Woche, genau die Vorgabe des Owners. Die Meldung
+/// bleibt damit eine Erinnerung und wird kein Stummschalter.
+const MAX_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Nachtraege als eigene Nachricht sind standardmaessig aus. Sie waren selbst
+/// der Spam, ueber den sich der Owner beschwert hat: erst die Fehlermeldung,
+/// dann zwei Minuten spaeter eine zweite Nachricht, die nur „danach noch 3 mal
+/// dasselbe" sagt. Die Anzahl geht ohne eigene Nachricht raus, naemlich an der
+/// naechsten gezeigten Meldung oder an der ersten Antwort, die wieder klappt.
+const DEFAULT_ERROR_FOLLOWUP_QUIET: Duration = Duration::ZERO;
 
 /// Takt, in dem der Worker nach faelligen Nachtraegen schaut.
 const FLUSH_TICK: Duration = Duration::from_secs(60);
@@ -176,11 +193,7 @@ fn env_bool(lookup: &impl Fn(&str) -> Option<String>, key: &str, default: bool) 
 
 /// Sekundenwert aus der Umgebung. Unlesbares faellt auf den Default zurueck,
 /// `0` ist ein gueltiger Wert und heisst „abgeschaltet".
-fn env_seconds(
-    lookup: &impl Fn(&str) -> Option<String>,
-    key: &str,
-    default: Duration,
-) -> Duration {
+fn env_seconds(lookup: &impl Fn(&str) -> Option<String>, key: &str, default: Duration) -> Duration {
     read_env(lookup, key)
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
@@ -328,18 +341,42 @@ impl ConversationRouter {
     }
 }
 
-type ErrorKey = (LlmUseCase, String);
+/// Modell plus Fehlertext des Anbieters. Bewusst ohne Anwendungsfall: ein
+/// gesperrtes Konto trifft jeden Anwendungsfall gleichzeitig, und mit dem
+/// Anwendungsfall im Schluessel meldete derselbe Ausfall einmal fuer das
+/// Scrim-Lagebild, einmal fuer Runde 2, einmal fuer den Verbinder und so
+/// weiter.
+///
+/// Das Modell gehoert dagegen hinein: ohne es sind ein 500 von Fireworks und
+/// ein 500 von Gemini derselbe Schluessel, und der zweite, unabhaengige
+/// Ausfall bliebe bis zu sechs Stunden unsichtbar. Es ist zugleich das
+/// Kriterium, an dem eine wieder geglueckte Antwort ihre eigene Serie
+/// wiedererkennt.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ErrorKey {
+    /// Das Modell, unter dem die Serie lief. `None` heisst „nicht bekannt".
+    /// Der Fehler- und der Erfolgspfad beziehen es aus derselben Quelle
+    /// ([`crate::chat_provider::ChatProvider::effective_model`]), sonst faende
+    /// eine geglueckte Antwort ihre eigene Serie nicht wieder. `None` bleibt
+    /// nur fuer Provider ohne eigenen Default uebrig.
+    model: Option<String>,
+    /// Der entstoerte Fehlertext, siehe [`fehler_schluessel`].
+    text: String,
+}
 
 /// Entprellt Wiederholungen desselben Fehlers.
 ///
-/// Der Schluessel ist (Anwendungsfall, Fehlertext). Die erste Meldung geht
-/// durch, jede weitere im Fenster wird gezaehlt. Die gezaehlte Anzahl erreicht
-/// den Owner auf drei Wegen, damit sie nie still verschwindet:
+/// Der Schluessel ist Modell plus Fehlertext. Die erste Meldung geht durch, jede
+/// weitere im Fenster wird gezaehlt, und das Fenster waechst mit jeder
+/// gezeigten Meldung ([`fenster_mit_backoff`]). Die gezaehlte Anzahl erreicht
+/// den Owner, ohne dass eine zusaetzliche Nachricht noetig waere:
 /// 1. an der naechsten gezeigten Meldung derselben Fehlerart,
-/// 2. als Nachtrag, sobald die Serie eine Ruhefrist lang aussetzt
-///    ([`ErrorThrottle::faellige_nachtraege`]),
-/// 3. beim Verdraengen aus dem Gedaechtnis und beim Herunterfahren
-///    ([`ErrorThrottle::offene_nachtraege`]).
+/// 2. an der ersten Antwort, die diese Serie wirklich quittiert: derselbe
+///    Anbieter, und entweder war der Fehler streckenweit oder es ist derselbe
+///    Anwendungsfall ([`erfolg_raeumt_ab`]). Der Erfolg raeumt genau diese
+///    Zaehler ab und traegt deren Anzahl mit,
+/// 3. als Nachtrag beim Verdraengen aus dem Gedaechtnis und beim
+///    Herunterfahren ([`ErrorThrottle::offene_nachtraege`]).
 ///
 /// Nicht abgedeckt bleibt der harte Abbruch (Absturz, SIGKILL): dort geht der
 /// laufende Zaehler verloren. Persistenz waere dafuer noetig und steht
@@ -351,7 +388,19 @@ struct ErrorThrottle {
     /// am laengsten nicht mehr vorkam, nicht was zuerst eintrat.
     order: VecDeque<ErrorKey>,
     /// Nachtraege, die durch Verdraengung faellig wurden.
-    verdraengt: Vec<(ErrorKey, u64)>,
+    verdraengt: Vec<Nachtrag>,
+}
+
+/// Eine gezaehlte Fehlerserie, deren Anzahl noch rausmuss.
+#[derive(Clone, Debug)]
+struct Nachtrag {
+    key: ErrorKey,
+    /// Anwendungsfall der letzten Meldung, nur fuer den Text.
+    use_case: LlmUseCase,
+    /// Der Fehlertext im Wortlaut der letzten Meldung, siehe
+    /// [`ErrorStreak::wortlaut`].
+    wortlaut: String,
+    anzahl: u64,
 }
 
 struct ErrorStreak {
@@ -360,13 +409,187 @@ struct ErrorStreak {
     /// Wann sie zuletzt auftrat, auch unterdrueckt.
     last_seen: Instant,
     suppressed: u64,
+    /// Wie oft diese Fehlerart schon im Kanal stand. Treibt das Backoff.
+    gezeigt: u32,
+    /// Anwendungsfall der letzten Meldung, nur fuer den Nachtragstext.
+    letzter_use_case: LlmUseCase,
+    /// Der Fehlertext der letzten Meldung im Wortlaut.
+    ///
+    /// [`ErrorKey::text`] taugt dafuer nicht: er ist der entstoerte
+    /// Deduplizierungs-Schluessel, in dem alles ab
+    /// [`crate::chat_provider::ANBIETER_MARKER`] fehlt und jede Zeichenfolge
+    /// mit Ziffer ab vier Zeichen durch `#` ersetzt ist. Im Nachtrag stuende
+    /// sonst ein anderer Fehlertext als in der Erstmeldung.
+    wortlaut: String,
 }
 
-/// `Show`: senden. `key` ist gesetzt, wenn nach erfolgreichem Senden
-/// [`ErrorThrottle::gesendet`] bestaetigt werden muss.
+/// Der Schluessel, unter dem zwei Fehler als "derselbe" gelten.
+///
+/// Der Fehlertext traegt seit dem Anbieter-Hinweis den Wortlaut des Anbieters,
+/// und der enthaelt oft eine Request-ID, eine Restlaufzeit oder einen
+/// Zeitstempel. Am rohen Text zu deduplizieren hiesse: jeder Aufruf ist ein
+/// neuer Fehler, und der Kanal ist wieder voll. Deshalb zwei Stufen:
+///
+/// 1. Alles ab [`crate::chat_provider::ANBIETER_MARKER`] faellt weg. Davor
+///    steht der Teil, den wir selbst bauen, und der ist stabil.
+/// 2. Was uebrig bleibt, wird von langen Ziffernfolgen befreit, damit auch
+///    Fehlertexte anderer Herkunft nicht an einer ID auseinanderfallen.
+///
+/// Das Modell kommt unveraendert dazu: es unterscheidet zwei Anbieter, die
+/// denselben Statuscode liefern.
+fn fehler_schluessel(error: &str, model: Option<&str>) -> ErrorKey {
+    ErrorKey {
+        model: model.map(str::to_string),
+        text: fehler_text_schluessel(error),
+    }
+}
+
+/// Der entstoerte Teil des Fehlertexts, siehe [`fehler_schluessel`].
+fn fehler_text_schluessel(error: &str) -> String {
+    let kopf = match error.find(crate::chat_provider::ANBIETER_MARKER) {
+        Some(pos) => &error[..pos],
+        None => error,
+    };
+
+    let mut key = String::with_capacity(kopf.len());
+    let mut lauf = String::new();
+
+    fn spuelen(lauf: &mut String, key: &mut String) {
+        if lauf.is_empty() {
+            return;
+        }
+        // Vier Zeichen mit Ziffer: Jahreszahl, Uhrzeit, Request-ID. Ein
+        // HTTP-Status hat drei und bleibt damit unterscheidbar.
+        let hat_ziffer = lauf.chars().any(|c| c.is_ascii_digit());
+        if hat_ziffer && lauf.chars().count() >= 4 {
+            key.push('#');
+        } else {
+            key.push_str(lauf);
+        }
+        lauf.clear();
+    }
+
+    for zeichen in kopf.chars() {
+        if zeichen.is_alphanumeric() {
+            lauf.push(zeichen);
+            continue;
+        }
+        spuelen(&mut lauf, &mut key);
+        key.push(zeichen);
+    }
+    spuelen(&mut lauf, &mut key);
+    key
+}
+
+/// Das Wiederholungsfenster waechst mit jeder gezeigten Meldung: nach der
+/// ersten Meldung die volle Basis, danach jeweils das Doppelte, gedeckelt bei
+/// [`MAX_ERROR_REPEAT_WINDOW`].
+///
+/// Ohne das meldet ein Dauerausfall alle 15 Minuten neu, und ein Abend mit
+/// gesperrtem Anbieter-Konto sind zwanzig gleiche Nachrichten.
+fn fenster_mit_backoff(basis: Duration, gezeigt: u32) -> Duration {
+    if basis.is_zero() || basis >= MAX_ERROR_REPEAT_WINDOW {
+        // Der Deckel gilt dem Backoff, nicht der Vorgabe. Wer bewusst zwoelf
+        // Stunden konfiguriert, bekommt zwoelf Stunden und nicht stillschweigend
+        // sechs.
+        return basis;
+    }
+    let faktor = 1u32 << gezeigt.saturating_sub(1).min(16);
+    basis.saturating_mul(faktor).min(MAX_ERROR_REPEAT_WINDOW)
+}
+
+/// Was nach einem bestaetigten Versand am Gedaechtnis nachzuziehen ist.
+///
+/// Nichts davon passiert in [`ErrorThrottle::decide`]: schlaegt der Post fehl,
+/// bleibt der Stand unveraendert, und keine gezaehlte Wiederholung verschwindet
+/// still.
+enum Nachhalten {
+    /// Entprellung abgeschaltet: es gibt kein Gedaechtnis zu pflegen.
+    Nichts,
+    /// Eine gezeigte Fehlermeldung: Fenster neu starten, Backoff erhoehen.
+    Fehler { key: ErrorKey, wortlaut: String },
+    /// Eine geglueckte Antwort: die Fehlerserien abraeumen, die sie wirklich
+    /// quittiert, siehe [`erfolg_raeumt_ab`].
+    Erfolg {
+        model: Option<String>,
+        use_case: LlmUseCase,
+    },
+}
+
+/// `Show`: senden. `nachhalten` sagt, was nach erfolgreichem Senden am
+/// Gedaechtnis nachzuziehen ist.
 enum ErrorDecision {
-    Show { key: Option<ErrorKey>, suppressed: u64 },
+    Show {
+        nachhalten: Nachhalten,
+        suppressed: u64,
+    },
     Suppress,
+}
+
+/// Gehoert eine Fehlerserie zu dem Modell, das gerade wieder geantwortet hat?
+///
+/// Verglichen wird das Modell als Ganzes, `None` eingeschlossen. Ein Erfolg mit
+/// bekanntem Modell raeumt also nie eine Serie ab, deren Modell unbekannt
+/// blieb: wir wissen dann schlicht nicht, ob es dieselbe Strecke war, und ein
+/// zu grosszuegiges Abraeumen ist genau der Spam, den die Entprellung
+/// verhindern soll.
+///
+/// Der Vergleich traegt nur, weil beide Seiten dasselbe Feld aus derselben
+/// Quelle fuellen: [`crate::chat_provider::ChatProvider::effective_model`],
+/// vor dem Aufruf, unabhaengig davon, ob eine Antwort kommt. Solange der
+/// Erfolg sein Modell aus dem Antwort-Body zog und der Fehler aus
+/// `ChatParams::model`, war die Gleichheit im Regelfall (`ChatParams::default()`)
+/// nie erfuellt und keine Serie wurde je beendet.
+fn passt_zum_modell(key: &ErrorKey, model: Option<&str>) -> bool {
+    key.model.as_deref() == model
+}
+
+/// Ist dieser Fehler ein Ausfall der ganzen Strecke oder ein Problem genau
+/// dieser Anfrage?
+///
+/// Streckenweit sind Timeout, Rate-Limit, Auth und 5xx: sie sagen etwas ueber
+/// den Anbieter und treffen jeden Anwendungsfall, der ueber dieselbe Strecke
+/// laeuft. Alles andere, insbesondere die 4xx, sagt etwas ueber die einzelne
+/// Anfrage: ein 413 „Anfrage zu gross" trifft das Scrim-Lagebild mit seinen
+/// 23.000 Zeichen Rohdaten und sonst niemanden.
+///
+/// Geprueft wird der entstoerte Schluesseltext, nicht der Rohtext: der
+/// Statusteil ueberlebt [`fehler_text_schluessel`] unveraendert (drei Ziffern
+/// bleiben stehen), der Anbieter-Wortlaut faellt dort ohnehin weg.
+fn fehler_ist_streckenweit(text: &str) -> bool {
+    text.contains("timed out")
+        || text.contains("rate limited")
+        || text.contains("authentication failed")
+        || text.contains("HTTP 5")
+}
+
+/// Quittiert diese geglueckte Antwort die Serie hinter `key`?
+///
+/// Zwei Wege, und der Fund aus der Abnahme sitzt genau dazwischen:
+///
+/// 1. Nur das Modell zu vergleichen war zu grosszuegig. Ein Fireworks-Modell
+///    bedient FAQ und Scrim-Lagebild; faellt das Lagebild bei jedem Lauf auf
+///    `HTTP 413`, raeumte jede geglueckte FAQ-Antwort die 413-Serie ab, und
+///    der naechste 413 ging als Erstmeldung sofort wieder raus. Mit dem
+///    24-Stunden-Fenster waere das taeglich vielfacher Spam.
+/// 2. Den Anwendungsfall in den Schluessel zu nehmen war zu eng: ein
+///    gesperrtes Konto trifft alle Anwendungsfaelle gleichzeitig und stuende
+///    dann einmal je Anwendungsfall im Kanal.
+///
+/// Also: das Modell muss immer passen, und dazu entweder der Fehler ist
+/// streckenweit (dann beweist jede geglueckte Antwort auf dieser Strecke, dass
+/// der Ausfall vorbei ist), oder es ist derselbe Anwendungsfall, der vorher
+/// scheiterte (dann beweist genau er es fuer sich). Ein anfragebezogener
+/// Fehler bleibt damit stehen, bis sein eigener Anwendungsfall wieder
+/// durchkommt; quittiert wird er also, nur eben von der richtigen Antwort.
+fn erfolg_raeumt_ab(
+    key: &ErrorKey,
+    serie_use_case: LlmUseCase,
+    model: Option<&str>,
+    use_case: LlmUseCase,
+) -> bool {
+    passt_zum_modell(key, model)
+        && (fehler_ist_streckenweit(&key.text) || serie_use_case == use_case)
 }
 
 impl ErrorThrottle {
@@ -378,22 +601,37 @@ impl ErrorThrottle {
         immer_zeigen: bool,
     ) -> ErrorDecision {
         let Some(error) = interaction.error.as_deref() else {
+            // Dieses Modell antwortet wieder: seine Serie ist vorbei. Die
+            // offenen Zaehler reisen auf dieser Antwort mit, statt eine eigene
+            // Nachricht zu bekommen, und sein Backoff faengt bei null an.
+            //
+            // Nur seine: raeumte der Erfolg das ganze Gedaechtnis ab, wuerde
+            // jede geglueckte Antwort eines anderen Modells die Serie des
+            // kaputten Anbieters loeschen, und dessen naechster Fehler stuende
+            // sofort wieder als Erstmeldung im Kanal.
             return ErrorDecision::Show {
-                key: None,
-                suppressed: 0,
+                nachhalten: Nachhalten::Erfolg {
+                    model: interaction.model.clone(),
+                    use_case: interaction.use_case,
+                },
+                suppressed: self
+                    .summe_fuer_erfolg(interaction.model.as_deref(), interaction.use_case),
             };
         };
         if window.is_zero() {
             return ErrorDecision::Show {
-                key: None,
+                nachhalten: Nachhalten::Nichts,
                 suppressed: 0,
             };
         }
-        let key = (interaction.use_case, error.to_string());
+        let key = fehler_schluessel(error, interaction.model.as_deref());
         self.beruehren(&key);
         if let Some(streak) = self.streaks.get_mut(&key) {
             streak.last_seen = now;
-            if !immer_zeigen && now.duration_since(streak.last_posted) < window {
+            streak.letzter_use_case = interaction.use_case;
+            streak.wortlaut = error.to_string();
+            let fenster = fenster_mit_backoff(window, streak.gezeigt);
+            if !immer_zeigen && now.duration_since(streak.last_posted) < fenster {
                 streak.suppressed += 1;
                 return ErrorDecision::Suppress;
             }
@@ -402,26 +640,35 @@ impl ErrorThrottle {
             // sichtbare Instanz und das ganze Fenster bleibt stumm.
             let carried = streak.suppressed;
             return ErrorDecision::Show {
-                key: Some(key),
+                nachhalten: Nachhalten::Fehler {
+                    key,
+                    wortlaut: error.to_string(),
+                },
                 suppressed: carried,
             };
         }
         // Erstes Auftreten: der Eintrag entsteht erst mit dem Senden. Kommt
         // der Post nicht durch, gibt es auch nichts zu entprellen.
         ErrorDecision::Show {
-            key: Some(key),
+            nachhalten: Nachhalten::Fehler {
+                key,
+                wortlaut: error.to_string(),
+            },
             suppressed: 0,
         }
     }
 
     /// Bestaetigt einen erfolgreich gesendeten Fehler: Fenster neu starten,
     /// Zaehler auf null.
-    fn gesendet(&mut self, key: ErrorKey, now: Instant) {
+    fn gesendet(&mut self, key: ErrorKey, wortlaut: String, use_case: LlmUseCase, now: Instant) {
         match self.streaks.get_mut(&key) {
             Some(streak) => {
                 streak.last_posted = now;
                 streak.last_seen = now;
                 streak.suppressed = 0;
+                streak.gezeigt = streak.gezeigt.saturating_add(1);
+                streak.letzter_use_case = use_case;
+                streak.wortlaut = wortlaut;
             }
             None => {
                 self.streaks.insert(
@@ -430,12 +677,49 @@ impl ErrorThrottle {
                         last_posted: now,
                         last_seen: now,
                         suppressed: 0,
+                        gezeigt: 1,
+                        letzter_use_case: use_case,
+                        wortlaut,
                     },
                 );
                 self.order.push_back(key);
                 self.verdraengen();
             }
         }
+    }
+
+    /// Was an offener Anzahl auf dem Konto genau dieses Modells steht, ohne
+    /// etwas zu veraendern. Die Summe geht als Anzahl an die erfolgreiche
+    /// Meldung; abgeraeumt wird erst, wenn die auch wirklich im Kanal steht
+    /// ([`ErrorThrottle::erfolg_bestaetigt`]).
+    fn summe_fuer_erfolg(&self, model: Option<&str>, use_case: LlmUseCase) -> u64 {
+        let summe = self
+            .verdraengt
+            .iter()
+            .filter(|nachtrag| erfolg_raeumt_ab(&nachtrag.key, nachtrag.use_case, model, use_case))
+            .fold(0u64, |summe, nachtrag| {
+                summe.saturating_add(nachtrag.anzahl)
+            });
+        self.streaks
+            .iter()
+            .filter(|(key, streak)| erfolg_raeumt_ab(key, streak.letzter_use_case, model, use_case))
+            .fold(summe, |summe, (_, streak)| {
+                summe.saturating_add(streak.suppressed)
+            })
+    }
+
+    /// Der Erfolg steht im Kanal: die Fehlerserien dieses Modells sind damit
+    /// erzaehlt und verschwinden, Backoff inklusive. Alles andere bleibt
+    /// stehen, sonst faengt eine fremde, weiterlaufende Serie wieder bei der
+    /// Erstmeldung an.
+    fn erfolg_bestaetigt(&mut self, model: Option<&str>, use_case: LlmUseCase) {
+        self.verdraengt.retain(|nachtrag| {
+            !erfolg_raeumt_ab(&nachtrag.key, nachtrag.use_case, model, use_case)
+        });
+        self.streaks
+            .retain(|key, streak| !erfolg_raeumt_ab(key, streak.letzter_use_case, model, use_case));
+        let streaks = &self.streaks;
+        self.order.retain(|key| streaks.contains_key(key));
     }
 
     /// Schiebt einen bekannten Schluessel ans Ende der LRU-Reihe.
@@ -455,7 +739,12 @@ impl ErrorThrottle {
             if let Some(streak) = self.streaks.remove(&alt) {
                 // Ein offener Zaehler darf nicht mit dem Eintrag verschwinden.
                 if streak.suppressed > 0 {
-                    self.verdraengt.push((alt, streak.suppressed));
+                    self.verdraengt.push(Nachtrag {
+                        key: alt,
+                        use_case: streak.letzter_use_case,
+                        wortlaut: streak.wortlaut.clone(),
+                        anzahl: streak.suppressed,
+                    });
                 }
             }
         }
@@ -463,14 +752,19 @@ impl ErrorThrottle {
 
     /// Fehlerserien, die seit der Ruhefrist nicht mehr auftraten und noch
     /// einen offenen Zaehler haben. Der Zaehler wird dabei geleert.
-    fn faellige_nachtraege(&mut self, quiet: Duration, now: Instant) -> Vec<(ErrorKey, u64)> {
+    fn faellige_nachtraege(&mut self, quiet: Duration, now: Instant) -> Vec<Nachtrag> {
         let mut faellig = std::mem::take(&mut self.verdraengt);
         if quiet.is_zero() {
             return faellig;
         }
         for (key, streak) in self.streaks.iter_mut() {
             if streak.suppressed > 0 && now.duration_since(streak.last_seen) >= quiet {
-                faellig.push((key.clone(), streak.suppressed));
+                faellig.push(Nachtrag {
+                    key: key.clone(),
+                    use_case: streak.letzter_use_case,
+                    wortlaut: streak.wortlaut.clone(),
+                    anzahl: streak.suppressed,
+                });
                 streak.suppressed = 0;
             }
         }
@@ -478,11 +772,16 @@ impl ErrorThrottle {
     }
 
     /// Alles, was noch offen ist — fuer den geordneten Abschluss.
-    fn offene_nachtraege(&mut self) -> Vec<(ErrorKey, u64)> {
+    fn offene_nachtraege(&mut self) -> Vec<Nachtrag> {
         let mut faellig = std::mem::take(&mut self.verdraengt);
         for (key, streak) in self.streaks.iter_mut() {
             if streak.suppressed > 0 {
-                faellig.push((key.clone(), streak.suppressed));
+                faellig.push(Nachtrag {
+                    key: key.clone(),
+                    use_case: streak.letzter_use_case,
+                    wortlaut: streak.wortlaut.clone(),
+                    anzahl: streak.suppressed,
+                });
                 streak.suppressed = 0;
             }
         }
@@ -495,18 +794,21 @@ fn with_repeat_notice(content: String, suppressed: u64) -> String {
     if suppressed == 0 {
         return content;
     }
-    let notice =
-        format!("\n_Davor {suppressed} mal derselbe Fehler, nicht einzeln angezeigt._");
+    let notice = format!("\n_Davor {suppressed} mal derselbe Fehler, nicht einzeln angezeigt._");
     let room = DISCORD_CONTENT_LIMIT.saturating_sub(notice.chars().count());
     format!("{}{notice}", cut(&content, room))
 }
 
 /// Der Nachtrag: die Serie ist vorbei, die Anzahl geht trotzdem raus.
-fn repeat_followup(key: &ErrorKey, suppressed: u64) -> String {
+/// Gezeigt wird der Wortlaut der letzten Meldung, nicht [`ErrorKey::text`]:
+/// der Schluessel ist entstoert und wuerde einen anderen Fehlertext zeigen als
+/// die Erstmeldung im selben Kanal.
+fn repeat_followup(nachtrag: &Nachtrag) -> String {
     let text = format!(
-        "**KI · {} · Fehler**\nDanach noch {suppressed} mal derselbe Fehler, nicht einzeln angezeigt.\nFehler: {}",
-        use_case_label(key.0),
-        key.1
+        "**KI · {} · Fehler**\nDanach noch {} mal derselbe Fehler, nicht einzeln angezeigt.\nFehler: {}",
+        use_case_label(nachtrag.use_case),
+        nachtrag.anzahl,
+        nachtrag.wortlaut,
     );
     cut(&text, DISCORD_CONTENT_LIMIT)
 }
@@ -567,9 +869,12 @@ async fn run_worker(
             Instant::now(),
             braucht_anker,
         );
-        let (key, suppressed) = match decision {
+        let (nachhalten, suppressed) = match decision {
             ErrorDecision::Suppress => continue,
-            ErrorDecision::Show { key, suppressed } => (key, suppressed),
+            ErrorDecision::Show {
+                nachhalten,
+                suppressed,
+            } => (nachhalten, suppressed),
         };
         let gesendet = deliver(
             &mut router,
@@ -580,9 +885,17 @@ async fn run_worker(
             &config,
         )
         .await;
-        if let Some(key) = key {
-            if gesendet {
-                errors.gesendet(key, Instant::now());
+        // Erst der bestaetigte Versand veraendert das Gedaechtnis: sonst
+        // nimmt ein fehlgeschlagener Post die gesammelte Anzahl mit ins Nichts.
+        if gesendet {
+            match nachhalten {
+                Nachhalten::Nichts => {}
+                Nachhalten::Fehler { key, wortlaut } => {
+                    errors.gesendet(key, wortlaut, interaction.use_case, Instant::now());
+                }
+                Nachhalten::Erfolg { model, use_case } => {
+                    errors.erfolg_bestaetigt(model.as_deref(), use_case)
+                }
             }
         }
         throttle(&config).await;
@@ -594,13 +907,14 @@ async fn run_worker(
 }
 
 async fn sende_nachtraege(
-    faellig: Vec<(ErrorKey, u64)>,
+    faellig: Vec<Nachtrag>,
     messenger: &dyn TransparencyMessenger,
     config: &TransparencyConfig,
 ) {
-    for (key, suppressed) in faellig {
+    for nachtrag in faellig {
+        let suppressed = nachtrag.anzahl;
         if let Err(error) = messenger
-            .send(config.channel_id, &repeat_followup(&key, suppressed))
+            .send(config.channel_id, &repeat_followup(&nachtrag))
             .await
         {
             tracing::warn!(%error, suppressed, "Nachtrag zu unterdrueckten KI-Fehlern nicht zustellbar");
@@ -661,7 +975,8 @@ async fn deliver(
             // verschwinden: dann eben in den Kanal.
             tracing::warn!(%error, thread_id = target, "KI-Transparenz-Thread nicht erreichbar, Rueckfall auf den Kanal");
             thread_id = None;
-            let fallback = with_repeat_notice(render_interaction(interaction, turn, true), suppressed);
+            let fallback =
+                with_repeat_notice(render_interaction(interaction, turn, true), suppressed);
             match messenger.send(config.channel_id, &fallback).await {
                 Ok(message_id) => Some(message_id),
                 Err(error) => {
@@ -729,12 +1044,24 @@ const SHRINK_STAGES: &[(Option<usize>, Option<usize>)] = &[
     (Some(0), Some(80)),
 ];
 
+/// Kuerzungsstufen fuer eine Fehlermeldung. Hier gibt es keine Antwort zu
+/// beurteilen, und der Auslöser ist im Fehlerfall wertlos: was im Kanal zaehlt,
+/// ist der Fehlertext. Ein Scrim-Lagebild schleppt 23.000 Zeichen Rohdaten im
+/// Auslöser mit, und davon standen vorher 500 in jeder Fehlermeldung.
+const ERROR_SHRINK_STAGES: &[(Option<usize>, Option<usize>)] =
+    &[(Some(0), Some(160)), (Some(0), Some(80))];
+
 /// Baut die Nachricht fuer den Kanal.
 ///
 /// `turn` ist die Rundennummer im Gespraech, `standalone` sagt, ob die
 /// Nachricht direkt im Kanal steht (dann braucht sie die Zuordnung im Text).
 pub fn render_interaction(interaction: &AiInteraction, turn: u32, standalone: bool) -> String {
-    for (system_budget, prompt_budget) in SHRINK_STAGES {
+    let stages = if interaction.error.is_some() {
+        ERROR_SHRINK_STAGES
+    } else {
+        SHRINK_STAGES
+    };
+    for (system_budget, prompt_budget) in stages {
         let candidate = build_message(
             interaction,
             turn,
@@ -795,9 +1122,22 @@ fn build_message(
         (None, Some(error)) => lines.push(format!("Fehler: {error}")),
         (None, None) => lines.push("Antwort: (leer)".to_string()),
     }
+    // Angefragtes Modell zuerst, weil daran der Kanal seine Serien
+    // wiedererkennt. Loest der Anbieter einen Alias auf etwas anderes auf,
+    // steht das geantwortete Modell daneben: genau dafuer gibt es den Kanal.
+    let modell = match (
+        interaction.model.as_deref(),
+        interaction.antwort_modell.as_deref(),
+    ) {
+        (Some(angefragt), Some(geantwortet)) if angefragt != geantwortet => {
+            format!("{angefragt} → geantwortet: {geantwortet}")
+        }
+        (Some(angefragt), _) => angefragt.to_string(),
+        (None, Some(geantwortet)) => format!("unbekannt → geantwortet: {geantwortet}"),
+        (None, None) => "unbekannt".to_string(),
+    };
     lines.push(format!(
-        "Modell: {} · Dauer: {} ms",
-        interaction.model.as_deref().unwrap_or("unbekannt"),
+        "Modell: {modell} · Dauer: {} ms",
         interaction.latency_ms
     ));
     lines.join("\n")
@@ -822,7 +1162,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::chat_provider::{ChatMessage, ChatParams, ChatProvider, ChatResponse};
+    use crate::chat_provider::{
+        anbieter_hinweis, ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse,
+    };
     use crate::transparency::TransparencyProvider;
 
     #[derive(Default)]
@@ -913,16 +1255,87 @@ mod tests {
     }
 
     fn fehler_interaktion(use_case: LlmUseCase, frage: &str, fehler: &str) -> AiInteraction {
+        fehler_interaktion_mit_modell(use_case, frage, fehler, None)
+    }
+
+    /// Wie [`fehler_interaktion`], nur mit bekanntem Modell. Beides muss die
+    /// Entprellung auseinanderhalten: `None` kommt von Providern ohne eigenen
+    /// Default, alles andere von [`ChatProvider::effective_model`].
+    fn fehler_interaktion_mit_modell(
+        use_case: LlmUseCase,
+        frage: &str,
+        fehler: &str,
+        modell: Option<&str>,
+    ) -> AiInteraction {
         AiInteraction {
             use_case,
             prompt_excerpt: frage.to_string(),
             system_excerpt: None,
             response: None,
             error: Some(fehler.to_string()),
-            model: None,
+            model: modell.map(str::to_string),
+            antwort_modell: None,
             latency_ms: 4,
             conversation_trail: vec![],
         }
+    }
+
+    #[test]
+    fn eine_wechselnde_request_id_macht_keinen_neuen_fehler() {
+        // Wortlaut wie von Fireworks, nur die Request-ID wechselt je Aufruf.
+        let erster = crate::chat_provider::anbieter_hinweis(
+            412,
+            r#"{"error":{"message":"Account mail-01rvneuz61yq is suspended (request chatcmpl-1e4b56f248b24bbb9e7cd3ea2add56ab)"}}"#,
+        );
+        let zweiter = crate::chat_provider::anbieter_hinweis(
+            412,
+            r#"{"error":{"message":"Account mail-01rvneuz61yq is suspended (request chatcmpl-99887766554433221100aabbccddeeff)"}}"#,
+        );
+        assert_ne!(erster, zweiter, "der Testaufbau muss variieren");
+        assert_eq!(
+            fehler_schluessel(&erster, None),
+            fehler_schluessel(&zweiter, None),
+            "eine wechselnde ID darf die Entprellung nicht aushebeln"
+        );
+    }
+
+    #[test]
+    fn verschiedene_statuscodes_bleiben_verschiedene_fehler() {
+        let gesperrt = crate::chat_provider::anbieter_hinweis(412, "");
+        let unbekannt = crate::chat_provider::anbieter_hinweis(404, "");
+        assert_ne!(
+            fehler_schluessel(&gesperrt, None),
+            fehler_schluessel(&unbekannt, None),
+            "412 und 404 sind zwei Befunde, keiner"
+        );
+    }
+
+    #[tokio::test]
+    async fn eine_serie_mit_wechselnder_id_wird_trotzdem_entprellt() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for index in 0..5 {
+            let fehler = crate::chat_provider::anbieter_hinweis(
+                412,
+                &format!(
+                    r#"{{"error":{{"message":"Account suspended (request req-{index}0000000000{index})"}}}}"#
+                ),
+            );
+            let mut interaktion = fehler_interaktion(LlmUseCase::ScrimLagebild, "team", &fehler);
+            interaktion.conversation_trail = vec![];
+            sink.record(interaktion);
+        }
+        assert!(warte_auf(|| !messenger.sent().is_empty()).await);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(
+            messenger.sent().len(),
+            1,
+            "wechselnde IDs sind derselbe Ausfall: {:?}",
+            messenger.sent()
+        );
     }
 
     #[tokio::test]
@@ -960,7 +1373,12 @@ mod tests {
         let sink = log.sink();
 
         for index in 0..4_u64 {
-            sink.record(interaktion(LlmUseCase::Faq, "gleiche frage", "gleiche antwort", &[index]));
+            sink.record(interaktion(
+                LlmUseCase::Faq,
+                "gleiche frage",
+                "gleiche antwort",
+                &[index],
+            ));
         }
         assert!(warte_auf(|| messenger.sent().len() == 4).await);
     }
@@ -1021,7 +1439,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(messenger.sent().len(), 1, "Runde 2 bleibt stumm");
 
-        sink.record(interaktion(LlmUseCase::BotPate, "runde 3", "endlich eine Antwort", &[2, 3]));
+        sink.record(interaktion(
+            LlmUseCase::BotPate,
+            "runde 3",
+            "endlich eine Antwort",
+            &[2, 3],
+        ));
         assert!(warte_auf(|| messenger.sent().len() == 2).await);
 
         let sent = messenger.sent();
@@ -1041,8 +1464,176 @@ mod tests {
     fn die_anzahl_sprengt_das_zeichenlimit_nicht() {
         let lang = "X".repeat(DISCORD_CONTENT_LIMIT);
         let text = with_repeat_notice(lang, 7);
-        assert!(text.chars().count() <= DISCORD_CONTENT_LIMIT, "{}", text.chars().count());
+        assert!(
+            text.chars().count() <= DISCORD_CONTENT_LIMIT,
+            "{}",
+            text.chars().count()
+        );
         assert!(text.contains("Davor 7 mal derselbe Fehler"));
+    }
+
+    #[test]
+    fn ein_erfolg_eines_anderen_anwendungsfalls_beendet_die_serie_nicht() {
+        // Der Fund: ein Fireworks-Modell bedient FAQ und Scrim-Lagebild. Die
+        // FAQ laeuft, das Lagebild faellt bei jedem Lauf auf `HTTP 413`.
+        // Raeumte jede FAQ-Antwort die 413-Serie ab, ginge jeder 413 als
+        // Erstmeldung sofort wieder raus, und mit dem 24-Stunden-Fenster waere
+        // das taeglich vielfacher Spam.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(24 * 60 * 60);
+        let kaputt = fehler_interaktion_mit_modell(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "LLM provider error: HTTP 413: Anfrage zu gross",
+            Some("fireworks/deepseek"),
+        );
+        let mut heil = interaktion(LlmUseCase::Faq, "frage", "antwort", &[]);
+        heil.model = Some("fireworks/deepseek".to_string());
+
+        zeigen(&mut throttle, &kaputt, fenster, jetzt);
+        for runde in 0..5 {
+            let getragen = zeigen(&mut throttle, &heil, fenster, jetzt);
+            assert_eq!(
+                getragen, 0,
+                "die FAQ-Antwort quittiert den 413 des Lagebilds nicht (Runde {runde})"
+            );
+            unterdruecken(&mut throttle, &kaputt, fenster, jetzt);
+        }
+        assert_eq!(
+            throttle.streaks.len(),
+            1,
+            "die 413-Serie muss stehen bleiben"
+        );
+
+        let spaeter = jetzt + Duration::from_secs(2 * 24 * 60 * 60);
+        assert_eq!(
+            zeigen(&mut throttle, &kaputt, fenster, spaeter),
+            5,
+            "keine unterdrueckte Wiederholung darf verloren gehen"
+        );
+    }
+
+    #[test]
+    fn ein_erfolg_desselben_anwendungsfalls_beendet_die_serie() {
+        // Die Gegenprobe zum Test darueber: der 413 wird sehr wohl quittiert,
+        // nur eben von der Antwort, die ihn wirklich widerlegt.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(24 * 60 * 60);
+        let kaputt = fehler_interaktion_mit_modell(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "LLM provider error: HTTP 413: Anfrage zu gross",
+            Some("fireworks/deepseek"),
+        );
+        let mut heil = interaktion(LlmUseCase::ScrimLagebild, "team 1", "geht wieder", &[]);
+        heil.model = Some("fireworks/deepseek".to_string());
+
+        zeigen(&mut throttle, &kaputt, fenster, jetzt);
+        for _ in 0..3 {
+            unterdruecken(&mut throttle, &kaputt, fenster, jetzt);
+        }
+        assert_eq!(zeigen(&mut throttle, &heil, fenster, jetzt), 3);
+        assert!(
+            throttle.streaks.is_empty(),
+            "der passende Erfolg raeumt die Serie ab"
+        );
+    }
+
+    #[test]
+    fn ein_streckenweiter_ausfall_wird_von_jedem_erfolg_quittiert() {
+        // Timeout, Rate-Limit, Auth und 5xx sagen etwas ueber den Anbieter und
+        // nicht ueber die einzelne Anfrage. Ist er wieder da, ist der Ausfall
+        // vorbei, egal welcher Anwendungsfall das zuerst merkt. Ohne diesen
+        // Zweig bliebe ein beendeter Ausfall bis zur Verdraengung unquittiert.
+        for text in [
+            "LLM provider request timed out",
+            "LLM provider rate limited",
+            "LLM provider authentication failed",
+            "LLM provider error: HTTP 500: Anbieter nicht erreichbar",
+        ] {
+            let mut throttle = ErrorThrottle::default();
+            let jetzt = Instant::now();
+            let fenster = Duration::from_secs(24 * 60 * 60);
+            let kaputt = fehler_interaktion_mit_modell(
+                LlmUseCase::ScrimLagebild,
+                "team 1",
+                text,
+                Some("fireworks/deepseek"),
+            );
+            let mut heil = interaktion(LlmUseCase::Faq, "frage", "antwort", &[]);
+            heil.model = Some("fireworks/deepseek".to_string());
+
+            zeigen(&mut throttle, &kaputt, fenster, jetzt);
+            unterdruecken(&mut throttle, &kaputt, fenster, jetzt);
+            assert_eq!(
+                zeigen(&mut throttle, &heil, fenster, jetzt),
+                1,
+                "{text}: die Anzahl reist auf der Erfolgsmeldung mit"
+            );
+            assert!(
+                throttle.streaks.is_empty(),
+                "{text}: der Ausfall ist vorbei und darf nicht stehen bleiben"
+            );
+        }
+    }
+
+    #[test]
+    fn der_nachtrag_zeigt_den_original_wortlaut() {
+        // `ErrorKey::text` ist entstoert: alles ab dem Anbieter-Marker fehlt
+        // und jede Zeichenfolge mit Ziffer ab vier Zeichen ist `#`. Stuende
+        // der im Nachtrag, laese der Owner dort einen anderen Fehlertext als
+        // in der Erstmeldung.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(24 * 60 * 60);
+        let wortlaut = format!(
+            "LLM provider error: HTTP 412: Anbieter-Konto gesperrt.{}rechnung 20260826 offen",
+            crate::chat_provider::ANBIETER_MARKER
+        );
+        let kaputt = fehler_interaktion_mit_modell(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            &wortlaut,
+            Some("fireworks/deepseek"),
+        );
+
+        zeigen(&mut throttle, &kaputt, fenster, jetzt);
+        unterdruecken(&mut throttle, &kaputt, fenster, jetzt);
+
+        let nachtraege = throttle.offene_nachtraege();
+        assert_eq!(nachtraege.len(), 1);
+        let text = repeat_followup(&nachtraege[0]);
+        assert!(
+            text.contains("rechnung 20260826 offen"),
+            "der Nachtrag zeigt den Wortlaut der Erstmeldung: {text}"
+        );
+        assert!(
+            !text.contains('#'),
+            "der entstoerte Schluessel gehoert nicht in den Nachtrag: {text}"
+        );
+    }
+
+    #[test]
+    fn der_kanal_zeigt_das_modell_das_wirklich_geantwortet_hat() {
+        // Loest der Anbieter ein Alias auf ein anderes Modell auf, ist genau
+        // das die Information, wegen der es den Transparenz-Kanal gibt.
+        let mut interaction = interaktion(LlmUseCase::Faq, "frage", "antwort", &[]);
+        interaction.model = Some("deepseek-v4-flash".to_string());
+        interaction.antwort_modell = Some("deepseek-v4-flash-0731".to_string());
+        let text = render_interaction(&interaction, 1, true);
+        assert!(
+            text.contains("deepseek-v4-flash → geantwortet: deepseek-v4-flash-0731"),
+            "{text}"
+        );
+
+        // Meldet der Anbieter dasselbe Modell zurueck, bleibt es bei einem
+        // Namen: doppelt zu schreiben, was gleich ist, ist nur Laerm.
+        interaction.antwort_modell = Some("deepseek-v4-flash".to_string());
+        let text = render_interaction(&interaction, 1, true);
+        assert!(text.contains("Modell: deepseek-v4-flash ·"), "{text}");
+        assert!(!text.contains("geantwortet"), "{text}");
     }
 
     /// Nimmt eine Entscheidung ab, die „senden" lauten muss, und bestaetigt
@@ -1054,9 +1645,18 @@ mod tests {
         jetzt: Instant,
     ) -> u64 {
         match throttle.decide(interaktion, fenster, jetzt, false) {
-            ErrorDecision::Show { key, suppressed } => {
-                if let Some(key) = key {
-                    throttle.gesendet(key, jetzt);
+            ErrorDecision::Show {
+                nachhalten,
+                suppressed,
+            } => {
+                match nachhalten {
+                    Nachhalten::Nichts => {}
+                    Nachhalten::Fehler { key, wortlaut } => {
+                        throttle.gesendet(key, wortlaut, interaktion.use_case, jetzt)
+                    }
+                    Nachhalten::Erfolg { model, use_case } => {
+                        throttle.erfolg_bestaetigt(model.as_deref(), use_case)
+                    }
                 }
                 suppressed
             }
@@ -1080,18 +1680,39 @@ mod tests {
     }
 
     #[test]
-    fn das_standardfenster_ist_kurz_genug_um_wieder_sichtbar_zu_werden() {
+    fn das_standardfenster_haelt_die_owner_vorgabe_eine_meldung_pro_tag() {
+        // Vorgabe des Owners im Wortlaut: „ich brauch nicht 10 Meldungen, eine
+        // reicht, ich les das und weiss das, und 1 pro Tag und 2 pro Woche
+        // reichen." Der Test hiess frueher
+        // `das_standardfenster_ist_kurz_genug_um_wieder_sichtbar_zu_werden`
+        // und zementierte mit 15 Minuten das Gegenteil.
         let default = TransparencyConfig::default();
         assert_eq!(
             default.error_repeat_window,
-            Duration::from_secs(15 * 60),
-            "ein Fenster von Stunden waere ein Stummschalter"
+            Duration::from_secs(24 * 60 * 60),
+            "eine Meldung pro Tag, nicht eine pro Viertelstunde"
+        );
+        assert_eq!(
+            MAX_ERROR_REPEAT_WINDOW,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            "der Deckel deckelt bei einer Woche"
+        );
+        // Mit der Verdopplung: Tag 0, Tag 1, Tag 3, Tag 7. Also eine Meldung
+        // am ersten Tag und danach hoechstens zwei pro Woche.
+        let basis = default.error_repeat_window;
+        assert_eq!(fenster_mit_backoff(basis, 1), Duration::from_secs(86_400));
+        assert_eq!(fenster_mit_backoff(basis, 2), Duration::from_secs(172_800));
+        assert_eq!(fenster_mit_backoff(basis, 3), Duration::from_secs(345_600));
+        assert_eq!(
+            fenster_mit_backoff(basis, 4),
+            MAX_ERROR_REPEAT_WINDOW,
+            "ab hier deckelt die Woche"
         );
         assert!(
-            default.error_followup_quiet <= default.error_repeat_window,
-            "der Nachtrag muss vor dem naechsten Fenster kommen"
+            default.error_followup_quiet.is_zero(),
+            "der Nachtrag als eigene Nachricht ist der Spam, ueber den sich der \
+             Owner beschwert hat; die Anzahl reist an der naechsten Meldung mit"
         );
-        assert!(!default.error_followup_quiet.is_zero());
     }
 
     #[test]
@@ -1118,8 +1739,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            unlesbar.error_repeat_window,
-            DEFAULT_ERROR_REPEAT_WINDOW,
+            unlesbar.error_repeat_window, DEFAULT_ERROR_REPEAT_WINDOW,
             "Unsinn faellt auf den Default zurueck"
         );
     }
@@ -1174,14 +1794,237 @@ mod tests {
         assert!(
             throttle
                 .streaks
-                .contains_key(&(LlmUseCase::Faq, "fehler 0".to_string())),
+                .contains_key(&fehler_schluessel("fehler 0", None)),
             "der zuletzt benutzte Eintrag darf nicht verdraengt werden"
         );
         assert!(
             !throttle
                 .streaks
-                .contains_key(&(LlmUseCase::Faq, "fehler 1".to_string())),
+                .contains_key(&fehler_schluessel("fehler 1", None)),
             "verdraengt wird der laengst ungenutzte Eintrag"
+        );
+    }
+
+    #[test]
+    fn ein_ausfall_meldet_sich_nicht_einmal_pro_anwendungsfall() {
+        // Ein gesperrtes Anbieter-Konto trifft jeden Anwendungsfall
+        // gleichzeitig. Mit dem Anwendungsfall im Schluessel meldete derselbe
+        // Ausfall einmal fuer das Scrim-Lagebild, einmal fuer den Verbinder
+        // und einmal fuer die FAQ, obwohl es ein einziges Problem ist.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let text = "HTTP 412: Anbieter-Konto gesperrt";
+
+        zeigen(
+            &mut throttle,
+            &fehler_interaktion(LlmUseCase::ScrimLagebild, "team 1", text),
+            fenster,
+            jetzt,
+        );
+        unterdruecken(
+            &mut throttle,
+            &fehler_interaktion(LlmUseCase::Faq, "frage", text),
+            fenster,
+            jetzt,
+        );
+        unterdruecken(
+            &mut throttle,
+            &fehler_interaktion(LlmUseCase::BotPate, "pate", text),
+            fenster,
+            jetzt,
+        );
+    }
+
+    #[test]
+    fn ein_dauerausfall_meldet_sich_immer_seltener() {
+        // Ohne Backoff sind zwoelf Stunden gesperrtes Konto achtundvierzig
+        // gleiche Nachrichten im Kanal.
+        let mut throttle = ErrorThrottle::default();
+        let mut jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let fehler = fehler_interaktion(LlmUseCase::ScrimLagebild, "team 1", "HTTP 412");
+
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+
+        // Zweite Meldung nach dem vollen Grundfenster.
+        jetzt += fenster;
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+
+        // Dritte erst nach dem doppelten: nach einem weiteren Grundfenster
+        // bleibt sie stumm.
+        jetzt += fenster;
+        unterdruecken(&mut throttle, &fehler, fenster, jetzt);
+        jetzt += fenster;
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+    }
+
+    #[test]
+    fn das_backoff_bleibt_unter_dem_deckel() {
+        // Ohne Deckel waere das Fenster nach zwanzig Meldungen laenger als ein
+        // Menschenleben und die Entprellung ein Stummschalter.
+        let basis = Duration::from_secs(900);
+        assert_eq!(fenster_mit_backoff(basis, 1), basis);
+        assert_eq!(fenster_mit_backoff(basis, 2), basis * 2);
+        assert_eq!(fenster_mit_backoff(basis, 3), basis * 4);
+        assert_eq!(fenster_mit_backoff(basis, 40), MAX_ERROR_REPEAT_WINDOW);
+        assert!(fenster_mit_backoff(Duration::ZERO, 40).is_zero());
+    }
+
+    #[test]
+    fn ein_erfolg_beendet_die_serie_und_traegt_die_anzahl() {
+        // Was dieser Test leistet und was nicht: er prueft die Mechanik von
+        // `ErrorThrottle` an von Hand gebauten Records. Er sagt nichts
+        // darueber, ob die Verdrahtung im `TransparencyProvider` ueberhaupt
+        // ein Paar mit gleichem Modell erzeugt; das kann nur ein Test ueber
+        // den echten Weg, siehe
+        // `ein_erfolg_beendet_die_serie_ueber_den_echten_weg`.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        // Dasselbe Modell auf beiden Seiten: nur dann weiss der Erfolg, dass
+        // er genau diese Serie beendet.
+        let fehler = fehler_interaktion_mit_modell(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "HTTP 412",
+            Some("test-modell"),
+        );
+
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+        for _ in 0..3 {
+            unterdruecken(&mut throttle, &fehler, fenster, jetzt);
+        }
+
+        let erfolg = interaktion(LlmUseCase::ScrimLagebild, "team 1", "geht wieder", &[]);
+        let getragen = zeigen(&mut throttle, &erfolg, fenster, jetzt);
+        assert_eq!(getragen, 3, "die Anzahl reist auf der Erfolgsmeldung mit");
+        assert!(
+            throttle.streaks.is_empty(),
+            "der Erfolg raeumt das Gedaechtnis ab"
+        );
+
+        // Und weil das Backoff mit zurueckgesetzt ist, ist der naechste Fehler
+        // sofort wieder sichtbar.
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+    }
+
+    #[test]
+    fn ein_erfolg_eines_anderen_modells_bricht_die_entprellung_nicht() {
+        // Der Vorfall: Fireworks liefert bei jedem Versuch 412 (Konto
+        // gesperrt), waehrend Gemini-FAQ und OpenAI normal weiter antworten.
+        // Raeumte jede dieser Erfolgsmeldungen das ganze Gedaechtnis ab,
+        // stuende jeder 412 sofort wieder als Erstmeldung im Kanal.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let kaputt = fehler_interaktion_mit_modell(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "HTTP 412: Anbieter-Konto gesperrt",
+            Some("fireworks/deepseek"),
+        );
+        let mut heil = interaktion(LlmUseCase::Faq, "frage", "antwort", &[]);
+        heil.model = Some("gemini-flash".to_string());
+
+        zeigen(&mut throttle, &kaputt, fenster, jetzt);
+
+        for runde in 0..5 {
+            let getragen = zeigen(&mut throttle, &heil, fenster, jetzt);
+            assert_eq!(
+                getragen, 0,
+                "der Erfolg eines anderen Modells traegt keine fremde Anzahl (Runde {runde})"
+            );
+            unterdruecken(&mut throttle, &kaputt, fenster, jetzt);
+        }
+
+        // Und die Serie hat weitergezaehlt, statt bei jedem Erfolg neu zu
+        // beginnen: die Anzahl reist an der naechsten gezeigten Meldung mit.
+        let spaeter = jetzt + Duration::from_secs(1_000);
+        let getragen = zeigen(&mut throttle, &kaputt, fenster, spaeter);
+        assert_eq!(
+            getragen, 5,
+            "keine der unterdrueckten Wiederholungen darf verloren gehen"
+        );
+    }
+
+    #[test]
+    fn ein_erfolg_raeumt_erst_nach_bestaetigtem_versand_ab() {
+        // Der Drain darf nicht in `decide` passieren: schlaegt der Post fehl,
+        // waere die gesammelte Anzahl weg, obwohl nie jemand sie gelesen hat.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let fehler = fehler_interaktion_mit_modell(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "HTTP 412",
+            Some("test-modell"),
+        );
+
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+        for _ in 0..3 {
+            unterdruecken(&mut throttle, &fehler, fenster, jetzt);
+        }
+
+        // Entscheidung abholen, aber den Versand NICHT bestaetigen.
+        let erfolg = interaktion(LlmUseCase::ScrimLagebild, "team 1", "geht wieder", &[]);
+        let angekuendigt = match throttle.decide(&erfolg, fenster, jetzt, false) {
+            ErrorDecision::Show { suppressed, .. } => suppressed,
+            ErrorDecision::Suppress => panic!("ein Erfolg wird nie entprellt"),
+        };
+        assert_eq!(angekuendigt, 3);
+        assert_eq!(
+            throttle.offene_nachtraege().len(),
+            1,
+            "ohne bestaetigten Versand bleibt der Zaehler stehen"
+        );
+    }
+
+    #[test]
+    fn zwei_anbieter_mit_demselben_status_sind_zwei_befunde() {
+        let text = crate::chat_provider::anbieter_hinweis(500, "upstream connect error");
+        assert_ne!(
+            fehler_schluessel(&text, Some("fireworks/deepseek")),
+            fehler_schluessel(&text, Some("gemini-flash")),
+            "ein zweiter, unabhaengiger Ausfall darf nicht hinter dem ersten verschwinden"
+        );
+    }
+
+    #[test]
+    fn ein_konfiguriertes_fenster_ueber_dem_deckel_bleibt_stehen() {
+        // Der Deckel gehoert dem Backoff. Wer vierzehn Tage konfiguriert,
+        // bekommt vierzehn Tage und nicht stillschweigend sieben.
+        let basis = Duration::from_secs(14 * 24 * 60 * 60);
+        assert!(basis > MAX_ERROR_REPEAT_WINDOW);
+        assert_eq!(fenster_mit_backoff(basis, 1), basis);
+        assert_eq!(fenster_mit_backoff(basis, 9), basis);
+    }
+
+    #[test]
+    fn eine_fehlermeldung_schleppt_den_ausloeser_nicht_mit() {
+        // Das Scrim-Lagebild reicht 23.000 Zeichen Rohdaten als Auslöser
+        // herein. Im Fehlerfall gibt es keine Antwort zu beurteilen, und was
+        // zaehlt, ist der Fehlertext.
+        let mut fehler = fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            &"{\"evidenzen\":[]}".repeat(2_000),
+            "HTTP 412: Anbieter-Konto gesperrt",
+        );
+        fehler.system_excerpt = Some("X".repeat(4_000));
+        let text = render_interaction(&fehler, 1, true);
+        assert!(
+            text.chars().count() < 500,
+            "eine Fehlermeldung bleibt kurz, war {} Zeichen",
+            text.chars().count()
+        );
+        assert!(
+            text.contains("Anbieter-Konto gesperrt"),
+            "der Fehlertext muss bleiben: {text}"
+        );
+        assert!(
+            !text.contains("Kontext:"),
+            "der Kontext hat im Fehlerfall nichts zu suchen: {text}"
         );
     }
 
@@ -1203,13 +2046,15 @@ mod tests {
         }
 
         let nachtraege = throttle.faellige_nachtraege(Duration::from_secs(120), jetzt);
+        assert_eq!(nachtraege.len(), 1);
         assert_eq!(
-            nachtraege,
-            vec![((LlmUseCase::Faq, "alter fehler".to_string()), 4)],
+            nachtraege[0].key,
+            fehler_schluessel("alter fehler", None),
             "der offene Zaehler darf nicht mit dem Eintrag verschwinden"
         );
-        assert!(repeat_followup(&nachtraege[0].0, nachtraege[0].1)
-            .contains("Danach noch 4 mal derselbe Fehler"));
+        assert_eq!(nachtraege[0].use_case, LlmUseCase::Faq);
+        assert_eq!(nachtraege[0].anzahl, 4);
+        assert!(repeat_followup(&nachtraege[0]).contains("Danach noch 4 mal derselbe Fehler"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1285,7 +2130,11 @@ mod tests {
         let sink = log.sink();
 
         // Der Fehler ist schon bekannt, das Fenster steht.
-        sink.record(fehler_interaktion(LlmUseCase::BotPate, "irgendwo", "HTTP 412"));
+        sink.record(fehler_interaktion(
+            LlmUseCase::BotPate,
+            "irgendwo",
+            "HTTP 412",
+        ));
         assert!(warte_auf(|| messenger.sent().len() == 1).await);
 
         // Runde 1 eines neuen Gespraechs faellt in die Entprellung.
@@ -1367,6 +2216,7 @@ mod tests {
             response: Some(antwort.to_string()),
             error: None,
             model: Some("test-modell".to_string()),
+            antwort_modell: None,
             latency_ms: 42,
             conversation_trail: trail.to_vec(),
         }
@@ -1547,6 +2397,151 @@ mod tests {
         gate.add_permits(100);
     }
 
+    /// Anbieter, der ein festes Skript abspielt und sein Modell kennt, so wie
+    /// jeder echte Provider es tut.
+    struct Skript {
+        modell: &'static str,
+        antworten: Mutex<Vec<Result<ChatResponse, ChatProviderError>>>,
+    }
+
+    impl Skript {
+        fn arc(
+            modell: &'static str,
+            antworten: Vec<Result<ChatResponse, ChatProviderError>>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                modell,
+                antworten: Mutex::new(antworten),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ChatProvider for Skript {
+        fn effective_model(&self, params: &ChatParams) -> Option<String> {
+            Some(
+                params
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.modell.to_string()),
+            )
+        }
+
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _params: ChatParams,
+        ) -> Result<ChatResponse, ChatProviderError> {
+            let mut antworten = self.antworten.lock().expect("skript lock");
+            if antworten.is_empty() {
+                return Err(ChatProviderError::Provider("skript leer".to_string()));
+            }
+            antworten.remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn ein_schluessel_im_anbieter_body_erreicht_den_kanal_nicht() {
+        // Der Vorfall: ein Nutzer schreibt seinen Schluessel in den Chat, der
+        // Anbieter antwortet 400 und spiegelt den beanstandeten Inhalt
+        // zurueck. Der Ausloeser war redigiert, der Fehlertext nicht: er war
+        // das einzige Feld, das nie durch `redact_secrets` lief.
+        const SCHLUESSEL: &str = "fw_liveGEHEIM1234ABCD";
+        let body = format!(r#"{{"error":{{"message":"invalid content: {SCHLUESSEL}"}}}}"#);
+        let inner = Skript::arc(
+            "fireworks/deepseek",
+            vec![Err(ChatProviderError::Provider(anbieter_hinweis(
+                400, &body,
+            )))],
+        );
+
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let provider = TransparencyProvider::new(inner, log.sink(), LlmUseCase::Faq);
+
+        let _ = provider
+            .chat(
+                &[ChatMessage::user(format!("mein token={SCHLUESSEL}"))],
+                ChatParams::default(),
+            )
+            .await;
+
+        assert!(warte_auf(|| !messenger.sent().is_empty()).await);
+        let sent = messenger.sent();
+        let text = &sent[0].1;
+        assert!(
+            !text.contains(SCHLUESSEL),
+            "der Schluessel darf den Kanal nie erreichen: {text}"
+        );
+        assert!(
+            text.contains("Fehler: ") && text.contains("HTTP 400"),
+            "die Deutung des Fehlers muss erhalten bleiben: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ein_erfolg_beendet_die_serie_ueber_den_echten_weg() {
+        // Ueber `TransparencyProvider` statt ueber von Hand gebaute Records,
+        // und mit `ChatParams::default()`, weil fast jeder Aufrufer das
+        // benutzt. Genau dort lag der Bruch: der Fehlerfall trug
+        // `params.model` (also `None`), der Erfolgsfall das Modell aus dem
+        // Antwort-Body. Die Entprellung hat ihre eigene Serie damit nie
+        // wiedergefunden.
+        const MODELL: &str = "fireworks/deepseek";
+        let fehler = || {
+            Err(ChatProviderError::Provider(
+                "HTTP 412: Anbieter-Konto gesperrt".to_string(),
+            ))
+        };
+        let erfolg = || {
+            Ok(ChatResponse {
+                content: "geht wieder".to_string(),
+                // Der Body meldet sein eigenes Modell. Frueher war genau das
+                // die zweite, abweichende Quelle.
+                model: Some(format!("accounts/{MODELL}")),
+                usage: crate::chat_provider::TokenUsage::default(),
+            })
+        };
+        let inner = Skript::arc(
+            MODELL,
+            vec![fehler(), fehler(), fehler(), erfolg(), fehler()],
+        );
+
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let provider = TransparencyProvider::new(inner, log.sink(), LlmUseCase::ScrimLagebild);
+
+        for runde in 0..5 {
+            let _ = provider
+                .chat(
+                    &[ChatMessage::user(format!("lagebild {runde}"))],
+                    ChatParams::default(),
+                )
+                .await;
+        }
+
+        assert!(warte_auf(|| messenger.sent().len() == 3).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sent = messenger.sent();
+        assert_eq!(
+            sent.len(),
+            3,
+            "Erstmeldung, Erfolg, und danach wieder eine Erstmeldung: {sent:?}"
+        );
+        assert!(sent[0].1.contains("HTTP 412"), "{}", sent[0].1);
+        assert!(
+            sent[1].1.contains("Davor 2 mal derselbe Fehler"),
+            "der Erfolg muss die gezaehlte Anzahl mittragen: {}",
+            sent[1].1
+        );
+        assert!(
+            sent[2].1.contains("HTTP 412"),
+            "nach dem Erfolg faengt das Backoff bei null an, der naechste \
+             Ausfall ist sofort wieder sichtbar: {}",
+            sent[2].1
+        );
+    }
+
     #[tokio::test]
     async fn konversation_landet_ab_der_zweiten_runde_im_thread() {
         let messenger = FakeMessenger::arc(true);
@@ -1646,6 +2641,7 @@ mod tests {
             response: Some("A".repeat(1_200)),
             error: None,
             model: Some("m".to_string()),
+            antwort_modell: None,
             latency_ms: 5,
             conversation_trail: vec![1],
         };
@@ -1676,6 +2672,7 @@ mod tests {
             response: Some("A".repeat(9_000)),
             error: None,
             model: Some("m".to_string()),
+            antwort_modell: None,
             latency_ms: 5,
             conversation_trail: vec![1],
         };
@@ -1699,6 +2696,7 @@ mod tests {
             response: None,
             error: Some("LLM provider rate limited".to_string()),
             model: None,
+            antwort_modell: None,
             latency_ms: 1_200,
             conversation_trail: vec![1],
         };

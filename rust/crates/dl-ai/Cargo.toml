@@ -7,6 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 version = "0.1.0"
 
+[features]
+# dl-ai hat keine Testdatenbank; das Merkmal existiert, damit der
+# Pflicht-Testbefehl des Repos (`--features testing`) auch fuer dieses Paket
+# einzeln laeuft, statt mit "does not contain this feature" abzubrechen.
+testing = []
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true

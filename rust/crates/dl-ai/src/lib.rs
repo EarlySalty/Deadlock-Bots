@@ -27,7 +27,19 @@ pub use transparency::*;
 pub use transparency_log::*;
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
-pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash";
+/// Belegt ist der Stand vom 2026-08-26. Ein echter Aufruf gegen
+/// `api.fireworks.ai/inference/v1/chat/completions` antwortete fuer
+/// `accounts/fireworks/models/deepseek-v4-flash` mit HTTP 404 "Model not
+/// found, inaccessible, and/or not deployed" und fuer die datierte Variante
+/// `...-0731` mit HTTP 412 "Account ... is suspended".
+///
+/// Der 404 belegt nur, dass der undatierte Name unter diesem Konto nicht
+/// ansprechbar war. Der 412 sagt ueberhaupt nichts ueber das Modell, sondern
+/// nur ueber das gesperrte Konto: ob `-0731` bei Fireworks wirklich
+/// ausgeliefert wird, ist erst wieder pruefbar, wenn das Konto offen ist.
+/// Freigegeben ist genau dieses Modell, teurere Varianten (Pro) nie ohne
+/// ausdrueckliche Freigabe des Owners.
+pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
@@ -1126,7 +1138,8 @@ pub fn strip_think(text: &str) -> String {
 /// (temperature 0, JSON-only-System-Prompt).
 ///
 /// Token-Budget: 160 stammt aus der Python-Zeit. Das aktuelle Modell
-/// (`deepseek-v4-flash`) schreibt eine ausführliche `reason`-Begründung und
+/// ([`DEFAULT_FIREWORKS_MODEL`], der undatierte Name war unter diesem Konto
+/// nicht ansprechbar) schreibt eine ausführliche `reason`-Begründung und
 /// braucht für einen Standardfall gemessene 222 Completion-Tokens; bei 160
 /// bricht die Antwort mitten im JSON ab, kommt mit `finish_reason=length`
 /// zurück und der Provider meldet "response truncated (max_tokens)" — der
