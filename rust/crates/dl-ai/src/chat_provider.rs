@@ -1089,23 +1089,27 @@ async fn send_json_with_retry(
             return if status == StatusCode::TOO_MANY_REQUESTS {
                 Err(ChatProviderError::RateLimit)
             } else {
-                Err(ChatProviderError::Provider(format!(
-                    "HTTP {}",
-                    status.as_u16()
+                let rohtext = response.text().await.unwrap_or_default();
+                Err(ChatProviderError::Provider(anbieter_hinweis(
+                    status.as_u16(),
+                    &rohtext,
                 )))
             };
         }
         if !status.is_success() {
+            // Der Fehlertext landet im Transparenz-Kanal. "HTTP 412" schickt
+            // den Leser auf die Suche, obwohl der Anbieter im Body genau
+            // sagt, was los ist.
+            let rohtext = response.text().await.unwrap_or_default();
+            let hinweis = anbieter_hinweis(status.as_u16(), &rohtext);
             tracing::warn!(
                 provider = provider,
                 status = status.as_u16(),
                 elapsed_ms = started.elapsed().as_millis(),
+                hinweis = %hinweis,
                 "LLM-Provider-API-Fehler"
             );
-            return Err(ChatProviderError::Provider(format!(
-                "HTTP {}",
-                status.as_u16()
-            )));
+            return Err(ChatProviderError::Provider(hinweis));
         }
         let body = response
             .json::<Value>()
@@ -1121,6 +1125,63 @@ async fn send_json_with_retry(
     Err(ChatProviderError::Provider(
         "retry loop exhausted unexpectedly".to_string(),
     ))
+}
+
+/// Uebersetzt eine Fehlerantwort des Anbieters in einen Satz, mit dem man
+/// etwas anfangen kann.
+///
+/// Der Text geht in den Transparenz-Kanal und in die Logs. "HTTP 412" sagt
+/// niemandem, dass das Fireworks-Konto wegen einer offenen Rechnung gesperrt
+/// ist; genau das stand aber im Body, den vorher niemand gelesen hat.
+pub fn anbieter_hinweis(status: u16, rohtext: &str) -> String {
+    let meldung = anbieter_meldung(rohtext);
+    let deutung = match status {
+        400 => Some("Anfrage abgelehnt, meist ein ungueltiger Parameter"),
+        402 | 412 => Some(
+            "Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen",
+        ),
+        404 => Some("Modell oder Endpunkt gibt es dort nicht, Modellnamen pruefen"),
+        413 => Some("Anfrage zu gross"),
+        _ => None,
+    };
+    match (deutung, meldung) {
+        (Some(d), Some(m)) => format!("HTTP {status}: {d}. Anbieter sagt: {m}"),
+        (Some(d), None) => format!("HTTP {status}: {d}"),
+        (None, Some(m)) => format!("HTTP {status}: {m}"),
+        (None, None) => format!("HTTP {status}"),
+    }
+}
+
+/// Zieht die Klartextmeldung aus einer Fehlerantwort, egal ob sie unter
+/// `error.message`, `error` oder `message` liegt. Gekuerzt, weil der Text in
+/// eine Discord-Nachricht passen muss.
+fn anbieter_meldung(rohtext: &str) -> Option<String> {
+    let text = rohtext.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // Parst der Body als JSON, zaehlt nur eine echte Textmeldung. Ein
+    // `{"error":400}` sagt nichts, was der Status nicht schon sagt, und wuerde
+    // den Hinweis nur mit Rohdaten zumuellen.
+    let gefunden = match serde_json::from_str::<Value>(text) {
+        Ok(wert) => wert
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .or_else(|| wert.get("error"))
+            .or_else(|| wert.get("message"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)?,
+        Err(_) => text.to_string(),
+    };
+    let sauber = gefunden.trim();
+    if sauber.is_empty() {
+        return None;
+    }
+    Some(if sauber.chars().count() > 300 {
+        format!("{}…", sauber.chars().take(300).collect::<String>())
+    } else {
+        sauber.to_string()
+    })
 }
 
 fn request_error_kind(err: &reqwest::Error) -> String {
@@ -1349,6 +1410,58 @@ impl ChatProvider for MockChatProvider {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn gesperrtes_konto_wird_im_klartext_gemeldet() {
+        // Wortlaut aus einer echten Fireworks-Antwort vom 2026-08-26.
+        let body = r#"{"error":{"message":"Account mail-01rvneuz61yq is suspended, possibly due to reaching the monthly spending limit or failure to pay past invoices.","code":"PRECONDITION_FAILED"}}"#;
+        let hinweis = anbieter_hinweis(412, body);
+        assert!(hinweis.contains("412"), "{hinweis}");
+        assert!(hinweis.contains("gesperrt"), "die Deutung fehlt: {hinweis}");
+        assert!(
+            hinweis.contains("is suspended"),
+            "der Anbieter-Wortlaut fehlt: {hinweis}"
+        );
+    }
+
+    #[test]
+    fn unbekanntes_modell_zeigt_auf_den_modellnamen() {
+        let body = r#"{"error":{"message":"Model not found, inaccessible, and/or not deployed","code":"NOT_FOUND"}}"#;
+        let hinweis = anbieter_hinweis(404, body);
+        assert!(hinweis.contains("Modellnamen pruefen"), "{hinweis}");
+        assert!(hinweis.contains("Model not found"), "{hinweis}");
+    }
+
+    #[test]
+    fn ohne_verwertbaren_body_bleibt_der_status_uebrig() {
+        assert_eq!(anbieter_hinweis(418, ""), "HTTP 418");
+        assert_eq!(anbieter_hinweis(418, "   "), "HTTP 418");
+    }
+
+    #[test]
+    fn kein_json_wird_trotzdem_durchgereicht() {
+        let hinweis = anbieter_hinweis(500, "upstream connect error");
+        assert!(hinweis.contains("upstream connect error"), "{hinweis}");
+    }
+
+    #[test]
+    fn ein_langer_anbietertext_wird_gekuerzt_und_gekennzeichnet() {
+        let lang = "x".repeat(2_000);
+        let hinweis = anbieter_hinweis(400, &lang);
+        assert!(hinweis.chars().count() < 400, "{}", hinweis.chars().count());
+        assert!(hinweis.contains('…'), "die Kuerzung muss sichtbar sein");
+    }
+
+    #[test]
+    fn der_fireworks_default_ist_das_freigegebene_modell() {
+        // Der undatierte Name antwortete mit 404; die Freigabe gilt fuer die
+        // datierte Variante.
+        assert_eq!(
+            crate::DEFAULT_FIREWORKS_MODEL,
+            "accounts/fireworks/models/deepseek-v4-flash-0731"
+        );
+    }
+
     use super::*;
 
     #[derive(Clone, Default)]
@@ -2077,7 +2190,7 @@ mod tests {
             .await
             .expect_err("server error");
 
-        assert_eq!(err, ChatProviderError::Provider("HTTP 500".to_string()));
+        assert_eq!(err, ChatProviderError::Provider("HTTP 500: server".to_string()));
         assert_eq!(*attempts.lock().expect("lock"), 3);
     }
 
@@ -2111,7 +2224,7 @@ mod tests {
             error_for_status(axum::http::StatusCode::BAD_REQUEST).await;
         assert_eq!(
             bad_request,
-            ChatProviderError::Provider("HTTP 400".to_string())
+            ChatProviderError::Provider("HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter".to_string())
         );
         assert_eq!(bad_request_attempts, 1);
 

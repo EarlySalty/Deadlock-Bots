@@ -27,7 +27,11 @@ pub use transparency::*;
 pub use transparency_log::*;
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
-pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash";
+/// Die datierte Variante ist die einzige, die es bei Fireworks gibt: der
+/// undatierte Name `deepseek-v4-flash` antwortet mit 404 "Model not found".
+/// Freigegeben ist genau dieses Modell, teurere Varianten (Pro) nie ohne
+/// ausdrueckliche Freigabe des Owners.
+pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
