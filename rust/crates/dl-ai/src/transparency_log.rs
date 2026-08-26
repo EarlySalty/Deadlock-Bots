@@ -6,8 +6,13 @@
 //! einer Nachricht einen Thread machen.
 //!
 //! Leitlinien aus der Abnahme:
-//! - Vollstaendigkeit schlaegt Sparsamkeit. Jede Interaktion wird einzeln
-//!   sichtbar, kein Sampling, keine Aggregation.
+//! - Erfolgreiche Antworten werden einzeln sichtbar, kein Sampling.
+//! - Fehler werden mindestens einmal einzeln sichtbar. Wiederholt derselbe
+//!   Provider denselben Fehler, zeigt der Kanal ihn einmal und danach nur noch
+//!   die Anzahl. Keine unterdrueckte Wiederholung verschwindet ohne Zahl: die
+//!   Anzahl kommt entweder an der naechsten gezeigten Meldung mit, als
+//!   Nachtrag, sobald die Fehlerserie zur Ruhe kommt, oder spaetestens beim
+//!   geordneten Herunterfahren.
 //! - Bei Lastspitzen lieber verzoegern als verwerfen: die Queue ist gross, die
 //!   Drossel ist eine Warteschlange und kein Filter. Verwerfen ist der letzte
 //!   Ausweg und wird dann mit Anzahl ausgewiesen.
@@ -19,6 +24,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+// Tokios Uhr statt std: nur so laesst sich das Wiederholungsfenster im Test
+// mit `tokio::time::advance` ueberspringen, statt es abzuwarten.
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -50,6 +58,26 @@ const DEFAULT_MIN_SEND_INTERVAL: Duration = Duration::from_millis(1_100);
 /// So viele Gespraeche behaelt die Thread-Zuordnung im Gedaechtnis.
 const CONVERSATION_MEMORY: usize = 2_000;
 
+/// Ein kaputter Provider liefert denselben Fehler bei jedem Versuch. Einmal
+/// muss der Owner ihn sehen, danach reicht die Anzahl: innerhalb dieses
+/// Fensters wird derselbe Fehler im selben Anwendungsfall nur gezaehlt und
+/// beim naechsten Durchlass als Anzahl mitgeschickt. 15 Minuten, damit ein
+/// laenger laufender Ausfall den Owner regelmaessig wieder erreicht — ein
+/// Fenster von Stunden waere praktisch ein Stummschalter.
+/// Erfolgreiche Antworten bleiben davon unberuehrt.
+const DEFAULT_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+/// Kommt eine Fehlerserie so lange nicht mehr vor, geht die gezaehlte Anzahl
+/// als Nachtrag in den Kanal. Ohne das erfaehrt der Owner die Anzahl nie,
+/// wenn der Ausfall vorbei ist, bevor das Wiederholungsfenster ablaeuft.
+const DEFAULT_ERROR_FOLLOWUP_QUIET: Duration = Duration::from_secs(2 * 60);
+
+/// Takt, in dem der Worker nach faelligen Nachtraegen schaut.
+const FLUSH_TICK: Duration = Duration::from_secs(60);
+
+/// So viele verschiedene Fehlerarten behaelt die Entprellung im Gedaechtnis.
+const ERROR_MEMORY: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransparencyConfig {
     pub enabled: bool,
@@ -59,6 +87,14 @@ pub struct TransparencyConfig {
     pub include_moderation: bool,
     pub queue_capacity: usize,
     pub min_send_interval: Duration,
+    /// Wie lange derselbe Fehler nach der ersten Meldung nur gezaehlt wird.
+    /// `Duration::ZERO` schaltet die Entprellung ab.
+    pub error_repeat_window: Duration,
+    /// Ruhefrist, nach der die gezaehlten Wiederholungen als Nachtrag in den
+    /// Kanal gehen. `Duration::ZERO` schaltet den Nachtrag ab; die Anzahl
+    /// kommt dann nur an der naechsten gezeigten Meldung und beim
+    /// Herunterfahren.
+    pub error_followup_quiet: Duration,
 }
 
 impl Default for TransparencyConfig {
@@ -69,6 +105,8 @@ impl Default for TransparencyConfig {
             include_moderation: false,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             min_send_interval: DEFAULT_MIN_SEND_INTERVAL,
+            error_repeat_window: DEFAULT_ERROR_REPEAT_WINDOW,
+            error_followup_quiet: DEFAULT_ERROR_FOLLOWUP_QUIET,
         }
     }
 }
@@ -86,6 +124,18 @@ impl TransparencyConfig {
                 &lookup,
                 "DL_AI_TRANSPARENCY_INCLUDE_MODERATION",
                 default.include_moderation,
+            ),
+            // Im Vorfall muss ein Operator die Entprellung abschalten koennen,
+            // ohne ein neues Binaer zu bauen: 0 heisst „jeden Fehler zeigen".
+            error_repeat_window: env_seconds(
+                &lookup,
+                "DL_AI_TRANSPARENCY_ERROR_REPEAT_SECONDS",
+                default.error_repeat_window,
+            ),
+            error_followup_quiet: env_seconds(
+                &lookup,
+                "DL_AI_TRANSPARENCY_ERROR_FOLLOWUP_SECONDS",
+                default.error_followup_quiet,
             ),
             ..default
         }
@@ -122,6 +172,19 @@ fn env_bool(lookup: &impl Fn(&str) -> Option<String>, key: &str, default: bool) 
             "0" | "false" | "no" | "nein" | "off" | "aus"
         ),
     }
+}
+
+/// Sekundenwert aus der Umgebung. Unlesbares faellt auf den Default zurueck,
+/// `0` ist ein gueltiger Wert und heisst „abgeschaltet".
+fn env_seconds(
+    lookup: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: Duration,
+) -> Duration {
+    read_env(lookup, key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(default)
 }
 
 /// Der Weg nach Discord, den das jeweilige Binaer schon hat.
@@ -265,6 +328,189 @@ impl ConversationRouter {
     }
 }
 
+type ErrorKey = (LlmUseCase, String);
+
+/// Entprellt Wiederholungen desselben Fehlers.
+///
+/// Der Schluessel ist (Anwendungsfall, Fehlertext). Die erste Meldung geht
+/// durch, jede weitere im Fenster wird gezaehlt. Die gezaehlte Anzahl erreicht
+/// den Owner auf drei Wegen, damit sie nie still verschwindet:
+/// 1. an der naechsten gezeigten Meldung derselben Fehlerart,
+/// 2. als Nachtrag, sobald die Serie eine Ruhefrist lang aussetzt
+///    ([`ErrorThrottle::faellige_nachtraege`]),
+/// 3. beim Verdraengen aus dem Gedaechtnis und beim Herunterfahren
+///    ([`ErrorThrottle::offene_nachtraege`]).
+///
+/// Nicht abgedeckt bleibt der harte Abbruch (Absturz, SIGKILL): dort geht der
+/// laufende Zaehler verloren. Persistenz waere dafuer noetig und steht
+/// bewusst nicht im Verhaeltnis zum Nutzen.
+#[derive(Default)]
+struct ErrorThrottle {
+    streaks: HashMap<ErrorKey, ErrorStreak>,
+    /// Zuletzt benutzter Schluessel steht hinten (LRU): verdraengt wird, was
+    /// am laengsten nicht mehr vorkam, nicht was zuerst eintrat.
+    order: VecDeque<ErrorKey>,
+    /// Nachtraege, die durch Verdraengung faellig wurden.
+    verdraengt: Vec<(ErrorKey, u64)>,
+}
+
+struct ErrorStreak {
+    /// Wann diese Fehlerart zuletzt tatsaechlich im Kanal stand.
+    last_posted: Instant,
+    /// Wann sie zuletzt auftrat, auch unterdrueckt.
+    last_seen: Instant,
+    suppressed: u64,
+}
+
+/// `Show`: senden. `key` ist gesetzt, wenn nach erfolgreichem Senden
+/// [`ErrorThrottle::gesendet`] bestaetigt werden muss.
+enum ErrorDecision {
+    Show { key: Option<ErrorKey>, suppressed: u64 },
+    Suppress,
+}
+
+impl ErrorThrottle {
+    fn decide(
+        &mut self,
+        interaction: &AiInteraction,
+        window: Duration,
+        now: Instant,
+        immer_zeigen: bool,
+    ) -> ErrorDecision {
+        let Some(error) = interaction.error.as_deref() else {
+            return ErrorDecision::Show {
+                key: None,
+                suppressed: 0,
+            };
+        };
+        if window.is_zero() {
+            return ErrorDecision::Show {
+                key: None,
+                suppressed: 0,
+            };
+        }
+        let key = (interaction.use_case, error.to_string());
+        self.beruehren(&key);
+        if let Some(streak) = self.streaks.get_mut(&key) {
+            streak.last_seen = now;
+            if !immer_zeigen && now.duration_since(streak.last_posted) < window {
+                streak.suppressed += 1;
+                return ErrorDecision::Suppress;
+            }
+            // `last_posted` bleibt stehen, bis das Senden geglueckt ist:
+            // sonst verschluckt ein fehlgeschlagener Post die einzige
+            // sichtbare Instanz und das ganze Fenster bleibt stumm.
+            let carried = streak.suppressed;
+            return ErrorDecision::Show {
+                key: Some(key),
+                suppressed: carried,
+            };
+        }
+        // Erstes Auftreten: der Eintrag entsteht erst mit dem Senden. Kommt
+        // der Post nicht durch, gibt es auch nichts zu entprellen.
+        ErrorDecision::Show {
+            key: Some(key),
+            suppressed: 0,
+        }
+    }
+
+    /// Bestaetigt einen erfolgreich gesendeten Fehler: Fenster neu starten,
+    /// Zaehler auf null.
+    fn gesendet(&mut self, key: ErrorKey, now: Instant) {
+        match self.streaks.get_mut(&key) {
+            Some(streak) => {
+                streak.last_posted = now;
+                streak.last_seen = now;
+                streak.suppressed = 0;
+            }
+            None => {
+                self.streaks.insert(
+                    key.clone(),
+                    ErrorStreak {
+                        last_posted: now,
+                        last_seen: now,
+                        suppressed: 0,
+                    },
+                );
+                self.order.push_back(key);
+                self.verdraengen();
+            }
+        }
+    }
+
+    /// Schiebt einen bekannten Schluessel ans Ende der LRU-Reihe.
+    fn beruehren(&mut self, key: &ErrorKey) {
+        if let Some(pos) = self.order.iter().position(|vorhanden| vorhanden == key) {
+            if let Some(gefunden) = self.order.remove(pos) {
+                self.order.push_back(gefunden);
+            }
+        }
+    }
+
+    fn verdraengen(&mut self) {
+        while self.order.len() > ERROR_MEMORY {
+            let Some(alt) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(streak) = self.streaks.remove(&alt) {
+                // Ein offener Zaehler darf nicht mit dem Eintrag verschwinden.
+                if streak.suppressed > 0 {
+                    self.verdraengt.push((alt, streak.suppressed));
+                }
+            }
+        }
+    }
+
+    /// Fehlerserien, die seit der Ruhefrist nicht mehr auftraten und noch
+    /// einen offenen Zaehler haben. Der Zaehler wird dabei geleert.
+    fn faellige_nachtraege(&mut self, quiet: Duration, now: Instant) -> Vec<(ErrorKey, u64)> {
+        let mut faellig = std::mem::take(&mut self.verdraengt);
+        if quiet.is_zero() {
+            return faellig;
+        }
+        for (key, streak) in self.streaks.iter_mut() {
+            if streak.suppressed > 0 && now.duration_since(streak.last_seen) >= quiet {
+                faellig.push((key.clone(), streak.suppressed));
+                streak.suppressed = 0;
+            }
+        }
+        faellig
+    }
+
+    /// Alles, was noch offen ist — fuer den geordneten Abschluss.
+    fn offene_nachtraege(&mut self) -> Vec<(ErrorKey, u64)> {
+        let mut faellig = std::mem::take(&mut self.verdraengt);
+        for (key, streak) in self.streaks.iter_mut() {
+            if streak.suppressed > 0 {
+                faellig.push((key.clone(), streak.suppressed));
+                streak.suppressed = 0;
+            }
+        }
+        faellig
+    }
+}
+
+/// Haengt die Anzahl der unterdrueckten Wiederholungen an die Meldung.
+fn with_repeat_notice(content: String, suppressed: u64) -> String {
+    if suppressed == 0 {
+        return content;
+    }
+    let notice =
+        format!("\n_Davor {suppressed} mal derselbe Fehler, nicht einzeln angezeigt._");
+    let room = DISCORD_CONTENT_LIMIT.saturating_sub(notice.chars().count());
+    format!("{}{notice}", cut(&content, room))
+}
+
+/// Der Nachtrag: die Serie ist vorbei, die Anzahl geht trotzdem raus.
+fn repeat_followup(key: &ErrorKey, suppressed: u64) -> String {
+    let text = format!(
+        "**KI · {} · Fehler**\nDanach noch {suppressed} mal derselbe Fehler, nicht einzeln angezeigt.\nFehler: {}",
+        use_case_label(key.0),
+        key.1
+    );
+    cut(&text, DISCORD_CONTENT_LIMIT)
+}
+
 async fn run_worker(
     mut rx: mpsc::Receiver<AiInteraction>,
     messenger: Arc<dyn TransparencyMessenger>,
@@ -272,7 +518,21 @@ async fn run_worker(
     dropped: Arc<AtomicU64>,
 ) {
     let mut router = ConversationRouter::default();
-    while let Some(interaction) = rx.recv().await {
+    let mut errors = ErrorThrottle::default();
+    let mut flush = tokio::time::interval(FLUSH_TICK);
+    loop {
+        let interaction = tokio::select! {
+            eingang = rx.recv() => match eingang {
+                Some(interaction) => interaction,
+                // Die Senke ist weg: was noch offen ist, geht jetzt raus.
+                None => break,
+            },
+            _ = flush.tick() => {
+                let faellig = errors.faellige_nachtraege(config.error_followup_quiet, Instant::now());
+                sende_nachtraege(faellig, messenger.as_ref(), &config).await;
+                continue;
+            }
+        };
         let missed = dropped.swap(0, Ordering::Relaxed);
         if missed > 0 {
             // Stille darf nie wie „keine KI-Aktivitaet" aussehen.
@@ -286,9 +546,66 @@ async fn run_worker(
             throttle(&config).await;
         }
 
+        // Auch unterdrueckte Eintraege laufen durch den Router: er haelt die
+        // Fingerprints des Gespraechs frisch und zaehlt die Runde weiter. Ohne
+        // das reisst eine laengere Fehlerserie den Thread ab und die naechste
+        // gezeigte Meldung traegt eine zu niedrige Rundennummer.
         let id = router.resolve(&interaction);
-        deliver(&mut router, id, &interaction, messenger.as_ref(), &config).await;
+
+        // Ein laufendes Gespraech, von dem noch nichts im Kanal steht, braucht
+        // seine Ankernachricht: ohne sie gibt es keinen Thread und der Verlauf
+        // liegt verstreut im Kanal. Diese eine Meldung geht darum immer durch.
+        let ohne_anker = router
+            .conversations
+            .get(&id)
+            .is_some_and(|state| state.anchor_message_id.is_none() && state.thread_id.is_none());
+        let braucht_anker = interaction.is_conversation() && ohne_anker;
+
+        let decision = errors.decide(
+            &interaction,
+            config.error_repeat_window,
+            Instant::now(),
+            braucht_anker,
+        );
+        let (key, suppressed) = match decision {
+            ErrorDecision::Suppress => continue,
+            ErrorDecision::Show { key, suppressed } => (key, suppressed),
+        };
+        let gesendet = deliver(
+            &mut router,
+            id,
+            &interaction,
+            suppressed,
+            messenger.as_ref(),
+            &config,
+        )
+        .await;
+        if let Some(key) = key {
+            if gesendet {
+                errors.gesendet(key, Instant::now());
+            }
+        }
         throttle(&config).await;
+    }
+
+    // Geordnetes Ende: kein gezaehlter Fehler verschwindet ungenannt.
+    let offen = errors.offene_nachtraege();
+    sende_nachtraege(offen, messenger.as_ref(), &config).await;
+}
+
+async fn sende_nachtraege(
+    faellig: Vec<(ErrorKey, u64)>,
+    messenger: &dyn TransparencyMessenger,
+    config: &TransparencyConfig,
+) {
+    for (key, suppressed) in faellig {
+        if let Err(error) = messenger
+            .send(config.channel_id, &repeat_followup(&key, suppressed))
+            .await
+        {
+            tracing::warn!(%error, suppressed, "Nachtrag zu unterdrueckten KI-Fehlern nicht zustellbar");
+        }
+        throttle(config).await;
     }
 }
 
@@ -302,11 +619,12 @@ async fn deliver(
     router: &mut ConversationRouter,
     id: u64,
     interaction: &AiInteraction,
+    suppressed: u64,
     messenger: &dyn TransparencyMessenger,
     config: &TransparencyConfig,
-) {
+) -> bool {
     let Some(state) = router.conversations.get(&id) else {
-        return;
+        return false;
     };
     let turn = state.turn;
     let mut thread_id = state.thread_id;
@@ -330,7 +648,10 @@ async fn deliver(
         }
     }
 
-    let content = render_interaction(interaction, turn, thread_id.is_none());
+    let content = with_repeat_notice(
+        render_interaction(interaction, turn, thread_id.is_none()),
+        suppressed,
+    );
     let target = thread_id.unwrap_or(config.channel_id);
     let sent = messenger.send(target, &content).await;
     let sent = match sent {
@@ -340,7 +661,7 @@ async fn deliver(
             // verschwinden: dann eben in den Kanal.
             tracing::warn!(%error, thread_id = target, "KI-Transparenz-Thread nicht erreichbar, Rueckfall auf den Kanal");
             thread_id = None;
-            let fallback = render_interaction(interaction, turn, true);
+            let fallback = with_repeat_notice(render_interaction(interaction, turn, true), suppressed);
             match messenger.send(config.channel_id, &fallback).await {
                 Ok(message_id) => Some(message_id),
                 Err(error) => {
@@ -361,6 +682,7 @@ async fn deliver(
             state.anchor_message_id = sent;
         }
     }
+    sent.is_some()
 }
 
 pub fn drop_notice(count: u64) -> String {
@@ -509,6 +831,8 @@ mod tests {
         threads: Mutex<Vec<(u64, u64, String)>>,
         thread_erlaubt: bool,
         blockiert: Option<Arc<tokio::sync::Semaphore>>,
+        /// So viele der naechsten Sendeversuche scheitern.
+        fehlschlaege: AtomicU64,
         next_id: AtomicU64,
     }
 
@@ -516,6 +840,15 @@ mod tests {
         fn arc(thread_erlaubt: bool) -> Arc<Self> {
             Arc::new(Self {
                 thread_erlaubt,
+                next_id: AtomicU64::new(1000),
+                ..Self::default()
+            })
+        }
+
+        fn mit_fehlschlaegen(anzahl: u64) -> Arc<Self> {
+            Arc::new(Self {
+                thread_erlaubt: false,
+                fehlschlaege: AtomicU64::new(anzahl),
                 next_id: AtomicU64::new(1000),
                 ..Self::default()
             })
@@ -546,6 +879,15 @@ mod tests {
                 let permit = gate.acquire().await.map_err(|_| "gate".to_string())?;
                 permit.forget();
             }
+            if self
+                .fehlschlaege
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |offen| {
+                    offen.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err("Discord antwortet nicht".to_string());
+            }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut sent) = self.sent.lock() {
                 sent.push((channel_id, content.to_string()));
@@ -568,6 +910,441 @@ mod tests {
                 Err("Threads hier nicht moeglich".to_string())
             }
         }
+    }
+
+    fn fehler_interaktion(use_case: LlmUseCase, frage: &str, fehler: &str) -> AiInteraction {
+        AiInteraction {
+            use_case,
+            prompt_excerpt: frage.to_string(),
+            system_excerpt: None,
+            response: None,
+            error: Some(fehler.to_string()),
+            model: None,
+            latency_ms: 4,
+            conversation_trail: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn derselbe_fehler_wird_einmal_gezeigt_und_danach_nur_gezaehlt() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for index in 0..5 {
+            sink.record(fehler_interaktion(
+                LlmUseCase::ScrimLagebild,
+                &format!("team {index}"),
+                "LLM provider error: HTTP 412",
+            ));
+        }
+        // Ein anderer Fehler muss trotzdem durchkommen.
+        sink.record(fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            "team 9",
+            "LLM provider error: HTTP 404",
+        ));
+        assert!(warte_auf(|| messenger.sent().len() == 2).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let sent = messenger.sent();
+        assert_eq!(sent.len(), 2, "vier Wiederholungen bleiben stumm: {sent:?}");
+        assert!(sent[0].1.contains("HTTP 412"), "{}", sent[0].1);
+        assert!(sent[1].1.contains("HTTP 404"), "{}", sent[1].1);
+    }
+
+    #[tokio::test]
+    async fn erfolgreiche_antworten_werden_nie_entprellt() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for index in 0..4_u64 {
+            sink.record(interaktion(LlmUseCase::Faq, "gleiche frage", "gleiche antwort", &[index]));
+        }
+        assert!(warte_auf(|| messenger.sent().len() == 4).await);
+    }
+
+    /// Pausierte Uhr: das Wiederholungsfenster wird per `advance` uebersprungen
+    /// statt es gegen die echte Uhr abzuwarten.
+    #[tokio::test(start_paused = true)]
+    async fn nach_dem_fenster_meldet_der_fehler_die_unterdrueckte_anzahl() {
+        let messenger = FakeMessenger::arc(false);
+        let config = TransparencyConfig {
+            error_repeat_window: Duration::from_secs(600),
+            // Der Nachtrag ist hier aus: geprueft wird der Weg ueber die
+            // naechste gezeigte Meldung.
+            error_followup_quiet: Duration::ZERO,
+            ..testkonfig()
+        };
+        let log = TransparencyLog::spawn(messenger.clone(), config);
+        let sink = log.sink();
+
+        for _ in 0..3 {
+            sink.record(fehler_interaktion(
+                LlmUseCase::ScrimLagebild,
+                "team 1",
+                "LLM provider error: HTTP 412",
+            ));
+        }
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+        tokio::time::advance(Duration::from_secs(700)).await;
+        sink.record(fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "LLM provider error: HTTP 412",
+        ));
+        assert!(warte_auf(|| messenger.sent().len() == 2).await);
+
+        let sent = messenger.sent();
+        assert!(
+            sent[1].1.contains("Davor 2 mal derselbe Fehler"),
+            "die Anzahl muss mitkommen: {}",
+            sent[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn unterdrueckte_runden_zaehlen_im_gespraech_weiter() {
+        let messenger = FakeMessenger::arc(true);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        let mut fehler = fehler_interaktion(LlmUseCase::BotPate, "runde 1", "HTTP 412");
+        fehler.conversation_trail = vec![1];
+        sink.record(fehler);
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+
+        let mut wiederholung = fehler_interaktion(LlmUseCase::BotPate, "runde 2", "HTTP 412");
+        wiederholung.conversation_trail = vec![1, 2];
+        sink.record(wiederholung);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(messenger.sent().len(), 1, "Runde 2 bleibt stumm");
+
+        sink.record(interaktion(LlmUseCase::BotPate, "runde 3", "endlich eine Antwort", &[2, 3]));
+        assert!(warte_auf(|| messenger.sent().len() == 2).await);
+
+        let sent = messenger.sent();
+        assert!(
+            sent[1].1.contains("Runde 3"),
+            "die unterdrueckte Runde zaehlt mit: {}",
+            sent[1].1
+        );
+        assert_eq!(
+            messenger.threads().len(),
+            1,
+            "das Gespraech behaelt seinen Thread"
+        );
+    }
+
+    #[test]
+    fn die_anzahl_sprengt_das_zeichenlimit_nicht() {
+        let lang = "X".repeat(DISCORD_CONTENT_LIMIT);
+        let text = with_repeat_notice(lang, 7);
+        assert!(text.chars().count() <= DISCORD_CONTENT_LIMIT, "{}", text.chars().count());
+        assert!(text.contains("Davor 7 mal derselbe Fehler"));
+    }
+
+    /// Nimmt eine Entscheidung ab, die „senden" lauten muss, und bestaetigt
+    /// den Versand. Liefert die mitgeschickte Anzahl.
+    fn zeigen(
+        throttle: &mut ErrorThrottle,
+        interaktion: &AiInteraction,
+        fenster: Duration,
+        jetzt: Instant,
+    ) -> u64 {
+        match throttle.decide(interaktion, fenster, jetzt, false) {
+            ErrorDecision::Show { key, suppressed } => {
+                if let Some(key) = key {
+                    throttle.gesendet(key, jetzt);
+                }
+                suppressed
+            }
+            ErrorDecision::Suppress => panic!("die Meldung haette gezeigt werden muessen"),
+        }
+    }
+
+    fn unterdruecken(
+        throttle: &mut ErrorThrottle,
+        interaktion: &AiInteraction,
+        fenster: Duration,
+        jetzt: Instant,
+    ) {
+        assert!(
+            matches!(
+                throttle.decide(interaktion, fenster, jetzt, false),
+                ErrorDecision::Suppress
+            ),
+            "die Wiederholung haette stumm bleiben muessen"
+        );
+    }
+
+    #[test]
+    fn das_standardfenster_ist_kurz_genug_um_wieder_sichtbar_zu_werden() {
+        let default = TransparencyConfig::default();
+        assert_eq!(
+            default.error_repeat_window,
+            Duration::from_secs(15 * 60),
+            "ein Fenster von Stunden waere ein Stummschalter"
+        );
+        assert!(
+            default.error_followup_quiet <= default.error_repeat_window,
+            "der Nachtrag muss vor dem naechsten Fenster kommen"
+        );
+        assert!(!default.error_followup_quiet.is_zero());
+    }
+
+    #[test]
+    fn die_entprellung_laesst_sich_per_umgebung_abschalten() {
+        let aus = TransparencyConfig::from_env(|key| match key {
+            "DL_AI_TRANSPARENCY_ERROR_REPEAT_SECONDS" => Some("0".to_string()),
+            _ => None,
+        });
+        assert!(
+            aus.error_repeat_window.is_zero(),
+            "0 muss die Entprellung im Vorfall abschalten"
+        );
+
+        let gesetzt = TransparencyConfig::from_env(|key| match key {
+            "DL_AI_TRANSPARENCY_ERROR_REPEAT_SECONDS" => Some("90".to_string()),
+            "DL_AI_TRANSPARENCY_ERROR_FOLLOWUP_SECONDS" => Some("30".to_string()),
+            _ => None,
+        });
+        assert_eq!(gesetzt.error_repeat_window, Duration::from_secs(90));
+        assert_eq!(gesetzt.error_followup_quiet, Duration::from_secs(30));
+
+        let unlesbar = TransparencyConfig::from_env(|key| match key {
+            "DL_AI_TRANSPARENCY_ERROR_REPEAT_SECONDS" => Some("bald".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            unlesbar.error_repeat_window,
+            DEFAULT_ERROR_REPEAT_WINDOW,
+            "Unsinn faellt auf den Default zurueck"
+        );
+    }
+
+    #[test]
+    fn ein_fehlgeschlagener_post_startet_das_fenster_nicht() {
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(600);
+        let fehler = fehler_interaktion(LlmUseCase::Faq, "frage", "HTTP 412");
+
+        // Erster Versuch: senden erlaubt, aber der Versand scheitert, also
+        // wird nicht bestaetigt.
+        assert!(matches!(
+            throttle.decide(&fehler, fenster, jetzt, false),
+            ErrorDecision::Show { .. }
+        ));
+        // Ohne Bestaetigung muss der naechste Versuch wieder durchgehen,
+        // sonst ist die einzige sichtbare Instanz verloren.
+        assert!(
+            matches!(
+                throttle.decide(&fehler, fenster, jetzt, false),
+                ErrorDecision::Show { .. }
+            ),
+            "ohne erfolgreichen Versand darf das Fenster nicht zugehen"
+        );
+
+        // Erst der bestaetigte Versand macht die Entprellung scharf.
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+        unterdruecken(&mut throttle, &fehler, fenster, jetzt);
+    }
+
+    #[test]
+    fn verdraengt_wird_nach_aktualitaet_nicht_nach_ersteintritt() {
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(600);
+
+        for index in 0..ERROR_MEMORY {
+            let fehler = fehler_interaktion(LlmUseCase::Faq, "frage", &format!("fehler {index}"));
+            zeigen(&mut throttle, &fehler, fenster, jetzt);
+        }
+
+        // Der aelteste Eintrag kommt gerade wieder vor.
+        let alt = fehler_interaktion(LlmUseCase::Faq, "frage", "fehler 0");
+        unterdruecken(&mut throttle, &alt, fenster, jetzt);
+
+        // Ein neuer Fehler verdraengt jetzt den laengst ungenutzten Eintrag.
+        let neu = fehler_interaktion(LlmUseCase::Faq, "frage", "ganz neuer fehler");
+        zeigen(&mut throttle, &neu, fenster, jetzt);
+
+        assert!(
+            throttle
+                .streaks
+                .contains_key(&(LlmUseCase::Faq, "fehler 0".to_string())),
+            "der zuletzt benutzte Eintrag darf nicht verdraengt werden"
+        );
+        assert!(
+            !throttle
+                .streaks
+                .contains_key(&(LlmUseCase::Faq, "fehler 1".to_string())),
+            "verdraengt wird der laengst ungenutzte Eintrag"
+        );
+    }
+
+    #[test]
+    fn ein_verdraengter_zaehler_geht_als_nachtrag_raus() {
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(600);
+        let alt = fehler_interaktion(LlmUseCase::Faq, "frage", "alter fehler");
+
+        zeigen(&mut throttle, &alt, fenster, jetzt);
+        for _ in 0..4 {
+            unterdruecken(&mut throttle, &alt, fenster, jetzt);
+        }
+        // Genug neue Fehlerarten, um den alten Eintrag zu verdraengen.
+        for index in 0..ERROR_MEMORY {
+            let neu = fehler_interaktion(LlmUseCase::Faq, "frage", &format!("neu {index}"));
+            zeigen(&mut throttle, &neu, fenster, jetzt);
+        }
+
+        let nachtraege = throttle.faellige_nachtraege(Duration::from_secs(120), jetzt);
+        assert_eq!(
+            nachtraege,
+            vec![((LlmUseCase::Faq, "alter fehler".to_string()), 4)],
+            "der offene Zaehler darf nicht mit dem Eintrag verschwinden"
+        );
+        assert!(repeat_followup(&nachtraege[0].0, nachtraege[0].1)
+            .contains("Danach noch 4 mal derselbe Fehler"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nach_der_ruhefrist_kommt_die_anzahl_als_nachtrag() {
+        let messenger = FakeMessenger::arc(false);
+        let config = TransparencyConfig {
+            error_repeat_window: Duration::from_secs(3_600),
+            error_followup_quiet: Duration::from_secs(120),
+            ..testkonfig()
+        };
+        let log = TransparencyLog::spawn(messenger.clone(), config);
+        let sink = log.sink();
+
+        for _ in 0..4 {
+            sink.record(fehler_interaktion(
+                LlmUseCase::ScrimLagebild,
+                "team 1",
+                "LLM provider error: HTTP 412",
+            ));
+        }
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+
+        // Die Fehlerserie ist vorbei, das Fenster laeuft aber noch lange.
+        tokio::time::advance(Duration::from_secs(200)).await;
+        assert!(
+            warte_auf(|| messenger.sent().len() == 2).await,
+            "die Anzahl muss den Owner auch ohne neuen Fehler erreichen"
+        );
+
+        let sent = messenger.sent();
+        assert!(
+            sent[1].1.contains("Danach noch 3 mal derselbe Fehler"),
+            "{}",
+            sent[1].1
+        );
+        assert!(sent[1].1.contains("HTTP 412"), "{}", sent[1].1);
+    }
+
+    #[tokio::test]
+    async fn beim_herunterfahren_kommt_die_offene_anzahl_noch_raus() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for _ in 0..3 {
+            sink.record(fehler_interaktion(
+                LlmUseCase::ScrimLagebild,
+                "team 1",
+                "LLM provider error: HTTP 412",
+            ));
+        }
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+        drop(sink);
+        log.shutdown().await;
+
+        let sent = messenger.sent();
+        assert_eq!(
+            sent.len(),
+            2,
+            "ein geordneter Neustart darf die Zaehler nicht verschlucken: {sent:?}"
+        );
+        assert!(
+            sent[1].1.contains("Danach noch 2 mal derselbe Fehler"),
+            "{}",
+            sent[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn die_ankerrunde_eines_gespraechs_wird_nie_unterdrueckt() {
+        let messenger = FakeMessenger::arc(true);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        // Der Fehler ist schon bekannt, das Fenster steht.
+        sink.record(fehler_interaktion(LlmUseCase::BotPate, "irgendwo", "HTTP 412"));
+        assert!(warte_auf(|| messenger.sent().len() == 1).await);
+
+        // Runde 1 eines neuen Gespraechs faellt in die Entprellung.
+        let mut runde1 = fehler_interaktion(LlmUseCase::BotPate, "runde 1", "HTTP 412");
+        runde1.conversation_trail = vec![7];
+        sink.record(runde1);
+
+        // Runde 2 darf nicht auch noch stumm bleiben, sonst bekommt das
+        // Gespraech nie eine Ankernachricht und keinen Thread.
+        let mut runde2 = fehler_interaktion(LlmUseCase::BotPate, "runde 2", "HTTP 412");
+        runde2.conversation_trail = vec![7, 8];
+        sink.record(runde2);
+        assert!(
+            warte_auf(|| messenger.sent().len() == 2).await,
+            "das Gespraech braucht seine Ankernachricht: {:?}",
+            messenger.sent()
+        );
+
+        let sent = messenger.sent();
+        assert!(sent[1].1.contains("Runde 2"), "{}", sent[1].1);
+
+        // Und die Runde danach haengt am Anker im Thread.
+        sink.record(interaktion(
+            LlmUseCase::BotPate,
+            "runde 3",
+            "endlich eine Antwort",
+            &[8, 9],
+        ));
+        assert!(warte_auf(|| messenger.sent().len() == 3).await);
+        assert_eq!(
+            messenger.threads().len(),
+            1,
+            "die Ankernachricht traegt jetzt einen Thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn ein_fehlgeschlagener_post_haelt_den_kanal_nicht_stunden_stumm() {
+        let messenger = FakeMessenger::mit_fehlschlaegen(1);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        sink.record(fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            "team 1",
+            "LLM provider error: HTTP 412",
+        ));
+        sink.record(fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            "team 2",
+            "LLM provider error: HTTP 412",
+        ));
+
+        assert!(
+            warte_auf(|| messenger.sent().len() == 1).await,
+            "der zweite Versuch muss durchkommen, der erste ging verloren"
+        );
+        let sent = messenger.sent();
+        assert!(sent[0].1.contains("team 2"), "{}", sent[0].1);
     }
 
     fn testkonfig() -> TransparencyConfig {
