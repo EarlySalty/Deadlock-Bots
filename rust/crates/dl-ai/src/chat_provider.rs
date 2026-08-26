@@ -1106,7 +1106,11 @@ async fn send_json_with_retry(
                 provider = provider,
                 status = status.as_u16(),
                 elapsed_ms = started.elapsed().as_millis(),
-                hinweis = %hinweis,
+                // Nur die Deutung, nie der Wortlaut des Anbieters: manche
+                // spiegeln bei 400 den beanstandeten Nachrichteninhalt
+                // zurueck, und Nutzertext gehoert nicht ins Anwendungslog.
+                // Den vollen Wortlaut bekommt der Transparenz-Kanal.
+                hinweis = %statusteil(&hinweis),
                 "LLM-Provider-API-Fehler"
             );
             return Err(ChatProviderError::Provider(hinweis));
@@ -1132,6 +1136,16 @@ async fn send_json_with_retry(
 /// Die Entprellung im Transparenz-Log dedupliziert am Text davor: der Wortlaut
 /// dahinter kann eine Request-ID tragen und waere je Aufruf verschieden.
 pub const ANBIETER_MARKER: &str = " Anbieter sagt: ";
+
+/// Der Teil des Hinweises, den wir selbst formulieren: Status und Deutung,
+/// ohne den Wortlaut des Anbieters. Fuer Logs, die kein Nutzertext erreichen
+/// darf.
+pub fn statusteil(hinweis: &str) -> &str {
+    match hinweis.find(ANBIETER_MARKER) {
+        Some(pos) => hinweis[..pos].trim_end_matches(':'),
+        None => hinweis,
+    }
+}
 
 /// Uebersetzt eine Fehlerantwort des Anbieters in einen Satz, mit dem man
 /// etwas anfangen kann.
@@ -1166,9 +1180,10 @@ fn anbieter_meldung(rohtext: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    // Parst der Body als JSON, zaehlt nur eine echte Textmeldung. Ein
-    // `{"error":400}` sagt nichts, was der Status nicht schon sagt, und wuerde
-    // den Hinweis nur mit Rohdaten zumuellen.
+    // Bevorzugt die uebliche Textmeldung. Findet sich keine, bleibt der
+    // Rohtext: ein Body wie `{"detail":"quota exceeded"}` traegt die Antwort
+    // auf die Frage, warum der Aufruf scheiterte, und darf nicht zugunsten
+    // eines nackten "HTTP 400" weggeworfen werden.
     let gefunden = match serde_json::from_str::<Value>(text) {
         Ok(wert) => wert
             .get("error")
@@ -1176,7 +1191,8 @@ fn anbieter_meldung(rohtext: &str) -> Option<String> {
             .or_else(|| wert.get("error"))
             .or_else(|| wert.get("message"))
             .and_then(|m| m.as_str())
-            .map(str::to_string)?,
+            .map(str::to_string)
+            .unwrap_or_else(|| text.to_string()),
         Err(_) => text.to_string(),
     };
     let sauber = gefunden.trim();
@@ -1459,9 +1475,72 @@ mod tests {
     }
 
     #[test]
+    fn ein_json_ohne_bekanntes_meldefeld_verliert_den_wortlaut_nicht() {
+        // `{"detail": ...}` kennt der Parser nicht. Frueher endete die Suche
+        // damit bei `None` und uebrig blieb ein nacktes "HTTP 400".
+        let hinweis = anbieter_hinweis(400, r#"{"detail":"quota exceeded"}"#);
+        assert!(
+            hinweis.contains("quota exceeded"),
+            "der Rohtext ist die einzige Spur: {hinweis}"
+        );
+
+        // Auch hier gilt das Zeichenlimit.
+        let lang = format!(r#"{{"detail":"{}"}}"#, "y".repeat(2_000));
+        let gekuerzt = anbieter_hinweis(400, &lang);
+        assert!(
+            gekuerzt.chars().count() < 400,
+            "{}",
+            gekuerzt.chars().count()
+        );
+        assert!(gekuerzt.contains('…'), "die Kuerzung muss sichtbar sein");
+    }
+
+    #[test]
+    fn der_statusteil_traegt_den_anbieter_wortlaut_nicht() {
+        let hinweis = anbieter_hinweis(400, r#"{"error":{"message":"verbotenes wort: hallo"}}"#);
+        assert!(hinweis.contains("verbotenes wort"), "{hinweis}");
+        let kurz = statusteil(&hinweis);
+        assert!(
+            !kurz.contains("verbotenes wort"),
+            "Nutzertext gehoert nicht ins Anwendungslog: {kurz}"
+        );
+        assert!(kurz.contains("400"), "der Status muss bleiben: {kurz}");
+        assert_eq!(statusteil("HTTP 418"), "HTTP 418");
+    }
+
+    #[test]
+    fn die_logstelle_schreibt_nur_den_statusteil() {
+        // Ein Laufzeittest waere hier unzuverlaessig: `tracing` merkt sich je
+        // Logstelle, ob ueberhaupt jemand zuhoert, und andere Tests treffen
+        // dieselbe Stelle zuerst. Also am Quelltext geprueft, wie im Test zum
+        // Anbieter-Label darueber.
+        let source = include_str!("chat_provider.rs");
+        let stelle = source
+            .split("\"LLM-Provider-API-Fehler\"")
+            .next()
+            .expect("Logstelle");
+        let block = stelle
+            .rsplit("tracing::warn!(")
+            .next()
+            .expect("warn-Aufruf der Logstelle");
+        assert!(
+            block.contains("hinweis = %statusteil(&hinweis)"),
+            "die Logstelle muss kuerzen, sonst steht Anbieter- und damit \
+             Nutzertext im Anwendungslog: {block}"
+        );
+    }
+
+    #[test]
     fn der_fireworks_default_ist_das_freigegebene_modell() {
         // Der undatierte Name antwortete mit 404; die Freigabe gilt fuer die
         // datierte Variante.
+        //
+        // Was dieser Test leistet und was nicht: er haelt die Konstante an
+        // ihrem freigegebenen Wert fest, damit ein Zurueckdrehen auf den
+        // undatierten Namen im Diff und im Testlauf auffaellt. Er beweist
+        // nicht, dass es das Modell bei Fireworks gibt. Ein Live-Aufruf
+        // koennte das, ist aber nicht moeglich, solange das Konto gesperrt
+        // ist.
         assert_eq!(
             crate::DEFAULT_FIREWORKS_MODEL,
             "accounts/fireworks/models/deepseek-v4-flash-0731"
@@ -2231,11 +2310,15 @@ mod tests {
 
         let (bad_request, bad_request_attempts) =
             error_for_status(axum::http::StatusCode::BAD_REQUEST).await;
+        // Der Body traegt keine Textmeldung, nur `{"error":400}`. Er wird
+        // trotzdem angehaengt: was der Anbieter geschickt hat, ist die einzige
+        // Spur, und lieber ein karger Body im Kanal als ein nacktes "HTTP 400".
         assert_eq!(
             bad_request,
-            ChatProviderError::Provider(
-                "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter".to_string()
-            )
+            ChatProviderError::Provider(format!(
+                "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter.\
+                 {ANBIETER_MARKER}{{\"error\":400}}"
+            ))
         );
         assert_eq!(bad_request_attempts, 1);
 
