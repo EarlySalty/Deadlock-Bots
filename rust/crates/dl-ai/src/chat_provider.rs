@@ -1127,6 +1127,12 @@ async fn send_json_with_retry(
     ))
 }
 
+/// Trennt den Teil, den wir selbst formulieren, vom Wortlaut des Anbieters.
+///
+/// Die Entprellung im Transparenz-Log dedupliziert am Text davor: der Wortlaut
+/// dahinter kann eine Request-ID tragen und waere je Aufruf verschieden.
+pub const ANBIETER_MARKER: &str = " Anbieter sagt: ";
+
 /// Uebersetzt eine Fehlerantwort des Anbieters in einen Satz, mit dem man
 /// etwas anfangen kann.
 ///
@@ -1137,17 +1143,17 @@ pub fn anbieter_hinweis(status: u16, rohtext: &str) -> String {
     let meldung = anbieter_meldung(rohtext);
     let deutung = match status {
         400 => Some("Anfrage abgelehnt, meist ein ungueltiger Parameter"),
-        402 | 412 => Some(
-            "Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen",
-        ),
+        402 | 412 => {
+            Some("Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen")
+        }
         404 => Some("Modell oder Endpunkt gibt es dort nicht, Modellnamen pruefen"),
         413 => Some("Anfrage zu gross"),
         _ => None,
     };
     match (deutung, meldung) {
-        (Some(d), Some(m)) => format!("HTTP {status}: {d}. Anbieter sagt: {m}"),
+        (Some(d), Some(m)) => format!("HTTP {status}: {d}.{ANBIETER_MARKER}{m}"),
         (Some(d), None) => format!("HTTP {status}: {d}"),
-        (None, Some(m)) => format!("HTTP {status}: {m}"),
+        (None, Some(m)) => format!("HTTP {status}:{ANBIETER_MARKER}{m}"),
         (None, None) => format!("HTTP {status}"),
     }
 }
@@ -2190,7 +2196,10 @@ mod tests {
             .await
             .expect_err("server error");
 
-        assert_eq!(err, ChatProviderError::Provider("HTTP 500: server".to_string()));
+        assert_eq!(
+            err,
+            ChatProviderError::Provider("HTTP 500: Anbieter sagt: server".to_string())
+        );
         assert_eq!(*attempts.lock().expect("lock"), 3);
     }
 
@@ -2224,7 +2233,9 @@ mod tests {
             error_for_status(axum::http::StatusCode::BAD_REQUEST).await;
         assert_eq!(
             bad_request,
-            ChatProviderError::Provider("HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter".to_string())
+            ChatProviderError::Provider(
+                "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter".to_string()
+            )
         );
         assert_eq!(bad_request_attempts, 1);
 

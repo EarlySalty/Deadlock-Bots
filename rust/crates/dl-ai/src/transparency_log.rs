@@ -60,17 +60,24 @@ const CONVERSATION_MEMORY: usize = 2_000;
 
 /// Ein kaputter Provider liefert denselben Fehler bei jedem Versuch. Einmal
 /// muss der Owner ihn sehen, danach reicht die Anzahl: innerhalb dieses
-/// Fensters wird derselbe Fehler im selben Anwendungsfall nur gezaehlt und
-/// beim naechsten Durchlass als Anzahl mitgeschickt. 15 Minuten, damit ein
-/// laenger laufender Ausfall den Owner regelmaessig wieder erreicht — ein
-/// Fenster von Stunden waere praktisch ein Stummschalter.
+/// Fensters wird derselbe Fehler nur gezaehlt und beim naechsten Durchlass als
+/// Anzahl mitgeschickt. 15 Minuten bis zur ersten Wiederholung, danach greift
+/// das Backoff aus [`fenster_mit_backoff`].
 /// Erfolgreiche Antworten bleiben davon unberuehrt.
 const DEFAULT_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(15 * 60);
 
-/// Kommt eine Fehlerserie so lange nicht mehr vor, geht die gezaehlte Anzahl
-/// als Nachtrag in den Kanal. Ohne das erfaehrt der Owner die Anzahl nie,
-/// wenn der Ausfall vorbei ist, bevor das Wiederholungsfenster ablaeuft.
-const DEFAULT_ERROR_FOLLOWUP_QUIET: Duration = Duration::from_secs(2 * 60);
+/// Obergrenze des Backoffs. Ein Ausfall, der einen ganzen Tag dauert (gesperrtes
+/// Anbieter-Konto, abgelaufene Rechnung), soll den Kanal nicht im Viertelstunden-
+/// takt zumuellen; alle sechs Stunden eine Erinnerung reicht, und die Meldung
+/// bleibt trotzdem eine Erinnerung und kein Stummschalter.
+const MAX_ERROR_REPEAT_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Nachtraege als eigene Nachricht sind standardmaessig aus. Sie waren selbst
+/// der Spam, ueber den sich der Owner beschwert hat: erst die Fehlermeldung,
+/// dann zwei Minuten spaeter eine zweite Nachricht, die nur „danach noch 3 mal
+/// dasselbe" sagt. Die Anzahl geht ohne eigene Nachricht raus, naemlich an der
+/// naechsten gezeigten Meldung oder an der ersten Antwort, die wieder klappt.
+const DEFAULT_ERROR_FOLLOWUP_QUIET: Duration = Duration::ZERO;
 
 /// Takt, in dem der Worker nach faelligen Nachtraegen schaut.
 const FLUSH_TICK: Duration = Duration::from_secs(60);
@@ -176,11 +183,7 @@ fn env_bool(lookup: &impl Fn(&str) -> Option<String>, key: &str, default: bool) 
 
 /// Sekundenwert aus der Umgebung. Unlesbares faellt auf den Default zurueck,
 /// `0` ist ein gueltiger Wert und heisst „abgeschaltet".
-fn env_seconds(
-    lookup: &impl Fn(&str) -> Option<String>,
-    key: &str,
-    default: Duration,
-) -> Duration {
+fn env_seconds(lookup: &impl Fn(&str) -> Option<String>, key: &str, default: Duration) -> Duration {
     read_env(lookup, key)
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
@@ -328,18 +331,23 @@ impl ConversationRouter {
     }
 }
 
-type ErrorKey = (LlmUseCase, String);
+/// Der Fehlertext des Anbieters. Bewusst ohne Anwendungsfall: ein gesperrtes
+/// Konto trifft jeden Anwendungsfall gleichzeitig, und mit dem Anwendungsfall
+/// im Schluessel meldete derselbe Ausfall einmal fuer das Scrim-Lagebild,
+/// einmal fuer Runde 2, einmal fuer den Verbinder und so weiter.
+type ErrorKey = String;
 
 /// Entprellt Wiederholungen desselben Fehlers.
 ///
-/// Der Schluessel ist (Anwendungsfall, Fehlertext). Die erste Meldung geht
-/// durch, jede weitere im Fenster wird gezaehlt. Die gezaehlte Anzahl erreicht
-/// den Owner auf drei Wegen, damit sie nie still verschwindet:
+/// Der Schluessel ist der Fehlertext. Die erste Meldung geht durch, jede
+/// weitere im Fenster wird gezaehlt, und das Fenster waechst mit jeder
+/// gezeigten Meldung ([`fenster_mit_backoff`]). Die gezaehlte Anzahl erreicht
+/// den Owner, ohne dass eine zusaetzliche Nachricht noetig waere:
 /// 1. an der naechsten gezeigten Meldung derselben Fehlerart,
-/// 2. als Nachtrag, sobald die Serie eine Ruhefrist lang aussetzt
-///    ([`ErrorThrottle::faellige_nachtraege`]),
-/// 3. beim Verdraengen aus dem Gedaechtnis und beim Herunterfahren
-///    ([`ErrorThrottle::offene_nachtraege`]).
+/// 2. an der ersten Antwort, die wieder klappt — der Erfolg raeumt die
+///    Zaehler ab und traegt die Anzahl mit,
+/// 3. als Nachtrag beim Verdraengen aus dem Gedaechtnis und beim
+///    Herunterfahren ([`ErrorThrottle::offene_nachtraege`]).
 ///
 /// Nicht abgedeckt bleibt der harte Abbruch (Absturz, SIGKILL): dort geht der
 /// laufende Zaehler verloren. Persistenz waere dafuer noetig und steht
@@ -350,8 +358,9 @@ struct ErrorThrottle {
     /// Zuletzt benutzter Schluessel steht hinten (LRU): verdraengt wird, was
     /// am laengsten nicht mehr vorkam, nicht was zuerst eintrat.
     order: VecDeque<ErrorKey>,
-    /// Nachtraege, die durch Verdraengung faellig wurden.
-    verdraengt: Vec<(ErrorKey, u64)>,
+    /// Nachtraege, die durch Verdraengung faellig wurden: Fehlertext,
+    /// Anwendungsfall der letzten Meldung, Anzahl.
+    verdraengt: Vec<(ErrorKey, LlmUseCase, u64)>,
 }
 
 struct ErrorStreak {
@@ -360,12 +369,80 @@ struct ErrorStreak {
     /// Wann sie zuletzt auftrat, auch unterdrueckt.
     last_seen: Instant,
     suppressed: u64,
+    /// Wie oft diese Fehlerart schon im Kanal stand. Treibt das Backoff.
+    gezeigt: u32,
+    /// Anwendungsfall der letzten Meldung, nur fuer den Nachtragstext.
+    letzter_use_case: LlmUseCase,
+}
+
+/// Der Schluessel, unter dem zwei Fehler als "derselbe" gelten.
+///
+/// Der Fehlertext traegt seit dem Anbieter-Hinweis den Wortlaut des Anbieters,
+/// und der enthaelt oft eine Request-ID, eine Restlaufzeit oder einen
+/// Zeitstempel. Am rohen Text zu deduplizieren hiesse: jeder Aufruf ist ein
+/// neuer Fehler, und der Kanal ist wieder voll. Deshalb zwei Stufen:
+///
+/// 1. Alles ab [`crate::chat_provider::ANBIETER_MARKER`] faellt weg. Davor
+///    steht der Teil, den wir selbst bauen, und der ist stabil.
+/// 2. Was uebrig bleibt, wird von langen Ziffernfolgen befreit, damit auch
+///    Fehlertexte anderer Herkunft nicht an einer ID auseinanderfallen.
+fn fehler_schluessel(error: &str) -> ErrorKey {
+    let kopf = match error.find(crate::chat_provider::ANBIETER_MARKER) {
+        Some(pos) => &error[..pos],
+        None => error,
+    };
+
+    let mut key = String::with_capacity(kopf.len());
+    let mut lauf = String::new();
+
+    fn spuelen(lauf: &mut String, key: &mut String) {
+        if lauf.is_empty() {
+            return;
+        }
+        // Vier Zeichen mit Ziffer: Jahreszahl, Uhrzeit, Request-ID. Ein
+        // HTTP-Status hat drei und bleibt damit unterscheidbar.
+        let hat_ziffer = lauf.chars().any(|c| c.is_ascii_digit());
+        if hat_ziffer && lauf.chars().count() >= 4 {
+            key.push('#');
+        } else {
+            key.push_str(lauf);
+        }
+        lauf.clear();
+    }
+
+    for zeichen in kopf.chars() {
+        if zeichen.is_alphanumeric() {
+            lauf.push(zeichen);
+            continue;
+        }
+        spuelen(&mut lauf, &mut key);
+        key.push(zeichen);
+    }
+    spuelen(&mut lauf, &mut key);
+    key
+}
+
+/// Das Wiederholungsfenster waechst mit jeder gezeigten Meldung: nach der
+/// ersten Meldung die volle Basis, danach jeweils das Doppelte, gedeckelt bei
+/// [`MAX_ERROR_REPEAT_WINDOW`].
+///
+/// Ohne das meldet ein Dauerausfall alle 15 Minuten neu, und ein Abend mit
+/// gesperrtem Anbieter-Konto sind zwanzig gleiche Nachrichten.
+fn fenster_mit_backoff(basis: Duration, gezeigt: u32) -> Duration {
+    if basis.is_zero() {
+        return basis;
+    }
+    let faktor = 1u32 << gezeigt.saturating_sub(1).min(16);
+    basis.saturating_mul(faktor).min(MAX_ERROR_REPEAT_WINDOW)
 }
 
 /// `Show`: senden. `key` ist gesetzt, wenn nach erfolgreichem Senden
 /// [`ErrorThrottle::gesendet`] bestaetigt werden muss.
 enum ErrorDecision {
-    Show { key: Option<ErrorKey>, suppressed: u64 },
+    Show {
+        key: Option<ErrorKey>,
+        suppressed: u64,
+    },
     Suppress,
 }
 
@@ -378,9 +455,12 @@ impl ErrorThrottle {
         immer_zeigen: bool,
     ) -> ErrorDecision {
         let Some(error) = interaction.error.as_deref() else {
+            // Der Anbieter antwortet wieder: die Serie ist vorbei. Die offenen
+            // Zaehler reisen auf dieser Antwort mit, statt eine eigene
+            // Nachricht zu bekommen, und das Backoff faengt bei null an.
             return ErrorDecision::Show {
                 key: None,
-                suppressed: 0,
+                suppressed: self.aufraeumen_nach_erfolg(),
             };
         };
         if window.is_zero() {
@@ -389,11 +469,13 @@ impl ErrorThrottle {
                 suppressed: 0,
             };
         }
-        let key = (interaction.use_case, error.to_string());
+        let key = fehler_schluessel(error);
         self.beruehren(&key);
         if let Some(streak) = self.streaks.get_mut(&key) {
             streak.last_seen = now;
-            if !immer_zeigen && now.duration_since(streak.last_posted) < window {
+            streak.letzter_use_case = interaction.use_case;
+            let fenster = fenster_mit_backoff(window, streak.gezeigt);
+            if !immer_zeigen && now.duration_since(streak.last_posted) < fenster {
                 streak.suppressed += 1;
                 return ErrorDecision::Suppress;
             }
@@ -416,12 +498,14 @@ impl ErrorThrottle {
 
     /// Bestaetigt einen erfolgreich gesendeten Fehler: Fenster neu starten,
     /// Zaehler auf null.
-    fn gesendet(&mut self, key: ErrorKey, now: Instant) {
+    fn gesendet(&mut self, key: ErrorKey, use_case: LlmUseCase, now: Instant) {
         match self.streaks.get_mut(&key) {
             Some(streak) => {
                 streak.last_posted = now;
                 streak.last_seen = now;
                 streak.suppressed = 0;
+                streak.gezeigt = streak.gezeigt.saturating_add(1);
+                streak.letzter_use_case = use_case;
             }
             None => {
                 self.streaks.insert(
@@ -430,12 +514,27 @@ impl ErrorThrottle {
                         last_posted: now,
                         last_seen: now,
                         suppressed: 0,
+                        gezeigt: 1,
+                        letzter_use_case: use_case,
                     },
                 );
                 self.order.push_back(key);
                 self.verdraengen();
             }
         }
+    }
+
+    /// Ein Erfolg beendet jede laufende Fehlerserie: Zaehler zusammenzaehlen,
+    /// Gedaechtnis leeren, Backoff zuruecksetzen. Die Summe geht als Anzahl an
+    /// die erfolgreiche Meldung, damit kein Zaehler still verschwindet und
+    /// trotzdem keine eigene Nachricht noetig ist.
+    fn aufraeumen_nach_erfolg(&mut self) -> u64 {
+        let mut summe: u64 = self.verdraengt.drain(..).map(|(_, _, anzahl)| anzahl).sum();
+        for (_, streak) in self.streaks.drain() {
+            summe = summe.saturating_add(streak.suppressed);
+        }
+        self.order.clear();
+        summe
     }
 
     /// Schiebt einen bekannten Schluessel ans Ende der LRU-Reihe.
@@ -455,7 +554,8 @@ impl ErrorThrottle {
             if let Some(streak) = self.streaks.remove(&alt) {
                 // Ein offener Zaehler darf nicht mit dem Eintrag verschwinden.
                 if streak.suppressed > 0 {
-                    self.verdraengt.push((alt, streak.suppressed));
+                    self.verdraengt
+                        .push((alt, streak.letzter_use_case, streak.suppressed));
                 }
             }
         }
@@ -463,14 +563,18 @@ impl ErrorThrottle {
 
     /// Fehlerserien, die seit der Ruhefrist nicht mehr auftraten und noch
     /// einen offenen Zaehler haben. Der Zaehler wird dabei geleert.
-    fn faellige_nachtraege(&mut self, quiet: Duration, now: Instant) -> Vec<(ErrorKey, u64)> {
+    fn faellige_nachtraege(
+        &mut self,
+        quiet: Duration,
+        now: Instant,
+    ) -> Vec<(ErrorKey, LlmUseCase, u64)> {
         let mut faellig = std::mem::take(&mut self.verdraengt);
         if quiet.is_zero() {
             return faellig;
         }
         for (key, streak) in self.streaks.iter_mut() {
             if streak.suppressed > 0 && now.duration_since(streak.last_seen) >= quiet {
-                faellig.push((key.clone(), streak.suppressed));
+                faellig.push((key.clone(), streak.letzter_use_case, streak.suppressed));
                 streak.suppressed = 0;
             }
         }
@@ -478,11 +582,11 @@ impl ErrorThrottle {
     }
 
     /// Alles, was noch offen ist — fuer den geordneten Abschluss.
-    fn offene_nachtraege(&mut self) -> Vec<(ErrorKey, u64)> {
+    fn offene_nachtraege(&mut self) -> Vec<(ErrorKey, LlmUseCase, u64)> {
         let mut faellig = std::mem::take(&mut self.verdraengt);
         for (key, streak) in self.streaks.iter_mut() {
             if streak.suppressed > 0 {
-                faellig.push((key.clone(), streak.suppressed));
+                faellig.push((key.clone(), streak.letzter_use_case, streak.suppressed));
                 streak.suppressed = 0;
             }
         }
@@ -495,18 +599,16 @@ fn with_repeat_notice(content: String, suppressed: u64) -> String {
     if suppressed == 0 {
         return content;
     }
-    let notice =
-        format!("\n_Davor {suppressed} mal derselbe Fehler, nicht einzeln angezeigt._");
+    let notice = format!("\n_Davor {suppressed} mal derselbe Fehler, nicht einzeln angezeigt._");
     let room = DISCORD_CONTENT_LIMIT.saturating_sub(notice.chars().count());
     format!("{}{notice}", cut(&content, room))
 }
 
 /// Der Nachtrag: die Serie ist vorbei, die Anzahl geht trotzdem raus.
-fn repeat_followup(key: &ErrorKey, suppressed: u64) -> String {
+fn repeat_followup(key: &ErrorKey, use_case: LlmUseCase, suppressed: u64) -> String {
     let text = format!(
-        "**KI · {} · Fehler**\nDanach noch {suppressed} mal derselbe Fehler, nicht einzeln angezeigt.\nFehler: {}",
-        use_case_label(key.0),
-        key.1
+        "**KI · {} · Fehler**\nDanach noch {suppressed} mal derselbe Fehler, nicht einzeln angezeigt.\nFehler: {key}",
+        use_case_label(use_case),
     );
     cut(&text, DISCORD_CONTENT_LIMIT)
 }
@@ -582,7 +684,7 @@ async fn run_worker(
         .await;
         if let Some(key) = key {
             if gesendet {
-                errors.gesendet(key, Instant::now());
+                errors.gesendet(key, interaction.use_case, Instant::now());
             }
         }
         throttle(&config).await;
@@ -594,13 +696,16 @@ async fn run_worker(
 }
 
 async fn sende_nachtraege(
-    faellig: Vec<(ErrorKey, u64)>,
+    faellig: Vec<(ErrorKey, LlmUseCase, u64)>,
     messenger: &dyn TransparencyMessenger,
     config: &TransparencyConfig,
 ) {
-    for (key, suppressed) in faellig {
+    for (key, use_case, suppressed) in faellig {
         if let Err(error) = messenger
-            .send(config.channel_id, &repeat_followup(&key, suppressed))
+            .send(
+                config.channel_id,
+                &repeat_followup(&key, use_case, suppressed),
+            )
             .await
         {
             tracing::warn!(%error, suppressed, "Nachtrag zu unterdrueckten KI-Fehlern nicht zustellbar");
@@ -661,7 +766,8 @@ async fn deliver(
             // verschwinden: dann eben in den Kanal.
             tracing::warn!(%error, thread_id = target, "KI-Transparenz-Thread nicht erreichbar, Rueckfall auf den Kanal");
             thread_id = None;
-            let fallback = with_repeat_notice(render_interaction(interaction, turn, true), suppressed);
+            let fallback =
+                with_repeat_notice(render_interaction(interaction, turn, true), suppressed);
             match messenger.send(config.channel_id, &fallback).await {
                 Ok(message_id) => Some(message_id),
                 Err(error) => {
@@ -729,12 +835,24 @@ const SHRINK_STAGES: &[(Option<usize>, Option<usize>)] = &[
     (Some(0), Some(80)),
 ];
 
+/// Kuerzungsstufen fuer eine Fehlermeldung. Hier gibt es keine Antwort zu
+/// beurteilen, und der Auslöser ist im Fehlerfall wertlos: was im Kanal zaehlt,
+/// ist der Fehlertext. Ein Scrim-Lagebild schleppt 23.000 Zeichen Rohdaten im
+/// Auslöser mit, und davon standen vorher 500 in jeder Fehlermeldung.
+const ERROR_SHRINK_STAGES: &[(Option<usize>, Option<usize>)] =
+    &[(Some(0), Some(160)), (Some(0), Some(80))];
+
 /// Baut die Nachricht fuer den Kanal.
 ///
 /// `turn` ist die Rundennummer im Gespraech, `standalone` sagt, ob die
 /// Nachricht direkt im Kanal steht (dann braucht sie die Zuordnung im Text).
 pub fn render_interaction(interaction: &AiInteraction, turn: u32, standalone: bool) -> String {
-    for (system_budget, prompt_budget) in SHRINK_STAGES {
+    let stages = if interaction.error.is_some() {
+        ERROR_SHRINK_STAGES
+    } else {
+        SHRINK_STAGES
+    };
+    for (system_budget, prompt_budget) in stages {
         let candidate = build_message(
             interaction,
             turn,
@@ -925,6 +1043,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn eine_wechselnde_request_id_macht_keinen_neuen_fehler() {
+        // Wortlaut wie von Fireworks, nur die Request-ID wechselt je Aufruf.
+        let erster = crate::chat_provider::anbieter_hinweis(
+            412,
+            r#"{"error":{"message":"Account mail-01rvneuz61yq is suspended (request chatcmpl-1e4b56f248b24bbb9e7cd3ea2add56ab)"}}"#,
+        );
+        let zweiter = crate::chat_provider::anbieter_hinweis(
+            412,
+            r#"{"error":{"message":"Account mail-01rvneuz61yq is suspended (request chatcmpl-99887766554433221100aabbccddeeff)"}}"#,
+        );
+        assert_ne!(erster, zweiter, "der Testaufbau muss variieren");
+        assert_eq!(
+            fehler_schluessel(&erster),
+            fehler_schluessel(&zweiter),
+            "eine wechselnde ID darf die Entprellung nicht aushebeln"
+        );
+    }
+
+    #[test]
+    fn verschiedene_statuscodes_bleiben_verschiedene_fehler() {
+        let gesperrt = crate::chat_provider::anbieter_hinweis(412, "");
+        let unbekannt = crate::chat_provider::anbieter_hinweis(404, "");
+        assert_ne!(
+            fehler_schluessel(&gesperrt),
+            fehler_schluessel(&unbekannt),
+            "412 und 404 sind zwei Befunde, keiner"
+        );
+    }
+
+    #[tokio::test]
+    async fn eine_serie_mit_wechselnder_id_wird_trotzdem_entprellt() {
+        let messenger = FakeMessenger::arc(false);
+        let log = TransparencyLog::spawn(messenger.clone(), testkonfig());
+        let sink = log.sink();
+
+        for index in 0..5 {
+            let fehler = crate::chat_provider::anbieter_hinweis(
+                412,
+                &format!(
+                    r#"{{"error":{{"message":"Account suspended (request req-{index}0000000000{index})"}}}}"#
+                ),
+            );
+            let mut interaktion = fehler_interaktion(LlmUseCase::ScrimLagebild, "team", &fehler);
+            interaktion.conversation_trail = vec![];
+            sink.record(interaktion);
+        }
+        assert!(warte_auf(|| !messenger.sent().is_empty()).await);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(
+            messenger.sent().len(),
+            1,
+            "wechselnde IDs sind derselbe Ausfall: {:?}",
+            messenger.sent()
+        );
+    }
+
     #[tokio::test]
     async fn derselbe_fehler_wird_einmal_gezeigt_und_danach_nur_gezaehlt() {
         let messenger = FakeMessenger::arc(false);
@@ -960,7 +1136,12 @@ mod tests {
         let sink = log.sink();
 
         for index in 0..4_u64 {
-            sink.record(interaktion(LlmUseCase::Faq, "gleiche frage", "gleiche antwort", &[index]));
+            sink.record(interaktion(
+                LlmUseCase::Faq,
+                "gleiche frage",
+                "gleiche antwort",
+                &[index],
+            ));
         }
         assert!(warte_auf(|| messenger.sent().len() == 4).await);
     }
@@ -1021,7 +1202,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(messenger.sent().len(), 1, "Runde 2 bleibt stumm");
 
-        sink.record(interaktion(LlmUseCase::BotPate, "runde 3", "endlich eine Antwort", &[2, 3]));
+        sink.record(interaktion(
+            LlmUseCase::BotPate,
+            "runde 3",
+            "endlich eine Antwort",
+            &[2, 3],
+        ));
         assert!(warte_auf(|| messenger.sent().len() == 2).await);
 
         let sent = messenger.sent();
@@ -1041,7 +1227,11 @@ mod tests {
     fn die_anzahl_sprengt_das_zeichenlimit_nicht() {
         let lang = "X".repeat(DISCORD_CONTENT_LIMIT);
         let text = with_repeat_notice(lang, 7);
-        assert!(text.chars().count() <= DISCORD_CONTENT_LIMIT, "{}", text.chars().count());
+        assert!(
+            text.chars().count() <= DISCORD_CONTENT_LIMIT,
+            "{}",
+            text.chars().count()
+        );
         assert!(text.contains("Davor 7 mal derselbe Fehler"));
     }
 
@@ -1056,7 +1246,7 @@ mod tests {
         match throttle.decide(interaktion, fenster, jetzt, false) {
             ErrorDecision::Show { key, suppressed } => {
                 if let Some(key) = key {
-                    throttle.gesendet(key, jetzt);
+                    throttle.gesendet(key, interaktion.use_case, jetzt);
                 }
                 suppressed
             }
@@ -1088,10 +1278,10 @@ mod tests {
             "ein Fenster von Stunden waere ein Stummschalter"
         );
         assert!(
-            default.error_followup_quiet <= default.error_repeat_window,
-            "der Nachtrag muss vor dem naechsten Fenster kommen"
+            default.error_followup_quiet.is_zero(),
+            "der Nachtrag als eigene Nachricht ist der Spam, ueber den sich der \
+             Owner beschwert hat; die Anzahl reist an der naechsten Meldung mit"
         );
-        assert!(!default.error_followup_quiet.is_zero());
     }
 
     #[test]
@@ -1118,8 +1308,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            unlesbar.error_repeat_window,
-            DEFAULT_ERROR_REPEAT_WINDOW,
+            unlesbar.error_repeat_window, DEFAULT_ERROR_REPEAT_WINDOW,
             "Unsinn faellt auf den Default zurueck"
         );
     }
@@ -1172,16 +1361,130 @@ mod tests {
         zeigen(&mut throttle, &neu, fenster, jetzt);
 
         assert!(
-            throttle
-                .streaks
-                .contains_key(&(LlmUseCase::Faq, "fehler 0".to_string())),
+            throttle.streaks.contains_key("fehler 0"),
             "der zuletzt benutzte Eintrag darf nicht verdraengt werden"
         );
         assert!(
-            !throttle
-                .streaks
-                .contains_key(&(LlmUseCase::Faq, "fehler 1".to_string())),
+            !throttle.streaks.contains_key("fehler 1"),
             "verdraengt wird der laengst ungenutzte Eintrag"
+        );
+    }
+
+    #[test]
+    fn ein_ausfall_meldet_sich_nicht_einmal_pro_anwendungsfall() {
+        // Ein gesperrtes Anbieter-Konto trifft jeden Anwendungsfall
+        // gleichzeitig. Mit dem Anwendungsfall im Schluessel meldete derselbe
+        // Ausfall einmal fuer das Scrim-Lagebild, einmal fuer den Verbinder
+        // und einmal fuer die FAQ, obwohl es ein einziges Problem ist.
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let text = "HTTP 412: Anbieter-Konto gesperrt";
+
+        zeigen(
+            &mut throttle,
+            &fehler_interaktion(LlmUseCase::ScrimLagebild, "team 1", text),
+            fenster,
+            jetzt,
+        );
+        unterdruecken(
+            &mut throttle,
+            &fehler_interaktion(LlmUseCase::Faq, "frage", text),
+            fenster,
+            jetzt,
+        );
+        unterdruecken(
+            &mut throttle,
+            &fehler_interaktion(LlmUseCase::BotPate, "pate", text),
+            fenster,
+            jetzt,
+        );
+    }
+
+    #[test]
+    fn ein_dauerausfall_meldet_sich_immer_seltener() {
+        // Ohne Backoff sind zwoelf Stunden gesperrtes Konto achtundvierzig
+        // gleiche Nachrichten im Kanal.
+        let mut throttle = ErrorThrottle::default();
+        let mut jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let fehler = fehler_interaktion(LlmUseCase::ScrimLagebild, "team 1", "HTTP 412");
+
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+
+        // Zweite Meldung nach dem vollen Grundfenster.
+        jetzt += fenster;
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+
+        // Dritte erst nach dem doppelten: nach einem weiteren Grundfenster
+        // bleibt sie stumm.
+        jetzt += fenster;
+        unterdruecken(&mut throttle, &fehler, fenster, jetzt);
+        jetzt += fenster;
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+    }
+
+    #[test]
+    fn das_backoff_bleibt_unter_dem_deckel() {
+        // Ohne Deckel waere das Fenster nach zwanzig Meldungen laenger als ein
+        // Menschenleben und die Entprellung ein Stummschalter.
+        let basis = Duration::from_secs(900);
+        assert_eq!(fenster_mit_backoff(basis, 1), basis);
+        assert_eq!(fenster_mit_backoff(basis, 2), basis * 2);
+        assert_eq!(fenster_mit_backoff(basis, 3), basis * 4);
+        assert_eq!(fenster_mit_backoff(basis, 40), MAX_ERROR_REPEAT_WINDOW);
+        assert!(fenster_mit_backoff(Duration::ZERO, 40).is_zero());
+    }
+
+    #[test]
+    fn ein_erfolg_beendet_die_serie_und_traegt_die_anzahl() {
+        let mut throttle = ErrorThrottle::default();
+        let jetzt = Instant::now();
+        let fenster = Duration::from_secs(900);
+        let fehler = fehler_interaktion(LlmUseCase::ScrimLagebild, "team 1", "HTTP 412");
+
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+        for _ in 0..3 {
+            unterdruecken(&mut throttle, &fehler, fenster, jetzt);
+        }
+
+        let erfolg = interaktion(LlmUseCase::ScrimLagebild, "team 1", "geht wieder", &[]);
+        let getragen = zeigen(&mut throttle, &erfolg, fenster, jetzt);
+        assert_eq!(getragen, 3, "die Anzahl reist auf der Erfolgsmeldung mit");
+        assert!(
+            throttle.streaks.is_empty(),
+            "der Erfolg raeumt das Gedaechtnis ab"
+        );
+
+        // Und weil das Backoff mit zurueckgesetzt ist, ist der naechste Fehler
+        // sofort wieder sichtbar.
+        zeigen(&mut throttle, &fehler, fenster, jetzt);
+    }
+
+    #[test]
+    fn eine_fehlermeldung_schleppt_den_ausloeser_nicht_mit() {
+        // Das Scrim-Lagebild reicht 23.000 Zeichen Rohdaten als Auslöser
+        // herein. Im Fehlerfall gibt es keine Antwort zu beurteilen, und was
+        // zaehlt, ist der Fehlertext.
+        let mut fehler = fehler_interaktion(
+            LlmUseCase::ScrimLagebild,
+            &"{\"evidenzen\":[]}".repeat(2_000),
+            "HTTP 412: Anbieter-Konto gesperrt",
+        );
+        fehler.system_excerpt = Some("X".repeat(4_000));
+        let text = render_interaction(&fehler, 1, true);
+        assert!(
+            text.chars().count() < 500,
+            "eine Fehlermeldung bleibt kurz, war {} Zeichen",
+            text.chars().count()
+        );
+        assert!(
+            text.contains("Anbieter-Konto gesperrt"),
+            "der Fehlertext muss bleiben: {text}"
+        );
+        assert!(
+            !text.contains("Kontext:"),
+            "der Kontext hat im Fehlerfall nichts zu suchen: {text}"
         );
     }
 
@@ -1205,11 +1508,13 @@ mod tests {
         let nachtraege = throttle.faellige_nachtraege(Duration::from_secs(120), jetzt);
         assert_eq!(
             nachtraege,
-            vec![((LlmUseCase::Faq, "alter fehler".to_string()), 4)],
+            vec![("alter fehler".to_string(), LlmUseCase::Faq, 4)],
             "der offene Zaehler darf nicht mit dem Eintrag verschwinden"
         );
-        assert!(repeat_followup(&nachtraege[0].0, nachtraege[0].1)
-            .contains("Danach noch 4 mal derselbe Fehler"));
+        assert!(
+            repeat_followup(&nachtraege[0].0, nachtraege[0].1, nachtraege[0].2)
+                .contains("Danach noch 4 mal derselbe Fehler")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1285,7 +1590,11 @@ mod tests {
         let sink = log.sink();
 
         // Der Fehler ist schon bekannt, das Fenster steht.
-        sink.record(fehler_interaktion(LlmUseCase::BotPate, "irgendwo", "HTTP 412"));
+        sink.record(fehler_interaktion(
+            LlmUseCase::BotPate,
+            "irgendwo",
+            "HTTP 412",
+        ));
         assert!(warte_auf(|| messenger.sent().len() == 1).await);
 
         // Runde 1 eines neuen Gespraechs faellt in die Entprellung.
