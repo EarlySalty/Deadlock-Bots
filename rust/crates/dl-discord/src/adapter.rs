@@ -420,6 +420,29 @@ impl DiscordAdapter {
     fn is_unknown_member_response(status_code: u16, discord_code: isize, message: &str) -> bool {
         discord_code == 10007 || (status_code == 404 && message == "Unknown Member")
     }
+
+    /// Kickt ein Mitglied aus der Gilde (`DELETE guilds/{}/members/{}`).
+    ///
+    /// Idempotent: ist das Mitglied bereits weg (Unknown Member / 404), gilt der
+    /// Kick als erfolgt und wird auf `Ok` abgebildet. Jeder andere Fehler
+    /// (Rate-Limit, 5xx, fehlende Rechte) bleibt ein Fehler, damit ein stiller
+    /// Ausfall nicht wie ein erfolgreicher Kick aussieht.
+    pub async fn kick(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        reason: &str,
+    ) -> Result<(), PortError> {
+        match self
+            .http
+            .kick_member(GuildId::new(guild_id), UserId::new(user_id), Some(reason))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) if Self::is_unknown_member(&err) => Ok(()),
+            Err(err) => Err(PortError::Discord(err.to_string())),
+        }
+    }
 }
 
 #[async_trait::async_trait]
