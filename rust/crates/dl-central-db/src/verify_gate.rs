@@ -186,11 +186,7 @@ pub async fn list_expired(
 }
 
 /// Vermerkt einen ueber das Gate gekickten Account (fuer den Rejoin-Freipass).
-pub async fn mark_kicked(
-    pool: &PgPool,
-    guild_id: i64,
-    user_id: i64,
-) -> Result<(), CentralDbError> {
+pub async fn mark_kicked(pool: &PgPool, guild_id: i64, user_id: i64) -> Result<(), CentralDbError> {
     sqlx::query(
         r#"
         INSERT INTO bot.verify_gate_kicked (guild_id, user_id)
@@ -243,27 +239,54 @@ mod tests {
         let now = Utc::now();
 
         // Frist in der Zukunft -> nicht abgelaufen.
-        upsert_pending(pool, guild, user, None, STATE_AWAITING_START, now + Duration::hours(24))
+        upsert_pending(
+            pool,
+            guild,
+            user,
+            None,
+            STATE_AWAITING_START,
+            now + Duration::hours(24),
+        )
+        .await
+        .expect("upsert");
+        let pending = get_pending(pool, guild, user)
             .await
-            .expect("upsert");
-        let pending = get_pending(pool, guild, user).await.expect("get").expect("row");
+            .expect("get")
+            .expect("row");
         assert_eq!(pending.attempts, 0);
         assert_eq!(pending.state, STATE_AWAITING_START);
         assert!(list_expired(pool, now).await.expect("expired").is_empty());
 
         // Idempotenz: zweiter Upsert laesst den Zustand unveraendert.
-        set_state(pool, guild, user, STATE_AWAITING_ANSWER).await.expect("state");
+        set_state(pool, guild, user, STATE_AWAITING_ANSWER)
+            .await
+            .expect("state");
         let bumped = incr_attempt(pool, guild, user).await.expect("incr");
         assert_eq!(bumped, 1);
-        upsert_pending(pool, guild, user, None, STATE_AWAITING_START, now + Duration::hours(1))
+        upsert_pending(
+            pool,
+            guild,
+            user,
+            None,
+            STATE_AWAITING_START,
+            now + Duration::hours(1),
+        )
+        .await
+        .expect("upsert idempotent");
+        let again = get_pending(pool, guild, user)
             .await
-            .expect("upsert idempotent");
-        let again = get_pending(pool, guild, user).await.expect("get").expect("row");
+            .expect("get")
+            .expect("row");
         assert_eq!(again.attempts, 1, "Versuche bleiben erhalten");
-        assert_eq!(again.state, STATE_AWAITING_ANSWER, "Zustand bleibt erhalten");
+        assert_eq!(
+            again.state, STATE_AWAITING_ANSWER,
+            "Zustand bleibt erhalten"
+        );
 
         // Abgelaufene Frist wird gelistet.
-        set_state(pool, guild, user, STATE_AWAITING_ANSWER).await.expect("state");
+        set_state(pool, guild, user, STATE_AWAITING_ANSWER)
+            .await
+            .expect("state");
         sqlx::query("UPDATE bot.verify_gate_pending SET deadline_at = $3 WHERE guild_id = $1 AND user_id = $2")
             .bind(guild)
             .bind(user)

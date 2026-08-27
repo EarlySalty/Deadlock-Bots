@@ -100,7 +100,10 @@ impl Default for VerifyGateConfig {
 /// Ergebnis eines DM-Versands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DmOutcome {
-    Sent { channel_id: u64, message_id: u64 },
+    Sent {
+        channel_id: u64,
+        message_id: u64,
+    },
     /// Discord verweigert die DM (Fehler 50007, DMs zu). Gilt als nicht zustellbar.
     Undeliverable,
     /// Technischer Fehler ohne Urteil ueber die Zustellbarkeit.
@@ -426,7 +429,10 @@ impl VerifyGate {
         }
 
         let Some(role_id) = self.ensure_role().await else {
-            tracing::error!(user_id, "Verify-Gate: kein Rollen-Setup, Join nicht gegatet");
+            tracing::error!(
+                user_id,
+                "Verify-Gate: kein Rollen-Setup, Join nicht gegatet"
+            );
             return;
         };
 
@@ -550,7 +556,12 @@ impl VerifyGate {
         if let Some(role_id) = self.ensure_role().await {
             if let Err(err) = self
                 .port
-                .remove_role(self.config.guild_id, user_id, role_id, "Verify-Gate: bestanden")
+                .remove_role(
+                    self.config.guild_id,
+                    user_id,
+                    role_id,
+                    "Verify-Gate: bestanden",
+                )
                 .await
             {
                 tracing::error!(%err, user_id, "Verify-Gate: Quarantaene-Rolle nicht entfernt");
@@ -558,7 +569,11 @@ impl VerifyGate {
         }
         match self.port.send_dm(user_id, text_dm_body(PASS_TEXT)).await {
             DmOutcome::Sent { .. } => {}
-            other => tracing::warn!(user_id, ?other, "Verify-Gate: Freischalt-DM nicht zugestellt"),
+            other => tracing::warn!(
+                user_id,
+                ?other,
+                "Verify-Gate: Freischalt-DM nicht zugestellt"
+            ),
         }
         if let Err(err) = store::delete_pending(&self.pool, self.guild(), user_id as i64).await {
             tracing::error!(%err, user_id, "Verify-Gate: pending nach Bestehen nicht geloescht");
@@ -621,7 +636,10 @@ impl InteractionHandler for VerifyStartHandler {
 
 /// Registriert den Verifizieren-Knopf am Interaction-Router.
 pub fn register(router: &mut InteractionRouter, gate: Arc<VerifyGate>) {
-    router.on_custom_id(VERIFY_START_CUSTOM_ID, Arc::new(VerifyStartHandler { gate }));
+    router.on_custom_id(
+        VERIFY_START_CUSTOM_ID,
+        Arc::new(VerifyStartHandler { gate }),
+    );
 }
 
 // ── Spawn (Join-Loop, DM-Loop, Frist-Scheduler) ─────────────────────────────
@@ -801,16 +819,26 @@ mod tests {
     #[tokio::test]
     async fn judge_passes_german_hero() {
         let generator = judge(Some("{\"hero\": true, \"deutsch\": true}"));
-        let verdict =
-            judge_answer(&generator, None, StdDuration::from_secs(5), "der mit der Kette").await;
+        let verdict = judge_answer(
+            &generator,
+            None,
+            StdDuration::from_secs(5),
+            "der mit der Kette",
+        )
+        .await;
         assert!(verdict.pass);
     }
 
     #[tokio::test]
     async fn judge_fails_english() {
         let generator = judge(Some("{\"hero\": true, \"deutsch\": false}"));
-        let verdict =
-            judge_answer(&generator, None, StdDuration::from_secs(5), "the one with hooks").await;
+        let verdict = judge_answer(
+            &generator,
+            None,
+            StdDuration::from_secs(5),
+            "the one with hooks",
+        )
+        .await;
         assert!(!verdict.pass);
     }
 
