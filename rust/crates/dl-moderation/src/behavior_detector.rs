@@ -173,13 +173,6 @@ impl DetectOutcome {
             DetectOutcome::Ignore | DetectOutcome::Cleanup => None,
         }
     }
-
-    pub fn signal(&self) -> Option<&BehaviorSignal> {
-        match self {
-            DetectOutcome::Signal(signal) => Some(signal.as_ref()),
-            DetectOutcome::Ignore | DetectOutcome::Cleanup => None,
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -207,6 +200,7 @@ pub struct BehaviorDetector {
     active: tokio::sync::Mutex<HashSet<u64>>,
     suppressed_until: tokio::sync::Mutex<HashMap<u64, i64>>,
     cleanup_until: tokio::sync::Mutex<HashMap<u64, i64>>,
+    cleanup_deleted: tokio::sync::Mutex<HashMap<u64, u32>>,
 }
 
 impl BehaviorDetector {
@@ -225,6 +219,7 @@ impl BehaviorDetector {
             active: tokio::sync::Mutex::new(HashSet::new()),
             suppressed_until: tokio::sync::Mutex::new(HashMap::new()),
             cleanup_until: tokio::sync::Mutex::new(HashMap::new()),
+            cleanup_deleted: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -256,9 +251,11 @@ impl BehaviorDetector {
         self.release(event.author_id).await;
         match signal {
             Some(signal) => {
-                if signal.trigger_type == BehaviorTriggerType::AccountTakeover {
-                    self.start_cleanup(event.author_id, now).await;
-                }
+                // Das Cleanup-Fenster wird bewusst NICHT hier beim Erkennen armiert.
+                // moderation_system armiert es erst nach erfolgreicher Durchsetzung
+                // (Case persistiert, enforce aktiv, Sanktion/Delete gelaufen) ueber
+                // arm_takeover_cleanup. So verschwindet im Shadow-Modus oder bei
+                // gescheitertem Case keine Folgenachricht spurlos.
                 self.history.lock().await.remove(&event.author_id);
                 self.suppress_user(event.author_id, now).await;
                 DetectOutcome::Signal(Box::new(signal))
@@ -336,7 +333,13 @@ impl BehaviorDetector {
         cleanup.get(&user_id).is_some_and(|until| *until > now)
     }
 
-    async fn start_cleanup(&self, user_id: u64, now: i64) {
+    /// Armiert das Cleanup-Fenster fuer ein Konto, dessen Takeover gerade durchgesetzt
+    /// wurde. Wird bewusst NICHT vom Detektor beim Erkennen aufgerufen, sondern erst von
+    /// moderation_system nach erfolgreicher Durchsetzung (Case persistiert, enforce aktiv,
+    /// Sanktion/Delete gelaufen). So verschwinden bei gescheitertem Case oder im
+    /// Shadow-Modus keine Folgenachrichten spurlos.
+    pub async fn arm_takeover_cleanup(&self, user_id: u64) {
+        let now = chrono::Utc::now().timestamp();
         let mut cleanup = self.cleanup_until.lock().await;
         cleanup.retain(|_, until| *until > now);
         cleanup.insert(user_id, now + TAKEOVER_CLEANUP_SECONDS);
@@ -350,6 +353,32 @@ impl BehaviorDetector {
             };
             cleanup.remove(&victim);
         }
+        // Zaehler der Welle zuruecksetzen und auf die noch aktiven Konten eindampfen.
+        let mut deleted = self.cleanup_deleted.lock().await;
+        deleted.retain(|user, _| cleanup.contains_key(user));
+        deleted.insert(user_id, 0);
+    }
+
+    /// Zaehlt eine erfolgte Cleanup-Loeschung dieser Welle und liefert den laufenden Stand.
+    /// Nur erfolgreiche Loeschungen erhoehen den Zaehler, damit die Zahl die real
+    /// entfernten Nachrichten der Welle widerspiegelt.
+    pub async fn note_cleanup_delete(&self, user_id: u64, deleted_ok: bool) -> u32 {
+        let mut deleted = self.cleanup_deleted.lock().await;
+        let entry = deleted.entry(user_id).or_insert(0);
+        if deleted_ok {
+            *entry = entry.saturating_add(1);
+        }
+        *entry
+    }
+
+    #[cfg(test)]
+    pub async fn cleanup_armed(&self, user_id: u64) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        self.cleanup_until
+            .lock()
+            .await
+            .get(&user_id)
+            .is_some_and(|until| *until > now)
     }
 
     async fn foreign_invite_code(&self, guild_id: u64, content: &str) -> Option<String> {
@@ -992,11 +1021,21 @@ mod tests {
         assert_eq!(signal.action_hint, BehaviorActionHint::Ban);
         assert_eq!(signal.evidence.channel_ids, vec![10, 11]);
         assert_eq!(signal.evidence.image_count, 2);
-        // Folgenachricht derselben Welle: wird jetzt als Restwelle geloescht (Cleanup),
-        // kein neuer Case. Kernaussage bleibt: nur ein Case pro Welle.
+        // Folgenachricht derselben Welle: solange die Durchsetzung das Cleanup-Fenster
+        // NICHT armiert hat, bleibt sie schlicht unterdrueckt (Ignore). Der Detektor
+        // armiert nicht mehr selbst beim Erkennen.
         assert_eq!(
             detector
                 .detect(1, &image_event(100, 12, 1002, created_at, joined_at))
+                .await,
+            DetectOutcome::Ignore
+        );
+        // Erst nachdem moderation_system den Takeover durchgesetzt und das Fenster
+        // armiert hat, wird die Restwelle geloescht (Cleanup), kein neuer Case.
+        detector.arm_takeover_cleanup(100).await;
+        assert_eq!(
+            detector
+                .detect(1, &image_event(100, 13, 1003, created_at, joined_at))
                 .await,
             DetectOutcome::Cleanup
         );
