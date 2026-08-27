@@ -9,12 +9,13 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use dl_broker::port::DiscordPort;
 use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, PermissionOverwriteType,
-    Permissions, ReactionType, RoleId, UserId,
+    ChannelId, ChannelType, CreateAttachment, GuildId, Http, Message, MessageId,
+    PermissionOverwrite, PermissionOverwriteType, Permissions, ReactionType, RoleId, UserId,
 };
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
@@ -2442,6 +2443,144 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             ),
         );
         self.adapter.send_raw_public(channel_id, &body).await
+    }
+}
+
+// ── Verify-Gate-Anbindung ──────────────────────────────────────────────────
+
+/// Discord-Glue fuer das Verify-Gate: Rolle einrichten/vergeben/entfernen,
+/// Kick und DM-Versand ueber den DiscordAdapter.
+pub struct VerifyGateGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+impl VerifyGateGlue {
+    const QUARANTINE_ROLE_NAME: &'static str = "Quarantäne";
+}
+
+#[async_trait::async_trait]
+impl dl_community::verify_gate::VerifyGatePort for VerifyGateGlue {
+    async fn ensure_quarantine_role(
+        &self,
+        guild_id: u64,
+        configured: Option<u64>,
+    ) -> Result<u64, String> {
+        // Rolle bestimmen: konfigurierte ID nutzen, sonst idempotent anlegen
+        // (create_role findet eine gleichnamige Rolle wieder).
+        let role_id = match configured {
+            Some(role_id) => role_id,
+            None => self
+                .adapter
+                .create_role(
+                    guild_id,
+                    Self::QUARANTINE_ROLE_NAME,
+                    false,
+                    "Verify-Gate: Quarantaene-Rolle",
+                )
+                .await
+                .map_err(|err| err.to_string())?,
+        };
+
+        // VIEW_CHANNEL auf allen Kategorien fuer die Rolle verweigern; Kanaele
+        // unter der Kategorie erben das. Idempotent (PUT ueberschreibt).
+        let channels = self
+            .adapter
+            .http
+            .get_channels(GuildId::new(guild_id))
+            .await
+            .map_err(|err| err.to_string())?;
+        for channel in channels {
+            if channel.kind != ChannelType::Category {
+                continue;
+            }
+            let overwrite = PermissionOverwrite {
+                allow: Permissions::empty(),
+                deny: Permissions::VIEW_CHANNEL,
+                kind: PermissionOverwriteType::Role(RoleId::new(role_id)),
+            };
+            if let Err(err) = channel
+                .id
+                .create_permission(&self.adapter.http, overwrite)
+                .await
+            {
+                tracing::warn!(
+                    %err,
+                    category_id = channel.id.get(),
+                    "Verify-Gate: Kanal-Deny fuer Quarantaene-Rolle fehlgeschlagen"
+                );
+            }
+        }
+        Ok(role_id)
+    }
+
+    async fn assign_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .add_role(guild_id, user_id, role_id, reason)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn remove_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        match self
+            .adapter
+            .remove_role(guild_id, user_id, role_id, reason)
+            .await
+        {
+            Ok(()) => Ok(()),
+            // Mitglied schon weg: Rolle ist damit ohnehin entfernt.
+            Err(dl_broker::port::PortError::MemberNotFound) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    async fn kick(&self, guild_id: u64, user_id: u64, reason: &str) -> Result<(), String> {
+        self.adapter
+            .kick(guild_id, user_id, reason)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn send_dm(
+        &self,
+        user_id: u64,
+        body: Map<String, Value>,
+    ) -> dl_community::verify_gate::DmOutcome {
+        use dl_community::verify_gate::DmOutcome;
+
+        let channel = match self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            Ok(channel) => channel,
+            Err(err) if is_discord_cannot_send_messages(&err) => return DmOutcome::Undeliverable,
+            Err(err) => return DmOutcome::Failed(err.to_string()),
+        };
+        match self
+            .adapter
+            .send_raw_public_typed(channel.id.get(), &body)
+            .await
+        {
+            Ok(message_id) => DmOutcome::Sent {
+                channel_id: channel.id.get(),
+                message_id,
+            },
+            Err(err) if is_discord_cannot_send_messages(&err) => DmOutcome::Undeliverable,
+            Err(err) => DmOutcome::Failed(err.to_string()),
+        }
     }
 }
 

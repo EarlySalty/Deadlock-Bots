@@ -101,6 +101,45 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// Baut die Verify-Gate-Konfiguration aus dem zentralen Config-Weg (Infisical).
+/// Das Gate ist ueber die Verdrahtung aktiv (kein ENABLED-Flag); `enforce`
+/// steuert das Kicken und ist der Betriebs-Notaus (Default an).
+fn verify_gate_config_from_lookup<F>(lookup: F) -> dl_community::verify_gate::VerifyGateConfig
+where
+    F: Fn(&str) -> Option<String>,
+{
+    use dl_community::verify_gate::VerifyGateConfig;
+    let defaults = VerifyGateConfig::default();
+    let parse_u64 = |key: &str| lookup(key).and_then(|v| v.trim().parse::<u64>().ok());
+    let enforce = lookup("VERIFY_GATE_ENFORCE")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true);
+    VerifyGateConfig {
+        enabled: true,
+        guild_id: parse_u64("VERIFY_GATE_GUILD_ID").unwrap_or(onboardglue::MAIN_GUILD_ID),
+        quarantine_role_id: parse_u64("VERIFY_GATE_QUARANTINE_ROLE_ID"),
+        max_account_age_days: lookup("VERIFY_GATE_MAX_ACCOUNT_AGE_DAYS")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(defaults.max_account_age_days),
+        deadline_hours: lookup("VERIFY_GATE_DEADLINE_HOURS")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(defaults.deadline_hours),
+        max_attempts: lookup("VERIFY_GATE_MAX_ATTEMPTS")
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .unwrap_or(defaults.max_attempts),
+        enforce,
+        model: lookup("VERIFY_GATE_MODEL")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        judge_timeout: defaults.judge_timeout,
+    }
+}
+
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
     match std::env::var("DL_LFG_PANEL_CHANNEL_ID") {
         Ok(raw) => lfg_panel_channel_id_from_value(Some(raw.as_str())),
@@ -1084,6 +1123,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_config.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
+    // Verify-Gate: frische Accounts ohne persoenlichen Invite kommen in
+    // Quarantaene und muessen per DM einen Deadlock-Hero nennen. Judge laeuft
+    // ueber den zentralen Connector (Repo-Default DeepSeek v4 Flash), enforce
+    // steuert das Kicken (false = Rolle/DM ohne Kick, Betriebs-Notaus).
+    let verify_gate = dl_community::verify_gate::VerifyGate::new(
+        central_pool.clone(),
+        Arc::new(modglue::VerifyGateGlue {
+            adapter: adapter.clone(),
+        }),
+        chat_text_generator(dl_ai::LlmUseCase::AiOnboarding, true),
+        verify_gate_config_from_lookup(env),
+    );
+    dl_community::verify_gate::register(&mut router, verify_gate.clone());
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
     dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
@@ -1607,6 +1659,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             onboardglue::MAIN_GUILD_ID,
         );
         let _concierge_tasks = dl_community::concierge::spawn(concierge.clone(), &dispatcher);
+        let _verify_gate_tasks = dl_community::verify_gate::spawn(verify_gate.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(
             central_pool.clone(),
             tag_service.clone(),

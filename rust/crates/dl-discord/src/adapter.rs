@@ -427,12 +427,7 @@ impl DiscordAdapter {
     /// Kick als erfolgt und wird auf `Ok` abgebildet. Jeder andere Fehler
     /// (Rate-Limit, 5xx, fehlende Rechte) bleibt ein Fehler, damit ein stiller
     /// Ausfall nicht wie ein erfolgreicher Kick aussieht.
-    pub async fn kick(
-        &self,
-        guild_id: u64,
-        user_id: u64,
-        reason: &str,
-    ) -> Result<(), PortError> {
+    pub async fn kick(&self, guild_id: u64, user_id: u64, reason: &str) -> Result<(), PortError> {
         match self
             .http
             .kick_member(GuildId::new(guild_id), UserId::new(user_id), Some(reason))
