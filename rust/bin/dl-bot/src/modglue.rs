@@ -2458,6 +2458,18 @@ impl VerifyGateGlue {
     const QUARANTINE_ROLE_NAME: &'static str = "Quarantäne";
 }
 
+/// Bekommt ein Kanal dieses Typs den Quarantaene-Deny (VIEW_CHANNEL verweigert)?
+///
+/// Nach dem Fix JEDER Kanaltyp: Kategorien, Text, Voice, Forum und
+/// Ankuendigungen (`News`). Vorher wurde nur auf Kategorien gedenied, wodurch
+/// Kanaele mit abgekoppelten Rechten (eigene Overwrites, z.B. Regeln oder
+/// Ankuendigungen) und unkategorisierte Kanaele ueber den @everyone-Allow
+/// sichtbar blieben. Als Funktion herausgezogen, damit die Regel unit-testbar
+/// ist und ein spaeterer, versehentlicher Kategorie-Filter auffaellt.
+const fn quarantine_denies_channel_type(_kind: ChannelType) -> bool {
+    true
+}
+
 #[async_trait::async_trait]
 impl dl_community::verify_gate::VerifyGatePort for VerifyGateGlue {
     async fn ensure_quarantine_role(
@@ -2475,14 +2487,19 @@ impl dl_community::verify_gate::VerifyGatePort for VerifyGateGlue {
                     guild_id,
                     Self::QUARANTINE_ROLE_NAME,
                     false,
-                    "Verify-Gate: Quarantaene-Rolle",
+                    "Verify-Gate: Quarantäne-Rolle",
                 )
                 .await
                 .map_err(|err| err.to_string())?,
         };
 
-        // VIEW_CHANNEL auf allen Kategorien fuer die Rolle verweigern; Kanaele
-        // unter der Kategorie erben das. Idempotent (PUT ueberschreibt).
+        // VIEW_CHANNEL fuer die Rolle auf JEDEM Kanal der Gilde verweigern:
+        // Kategorien, alle kategorisierten Kinder und unkategorisierte Kanaele.
+        // Kanaele mit abgekoppelten Rechten (eigene Overwrites, z.B. Regeln oder
+        // Ankuendigungen) wuerden sonst ueber den @everyone-Allow sichtbar
+        // bleiben. Text, Voice, Forum und Ankuendigungen alle abgedeckt.
+        // Threads erben von ihrem Elternkanal und sind damit mit erfasst.
+        // Idempotent (PUT ueberschreibt einen bestehenden Overwrite).
         let channels = self
             .adapter
             .http
@@ -2490,7 +2507,7 @@ impl dl_community::verify_gate::VerifyGatePort for VerifyGateGlue {
             .await
             .map_err(|err| err.to_string())?;
         for channel in channels {
-            if channel.kind != ChannelType::Category {
+            if !quarantine_denies_channel_type(channel.kind) {
                 continue;
             }
             let overwrite = PermissionOverwrite {
@@ -2505,7 +2522,8 @@ impl dl_community::verify_gate::VerifyGatePort for VerifyGateGlue {
             {
                 tracing::warn!(
                     %err,
-                    category_id = channel.id.get(),
+                    channel_id = channel.id.get(),
+                    channel_kind = ?channel.kind,
                     "Verify-Gate: Kanal-Deny fuer Quarantaene-Rolle fehlgeschlagen"
                 );
             }
@@ -3502,6 +3520,26 @@ mod tests {
         assert_eq!(body["message_reference"]["message_id"], "555");
         assert_eq!(body["allowed_mentions"]["parse"], json!([]));
         assert_eq!(body["allowed_mentions"]["replied_user"], false);
+    }
+
+    #[test]
+    fn quarantaene_deny_trifft_jeden_kanaltyp() {
+        // Regressionsschutz: der Quarantaene-Deny darf keinen Kanaltyp
+        // auslassen, sonst bleiben Kanaele mit eigenen Overwrites oder ohne
+        // Kategorie ueber den @everyone-Allow sichtbar (REQ-02).
+        for kind in [
+            ChannelType::Category,
+            ChannelType::Text,
+            ChannelType::Voice,
+            ChannelType::News,
+            ChannelType::Forum,
+            ChannelType::Stage,
+        ] {
+            assert!(
+                quarantine_denies_channel_type(kind),
+                "Kanaltyp {kind:?} muss den Quarantaene-Deny bekommen"
+            );
+        }
     }
 
     fn shell_quote(path: &Path) -> String {

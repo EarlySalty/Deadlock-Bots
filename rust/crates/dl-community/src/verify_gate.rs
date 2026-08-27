@@ -115,8 +115,9 @@ pub enum DmOutcome {
 #[async_trait]
 pub trait VerifyGatePort: Send + Sync {
     /// Quarantaene-Rolle sicherstellen: existiert `configured` nicht, wird eine
-    /// Rolle angelegt; danach wird VIEW_CHANNEL auf allen Kategorien der Gilde
-    /// fuer diese Rolle verweigert. Liefert die effektive Rollen-ID. Idempotent.
+    /// Rolle angelegt; danach wird VIEW_CHANNEL auf JEDEM Kanal der Gilde
+    /// (Kategorien, Kinder, unkategorisierte) fuer diese Rolle verweigert.
+    /// Liefert die effektive Rollen-ID. Idempotent.
     async fn ensure_quarantine_role(
         &self,
         guild_id: u64,
