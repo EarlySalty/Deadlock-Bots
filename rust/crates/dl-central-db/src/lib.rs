@@ -6,6 +6,7 @@ mod proactive_dm;
 pub mod scrim_runtime;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod verify_gate;
 
 pub use core_users::{get_user, upsert_user, CoreUser};
 pub use kv::{delete as delete_kv, get as get_kv, set as set_kv};
