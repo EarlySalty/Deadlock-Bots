@@ -59,6 +59,10 @@ Ziel und Anforderungen: siehe CONTRACT.md. Belege: EVIDENCE.md. Klasse hoch, Use
 - Wegwerf-Account joint ueber Vanity/Discovery: bekommt DM, Quarantaene, sieht keine Kanaele; korrekte Antwort schaltet frei; falsche 3x kickt; kein Invite-Weg umgeht das Gate; echter Bestand bleibt unberuehrt.
 - Danach Deploy, systemctl Restart, Live-Beweis, Branch/Worktree loeschen.
 
+## Restrisiken
+
+- **Quarantaene deckt keine nach dem Setup neu angelegten Kanaele.** Der VIEW_CHANNEL-Deny fuer die Quarantaene-Rolle wird nur ueber die beim Setup existierenden Kanaele gelegt (`rust/bin/dl-bot/src/modglue.rs`, `ensure_quarantine_role`, get_channels-Schleife). Ein Kanal, der spaeter angelegt wird, bleibt fuer Quarantaenierte ueber den @everyone-Allow sichtbar, bis der naechste Setup-Lauf greift. Kein billiger Nachzug moeglich: Der Gateway (`rust/crates/dl-discord/src/gateway.rs`) verarbeitet nur `channel_update` (Aenderungen an bestehenden Kanaelen), keinen `channel_create`. `ChannelEvent` (`dispatcher.rs`) hat ausschliesslich Voice-Varianten (VoiceCategoryChanged, VoiceChannelUpdated) und keinen Verbraucher fuer diesen Zweck. Ein Nachzug braucht daher einen neuen `channel_create`-Handler, eine neue ChannelEvent-Variante, das Publish im Dispatcher, einen Verify-Gate-Abonnenten und eine neue Port-Methode fuer den Einzelkanal-Deny. Das ist ein eigener Event-Pfad und sprengt den Rahmen dieses Fixes. Zwischenschutz greift beim naechsten Bot-Start (idempotenter Setup-Lauf legt den Deny neu ueber alle dann existierenden Kanaele).
+
 ## Offene Build-Entscheidungen (an User)
 1. Freischalt-DM nach bestandener Antwort: ja (Plan) oder wortlos freischalten.
 2. Betriebs-Notaus `enforce` in der Config: ja (Plan) oder ganz ohne Schalter scharf.
