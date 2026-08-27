@@ -575,19 +575,35 @@ impl VerifyGate {
     }
 
     async fn pass_member(&self, user_id: u64) {
-        if let Some(role_id) = self.ensure_role().await {
-            if let Err(err) = self
-                .port
-                .remove_role(
-                    self.config.guild_id,
-                    user_id,
-                    role_id,
-                    "Verify-Gate: bestanden",
-                )
-                .await
-            {
-                tracing::error!(%err, user_id, "Verify-Gate: Quarantaene-Rolle nicht entfernt");
-            }
+        // Freischalten erst NACH erfolgreichem Entfernen der Quarantaene-Rolle.
+        // Schlaegt das Setup oder remove_role fehl, bleibt pending erhalten,
+        // damit der naechste Antwort- oder Sweep-Durchlauf es erneut versucht;
+        // sonst saehe der Nutzer keine Kanaele, glaubte aber, frei zu sein.
+        // Die Port-Implementierung meldet MemberNotFound als Erfolg (Nutzer ist
+        // ohnehin weg), sodass Ok hier durchgehend "entquarantaeniert" bedeutet.
+        let Some(role_id) = self.ensure_role().await else {
+            tracing::error!(
+                user_id,
+                "Verify-Gate: kein Rollen-Setup, bleibt in Quarantaene, pending gehalten"
+            );
+            return;
+        };
+        if let Err(err) = self
+            .port
+            .remove_role(
+                self.config.guild_id,
+                user_id,
+                role_id,
+                "Verify-Gate: bestanden",
+            )
+            .await
+        {
+            tracing::error!(
+                %err,
+                user_id,
+                "Verify-Gate: Quarantaene-Rolle nicht entfernt, pending gehalten fuer erneuten Versuch"
+            );
+            return;
         }
         match self.port.send_dm(user_id, text_dm_body(PASS_TEXT)).await {
             DmOutcome::Sent { .. } => {}
@@ -908,6 +924,8 @@ mod tests {
         struct MockPort {
             role_id: u64,
             dm: DmOutcome,
+            /// Laesst remove_role fehlschlagen (kein MemberNotFound).
+            remove_fail: bool,
             rec: Mutex<Recorder>,
         }
 
@@ -916,6 +934,16 @@ mod tests {
                 Arc::new(Self {
                     role_id: 999,
                     dm,
+                    remove_fail: false,
+                    rec: Mutex::new(Recorder::default()),
+                })
+            }
+
+            fn with_remove_fail(dm: DmOutcome) -> Arc<Self> {
+                Arc::new(Self {
+                    role_id: 999,
+                    dm,
+                    remove_fail: true,
                     rec: Mutex::new(Recorder::default()),
                 })
             }
@@ -947,6 +975,9 @@ mod tests {
                 _r: u64,
                 _reason: &str,
             ) -> Result<(), String> {
+                if self.remove_fail {
+                    return Err("remove_role-Fehler (Test)".to_string());
+                }
                 self.rec.lock().unwrap().removed.push(user_id);
                 Ok(())
             }
@@ -1053,6 +1084,37 @@ mod tests {
             assert_eq!(port.rec.lock().unwrap().removed, vec![400]);
             assert!(store::get_pending(&db, 42, 400).await.unwrap().is_none());
             assert!(!store::was_kicked(&db, 42, 400).await.unwrap());
+        }
+
+        #[tokio::test]
+        #[ignore = "requires CENTRAL_TEST_DSN"]
+        async fn remove_role_error_holds_pending() {
+            let db = test_pool().await.expect("test pool");
+            // remove_role schlaegt fehl -> der Nutzer darf nicht als frei gelten.
+            let port = MockPort::with_remove_fail(DmOutcome::Sent {
+                channel_id: 7,
+                message_id: 8,
+            });
+            // Judge sagt Ja, der Nutzer haette also bestanden.
+            let gate = VerifyGate::new(
+                (*db).clone(),
+                port.clone(),
+                Some(judge(Some("{\"hero\": true, \"deutsch\": true}"))),
+                config(),
+            );
+            let now = Utc::now().timestamp();
+            gate.handle_join(42, 410, false, now - 86_400, &young_join_meta())
+                .await;
+            gate.handle_verify_start(410).await;
+            gate.handle_answer(410, "der grosse Roboter mit der Bombe")
+                .await;
+
+            // Kein "entquarantaeniert" verbucht, pending bleibt fuer den naechsten
+            // Durchlauf erhalten, kein Kick.
+            assert!(port.rec.lock().unwrap().removed.is_empty());
+            let pending = store::get_pending(&db, 42, 410).await.unwrap();
+            assert!(pending.is_some(), "pending muss bei remove_role-Fehler bleiben");
+            assert!(!store::was_kicked(&db, 42, 410).await.unwrap());
         }
 
         #[tokio::test]
