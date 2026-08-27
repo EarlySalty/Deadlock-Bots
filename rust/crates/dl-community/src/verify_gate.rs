@@ -432,21 +432,39 @@ impl VerifyGate {
             return;
         }
 
-        let Some(role_id) = self.ensure_role().await else {
-            tracing::error!(
-                user_id,
-                "Verify-Gate: kein Rollen-Setup, Join nicht gegatet"
-            );
-            return;
+        // Rollen-Setup mit einem Retry. Ein Sicherheits-Gate darf bei einem
+        // Setup-Fehler nicht still offen durchlassen.
+        let role_id = match self.ensure_role().await {
+            Some(role_id) => Some(role_id),
+            None => {
+                tracing::warn!(
+                    user_id,
+                    "Verify-Gate: Rollen-Setup fehlgeschlagen, ein Retry folgt"
+                );
+                self.ensure_role().await
+            }
         };
 
-        // Quarantaene zuerst (Kanaele sofort weg), dann DM.
-        if let Err(err) = self
-            .port
-            .assign_role(guild_id, user_id, role_id, "Verify-Gate: Quarantaene")
-            .await
-        {
-            tracing::error!(%err, user_id, "Verify-Gate: Quarantaene-Rolle nicht vergeben");
+        // Quarantaene zuerst (Kanaele sofort weg), dann DM. Ist kein Rollen-Setup
+        // moeglich, wird der Join nicht still durchgelassen: pending, DM und
+        // Frist-Kick greifen trotzdem, damit kein ungegateter Account frei
+        // durchlaeuft.
+        match role_id {
+            Some(role_id) => {
+                if let Err(err) = self
+                    .port
+                    .assign_role(guild_id, user_id, role_id, "Verify-Gate: Quarantäne")
+                    .await
+                {
+                    tracing::error!(%err, user_id, "Verify-Gate: Quarantaene-Rolle nicht vergeben");
+                }
+            }
+            None => {
+                tracing::error!(
+                    user_id,
+                    "Verify-Gate: kein Rollen-Setup nach Retry, gate ueber pending und Frist statt Rolle"
+                );
+            }
         }
 
         let deadline = Utc::now() + Duration::hours(self.config.deadline_hours);
