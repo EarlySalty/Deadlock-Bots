@@ -13,6 +13,7 @@
 //! Verifizieren-Knopf, Persistenz in `dl_central_db::verify_gate`, Judge ueber
 //! den zentralen `dl_ai::TextGenerator` (Repo-Default DeepSeek v4 Flash).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -30,7 +31,7 @@ use dl_discord::{
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
-use crate::invites::{classify_join_source, InviteStore};
+use crate::invites::{join_source_kind, InviteStore, JoinSourceKind};
 
 /// Hauptgilde der Community (Deadlock).
 pub const DEFAULT_GUILD_ID: u64 = 1_289_721_245_281_292_288;
@@ -149,9 +150,12 @@ pub fn account_is_young(account_created_at: i64, now: i64, max_age_days: i64) ->
     age_secs < max_age_days.saturating_mul(86_400)
 }
 
-/// Ist die klassifizierte Join-Quelle ein persoenlicher Invite eines Mitglieds?
-pub fn is_personal_invite(join_source_label: &str) -> bool {
-    join_source_label.starts_with("Persönlicher Invite")
+/// Ist die Join-Quelle ein persoenlicher Invite eines Mitglieds? Prueft die rohe
+/// Quell-Art aus dem metadata-JSON statt eines formatierten Anzeige-Labels,
+/// damit eine Wortaenderung am Label die Ausnahme nicht still bricht. Ein
+/// Website-Invite-Code hat Vorrang und zaehlt NICHT als persoenlich.
+pub fn is_personal_invite(meta: &Value, website_codes: &HashMap<String, String>) -> bool {
+    join_source_kind(meta, website_codes) == JoinSourceKind::PersonalInvite
 }
 
 /// Greift das Gate fuer diesen Join?
@@ -415,8 +419,7 @@ impl VerifyGate {
         }
         .website_code_map()
         .await;
-        let label = classify_join_source(metadata, &website_codes);
-        let personal = is_personal_invite(&label);
+        let personal = is_personal_invite(metadata, &website_codes);
 
         let already_kicked = store::was_kicked(&self.pool, self.guild(), user_id as i64)
             .await
@@ -750,10 +753,27 @@ mod tests {
 
     #[test]
     fn personal_invite_detection() {
-        assert!(is_personal_invite("Persönlicher Invite (nani)"));
-        assert!(!is_personal_invite("Vanity-Link (Discord-Listings)"));
-        assert!(!is_personal_invite("Server entdecken"));
-        assert!(!is_personal_invite("Website: Landing"));
+        let no_codes = HashMap::new();
+        assert!(is_personal_invite(
+            &json!({ "join_source_kind": "invite_link", "inviter_name": "nani" }),
+            &no_codes,
+        ));
+        assert!(!is_personal_invite(
+            &json!({ "join_source_kind": "vanity" }),
+            &no_codes,
+        ));
+        assert!(!is_personal_invite(
+            &json!({ "join_source_kind": "server_discovery" }),
+            &no_codes,
+        ));
+        // Website-Invite (invite_link mit Website-Code) zaehlt NICHT als
+        // persoenlich, obwohl die rohe kind "invite_link" ist.
+        let mut website_codes = HashMap::new();
+        website_codes.insert("abc123".to_string(), "Landing".to_string());
+        assert!(!is_personal_invite(
+            &json!({ "join_source_kind": "invite_link", "invite_code": "ABC123" }),
+            &website_codes,
+        ));
     }
 
     #[test]

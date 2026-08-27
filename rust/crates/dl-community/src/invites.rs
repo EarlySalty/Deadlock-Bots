@@ -29,44 +29,83 @@ pub const WEBSITE_SUBPAGES: [(&str, &str); 6] = [
 
 // ── Pure Klassifikation (wie cmd_join_sources) ─────────────────────────────
 
+/// Rohe, ungeformatte Quell-Art eines Joins. Spiegelt die Entscheidung von
+/// `classify_join_source`, liefert aber stabile Rohwerte statt Anzeige-Labels,
+/// damit sich Konsumenten (z.B. das Verify-Gate) nicht an formatierte Strings
+/// koppeln muessen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSourceKind {
+    /// Join ueber einen konfigurierten Website-Invite-Code.
+    Website,
+    /// Vanity-Link (Discord-Listings).
+    Vanity,
+    /// Join ueber einen Twitch-Streamer.
+    TwitchStreamer,
+    /// Bot-OAuth-Join.
+    BotInvite,
+    /// Persoenlicher Invite eines Mitglieds.
+    PersonalInvite,
+    /// Server-Entdeckung.
+    ServerDiscovery,
+    /// Nicht zuordenbar.
+    Unknown,
+}
+
+fn meta_str(meta: &Value, key: &str) -> String {
+    meta.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Rohe Quell-Art eines member_events-Metadatensatzes. Ein Website-Invite-Code
+/// hat Vorrang vor der `join_source_kind`, genau wie in `classify_join_source`.
+pub fn join_source_kind(meta: &Value, website_codes: &HashMap<String, String>) -> JoinSourceKind {
+    let invite_code = meta_str(meta, "invite_code");
+    if !invite_code.is_empty() && website_codes.contains_key(&invite_code.to_lowercase()) {
+        return JoinSourceKind::Website;
+    }
+    match meta_str(meta, "join_source_kind").as_str() {
+        "vanity" => JoinSourceKind::Vanity,
+        "twitch_streamer" => JoinSourceKind::TwitchStreamer,
+        "bot_invite" => JoinSourceKind::BotInvite,
+        "invite_link" => JoinSourceKind::PersonalInvite,
+        "server_discovery" => JoinSourceKind::ServerDiscovery,
+        _ => JoinSourceKind::Unknown,
+    }
+}
+
 /// Join-Quelle eines member_events-Metadatensatzes benennen.
 pub fn classify_join_source(meta: &Value, website_codes: &HashMap<String, String>) -> String {
-    let get = |key: &str| {
-        meta.get(key)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    };
-    let invite_code = get("invite_code");
-    let kind = get("join_source_kind");
-    let label_existing = get("join_source_label");
-
-    if !invite_code.is_empty() {
-        if let Some(label) = website_codes.get(&invite_code.to_lowercase()) {
-            return format!("{WEBSITE_SOURCE_LABEL}: {label}");
+    match join_source_kind(meta, website_codes) {
+        JoinSourceKind::Website => {
+            let invite_code = meta_str(meta, "invite_code");
+            let label = website_codes
+                .get(&invite_code.to_lowercase())
+                .map_or("", String::as_str);
+            format!("{WEBSITE_SOURCE_LABEL}: {label}")
         }
-    }
-    match kind.as_str() {
-        "vanity" => "Vanity-Link (Discord-Listings)".to_string(),
-        "twitch_streamer" => {
-            let login = get("twitch_streamer_login");
+        JoinSourceKind::Vanity => "Vanity-Link (Discord-Listings)".to_string(),
+        JoinSourceKind::TwitchStreamer => {
+            let login = meta_str(meta, "twitch_streamer_login");
             if login.is_empty() {
                 "Twitch-Streamer".to_string()
             } else {
                 format!("Twitch: {login}")
             }
         }
-        "bot_invite" => "Bot-Invite".to_string(),
-        "invite_link" => {
-            let inviter = get("inviter_name");
+        JoinSourceKind::BotInvite => "Bot-Invite".to_string(),
+        JoinSourceKind::PersonalInvite => {
+            let inviter = meta_str(meta, "inviter_name");
             format!(
                 "Persönlicher Invite ({})",
                 if inviter.is_empty() { "?" } else { &inviter }
             )
         }
-        "server_discovery" => "Server entdecken".to_string(),
-        _ => {
+        JoinSourceKind::ServerDiscovery => "Server entdecken".to_string(),
+        JoinSourceKind::Unknown => {
+            let label_existing = meta_str(meta, "join_source_label");
             if label_existing.is_empty() {
                 "Unbekannt".to_string()
             } else {
