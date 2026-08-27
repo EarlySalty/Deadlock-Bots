@@ -1080,6 +1080,23 @@ const USER_TABLES: &[TableSpec] = &[
         "subject_user_id",
         ColumnType::I64,
     ),
+    // Verify-Gate: offener Quarantaene-Zustand (lebt hoechstens 24 h) und die
+    // Liste der ueber das Gate gekickten Accounts. Beide sind personenbezogen
+    // und werden beim Nutzer-Loeschen mitentfernt.
+    TableSpec::new(
+        "verify_gate_pending",
+        "user_id",
+        "bot.verify_gate_pending",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "verify_gate_kicked",
+        "user_id",
+        "bot.verify_gate_kicked",
+        "user_id",
+        ColumnType::I64,
+    ),
 ];
 
 const NULLABLE_USER_COLUMNS: &[TableSpec] = &[TableSpec::new(
