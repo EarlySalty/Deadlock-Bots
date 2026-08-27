@@ -5,7 +5,9 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::action_policy::{ActionPolicy, ModerationAction, PolicyDecision, PolicyDecisionSource};
-use crate::behavior_detector::{BehaviorDetector, BehaviorSignal, BehaviorTriggerType};
+use crate::behavior_detector::{
+    BehaviorDetector, BehaviorSignal, BehaviorTriggerType, DetectOutcome,
+};
 use crate::case_embed::{build_case_components, build_compact_case_embed, CompactCaseEmbedInput};
 use crate::content_analyzer::{
     ContentModerationEvaluation, ContentModerationPipeline, ModerationInput,
@@ -179,11 +181,26 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         // Verhaltens-Erkennung (Takeover/Burst) laeuft serverweit: uebernommene Konten
         // koennen in jedem Kanal posten. Bei Verhaltenstreffern laeuft Content-AI als
         // Richter nach, damit reine Heuristiken keine Fake-Konfidenz erzeugen.
-        let behavior_signal = if let Some(detector) = &self.behavior_detector {
+        let behavior_outcome = if let Some(detector) = &self.behavior_detector {
             detector.detect(guild_id, event).await
         } else {
-            None
+            DetectOutcome::Ignore
         };
+        // Restwelle eines bereits geahndeten Takeover-Kontos: nur loeschen, kein Case,
+        // keine Sanktion, kein Spiegeln. Im Shadow-Modus wird nichts geloescht.
+        if let DetectOutcome::Cleanup = behavior_outcome {
+            if self.config.enforce {
+                self.port
+                    .delete_message(
+                        event.channel_id,
+                        event.message_id,
+                        "Automatische Moderation: Restwelle entfernt",
+                    )
+                    .await;
+            }
+            return;
+        }
+        let behavior_signal = behavior_outcome.into_signal();
         let content_input = if (self.config.scan_channel_ids.contains(&event.channel_id)
             || behavior_signal.is_some())
             && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
@@ -1213,6 +1230,24 @@ mod tests {
         event
     }
 
+    fn multi_image_event(
+        user_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        images: u32,
+        created_at: i64,
+        joined_at: Option<i64>,
+    ) -> dl_discord::MessageEvent {
+        let mut event = image_event(user_id, channel_id, message_id, created_at, joined_at);
+        let urls: Vec<String> = (0..images)
+            .map(|idx| format!("https://img/{message_id}-{idx}.png"))
+            .collect();
+        event.attachment_count = images;
+        event.image_attachment_count = images;
+        event.image_attachment_urls = urls;
+        event
+    }
+
     fn burst_text_attachment_event(
         user_id: u64,
         channel_id: u64,
@@ -1542,14 +1577,13 @@ mod tests {
             port.delete_targets.lock().await.as_slice(),
             &[(10, 1000), (11, 1001)]
         );
+        // REQ3: als Beweis wird genau EINE Nachricht gespiegelt (die ausloesende
+        // Event-Nachricht 1001), kein Mix ueber beide Wellennachrichten.
         assert_eq!(
             port.mirrored_urls.lock().await.as_slice(),
-            &[
-                "https://img/1000.png".to_string(),
-                "https://img/1001.png".to_string()
-            ]
+            &["https://img/1001.png".to_string()]
         );
-        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[2]);
+        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[1]);
         assert_eq!(port.bans.load(Ordering::Relaxed), 1);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         drop(drafts);
@@ -1696,5 +1730,72 @@ mod tests {
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
         assert_eq!(moderator.store.drafts.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn takeover_wave_deletes_all_messages_with_one_case_and_one_timeout() {
+        // Eine Welle: vier Nachrichten in vier Kanaelen, alle im selben Sekundenfenster,
+        // sequenziell durch handle_message. Nach dem Trigger stehen Nachricht 3 und 4
+        // bereits in der Queue. Erwartung: ALLE vier werden geloescht, aber es entsteht
+        // genau EIN Case und genau EIN Timeout. Vor dem Fix bricht detect() fuer die
+        // unterdrueckten Nachrichten 3/4 mit None ab, es werden nur zwei geloescht.
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let now = chrono::Utc::now().timestamp();
+        // Etabliertes Konto -> Takeover-Aktion ist Timeout, nicht Ban.
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        for (idx, channel_id) in [10u64, 11, 12, 13].into_iter().enumerate() {
+            moderator
+                .handle_message(&image_event(
+                    500,
+                    channel_id,
+                    1000 + idx as u64,
+                    created_at,
+                    joined_at,
+                ))
+                .await;
+        }
+
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 4);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.delete_targets.lock().await.as_slice(),
+            &[(10, 1000), (11, 1001), (12, 1002), (13, 1003)]
+        );
+    }
+
+    #[tokio::test]
+    async fn takeover_mirrors_exactly_one_complete_message() {
+        // Welle mit zwei Nachrichten a vier Bildern. Als Beweis wird genau EINE
+        // Nachricht vollstaendig gespiegelt (die ausloesende Event-Nachricht), nicht ein
+        // Vier-Bild-Mix aus beiden Nachrichten. Vor dem Fix flacht build_evidence beide
+        // Nachrichten zusammen und mischt.
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&multi_image_event(600, 10, 2000, 4, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&multi_image_event(600, 11, 2001, 4, created_at, joined_at))
+            .await;
+
+        assert_eq!(
+            port.mirrored_urls.lock().await.as_slice(),
+            &[
+                "https://img/2001-0.png".to_string(),
+                "https://img/2001-1.png".to_string(),
+                "https://img/2001-2.png".to_string(),
+                "https://img/2001-3.png".to_string(),
+            ]
+        );
+        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[4]);
     }
 }
