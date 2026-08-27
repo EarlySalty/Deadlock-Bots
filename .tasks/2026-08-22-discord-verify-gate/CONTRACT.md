@@ -1,4 +1,5 @@
-status: aktiv 2026-08-27
+status: aktiv
+datum: 2026-08-27
 
 # Contract: Discord Verify-Gate fuer neue Accounts
 
@@ -46,6 +47,7 @@ Neue Discord-Mitglieder mit einem Konto juenger als 1 Monat, die nicht ueber ein
 - `rust/crates/dl-community/` (Gate-Logik, Antwortbewertung, Invite-Klassifizierung nutzen)
 - `rust/bin/dl-bot/` (Verdrahtung, Scheduler/Frist-Kick, DM-Interaktions-Handler)
 - `rust/crates/dl-central-db/migrations/` (neue Tabellen pending-verify + gekickt)
+- `rust/crates/dl-central-db/src/` (Store-Modul verify_gate.rs und lib.rs-Export)
 - Heroliste: bestehende Datenquelle nutzen, sonst neue Konstante/Tabelle
 - `.tasks/2026-08-22-discord-verify-gate/` (Artefakte)
 
