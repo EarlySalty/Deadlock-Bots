@@ -5,7 +5,9 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::action_policy::{ActionPolicy, ModerationAction, PolicyDecision, PolicyDecisionSource};
-use crate::behavior_detector::{BehaviorDetector, BehaviorSignal, BehaviorTriggerType};
+use crate::behavior_detector::{
+    BehaviorDetector, BehaviorSignal, BehaviorTriggerType, DetectOutcome,
+};
 use crate::case_embed::{build_case_components, build_compact_case_embed, CompactCaseEmbedInput};
 use crate::content_analyzer::{
     ContentModerationEvaluation, ContentModerationPipeline, ModerationInput,
@@ -179,11 +181,62 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         // Verhaltens-Erkennung (Takeover/Burst) laeuft serverweit: uebernommene Konten
         // koennen in jedem Kanal posten. Bei Verhaltenstreffern laeuft Content-AI als
         // Richter nach, damit reine Heuristiken keine Fake-Konfidenz erzeugen.
-        let behavior_signal = if let Some(detector) = &self.behavior_detector {
+        let behavior_outcome = if let Some(detector) = &self.behavior_detector {
             detector.detect(guild_id, event).await
         } else {
-            None
+            DetectOutcome::Ignore
         };
+        // Restwelle eines bereits geahndeten Takeover-Kontos: nur loeschen, kein Case,
+        // keine Sanktion, kein Spiegeln. Im Shadow-Modus wird nichts geloescht.
+        if let DetectOutcome::Cleanup = behavior_outcome {
+            if self.config.enforce {
+                let deleted = self
+                    .port
+                    .delete_message(
+                        event.channel_id,
+                        event.message_id,
+                        "Automatische Moderation: Restwelle entfernt",
+                    )
+                    .await;
+                // Jede Cleanup-Loeschung nachvollziehbar machen: sie erzeugt keinen Case
+                // und erscheint sonst nirgends. Der Zaehler haelt fest, wie viele
+                // Wellennachrichten nach dem Haupt-Case zusaetzlich entfernt wurden.
+                let wave_deleted = if let Some(detector) = &self.behavior_detector {
+                    detector
+                        .note_cleanup_delete(event.author_id, deleted)
+                        .await
+                } else {
+                    0
+                };
+                if deleted {
+                    tracing::info!(
+                        guild_id,
+                        channel_id = event.channel_id,
+                        message_id = event.message_id,
+                        user_id = event.author_id,
+                        wave_deleted,
+                        "Moderation: Restwelle-Nachricht entfernt (kein neuer Case)"
+                    );
+                } else {
+                    tracing::warn!(
+                        guild_id,
+                        channel_id = event.channel_id,
+                        message_id = event.message_id,
+                        user_id = event.author_id,
+                        wave_deleted,
+                        "Moderation: Restwelle-Nachricht konnte nicht entfernt werden"
+                    );
+                }
+                // TODO(scam-takeover): den urspruenglichen Takeover-Case nachtraeglich um
+                // "zusaetzlich N Wellennachrichten entfernt" ergaenzen. Das erfordert, die
+                // Case-Message-ID je Konto vorzuhalten und das bereits gepostete Embed zu
+                // editieren (neue Port-Faehigkeit), was ausserhalb des im Contract erlaubten
+                // Datei-Bereichs liegt. Bis dahin macht das tracing oben die Zusatzloeschung
+                // nachvollziehbar.
+            }
+            return;
+        }
+        let behavior_signal = behavior_outcome.into_signal();
         let content_input = if (self.config.scan_channel_ids.contains(&event.channel_id)
             || behavior_signal.is_some())
             && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
@@ -320,6 +373,10 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             PolicyDecision::Proposal { .. } => "proposed",
             PolicyDecision::Ignore => "ignored",
         };
+        let is_takeover = behavior_signal
+            .as_ref()
+            .map(|signal| signal.trigger_type == BehaviorTriggerType::AccountTakeover)
+            .unwrap_or(false);
         let draft = self.case_draft(
             guild_id,
             event,
@@ -407,6 +464,16 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                     (ModerationAction::Ban, false) => "auto_ban_failed",
                 };
                 self.store.update_case_action(&case_id, final_action).await;
+                // Cleanup-Fenster erst JETZT armieren: Case ist persistiert, enforce ist
+                // aktiv und die Sanktion/Delete-Runde ist gelaufen. Nur so werden noch in
+                // der Queue liegende Wellennachrichten desselben Kontos ohne zweiten Case
+                // geloescht, ohne dass Shadow-Modus oder ein gescheiterter Case spurlos
+                // loeschen.
+                if is_takeover {
+                    if let Some(detector) = &self.behavior_detector {
+                        detector.arm_takeover_cleanup(event.author_id).await;
+                    }
+                }
             } else {
                 executed_actions.push("shadow:no_action".to_string());
                 self.store
@@ -1039,6 +1106,34 @@ mod tests {
         }
     }
 
+    /// Store, dessen Case-Persistenz immer scheitert (insert_case -> None). Damit laesst
+    /// sich pruefen, dass ohne persistierten Case kein Cleanup-Fenster armiert wird.
+    #[derive(Default)]
+    struct FailingInsertStore {
+        actions: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModerationCaseStore for FailingInsertStore {
+        async fn insert_case(&self, _draft: CaseDraft) -> Option<String> {
+            None
+        }
+
+        async fn update_case_action(&self, _case_id: &str, action: &str) {
+            self.actions.lock().await.push(action.to_string());
+        }
+
+        async fn set_review_message(&self, _case_id: &str, _message_id: u64) {}
+
+        async fn fetch_case(&self, _case_id: &str) -> Option<CaseRecord> {
+            None
+        }
+
+        async fn resolve_case(&self, _case_id: &str, _action: &str, _mod_id: u64) {}
+
+        async fn resolve_case_denied(&self, _case_id: &str, _mod_id: u64, _reason: &str) {}
+    }
+
     #[derive(Default)]
     struct FakeBehaviorPort;
 
@@ -1210,6 +1305,24 @@ mod tests {
         event.content = content.to_string();
         event.author_created_at = chrono::Utc::now().timestamp() - 90 * 24 * 3600;
         event.author_joined_at = Some(chrono::Utc::now().timestamp() - 30 * 24 * 3600);
+        event
+    }
+
+    fn multi_image_event(
+        user_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        images: u32,
+        created_at: i64,
+        joined_at: Option<i64>,
+    ) -> dl_discord::MessageEvent {
+        let mut event = image_event(user_id, channel_id, message_id, created_at, joined_at);
+        let urls: Vec<String> = (0..images)
+            .map(|idx| format!("https://img/{message_id}-{idx}.png"))
+            .collect();
+        event.attachment_count = images;
+        event.image_attachment_count = images;
+        event.image_attachment_urls = urls;
         event
     }
 
@@ -1542,14 +1655,13 @@ mod tests {
             port.delete_targets.lock().await.as_slice(),
             &[(10, 1000), (11, 1001)]
         );
+        // REQ3: als Beweis wird genau EINE Nachricht gespiegelt (die ausloesende
+        // Event-Nachricht 1001), kein Mix ueber beide Wellennachrichten.
         assert_eq!(
             port.mirrored_urls.lock().await.as_slice(),
-            &[
-                "https://img/1000.png".to_string(),
-                "https://img/1001.png".to_string()
-            ]
+            &["https://img/1001.png".to_string()]
         );
-        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[2]);
+        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[1]);
         assert_eq!(port.bans.load(Ordering::Relaxed), 1);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         drop(drafts);
@@ -1696,5 +1808,154 @@ mod tests {
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
         assert_eq!(moderator.store.drafts.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn takeover_wave_deletes_all_messages_with_one_case_and_one_timeout() {
+        // Eine Welle: vier Nachrichten in vier Kanaelen, alle im selben Sekundenfenster,
+        // sequenziell durch handle_message. Nach dem Trigger stehen Nachricht 3 und 4
+        // bereits in der Queue. Erwartung: ALLE vier werden geloescht, aber es entsteht
+        // genau EIN Case und genau EIN Timeout. Vor dem Fix bricht detect() fuer die
+        // unterdrueckten Nachrichten 3/4 mit None ab, es werden nur zwei geloescht.
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let now = chrono::Utc::now().timestamp();
+        // Etabliertes Konto -> Takeover-Aktion ist Timeout, nicht Ban.
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        for (idx, channel_id) in [10u64, 11, 12, 13].into_iter().enumerate() {
+            moderator
+                .handle_message(&image_event(
+                    500,
+                    channel_id,
+                    1000 + idx as u64,
+                    created_at,
+                    joined_at,
+                ))
+                .await;
+        }
+
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 4);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.delete_targets.lock().await.as_slice(),
+            &[(10, 1000), (11, 1001), (12, 1002), (13, 1003)]
+        );
+    }
+
+    #[tokio::test]
+    async fn takeover_mirrors_exactly_one_complete_message() {
+        // Welle mit zwei Nachrichten a vier Bildern. Als Beweis wird genau EINE
+        // Nachricht vollstaendig gespiegelt (die ausloesende Event-Nachricht), nicht ein
+        // Vier-Bild-Mix aus beiden Nachrichten. Vor dem Fix flacht build_evidence beide
+        // Nachrichten zusammen und mischt.
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&multi_image_event(600, 10, 2000, 4, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&multi_image_event(600, 11, 2001, 4, created_at, joined_at))
+            .await;
+
+        assert_eq!(
+            port.mirrored_urls.lock().await.as_slice(),
+            &[
+                "https://img/2001-0.png".to_string(),
+                "https://img/2001-1.png".to_string(),
+                "https://img/2001-2.png".to_string(),
+                "https://img/2001-3.png".to_string(),
+            ]
+        );
+        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[4]);
+    }
+
+    #[tokio::test]
+    async fn shadow_mode_does_not_arm_takeover_cleanup() {
+        // Shadow-Modus (enforce=false): der Takeover-Treffer darf KEIN Cleanup-Fenster
+        // armieren. Vor dem Fix armiert detect() das Fenster schon beim Erkennen, sodass
+        // Folgenachrichten spurlos verschwinden koennten und die Shadow-Auswertung
+        // schlechter wird als der bisherige Suppression-Pfad.
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) =
+            memory_moderator(&[], &[], Some(detector.clone()), vec![999], false).await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&image_event(700, 10, 3000, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(700, 11, 3001, created_at, joined_at))
+            .await;
+
+        // Shadow loescht nie.
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        // Und ohne Durchsetzung wird auch kein Cleanup-Fenster armiert.
+        assert!(!detector.cleanup_armed(700).await);
+    }
+
+    #[tokio::test]
+    async fn failed_case_persist_does_not_arm_takeover_cleanup() {
+        // Scheitert die Case-Persistenz, gibt es keine Sanktion. Dann darf auch kein
+        // Cleanup-Fenster armiert werden, sonst verschwinden 120 s lang alle
+        // Folgenachrichten des Kontos spurlos, obwohl nichts geahndet wurde. Vor dem Fix
+        // armiert detect() unabhaengig von insert_case, sodass die dritte Nachricht als
+        // Restwelle geloescht wird.
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let analyzer_text = Arc::new(StaticText::default());
+        let verifier_text = Arc::new(StaticText::default());
+        let port = Arc::new(CountingPort::default());
+        let moderator = ModerationSystem::new_with_store(
+            FailingInsertStore::default(),
+            ContentModerationPipeline::new(
+                ContentAnalyzer::new(
+                    analyzer_text,
+                    None,
+                    ContentAnalyzerConfig {
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                        image_model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
+                ContentVerifier::new(verifier_text, None, Default::default()),
+                0.5,
+            ),
+            Some(detector.clone()),
+            ActionPolicy::new(ActionPolicyConfig::default()),
+            port.clone(),
+            ModerationSystemConfig {
+                scan_channel_ids: vec![999],
+                moderation_channel_id: 99,
+                enforce: true,
+            },
+        );
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        // Trigger: zwei Bild-Nachrichten in zwei Kanaelen. insert_case scheitert, daher
+        // keine Sanktion und kein Case.
+        moderator
+            .handle_message(&image_event(800, 10, 4000, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(800, 11, 4001, created_at, joined_at))
+            .await;
+        // Dritte Wellennachricht: darf NICHT als Restwelle geloescht werden.
+        moderator
+            .handle_message(&image_event(800, 12, 4002, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert!(!detector.cleanup_armed(800).await);
     }
 }

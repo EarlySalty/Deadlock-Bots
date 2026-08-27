@@ -20,13 +20,21 @@ pub const IMAGE_CHANNEL_THRESHOLD: usize = 2;
 pub const IMAGE_MULTICHANNEL_WINDOW_SECONDS: i64 = 300;
 pub const TAKEOVER_WINDOW_SECONDS: i64 = 30;
 pub const TAKEOVER_IMAGE_CHANNELS: usize = 2;
+/// Fenster, aus dem beim Takeover-Treffer alle Wellennachrichten als Loesch- und
+/// Beweisziel eingesammelt werden. Der 30-s-Trigger bleibt das Ausloesekriterium; die
+/// Welle selbst laeuft laenger, deshalb ein breiteres Loeschfenster.
+pub const TAKEOVER_WAVE_SECONDS: i64 = 120;
+/// Nach einem Takeover-Treffer noch offene Wellennachrichten desselben Kontos, die
+/// bereits in der Broadcast-Queue lagen, werden in diesem Fenster nur geloescht, ohne
+/// neuen Case und ohne neue Sanktion.
+pub const TAKEOVER_CLEANUP_SECONDS: i64 = 120;
 pub const TIMEOUT_MINUTES: i64 = 1440;
 pub const PROPOSAL_TIMEOUT_MINUTES: i64 = 60;
 pub const CASE_COOLDOWN_SECONDS: i64 = 600;
 pub const HISTORY_MAX: usize = 20;
 pub const HISTORY_USER_MAX: usize = 128;
 pub const SUPPRESSED_USER_MAX: usize = 512;
-pub const EVIDENCE_IMAGE_LIMIT: usize = 4;
+pub const EVIDENCE_IMAGE_LIMIT: usize = 10;
 
 pub const KEYWORDS: [&str; 15] = [
     "telegram",
@@ -148,6 +156,25 @@ impl BehaviorSignal {
     }
 }
 
+/// Ergebnis einer Detektor-Pruefung. `Cleanup` markiert eine Nachricht, die zu einer
+/// bereits geahndeten Welle gehoert und nur noch geloescht werden soll: kein Case, keine
+/// Sanktion, kein Spiegeln.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectOutcome {
+    Ignore,
+    Signal(Box<BehaviorSignal>),
+    Cleanup,
+}
+
+impl DetectOutcome {
+    pub fn into_signal(self) -> Option<BehaviorSignal> {
+        match self {
+            DetectOutcome::Signal(signal) => Some(*signal),
+            DetectOutcome::Ignore | DetectOutcome::Cleanup => None,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait BehaviorDetectorPort: Send + Sync {
     async fn resolve_invite_guild(&self, code: &str) -> Option<u64>;
@@ -172,6 +199,8 @@ pub struct BehaviorDetector {
     history: tokio::sync::Mutex<HashMap<u64, VecDeque<RecentMessage>>>,
     active: tokio::sync::Mutex<HashSet<u64>>,
     suppressed_until: tokio::sync::Mutex<HashMap<u64, i64>>,
+    cleanup_until: tokio::sync::Mutex<HashMap<u64, i64>>,
+    cleanup_deleted: tokio::sync::Mutex<HashMap<u64, u32>>,
 }
 
 impl BehaviorDetector {
@@ -189,6 +218,8 @@ impl BehaviorDetector {
             history: tokio::sync::Mutex::new(HashMap::new()),
             active: tokio::sync::Mutex::new(HashSet::new()),
             suppressed_until: tokio::sync::Mutex::new(HashMap::new()),
+            cleanup_until: tokio::sync::Mutex::new(HashMap::new()),
+            cleanup_deleted: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -196,26 +227,41 @@ impl BehaviorDetector {
         self: &Arc<Self>,
         guild_id: u64,
         event: &dl_discord::MessageEvent,
-    ) -> Option<BehaviorSignal> {
+    ) -> DetectOutcome {
         if !event.author_staff_status_known || event.author_is_staff {
-            return None;
+            return DetectOutcome::Ignore;
         }
         let now = chrono::Utc::now().timestamp();
+        // Restwelle: nach einem Takeover-Treffer bereits geposteten Nachrichten desselben
+        // Kontos werden nur noch geloescht, ohne neuen Case oder neue Sanktion. Diese
+        // Pruefung liegt vor is_suppressed, weil der Treffer beide Fenster setzt und das
+        // Cleanup-Fenster das kuerzere ist.
+        if self.in_cleanup(event.author_id, now).await {
+            return DetectOutcome::Cleanup;
+        }
         if self.is_suppressed(event.author_id, now).await {
-            return None;
+            return DetectOutcome::Ignore;
         }
 
         let recent = self.record_recent(event, now).await;
         if !self.try_claim(event.author_id).await {
-            return None;
+            return DetectOutcome::Ignore;
         }
         let signal = self.run_detection(guild_id, event, &recent, now).await;
         self.release(event.author_id).await;
-        if signal.is_some() {
-            self.history.lock().await.remove(&event.author_id);
-            self.suppress_user(event.author_id, now).await;
+        match signal {
+            Some(signal) => {
+                // Das Cleanup-Fenster wird bewusst NICHT hier beim Erkennen armiert.
+                // moderation_system armiert es erst nach erfolgreicher Durchsetzung
+                // (Case persistiert, enforce aktiv, Sanktion/Delete gelaufen) ueber
+                // arm_takeover_cleanup. So verschwindet im Shadow-Modus oder bei
+                // gescheitertem Case keine Folgenachricht spurlos.
+                self.history.lock().await.remove(&event.author_id);
+                self.suppress_user(event.author_id, now).await;
+                DetectOutcome::Signal(Box::new(signal))
+            }
+            None => DetectOutcome::Ignore,
         }
-        signal
     }
 
     async fn record_recent(
@@ -279,6 +325,60 @@ impl BehaviorDetector {
             };
             suppressed.remove(&victim);
         }
+    }
+
+    async fn in_cleanup(&self, user_id: u64, now: i64) -> bool {
+        let mut cleanup = self.cleanup_until.lock().await;
+        cleanup.retain(|_, until| *until > now);
+        cleanup.get(&user_id).is_some_and(|until| *until > now)
+    }
+
+    /// Armiert das Cleanup-Fenster fuer ein Konto, dessen Takeover gerade durchgesetzt
+    /// wurde. Wird bewusst NICHT vom Detektor beim Erkennen aufgerufen, sondern erst von
+    /// moderation_system nach erfolgreicher Durchsetzung (Case persistiert, enforce aktiv,
+    /// Sanktion/Delete gelaufen). So verschwinden bei gescheitertem Case oder im
+    /// Shadow-Modus keine Folgenachrichten spurlos.
+    pub async fn arm_takeover_cleanup(&self, user_id: u64) {
+        let now = chrono::Utc::now().timestamp();
+        let mut cleanup = self.cleanup_until.lock().await;
+        cleanup.retain(|_, until| *until > now);
+        cleanup.insert(user_id, now + TAKEOVER_CLEANUP_SECONDS);
+        while cleanup.len() > SUPPRESSED_USER_MAX {
+            let Some(victim) = cleanup
+                .iter()
+                .min_by_key(|(user_id, until)| (*until, *user_id))
+                .map(|(user_id, _)| *user_id)
+            else {
+                break;
+            };
+            cleanup.remove(&victim);
+        }
+        // Zaehler der Welle zuruecksetzen und auf die noch aktiven Konten eindampfen.
+        let mut deleted = self.cleanup_deleted.lock().await;
+        deleted.retain(|user, _| cleanup.contains_key(user));
+        deleted.insert(user_id, 0);
+    }
+
+    /// Zaehlt eine erfolgte Cleanup-Loeschung dieser Welle und liefert den laufenden Stand.
+    /// Nur erfolgreiche Loeschungen erhoehen den Zaehler, damit die Zahl die real
+    /// entfernten Nachrichten der Welle widerspiegelt.
+    pub async fn note_cleanup_delete(&self, user_id: u64, deleted_ok: bool) -> u32 {
+        let mut deleted = self.cleanup_deleted.lock().await;
+        let entry = deleted.entry(user_id).or_insert(0);
+        if deleted_ok {
+            *entry = entry.saturating_add(1);
+        }
+        *entry
+    }
+
+    #[cfg(test)]
+    pub async fn cleanup_armed(&self, user_id: u64) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        self.cleanup_until
+            .lock()
+            .await
+            .get(&user_id)
+            .is_some_and(|until| *until > now)
     }
 
     async fn foreign_invite_code(&self, guild_id: u64, content: &str) -> Option<String> {
@@ -473,6 +573,7 @@ fn build_signal(
         evidence: build_evidence(
             window_seconds,
             &messages,
+            event.message_id,
             account_age_hours,
             join_age_hours,
             invite_code,
@@ -484,6 +585,7 @@ fn build_signal(
 fn build_evidence(
     window_seconds: i64,
     messages: &[RecentMessage],
+    event_message_id: u64,
     account_age_hours: i64,
     join_age_hours: Option<i64>,
     invite_code: Option<String>,
@@ -507,14 +609,7 @@ fn build_evidence(
     let keyword_hit = messages
         .iter()
         .any(|message| contains_suspicious_text(&message.content));
-    let mut seen_images = HashSet::new();
-    let image_urls = messages
-        .iter()
-        .flat_map(|message| message.image_urls.iter())
-        .filter(|url| seen_images.insert((*url).clone()))
-        .take(EVIDENCE_IMAGE_LIMIT)
-        .cloned()
-        .collect();
+    let image_urls = single_message_image_urls(messages, event_message_id);
 
     BehaviorEvidence {
         window_seconds,
@@ -529,6 +624,33 @@ fn build_evidence(
         invite_code,
         image_urls,
     }
+}
+
+/// Bilder GENAU EINER Nachricht als Beweis. Bevorzugt die ausloesende Event-Nachricht;
+/// hat sie keine Bilder, die bildreichste Wellennachricht. So entsteht kein Mix ueber
+/// mehrere Nachrichten. moderation_system haengt die Anhaenge der Event-Nachricht ohnehin
+/// an, deshalb bleibt es bei der Wahl der Event-Nachricht genau eine Nachricht.
+fn single_message_image_urls(messages: &[RecentMessage], event_message_id: u64) -> Vec<String> {
+    let chosen = messages
+        .iter()
+        .find(|message| message.message_id == event_message_id && !message.image_urls.is_empty())
+        .or_else(|| {
+            messages
+                .iter()
+                .filter(|message| !message.image_urls.is_empty())
+                .max_by_key(|message| message.image_urls.len())
+        });
+    let Some(message) = chosen else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    message
+        .image_urls
+        .iter()
+        .filter(|url| seen.insert((*url).clone()))
+        .take(EVIDENCE_IMAGE_LIMIT)
+        .cloned()
+        .collect()
 }
 
 fn takeover_action_hint(created_at: i64, joined_at: Option<i64>, now: i64) -> BehaviorActionHint {
@@ -595,15 +717,14 @@ pub fn detect_takeover(
     messages: &[RecentMessage],
     now: i64,
 ) -> Option<(String, Vec<RecentMessage>)> {
-    let cutoff = now - TAKEOVER_WINDOW_SECONDS;
-    let window = messages
-        .iter()
-        .filter(|message| message.created_at >= cutoff)
-        .cloned()
-        .collect::<Vec<_>>();
+    // Ausloesekriterium bleibt eng: Bilder in mindestens zwei Kanaelen innerhalb von 30 s.
+    let trigger_cutoff = now - TAKEOVER_WINDOW_SECONDS;
     let mut image_channels: HashMap<u64, u32> = HashMap::new();
     let mut image_count = 0u32;
-    for message in &window {
+    for message in messages
+        .iter()
+        .filter(|message| message.created_at >= trigger_cutoff)
+    {
         if message.image_count > 0 {
             *image_channels.entry(message.channel_id).or_default() += message.image_count;
             image_count += message.image_count;
@@ -612,12 +733,20 @@ pub fn detect_takeover(
     if image_channels.len() < TAKEOVER_IMAGE_CHANNELS {
         return None;
     }
+    // Loesch- und Beweisziel ist die ganze erfasste Welle, nicht nur das 30-s-Fenster:
+    // die Welle postet ueber laenger als 30 s, und alle diese Nachrichten sollen weg.
+    let wave_cutoff = now - TAKEOVER_WAVE_SECONDS;
+    let wave = messages
+        .iter()
+        .filter(|message| message.created_at >= wave_cutoff)
+        .cloned()
+        .collect::<Vec<_>>();
     Some((
         format!(
             "account_takeover:{image_count}:{}:{TAKEOVER_WINDOW_SECONDS}",
             image_channels.len()
         ),
-        window,
+        wave,
     ))
 }
 
@@ -875,13 +1004,16 @@ mod tests {
         let created_at = now - 10 * 3600;
         let joined_at = Some(now - 3600);
 
-        assert!(detector
-            .detect(1, &image_event(100, 10, 1000, created_at, joined_at))
-            .await
-            .is_none());
+        assert_eq!(
+            detector
+                .detect(1, &image_event(100, 10, 1000, created_at, joined_at))
+                .await,
+            DetectOutcome::Ignore
+        );
         let signal = detector
             .detect(1, &image_event(100, 11, 1001, created_at, joined_at))
             .await
+            .into_signal()
             .expect("takeover signal");
 
         assert_eq!(signal.trigger_type, BehaviorTriggerType::AccountTakeover);
@@ -889,10 +1021,24 @@ mod tests {
         assert_eq!(signal.action_hint, BehaviorActionHint::Ban);
         assert_eq!(signal.evidence.channel_ids, vec![10, 11]);
         assert_eq!(signal.evidence.image_count, 2);
-        assert!(detector
-            .detect(1, &image_event(100, 12, 1002, created_at, joined_at))
-            .await
-            .is_none());
+        // Folgenachricht derselben Welle: solange die Durchsetzung das Cleanup-Fenster
+        // NICHT armiert hat, bleibt sie schlicht unterdrueckt (Ignore). Der Detektor
+        // armiert nicht mehr selbst beim Erkennen.
+        assert_eq!(
+            detector
+                .detect(1, &image_event(100, 12, 1002, created_at, joined_at))
+                .await,
+            DetectOutcome::Ignore
+        );
+        // Erst nachdem moderation_system den Takeover durchgesetzt und das Fenster
+        // armiert hat, wird die Restwelle geloescht (Cleanup), kein neuer Case.
+        detector.arm_takeover_cleanup(100).await;
+        assert_eq!(
+            detector
+                .detect(1, &image_event(100, 13, 1003, created_at, joined_at))
+                .await,
+            DetectOutcome::Cleanup
+        );
     }
 
     #[tokio::test]
@@ -902,7 +1048,7 @@ mod tests {
         let created_at = now - 67508 * 3600;
         let joined_at = Some(now - 6317 * 3600);
         let channels = [10, 11, 12];
-        let mut last = None;
+        let mut last = DetectOutcome::Ignore;
 
         for (idx, channel_id) in channels.into_iter().enumerate() {
             last = detector
@@ -920,7 +1066,9 @@ mod tests {
                 .await;
         }
 
-        let sig = last.expect("established account fast multichannel burst signal");
+        let sig = last
+            .into_signal()
+            .expect("established account fast multichannel burst signal");
         assert_eq!(sig.trigger_type, BehaviorTriggerType::BurstRate);
     }
 
@@ -931,7 +1079,7 @@ mod tests {
         let created_at = now - 10 * 3600;
         let joined_at = Some(now - 2 * 3600);
         let channels = [10, 11, 12];
-        let mut last = None;
+        let mut last = DetectOutcome::Ignore;
 
         for (idx, channel_id) in channels.into_iter().enumerate() {
             last = detector
@@ -949,7 +1097,9 @@ mod tests {
                 .await;
         }
 
-        let sig = last.expect("new account plain multichannel burst signal");
+        let sig = last
+            .into_signal()
+            .expect("new account plain multichannel burst signal");
         assert_eq!(sig.trigger_type, BehaviorTriggerType::YoungAccountBurst);
     }
 

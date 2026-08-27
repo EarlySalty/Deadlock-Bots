@@ -30,7 +30,7 @@ const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const CASE_IMAGE_ATTACHMENT_EXTENSIONS: &[&str] =
     &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
-const MODERATION_EVIDENCE_IMAGE_LIMIT: usize = 4;
+const MODERATION_EVIDENCE_IMAGE_LIMIT: usize = 10;
 const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
