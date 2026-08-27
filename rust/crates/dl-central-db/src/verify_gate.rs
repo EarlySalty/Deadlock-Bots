@@ -20,6 +20,11 @@ use crate::CentralDbError;
 pub const STATE_AWAITING_START: &str = "awaiting_start";
 /// Zustand nach dem Verifizieren-Knopf: der Bot wartet auf die Hero-Antwort.
 pub const STATE_AWAITING_ANSWER: &str = "awaiting_answer";
+/// Zustand nach bestandener Antwort, aber noch quarantaeniert: der Rollenentzug
+/// (`remove_role`) ist fehlgeschlagen und wird beim naechsten Sweep erneut
+/// versucht. Ein Eintrag in diesem Zustand darf NIEMALS ueber die Frist gekickt
+/// werden, der Nutzer hat ja bestanden.
+pub const STATE_PASSED_UNQUARANTINE_PENDING: &str = "passed_unquarantine_pending";
 
 /// Offener Verify-Zustand eines Mitglieds.
 #[derive(Debug, Clone, sqlx::FromRow, PartialEq, Eq)]
@@ -166,7 +171,10 @@ pub async fn delete_pending(
     Ok(())
 }
 
-/// Alle offenen Zustaende, deren Frist bis `now` abgelaufen ist.
+/// Alle offenen Zustaende, deren Frist bis `now` abgelaufen ist. Bestandene, aber
+/// noch quarantaenierte Eintraege (`passed_unquarantine_pending`) sind bewusst
+/// ausgeschlossen: sie duerfen nie gekickt werden, ihr Rollenentzug wird ueber
+/// `list_passed_unquarantine_pending` erneut versucht.
 pub async fn list_expired(
     pool: &PgPool,
     now: DateTime<Utc>,
@@ -176,10 +184,33 @@ pub async fn list_expired(
         SELECT guild_id, user_id, dm_channel_id, attempts, state, created_at, deadline_at
           FROM bot.verify_gate_pending
          WHERE deadline_at <= $1
+           AND state <> $2
          ORDER BY deadline_at ASC
         "#,
     )
     .bind(now)
+    .bind(STATE_PASSED_UNQUARANTINE_PENDING)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Alle bestandenen, aber noch quarantaenierten Eintraege
+/// (`passed_unquarantine_pending`), unabhaengig von der Frist. Fuer den
+/// `remove_role`-Retry im Sweep: der Nutzer hat bestanden, nur der Rollenentzug
+/// steht noch aus.
+pub async fn list_passed_unquarantine_pending(
+    pool: &PgPool,
+) -> Result<Vec<PendingVerify>, CentralDbError> {
+    let rows = sqlx::query_as::<_, PendingVerify>(
+        r#"
+        SELECT guild_id, user_id, dm_channel_id, attempts, state, created_at, deadline_at
+          FROM bot.verify_gate_pending
+         WHERE state = $1
+         ORDER BY created_at ASC
+        "#,
+    )
+    .bind(STATE_PASSED_UNQUARANTINE_PENDING)
     .fetch_all(pool)
     .await?;
     Ok(rows)

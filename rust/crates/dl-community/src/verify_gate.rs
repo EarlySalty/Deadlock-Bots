@@ -24,6 +24,7 @@ use dl_ai::{GenerateRequest, TextGenerator};
 use dl_central_db::verify_gate as store;
 use dl_central_db::verify_gate::STATE_AWAITING_ANSWER;
 use dl_central_db::verify_gate::STATE_AWAITING_START;
+use dl_central_db::verify_gate::STATE_PASSED_UNQUARANTINE_PENDING;
 use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, MemberEvent,
     MessageEvent,
@@ -584,19 +585,19 @@ impl VerifyGate {
         }
     }
 
-    async fn pass_member(&self, user_id: u64) {
-        // Freischalten erst NACH erfolgreichem Entfernen der Quarantaene-Rolle.
-        // Schlaegt das Setup oder remove_role fehl, bleibt pending erhalten,
-        // damit der naechste Antwort- oder Sweep-Durchlauf es erneut versucht;
-        // sonst saehe der Nutzer keine Kanaele, glaubte aber, frei zu sein.
-        // Die Port-Implementierung meldet MemberNotFound als Erfolg (Nutzer ist
-        // ohnehin weg), sodass Ok hier durchgehend "entquarantaeniert" bedeutet.
+    /// Versucht, die Quarantaene-Rolle zu entfernen und den Nutzer freizuschalten.
+    /// Erfolg (inklusive MemberNotFound, das die Port-Implementierung als Ok
+    /// meldet): Freischalt-DM + pending geloescht, liefert `true`. Kein
+    /// Rollen-Setup oder ein sonstiger `remove_role`-Fehler: liefert `false`,
+    /// ohne pending anzufassen, ohne Freischalt-DM und ohne Kick. Der Aufrufer
+    /// entscheidet, wie der offene Rollenentzug vermerkt wird.
+    async fn try_unquarantine(&self, user_id: u64) -> bool {
         let Some(role_id) = self.ensure_role().await else {
             tracing::error!(
                 user_id,
-                "Verify-Gate: kein Rollen-Setup, bleibt in Quarantaene, pending gehalten"
+                "Verify-Gate: kein Rollen-Setup, Rollenentzug bleibt offen"
             );
-            return;
+            return false;
         };
         if let Err(err) = self
             .port
@@ -611,9 +612,9 @@ impl VerifyGate {
             tracing::error!(
                 %err,
                 user_id,
-                "Verify-Gate: Quarantaene-Rolle nicht entfernt, pending gehalten fuer erneuten Versuch"
+                "Verify-Gate: Quarantaene-Rolle nicht entfernt, Rollenentzug bleibt offen"
             );
-            return;
+            return false;
         }
         match self.port.send_dm(user_id, text_dm_body(PASS_TEXT)).await {
             DmOutcome::Sent { .. } => {}
@@ -625,6 +626,32 @@ impl VerifyGate {
         }
         if let Err(err) = store::delete_pending(&self.pool, self.guild(), user_id as i64).await {
             tracing::error!(%err, user_id, "Verify-Gate: pending nach Bestehen nicht geloescht");
+        }
+        true
+    }
+
+    async fn pass_member(&self, user_id: u64) {
+        // Freischalten erst NACH erfolgreichem Entfernen der Quarantaene-Rolle.
+        // Schlaegt das Setup oder remove_role fehl, wird der pending-Eintrag als
+        // "bestanden, Rollenentzug offen" markiert. So sieht der Nutzer zwar noch
+        // keine Kanaele, wird aber vom Frist-Sweep NICHT gekickt (er hat ja
+        // bestanden); stattdessen faehrt der Sweep den remove_role-Retry.
+        if self.try_unquarantine(user_id).await {
+            return;
+        }
+        if let Err(err) = store::set_state(
+            &self.pool,
+            self.guild(),
+            user_id as i64,
+            STATE_PASSED_UNQUARANTINE_PENDING,
+        )
+        .await
+        {
+            tracing::error!(
+                %err,
+                user_id,
+                "Verify-Gate: Zustand passed_unquarantine_pending nicht gesetzt, pending bleibt unveraendert gehalten"
+            );
         }
     }
 
@@ -649,9 +676,34 @@ impl VerifyGate {
         }
     }
 
-    /// Frist-Kick: alle abgelaufenen offenen Zustaende kicken.
+    /// Frist-Sweep. Zwei Zweige, streng getrennt:
+    /// 1. Bestandene, aber noch quarantaenierte Eintraege
+    ///    (`passed_unquarantine_pending`): remove_role erneut versuchen, NIE
+    ///    kicken. Erfolg -> Freischalt-DM + delete_pending; erneuter Fehler ->
+    ///    Eintrag halten (weiter kein Kick).
+    /// 2. Echte Fristablaeufe (awaiting_start/awaiting_answer): kicken. Diese
+    ///    Liste schliesst den passed-Zustand per SQL bereits aus.
     pub async fn run_deadline_sweep(&self) {
         let now = Utc::now();
+
+        // Zweig 1: bestanden, Rollenentzug offen -> Retry statt Kick.
+        match store::list_passed_unquarantine_pending(&self.pool).await {
+            Ok(passed) => {
+                for pending in passed {
+                    if pending.guild_id != self.guild() {
+                        continue;
+                    }
+                    // try_unquarantine haelt bei erneutem Fehler den Eintrag,
+                    // ohne zu kicken; bei Erfolg loescht es pending selbst.
+                    self.try_unquarantine(pending.user_id as u64).await;
+                }
+            }
+            Err(err) => {
+                tracing::error!(%err, "Verify-Gate: list_passed_unquarantine_pending fehlgeschlagen");
+            }
+        }
+
+        // Zweig 2: echte Fristablaeufe -> Kick.
         let expired = match store::list_expired(&self.pool, now).await {
             Ok(expired) => expired,
             Err(err) => {
@@ -921,6 +973,7 @@ mod tests {
     mod flow {
         use super::*;
         use dl_central_db::testing::test_pool;
+        use std::sync::atomic::AtomicBool;
         use std::sync::Mutex;
 
         #[derive(Default)]
@@ -934,8 +987,9 @@ mod tests {
         struct MockPort {
             role_id: u64,
             dm: DmOutcome,
-            /// Laesst remove_role fehlschlagen (kein MemberNotFound).
-            remove_fail: bool,
+            /// Laesst remove_role fehlschlagen (kein MemberNotFound). Zur Laufzeit
+            /// umschaltbar, damit ein Test den transienten Fehler heilen kann.
+            remove_fail: AtomicBool,
             rec: Mutex<Recorder>,
         }
 
@@ -944,7 +998,7 @@ mod tests {
                 Arc::new(Self {
                     role_id: 999,
                     dm,
-                    remove_fail: false,
+                    remove_fail: AtomicBool::new(false),
                     rec: Mutex::new(Recorder::default()),
                 })
             }
@@ -953,9 +1007,14 @@ mod tests {
                 Arc::new(Self {
                     role_id: 999,
                     dm,
-                    remove_fail: true,
+                    remove_fail: AtomicBool::new(true),
                     rec: Mutex::new(Recorder::default()),
                 })
+            }
+
+            /// Heilt oder setzt den transienten remove_role-Fehler.
+            fn set_remove_fail(&self, fail: bool) {
+                self.remove_fail.store(fail, Ordering::SeqCst);
             }
         }
 
@@ -985,7 +1044,7 @@ mod tests {
                 _r: u64,
                 _reason: &str,
             ) -> Result<(), String> {
-                if self.remove_fail {
+                if self.remove_fail.load(Ordering::SeqCst) {
                     return Err("remove_role-Fehler (Test)".to_string());
                 }
                 self.rec.lock().unwrap().removed.push(user_id);
@@ -1120,11 +1179,72 @@ mod tests {
                 .await;
 
             // Kein "entquarantaeniert" verbucht, pending bleibt fuer den naechsten
-            // Durchlauf erhalten, kein Kick.
+            // Durchlauf erhalten, kein Kick, und der Zustand ist "bestanden,
+            // Rollenentzug offen".
             assert!(port.rec.lock().unwrap().removed.is_empty());
-            let pending = store::get_pending(&db, 42, 410).await.unwrap();
-            assert!(pending.is_some(), "pending muss bei remove_role-Fehler bleiben");
+            let pending = store::get_pending(&db, 42, 410)
+                .await
+                .unwrap()
+                .expect("pending muss bei remove_role-Fehler bleiben");
+            assert_eq!(pending.state, STATE_PASSED_UNQUARANTINE_PENDING);
             assert!(!store::was_kicked(&db, 42, 410).await.unwrap());
+        }
+
+        #[tokio::test]
+        #[ignore = "requires CENTRAL_TEST_DSN"]
+        async fn sweep_retries_passed_pending_and_never_kicks() {
+            let db = test_pool().await.expect("test pool");
+            // remove_role schlaegt zunaechst fehl -> der bestandene Nutzer landet
+            // im Zustand passed_unquarantine_pending statt frei zu werden.
+            let port = MockPort::with_remove_fail(DmOutcome::Sent {
+                channel_id: 7,
+                message_id: 8,
+            });
+            let gate = VerifyGate::new(
+                (*db).clone(),
+                port.clone(),
+                Some(judge(Some("{\"hero\": true, \"deutsch\": true}"))),
+                config(),
+            );
+            let now = Utc::now().timestamp();
+            gate.handle_join(42, 420, false, now - 86_400, &young_join_meta())
+                .await;
+            gate.handle_verify_start(420).await;
+            gate.handle_answer(420, "der grosse Roboter mit der Bombe")
+                .await;
+
+            // Vorbedingung: bestanden, aber Rollenentzug offen, kein Kick.
+            let pending = store::get_pending(&db, 42, 420)
+                .await
+                .unwrap()
+                .expect("pending muss bestehen");
+            assert_eq!(pending.state, STATE_PASSED_UNQUARANTINE_PENDING);
+            assert!(port.rec.lock().unwrap().kicked.is_empty());
+
+            // Frist ablaufen lassen: genau der Fall, der zuvor zum Fehlkick fuehrte.
+            sqlx::query(
+                "UPDATE bot.verify_gate_pending SET deadline_at = $3 WHERE guild_id = $1 AND user_id = $2",
+            )
+            .bind(42_i64)
+            .bind(420_i64)
+            .bind(Utc::now() - Duration::minutes(5))
+            .execute(&*db)
+            .await
+            .unwrap();
+
+            // Transienten remove_role-Fehler heilen und den Sweep fahren.
+            port.set_remove_fail(false);
+            gate.run_deadline_sweep().await;
+
+            // Beweis: KEIN Kick trotz abgelaufener Frist, stattdessen erfolgreicher
+            // remove_role-Retry, Freischalt-DM und delete_pending.
+            {
+                let rec = port.rec.lock().unwrap();
+                assert!(rec.kicked.is_empty(), "bestandener Nutzer darf nie gekickt werden");
+                assert_eq!(rec.removed, vec![420], "remove_role-Retry im Sweep");
+            }
+            assert!(store::get_pending(&db, 42, 420).await.unwrap().is_none());
+            assert!(!store::was_kicked(&db, 42, 420).await.unwrap());
         }
 
         #[tokio::test]
