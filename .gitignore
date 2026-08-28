@@ -82,6 +82,7 @@ Gemini.ps1
 !scripts/export_infisical_env.py
 !scripts/run_brain_feeder.sh
 !scripts/run_verbinder.sh
+!scripts/run_dl_insights_sync.sh
 /service/pg_twitch/
 /.github/tmp
 /erinnerungen

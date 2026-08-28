@@ -391,11 +391,14 @@ async fn connect_browser() -> Result<Ws> {
             tracing::warn!(error = %err, "Inspect-Tab öffnen fehlgeschlagen");
         }
     }
-    match handshake_with_keys(&endpoint, &["Return"]).await {
+    match handshake_with_keys(&endpoint, crate::allow::ALLOW_CONFIRM_KEYS).await {
         Ok(ws) => Ok(ws),
         Err(first) => {
-            tracing::info!(error = %first, "erster Allow-Versuch, jetzt Tab+Return");
-            handshake_with_keys(&endpoint, &["Tab", "Return"]).await
+            tracing::info!(
+                error = %first,
+                "erster Allow-Versuch, nochmal Tab dann Return"
+            );
+            handshake_with_keys(&endpoint, crate::allow::ALLOW_CONFIRM_KEYS).await
         }
     }
 }
@@ -404,7 +407,7 @@ async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     let request = ws_request(endpoint)?;
     let keys = keys.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let click = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
         let clicked = tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
             crate::allow::confirm_allow(&refs)
