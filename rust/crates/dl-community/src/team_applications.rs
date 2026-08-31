@@ -645,7 +645,7 @@ impl TeamApplications {
                     }
                     Err(check_error) => {
                         tracing::error!(%check_error, id, "Finalisierungsstatus der Team-Bewerbung ist unklar");
-                        return safe_reply("Deine Bewerbung ist im internen Mod-Bereich sichtbar, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
+                        return self.compensate_published_message(id, message_id).await;
                     }
                 }
             }
