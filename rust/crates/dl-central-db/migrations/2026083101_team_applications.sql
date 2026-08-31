@@ -8,10 +8,13 @@ CREATE TABLE IF NOT EXISTS community.team_applications (
     kind TEXT NOT NULL CHECK (kind IN ('moderation', 'coach', 'caster', 'turnier', 'coder', 'sonstiges')),
     answers JSONB NOT NULL CHECK (jsonb_typeof(answers) = 'object'),
     status TEXT NOT NULL DEFAULT 'publishing' CHECK (status IN ('publishing', 'open', 'review', 'question', 'accepted', 'rejected')),
+    publication_started_at TIMESTAMPTZ,
+    publication_last_attempt_at TIMESTAMPTZ,
     moderator_message_id BIGINT CHECK (moderator_message_id > 0),
     reviewer_user_id BIGINT CHECK (reviewer_user_id > 0),
     status_note TEXT,
     status_version INTEGER NOT NULL DEFAULT 0 CHECK (status_version >= 0),
+    status_dm_claimed_at TIMESTAMPTZ,
     status_dm_sent_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
