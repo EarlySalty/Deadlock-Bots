@@ -9,9 +9,9 @@
 //! vom selben tokio::select! in main.rs getragen.
 //!
 //! Env (alle optional):
-//!   MCP_CONNECTOR_HOST    default 127.0.0.1 (nicht öffentlich binden!)
 //!   MCP_CONNECTOR_PORT    default 8890
-//!   MCP_CONNECTOR_TOKEN   wenn gesetzt: Authorization: Bearer <t> ODER ?token=<t>
+//!   MCP_CONNECTOR_TOKEN   optionaler Override für Authorization: Bearer <t>
+//!   TWITCH_INTERNAL_API_TOKEN  vorhandener interner Token als Pflicht-Fallback
 //!   MCP_DEFAULT_GUILD_ID  default: einzige Guild des Bots
 //!   MCP_EXPORT_DIR        default data/mcp_exports (relativ zum WorkingDirectory)
 
@@ -19,7 +19,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -27,6 +27,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const DISCORD_API: &str = "https://discord.com/api/v10";
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -38,7 +39,7 @@ const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"]
 pub struct McpState {
     http: reqwest::Client,
     bot_token: String,
-    auth_token: Option<String>,
+    auth_token: String,
     default_guild: Option<String>,
     export_dir: PathBuf,
 }
@@ -52,10 +53,19 @@ impl McpState {
             .timeout(Duration::from_secs(60))
             .build()
             .context("MCP: reqwest-Client")?;
+        let auth_token = lookup("MCP_CONNECTOR_TOKEN")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| lookup("TWITCH_INTERNAL_API_TOKEN"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .context(
+                "MCP: interner Auth-Token fehlt \
+                 (MCP_CONNECTOR_TOKEN/TWITCH_INTERNAL_API_TOKEN)",
+            )?;
         Ok(Self {
             http,
             bot_token,
-            auth_token: lookup("MCP_CONNECTOR_TOKEN").filter(|s| !s.trim().is_empty()),
+            auth_token,
             default_guild: lookup("MCP_DEFAULT_GUILD_ID").filter(|s| !s.trim().is_empty()),
             export_dir: lookup("MCP_EXPORT_DIR")
                 .map(PathBuf::from)
@@ -67,9 +77,8 @@ impl McpState {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let host = lookup("MCP_CONNECTOR_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
         let port = lookup("MCP_CONNECTOR_PORT").unwrap_or_else(|| "8890".to_string());
-        format!("{host}:{port}")
+        format!("127.0.0.1:{port}")
     }
 }
 
@@ -91,32 +100,23 @@ fn json_response(status: StatusCode, body: Value) -> Response {
         .into_response()
 }
 
-fn auth_ok(st: &McpState, headers: &HeaderMap, query: &HashMap<String, String>) -> bool {
-    let Some(expected) = &st.auth_token else {
-        return true;
-    };
-    if let Some(v) = headers
+fn auth_ok(st: &McpState, headers: &HeaderMap) -> bool {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-    {
-        if let Some(tok) = v.strip_prefix("Bearer ") {
-            if constant_time_eq(tok.trim(), expected) {
-                return true;
-            }
-        }
-    }
-    query
-        .get("token")
-        .map(|t| constant_time_eq(t, expected))
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| constant_time_eq(token.trim(), &st.auth_token))
         .unwrap_or(false)
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    let left = Sha256::digest(a.as_bytes());
+    let right = Sha256::digest(b.as_bytes());
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (left, right)| acc | (left ^ right))
+        == 0
 }
 
 async fn mcp_get() -> Response {
@@ -127,13 +127,8 @@ async fn mcp_get() -> Response {
     )
 }
 
-async fn mcp_post(
-    State(st): State<Arc<McpState>>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    if !auth_ok(&st, &headers, &query) {
+async fn mcp_post(State(st): State<Arc<McpState>>, headers: HeaderMap, body: String) -> Response {
+    if !auth_ok(&st, &headers) {
         return json_response(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
     }
     let parsed: Value = match serde_json::from_str(&body) {
@@ -1142,4 +1137,98 @@ async fn tool_api_call(st: &McpState, args: &Value) -> Result<Value> {
     } else {
         res
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup<'a>(
+        values: &'a HashMap<&'static str, &'static str>,
+    ) -> impl Fn(&str) -> Option<String> + 'a {
+        |key| values.get(key).map(|value| (*value).to_string())
+    }
+
+    #[test]
+    fn mcp_state_ist_ohne_internen_token_fail_closed() {
+        let values = HashMap::new();
+        assert!(McpState::from_env("bot-token".into(), lookup(&values)).is_err());
+    }
+
+    #[test]
+    fn mcp_state_nutzt_vorhandenen_twitch_internen_token_als_fallback() {
+        let values = HashMap::from([("TWITCH_INTERNAL_API_TOKEN", "shared-token")]);
+        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        assert_eq!(state.auth_token, "shared-token");
+    }
+
+    #[test]
+    fn expliziter_mcp_token_hat_vorrang_und_leerraum_faellt_zurueck() {
+        let values = HashMap::from([
+            ("MCP_CONNECTOR_TOKEN", " explicit "),
+            ("TWITCH_INTERNAL_API_TOKEN", "shared"),
+        ]);
+        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        assert_eq!(state.auth_token, "explicit");
+
+        let values = HashMap::from([
+            ("MCP_CONNECTOR_TOKEN", "   "),
+            ("TWITCH_INTERNAL_API_TOKEN", " shared "),
+        ]);
+        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        assert_eq!(state.auth_token, "shared");
+    }
+
+    #[test]
+    fn mcp_auth_akzeptiert_nur_bearer_header_nicht_query_token() {
+        let values = HashMap::from([("MCP_CONNECTOR_TOKEN", "expected")]);
+        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer expected".parse().unwrap());
+        assert!(auth_ok(&state, &headers));
+
+        assert!(!auth_ok(&state, &HeaderMap::new()));
+    }
+
+    #[test]
+    fn mcp_auth_lehnt_falsche_token_unabhaengig_von_der_laenge_ab() {
+        let values = HashMap::from([("MCP_CONNECTOR_TOKEN", "expected")]);
+        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        for token in ["x", "wrongbut", "much-longer-than-expected"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            assert!(!auth_ok(&state, &headers));
+        }
+    }
+
+    #[test]
+    fn mcp_bind_bleibt_auch_bei_fremder_host_config_auf_loopback() {
+        let values = HashMap::from([
+            ("MCP_CONNECTOR_HOST", "0.0.0.0"),
+            ("MCP_CONNECTOR_PORT", "8891"),
+        ]);
+        assert_eq!(McpState::bind_addr(lookup(&values)), "127.0.0.1:8891");
+    }
+
+    #[tokio::test]
+    async fn mcp_post_verlangt_bearer_vor_dem_json_parser() {
+        let values = HashMap::from([("MCP_CONNECTOR_TOKEN", "expected")]);
+        let state = Arc::new(McpState::from_env("bot-token".into(), lookup(&values)).unwrap());
+
+        let response = mcp_post(State(state.clone()), HeaderMap::new(), "kein json".into()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer expected".parse().unwrap());
+        let response = mcp_post(
+            State(state),
+            headers,
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.into(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
