@@ -2040,6 +2040,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "status_dm_claimed_at",
             "status_dm_dispatch_started_at",
             "status_dm_sent_at",
+            "status_dm_audit_claimed_at",
             "status_dm_audited_at",
             "created_at",
             "updated_at"

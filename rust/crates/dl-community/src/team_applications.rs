@@ -533,13 +533,21 @@ impl TeamApplications {
         }
 
         let rows = match sqlx::query(
-            r#"SELECT id, status_version
-                 FROM community.team_applications
-                WHERE status_dm_sent_at IS NULL
-                  AND status_dm_dispatch_started_at < now() - interval '5 minutes'
-                  AND status_dm_audited_at IS NULL
-                ORDER BY status_dm_dispatch_started_at
-                LIMIT 25"#,
+            r#"WITH candidates AS (
+                   SELECT id
+                     FROM community.team_applications
+                    WHERE status_dm_sent_at IS NULL
+                      AND status_dm_dispatch_started_at < now() - interval '5 minutes'
+                      AND status_dm_audit_claimed_at IS NULL
+                    ORDER BY status_dm_dispatch_started_at
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 25
+               )
+               UPDATE community.team_applications AS application
+                  SET status_dm_audit_claimed_at=now(), updated_at=now()
+                 FROM candidates
+                WHERE application.id=candidates.id
+               RETURNING application.id, application.status_version"#,
         )
         .fetch_all(&self.pool)
         .await
@@ -572,7 +580,8 @@ impl TeamApplications {
                       SET status_dm_audited_at=now(), updated_at=now()
                     WHERE id=$1 AND status_version=$2
                       AND status_dm_sent_at IS NULL
-                      AND status_dm_dispatch_started_at IS NOT NULL"#,
+                      AND status_dm_dispatch_started_at IS NOT NULL
+                      AND status_dm_audit_claimed_at IS NOT NULL"#,
             )
             .bind(id)
             .bind(status_version)
@@ -941,13 +950,18 @@ impl TeamApplications {
             ApplicationStatus::Open,
             None,
         );
-        match self
-            .port
-            .edit_moderator_application(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, message_id, post.body)
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.port.edit_moderator_application(
+                TEAM_APPLICATION_NOTIFY_CHANNEL_ID,
+                message_id,
+                post.body,
+            ),
+        )
+        .await
         {
-            Ok(()) => {}
-            Err(ModeratorEditError::NotFound) => {
+            Ok(Ok(())) => {}
+            Ok(Err(ModeratorEditError::NotFound)) => {
                 let reset = sqlx::query(
                     r#"UPDATE community.team_applications
                           SET moderator_message_id=NULL,
@@ -976,10 +990,19 @@ impl TeamApplications {
                 }
                 return Err(safe_reply("Der gelöschte Bewerbungsbeitrag wird automatisch neu angelegt. Bitte reiche deine Bewerbung nicht noch einmal ein."));
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::warn!(%error, id, message_id, "Gespeicherter Team-Bewerbungsplatzhalter konnte noch nicht befüllt werden");
                 let _ = tx.rollback().await;
                 return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch an das Moderationsteam zugestellt. Bitte reiche sie nicht noch einmal ein."));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    id,
+                    message_id,
+                    "Discord-Edit der Team-Bewerbung hat das Zeitlimit überschritten"
+                );
+                let _ = tx.rollback().await;
+                return Err(safe_reply("Discord antwortet gerade zu langsam. Deine Bewerbung bleibt sicher gespeichert und wird automatisch fertiggestellt."));
             }
         }
 
@@ -1183,6 +1206,11 @@ impl TeamApplications {
                        THEN status_dm_dispatch_started_at
                        ELSE NULL
                    END,
+                   status_dm_audit_claimed_at=CASE
+                       WHEN status=$1 AND status_note IS NOT DISTINCT FROM $3
+                       THEN status_dm_audit_claimed_at
+                       ELSE NULL
+                   END,
                    status_dm_audited_at=CASE
                        WHEN status=$1 AND status_note IS NOT DISTINCT FROM $3
                        THEN status_dm_audited_at
@@ -1198,7 +1226,8 @@ impl TeamApplications {
                RETURNING applicant_user_id, applicant_name, kind, answers,
                          moderator_message_id, status_dm_claimed_at,
                          status_dm_dispatch_started_at, status_dm_sent_at,
-                         status_dm_audited_at, status_version"#,
+                         status_dm_audit_claimed_at, status_dm_audited_at,
+                         status_version"#,
         )
         .bind(target.slug())
         .bind(reviewer_user_id)

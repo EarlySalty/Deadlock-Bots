@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS community.team_applications (
     status_dm_claimed_at TIMESTAMPTZ,
     status_dm_dispatch_started_at TIMESTAMPTZ,
     status_dm_sent_at TIMESTAMPTZ,
+    status_dm_audit_claimed_at TIMESTAMPTZ,
     status_dm_audited_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
