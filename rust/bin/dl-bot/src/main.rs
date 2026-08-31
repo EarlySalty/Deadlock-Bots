@@ -1049,7 +1049,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     coaching_requests.ensure_panel().await;
 
     // Team-Bewerbungen: öffentliches Components-V2-Panel, Modal-Aufnahme und
-    // interne Forumsposts. Der Streamer-Weg bleibt ein reiner Website-Link.
+    // interne Beiträge in moderator-only. Der Streamer-Weg bleibt ein Website-Link.
     let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)

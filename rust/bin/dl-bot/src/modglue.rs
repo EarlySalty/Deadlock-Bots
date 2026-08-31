@@ -16,7 +16,7 @@ use serenity::all::{
     ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, PermissionOverwriteType,
     Permissions, ReactionType, RoleId, UserId,
 };
-use serenity::builder::{EditThread, GetMessages};
+use serenity::builder::GetMessages;
 use serenity::http::HttpError;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -2992,18 +2992,6 @@ pub struct TeamApplicationGlue {
 
 #[async_trait::async_trait]
 impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlue {
-    async fn resolve_channel(&self, guild_id: u64, name: &str) -> Result<u64, String> {
-        self.adapter
-            .http
-            .get_channels(GuildId::new(guild_id))
-            .await
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|channel| channel.name == name)
-            .map(|channel| channel.id.get())
-            .ok_or_else(|| format!("Discord-Kanal `{name}` fehlt"))
-    }
-
     async fn post_panel(
         &self,
         channel_id: u64,
@@ -3031,36 +3019,24 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
             .map_err(|error| error.to_string())
     }
 
-    async fn create_forum_post(
+    async fn post_moderator_application(
         &self,
-        forum_id: u64,
-        post: dl_community::team_applications::ForumPost,
-    ) -> Result<(u64, u64), String> {
-        let payload = json!({
-            "name": post.title,
-            "auto_archive_duration": 10080,
-            "message": Value::Object(post.body),
-        });
-        let thread = self
-            .adapter
-            .http
-            .create_forum_post(ChannelId::new(forum_id), &payload, None)
-            .await
-            .map_err(|error| error.to_string())?;
-        // Bei Forum-Posts ist die Starter-Nachricht dieselbe Snowflake wie der Thread.
-        Ok((thread.id.get(), thread.id.get()))
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
     }
 
-    async fn edit_forum_post(
+    async fn edit_moderator_application(
         &self,
-        thread_id: u64,
+        channel_id: u64,
         message_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String> {
         self.adapter
             .http
             .edit_message(
-                ChannelId::new(thread_id),
+                ChannelId::new(channel_id),
                 MessageId::new(message_id),
                 &body,
                 Vec::new(),
@@ -3068,27 +3044,6 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-
-    async fn set_thread_archived(&self, thread_id: u64, archived: bool) -> Result<(), String> {
-        self.adapter
-            .http
-            .edit_thread(
-                ChannelId::new(thread_id),
-                &EditThread::new().archived(archived),
-                Some("Team-Bewerbungsstatus aktualisiert"),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    }
-
-    async fn post_notification(
-        &self,
-        channel_id: u64,
-        body: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<u64, String> {
-        self.adapter.send_raw_public(channel_id, &body).await
     }
 
     async fn send_dm(

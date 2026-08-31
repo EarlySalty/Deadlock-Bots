@@ -14,10 +14,8 @@ use sqlx::{PgPool, Row};
 pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const STREAMER_PARTNER_URL: &str = "https://deutsche-deadlock-community.de/streamer";
 pub const TEAM_PANEL_CHANNEL_NAME: &str = "🤝team-werden";
-pub const TEAM_APPLICATION_FORUM_NAME: &str = "📥team-bewerbungen";
 pub const TEAM_APPLICATION_NOTIFY_CHANNEL_ID: u64 = 1_315_684_135_175_716_978;
 pub const TEAM_PANEL_CHANNEL_ID: u64 = 1_544_026_617_733_710_006;
-pub const TEAM_APPLICATION_FORUM_ID: u64 = 1_544_028_012_771_545_128;
 const PANEL_KV_NS: &str = "team_applications";
 const PANEL_KV_KEY: &str = "panel_message_id";
 const PANEL_TEXT_FILE: &str = "assets/team_application_texts.toml";
@@ -332,14 +330,12 @@ pub fn staff_components(id: i64, status: ApplicationStatus) -> Value {
 }
 
 #[derive(Debug, Clone)]
-pub struct ForumPost {
-    pub title: String,
+pub struct ModeratorPost {
     pub body: Map<String, Value>,
 }
 
 #[async_trait::async_trait]
 pub trait TeamApplicationPort: Send + Sync {
-    async fn resolve_channel(&self, guild_id: u64, name: &str) -> Result<u64, String>;
     async fn post_panel(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
     async fn edit_panel(
         &self,
@@ -347,20 +343,17 @@ pub trait TeamApplicationPort: Send + Sync {
         message_id: u64,
         body: Map<String, Value>,
     ) -> Result<(), String>;
-    async fn create_forum_post(&self, forum_id: u64, post: ForumPost)
-        -> Result<(u64, u64), String>;
-    async fn edit_forum_post(
-        &self,
-        thread_id: u64,
-        message_id: u64,
-        body: Map<String, Value>,
-    ) -> Result<(), String>;
-    async fn set_thread_archived(&self, thread_id: u64, archived: bool) -> Result<(), String>;
-    async fn post_notification(
+    async fn post_moderator_application(
         &self,
         channel_id: u64,
         body: Map<String, Value>,
     ) -> Result<u64, String>;
+    async fn edit_moderator_application(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String>;
     async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String>;
 }
 
@@ -517,8 +510,7 @@ impl TeamApplications {
             tracing::warn!(%error, id, "Team-Bewerbungs-Transaktion konnte nicht bestätigt werden");
             return safe_reply("Deine Bewerbung konnte gerade nicht sicher gespeichert werden. Bitte versuche es später noch einmal.");
         }
-        let forum_id = TEAM_APPLICATION_FORUM_ID;
-        let forum = forum_post(
+        let post = moderator_post(
             id,
             interaction.user_id,
             &applicant_name,
@@ -527,43 +519,30 @@ impl TeamApplications {
             ApplicationStatus::Open,
             None,
         );
-        let (thread_id, message_id) = match self.port.create_forum_post(forum_id, forum).await {
-            Ok(ids) => ids,
+        let message_id = match self
+            .port
+            .post_moderator_application(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, post.body)
+            .await
+        {
+            Ok(id) => id,
             Err(error) => return self.fail_publication(id, error).await,
         };
-        let (Ok(thread_db_id), Ok(message_db_id)) =
-            (i64::try_from(thread_id), i64::try_from(message_id))
-        else {
+        let Ok(message_db_id) = i64::try_from(message_id) else {
             tracing::error!(
                 id,
-                thread_id,
                 message_id,
                 "Discord-Snowflake liegt außerhalb des DB-Bereichs"
             );
             return safe_reply("Deine Bewerbung wurde erstellt, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
         };
         if let Err(error) = sqlx::query(
-            "UPDATE community.team_applications SET status='open', forum_thread_id=$2, forum_message_id=$3, updated_at=now() WHERE id=$1",
+            "UPDATE community.team_applications SET status='open', moderator_message_id=$2, updated_at=now() WHERE id=$1",
         )
         .bind(id)
-        .bind(thread_db_id)
         .bind(message_db_id)
         .execute(&self.pool).await {
-            tracing::error!(%error, id, "Team-Bewerbung konnte nach Forumserstellung nicht finalisiert werden");
+            tracing::error!(%error, id, "Team-Bewerbung konnte nach Mod-Post nicht finalisiert werden");
             return safe_reply("Deine Bewerbung wurde erstellt, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
-        }
-        let jump = format!(
-            "https://discord.com/channels/{}/{thread_id}/{message_id}",
-            self.guild_id
-        );
-        let notification =
-            notification_body(interaction.user_id, &applicant_name, kind, &answers, &jump);
-        if let Err(error) = self
-            .port
-            .post_notification(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, notification)
-            .await
-        {
-            tracing::warn!(%error, id, "Team-Bewerbungs-Benachrichtigung fehlgeschlagen");
         }
         safe_reply(
             "Danke! Deine Bewerbung ist bei uns angekommen. Wir melden uns per Discord-DM bei dir.",
@@ -571,7 +550,7 @@ impl TeamApplications {
     }
 
     async fn fail_publication(&self, id: i64, error: String) -> BridgeReply {
-        tracing::warn!(%error, id, "Team-Bewerbungs-Forumspost fehlgeschlagen");
+        tracing::warn!(%error, id, "Team-Bewerbungs-Post im Mod-Chat fehlgeschlagen");
         if let Err(delete_error) = sqlx::query(
             "DELETE FROM community.team_applications WHERE id=$1 AND status='publishing'",
         )
@@ -594,10 +573,16 @@ impl TeamApplications {
         if !interaction.author_can_manage_messages {
             return safe_reply("Diese Aktion ist nur für das Moderationsteam verfügbar.");
         }
-        let (Ok(reviewer_user_id), Ok(guild_id), Ok(thread_id)) = (
+        if interaction.channel_id != TEAM_APPLICATION_NOTIFY_CHANNEL_ID {
+            return safe_reply("Statusaktionen sind nur am Bewerbungsbeitrag im Mod-Chat möglich.");
+        }
+        let Some(interaction_message_id) = interaction.message_id else {
+            return safe_reply("Der Bewerbungsbeitrag konnte nicht eindeutig zugeordnet werden.");
+        };
+        let (Ok(reviewer_user_id), Ok(guild_id), Ok(message_id)) = (
             i64::try_from(interaction.user_id),
             i64::try_from(self.guild_id),
-            i64::try_from(interaction.channel_id),
+            i64::try_from(interaction_message_id),
         ) else {
             return safe_reply("Die Discord-IDs konnten nicht sicher verarbeitet werden.");
         };
@@ -623,10 +608,10 @@ impl TeamApplications {
             r#"UPDATE community.team_applications
                SET status=$1, reviewer_user_id=$2, status_note=$3, updated_at=now()
                WHERE id=$4 AND guild_id=$5
-                 AND forum_thread_id=$6
+                 AND moderator_message_id=$6
                  AND status IN ('open', 'review', 'question')
                RETURNING applicant_user_id, applicant_name, kind, answers,
-                         forum_thread_id, forum_message_id"#,
+                         moderator_message_id"#,
         )
         .bind(target.slug())
         .bind(reviewer_user_id)
@@ -637,7 +622,7 @@ impl TeamApplications {
         })
         .bind(id)
         .bind(guild_id)
-        .bind(thread_id)
+        .bind(message_id)
         .fetch_optional(&self.pool)
         .await
         {
@@ -663,13 +648,8 @@ impl TeamApplications {
             .and_then(|value| u64::try_from(value).ok());
         let applicant_name = record.try_get::<String, _>("applicant_name").ok();
         let answers = record.try_get::<Value, _>("answers").ok();
-        let thread_id = record
-            .try_get::<Option<i64>, _>("forum_thread_id")
-            .ok()
-            .flatten()
-            .and_then(|value| u64::try_from(value).ok());
         let message_id = record
-            .try_get::<Option<i64>, _>("forum_message_id")
+            .try_get::<Option<i64>, _>("moderator_message_id")
             .ok()
             .flatten()
             .and_then(|value| u64::try_from(value).ok());
@@ -680,8 +660,8 @@ impl TeamApplications {
             return safe_reply("Der Status wurde gespeichert, aber die Anzeige ist unvollständig.");
         };
 
-        if let (Some(thread_id), Some(message_id)) = (thread_id, message_id) {
-            let post = forum_post(
+        if let Some(message_id) = message_id {
+            let post = moderator_post(
                 id,
                 applicant_user_id,
                 &applicant_name,
@@ -692,18 +672,14 @@ impl TeamApplications {
             );
             if let Err(error) = self
                 .port
-                .edit_forum_post(thread_id, message_id, post.body)
+                .edit_moderator_application(
+                    TEAM_APPLICATION_NOTIFY_CHANNEL_ID,
+                    message_id,
+                    post.body,
+                )
                 .await
             {
-                tracing::warn!(%error, id, "Team-Bewerbungs-Forumspost konnte nicht aktualisiert werden");
-            }
-            if matches!(
-                target,
-                ApplicationStatus::Accepted | ApplicationStatus::Rejected
-            ) {
-                if let Err(error) = self.port.set_thread_archived(thread_id, true).await {
-                    tracing::warn!(%error, id, "Team-Bewerbungs-Thread konnte nicht archiviert werden");
-                }
+                tracing::warn!(%error, id, "Team-Bewerbungs-Post im Mod-Chat konnte nicht aktualisiert werden");
             }
         }
 
@@ -743,7 +719,7 @@ fn safe_reply(content: &str) -> BridgeReply {
     }
 }
 
-fn forum_post(
+fn moderator_post(
     id: i64,
     user_id: u64,
     name: &str,
@@ -751,7 +727,7 @@ fn forum_post(
     answers: &Value,
     status: ApplicationStatus,
     status_note: Option<&str>,
-) -> ForumPost {
+) -> ModeratorPost {
     let sections = [
         ("Motivation", "motivation"),
         ("Erfahrung und Stärken", "experience"),
@@ -788,31 +764,7 @@ fn forum_post(
         "components".into(),
         json!([{"type": 17, "accent_color": 0xC8A86B, "components": components}]),
     );
-    ForumPost {
-        title: sanitize_text(&format!("{} · {name}", kind.label()), 100),
-        body,
-    }
-}
-
-fn notification_body(
-    user_id: u64,
-    name: &str,
-    kind: ApplicationKind,
-    answers: &Value,
-    jump: &str,
-) -> Map<String, Value> {
-    let mut body = Map::new();
-    body.insert("allowed_mentions".into(), json!({"parse": []}));
-    body.insert("embeds".into(), json!([{
-        "title": "Neue Team-Bewerbung", "color": 0xC8A86B,
-        "fields": [
-            {"name": "Wer", "value": format!("{name} (`{user_id}`)"), "inline": true},
-            {"name": "Was", "value": kind.label(), "inline": true},
-            {"name": "Wie", "value": sanitize_text(answers["contribution"].as_str().unwrap_or("—"), 1024), "inline": false}
-        ],
-        "url": jump, "description": format!("[Bewerbung im internen Forum öffnen]({jump})")
-    }]));
-    body
+    ModeratorPost { body }
 }
 
 struct Handler {
@@ -985,7 +937,7 @@ mod tests {
             "contribution": "d".repeat(1000),
             "focus": "e".repeat(1000)
         });
-        let post = forum_post(
+        let post = moderator_post(
             42,
             7,
             "Testnutzer",

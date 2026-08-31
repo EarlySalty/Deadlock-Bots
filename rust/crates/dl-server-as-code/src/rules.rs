@@ -9,7 +9,6 @@ use crate::model::{
 use crate::{Result, ServerAsCodeError};
 
 const ROLE_COMMUNITY_MODERATOR: &str = "Community Moderator";
-const ROLE_MODERATOR: &str = "Moderator";
 const ROLE_DEADLOCK_PATCHNOTES: &str = "Deadlock Patchnotes";
 const ROLE_DL_RANG: &str = "DL-Rang";
 const ROLE_TICKET_TOOL: &str = "Ticket Tool";
@@ -72,7 +71,6 @@ const CHANNEL_LFG_ARCHIVE: &str = "archiv-mitspieler-suche";
 const CHANNEL_WILLKOMMEN: &str = "willkommen";
 const CHANNEL_SCRIM_PLANUNG: &str = "scrim-planung";
 const CHANNEL_TEAM_WERDEN: &str = "teil-vom-team-werden";
-const CHANNEL_TEAM_BEWERBUNGEN: &str = "team-bewerbungen";
 const TOPIC_WILLKOMMEN: &str =
     "Dein Startpunkt: Was es hier gibt, wer dahinter steckt und wie du loslegst.";
 const TOPIC_KREATIV_ECKE: &str =
@@ -80,8 +78,6 @@ const TOPIC_KREATIV_ECKE: &str =
 const TOPIC_SCRIM_PLANUNG: &str = "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread.";
 const TOPIC_TEAM_WERDEN: &str =
     "Hier kannst du dich für das Community-Team bewerben — die Formulare öffnen sich über die Buttons.";
-const TOPIC_TEAM_BEWERBUNGEN: &str =
-    "Interne Bewerbungsübersicht des Community-Teams — pro Bewerbung ein Forumspost.";
 const TOPIC_PLUS_LOUNGE: &str =
     "Der Raum für alle mit Plus. Fragen, Vorschläge, Vorabblicke auf das, was gerade gebaut wird.";
 const TOPIC_PLUS_ABSTIMMUNGEN: &str = "Hier entscheidet ihr mit, was als Nächstes gebaut wird. \
@@ -939,15 +935,6 @@ fn ensure_welle3_static_channels(desired: &mut GuildModel, ctx: &mut RuleContext
             Some(TOPIC_SCRIM_PLANUNG),
         );
     }
-    if let Some(category_id) = ctx.category_id(CATEGORY_MODERATION) {
-        ensure_forum_channel(
-            desired,
-            category_id,
-            &[CHANNEL_TEAM_BEWERBUNGEN],
-            "📥team-bewerbungen",
-            Some(TOPIC_TEAM_BEWERBUNGEN),
-        );
-    }
 }
 
 fn ensure_text_channel(
@@ -992,53 +979,6 @@ fn ensure_text_channel(
             user_limit: None,
             rate_limit_per_user: None,
             default_auto_archive_duration: None,
-            status: None,
-        },
-    );
-    channel_id
-}
-
-fn ensure_forum_channel(
-    desired: &mut GuildModel,
-    parent_category_id: DiscordId,
-    aliases: &[&str],
-    desired_name: &str,
-    topic: Option<&str>,
-) -> DiscordId {
-    if let Some(channel) = desired.channels.values_mut().find(|channel| {
-        channel.kind == ChannelKind::Forum && channel_matches(&channel.name, aliases)
-    }) {
-        channel.name = desired_name.to_string();
-        channel.parent_category_id = Some(parent_category_id);
-        channel.topic = topic.map(str::to_string);
-        channel.default_auto_archive_duration = Some(1440);
-        return channel.channel_id;
-    }
-
-    let channel_id = next_synthetic_discord_id(desired);
-    let position = desired
-        .channels
-        .values()
-        .filter(|channel| channel.parent_category_id == Some(parent_category_id))
-        .map(|channel| channel.position)
-        .max()
-        .unwrap_or(0)
-        + 1;
-    desired.channels.insert(
-        channel_id,
-        crate::model::ChannelSpec {
-            guild_id: desired.guild_id,
-            channel_id,
-            name: desired_name.to_string(),
-            kind: ChannelKind::Forum,
-            topic: topic.map(str::to_string),
-            position,
-            parent_category_id: Some(parent_category_id),
-            nsfw: false,
-            bitrate: None,
-            user_limit: None,
-            rate_limit_per_user: None,
-            default_auto_archive_duration: Some(1440),
             status: None,
         },
     );
@@ -1179,34 +1119,7 @@ fn apply_moderation(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, categor
     for channel_id in child_channel_ids(desired, category_id) {
         let name = desired.channel_name(channel_id).unwrap_or_default();
         let mut overwrites = Vec::new();
-        if channel_matches(name, &[CHANNEL_TEAM_BEWERBUNGEN]) {
-            let forum_manage = allow(
-                Permissions::VIEW_CHANNEL
-                    | Permissions::READ_MESSAGE_HISTORY
-                    | Permissions::SEND_MESSAGES
-                    | Permissions::CREATE_PUBLIC_THREADS
-                    | Permissions::SEND_MESSAGES_IN_THREADS
-                    | Permissions::MANAGE_THREADS
-                    | Permissions::MANAGE_MESSAGES
-                    | Permissions::EMBED_LINKS
-                    | Permissions::ATTACH_FILES,
-            );
-            overwrites.push(everyone_overwrite(
-                desired.guild_id,
-                channel_id,
-                f_everyone_hidden_profile(),
-            ));
-            for role in [ROLE_MODERATOR, ROLE_COMMUNITY_MODERATOR] {
-                push_role_overwrite_if_present(
-                    &mut overwrites,
-                    desired.guild_id,
-                    channel_id,
-                    ctx,
-                    role,
-                    forum_manage,
-                );
-            }
-        } else if name == "bot-logs" {
+        if name == "bot-logs" {
             push_role_overwrite(
                 &mut overwrites,
                 desired.guild_id,
@@ -2702,7 +2615,6 @@ mod tests {
 
     const GUILD_ID: u64 = 1289721245281292288;
     const CHAT_CATEGORY: u64 = 200;
-    const MODERATION_CATEGORY: u64 = 201;
     const GENERAL: u64 = 201;
     const UNKNOWN_CATEGORY: u64 = 202;
     const UNKNOWN_CHANNEL: u64 = 203;
@@ -4263,10 +4175,6 @@ mod tests {
     #[test]
     fn welle3_static_channels_und_trennernamen_werden_kodiert() -> anyhow::Result<()> {
         let mut actual = documented_categories_model();
-        actual.categories.insert(
-            MODERATION_CATEGORY,
-            category(MODERATION_CATEGORY, "Moderation"),
-        );
         actual
             .roles
             .insert(COACH_ROLE, role(COACH_ROLE, ROLE_COACH, 0));
@@ -4376,28 +4284,6 @@ mod tests {
                 p1_announcement_profile().deny_bits
             ))
         );
-
-        let team_forum = derived
-            .desired
-            .channels
-            .values()
-            .find(|channel| channel.name == "📥team-bewerbungen")
-            .expect("team-bewerbungen");
-        assert_eq!(team_forum.kind, ChannelKind::Forum);
-        assert_eq!(team_forum.parent_category_id, Some(MODERATION_CATEGORY));
-        assert_eq!(team_forum.topic.as_deref(), Some(TOPIC_TEAM_BEWERBUNGEN));
-        assert_eq!(team_forum.default_auto_archive_duration, Some(1440));
-        let forum_everyone = derived
-            .desired
-            .overwrites
-            .get(&OverwriteKey {
-                channel_id: team_forum.channel_id,
-                target_kind: TargetKind::Role,
-                target_id: GUILD_ID,
-            })
-            .expect("forum @everyone overwrite");
-        assert!(Permissions::from_bits_truncate(forum_everyone.deny_bits)
-            .contains(Permissions::VIEW_CHANNEL));
 
         let scrim = derived
             .desired
