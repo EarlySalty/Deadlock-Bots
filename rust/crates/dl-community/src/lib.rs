@@ -23,4 +23,5 @@ pub mod retention;
 pub mod scrim_signup;
 pub mod tags;
 pub mod tags_ui;
+pub mod team_applications;
 pub mod voice_change_hint;

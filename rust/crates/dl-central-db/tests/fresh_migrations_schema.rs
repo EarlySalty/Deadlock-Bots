@@ -2007,11 +2007,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
               'clips',
               'content',
               'brain',
-              'server_config'
+              'server_config',
+              'community'
           )",
     )
     .await;
-    assert_eq!(schema_count, 15);
+    assert_eq!(schema_count, 16);
 
     let timescaledb_count = scalar_i64(
         &pool,
@@ -2019,6 +2020,47 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(timescaledb_count, 1);
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "community", "team_applications").await,
+        vec![
+            "id",
+            "guild_id",
+            "applicant_user_id",
+            "applicant_name",
+            "kind",
+            "answers",
+            "status",
+            "forum_thread_id",
+            "forum_message_id",
+            "reviewer_user_id",
+            "status_note",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    let team_application_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'community'
+            AND table_name = 'team_applications'
+            AND column_name IN (
+                'applicant_user_id',
+                'applicant_name',
+                'answers',
+                'reviewer_user_id',
+                'status_note'
+            )
+            AND (
+                (column_name = 'applicant_user_id' AND erasure_action = 'delete_row_on_user_delete')
+                OR
+                (column_name <> 'applicant_user_id' AND erasure_action = 'redact_on_user_delete')
+            )",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("team application privacy registry rows");
+    assert_eq!(team_application_privacy_rows, 5);
 
     assert_eq!(
         table_columns_in_schema(&pool, "scrim", "match_request_reminder_effects").await,

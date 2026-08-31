@@ -1080,15 +1080,31 @@ const USER_TABLES: &[TableSpec] = &[
         "subject_user_id",
         ColumnType::I64,
     ),
+    TableSpec::new(
+        "community_team_applications",
+        "applicant_user_id",
+        "community.team_applications",
+        "applicant_user_id",
+        ColumnType::I64,
+    ),
 ];
 
-const NULLABLE_USER_COLUMNS: &[TableSpec] = &[TableSpec::new(
-    "clip_contests",
-    "winner_user_id",
-    "clips.clip_contests",
-    "winner_user_id",
-    ColumnType::I64,
-)];
+const NULLABLE_USER_COLUMNS: &[TableSpec] = &[
+    TableSpec::new(
+        "clip_contests",
+        "winner_user_id",
+        "clips.clip_contests",
+        "winner_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "community_team_applications",
+        "reviewer_user_id",
+        "community.team_applications",
+        "reviewer_user_id",
+        ColumnType::I64,
+    ),
+];
 
 const STEAM_SIDE_TABLES: &[TableSpec] = &[
     TableSpec::new(

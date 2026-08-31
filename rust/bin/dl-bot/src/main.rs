@@ -1048,6 +1048,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::coaching_requests::register(&mut router, coaching_requests.clone());
     coaching_requests.ensure_panel().await;
 
+    // Team-Bewerbungen: öffentliches Components-V2-Panel, Modal-Aufnahme und
+    // interne Forumsposts. Der Streamer-Weg bleibt ein reiner Website-Link.
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .context("Repository-Wurzel für Team-Bewerbungstexte fehlt")?;
+    let team_applications = dl_community::team_applications::TeamApplications::new(
+        central_pool.clone(),
+        Arc::new(modglue::TeamApplicationGlue {
+            adapter: adapter.clone(),
+        }),
+        our_guild_id,
+        repository_root,
+    );
+    dl_community::team_applications::register(&mut router, team_applications.clone());
+    team_applications.ensure_panel().await;
+
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
     let faq = dl_community::faq::FaqChat::new_with_ticket_generator(
         central_pool.clone(),
