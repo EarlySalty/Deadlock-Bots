@@ -355,6 +355,27 @@ fn status_dm_nonce(id: i64, status_version: i32) -> String {
     )
 }
 
+fn status_dm_audit_nonce(id: i64, status_version: i32) -> String {
+    format!(
+        "u:{}:{}",
+        base36(id.unsigned_abs()),
+        base36(status_version.unsigned_abs().into())
+    )
+}
+
+fn status_dm_audit_body(id: i64) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("flags".into(), json!(COMPONENTS_V2_FLAG));
+    body.insert("allowed_mentions".into(), json!({"parse": []}));
+    body.insert(
+        "components".into(),
+        json!([{"type": 17, "accent_color": 0xD97706, "components": [
+            display(format!("## ⚠️ DM-Zustellung unklar\n\nBei Bewerbung #{id} konnte nach einem unterbrochenen Versand nicht sicher bestätigt werden, ob die Status-DM angekommen ist. Bitte kontaktiert den Bewerber manuell und sendet die Statusaktion nicht erneut."))
+        ]}]),
+    );
+    body
+}
+
 fn add_nonce(body: &mut Map<String, Value>, nonce: String) {
     body.insert("nonce".into(), json!(nonce));
     body.insert("enforce_nonce".into(), json!(true));
@@ -378,6 +399,21 @@ pub struct ModeratorPost {
     pub body: Map<String, Value>,
 }
 
+#[derive(Debug)]
+pub enum ModeratorEditError {
+    NotFound,
+    Other(String),
+}
+
+impl std::fmt::Display for ModeratorEditError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("Discord-Nachricht nicht gefunden"),
+            Self::Other(error) => formatter.write_str(error),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait TeamApplicationPort: Send + Sync {
     async fn post_panel(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
@@ -397,7 +433,7 @@ pub trait TeamApplicationPort: Send + Sync {
         channel_id: u64,
         message_id: u64,
         body: Map<String, Value>,
-    ) -> Result<(), String>;
+    ) -> Result<(), ModeratorEditError>;
     async fn delete_moderator_application(
         &self,
         channel_id: u64,
@@ -477,7 +513,74 @@ impl TeamApplications {
         loop {
             interval.tick().await;
             self.process_pending_publications().await;
+            self.process_status_dm_recovery().await;
             self.process_discord_erasure_queue().await;
+        }
+    }
+
+    async fn process_status_dm_recovery(&self) {
+        if let Err(error) = sqlx::query(
+            r#"UPDATE community.team_applications
+                  SET status_dm_claimed_at=NULL, updated_at=now()
+                WHERE status_dm_sent_at IS NULL
+                  AND status_dm_dispatch_started_at IS NULL
+                  AND status_dm_claimed_at < now() - interval '5 minutes'"#,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%error, "Nicht gestartete Team-Bewerbungs-DMs konnten nicht freigegeben werden");
+        }
+
+        let rows = match sqlx::query(
+            r#"SELECT id, status_version
+                 FROM community.team_applications
+                WHERE status_dm_sent_at IS NULL
+                  AND status_dm_dispatch_started_at < now() - interval '5 minutes'
+                  AND status_dm_audited_at IS NULL
+                ORDER BY status_dm_dispatch_started_at
+                LIMIT 25"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "Unklare Team-Bewerbungs-DMs konnten nicht geprüft werden");
+                return;
+            }
+        };
+        for row in rows {
+            let (Ok(id), Ok(status_version)) = (
+                row.try_get::<i64, _>("id"),
+                row.try_get::<i32, _>("status_version"),
+            ) else {
+                continue;
+            };
+            let mut body = status_dm_audit_body(id);
+            add_nonce(&mut body, status_dm_audit_nonce(id, status_version));
+            if let Err(error) = self
+                .port
+                .post_moderator_application(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, body)
+                .await
+            {
+                tracing::warn!(%error, id, status_version, "Unklare Team-Bewerbungs-DM konnte dem Mod-Team nicht gemeldet werden");
+                continue;
+            }
+            if let Err(error) = sqlx::query(
+                r#"UPDATE community.team_applications
+                      SET status_dm_audited_at=now(), updated_at=now()
+                    WHERE id=$1 AND status_version=$2
+                      AND status_dm_sent_at IS NULL
+                      AND status_dm_dispatch_started_at IS NOT NULL"#,
+            )
+            .bind(id)
+            .bind(status_version)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::warn!(%error, id, status_version, "Hinweis zur unklaren Team-Bewerbungs-DM konnte nicht bestätigt werden");
+            }
         }
     }
 
@@ -769,6 +872,66 @@ impl TeamApplications {
             }
         };
 
+        let Ok(message_db_id) = i64::try_from(message_id) else {
+            tracing::error!(
+                id,
+                message_id,
+                "Discord-Snowflake liegt außerhalb des DB-Bereichs"
+            );
+            return Err(self.compensate_published_message(id, message_id).await);
+        };
+        let Ok(applicant_db_id) = i64::try_from(applicant_user_id) else {
+            return Err(self.compensate_published_message(id, message_id).await);
+        };
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::warn!(%error, id, "Datenschutztransaktion vor Team-Bewerbungs-Edit konnte nicht gestartet werden");
+                return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch fertiggestellt. Bitte reiche sie nicht noch einmal ein."));
+            }
+        };
+        match dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, applicant_db_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                let _ = tx.rollback().await;
+                return Err(self.compensate_published_message(id, message_id).await);
+            }
+            Err(error) => {
+                tracing::warn!(%error, id, "Datenschutzstatus vor Team-Bewerbungs-Edit konnte nicht geprüft werden");
+                let _ = tx.rollback().await;
+                return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch fertiggestellt. Bitte reiche sie nicht noch einmal ein."));
+            }
+        }
+        let stored = sqlx::query_as::<_, (String, Option<i64>)>(
+            r#"SELECT status, moderator_message_id
+                 FROM community.team_applications
+                WHERE id=$1 AND applicant_user_id=$2
+                FOR UPDATE"#,
+        )
+        .bind(id)
+        .bind(applicant_db_id)
+        .fetch_optional(&mut *tx)
+        .await;
+        match stored {
+            Ok(Some((status, Some(stored_message_id))))
+                if status == "open" && stored_message_id == message_db_id =>
+            {
+                let _ = tx.commit().await;
+                return Ok(());
+            }
+            Ok(Some((status, Some(stored_message_id))))
+                if status == "publishing" && stored_message_id == message_db_id => {}
+            Ok(_) => {
+                let _ = tx.rollback().await;
+                return Err(self.compensate_published_message(id, message_id).await);
+            }
+            Err(error) => {
+                tracing::warn!(%error, id, "Gespeicherte Team-Bewerbung konnte vor Discord-Edit nicht bestätigt werden");
+                let _ = tx.rollback().await;
+                return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch fertiggestellt. Bitte reiche sie nicht noch einmal ein."));
+            }
+        }
+
         let post = moderator_post(
             id,
             applicant_user_id,
@@ -778,62 +941,72 @@ impl TeamApplications {
             ApplicationStatus::Open,
             None,
         );
-        if let Err(error) = self
+        match self
             .port
             .edit_moderator_application(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, message_id, post.body)
             .await
         {
-            tracing::warn!(%error, id, message_id, "Gespeicherter Team-Bewerbungsplatzhalter konnte noch nicht befüllt werden");
-            return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch an das Moderationsteam zugestellt. Bitte reiche sie nicht noch einmal ein."));
+            Ok(()) => {}
+            Err(ModeratorEditError::NotFound) => {
+                let reset = sqlx::query(
+                    r#"UPDATE community.team_applications
+                          SET moderator_message_id=NULL,
+                              publication_last_attempt_at=NULL,
+                              updated_at=now()
+                        WHERE id=$1 AND status='publishing'
+                          AND moderator_message_id=$2"#,
+                )
+                .bind(id)
+                .bind(message_db_id)
+                .execute(&mut *tx)
+                .await;
+                match reset {
+                    Ok(result) if result.rows_affected() == 1 => {
+                        if let Err(error) = tx.commit().await {
+                            tracing::warn!(%error, id, "Gelöschter Team-Bewerbungsplatzhalter konnte nicht zurückgesetzt werden");
+                        }
+                    }
+                    Ok(_) => {
+                        let _ = tx.rollback().await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, id, "Gelöschter Team-Bewerbungsplatzhalter konnte nicht zurückgesetzt werden");
+                        let _ = tx.rollback().await;
+                    }
+                }
+                return Err(safe_reply("Der gelöschte Bewerbungsbeitrag wird automatisch neu angelegt. Bitte reiche deine Bewerbung nicht noch einmal ein."));
+            }
+            Err(error) => {
+                tracing::warn!(%error, id, message_id, "Gespeicherter Team-Bewerbungsplatzhalter konnte noch nicht befüllt werden");
+                let _ = tx.rollback().await;
+                return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch an das Moderationsteam zugestellt. Bitte reiche sie nicht noch einmal ein."));
+            }
         }
 
-        let Ok(message_db_id) = i64::try_from(message_id) else {
-            tracing::error!(
-                id,
-                message_id,
-                "Discord-Snowflake liegt außerhalb des DB-Bereichs"
-            );
-            return Err(self.compensate_published_message(id, message_id).await);
-        };
         let finalized = sqlx::query(
             "UPDATE community.team_applications SET status='open', updated_at=now() WHERE id=$1 AND status='publishing' AND moderator_message_id=$2",
         )
         .bind(id)
         .bind(message_db_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         match finalized {
-            Ok(result) if result.rows_affected() == 1 => return Ok(()),
+            Ok(result) if result.rows_affected() == 1 => {}
             Ok(_) => {
-                tracing::warn!(
-                    id,
-                    message_id,
-                    "Team-Bewerbung wurde parallel finalisiert oder entfernt"
-                );
+                let _ = tx.rollback().await;
+                return Err(self.compensate_published_message(id, message_id).await);
             }
             Err(error) => {
                 tracing::error!(%error, id, message_id, "Team-Bewerbung konnte nach Mod-Post nicht finalisiert werden");
+                let _ = tx.rollback().await;
                 return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch fertiggestellt. Bitte reiche sie nicht noch einmal ein."));
             }
         }
-
-        let stored = sqlx::query_as::<_, (String, Option<i64>)>(
-            "SELECT status, moderator_message_id FROM community.team_applications WHERE id=$1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await;
-        if matches!(
-            stored,
-            Ok(Some((ref status, Some(stored_message_id))))
-                if status == "open" && stored_message_id == message_db_id
-        ) {
-            return Ok(());
+        if let Err(error) = tx.commit().await {
+            tracing::error!(%error, id, message_id, "Team-Bewerbungsfinalisierung konnte nicht bestätigt werden");
+            return Err(safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch fertiggestellt. Bitte reiche sie nicht noch einmal ein."));
         }
-        if let Err(error) = stored {
-            tracing::error!(%error, id, message_id, "Finalisierungsstatus der Team-Bewerbung ist unklar");
-        }
-        Err(self.compensate_published_message(id, message_id).await)
+        Ok(())
     }
 
     async fn stage_publication_message(
@@ -1005,6 +1178,16 @@ impl TeamApplications {
                        THEN status_dm_claimed_at
                        ELSE NULL
                    END,
+                   status_dm_dispatch_started_at=CASE
+                       WHEN status=$1 AND status_note IS NOT DISTINCT FROM $3
+                       THEN status_dm_dispatch_started_at
+                       ELSE NULL
+                   END,
+                   status_dm_audited_at=CASE
+                       WHEN status=$1 AND status_note IS NOT DISTINCT FROM $3
+                       THEN status_dm_audited_at
+                       ELSE NULL
+                   END,
                    updated_at=now()
                WHERE id=$4 AND guild_id=$5
                  AND moderator_message_id=$6
@@ -1014,7 +1197,8 @@ impl TeamApplications {
                  )
                RETURNING applicant_user_id, applicant_name, kind, answers,
                          moderator_message_id, status_dm_claimed_at,
-                         status_dm_sent_at, status_version"#,
+                         status_dm_dispatch_started_at, status_dm_sent_at,
+                         status_dm_audited_at, status_version"#,
         )
         .bind(target.slug())
         .bind(reviewer_user_id)
@@ -1108,7 +1292,33 @@ impl TeamApplications {
                     }
                 }
             };
-            if claimed_now {
+            let dispatch_started = if claimed_now {
+                match sqlx::query_scalar::<_, i64>(
+                    r#"UPDATE community.team_applications
+                          SET status_dm_dispatch_started_at=now(), updated_at=now()
+                        WHERE id=$1 AND status=$2 AND status_version=$3
+                          AND status_dm_claimed_at IS NOT NULL
+                          AND status_dm_dispatch_started_at IS NULL
+                      RETURNING id"#,
+                )
+                .bind(id)
+                .bind(target.slug())
+                .bind(status_version)
+                .fetch_optional(&self.pool)
+                .await
+                {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(error) => {
+                        tracing::error!(%error, id, "Start der Team-Bewerbungs-DM konnte nicht gespeichert werden");
+                        delivery_warning = Some("Der Status wurde gespeichert, aber der DM-Versand konnte nicht gestartet werden. Der Vorgang wird automatisch wieder freigegeben.");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if dispatch_started {
                 let dm_text = status_dm_text(target, kind, &note);
                 let mut dm = Map::new();
                 dm.insert("content".into(), json!(dm_text));
@@ -1119,7 +1329,7 @@ impl TeamApplications {
                     delivery_warning = Some("Der Status wurde gespeichert, aber die DM-Zustellung ist unklar. Zum Schutz vor Doppelversand wird sie nicht automatisch wiederholt; bitte kontaktiere den Bewerber manuell.");
                 } else {
                     match sqlx::query(
-                        "UPDATE community.team_applications SET status_dm_sent_at=now(), updated_at=now() WHERE id=$1 AND status=$2 AND status_version=$3 AND status_dm_claimed_at IS NOT NULL",
+                        "UPDATE community.team_applications SET status_dm_sent_at=now(), updated_at=now() WHERE id=$1 AND status=$2 AND status_version=$3 AND status_dm_dispatch_started_at IS NOT NULL",
                     )
                     .bind(id)
                     .bind(target.slug())
@@ -1454,8 +1664,10 @@ mod tests {
         let publication = publication_nonce(i64::MAX);
         let first_status = status_dm_nonce(i64::MAX, i32::MAX);
         let next_status = status_dm_nonce(i64::MAX, i32::MAX - 1);
+        let audit = status_dm_audit_nonce(i64::MAX, i32::MAX);
         assert!(publication.len() <= 25);
         assert!(first_status.len() <= 25);
+        assert!(audit.len() <= 25);
         assert_ne!(first_status, next_status);
     }
 

@@ -15,7 +15,9 @@ CREATE TABLE IF NOT EXISTS community.team_applications (
     status_note TEXT,
     status_version INTEGER NOT NULL DEFAULT 0 CHECK (status_version >= 0),
     status_dm_claimed_at TIMESTAMPTZ,
+    status_dm_dispatch_started_at TIMESTAMPTZ,
     status_dm_sent_at TIMESTAMPTZ,
+    status_dm_audited_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

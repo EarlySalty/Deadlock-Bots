@@ -3032,8 +3032,9 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
         channel_id: u64,
         message_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), String> {
-        self.adapter
+    ) -> Result<(), dl_community::team_applications::ModeratorEditError> {
+        match self
+            .adapter
             .http
             .edit_message(
                 ChannelId::new(channel_id),
@@ -3042,8 +3043,17 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
                 Vec::new(),
             )
             .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        {
+            Ok(_) => Ok(()),
+            Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+                if response.status_code.as_u16() == 404 || response.error.code == 10008 =>
+            {
+                Err(dl_community::team_applications::ModeratorEditError::NotFound)
+            }
+            Err(error) => Err(dl_community::team_applications::ModeratorEditError::Other(
+                error.to_string(),
+            )),
+        }
     }
 
     async fn delete_moderator_application(
