@@ -1158,7 +1158,8 @@ mod tests {
     #[test]
     fn mcp_state_nutzt_vorhandenen_twitch_internen_token_als_fallback() {
         let values = HashMap::from([("TWITCH_INTERNAL_API_TOKEN", "shared-token")]);
-        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        let state = McpState::from_env("bot-token".into(), lookup(&values))
+            .expect("Twitch-Fallback muss einen gültigen MCP-State erzeugen");
         assert_eq!(state.auth_token, "shared-token");
     }
 
@@ -1168,23 +1169,31 @@ mod tests {
             ("MCP_CONNECTOR_TOKEN", " explicit "),
             ("TWITCH_INTERNAL_API_TOKEN", "shared"),
         ]);
-        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        let state = McpState::from_env("bot-token".into(), lookup(&values))
+            .expect("expliziter MCP-Token muss gültig sein");
         assert_eq!(state.auth_token, "explicit");
 
         let values = HashMap::from([
             ("MCP_CONNECTOR_TOKEN", "   "),
             ("TWITCH_INTERNAL_API_TOKEN", " shared "),
         ]);
-        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        let state = McpState::from_env("bot-token".into(), lookup(&values))
+            .expect("Fallback nach leerem Override muss gültig sein");
         assert_eq!(state.auth_token, "shared");
     }
 
     #[test]
     fn mcp_auth_akzeptiert_nur_bearer_header_nicht_query_token() {
         let values = HashMap::from([("MCP_CONNECTOR_TOKEN", "expected")]);
-        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        let state = McpState::from_env("bot-token".into(), lookup(&values))
+            .expect("Test-Token muss einen gültigen MCP-State erzeugen");
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer expected".parse().unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer expected"
+                .parse()
+                .expect("statischer Authorization-Header muss gültig sein"),
+        );
         assert!(auth_ok(&state, &headers));
 
         assert!(!auth_ok(&state, &HeaderMap::new()));
@@ -1193,12 +1202,15 @@ mod tests {
     #[test]
     fn mcp_auth_lehnt_falsche_token_unabhaengig_von_der_laenge_ab() {
         let values = HashMap::from([("MCP_CONNECTOR_TOKEN", "expected")]);
-        let state = McpState::from_env("bot-token".into(), lookup(&values)).unwrap();
+        let state = McpState::from_env("bot-token".into(), lookup(&values))
+            .expect("Test-Token muss einen gültigen MCP-State erzeugen");
         for token in ["x", "wrongbut", "much-longer-than-expected"] {
             let mut headers = HeaderMap::new();
             headers.insert(
                 header::AUTHORIZATION,
-                format!("Bearer {token}").parse().unwrap(),
+                format!("Bearer {token}")
+                    .parse()
+                    .expect("Test-Token muss einen gültigen Header ergeben"),
             );
             assert!(!auth_ok(&state, &headers));
         }
@@ -1216,13 +1228,21 @@ mod tests {
     #[tokio::test]
     async fn mcp_post_verlangt_bearer_vor_dem_json_parser() {
         let values = HashMap::from([("MCP_CONNECTOR_TOKEN", "expected")]);
-        let state = Arc::new(McpState::from_env("bot-token".into(), lookup(&values)).unwrap());
+        let state = Arc::new(
+            McpState::from_env("bot-token".into(), lookup(&values))
+                .expect("Test-Token muss einen gültigen MCP-State erzeugen"),
+        );
 
         let response = mcp_post(State(state.clone()), HeaderMap::new(), "kein json".into()).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer expected".parse().unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer expected"
+                .parse()
+                .expect("statischer Authorization-Header muss gültig sein"),
+        );
         let response = mcp_post(
             State(state),
             headers,
