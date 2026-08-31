@@ -440,7 +440,7 @@ impl TeamApplications {
         let rows = match sqlx::query(
             "SELECT application_id, moderator_message_id
                FROM community.team_application_discord_erasure_queue
-              ORDER BY created_at
+              ORDER BY attempts, updated_at, created_at
               LIMIT 25",
         )
         .fetch_all(&self.pool)
@@ -611,30 +611,42 @@ impl TeamApplications {
             );
             return self.compensate_published_message(id, message_id).await;
         };
-        if let Err(error) = sqlx::query(
+        let finalized = sqlx::query(
             "UPDATE community.team_applications SET status='open', moderator_message_id=$2, updated_at=now() WHERE id=$1",
         )
         .bind(id)
         .bind(message_db_id)
-        .execute(&self.pool).await {
-            tracing::error!(%error, id, "Team-Bewerbung konnte nach Mod-Post nicht finalisiert werden");
-            let status = sqlx::query_scalar::<_, String>(
-                "SELECT status FROM community.team_applications WHERE id=$1",
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await;
-            match status {
-                Ok(Some(status)) if status == "open" => {}
-                Ok(Some(status)) if status == "publishing" => {
-                    return self.compensate_published_message(id, message_id).await;
-                }
-                Ok(_) => {
-                    return safe_reply("Deine Bewerbung konnte gerade nicht sicher gespeichert werden. Bitte versuche es später erneut.");
-                }
-                Err(check_error) => {
-                    tracing::error!(%check_error, id, "Finalisierungsstatus der Team-Bewerbung ist unklar");
-                    return safe_reply("Deine Bewerbung ist im internen Mod-Bereich sichtbar, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
+        .execute(&self.pool)
+        .await;
+        match finalized {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                tracing::warn!(
+                    id,
+                    "Team-Bewerbung wurde während der Veröffentlichung entfernt"
+                );
+                return self.compensate_published_message(id, message_id).await;
+            }
+            Err(error) => {
+                tracing::error!(%error, id, "Team-Bewerbung konnte nach Mod-Post nicht finalisiert werden");
+                let status = sqlx::query_scalar::<_, String>(
+                    "SELECT status FROM community.team_applications WHERE id=$1",
+                )
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await;
+                match status {
+                    Ok(Some(status)) if status == "open" => {}
+                    Ok(Some(status)) if status == "publishing" => {
+                        return self.compensate_published_message(id, message_id).await;
+                    }
+                    Ok(_) => {
+                        return self.compensate_published_message(id, message_id).await;
+                    }
+                    Err(check_error) => {
+                        tracing::error!(%check_error, id, "Finalisierungsstatus der Team-Bewerbung ist unklar");
+                        return safe_reply("Deine Bewerbung ist im internen Mod-Bereich sichtbar, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
+                    }
                 }
             }
         }
@@ -664,7 +676,25 @@ impl TeamApplications {
             .await
         {
             tracing::error!(%error, id, message_id, "Unvollständiger Team-Bewerbungsbeitrag konnte nicht entfernt werden");
-            return safe_reply("Deine Bewerbung ist im internen Mod-Bereich sichtbar, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
+            let Ok(queue_message_id) = i64::try_from(message_id) else {
+                return safe_reply("Deine Bewerbung ist im internen Mod-Bereich sichtbar, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
+            };
+            if let Err(queue_error) = sqlx::query(
+                "INSERT INTO community.team_application_discord_erasure_queue(
+                     application_id, moderator_message_id, updated_at
+                 ) VALUES ($1, $2, now())
+                 ON CONFLICT (application_id) DO UPDATE SET
+                     moderator_message_id=EXCLUDED.moderator_message_id,
+                     updated_at=EXCLUDED.updated_at",
+            )
+            .bind(id)
+            .bind(queue_message_id)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::error!(%queue_error, id, message_id, "Unvollständiger Team-Bewerbungsbeitrag konnte nicht zur Löschung vorgemerkt werden");
+                return safe_reply("Deine Bewerbung ist im internen Mod-Bereich sichtbar, konnte aber nicht vollständig bestätigt werden. Das Team prüft den Vorgang.");
+            }
         }
         if let Err(error) = sqlx::query(
             "DELETE FROM community.team_applications WHERE id=$1 AND status='publishing'",

@@ -3051,7 +3051,8 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
         channel_id: u64,
         message_id: u64,
     ) -> Result<(), String> {
-        self.adapter
+        match self
+            .adapter
             .http
             .delete_message(
                 ChannelId::new(channel_id),
@@ -3059,7 +3060,15 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
                 Some("DSGVO-Löschung einer Team-Bewerbung"),
             )
             .await
-            .map_err(|error| error.to_string())
+        {
+            Ok(()) => Ok(()),
+            Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+                if response.status_code.as_u16() == 404 || response.error.code == 10008 =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     async fn send_dm(
