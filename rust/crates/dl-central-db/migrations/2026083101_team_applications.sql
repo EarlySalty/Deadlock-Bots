@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS community.team_applications (
     moderator_message_id BIGINT CHECK (moderator_message_id > 0),
     reviewer_user_id BIGINT CHECK (reviewer_user_id > 0),
     status_note TEXT,
+    status_version INTEGER NOT NULL DEFAULT 0 CHECK (status_version >= 0),
     status_dm_sent_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

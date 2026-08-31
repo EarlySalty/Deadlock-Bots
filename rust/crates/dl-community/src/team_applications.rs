@@ -1,4 +1,4 @@
-//! Team-Bewerbungen über ein öffentliches Components-V2-Panel und ein internes Forum.
+//! Team-Bewerbungen über ein öffentliches Components-V2-Panel und den internen Mod-Chat.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub const TEAM_PANEL_CHANNEL_ID: u64 = 1_544_026_617_733_710_006;
 const PANEL_KV_NS: &str = "team_applications";
 const PANEL_KV_KEY: &str = "panel_message_id";
 const PANEL_TEXT_FILE: &str = "assets/team_application_texts.toml";
+const APPLICATION_ANSWER_MAX_LENGTH: usize = 650;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationKind {
@@ -115,7 +116,7 @@ impl Default for PanelText {
         Self {
             title: "🤝 Werde Teil unseres Teams".to_string(),
             intro: "Du möchtest die Deutsche Deadlock Community mitgestalten? Wähle den Bereich, der zu dir passt, und erzähl uns kurz, wie du dich einbringen möchtest. Erfahrung ist hilfreich, aber kein Muss — wichtiger sind Verlässlichkeit, ein respektvoller Umgang und Lust, gemeinsam etwas aufzubauen.".to_string(),
-            process: "Deine Bewerbung landet ausschließlich im internen Team-Forum. Wir lesen jede Bewerbung und melden uns per Discord-DM bei dir. Bitte teile keine sensiblen oder privaten Daten.".to_string(),
+            process: "Deine Bewerbung landet ausschließlich im internen Moderationsbereich. Wir lesen jede Bewerbung und melden uns per Discord-DM bei dir. Bitte teile keine sensiblen oder privaten Daten.".to_string(),
             footer: "Du findest dich in keinem Bereich wieder? Nutze „Eigene Idee“ — gute Ideen müssen nicht in eine Schublade passen.".to_string(),
         }
     }
@@ -220,7 +221,7 @@ fn modal_field(id: &str, label: &str, placeholder: &str, required: bool) -> Moda
         value: None,
         required,
         min_length: if required { 10 } else { 0 },
-        max_length: 1000,
+        max_length: APPLICATION_ANSWER_MAX_LENGTH as u16,
         paragraph: true,
     }
 }
@@ -314,6 +315,36 @@ pub fn sanitize_text(value: &str, limit: usize) -> String {
     }
     let keep = limit.saturating_sub(1);
     format!("{}…", cleaned.chars().take(keep).collect::<String>())
+}
+
+fn base36(mut value: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return "0".to_string();
+    }
+    let mut encoded = Vec::new();
+    while value > 0 {
+        encoded.push(DIGITS[(value % 36) as usize] as char);
+        value /= 36;
+    }
+    encoded.iter().rev().collect()
+}
+
+fn publication_nonce(id: i64) -> String {
+    format!("a:{}", base36(id.unsigned_abs()))
+}
+
+fn status_dm_nonce(id: i64, status_version: i32) -> String {
+    format!(
+        "d:{}:{}",
+        base36(id.unsigned_abs()),
+        base36(status_version.unsigned_abs().into())
+    )
+}
+
+fn add_nonce(body: &mut Map<String, Value>, nonce: String) {
+    body.insert("nonce".into(), json!(nonce));
+    body.insert("enforce_nonce".into(), json!(true));
 }
 
 pub fn staff_components(id: i64, status: ApplicationStatus) -> Value {
@@ -428,11 +459,96 @@ impl TeamApplications {
         }
     }
 
-    pub async fn run_discord_erasure_loop(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    pub async fn run_maintenance_loop(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
+            self.process_pending_publications().await;
             self.process_discord_erasure_queue().await;
+        }
+    }
+
+    async fn process_pending_publications(&self) {
+        let rows = match sqlx::query(
+            r#"SELECT id, applicant_user_id, applicant_name, kind, answers
+                 FROM community.team_applications
+                WHERE status='publishing'
+                ORDER BY created_at
+                LIMIT 25"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "Offene Team-Bewerbungen konnten nicht gelesen werden");
+                return;
+            }
+        };
+
+        for row in rows {
+            let (Ok(id), Some(applicant_user_id), Ok(applicant_name), Some(kind), Ok(answers)) = (
+                row.try_get::<i64, _>("id"),
+                row.try_get::<i64, _>("applicant_user_id")
+                    .ok()
+                    .and_then(|value| u64::try_from(value).ok()),
+                row.try_get::<String, _>("applicant_name"),
+                row.try_get::<String, _>("kind")
+                    .ok()
+                    .and_then(|value| ApplicationKind::from_slug(&value)),
+                row.try_get::<Value, _>("answers"),
+            ) else {
+                tracing::error!("Offene Team-Bewerbung enthält ungültige Daten");
+                continue;
+            };
+            let mut body = moderator_post(
+                id,
+                applicant_user_id,
+                &applicant_name,
+                kind,
+                &answers,
+                ApplicationStatus::Open,
+                None,
+            )
+            .body;
+            add_nonce(&mut body, publication_nonce(id));
+            let message_id = match self
+                .port
+                .post_moderator_application(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, body)
+                .await
+            {
+                Ok(message_id) => message_id,
+                Err(error) => {
+                    tracing::warn!(%error, id, "Offene Team-Bewerbung konnte noch nicht im Mod-Chat veröffentlicht werden");
+                    continue;
+                }
+            };
+            let Ok(message_db_id) = i64::try_from(message_id) else {
+                tracing::error!(
+                    id,
+                    message_id,
+                    "Discord-Snowflake liegt außerhalb des DB-Bereichs"
+                );
+                let _ = self.compensate_published_message(id, message_id).await;
+                continue;
+            };
+            match sqlx::query(
+                "UPDATE community.team_applications SET status='open', moderator_message_id=$2, updated_at=now() WHERE id=$1 AND status='publishing'",
+            )
+            .bind(id)
+            .bind(message_db_id)
+            .execute(&self.pool)
+            .await
+            {
+                Ok(result) if result.rows_affected() == 1 => {}
+                Ok(_) => {
+                    tracing::warn!(id, "Team-Bewerbung wurde während der Wiederaufnahme entfernt");
+                    let _ = self.compensate_published_message(id, message_id).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, id, "Wiederaufgenommene Team-Bewerbung konnte noch nicht finalisiert werden");
+                }
+            }
         }
     }
 
@@ -507,7 +623,7 @@ impl TeamApplications {
                     .get(key)
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
-                1000,
+                APPLICATION_ANSWER_MAX_LENGTH,
             )
         };
         let answers = json!({
@@ -586,7 +702,7 @@ impl TeamApplications {
             tracing::warn!(%error, id, "Team-Bewerbungs-Transaktion konnte nicht bestätigt werden");
             return safe_reply("Deine Bewerbung konnte gerade nicht sicher gespeichert werden. Bitte versuche es später noch einmal.");
         }
-        let post = moderator_post(
+        let mut post = moderator_post(
             id,
             interaction.user_id,
             &applicant_name,
@@ -595,6 +711,7 @@ impl TeamApplications {
             ApplicationStatus::Open,
             None,
         );
+        add_nonce(&mut post.body, publication_nonce(id));
         let message_id = match self
             .port
             .post_moderator_application(TEAM_APPLICATION_NOTIFY_CHANNEL_ID, post.body)
@@ -612,7 +729,7 @@ impl TeamApplications {
             return self.compensate_published_message(id, message_id).await;
         };
         let finalized = sqlx::query(
-            "UPDATE community.team_applications SET status='open', moderator_message_id=$2, updated_at=now() WHERE id=$1",
+            "UPDATE community.team_applications SET status='open', moderator_message_id=$2, updated_at=now() WHERE id=$1 AND status='publishing'",
         )
         .bind(id)
         .bind(message_db_id)
@@ -657,16 +774,7 @@ impl TeamApplications {
 
     async fn fail_publication(&self, id: i64, error: String) -> BridgeReply {
         tracing::warn!(%error, id, "Team-Bewerbungs-Post im Mod-Chat fehlgeschlagen");
-        if let Err(delete_error) = sqlx::query(
-            "DELETE FROM community.team_applications WHERE id=$1 AND status='publishing'",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        {
-            tracing::error!(%delete_error, id, "Fehlgeschlagene Team-Bewerbung konnte nicht bereinigt werden");
-        }
-        safe_reply("Deine Bewerbung konnte gerade nicht sicher gespeichert werden. Bitte versuche es später noch einmal.")
+        safe_reply("Deine Bewerbung ist sicher gespeichert und wird automatisch an das Moderationsteam zugestellt. Bitte reiche sie nicht noch einmal ein.")
     }
 
     async fn compensate_published_message(&self, id: i64, message_id: u64) -> BridgeReply {
@@ -759,6 +867,11 @@ impl TeamApplications {
                SET status=$1,
                    reviewer_user_id=$2,
                    status_note=$3,
+                   status_version=CASE
+                       WHEN status=$1 AND status_note IS NOT DISTINCT FROM $3
+                       THEN status_version
+                       ELSE status_version + 1
+                   END,
                    status_dm_sent_at=CASE
                        WHEN status=$1 AND status_note IS NOT DISTINCT FROM $3
                        THEN status_dm_sent_at
@@ -772,7 +885,7 @@ impl TeamApplications {
                      OR (status=$1 AND status_note IS NOT DISTINCT FROM $3)
                  )
                RETURNING applicant_user_id, applicant_name, kind, answers,
-                         moderator_message_id, status_dm_sent_at"#,
+                         moderator_message_id, status_dm_sent_at, status_version"#,
         )
         .bind(target.slug())
         .bind(reviewer_user_id)
@@ -815,6 +928,7 @@ impl TeamApplications {
             .ok()
             .flatten()
             .is_some();
+        let status_version = record.try_get::<i32, _>("status_version").unwrap_or(0);
         let (Some(kind), Some(applicant_user_id), Some(applicant_name), Some(answers)) =
             (kind, applicant_user_id, applicant_name, answers)
         else {
@@ -827,15 +941,17 @@ impl TeamApplications {
             let mut dm = Map::new();
             dm.insert("content".into(), json!(dm_text));
             dm.insert("allowed_mentions".into(), json!({"parse": []}));
+            add_nonce(&mut dm, status_dm_nonce(id, status_version));
             if let Err(error) = self.port.send_dm(applicant_user_id, dm).await {
                 tracing::warn!(%error, id, "Team-Bewerbungs-DM konnte nicht zugestellt werden");
                 return safe_reply("Der Status ist vorgemerkt, aber die DM konnte nicht zugestellt werden. Bitte prüfe die DMs des Bewerbers und versuche dieselbe Aktion erneut.");
             }
             if let Err(error) = sqlx::query(
-                "UPDATE community.team_applications SET status_dm_sent_at=now(), updated_at=now() WHERE id=$1 AND status=$2",
+                "UPDATE community.team_applications SET status_dm_sent_at=now(), updated_at=now() WHERE id=$1 AND status=$2 AND status_version=$3",
             )
             .bind(id)
             .bind(target.slug())
+            .bind(status_version)
             .execute(&self.pool)
             .await
             {
@@ -1056,7 +1172,10 @@ mod tests {
             let modal = application_modal(kind);
             assert!(!modal.fields.is_empty());
             assert!(modal.fields.len() <= 5);
-            assert!(modal.fields.iter().all(|field| field.max_length <= 1000));
+            assert!(modal
+                .fields
+                .iter()
+                .all(|field| field.max_length as usize <= APPLICATION_ANSWER_MAX_LENGTH));
         }
     }
 
@@ -1106,13 +1225,13 @@ mod tests {
 
     #[test]
     fn maximale_antworten_bleiben_in_eigenen_textanzeigen() {
-        let long = "ä".repeat(1000);
+        let long = "ä".repeat(APPLICATION_ANSWER_MAX_LENGTH);
         let answers = json!({
             "motivation": long,
-            "experience": "b".repeat(1000),
-            "availability": "c".repeat(1000),
-            "contribution": "d".repeat(1000),
-            "focus": "e".repeat(1000)
+            "experience": "b".repeat(APPLICATION_ANSWER_MAX_LENGTH),
+            "availability": "c".repeat(APPLICATION_ANSWER_MAX_LENGTH),
+            "contribution": "d".repeat(APPLICATION_ANSWER_MAX_LENGTH),
+            "focus": "e".repeat(APPLICATION_ANSWER_MAX_LENGTH)
         });
         let post = moderator_post(
             42,
@@ -1135,5 +1254,22 @@ mod tests {
         assert!(text_displays.iter().all(|component| component["content"]
             .as_str()
             .is_some_and(|content| content.chars().count() <= 4_000)));
+        let total_text_length = text_displays
+            .iter()
+            .filter_map(|component| component["content"].as_str())
+            .map(str::chars)
+            .map(Iterator::count)
+            .sum::<usize>();
+        assert!(total_text_length <= 4_000);
+    }
+
+    #[test]
+    fn discord_nonces_bleiben_eindeutig_und_unter_25_zeichen() {
+        let publication = publication_nonce(i64::MAX);
+        let first_status = status_dm_nonce(i64::MAX, i32::MAX);
+        let next_status = status_dm_nonce(i64::MAX, i32::MAX - 1);
+        assert!(publication.len() <= 25);
+        assert!(first_status.len() <= 25);
+        assert_ne!(first_status, next_status);
     }
 }

@@ -1065,7 +1065,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_community::team_applications::register(&mut router, team_applications.clone());
     team_applications.ensure_panel().await;
-    tokio::spawn(team_applications.clone().run_discord_erasure_loop());
+    tokio::spawn(team_applications.clone().run_maintenance_loop());
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
     let faq = dl_community::faq::FaqChat::new_with_ticket_generator(

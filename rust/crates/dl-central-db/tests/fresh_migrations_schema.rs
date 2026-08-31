@@ -2034,6 +2034,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "moderator_message_id",
             "reviewer_user_id",
             "status_note",
+            "status_version",
             "status_dm_sent_at",
             "created_at",
             "updated_at"
