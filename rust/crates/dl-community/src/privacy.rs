@@ -3813,6 +3813,28 @@ pub async fn delete_user_data(
         counts.insert("scrim_audit_actor_pseudonyms.actor_ref".to_string(), n);
     }
 
+    if relations.contains("community.team_applications") {
+        let queued = sqlx::query(
+            "INSERT INTO community.team_application_discord_erasure_queue(
+                 application_id, moderator_message_id, updated_at
+             )
+             SELECT id, moderator_message_id, now()
+               FROM community.team_applications
+              WHERE applicant_user_id=$1
+                AND moderator_message_id IS NOT NULL
+             ON CONFLICT (application_id) DO UPDATE SET
+                 moderator_message_id=EXCLUDED.moderator_message_id,
+                 updated_at=EXCLUDED.updated_at",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        counts.insert(
+            "community_team_applications.discord_erasure_queued".to_string(),
+            rows_to_i64(queued.rows_affected()),
+        );
+    }
+
     for &spec in USER_TABLES {
         if spec.relation == "activity.message_metadata_events" {
             let (journey_events, journey_states) =

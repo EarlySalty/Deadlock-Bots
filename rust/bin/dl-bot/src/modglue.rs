@@ -3046,6 +3046,22 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
             .map_err(|error| error.to_string())
     }
 
+    async fn delete_moderator_application(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("DSGVO-Löschung einer Team-Bewerbung"),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn send_dm(
         &self,
         user_id: u64,

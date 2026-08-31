@@ -2034,6 +2034,17 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "moderator_message_id",
             "reviewer_user_id",
             "status_note",
+            "status_dm_sent_at",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community", "team_application_discord_erasure_queue").await,
+        vec![
+            "application_id",
+            "moderator_message_id",
+            "attempts",
             "created_at",
             "updated_at"
         ]
