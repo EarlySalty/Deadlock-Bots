@@ -12,7 +12,7 @@ Environment=DISPLAY=:10
 Environment=XAUTHORITY=/home/nathanael/.Xauthority
 Environment=INSIGHTS_BRAVE_START=1
 ExecStartPre=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/wait_for_infisical.sh'
-ExecStart=/usr/bin/bash -lc '/home/naniadm/.local/bin/dl-infisical-env --profile all -- /home/naniadm/Documents/Deadlock-Bots/rust/target/release/dl-insights-sync'
+ExecStart=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/run_dl_insights_sync.sh'
 Nice=10
 
 [Install]

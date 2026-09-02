@@ -382,36 +382,40 @@ fn ws_request(endpoint: &str) -> Result<tokio_tungstenite::tungstenite::http::Re
 async fn connect_browser() -> Result<Ws> {
     let endpoint = browser_ws_endpoint()?;
     tracing::info!(%endpoint, "Brave CDP");
-    if port_from_env_or_file().and_then(json_version_ws).is_none() {
-        if let Err(err) = tokio::task::spawn_blocking(crate::allow::open_inspect_tab)
-            .await
-            .map_err(|err| anyhow!("Inspect-Tab Task: {err}"))
-            .and_then(|r| r)
-        {
-            tracing::warn!(error = %err, "Inspect-Tab öffnen fehlgeschlagen");
-        }
-    }
-    match handshake_with_keys(&endpoint, &["Return"]).await {
-        Ok(ws) => Ok(ws),
+    match handshake_with_keys(&endpoint, crate::allow::ALLOW_CONFIRM_KEYS).await {
+        Ok(ws) => return Ok(ws),
         Err(first) => {
-            tracing::info!(error = %first, "erster Allow-Versuch, jetzt Tab+Return");
-            handshake_with_keys(&endpoint, &["Tab", "Return"]).await
+            tracing::info!(
+                error = %first,
+                "Allow-Overlay nicht weg, öffne Inspect-Tab"
+            );
         }
     }
+    if let Err(err) = tokio::task::spawn_blocking(crate::allow::open_inspect_tab)
+        .await
+        .map_err(|err| anyhow!("Inspect-Tab Task: {err}"))
+        .and_then(|r| r)
+    {
+        tracing::warn!(error = %err, "Inspect-Tab öffnen fehlgeschlagen");
+    }
+    handshake_with_keys(&endpoint, crate::allow::ALLOW_CONFIRM_KEYS).await
 }
 
 async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     let request = ws_request(endpoint)?;
     let keys = keys.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let click = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let clicked = tokio::task::spawn_blocking(move || {
-            let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-            crate::allow::confirm_allow(&refs)
-        })
-        .await;
-        if let Ok(Err(err)) = clicked {
-            tracing::warn!(error = %err, "Allow-Klick fehlgeschlagen");
+        for i in 0..6u8 {
+            tokio::time::sleep(Duration::from_millis(if i == 0 { 250 } else { 500 })).await;
+            let round = keys.clone();
+            let clicked = tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = round.iter().map(String::as_str).collect();
+                crate::allow::confirm_allow(&refs)
+            })
+            .await;
+            if let Ok(Err(err)) = clicked {
+                tracing::warn!(error = %err, "Allow-Klick fehlgeschlagen");
+            }
         }
     });
     let result = tokio::time::timeout(
