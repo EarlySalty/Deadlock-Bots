@@ -4,7 +4,6 @@
 //! Tasten gehen über XTEST (ohne `--window`): Chromium ignoriert XSendEvent.
 
 use std::process::Command;
-use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -32,18 +31,20 @@ pub fn open_inspect_tab() -> Result<()> {
     let id = main_brave_window()?;
     raise_brave(&id)?;
     send_key("ctrl+t")?;
-    std::thread::sleep(Duration::from_millis(250));
+    crate::human::thread_pause(180, 420);
     send_key("ctrl+l")?;
-    std::thread::sleep(Duration::from_millis(120));
+    crate::human::thread_pause(90, 220);
+    let delay = crate::human::type_delay_ms().to_string();
     let typed = xdotool_cmd()
-        .args(["type", "--delay", "8", "--clearmodifiers", INSPECT_URL])
+        .args(["type", "--delay", &delay, "--clearmodifiers", INSPECT_URL])
         .status()
         .context("xdotool type")?;
     if !typed.success() {
         return Err(anyhow!("Inspect-URL konnte nicht eingetippt werden"));
     }
+    crate::human::thread_pause(40, 140);
     send_key("Return")?;
-    std::thread::sleep(Duration::from_millis(900));
+    crate::human::thread_pause(700, 1300);
     raise_brave(&id)?;
     tracing::info!(window = %id, "Inspect-Tab im bestehenden Fenster geöffnet");
     Ok(())
@@ -61,8 +62,8 @@ pub fn confirm_allow(keys: &[&str]) -> Result<()> {
     let id = main_brave_window()?;
     raise_brave(&id)?;
     for key in keys {
+        crate::human::thread_pause(45, 160);
         send_key(key)?;
-        std::thread::sleep(Duration::from_millis(80));
     }
     Ok(())
 }
@@ -72,7 +73,7 @@ fn raise_brave(id: &str) -> Result<()> {
     xdotool(&["windowactivate", "--sync", id])?;
     let _ = xdotool(&["windowfocus", "--sync", id]);
     let _ = xdotool(&["windowraise", id]);
-    std::thread::sleep(Duration::from_millis(150));
+    crate::human::thread_pause(90, 260);
     Ok(())
 }
 

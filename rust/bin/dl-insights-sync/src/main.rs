@@ -12,6 +12,7 @@
 
 mod allow;
 mod brave_cdp;
+mod human;
 
 use dl_dashboard::insights_sync::{archive_readme, import_csv_dir};
 

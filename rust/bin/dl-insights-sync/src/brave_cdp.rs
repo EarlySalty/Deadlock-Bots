@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -77,10 +78,12 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
         )
         .await?;
         wait_for_insights_data(&mut ws, &mut next_id, &session_id).await?;
+        crate::human::pause(480, 2100).await;
         let dump = evaluate_dump(&mut ws, &mut next_id, &session_id).await?;
         let confirm = tokio::spawn(async {
-            for _ in 0..12 {
-                tokio::time::sleep(Duration::from_millis(400)).await;
+            let n = rand::thread_rng().gen_range(8u8..=15);
+            for _ in 0..n {
+                crate::human::pause(280, 860).await;
                 let _ = tokio::task::spawn_blocking(crate::allow::confirm_download).await;
             }
         });
@@ -93,6 +96,7 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
             json: dump,
             official,
         });
+        crate::human::pause(1100, 3600).await;
     }
     let _ = call(
         &mut ws,
@@ -405,7 +409,7 @@ async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     let request = ws_request(endpoint)?;
     let keys = keys.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let click = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        crate::human::pause(160, 540).await;
         let clicked = tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
             crate::allow::confirm_allow(&refs)
@@ -591,7 +595,7 @@ async fn wait_for_insights_data(ws: &mut Ws, next_id: &mut u64, session_id: &str
             stable = 0;
             last = None;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        crate::human::pause(680, 1480).await;
     }
     Err(anyhow!(
         "Insights-Seite hat nach {INSIGHTS_LOAD_SECS}s keine Zahlen. Discord braucht oft 5-10s, Brave muss eingeloggt sein."
@@ -624,42 +628,111 @@ async fn evaluate_official_csvs(
     next_id: &mut u64,
     session_id: &str,
 ) -> Result<Vec<(String, String)>> {
-    let expr = r#"(async function(){
+    let bag = format!("k{:x}", rand::random::<u64>());
+    let install = format!(
+        r#"(function(){{
+      var bag = {bag:?};
       var files = [];
-      function captureAnchor(el) {
-        if (!el.href || String(el.href).indexOf('data:') !== 0) {
+      function captureAnchor(el) {{
+        if (!el.href || String(el.href).indexOf('data:') !== 0) {{
           return;
-        }
+        }}
         var s = String(el.href);
         var comma = s.indexOf(',');
         var raw = comma >= 0 ? s.slice(comma + 1) : s;
         var text = raw;
-        try { text = decodeURIComponent(raw); } catch (e) {}
-        files.push({ download: el.download || '', text: text });
-      }
+        try {{ text = decodeURIComponent(raw); }} catch (e) {{}}
+        files.push({{ download: el.download || '', text: text }});
+      }}
       var origCreate = document.createElement.bind(document);
-      document.createElement = function(tag) {
+      document.createElement = function(tag) {{
         var el = origCreate(tag);
-        if (String(tag).toLowerCase() === 'a') {
-          el.click = function() {
+        if (String(tag).toLowerCase() === 'a') {{
+          el.click = function() {{
             captureAnchor(el);
-          };
-          setTimeout(function(){ captureAnchor(el); }, 0);
-        }
+          }};
+          setTimeout(function(){{ captureAnchor(el); }}, 0);
+        }}
         return el;
-      };
-      var btns = Array.prototype.filter.call(document.querySelectorAll('button'), function(b){
-        return (b.innerText || '').indexOf('CSV') >= 0;
-      });
-      for (var i = 0; i < btns.length; i++) {
-        btns[i].click();
-        await new Promise(function(r){ setTimeout(r, 350); });
-      }
-      await new Promise(function(r){ setTimeout(r, 700); });
-      document.createElement = origCreate;
+      }};
+      window[bag] = files;
+      window[bag + 'c'] = origCreate;
+      return true;
+    }})()"#
+    );
+    let _ = evaluate(ws, next_id, session_id, &install).await?;
+    let count = evaluate(
+        ws,
+        next_id,
+        session_id,
+        r#"(function(){
+          var n = 0;
+          var btns = document.querySelectorAll('button');
+          for (var i = 0; i < btns.length; i++) {
+            if ((btns[i].innerText || '').indexOf('CSV') >= 0) n++;
+          }
+          return n;
+        })()"#,
+    )
+    .await
+    .ok()
+    .and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+    })
+    .unwrap_or(0);
+    let mut cursor = crate::human::start_cursor();
+    for i in 0..count {
+        let show = format!(
+            r#"(function(){{
+          var btns = [];
+          var all = document.querySelectorAll('button');
+          for (var i = 0; i < all.length; i++) {{
+            if ((all[i].innerText || '').indexOf('CSV') >= 0) btns.push(all[i]);
+          }}
+          var b = btns[{i}];
+          if (!b) return false;
+          b.scrollIntoView({{ block: 'center', behavior: 'smooth' }});
+          return true;
+        }})()"#
+        );
+        let _ = evaluate(ws, next_id, session_id, &show).await;
+        crate::human::pause(380, 980).await;
+        let measure = format!(
+            r#"(function(){{
+          var btns = [];
+          var all = document.querySelectorAll('button');
+          for (var i = 0; i < all.length; i++) {{
+            if ((all[i].innerText || '').indexOf('CSV') >= 0) btns.push(all[i]);
+          }}
+          var b = btns[{i}];
+          if (!b) return null;
+          var r = b.getBoundingClientRect();
+          return {{ x: r.x, y: r.y, w: r.width, h: r.height }};
+        }})()"#
+        );
+        let rect_v = evaluate(ws, next_id, session_id, &measure)
+            .await
+            .unwrap_or(Value::Null);
+        let Some(rect) = rect_from_value(&rect_v) else {
+            continue;
+        };
+        human_click(ws, next_id, session_id, &mut cursor, rect).await?;
+        crate::human::pause(900, 2700).await;
+    }
+    crate::human::pause(500, 1400).await;
+    let drain = format!(
+        r#"(function(){{
+      var bag = {bag:?};
+      var files = window[bag] || [];
+      var orig = window[bag + 'c'];
+      if (orig) document.createElement = orig;
+      try {{ delete window[bag]; }} catch (e) {{}}
+      try {{ delete window[bag + 'c']; }} catch (e) {{}}
       return files;
-    })()"#;
-    let value = evaluate_await(ws, next_id, session_id, expr).await?;
+    }})()"#
+    );
+    let value = evaluate(ws, next_id, session_id, &drain).await?;
     let Some(items) = value.as_array() else {
         return Ok(Vec::new());
     };
@@ -676,6 +749,95 @@ async fn evaluate_official_csvs(
         .collect())
 }
 
+fn rect_from_value(value: &Value) -> Option<crate::human::Rect> {
+    Some(crate::human::Rect {
+        x: json_f64(value, "x")?,
+        y: json_f64(value, "y")?,
+        w: json_f64(value, "w")?,
+        h: json_f64(value, "h")?,
+    })
+}
+
+fn json_f64(value: &Value, key: &str) -> Option<f64> {
+    let n = value.get(key)?;
+    n.as_f64()
+        .or_else(|| n.as_i64().map(|x| x as f64))
+        .or_else(|| n.as_u64().map(|x| x as f64))
+}
+
+async fn human_click(
+    ws: &mut Ws,
+    next_id: &mut u64,
+    session_id: &str,
+    cursor: &mut (f64, f64),
+    rect: crate::human::Rect,
+) -> Result<()> {
+    if rect.w < 4.0 || rect.h < 4.0 {
+        return Ok(());
+    }
+    let target = crate::human::aim(rect);
+    for (x, y) in crate::human::path(*cursor, target) {
+        mouse_event(ws, next_id, session_id, "mouseMoved", x, y, None).await?;
+        crate::human::pause(8, 22).await;
+    }
+    crate::human::pause(50, 140).await;
+    mouse_event(
+        ws,
+        next_id,
+        session_id,
+        "mousePressed",
+        target.0,
+        target.1,
+        Some("left"),
+    )
+    .await?;
+    crate::human::pause(52, 140).await;
+    mouse_event(
+        ws,
+        next_id,
+        session_id,
+        "mouseReleased",
+        target.0,
+        target.1,
+        Some("left"),
+    )
+    .await?;
+    *cursor = target;
+    Ok(())
+}
+
+async fn mouse_event(
+    ws: &mut Ws,
+    next_id: &mut u64,
+    session_id: &str,
+    kind: &str,
+    x: f64,
+    y: f64,
+    button: Option<&str>,
+) -> Result<Value> {
+    let mut params = json!({
+        "type": kind,
+        "x": x,
+        "y": y,
+        "pointerType": "mouse"
+    });
+    if let Some(btn) = button {
+        params["button"] = json!(btn);
+        params["clickCount"] = json!(1);
+        if kind == "mousePressed" {
+            params["buttons"] = json!(1);
+        }
+    }
+    call(
+        ws,
+        next_id,
+        "Input.dispatchMouseEvent",
+        params,
+        Some(session_id),
+    )
+    .await
+}
+
 async fn evaluate(
     ws: &mut Ws,
     next_id: &mut u64,
@@ -683,15 +845,6 @@ async fn evaluate(
     expression: &str,
 ) -> Result<Value> {
     evaluate_inner(ws, next_id, session_id, expression, false).await
-}
-
-async fn evaluate_await(
-    ws: &mut Ws,
-    next_id: &mut u64,
-    session_id: &str,
-    expression: &str,
-) -> Result<Value> {
-    evaluate_inner(ws, next_id, session_id, expression, true).await
 }
 
 async fn evaluate_inner(

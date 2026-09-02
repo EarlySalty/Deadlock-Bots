@@ -78,8 +78,9 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
   und Return. Cancel trägt den Fokusring, Return allein würde Cancel treffen.
   Welcher Tab vorher aktiv war, ist egal. Pro Seite wartet der Job, bis Charts
   echte Punkte haben, die CSV-Knöpfe da sind und die Zahlen zwei Sekunden
-  unverändert bleiben (Discord lädt oft 5-10s). Danach klickt der Job
-  die Buttons „CSV exportieren“, bestätigt die Download-Leiste und spielt
+  unverändert bleiben (Discord lädt oft 5-10s). CSV-Export geht per Mausweg
+  mit Streuung und unregelmäßigen Pausen, nicht per JS-Klickschleife. Danach
+  spielt der Job
   genau diese offiziellen Dateien ein. Ohne offizielle CSV bricht der Job ab;
   der Highcharts-Weg läuft nur noch, wenn man ihn über `INSIGHTS_BRAVE_DUMP_DIR`
   ausdrücklich anstößt, nie im regulären Lauf. Timer montags 06:15 und

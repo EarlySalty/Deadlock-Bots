@@ -15,6 +15,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }
+rand.workspace = true
 
 [lints]
 workspace = true
