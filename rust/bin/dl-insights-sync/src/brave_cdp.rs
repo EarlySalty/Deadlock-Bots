@@ -76,7 +76,7 @@ pub async fn dump_insights_pages(guild_id: i64) -> Result<Vec<BraveDump>> {
             Some(&session_id),
         )
         .await?;
-        wait_for_charts(&mut ws, &mut next_id, &session_id).await?;
+        wait_for_insights_data(&mut ws, &mut next_id, &session_id).await?;
         let dump = evaluate_dump(&mut ws, &mut next_id, &session_id).await?;
         let confirm = tokio::spawn(async {
             for _ in 0..12 {
@@ -517,23 +517,84 @@ async fn attach(ws: &mut Ws, next_id: &mut u64, target_id: &str) -> Result<Strin
         .ok_or_else(|| anyhow!("attachToTarget ohne sessionId"))
 }
 
-async fn wait_for_charts(ws: &mut Ws, next_id: &mut u64, session_id: &str) -> Result<()> {
-    for _ in 0..30 {
-        let ready = evaluate(
-            ws,
-            next_id,
-            session_id,
-            "(function(){ var hc = window._Highcharts; return !!(hc && hc.charts && hc.charts.filter(Boolean).length); })()",
-        )
-        .await
-        .unwrap_or(Value::Bool(false));
-        if ready.as_bool() == Some(true) {
-            return Ok(());
+const INSIGHTS_LOAD_SECS: u8 = 45;
+const INSIGHTS_STABLE_TICKS: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InsightsReady {
+    charts: u64,
+    points: u64,
+    csv: u64,
+}
+
+impl InsightsReady {
+    fn has_data(self) -> bool {
+        self.points > 0 && self.csv > 0
+    }
+}
+
+fn insights_ready_from_value(value: &Value) -> Option<InsightsReady> {
+    Some(InsightsReady {
+        charts: json_u64(value, "charts")?,
+        points: json_u64(value, "points")?,
+        csv: json_u64(value, "csv")?,
+    })
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    let n = value.get(key)?;
+    n.as_u64()
+        .or_else(|| n.as_i64().and_then(|x| u64::try_from(x).ok()))
+}
+
+async fn wait_for_insights_data(ws: &mut Ws, next_id: &mut u64, session_id: &str) -> Result<()> {
+    let expr = r#"(function(){
+      var hc = window._Highcharts;
+      var charts = (hc && hc.charts) ? hc.charts.filter(Boolean) : [];
+      var points = 0;
+      for (var i = 0; i < charts.length; i++) {
+        var series = charts[i].series || [];
+        for (var j = 0; j < series.length; j++) {
+          points += (series[j].points || []).length;
+        }
+      }
+      var csv = 0;
+      var btns = document.querySelectorAll('button');
+      for (var k = 0; k < btns.length; k++) {
+        if ((btns[k].innerText || '').indexOf('CSV') >= 0) csv++;
+      }
+      return { charts: charts.length, points: points, csv: csv };
+    })()"#;
+    let mut last = None;
+    let mut stable = 0u8;
+    for tick in 0..INSIGHTS_LOAD_SECS {
+        let value = evaluate(ws, next_id, session_id, expr).await.ok();
+        let snap = value.as_ref().and_then(insights_ready_from_value);
+        if let Some(now) = snap {
+            if now.has_data() && last == Some(now) {
+                stable = stable.saturating_add(1);
+                if stable >= INSIGHTS_STABLE_TICKS {
+                    tracing::info!(
+                        charts = now.charts,
+                        points = now.points,
+                        csv = now.csv,
+                        tick,
+                        "Insights-Daten geladen"
+                    );
+                    return Ok(());
+                }
+            } else {
+                stable = 0;
+            }
+            last = Some(now);
+        } else {
+            stable = 0;
+            last = None;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Err(anyhow!(
-        "Insights-Seite hat nach 30s keine Charts. Brave muss in Discord eingeloggt sein."
+        "Insights-Seite hat nach {INSIGHTS_LOAD_SECS}s keine Zahlen. Discord braucht oft 5-10s, Brave muss eingeloggt sein."
     ))
 }
 
@@ -712,7 +773,10 @@ async fn call(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_port_file_text, ws_request, ws_url_from_version_http};
+    use super::{
+        insights_ready_from_value, parse_port_file_text, ws_request, ws_url_from_version_http,
+    };
+    use serde_json::json;
 
     #[test]
     fn ws_url_aus_port_datei() {
@@ -736,5 +800,27 @@ mod tests {
             ws_url_from_version_http(raw).expect("url"),
             "ws://127.0.0.1:9333/devtools/browser/abc"
         );
+    }
+
+    #[test]
+    fn leere_charts_sind_nicht_bereit() {
+        let snap = insights_ready_from_value(&json!({"charts": 2, "points": 0, "csv": 3})).unwrap();
+        assert!(!snap.has_data());
+    }
+
+    #[test]
+    fn punkte_ohne_csv_knopf_sind_nicht_bereit() {
+        let snap =
+            insights_ready_from_value(&json!({"charts": 1, "points": 12, "csv": 0})).unwrap();
+        assert!(!snap.has_data());
+    }
+
+    #[test]
+    fn punkte_und_csv_sind_bereit() {
+        let snap =
+            insights_ready_from_value(&json!({"charts": 3, "points": 40, "csv": 4})).unwrap();
+        assert!(snap.has_data());
+        assert_eq!(snap.points, 40);
+        assert_eq!(snap.csv, 4);
     }
 }
