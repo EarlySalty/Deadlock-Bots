@@ -736,12 +736,16 @@ async fn evaluate_official_csvs(
     let Some(items) = value.as_array() else {
         return Ok(Vec::new());
     };
+    let mut seen = std::collections::HashSet::new();
     Ok(items
         .iter()
         .filter_map(|item| {
             let name = item.get("download").and_then(Value::as_str)?;
             let text = item.get("text").and_then(Value::as_str)?;
             if name.is_empty() || text.is_empty() {
+                return None;
+            }
+            if !seen.insert((name.to_string(), text.to_string())) {
                 return None;
             }
             Some((name.to_string(), text.to_string()))
