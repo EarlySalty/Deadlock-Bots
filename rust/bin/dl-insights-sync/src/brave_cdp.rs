@@ -405,17 +405,14 @@ async fn handshake_with_keys(endpoint: &str, keys: &[&str]) -> Result<Ws> {
     let request = ws_request(endpoint)?;
     let keys = keys.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let click = tokio::spawn(async move {
-        for i in 0..6u8 {
-            tokio::time::sleep(Duration::from_millis(if i == 0 { 250 } else { 500 })).await;
-            let round = keys.clone();
-            let clicked = tokio::task::spawn_blocking(move || {
-                let refs: Vec<&str> = round.iter().map(String::as_str).collect();
-                crate::allow::confirm_allow(&refs)
-            })
-            .await;
-            if let Ok(Err(err)) = clicked {
-                tracing::warn!(error = %err, "Allow-Klick fehlgeschlagen");
-            }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let clicked = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+            crate::allow::confirm_allow(&refs)
+        })
+        .await;
+        if let Ok(Err(err)) = clicked {
+            tracing::warn!(error = %err, "Allow-Klick fehlgeschlagen");
         }
     });
     let result = tokio::time::timeout(

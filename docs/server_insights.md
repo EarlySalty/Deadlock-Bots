@@ -73,9 +73,10 @@ Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
   Remote Debugging bleibt unter `brave://inspect` an. Läuft Brave nicht, startet
   der Job das Default-Profil mit `--remote-debugging-port` und
   `--remote-allow-origins=*`. Das Overlay „Allow remote debugging?“ klickt der
-  Job selbst weg: immer ein neuer Inspect-Tab im laufenden Fenster, Fenster nach
-  vorn, dann Tab und Return. Cancel trägt den Fokusring, Return allein würde
-  Cancel treffen. Welcher Tab vorher aktiv war, ist egal. Danach klickt der Job
+  Job selbst weg: zuerst Tab und Return auf dem schon offenen Overlay. Nur wenn
+  der Handshake trotzdem scheitert, kommt ein Inspect-Tab, dann noch einmal Tab
+  und Return. Cancel trägt den Fokusring, Return allein würde Cancel treffen.
+  Welcher Tab vorher aktiv war, ist egal. Danach klickt der Job
   die Buttons „CSV exportieren“, bestätigt die Download-Leiste und spielt
   genau diese offiziellen Dateien ein. Ohne offizielle CSV bricht der Job ab;
   der Highcharts-Weg läuft nur noch, wenn man ihn über `INSIGHTS_BRAVE_DUMP_DIR`
