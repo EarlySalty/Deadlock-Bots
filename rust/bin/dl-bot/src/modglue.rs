@@ -2767,6 +2767,25 @@ fn is_lfg_offtopic_channel(name: &str) -> bool {
     name.to_lowercase().contains(OFFTOPIC_NAME_SUBSTRING)
 }
 
+fn resolve_lane_label(
+    channel_id: u64,
+    name: &str,
+    category_label: &str,
+) -> dl_activity::lfg::LaneLabel {
+    use dl_activity::lfg::LaneLabel;
+    if channel_id == dl_voice::adaptive::NP_ANCHOR_CHANNEL_ID
+        || name.starts_with(dl_voice::adaptive::NP_LANE_BASE_NAME)
+    {
+        return LaneLabel::NewPlayer;
+    }
+    match category_label {
+        "Ranked" => LaneLabel::Ranked,
+        "Street Brawl" => LaneLabel::StreetBrawl,
+        "New Player" => LaneLabel::NewPlayer,
+        _ => LaneLabel::Casual,
+    }
+}
+
 fn visible_lfg_member_ids(members: &[(u64, bool)]) -> Vec<u64> {
     members
         .iter()
@@ -2851,12 +2870,7 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
             }) else {
                 continue;
             };
-            let label = match label {
-                "Ranked" => LaneLabel::Ranked,
-                "Street Brawl" => LaneLabel::StreetBrawl,
-                "New Player" => LaneLabel::NewPlayer,
-                _ => LaneLabel::Casual,
-            };
+            let label = resolve_lane_label(channel.id.get(), &channel.name, label);
             let voice_members: Vec<(u64, bool)> = guild
                 .voice_states
                 .iter()
@@ -3469,6 +3483,32 @@ mod tests {
     use std::time::Instant;
 
     use dl_brain::BrainRetriever as _;
+
+    #[test]
+    fn np_lane_in_chill_wird_als_new_player_gelabelt() {
+        use dl_activity::lfg::LaneLabel;
+
+        assert_eq!(
+            resolve_lane_label(999, "🆕Neue Spieler Lane 2", "Casual"),
+            LaneLabel::NewPlayer
+        );
+        assert_eq!(
+            resolve_lane_label(
+                dl_voice::adaptive::NP_ANCHOR_CHANNEL_ID,
+                "🆕Neue Spieler Lane",
+                "Casual"
+            ),
+            LaneLabel::NewPlayer
+        );
+        assert_eq!(
+            resolve_lane_label(999, "Chill Lane 1", "Casual"),
+            LaneLabel::Casual
+        );
+        assert_eq!(
+            resolve_lane_label(999, "Ranked Seeker 1", "Ranked"),
+            LaneLabel::Ranked
+        );
+    }
 
     #[test]
     fn lfg_freitext_rueckfrage_antwortet_ohne_mentions_auf_die_quellnachricht() {
