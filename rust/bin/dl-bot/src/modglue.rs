@@ -3493,7 +3493,11 @@ mod tests {
             LaneLabel::NewPlayer
         );
         assert_eq!(
-            resolve_lane_label(dl_voice::adaptive::NP_ANCHOR_CHANNEL_ID, "🆕Neue Spieler Lane", "Casual"),
+            resolve_lane_label(
+                dl_voice::adaptive::NP_ANCHOR_CHANNEL_ID,
+                "🆕Neue Spieler Lane",
+                "Casual"
+            ),
             LaneLabel::NewPlayer
         );
         assert_eq!(
