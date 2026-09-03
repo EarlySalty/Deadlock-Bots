@@ -18,7 +18,6 @@ use crate::tempvoice::logic;
 use crate::tempvoice::TempVoiceEngine;
 use dl_discord::GatewayEvent;
 
-pub const NP_TARGET_CATEGORY_ID: u64 = 1465839366634209361;
 pub const NP_ANCHOR_CHANNEL_ID: u64 = 1470126503252721845;
 pub const NP_LANE_BASE_NAME: &str = "🆕Neue Spieler Lane";
 pub const NP_EXPAND_THRESHOLD: usize = 6;
@@ -407,7 +406,7 @@ impl AdaptiveLanes {
         // Ziel: vollste verwaltete Lane unter der Schwelle (Anker zählt mit)
         let channels = self
             .port
-            .category_channels(guild_id, NP_TARGET_CATEGORY_ID)
+            .category_channels(guild_id, CHILL_CATEGORY_ID)
             .await;
         let mut candidates: Vec<&(u64, String, usize, i64)> = channels
             .iter()
@@ -441,7 +440,7 @@ impl AdaptiveLanes {
     pub async fn sync_new_player(&self, guild_id: u64) {
         self.sync_managed(
             guild_id,
-            NP_TARGET_CATEGORY_ID,
+            CHILL_CATEGORY_ID,
             NP_ANCHOR_CHANNEL_ID,
             NP_LANE_BASE_NAME,
             NP_EXPAND_THRESHOLD,
@@ -547,7 +546,12 @@ impl AdaptiveLanes {
     }
 
     pub async fn sort_tempvoice_category(&self, guild_id: u64) {
-        const SKIP_IDS: [u64; 3] = [CASUAL_STAGING_ID, PERMANENT_CHILL_ID, PINNED_CHILL_END_ID];
+        const SKIP_IDS: [u64; 4] = [
+            CASUAL_STAGING_ID,
+            PERMANENT_CHILL_ID,
+            PINNED_CHILL_END_ID,
+            NP_ANCHOR_CHANNEL_ID,
+        ];
         let channels = self
             .port
             .category_channels(guild_id, CHILL_CATEGORY_ID)
@@ -555,7 +559,11 @@ impl AdaptiveLanes {
         let entries: Vec<_> = channels
             .iter()
             .enumerate()
-            .filter(|(_, (id, _, _, _))| !SKIP_IDS.contains(id) && *id != DUO_ANCHOR_CHANNEL_ID)
+            .filter(|(_, (id, name, _, _))| {
+                !SKIP_IDS.contains(id)
+                    && *id != DUO_ANCHOR_CHANNEL_ID
+                    && !name.starts_with(NP_LANE_BASE_NAME)
+            })
             .filter_map(|(stable_order, (id, name, _, position))| {
                 sort_snapshot_from_name(*id, name, *position, stable_order)
             })
@@ -994,6 +1002,28 @@ mod tests {
 
         assert_eq!(port.create_calls.lock().expect("lock").len(), 1);
         assert!(port.position_calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_new_player_erzeugt_lanes_in_chill_kategorie() {
+        let port = Arc::new(
+            MockAdaptivePort::new(vec![(
+                NP_ANCHOR_CHANNEL_ID,
+                NP_LANE_BASE_NAME.to_string(),
+                NP_EXPAND_THRESHOLD,
+                10,
+            )])
+            .with_create_results(vec![Ok(200)]),
+        );
+        let adaptive = AdaptiveLanes::new(port.clone());
+
+        adaptive.sync_new_player(MAIN_GUILD_ID).await;
+
+        let creates = port.create_calls.lock().expect("lock").clone();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0].category_id, CHILL_CATEGORY_ID);
+        assert_eq!(creates[0].anchor_id, NP_ANCHOR_CHANNEL_ID);
+        assert_eq!(creates[0].name, "🆕Neue Spieler Lane 2");
     }
 
     #[test]
