@@ -57,4 +57,5 @@ Stop-Regel: PUT ändert andere Prompts oder Role-IDs.
 - 2026-09-07: Plan angelegt, Implementierung startet bei M1.
 - 2026-09-07: M1/M2 Overlay + Extra-Prompts im Builder, Tests grün.
 - 2026-09-07: Rang-Namenslisten auf API-Stand. Assets unter assets/rank-emojis/.
-- 2026-09-07: Live-Emoji-Upload und Onboarding-PUT folgen beim Deploy (Guild-Mutation).
+- 2026-09-07: Live-Emoji-Upload und Onboarding-PUT über den Bot-MCP, nicht über Server Sync.
+- 2026-09-07: Overlay in serversync.rs zurückgenommen (User: Server Sync ist aktuell nicht korrekt).

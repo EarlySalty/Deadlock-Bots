@@ -88,3 +88,5 @@ und Archon mit den alten Emojis.
 - keine
 
 ## Amendments
+
+- 2026-09-07: REQ-04 und REQ-05 gelten nicht. Server Sync ist aktuell nicht korrekt; die Rangfrage wird nicht über `onboarding-apply` geschrieben. Live-Schreibe nur per Discord-REST über den Bot-MCP (`api_call`). Overlay in `serversync.rs` ist zurückgenommen. entschieden von User
