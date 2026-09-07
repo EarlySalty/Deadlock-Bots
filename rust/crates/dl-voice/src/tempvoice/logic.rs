@@ -5,18 +5,18 @@ pub const RANK_ORDER: [&str; 12] = [
     "unknown",
     "initiate",
     "seeker",
-    "alchemist",
-    "arcanist",
+    "acolyte",
+    "sentinel",
+    "mystic",
     "ritualist",
     "emissary",
-    "archon",
     "oracle",
     "phantom",
     "ascendant",
     "eternus",
 ];
 
-pub const SUFFIX_THRESHOLD_RANK: &str = "emissary";
+pub const SUFFIX_THRESHOLD_RANK: &str = "ritualist";
 pub const CASUAL_RANK_FALLBACK: &str = "Chill";
 pub const DEFAULT_CASUAL_CAP: i64 = 8;
 pub const DEFAULT_RANKED_CAP: i64 = 6;
@@ -27,20 +27,37 @@ pub const OWNER_CLAIM_MIN_SECONDS: i64 = 20 * 60;
 const RANK_SHORT: [(&str, &str); 11] = [
     ("ini", "initiate"),
     ("see", "seeker"),
-    ("alc", "alchemist"),
-    ("arc", "arcanist"),
+    ("aco", "acolyte"),
+    ("sen", "sentinel"),
+    ("mys", "mystic"),
     ("rit", "ritualist"),
     ("emi", "emissary"),
-    ("arch", "archon"),
     ("ora", "oracle"),
     ("pha", "phantom"),
     ("asc", "ascendant"),
     ("ete", "eternus"),
 ];
 
+const RANK_ALIASES: [(&str, &str); 9] = [
+    ("alchemist", "acolyte"),
+    ("alc", "acolyte"),
+    ("alch", "acolyte"),
+    ("arcanist", "sentinel"),
+    ("arc", "sentinel"),
+    ("arkanist", "sentinel"),
+    ("archon", "emissary"),
+    ("arch", "emissary"),
+    ("kultist", "seeker"),
+];
+
 pub fn rank_index(name: &str) -> usize {
     let n = name.to_lowercase();
-    RANK_ORDER.iter().position(|r| *r == n).unwrap_or(0)
+    let canonical = RANK_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == n)
+        .map(|(_, full)| *full)
+        .unwrap_or(n.as_str());
+    RANK_ORDER.iter().position(|r| *r == canonical).unwrap_or(0)
 }
 
 fn resolve_rank_part(part: &str) -> usize {
@@ -222,12 +239,13 @@ mod tests {
         // Referenz aus CPython (_rank_score)
         assert_eq!(rank_score("initiate"), 6);
         assert_eq!(rank_score("Initiate 3"), 9);
-        assert_eq!(rank_score("Emissary 1"), 37);
+        assert_eq!(rank_score("Emissary 1"), 43);
         assert_eq!(rank_score("Asc 3"), 63);
         assert_eq!(rank_score("eternus"), 66);
         assert_eq!(rank_score("quatsch"), 0);
         assert_eq!(rank_score("Phantom 6"), 60);
         assert_eq!(rank_score("arch 2"), 44);
+        assert_eq!(rank_score("Acolyte 3"), 21);
     }
 
     #[test]
@@ -244,8 +262,7 @@ mod tests {
 
     #[test]
     fn durchschnittsrang() {
-        // initiate(1) + eternus(11) → avg 6 → emissary
-        assert_eq!(average_rank_prefix(&[1, 11]).as_deref(), Some("Emissary"));
+        assert_eq!(average_rank_prefix(&[1, 11]).as_deref(), Some("Ritualist"));
         assert_eq!(average_rank_prefix(&[0, 0]), None);
         // unknown wird ignoriert: nur seeker(2)
         assert_eq!(average_rank_prefix(&[0, 2]).as_deref(), Some("Seeker"));

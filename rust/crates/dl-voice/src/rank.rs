@@ -57,11 +57,11 @@ pub fn major_rank_roles() -> HashMap<u64, (&'static str, i64)> {
     HashMap::from([
         (1331457571118387210, ("Initiate", 1)),
         (1331457652877955072, ("Seeker", 2)),
-        (1331457699992436829, ("Alchemist", 3)),
-        (1331457724848017539, ("Arcanist", 4)),
-        (1331457879345070110, ("Ritualist", 5)),
-        (1331457898781474836, ("Emissary", 6)),
-        (1331457949654319114, ("Archon", 7)),
+        (1331457699992436829, ("Acolyte", 3)),
+        (1331457724848017539, ("Sentinel", 4)),
+        (1331457879345070110, ("Mystic", 5)),
+        (1331457898781474836, ("Ritualist", 6)),
+        (1331457949654319114, ("Emissary", 7)),
         (1316966867033653338, ("Oracle", 8)),
         (1331458016356208680, ("Phantom", 9)),
         (1331458049637875785, ("Ascendant", 10)),
@@ -69,14 +69,17 @@ pub fn major_rank_roles() -> HashMap<u64, (&'static str, i64)> {
     ])
 }
 
-const RANK_VALUES: [(&str, i64); 12] = [
+const RANK_VALUES: [(&str, i64); 15] = [
     ("obscurus", 0),
     ("initiate", 1),
     ("seeker", 2),
+    ("acolyte", 3),
     ("alchemist", 3),
+    ("sentinel", 4),
     ("arcanist", 4),
-    ("ritualist", 5),
-    ("emissary", 6),
+    ("mystic", 5),
+    ("ritualist", 6),
+    ("emissary", 7),
     ("archon", 7),
     ("oracle", 8),
     ("phantom", 9),
@@ -84,14 +87,17 @@ const RANK_VALUES: [(&str, i64); 12] = [
     ("eternus", 11),
 ];
 
-const SHORT_TO_RANK: [(&str, &str); 11] = [
+const SHORT_TO_RANK: [(&str, &str); 14] = [
     ("ini", "Initiate"),
     ("see", "Seeker"),
-    ("alc", "Alchemist"),
-    ("arc", "Arcanist"),
+    ("aco", "Acolyte"),
+    ("alc", "Acolyte"),
+    ("sen", "Sentinel"),
+    ("arc", "Sentinel"),
+    ("mys", "Mystic"),
     ("rit", "Ritualist"),
     ("emi", "Emissary"),
-    ("arch", "Archon"),
+    ("arch", "Emissary"),
     ("ora", "Oracle"),
     ("pha", "Phantom"),
     ("asc", "Ascendant"),
@@ -1477,7 +1483,7 @@ mod tests {
         );
         assert_eq!(
             parse_subrank_role("arch 2"),
-            Some(("Archon".to_string(), 7, 2))
+            Some(("Emissary".to_string(), 7, 2))
         );
         assert_eq!(parse_subrank_role("Phantom 7"), None);
         assert_eq!(parse_subrank_role("Moderator"), None);
@@ -1831,14 +1837,14 @@ mod tests {
         let mut port = monitored_port();
         port.channel_members = vec![(7, vec![role(1331458016356208680, "Phantom")])];
         port.guild_member_roles
-            .insert(42, Some(vec![role(1331457949654319114, "Archon")]));
+            .insert(42, Some(vec![role(1331457949654319114, "Emissary")]));
         let (_dir, _cmds, manager, port) = rank_setup_with_owner(port, owner_for(500, 42)).await;
 
         manager.reconcile_channel(1, 500).await;
 
         let anchor = manager.anchor_for(500).await.expect("anchor");
         assert_eq!(anchor.user_id, 42);
-        assert_eq!(anchor.rank_name, "Archon");
+        assert_eq!(anchor.rank_name, "Emissary");
         assert_eq!(anchor.rank_value, 7);
         assert_eq!(
             *port.guild_member_role_calls.lock().expect("lock"),
@@ -1900,7 +1906,7 @@ mod tests {
         );
 
         let mut port = monitored_port();
-        port.channel_members = vec![(8, vec![role(1331457949654319114, "Archon")])];
+        port.channel_members = vec![(8, vec![role(1331457949654319114, "Emissary")])];
         port.guild_member_roles
             .insert(43, Some(vec![role(999, "Moderator")]));
         let (_dir, _cmds, manager, _port) = rank_setup_with_owner(port, owner_for(500, 43)).await;
@@ -1909,6 +1915,6 @@ mod tests {
 
         let anchor = manager.anchor_for(500).await.expect("anchor");
         assert_eq!(anchor.user_id, 8);
-        assert_eq!(anchor.rank_name, "Archon");
+        assert_eq!(anchor.rank_name, "Emissary");
     }
 }

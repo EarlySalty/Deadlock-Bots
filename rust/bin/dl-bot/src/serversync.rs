@@ -47,6 +47,21 @@ pub const PORT: u16 = 8901;
 pub const TOKEN_HEADER: &str = "X-Internal-Token";
 const AUDIT_LOG_REASON: &str = "Onboarding-Redesign Welle 2a (Rechte-Sanierung)";
 const ONBOARDING_AUDIT_LOG_REASON: &str = "serversync welle2b";
+const RANK_ONBOARDING_OPTIONS: [(&str, &str, &str); 11] = [
+    ("1492960891619250408", "Initiate / Novize", "initiate"),
+    ("1492959966284218611", "Seeker", "seeker"),
+    ("1492960350755225730", "Acolyte / Akolyth", "acolyte"),
+    ("1492960274096066831", "Sentinel", "sentinel"),
+    ("1492960262184239178", "Mystic", "mystic"),
+    ("1492960184920834110", "Ritualist", "ritualist"),
+    ("1492959936513052672", "Emissary / Emissär", "emissary"),
+    ("1492959889767534602", "Oracle / Orakel", "oracle"),
+    ("1492959474468655134", "Phantom", "phantom"),
+    ("1491935935414276198", "Ascendant / Aszendent", "ascendant"),
+    ("1492959003700101180", "Eternus", "eternus"),
+];
+const PRESERVED_ONBOARDING_PROMPT_TITLES: [&str; 2] =
+    ["Willst du Starthilfe?", "Deinen Account verknüpfen"];
 const ROLLBACK_VERSION: &str = "serversync.rollback_export.v2";
 const ROLLBACK_VERSION_V1: &str = "serversync.rollback_export.v1";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -875,6 +890,44 @@ impl ServerSyncService {
             )));
         }
         Ok(response.json::<Value>().await?)
+    }
+
+    async fn fetch_guild_emoji_ids(&self) -> ServerSyncResult<BTreeMap<String, String>> {
+        let url = format!("{DISCORD_API_BASE}/guilds/{}/emojis", self.guild_id);
+        let response = self
+            .http_client
+            .get(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let body_preview: String = body.chars().take(300).collect();
+            return Err(ServerSyncError::internal(format!(
+                "Discord emojis GET fehlgeschlagen: HTTP {}: {}",
+                status.as_u16(),
+                body_preview
+            )));
+        }
+        let emojis: Vec<Value> = response.json().await?;
+        Ok(emojis
+            .iter()
+            .filter_map(|emoji| {
+                let name = emoji.get("name")?.as_str()?.to_string();
+                let id = emoji
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        emoji
+                            .get("id")
+                            .and_then(Value::as_u64)
+                            .map(|id| id.to_string())
+                    })?;
+                Some((name, id))
+            })
+            .collect())
     }
 
     async fn put_native_onboarding_config(
@@ -3133,7 +3186,8 @@ impl ServerSyncOps for ServerSyncService {
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
                 .await?;
         let live_onboarding = self.fetch_native_onboarding_config().await?;
-        let built = build_welle2b_onboarding_config(&live_onboarding, &live)?;
+        let emoji_ids = self.fetch_guild_emoji_ids().await.unwrap_or_default();
+        let built = build_welle2b_onboarding_config(&live_onboarding, &live, &emoji_ids)?;
         if !built.blockers.is_empty() {
             return Ok(OnboardingPreviewOutput {
                 preview_id: None,
@@ -5767,6 +5821,7 @@ fn validate_server_guide_config(
 fn build_welle2b_onboarding_config(
     live_config: &Value,
     model: &GuildModel,
+    emoji_ids: &BTreeMap<String, String>,
 ) -> ServerSyncResult<OnboardingBuildOutput> {
     let live = parse_live_onboarding_config(live_config)?;
     let mut blockers = Vec::new();
@@ -5825,8 +5880,17 @@ fn build_welle2b_onboarding_config(
     )];
     prompts.push(ping_prompt(model, &mut blockers));
     if let Some(mut prompt) = rank_prompt {
+        overlay_rank_prompt(&mut prompt, emoji_ids);
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
         prompts.push(prompt);
+    }
+    for prompt in &live.prompts {
+        if PRESERVED_ONBOARDING_PROMPT_TITLES
+            .iter()
+            .any(|title| prompt.title == *title)
+        {
+            prompts.push(prompt.clone());
+        }
     }
     if mitspieler_suche.is_some() {
         warnings.push(
@@ -6112,6 +6176,42 @@ fn find_rank_prompt(
                     >= 10
         })
         .cloned()
+}
+
+fn overlay_rank_prompt(prompt: &mut NativeOnboardingPrompt, emoji_ids: &BTreeMap<String, String>) {
+    for option in &mut prompt.options {
+        if !option_has_custom_emoji(option) {
+            continue;
+        }
+        let Some(role_id) = option.role_ids.first() else {
+            continue;
+        };
+        let Some((_, title, emoji_name)) = RANK_ONBOARDING_OPTIONS
+            .iter()
+            .find(|(id, _, _)| *id == role_id)
+        else {
+            continue;
+        };
+        option.title = title.to_string();
+        if let Some(emoji_id) = emoji_ids.get(*emoji_name) {
+            option.emoji = Some(json!({
+                "id": emoji_id,
+                "name": emoji_name,
+                "animated": false
+            }));
+        }
+    }
+}
+
+fn option_has_custom_emoji(option: &NativeOnboardingOption) -> bool {
+    let Some(emoji) = option.emoji.as_ref() else {
+        return false;
+    };
+    match emoji.get("id") {
+        Some(Value::String(id)) => !id.is_empty(),
+        Some(Value::Number(_)) => true,
+        _ => false,
+    }
 }
 
 /// Discord behaelt in der Onboarding-Config Kanal-IDs geloeschter Kanaele;
@@ -10043,7 +10143,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
-        let built = build_welle2b_onboarding_config(&live, &model).expect("build");
+        let built =
+            build_welle2b_onboarding_config(&live, &model, &BTreeMap::new()).expect("build");
 
         assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
         assert!(built.config.enabled);
@@ -10078,11 +10179,113 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
+    fn onboarding_builder_overlayt_rang_titel_und_emojis_an_unverifizierten_rollen() {
+        let mut model = onboarding_model();
+        let mut emoji_ids = BTreeMap::new();
+        let mut options = Vec::new();
+        for (idx, (role_id, title, emoji_name)) in RANK_ONBOARDING_OPTIONS.iter().enumerate() {
+            let parsed: u64 = role_id.parse().expect("role id");
+            let short = title.split(" / ").next().expect("short name");
+            model.roles.insert(
+                parsed,
+                onboarding_role(parsed, &format!("{short} (unverifiziert)"), false),
+            );
+            emoji_ids.insert((*emoji_name).to_string(), format!("emoji-{idx}"));
+            options.push(json!({
+                "id": format!("rank-option-{idx}"),
+                "title": "Alchemist",
+                "role_ids": [role_id],
+                "channel_ids": [],
+                "emoji": {"id": "old-emoji", "name": "alchemist", "animated": false},
+            }));
+        }
+        options.push(json!({
+            "id": "rank-unknown",
+            "title": "Neu im Game / Rang ist Unbekannt",
+            "role_ids": ["1492960891619250408"],
+            "channel_ids": [],
+            "emoji": {"name": "❓"},
+        }));
+        let live = json!({
+            "enabled": true,
+            "mode": 1,
+            "default_channel_ids": ["6001","6002","6003","6004","6005","6006","6007","6008","6009"],
+            "prompts": [{
+                "id": "rank-prompt",
+                "type": 0,
+                "title": "Wähle hier deinen aktuellen Deadlock Rang aus.",
+                "options": options,
+                "single_select": true,
+                "required": true,
+                "in_onboarding": true
+            }]
+        });
+
+        let built = build_welle2b_onboarding_config(&live, &model, &emoji_ids).expect("build");
+        let rank = &built.config.prompts[2];
+        assert_eq!(rank.id.as_deref(), Some("rank-prompt"));
+        assert_eq!(rank.options.len(), 12);
+        assert_eq!(rank.options[2].title, "Acolyte / Akolyth");
+        assert_eq!(rank.options[2].id.as_deref(), Some("rank-option-2"));
+        assert_eq!(
+            rank.options[2].emoji,
+            Some(json!({"id": "emoji-2", "name": "acolyte", "animated": false}))
+        );
+        assert_eq!(rank.options[3].title, "Sentinel");
+        assert_eq!(rank.options[4].title, "Mystic");
+        assert_eq!(rank.options[5].title, "Ritualist");
+        assert_eq!(rank.options[6].title, "Emissary / Emissär");
+        assert_eq!(rank.options[11].title, "Neu im Game / Rang ist Unbekannt");
+        assert_eq!(rank.options[11].emoji, Some(json!({"name": "❓"})));
+        assert!(rank.options.iter().all(|option| option.title != "Alchemist"
+            && !option.title.contains("Arcanist")
+            && !option.title.contains("Archon")));
+    }
+
+    #[test]
+    fn onboarding_builder_behaelt_starthilfe_und_steam_prompts() {
+        let model = onboarding_model();
+        let mut live = rank_live_onboarding_config();
+        live["prompts"]
+            .as_array_mut()
+            .expect("prompts")
+            .extend([
+                json!({
+                    "id": "starthilfe",
+                    "type": 0,
+                    "title": "Willst du Starthilfe?",
+                    "options": [{"id": "tour", "title": "Kleine Server-Tour per DM", "role_ids": [], "channel_ids": []}],
+                    "single_select": false,
+                    "required": false,
+                    "in_onboarding": true
+                }),
+                json!({
+                    "id": "steam",
+                    "type": 0,
+                    "title": "Deinen Account verknüpfen",
+                    "options": [{"id": "steam-opt", "title": "Steam", "role_ids": [], "channel_ids": []}],
+                    "single_select": true,
+                    "required": false,
+                    "in_onboarding": true
+                }),
+            ]);
+
+        let built =
+            build_welle2b_onboarding_config(&live, &model, &BTreeMap::new()).expect("build");
+        assert_eq!(built.config.prompts.len(), 5);
+        assert_eq!(built.config.prompts[3].title, "Willst du Starthilfe?");
+        assert_eq!(built.config.prompts[3].id.as_deref(), Some("starthilfe"));
+        assert_eq!(built.config.prompts[4].title, "Deinen Account verknüpfen");
+        assert_eq!(built.config.prompts[4].id.as_deref(), Some("steam"));
+    }
+
+    #[test]
     fn onboarding_payload_laesst_neue_ids_weg_und_nutzt_name_resolved_ids() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
-        let built = build_welle2b_onboarding_config(&live, &model).expect("build");
+        let built =
+            build_welle2b_onboarding_config(&live, &model, &BTreeMap::new()).expect("build");
         let payload = serde_json::to_value(&built.config).expect("payload");
 
         let prompts = payload["prompts"].as_array().expect("prompts");
@@ -10120,7 +10323,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
-        let built = build_welle2b_onboarding_config(&live, &model).expect("build");
+        let built =
+            build_welle2b_onboarding_config(&live, &model, &BTreeMap::new()).expect("build");
         let payload =
             serde_json::to_value(native_onboarding_put_payload(&built.config)).expect("payload");
 
@@ -10173,8 +10377,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             onboarding_role(5999, "Deadlock Patchnotes Ping Rolle", true),
         );
 
-        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
-            .expect("builder returns blockers");
+        let built = build_welle2b_onboarding_config(
+            &rank_live_onboarding_config(),
+            &model,
+            &BTreeMap::new(),
+        )
+        .expect("builder returns blockers");
 
         assert!(built
             .blockers
@@ -10185,10 +10393,13 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
     #[test]
     fn onboarding_apply_revalidiert_role_und_channel_ids_gegen_live_modell() {
-        let mut config =
-            build_welle2b_onboarding_config(&rank_live_onboarding_config(), &onboarding_model())
-                .expect("build")
-                .config;
+        let mut config = build_welle2b_onboarding_config(
+            &rank_live_onboarding_config(),
+            &onboarding_model(),
+            &BTreeMap::new(),
+        )
+        .expect("build")
+        .config;
         config.prompts[1].options[0].role_ids = vec!["999999".to_string()];
         config.prompts[0].options[0].channel_ids = vec!["kaputt".to_string()];
 
@@ -10203,7 +10414,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     fn onboarding_preview_extraktion_blockt_falschen_message_key() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
-        let config = build_welle2b_onboarding_config(&live, &model)
+        let config = build_welle2b_onboarding_config(&live, &model, &BTreeMap::new())
             .expect("build")
             .config;
         let mut diff = onboarding_diff(GUILD_ID, &live, &config).expect("diff");
@@ -10225,7 +10436,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let pool = db.pool();
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
-        let config = build_welle2b_onboarding_config(&live, &model)
+        let config = build_welle2b_onboarding_config(&live, &model, &BTreeMap::new())
             .expect("build")
             .config;
         let diff = onboarding_diff(GUILD_ID, &live, &config).expect("diff");
@@ -10333,8 +10544,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .channels
             .retain(|_, channel| channel.name != "server-support");
 
-        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
-            .expect("builder returns blockers");
+        let built = build_welle2b_onboarding_config(
+            &rank_live_onboarding_config(),
+            &model,
+            &BTreeMap::new(),
+        )
+        .expect("builder returns blockers");
 
         assert!(built
             .blockers

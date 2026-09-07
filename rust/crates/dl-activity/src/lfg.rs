@@ -7,13 +7,15 @@
 
 use serde_json::json;
 
-const RANK_TOKENS: [&str; 35] = [
-    // RANK_NAME_TO_VALUE-Schlüssel
+const RANK_TOKENS: [&str; 38] = [
     "obscurus",
     "initiate",
     "seeker",
+    "acolyte",
     "alchemist",
+    "sentinel",
     "arcanist",
+    "mystic",
     "ritualist",
     "emissary",
     "archon",
@@ -21,11 +23,13 @@ const RANK_TOKENS: [&str; 35] = [
     "phantom",
     "ascendant",
     "eternus",
-    // SHORT_NAME_TO_RANK-Schlüssel
     "ini",
     "see",
+    "aco",
     "alc",
+    "sen",
     "arc",
+    "mys",
     "rit",
     "emi",
     "arch",
@@ -33,7 +37,6 @@ const RANK_TOKENS: [&str; 35] = [
     "pha",
     "asc",
     "ete",
-    // MESSAGE_RANK_ALIASES-Schlüssel
     "seek",
     "alch",
     "emiss",
@@ -41,12 +44,8 @@ const RANK_TOKENS: [&str; 35] = [
     "arkanist",
     "ascendent",
     "ethernus",
-    // Auffüllung auf Originalumfang (Aliasse mit identischen Kurzformen)
-    "ini",
-    "arc",
-    "rit",
-    "emi",
-    "arch",
+    "akolyth",
+    "waechter",
 ];
 
 fn contains_any(text: &str, words: &[&str]) -> bool {
@@ -1205,13 +1204,16 @@ pub fn build_lfg_reply(
 // ── Flow-Anschluss (wie on_message + _handle_lfg_request) ─────────────────
 
 /// Rang-Namen → Wert (Initiate=1 … Eternus=11), für Text-Parsing.
-pub const RANK_NAMES: [(&str, i64); 11] = [
+pub const RANK_NAMES: [(&str, i64); 14] = [
     ("initiate", 1),
     ("seeker", 2),
+    ("acolyte", 3),
     ("alchemist", 3),
+    ("sentinel", 4),
     ("arcanist", 4),
-    ("ritualist", 5),
-    ("emissary", 6),
+    ("mystic", 5),
+    ("ritualist", 6),
+    ("emissary", 7),
     ("archon", 7),
     ("oracle", 8),
     ("phantom", 9),
@@ -1222,18 +1224,23 @@ pub const RANK_NAMES: [(&str, i64); 11] = [
 /// Rang aus dem Nachrichtentext ("Oracle 3", "emi II") — wie
 /// `_parse_rank_from_message` inkl. Kurz-Aliasse und römischer Subränge.
 pub fn parse_rank_from_message(content_lower: &str) -> (String, i64, Option<i64>) {
-    const ALIASES: [(&str, &str); 13] = [
+    const ALIASES: [(&str, &str); 18] = [
         ("ini", "initiate"),
         ("seek", "seeker"),
-        ("alch", "alchemist"),
-        ("arc", "arcanist"),
+        ("aco", "acolyte"),
+        ("alc", "acolyte"),
+        ("alch", "acolyte"),
+        ("sen", "sentinel"),
+        ("arc", "sentinel"),
+        ("arkanist", "sentinel"),
+        ("mys", "mystic"),
         ("rit", "ritualist"),
         ("emi", "emissary"),
         ("emiss", "emissary"),
-        ("arch", "archon"),
+        ("arch", "emissary"),
         ("asc", "ascendant"),
         ("et", "eternus"),
-        ("arkanist", "arcanist"),
+        ("akolyth", "acolyte"),
         ("ascendent", "ascendant"),
         ("ethernus", "eternus"),
     ];

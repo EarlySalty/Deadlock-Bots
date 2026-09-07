@@ -13,11 +13,11 @@ use sqlx::PgPool;
 pub const RANK_ORDER: [&str; 11] = [
     "initiate",
     "seeker",
-    "alchemist",
-    "arcanist",
+    "acolyte",
+    "sentinel",
+    "mystic",
     "ritualist",
     "emissary",
-    "archon",
     "oracle",
     "phantom",
     "ascendant",
@@ -25,17 +25,17 @@ pub const RANK_ORDER: [&str; 11] = [
 ];
 
 pub const RANK_COLORS: [(&str, &str); 11] = [
-    ("initiate", "#8fa4b4"),
-    ("seeker", "#72aa5a"),
-    ("alchemist", "#3dbb44"),
-    ("arcanist", "#18bba8"),
-    ("ritualist", "#2288ee"),
-    ("emissary", "#5055ee"),
-    ("archon", "#8833dd"),
-    ("oracle", "#cc33bb"),
-    ("phantom", "#dd3344"),
-    ("ascendant", "#ee9922"),
-    ("eternus", "#f5cc11"),
+    ("initiate", "#6A3E1E"),
+    ("seeker", "#882355"),
+    ("acolyte", "#5C6DAB"),
+    ("sentinel", "#719C47"),
+    ("mystic", "#DDA326"),
+    ("ritualist", "#EE4F57"),
+    ("emissary", "#B47FEB"),
+    ("oracle", "#955138"),
+    ("phantom", "#7C7C7C"),
+    ("ascendant", "#C39751"),
+    ("eternus", "#5CE9A9"),
 ];
 
 /// Rank-Lookup mit Request-lokalem Cache. Das Original feuert dieselbe
@@ -77,7 +77,13 @@ impl<'c> RankResolver<'c> {
         .and_then(|row| row.deadlock_rank_name);
         let resolved = raw
             .map(|s| s.to_lowercase())
-            .and_then(|name| RANK_ORDER.iter().find(|r| **r == name).copied());
+            .map(|name| match name.as_str() {
+                "alchemist" => "acolyte".to_string(),
+                "arcanist" => "sentinel".to_string(),
+                "archon" => "emissary".to_string(),
+                _ => name,
+            })
+            .and_then(|name| RANK_ORDER.iter().find(|r| *r == &name).copied());
         self.cache.insert(user_id, resolved);
         Ok(resolved)
     }

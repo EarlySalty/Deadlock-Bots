@@ -2,7 +2,7 @@
 //! `duo_lanes.py` und `lane_sorting.py` (die letzten Voice-Lücken).
 //!
 //! Drei Subsysteme:
-//! - **Neue-Spieler-Lanes**: Anfänger (Rang ≤ Arcanist, verifiziert oder
+//! - **Neue-Spieler-Lanes**: Anfänger (Rang ≤ Sentinel, verifiziert oder
 //!   Unverifiziert-Rolle) werden beim Staging-Join in die Anfänger-Kategorie
 //!   umgeleitet; Lanes wachsen ab 6 Mitgliedern nach (Anker + „🆕Neue
 //!   Spieler Lane N"), mit 4-Minuten-Rückkehr-Fenster zum normalen Flow.
@@ -32,8 +32,8 @@ pub const DUO_EXPAND_THRESHOLD: usize = 2;
 pub const UNVERIFIED_RANK_ROLES: [(u64, i64); 4] = [
     (1492960891619250408, 1), // Initiate (unverifiziert)
     (1492959966284218611, 2), // Seeker (unverifiziert)
-    (1492960350755225730, 3), // Alchemist (unverifiziert)
-    (1492960274096066831, 4), // Arcanist (unverifiziert)
+    (1492960350755225730, 3), // Acolyte (unverifiziert)
+    (1492960274096066831, 4), // Sentinel (unverifiziert)
 ];
 
 /// Stagings, aus denen Anfänger umgeleitet werden (Casual + Comp).
