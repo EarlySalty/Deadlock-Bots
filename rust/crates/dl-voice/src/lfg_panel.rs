@@ -314,67 +314,67 @@ const LFG_RANK_SELECT_OPTIONS: [LfgRankSelectOption; 11] = [
         label: "Initiate",
         value: "initiate",
         emoji_name: "initiate",
-        emoji_id: "1316457822518775869",
+        emoji_id: "1546480749845418037",
     },
     LfgRankSelectOption {
         label: "Seeker",
         value: "seeker",
         emoji_name: "seeker",
-        emoji_id: "1316458138886475876",
+        emoji_id: "1546480757155827752",
     },
     LfgRankSelectOption {
         label: "Acolyte",
         value: "acolyte",
         emoji_name: "acolyte",
-        emoji_id: "1316455291629342750",
+        emoji_id: "1546480764093202542",
     },
     LfgRankSelectOption {
         label: "Sentinel",
         value: "sentinel",
         emoji_name: "sentinel",
-        emoji_id: "1316455305315352587",
+        emoji_id: "1546480771131514991",
     },
     LfgRankSelectOption {
         label: "Mystic",
         value: "mystic",
         emoji_name: "mystic",
-        emoji_id: "1316458203298660533",
+        emoji_id: "1546480778496581734",
     },
     LfgRankSelectOption {
         label: "Ritualist",
         value: "ritualist",
         emoji_name: "ritualist",
-        emoji_id: "1316457650367496306",
+        emoji_id: "1546480786763415567",
     },
     LfgRankSelectOption {
         label: "Emissary",
         value: "emissary",
         emoji_name: "emissary",
-        emoji_id: "1397687455313952918",
+        emoji_id: "1546480793961107476",
     },
     LfgRankSelectOption {
         label: "Oracle",
         value: "oracle",
         emoji_name: "oracle",
-        emoji_id: "1316457885743579317",
+        emoji_id: "1546480801032704000",
     },
     LfgRankSelectOption {
         label: "Phantom",
         value: "phantom",
         emoji_name: "phantom",
-        emoji_id: "1316457982363701278",
+        emoji_id: "1546480809433763902",
     },
     LfgRankSelectOption {
         label: "Ascendant",
         value: "ascendant",
         emoji_name: "ascendant",
-        emoji_id: "1316457367818338385",
+        emoji_id: "1546480817046298675",
     },
     LfgRankSelectOption {
         label: "Eternus",
         value: "eternus",
         emoji_name: "eternus",
-        emoji_id: "1316457737621868574",
+        emoji_id: "1546480824222748674",
     },
 ];
 
@@ -4010,7 +4010,7 @@ mod tests {
             .expect("emissary option");
         assert_eq!(emissary["label"], "Emissary");
         assert_eq!(emissary["emoji"]["name"], "emissary");
-        assert_eq!(emissary["emoji"]["id"], "1397687455313952918");
+        assert_eq!(emissary["emoji"]["id"], "1546480793961107476");
         assert_eq!(
             rows[4]["components"][0]["custom_id"],
             lfg_post_custom_id(LfgMode::Ranked)
