@@ -3186,8 +3186,19 @@ impl ServerSyncOps for ServerSyncService {
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
                 .await?;
         let live_onboarding = self.fetch_native_onboarding_config().await?;
-        let emoji_ids = self.fetch_guild_emoji_ids().await.unwrap_or_default();
-        let built = build_welle2b_onboarding_config(&live_onboarding, &live, &emoji_ids)?;
+        let (emoji_ids, emoji_warning) = match self.fetch_guild_emoji_ids().await {
+            Ok(map) => (map, None),
+            Err(err) => (
+                BTreeMap::new(),
+                Some(format!(
+                    "Rang-Emojis nicht geladen, Bilder bleiben live: {err}"
+                )),
+            ),
+        };
+        let mut built = build_welle2b_onboarding_config(&live_onboarding, &live, &emoji_ids)?;
+        if let Some(warning) = emoji_warning {
+            built.warnings.push(warning);
+        }
         if !built.blockers.is_empty() {
             return Ok(OnboardingPreviewOutput {
                 preview_id: None,
@@ -5889,7 +5900,9 @@ fn build_welle2b_onboarding_config(
             .iter()
             .any(|title| prompt.title == *title)
         {
-            prompts.push(prompt.clone());
+            let mut extra = prompt.clone();
+            sanitize_carried_over_channel_ids(&mut extra, model, &mut warnings);
+            prompts.push(extra);
         }
     }
     if mitspieler_suche.is_some() {
@@ -10254,7 +10267,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     "id": "starthilfe",
                     "type": 0,
                     "title": "Willst du Starthilfe?",
-                    "options": [{"id": "tour", "title": "Kleine Server-Tour per DM", "role_ids": [], "channel_ids": []}],
+                    "options": [{"id": "tour", "title": "Kleine Server-Tour per DM", "role_ids": [], "channel_ids": ["1"]}],
                     "single_select": false,
                     "required": false,
                     "in_onboarding": true
@@ -10275,6 +10288,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(built.config.prompts.len(), 5);
         assert_eq!(built.config.prompts[3].title, "Willst du Starthilfe?");
         assert_eq!(built.config.prompts[3].id.as_deref(), Some("starthilfe"));
+        assert!(built.config.prompts[3].options[0].channel_ids.is_empty());
+        assert!(built
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("stale Kanal-IDs") && warning.contains("1")));
         assert_eq!(built.config.prompts[4].title, "Deinen Account verknüpfen");
         assert_eq!(built.config.prompts[4].id.as_deref(), Some("steam"));
     }

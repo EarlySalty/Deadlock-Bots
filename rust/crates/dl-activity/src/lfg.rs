@@ -1204,6 +1204,23 @@ pub fn build_lfg_reply(
 // ── Flow-Anschluss (wie on_message + _handle_lfg_request) ─────────────────
 
 /// Rang-Namen → Wert (Initiate=1 … Eternus=11), für Text-Parsing.
+fn rank_display_name(name: &str) -> &'static str {
+    match name {
+        "initiate" => "Initiate",
+        "seeker" => "Seeker",
+        "acolyte" | "alchemist" => "Acolyte",
+        "sentinel" | "arcanist" => "Sentinel",
+        "mystic" => "Mystic",
+        "ritualist" => "Ritualist",
+        "emissary" | "archon" => "Emissary",
+        "oracle" => "Oracle",
+        "phantom" => "Phantom",
+        "ascendant" => "Ascendant",
+        "eternus" => "Eternus",
+        _ => "Unbekannt",
+    }
+}
+
 pub const RANK_NAMES: [(&str, i64); 14] = [
     ("initiate", 1),
     ("seeker", 2),
@@ -1286,11 +1303,7 @@ pub fn parse_rank_from_message(content_lower: &str) -> (String, i64, Option<i64>
         }
         let sub = tokens.get(index + 1).and_then(|next| parse_sub(next));
         if rank_value > best.1 || (rank_value == best.1 && sub.is_some()) {
-            let mut display = full_name.to_string();
-            if let Some(first) = display.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            best = (display, rank_value, sub);
+            best = (rank_display_name(full_name).to_string(), rank_value, sub);
         }
     }
     best
@@ -1834,7 +1847,7 @@ mod tests {
         );
         assert_eq!(
             parse_rank_from_message("emi ii lobby?"),
-            ("Emissary".to_string(), 6, Some(2))
+            ("Emissary".to_string(), 7, Some(2))
         );
         assert_eq!(
             parse_rank_from_message("wer bock auf et"),

@@ -2708,11 +2708,14 @@ const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
     (1492959966284218611, "Seeker", 2),
     (1492960891619250408, "Initiate", 1),
 ];
-const RANK_SHORT_NAMES: [(&str, &str); 11] = [
+const RANK_SHORT_NAMES: [(&str, &str); 14] = [
     ("ini", "Initiate"),
     ("see", "Seeker"),
+    ("aco", "Acolyte"),
     ("alc", "Acolyte"),
+    ("sen", "Sentinel"),
     ("arc", "Sentinel"),
+    ("mys", "Mystic"),
     ("rit", "Ritualist"),
     ("emi", "Emissary"),
     ("arch", "Emissary"),
