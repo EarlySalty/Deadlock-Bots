@@ -40,7 +40,8 @@ function payload(url) {
     if (uri.pathname === '/api/repo-activity') return {available:false,error:'Keine Daten'};
     if (uri.pathname === '/api/brain/overview') return {report:{period_start:'2026-07-27T00:00:00Z',period_end:'2026-08-02T00:00:00Z',report_text:'Alter Bericht'},report_stale:true,effectiveness_week:{decisions:5028,shadow_decisions:5024,snapshots_created:4,measured_outcomes:16,successful_outcomes:0},plan_usage:{total:19,open:19,decided:0,commented:0},ledger_week:[],top_reasons:[],feeder_runs:[]};
     if (uri.pathname === '/api/brain/plan') return {run:null};
-    if (uri.pathname === '/api/brain/wiki') return {pages:[]};
+    if (uri.pathname === '/api/brain/wiki') return {pages:['wissen/Team.md'],index:'Siehe [[Team|Team-Wissen]].',log:'Letzter Lauf'};
+    if (uri.pathname === '/api/brain/wiki/page') return {path:uri.searchParams.get('path'),content:'Gespeichertes Team-Wissen.'};
     if (uri.pathname.startsWith('/api/insights/')) {
         if (uri.pathname.endsWith('/overview')) return {live:{cards:[]},imported:[{import_kind:'membership',period_start:'2026-09-04',dimension:'total_membership',value:membershipBase},{import_kind:'membership',period_start:'2026-09-05',dimension:'total_membership',value:membershipBase+3},{import_kind:'retention',period_start:'2026-08-30',dimension:'pct_retained',value:12}],import_status:{rows:3,last_import_at:'2026-09-07T05:16:00Z',latest_period:'2026-09-05',kinds:['membership','retention']}};
         if(uri.pathname.endsWith('/growth')) return {live:{periods:[],member_total_basis:'directory'}};
@@ -124,6 +125,20 @@ async function tab(name) {document.querySelector('.tab-btn[data-tab="'+name+'"]'
     await tab('overview');assert.ok($('retention-recent').textContent.includes('Ausgetreten'));assert.ok($('retention-recent').textContent.includes('Versand fehlgeschlagen'));assert.equal($('retention-recent').querySelectorAll('img').length,0);
     await tab('scrims');assert.ok($('scrim-match-rows').textContent.includes('Erstes Team vs Zweites Team'));assert.ok($('scrim-match-rows').textContent.includes('Geplant'));assert.equal($('scrim-runtime-control').tagName,'DETAILS');assert.equal($('scrim-runtime-control').open,false);assert.equal(document.querySelector('.scrim-block-card').open,false);
     await tab('brain');assert.equal($('brain-verdict').textContent,'Ein Nutzen ist bisher nicht belegt');assert.ok($('brain-report-period').textContent.includes('Veraltet'));assert.ok($('brain-plan-usage').textContent.includes('bewertet: 0'));
+    $('brain-wiki-nav').closest('details').open=true;
+    const wikiIndex=$('brain-wiki-nav').querySelector('[data-special="index"]');
+    assert.equal(wikiIndex.tagName,'BUTTON');assert.equal(wikiIndex.type,'button');assert.equal(wikiIndex.tabIndex,0,'wiki navigation uses native keyboard controls');
+    wikiIndex.focus();assert.equal(document.activeElement,wikiIndex);wikiIndex.click();
+    const wikiLink=$('brain-wiki-content').querySelector('.wiki-link');
+    assert.equal(wikiLink.tagName,'BUTTON');assert.equal(wikiLink.tabIndex,0,'inline wiki links are keyboard reachable');
+    wikiLink.focus();assert.equal(document.activeElement,wikiLink);wikiLink.click();await wait(20);
+    assert.ok($('brain-wiki-content').textContent.includes('Gespeichertes Team-Wissen.'));assert.equal(document.activeElement,$('brain-wiki-content').querySelector('h3'),'new wiki page receives focus');
+    assert.equal($('brain-wiki-nav').querySelector('[data-page]').getAttribute('aria-current'),'page');
+    for(const target of ['brain','insights']) {
+        await tab(target);document.querySelector('.skip-link').click();await wait(10);
+        assert.equal(document.querySelector('.tab-panel.active').dataset.tab,target,'skip link preserves current tab');assert.equal(window.location.hash,'#'+target);assert.equal(document.activeElement,$('dashboard-main'));
+    }
+    window.location.hash='#dashboard-main';await wait(20);assert.equal(document.querySelector('.tab-panel.active').dataset.tab,'insights','content anchors do not change tabs');
     for(const name of ['deadlock','audit','entwicklung','overview']){await tab(name);assert.equal(document.querySelector('.tab-panel.active').dataset.tab,name);assert.equal(window.location.hash,'#'+name);}
     await tab('insights');insightsFail=true;$('insights-refreshInsights').click();await wait(30);assert.ok($('insights-importStatus').textContent.includes('Daten konnten nicht geladen werden'));assert.ok(!document.querySelector('.insights-panel').classList.contains('loading'));assert.equal($('insights-importMetric').disabled,true);assert.equal($('insights-importedValues').textContent,'','failed current range cannot reuse old values');
     insightsFail=false;await tab('scrims');

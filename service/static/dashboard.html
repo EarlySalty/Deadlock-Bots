@@ -1044,8 +1044,8 @@
             padding-right: 0.5rem;
         }
         .brain-wiki-nav .wiki-folder { margin: 0.6rem 0 0.2rem; color: #9aa0a6; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
-        .brain-wiki-nav a { display: block; color: #74c0fc; text-decoration: none; padding: 0.15rem 0; font-size: 0.9rem; word-break: break-word; }
-        .brain-wiki-nav a:hover, .brain-wiki-nav a.active { color: #fff; text-decoration: underline; }
+        .brain-wiki-nav button { display: block; width: 100%; background: transparent; border: 0; color: var(--gold-strong); text-align: left; padding: 0.35rem 0.5rem; font-size: 0.9rem; word-break: break-word; }
+        .brain-wiki-nav button:hover, .brain-wiki-nav button[aria-current="page"] { color: #fff; text-decoration: underline; }
         .brain-wiki-content { flex: 1 1 400px; min-width: 0; max-height: 620px; overflow: auto; }
         .brain-wiki-content h3, .brain-wiki-content h4, .brain-wiki-content h5, .brain-wiki-content h6 { margin: 0.8rem 0 0.4rem; }
         .brain-wiki-content p { line-height: 1.55; }
@@ -1055,7 +1055,7 @@
             background: #0f0f0f; border: 1px solid rgba(255,255,255,0.05);
             border-radius: 6px; padding: 0.8rem; font-size: 0.85rem;
         }
-        .brain-wiki-content .wiki-link { color: #ffd43b; cursor: pointer; text-decoration: underline; }
+        .brain-wiki-content .wiki-link { min-height: 0; padding: 0 0.15rem; background: transparent; border: 0; color: var(--gold-strong); font: inherit; cursor: pointer; text-decoration: underline; }
         .brain-plan-card { border-top: 2px solid #ffd43b; }
         .brain-plan-banner { padding: 0.8rem 1rem; margin: 0.8rem 0; border: 1px solid currentColor; border-radius: 6px; }
         .brain-plan-accountability { color: #ffd43b; font-weight: 600; }
@@ -6962,7 +6962,7 @@ document.getElementById('co-network-range').addEventListener('change', loadCoNet
             let s = esc(text);
             // [[Ziel|Label]] / [[Ziel]] → klickbare Wiki-Navigation (Captures sind bereits escapt)
             s = s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (m, target, label) =>
-                `<a class="wiki-link" data-target="${target.trim()}">${(label || target).trim()}</a>`);
+                `<button type="button" class="wiki-link" data-target="${target.trim()}">${(label || target).trim()}</button>`);
             // [Text](url) → nur der (bereits escapte) Text, nicht klickbar
             s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, txt) => txt);
             // **fett**
@@ -7014,27 +7014,33 @@ document.getElementById('co-network-range').addEventListener('change', loadCoNet
                 (groups[folder] = groups[folder] || []).push(page);
             }
             let html = '<div class="wiki-folder">Übersicht</div>'
-                + '<a data-special="index">index.md</a>'
-                + '<a data-special="log">log.md</a>';
+                + '<button type="button" data-special="index">index.md</button>'
+                + '<button type="button" data-special="log">log.md</button>';
             for (const folder of Object.keys(groups).sort()) {
                 html += `<div class="wiki-folder">${esc(folder)}</div>`;
                 for (const page of groups[folder]) {
                     const label = page.slice(page.lastIndexOf('/') + 1);
-                    html += `<a data-page="${esc(page)}">${esc(label)}</a>`;
+                    html += `<button type="button" data-page="${esc(page)}">${esc(label)}</button>`;
                 }
             }
             nav.innerHTML = html;
-            nav.querySelectorAll('a[data-special="index"]').forEach(a =>
-                a.addEventListener('click', () => showPage('index.md', index)));
-            nav.querySelectorAll('a[data-special="log"]').forEach(a =>
-                a.addEventListener('click', () => showPage('log.md', log)));
-            nav.querySelectorAll('a[data-page]').forEach(a =>
-                a.addEventListener('click', () => loadWikiPage(a.dataset.page)));
+            nav.querySelectorAll('button[data-special="index"]').forEach(button =>
+                button.addEventListener('click', () => showPage('index.md', index)));
+            nav.querySelectorAll('button[data-special="log"]').forEach(button =>
+                button.addEventListener('click', () => showPage('log.md', log)));
+            nav.querySelectorAll('button[data-page]').forEach(button =>
+                button.addEventListener('click', () => loadWikiPage(button.dataset.page)));
         }
 
         function showPage(path, content) {
             const el = document.getElementById('brain-wiki-content');
-            el.innerHTML = `<h3>${esc(path)}</h3>` + renderMarkdown(content);
+            el.innerHTML = `<h3 tabindex="-1">${esc(path)}</h3>` + renderMarkdown(content);
+            document.querySelectorAll('#brain-wiki-nav button').forEach(button => {
+                const current = button.dataset.page === path || button.dataset.special + '.md' === path;
+                if (current) button.setAttribute('aria-current', 'page');
+                else button.removeAttribute('aria-current');
+            });
+            el.querySelector('h3').focus({ preventScroll: true });
         }
 
         async function loadWikiPage(path) {
@@ -7791,7 +7797,16 @@ document.getElementById("insights-refreshInsights").addEventListener("click", lo
             if (target === 'brain') window.loadBrain?.();
         }
         buttons.forEach(button => button.addEventListener('click', () => activate(button.dataset.tab)));
-        window.addEventListener('hashchange', () => activate(location.hash.slice(1),false));
+        window.addEventListener('hashchange', () => {
+            const target = location.hash.slice(1);
+            if (buttons.some(button => button.dataset.tab === target)) activate(target, false);
+        });
+        document.querySelector('.skip-link').addEventListener('click', event => {
+            event.preventDefault();
+            const main = document.getElementById('dashboard-main');
+            main.focus({ preventScroll: true });
+            main.scrollIntoView({ block: 'start' });
+        });
         // All lexical state above is initialized before the first deferred API call.
         setTimeout(() => activate(location.hash.slice(1) || 'overview', false),0);
     })();
