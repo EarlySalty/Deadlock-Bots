@@ -108,7 +108,9 @@ async function tab(name) {document.querySelector('.tab-btn[data-tab="'+name+'"]'
     assert.ok(calls.some(x=>x.url.includes('/api/insights/overview?')&&x.url.includes('from=2026-08-01')&&!x.url.includes('insights-from')),'date filter reaches backend');
     insightsDelay=true;
     $('insights-from').value='2026-08-01';$('insights-from').dispatchEvent(new window.Event('change'));
+    assert.equal(window.getComputedStyle(document.querySelector('.insights-panel')).opacity,'0.55','the panel visibly dims during a pending Insights request');
     $('insights-from').value='2026-09-01';$('insights-from').dispatchEvent(new window.Event('change'));await wait(100);
+    assert.equal(document.querySelector('.insights-panel').classList.contains('loading'),false,'the loading state ends after the current request');
     const newestImport=chartCalls.filter(chart=>chart.id==='insights-importedChart').at(-1);
     assert.deepEqual(Array.from(newestImport.config.data.datasets[0].data),[200,203],'slower old Insights range cannot replace new range');
     insightsDelay=false;

@@ -106,6 +106,7 @@ pub async fn search_users(
         "WITH names AS ({STORED_NAMES}), matches AS (\
            SELECT user_id, MAX(seen_at) AS seen_at FROM names \
            WHERE user_id::text = $1 OR strpos(lower(name), lower($1)) > 0 \
+              OR user_id IN (SELECT discord_id FROM core.users WHERE strpos(lower(username), lower($1)) > 0) \
            GROUP BY user_id ORDER BY (user_id::text = $1) DESC, MAX(seen_at) DESC NULLS LAST, user_id LIMIT 20\
          ) SELECT matches.user_id, COALESCE(latest.name, 'User ' || matches.user_id::text) \
            FROM matches LEFT JOIN LATERAL (\
@@ -199,6 +200,35 @@ mod identity_tests {
             .await
             .expect("gültige Testdaten")
             .is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn benutzername_findet_konto_mit_abweichendem_anzeigenamen() {
+        struct EmptyResolver;
+        #[async_trait::async_trait]
+        impl NameResolver for EmptyResolver {
+            async fn resolve(&self, _: &[u64]) -> HashMap<u64, String> {
+                HashMap::new()
+            }
+        }
+        let db = crate::db::test_pool().await.expect("Testdatenbank");
+        sqlx::query(
+            "INSERT INTO core.users(discord_id,username,global_name,last_seen) \
+             VALUES(1411350229747241010,'suchbarer_login','Anzeigename','2026-09-01T00:00:00Z')",
+        )
+        .execute(db.pool())
+        .await
+        .expect("Testmitglied");
+        let found = search_users(db.pool(), &EmptyResolver, "SUCHBARER_LOGIN")
+            .await
+            .expect("Benutzernamensuche");
+        assert_eq!(
+            found,
+            vec![serde_json::json!({
+                "user_id": "1411350229747241010", "display_name": "Anzeigename"
+            })]
+        );
     }
 }
 
