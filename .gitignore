@@ -117,3 +117,8 @@ deadlock-bot-rust.pid
 
 # Secretfreie Peer-Konfiguration für die Dashboard-Integrationstests
 !rust/crates/dl-dashboard/tests/postgres.json
+
+# Reviewbares einmaliges Reparaturskript, keine Laufzeitdaten.
+!/scripts/maintenance/
+/scripts/maintenance/*
+!/scripts/maintenance/repair_discord_system_messages_20260908.sql

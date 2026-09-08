@@ -257,55 +257,108 @@ async fn visitors(
     }
 }
 
+/// Eine Person pro Guild und Beitrittsperiode; Wiederbeitritte innerhalb derselben
+/// Periode zählen einmal. Später Ausgetretene bleiben im Nenner. Teilnahme ist
+/// eine echte Nachricht oder Voice, niemals bloßer Onlinestatus/Verify-Knopf.
+async fn participation_cohorts(
+    pool: &PgPool,
+    query: &InsightQuery,
+    following_week: bool,
+    today: NaiveDate,
+) -> DashboardDbResult<Vec<Value>> {
+    let interval = if following_week {
+        Interval::Weekly
+    } else {
+        query.interval
+    };
+    let expr = period_expr("occurred_at", interval);
+    let whole_period = if interval == Interval::Weekly {
+        format!("HAVING {expr} >= $2::date AND {expr} + 7 <= $3::date")
+    } else {
+        String::new()
+    };
+    let (window_start, window_end, completed) = if following_week {
+        (
+            "(c.period + 7)::timestamp AT TIME ZONE 'UTC'",
+            "(c.period + 14)::timestamp AT TIME ZONE 'UTC'",
+            "c.period + 14 <= $4::date",
+        )
+    } else {
+        (
+            "c.joined_at",
+            "((c.joined_at AT TIME ZONE 'UTC')::date + 1)::timestamp AT TIME ZONE 'UTC'",
+            if interval == Interval::Weekly {
+                "c.period + 7 <= $4::date"
+            } else {
+                "(c.joined_at AT TIME ZONE 'UTC')::date < $4::date"
+            },
+        )
+    };
+    let sql = format!(
+        r#"
+        WITH coverage AS (
+            SELECT CASE WHEN min(ts) IS NOT NULL THEN
+                greatest($5::date - 180, (min(ts) AT TIME ZONE 'UTC')::date + 1) END AS starts
+            FROM (
+                SELECT min(occurred_at) AS ts FROM activity.message_metadata_events WHERE ($1::bigint IS NULL OR guild_id=$1)
+                UNION ALL
+                SELECT min(occurred_at) FROM activity.voice_metadata_events WHERE ($1::bigint IS NULL OR guild_id=$1)
+            ) first_raw
+        ), cohorts AS (
+            SELECT {expr} AS period, guild_id, user_id, min(occurred_at) AS joined_at
+            FROM activity.member_events
+            WHERE event_type = 'join' AND ($1::BIGINT IS NULL OR guild_id = $1)
+              AND occurred_at >= $2::date::timestamp AT TIME ZONE 'UTC'
+              AND occurred_at < $3::date::timestamp AT TIME ZONE 'UTC'
+            GROUP BY period, guild_id, user_id
+            {whole_period}
+        )
+        SELECT c.period, count(*)::bigint AS members,
+            CASE WHEN bool_and({window_start} >= coverage.starts::timestamp AT TIME ZONE 'UTC')
+            THEN count(*) FILTER (WHERE
+                EXISTS (SELECT 1 FROM activity.message_metadata_events m
+                    WHERE m.guild_id = c.guild_id AND m.user_id = c.user_id
+                      AND m.occurred_at >= {window_start} AND m.occurred_at < {window_end})
+                OR EXISTS (SELECT 1 FROM activity.voice_metadata_events v
+                    WHERE v.guild_id = c.guild_id AND v.user_id = c.user_id
+                      AND v.occurred_at >= {window_start} AND v.occurred_at < {window_end})
+            )::bigint ELSE NULL END AS active
+        FROM cohorts c CROSS JOIN coverage WHERE {completed} GROUP BY c.period ORDER BY c.period
+    "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(query.guild_id)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(if following_week { monday(today) } else { today })
+        .bind(today)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|row| {
+        let members: i64 = row.get("members");
+        let active: Option<i64> = row.get("active");
+        let period = row.get::<NaiveDate,_>("period").to_string();
+        let rate = active.filter(|_| members>0).map(|n| json!(n as f64 / members as f64)).unwrap_or(Value::Null);
+        if following_week {
+            json!({"cohort_week":period,"joined":members,"retained":active,"retention_rate":rate,
+                "data_available":active.is_some(),"basis":"unique_join_cohort_message_voice_utc"})
+        } else {
+            json!({"period_start":period,"new_members":members,"same_day_interaction_count":active,
+                "same_day_interaction_rate":rate,"data_available":active.is_some(),"basis":"unique_join_cohort_message_voice_utc"})
+        }
+    }).collect())
+}
+
 async fn week1_retention_latest(
     pool: &PgPool,
-    guild: Option<i64>,
+    query: &InsightQuery,
 ) -> DashboardDbResult<Option<f64>> {
-    let today_week = monday(Utc::now().date_naive());
-    let row = sqlx::query(
-        r#"
-        WITH cohorts AS (
-            SELECT date_trunc('week', occurred_at AT TIME ZONE 'UTC')::date AS cohort_week,
-                   guild_id,
-                   user_id
-              FROM activity.member_events
-             WHERE event_type = 'join'
-               AND ($1::BIGINT IS NULL OR guild_id = $1)
-               AND date_trunc('week', occurred_at AT TIME ZONE 'UTC')::date + interval '14 days' <= $2::date
-        ),
-        latest AS (
-            SELECT MAX(cohort_week) AS cohort_week FROM cohorts
-        ),
-        activity_users AS (
-            SELECT guild_id, user_id, (occurred_at AT TIME ZONE 'UTC')::date AS day FROM activity.message_metadata_events
-            UNION ALL
-            SELECT guild_id, user_id, (occurred_at AT TIME ZONE 'UTC')::date AS day FROM activity.voice_metadata_events
-            UNION ALL
-            SELECT guild_id, user_id, (occurred_at AT TIME ZONE 'UTC')::date AS day FROM activity.interaction_events
-            UNION ALL
-            SELECT guild_id, user_id, day FROM activity.presence_daily_seen
-        )
-        SELECT COUNT(*)::BIGINT AS joined,
-               COUNT(*) FILTER (
-                   WHERE EXISTS (
-                       SELECT 1 FROM activity_users au
-                        WHERE au.guild_id = c.guild_id
-                          AND au.user_id = c.user_id
-                          AND au.day >= c.cohort_week + 7
-                          AND au.day < c.cohort_week + 14
-                   )
-               )::BIGINT AS retained
-          FROM cohorts c
-          JOIN latest l ON l.cohort_week = c.cohort_week
-        "#,
+    Ok(
+        participation_cohorts(pool, query, true, Utc::now().date_naive())
+            .await?
+            .last()
+            .and_then(|row| row["retention_rate"].as_f64()),
     )
-    .bind(guild)
-    .bind(today_week)
-    .fetch_one(pool)
-    .await?;
-    let joined: i64 = row.get("joined");
-    let retained: i64 = row.get("retained");
-    Ok((joined > 0).then_some(retained as f64 / joined as f64))
 }
 
 pub async fn overview(
@@ -357,7 +410,7 @@ pub async fn overview(
             voice_minutes(app.pool(), previous, query.guild_id, query.interval).await?;
         let visitors_total = visitors(app.pool(), current, query.guild_id).await?;
         let prev_visitors_total = visitors(app.pool(), previous, query.guild_id).await?;
-        let retention = week1_retention_latest(app.pool(), query.guild_id).await?;
+        let retention = week1_retention_latest(app.pool(), &query).await?;
 
         let card = |key: &str, value: Option<f64>, prev: Option<f64>, basis: &str| {
             json!({
@@ -749,50 +802,7 @@ pub async fn activation(
         Ok(query) => query,
         Err(resp) => return resp,
     };
-    let expr = period_expr("joined_at", query.interval);
-    let sql = format!(
-        r#"
-        SELECT {expr} AS period,
-               COUNT(*)::BIGINT AS new_members,
-               COUNT(*) FILTER (
-                   WHERE (
-                       first_message_at IS NOT NULL
-                       AND (first_message_at AT TIME ZONE 'UTC')::date = (joined_at AT TIME ZONE 'UTC')::date
-                   ) OR (
-                       first_voice_at IS NOT NULL
-                       AND (first_voice_at AT TIME ZONE 'UTC')::date = (joined_at AT TIME ZONE 'UTC')::date
-                   )
-               )::BIGINT AS activated
-          FROM activity.journey_user_state
-         WHERE joined_at IS NOT NULL
-           AND ($1::BIGINT IS NULL OR guild_id = $1)
-           AND joined_at >= $2
-           AND joined_at < $3
-         GROUP BY period
-         ORDER BY period
-        "#
-    );
-    let read: DashboardDbResult<Vec<Value>> = async {
-        let mut rows = Vec::new();
-        for row in sqlx::query(&sql)
-            .bind(query.guild_id)
-            .bind(query.from)
-            .bind(query.to)
-            .fetch_all(app.pool())
-            .await?
-        {
-            let new_members: i64 = row.get("new_members");
-            let activated: i64 = row.get("activated");
-            rows.push(json!({
-                "period_start": row.get::<NaiveDate, _>("period").to_string(),
-                "new_members": new_members,
-                "same_day_interaction_count": activated,
-                "same_day_interaction_rate": if new_members > 0 { json!(activated as f64 / new_members as f64) } else { Value::Null },
-            }));
-        }
-        Ok(rows)
-    }
-    .await;
+    let read = participation_cohorts(app.pool(), &query, false, Utc::now().date_naive()).await;
     match read {
         Ok(live) => with_imported(app.pool(), &query, json!({ "periods": live })).await,
         Err(err) => {
@@ -810,71 +820,11 @@ pub async fn retention(
     if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
-    let mut query = match parse_query(params) {
+    let query = match parse_query(params) {
         Ok(query) => query,
         Err(resp) => return resp,
     };
-    query.interval = Interval::Weekly;
-    let today_week = monday(Utc::now().date_naive());
-    let sql = r#"
-        WITH cohorts AS (
-            SELECT date_trunc('week', occurred_at AT TIME ZONE 'UTC')::date AS cohort_week,
-                   guild_id,
-                   user_id
-              FROM activity.member_events
-             WHERE event_type = 'join'
-               AND ($1::BIGINT IS NULL OR guild_id = $1)
-               AND occurred_at >= $2
-               AND occurred_at < $3
-               AND date_trunc('week', occurred_at AT TIME ZONE 'UTC')::date + interval '14 days' <= $4::date
-        ),
-        activity_users AS (
-            SELECT guild_id, user_id, (occurred_at AT TIME ZONE 'UTC')::date AS day FROM activity.message_metadata_events
-            UNION ALL
-            SELECT guild_id, user_id, (occurred_at AT TIME ZONE 'UTC')::date AS day FROM activity.voice_metadata_events
-            UNION ALL
-            SELECT guild_id, user_id, (occurred_at AT TIME ZONE 'UTC')::date AS day FROM activity.interaction_events
-            UNION ALL
-            SELECT guild_id, user_id, day FROM activity.presence_daily_seen
-        )
-        SELECT c.cohort_week,
-               COUNT(*)::BIGINT AS joined,
-               COUNT(*) FILTER (
-                   WHERE EXISTS (
-                       SELECT 1 FROM activity_users au
-                        WHERE au.guild_id = c.guild_id
-                          AND au.user_id = c.user_id
-                          AND au.day >= c.cohort_week + 7
-                          AND au.day < c.cohort_week + 14
-                   )
-               )::BIGINT AS retained
-          FROM cohorts c
-         GROUP BY c.cohort_week
-         ORDER BY c.cohort_week
-    "#;
-    let read: DashboardDbResult<Vec<Value>> = async {
-        let mut out = Vec::new();
-        for row in sqlx::query(sql)
-            .bind(query.guild_id)
-            .bind(query.from)
-            .bind(query.to)
-            .bind(today_week)
-            .fetch_all(app.pool())
-            .await?
-        {
-            let joined: i64 = row.get("joined");
-            let retained: i64 = row.get("retained");
-            out.push(json!({
-                "cohort_week": row.get::<NaiveDate, _>("cohort_week").to_string(),
-                "joined": joined,
-                "retained": retained,
-                "retention_rate": if joined > 0 { json!(retained as f64 / joined as f64) } else { Value::Null },
-                "basis": "raw_message_voice_interaction_presence_events",
-            }));
-        }
-        Ok(out)
-    }
-    .await;
+    let read = participation_cohorts(app.pool(), &query, true, Utc::now().date_naive()).await;
     match read {
         Ok(live) => with_imported(app.pool(), &query, json!({ "cohorts": live })).await,
         Err(err) => {
@@ -1441,6 +1391,81 @@ fn parse_csv(input: &str) -> Option<Vec<Vec<String>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn teilnahme_zaehlt_echte_ereignisse_ohne_online_und_doppelte_beitritte(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = crate::db::test_pool().await?;
+        sqlx::raw_sql(r#"
+            INSERT INTO activity.member_events(id,user_id,guild_id,event_type,occurred_at) VALUES
+            (1,1,7001,'join','2026-08-24 23:30Z'),(2,1,7001,'join','2026-08-24 23:45Z'),
+            (3,2,7001,'join','2026-08-25 10:00Z'),(4,3,7001,'join','2026-08-26 08:00Z'),
+            (5,3,7001,'leave','2026-08-26 12:00Z'),(6,4,7001,'join','2026-08-31 12:00Z'),
+            (7,5,7001,'join','2026-02-02 12:00Z');
+            INSERT INTO activity.message_metadata_events
+                (user_id,guild_id,channel_id,message_id,occurred_at,message_length,has_attachment,attachment_count,is_reply) VALUES
+            (1,7001,11,101,'2026-08-24 23:00Z',5,false,0,false),
+            (1,7001,11,102,'2026-08-25 00:00Z',5,false,0,false),
+            (1,7001,11,103,'2026-08-31 00:00Z',5,false,0,false),
+            (3,7001,11,104,'2026-08-26 08:05Z',0,true,1,false),
+            (9,7001,11,105,'2026-08-23 12:00Z',5,false,0,false),
+            (2,9999,11,106,'2026-09-01 12:00Z',5,false,0,false),
+            (2,7001,11,107,'2026-09-07 00:00Z',5,false,0,false);
+            INSERT INTO activity.voice_metadata_events(user_id,guild_id,channel_id,event_type,occurred_at)
+            VALUES (2,7001,12,'join','2026-08-25 11:00Z');
+            INSERT INTO activity.presence_daily_seen(user_id,guild_id,day) VALUES (2,7001,'2026-09-01');
+            INSERT INTO activity.interaction_events(user_id,guild_id,channel_id,interaction_id,interaction_kind,route,occurred_at)
+            VALUES (2,7001,11,201,'component','verify','2026-09-01 10:00Z');
+        "#).execute(db.pool()).await?;
+        let query = InsightQuery {
+            interval: Interval::Weekly,
+            guild_id: Some(7001),
+            from: NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+            to: NaiveDate::from_ymd_opt(2026, 9, 7).unwrap(),
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let activation = participation_cohorts(db.pool(), &query, false, today).await?;
+        assert_eq!(
+            activation[0]["new_members"], 3,
+            "Rejoin dedupliziert; Ausgetretener bleibt im Nenner"
+        );
+        assert_eq!(
+            activation[0]["same_day_interaction_count"], 2,
+            "Nur nach Beitritt am selben UTC-Tag; Anhänge zählen"
+        );
+        let retention = participation_cohorts(db.pool(), &query, true, today).await?;
+        assert_eq!(retention.len(), 1, "Unfertige Folgewoche bleibt unsichtbar");
+        assert_eq!(retention[0]["joined"], 3);
+        assert_eq!(
+            retention[0]["retained"], 1,
+            "Online und Verify sind keine Communityteilnahme"
+        );
+        let partial = InsightQuery {
+            from: NaiveDate::from_ymd_opt(2026, 8, 26).unwrap(),
+            to: NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
+            ..query
+        };
+        assert!(participation_cohorts(db.pool(), &partial, true, today)
+            .await?
+            .is_empty());
+        assert!(participation_cohorts(db.pool(), &partial, false, today)
+            .await?
+            .is_empty());
+        let old = InsightQuery {
+            from: NaiveDate::from_ymd_opt(2026, 2, 2).unwrap(),
+            to: NaiveDate::from_ymd_opt(2026, 2, 9).unwrap(),
+            ..query
+        };
+        for following_week in [false, true] {
+            let rows = participation_cohorts(db.pool(), &old, following_week, today).await?;
+            assert_eq!(
+                rows[0]["data_available"], false,
+                "Fehlende Rohdaten sind keine Inaktivität"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn weekly_periods_use_completed_monday_weeks() {

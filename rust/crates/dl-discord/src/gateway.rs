@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, Context, EventHandler, GatewayIntents, GuildChannel,
     GuildId, GuildMemberFlags, GuildMemberUpdateEvent, Interaction, InviteCreateEvent,
-    InviteDeleteEvent, Member, Message, OnlineStatus, Permissions, Reaction, ReactionType, Ready,
-    User, UserId, VoiceState,
+    InviteDeleteEvent, Member, Message, MessageType, OnlineStatus, Permissions, Reaction,
+    ReactionType, Ready, User, UserId, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -28,6 +28,17 @@ use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
 
 const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
+
+// Discord-Systemmeldungen tragen teilweise einen menschlichen Autor (z. B.
+// MemberJoin). Sie sind keine Nachricht dieses Mitglieds. Inhalt darf leer sein:
+// Sticker, Anhänge und Weiterleitungen bleiben reguläre Nutzernachrichten.
+fn is_user_message(message: &Message) -> bool {
+    !message.author.bot
+        && matches!(
+            message.kind,
+            MessageType::Regular | MessageType::InlineReply
+        )
+}
 
 fn ready_contains_guild(guild_ids: impl IntoIterator<Item = u64>, guild_id: u64) -> bool {
     guild_ids.into_iter().any(|candidate| candidate == guild_id)
@@ -346,7 +357,7 @@ impl EventHandler for Handler {
     }
 
     async fn message(&self, ctx: Context, message: Message) {
-        if message.author.bot {
+        if !is_user_message(&message) {
             return;
         }
         self.record_core_user(
@@ -709,6 +720,32 @@ pub async fn build_voice_worker_client(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn member_join_mit_menschlichem_autor_ist_keine_chatnachricht() {
+        let mut message = serenity::all::Message::default();
+        message.author.bot = false;
+        message.kind = serenity::all::MessageType::MemberJoin;
+        assert!(!super::is_user_message(&message));
+        message.kind = serenity::all::MessageType::PinsAdd;
+        assert!(!super::is_user_message(&message));
+    }
+
+    #[test]
+    fn echte_nachrichten_bleiben_auch_ohne_text_erhalten() {
+        let mut message = serenity::all::Message::default();
+        for kind in [
+            serenity::all::MessageType::Regular,
+            serenity::all::MessageType::InlineReply,
+        ] {
+            message.kind = kind;
+            message.content.clear(); // Anhänge, Sticker und Weiterleitungen benötigen keinen Text.
+            assert!(super::is_user_message(&message));
+            message.content = "Hallo zusammen".into();
+            assert!(super::is_user_message(&message));
+        }
+        message.author.bot = true;
+        assert!(!super::is_user_message(&message));
+    }
     use super::*;
 
     #[test]

@@ -788,7 +788,8 @@
         .chart-container {
             position: relative;
             width: 100%;
-            min-height: 420px;
+            min-height: 0;
+            height: 320px;
         }
         .voice-recent-wrap {
             margin-top: 1rem;
@@ -1447,7 +1448,6 @@ section { margin-bottom: 24px; background: var(--surface); border: 1px solid #62
 .search-results:not(:empty) { position: absolute; top: 100%; left: 0; right: 0; z-index: 8; max-height: 320px; overflow-y: auto; border: 1px solid #756343; background: #191a1f; box-shadow: 0 12px 32px #0009; border-radius: 8px; padding: 6px; }
 .search-result { display: block; text-align: left; width: 100%; border: 0; border-radius: 5px; background: transparent; color: #f1e6cf; }
 .search-result small { display: block; font-weight: 400; color: #a8a8b1; font-size: 11px; }
-.chart-container { max-height: 390px; }
 .voice-user-grid { grid-template-columns: repeat(auto-fit,minmax(170px,1fr)); }
 .voice-table,.dev-table-wrap { max-width: 100%; overflow: auto; }
 table { width: 100%; border-collapse: collapse; }
@@ -1505,13 +1505,19 @@ details[open] > summary { margin-bottom: 18px; }
 .insights-panel .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .insights-panel .controls label { display: block; margin-bottom: 4px; }
 .insights-panel .grid { gap: 16px; }
-.insights-panel .grid.two,.insights-panel .grid.three { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.insights-panel .grid.two { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.insights-panel .grid.three { display: flex; flex-wrap: wrap; }
+.insights-panel .grid.three > .card { flex: 1 1 280px; }
 .insights-panel .grid.kpi { grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); }
 .insights-panel .kpi-label { color: #b8b4ac; font-size: 12px; }
 .insights-panel .kpi-value { color: #ead09e; font-size: 28px; font-weight: 700; margin: 8px 0; }
 .insights-panel .kpi-change { color: #b1b0b8; font-size: 12px; }
-.insights-panel .chart-wrap { position: relative; height: 270px; margin-top: 20px; }
-.insights-panel .chart-wrap.tall { height: 340px; }
+.insights-panel .chart-wrap { position: relative; height: 240px; min-height: 0; margin-top: 16px; }
+.insights-panel .chart-wrap.tall { height: 280px; }
+.insights-comparison-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 20px; margin-bottom: 24px; }
+.insights-comparison-grid > section { margin-bottom: 0; }
+.insights-panel .insights-comparison-grid .chart-wrap { height: 220px; }
+.insights-panel .audience-chart { height: 285px; }
 .insights-panel .badge { color: #d8bd85; font-size: 10px; margin-left: 8px; }
 .insights-panel .import-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 .insights-panel .dropzone { display: block; width: 100%; border: 1px dashed #88744f; border-radius: 8px; padding: 30px; text-align: center; color: #c8bfab; background: #111216; }
@@ -1519,6 +1525,9 @@ details[open] > summary { margin-bottom: 18px; }
 .insights-panel .empty { padding: 24px; color: #b3b2ba; }
 .insights-panel.loading { opacity: .55; }
 .insights-panel .note { margin-top: 15px; }
+.insights-panel .rate-counts { color: #e8e5dd; font-size: 14px; }
+.insights-panel .rate-counts strong { color: #f5f2eb; }
+.insights-panel .rate-values { overflow-x: auto; max-height: 260px; }
 .source-note { border-left: 3px solid #b69b67; padding: 10px 16px; margin: 18px 0; color: #c8c1b2; font-size: 13px; }
 .insights-import-status { display: flex; gap: 14px; flex-wrap: wrap; color: #bdb6a7; margin: 12px 0; font-size: 12px; }
 .insights-panel .imported-values { max-height: 290px; overflow: auto; }
@@ -1526,6 +1535,8 @@ details[open] > summary { margin-bottom: 18px; }
 @media (max-width: 1050px) { body { padding-left: 224px; padding-right: 20px; } .tab-nav { width: 204px; } .top-nav { align-items: flex-start; } .top-nav-left { max-width: 190px; justify-content: flex-end; } .stats-grid { grid-template-columns: 1fr; } .stats-grid > .card { grid-column: auto; } section { padding: 20px; } .insights-panel .grid.three { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { body { padding: 0 14px 24px; } .top-nav { min-height: auto; padding: 20px 0; flex-wrap: wrap; } h1 { font-size: 26px; } .top-nav-left { max-width: none; justify-content: flex-start; } .tab-nav { position: sticky; top: 0; width: calc(100% + 28px); margin: 0 -14px 18px; padding: 8px 12px; flex-direction: row; overflow-x: auto; border-bottom: 1px solid #494033; } .nav-brand,.nav-group { display: none; } .tab-btn { flex-shrink: 0; padding: 8px 12px; } .tab-btn.active { box-shadow: inset 0 -2px 0 #d3b475; } section { padding: 16px; border-radius: 10px; } .card { padding: 14px; } .section-header { align-items: flex-start; } .section-actions { gap: 8px; } .section-actions .voice-meta { flex-basis: 100%; font-size: 11px; } .member-source-layout { flex-direction: column; } .member-source-details { grid-template-columns: 1fr 1fr; } .member-search { max-width: none; flex-basis: 100%; } .coplayer-row { padding: 12px; gap: 5px 10px; grid-template-columns: 22px minmax(0,1fr) auto; } .coplayer-time { font-size: 12px; } .scrim-slot-row,.scrim-block-match-row { grid-template-columns: 1fr 1fr; } .scrim-manual-card .scrim-form { grid-template-columns: 1fr; } .scrim-runtime-values,.scrim-runtime-form { grid-template-columns: 1fr; } .insights-panel .grid.two { grid-template-columns: 1fr; } .skip-link { left: 14px; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; animation: none !important; } }
+@media (max-width: 1100px) { .insights-comparison-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .chart-container { height: 280px; } .insights-panel .chart-wrap.tall { height: 250px; } .insights-panel .insights-comparison-grid .chart-wrap { height: 220px; } .insights-panel .grid.three > .card { flex-basis: 100%; } }
 
     </style>
 </head>
@@ -2468,30 +2479,34 @@ details[open] > summary { margin-bottom: 18px; }
   </section>
 
   <!-- ── Aktivierung ── -->
+  <div class="insights-comparison-grid">
   <section id="insights-activation">
-    <h2>Aktivierung neuer Mitglieder</h2>
-    <p class="hint">Anteil neuer Mitglieder, die noch am Beitrittstag etwas geschrieben haben oder in einem Voice-Kanal waren. Die Quote beschreibt die gemessene Aktivität, nicht die Wirkung einzelner Begrüßungen.</p>
+    <h2>Aktivität nach dem Beitritt</h2>
+    <p class="hint">Anteil der beigetretenen Mitglieder mit einer eigenen Nachricht oder einem Voice-Aufenthalt am selben Kalendertag (UTC). Jedes Mitglied zählt pro Beitrittsperiode einmal.</p>
     <div class="card">
-      <h3>Interaktion am Beitrittstag</h3>
+      <h3>Nachricht oder Voice am Beitrittstag</h3>
       <div class="sub">Anteil mit Aktivität am Beitrittstag.</div>
       <div class="chart-wrap tall"><canvas id="insights-activationChart"></canvas></div>
-      <div class="note">Rohzahlen (neue Mitglieder, davon aktiviert) stehen im Tooltip.</div>
+      <p id="insights-activation-counts" class="note rate-counts" aria-live="polite">Anzahlen werden geladen…</p>
+      <details><summary>Zahlen je Zeitraum</summary><div id="insights-activation-values" class="rate-values"></div></details>
     </div>
   </section>
 
   <!-- ── Bindung ── -->
   <section id="insights-retention">
     <h2>Woche-1-Bindung</h2>
-    <p class="hint">Kohorte = Beitritte einer Kalenderwoche (Mo–So, UTC). Gebunden = in der Folgewoche noch einmal aktiv gewesen (Nachricht, Voice, Interaktion oder online gesehen). Es werden nur Kohorten gezeigt, deren Folgewoche komplett vorbei ist.</p>
+    <p class="hint">Mitglieder einer Beitrittswoche, die in der vollständigen Folgewoche erneut selbst schreiben oder im Voice sind (Mo–So, UTC). Online-Anwesenheit und Systemmeldungen zählen nicht.</p>
     <div class="card">
       <h3>Bindung pro Beitrittswoche</h3>
       <div class="sub">Rückkehr in der ersten vollständigen Folgewoche.</div>
       <div class="chart-wrap tall"><canvas id="insights-retentionChart"></canvas></div>
-      <div class="note">Rohzahlen (beigetreten, davon zurückgekehrt) stehen im Tooltip.</div>
+      <p id="insights-retention-counts" class="note rate-counts" aria-live="polite">Anzahlen werden geladen…</p>
+      <details><summary>Zahlen je Beitrittswoche</summary><div id="insights-retention-values" class="rate-values"></div></details>
     </div>
   </section>
 
   <!-- ── Beteiligung ── -->
+  </div>
   <section id="insights-engagement">
     <h2>Beteiligung</h2>
     <p class="hint">Besucher = online im Server gesehen (Näherung über Presence). Beiträger = mindestens 3 Nachrichten oder Voice-Teilnahme in der Periode — nach der Definition unserer Bot-Auswertung.</p>
@@ -2522,12 +2537,12 @@ details[open] > summary { margin-bottom: 18px; }
       <div class="card">
         <h3>Wie lange schon Mitglied?</h3>
         <div class="sub" id="insights-tenureBasis">Aktuelle Mitglieder nach Beitrittsdatum.</div>
-        <div class="chart-wrap"><canvas id="insights-tenureChart"></canvas></div>
+        <div class="chart-wrap audience-chart"><canvas id="insights-tenureChart"></canvas></div>
       </div>
       <div class="card">
         <h3>Sind neue Mitglieder auch neu bei Discord?</h3>
         <div class="sub">Kontoalter der Beitritte der letzten 28 Tage.</div>
-        <div class="chart-wrap"><canvas id="insights-accountAgeChart"></canvas></div>
+        <div class="chart-wrap audience-chart"><canvas id="insights-accountAgeChart"></canvas></div>
       </div>
     </div>
   </section>
@@ -2571,6 +2586,71 @@ details[open] > summary { margin-bottom: 18px; }
     <details class="session-messages"><summary>Meldungen dieser Sitzung</summary><p class="voice-meta">Rückmeldungen zu deinen Aktionen in diesem Browserfenster.</p><div class="log" id="operation-log" role="log" aria-live="polite"></div></details>
     </main>
 <script>
+    const DASHBOARD_CHART_THEME = Object.freeze({
+        text: '#e8e5dd', ticks: '#c8c5bd', grid: 'rgba(255,255,255,0.14)',
+        tooltip: '#202126', tooltipText: '#f5f2eb', surface: '#111216',
+        font: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+    });
+    const DASHBOARD_CHART_COLORS = Object.freeze({
+        blue: '#65b5ef', orange: '#e9a15b', teal: '#5ecab7',
+        purple: '#bc9cea', rose: '#e995b5', neutral: '#b6becb', gold: '#d2b474',
+    });
+
+    // Canvas erbt keine CSS-Textfarben. Jede Instanz bekommt daher ihr vollständiges
+    // dunkles Theme, unabhängig von Browserpräferenz und globalen Chart.js-Defaults.
+    function createDashboardChart(canvas, config) {
+        const theme = DASHBOARD_CHART_THEME;
+        const options = config.options || {};
+        const plugins = options.plugins || {};
+        const legend = plugins.legend || {};
+        const labels = legend.labels || {};
+        const font = (existing = {}, size = 13) => ({
+            ...existing, family: theme.font, size: Math.max(size, Number(existing.size) || size),
+        });
+        const themedLabels = {
+            ...labels, color: theme.text, font: font(labels.font), padding: 14,
+            boxWidth: 13, boxHeight: 13, usePointStyle: true, pointStyle: 'rectRounded',
+        };
+        if (typeof labels.generateLabels === 'function') {
+            themedLabels.generateLabels = function(...args) {
+                return labels.generateLabels.apply(this, args).map(item => ({ ...item, fontColor: theme.text }));
+            };
+        }
+        const tooltip = plugins.tooltip || {};
+        const scales = {};
+        for (const [name, scale] of Object.entries(options.scales || {})) {
+            scales[name] = {
+                ...scale,
+                ticks: { maxTicksLimit: 6, ...scale.ticks, color: theme.ticks, font: font(scale.ticks?.font) },
+                grid: { ...scale.grid, color: theme.grid, tickColor: theme.grid },
+                border: { ...scale.border, color: theme.grid },
+                title: { ...scale.title, color: theme.text, font: font(scale.title?.font, 14) },
+            };
+        }
+        return new Chart(canvas, {
+            ...config,
+            options: {
+                ...options, color: theme.text, font: font(options.font), locale: 'de-DE',
+                scales,
+                plugins: {
+                    ...plugins,
+                    legend: plugins.legend === false ? false : {
+                        ...legend, labels: themedLabels,
+                        title: { ...legend.title, color: theme.text, font: font(legend.title?.font, 14) },
+                    },
+                    tooltip: plugins.tooltip === false ? false : {
+                        ...tooltip, backgroundColor: theme.tooltip, titleColor: theme.tooltipText,
+                        bodyColor: theme.tooltipText, footerColor: theme.tooltipText,
+                        titleFont: font(tooltip.titleFont, 14), bodyFont: font(tooltip.bodyFont), footerFont: font(tooltip.footerFont),
+                        borderColor: '#696763', borderWidth: 1, padding: 12,
+                    },
+                    title: { ...plugins.title, color: theme.text, font: font(plugins.title?.font, 14) },
+                    subtitle: { ...plugins.subtitle, color: theme.ticks, font: font(plugins.subtitle?.font) },
+                },
+            },
+        });
+    }
+
     const opLog = document.getElementById('operation-log');
 
 
@@ -5218,7 +5298,7 @@ function renderVoiceHourlyChart(rows, mode, userInfo) {
     }
     const baseLabel = userInfo && userInfo.display_name ? userInfo.display_name : 'Voice';
     const subtitle = mode === 'hour' ? 'Stunde (UTC)' : mode === 'day' ? 'Wochentag' : mode === 'week' ? 'Kalenderwoche' : 'Monat';
-    voiceHourlyChart = new Chart(voiceHourlyChartCanvas, {
+    voiceHourlyChart = createDashboardChart(voiceHourlyChartCanvas, {
         type: 'line',
         data: {
             labels,
@@ -5226,8 +5306,8 @@ function renderVoiceHourlyChart(rows, mode, userInfo) {
                 {
                     label: `${baseLabel} Ø Stunden`,
                     data: hoursData,
-                    borderColor: '#4dabf7',
-                    backgroundColor: 'rgba(77,171,247,0.18)',
+                    borderColor: DASHBOARD_CHART_COLORS.blue,
+                    backgroundColor: 'rgba(101,181,239,0.16)',
                     fill: true,
                     tension: 0.35,
                     yAxisID: 'yHours',
@@ -5236,8 +5316,8 @@ function renderVoiceHourlyChart(rows, mode, userInfo) {
                 {
                     label: `${baseLabel} Ø Peak`,
                     data: peakData,
-                    borderColor: '#e599f7',
-                    backgroundColor: 'rgba(229,153,247,0.15)',
+                    borderColor: DASHBOARD_CHART_COLORS.purple,
+                    backgroundColor: 'rgba(188,156,234,0.15)',
                     borderDash: [6, 4],
                     fill: false,
                     tension: 0.35,
@@ -5274,9 +5354,9 @@ function renderVoiceHourlyChart(rows, mode, userInfo) {
                             const label = ctx.dataset.label || '';
                             const value = ctx.parsed.y || 0;
                             if (ctx.dataset.yAxisID === 'yHours') {
-                                return `${label}: ${value.toFixed(2)} h`;
+                                return `${label}: ${value.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} h`;
                             }
-                            return `${label}: ${value.toFixed(1)}`;
+                            return `${label}: ${value.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`;
                         },
                     },
                 },
@@ -5556,12 +5636,12 @@ function renderMemberSourceAnalytics(data) {
     const total = Number(analytics.tracked_joins || 0);
 
     const series = [
-        { key: 'public', label: 'Public', color: '#4dabf7' },
-        { key: 'website', label: 'Website', color: '#51cf66' },
-        { key: 'twitch', label: 'Twitch', color: '#9775fa' },
-        { key: 'personal', label: 'Persönlich', color: '#ffa94d' },
-        { key: 'bot_invite', label: 'Bot Invites', color: '#ff6b6b' },
-        { key: 'unknown', label: 'Unbekannt', color: '#868e96' },
+        { key: 'public', label: 'Server entdecken', color: DASHBOARD_CHART_COLORS.teal },
+        { key: 'website', label: 'Website', color: DASHBOARD_CHART_COLORS.blue },
+        { key: 'twitch', label: 'Twitch', color: DASHBOARD_CHART_COLORS.purple },
+        { key: 'personal', label: 'Persönlich', color: DASHBOARD_CHART_COLORS.orange },
+        { key: 'bot_invite', label: 'Bot-Einladungen', color: DASHBOARD_CHART_COLORS.rose },
+        { key: 'unknown', label: 'Unbekannt', color: DASHBOARD_CHART_COLORS.neutral },
     ];
 
     if (memberSourceSummary) {
@@ -5582,7 +5662,7 @@ function renderMemberSourceAnalytics(data) {
 
             const label = document.createElement('span');
             label.className = 'member-source-label';
-            const pct = total > 0 ? ` (${((count / total) * 100).toFixed(1)}%)` : '';
+            const pct = total > 0 ? ` (${((count / total) * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 })} %)` : '';
             label.textContent = `${entry.label}${pct}`;
             row.appendChild(label);
 
@@ -5614,15 +5694,15 @@ function renderMemberSourceAnalytics(data) {
         if (memberSourceChart) {
             memberSourceChart.destroy();
         }
-        memberSourceChart = new Chart(memberSourceChartCanvas, {
+        memberSourceChart = createDashboardChart(memberSourceChartCanvas, {
             type: 'doughnut',
             data: {
                 labels: series.map((s) => s.label),
                 datasets: [{
                     data: series.map((s) => Number(bucketCounts[s.key] || 0)),
                     backgroundColor: series.map((s) => s.color),
-                    borderColor: 'rgba(18,18,18,0.9)',
-                    borderWidth: 2,
+                    borderColor: DASHBOARD_CHART_THEME.surface,
+                    borderWidth: 3,
                     hoverOffset: 4,
                 }],
             },
@@ -5635,8 +5715,8 @@ function renderMemberSourceAnalytics(data) {
                         callbacks: {
                             label: (ctx) => {
                                 const val = Number(ctx.parsed || 0);
-                                const pct = total > 0 ? ((val / total) * 100).toFixed(1) : '0.0';
-                                const base = `${ctx.label}: ${val.toLocaleString('de-DE')} (${pct}%)`;
+                                const pct = total > 0 ? ((val / total) * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) : '0';
+                                const base = `${ctx.label}: ${val.toLocaleString('de-DE')} (${pct} %)`;
                                 if (ctx.label === 'Twitch' && analytics.twitch_breakdown && analytics.twitch_breakdown.length > 0) {
                                     const lines = analytics.twitch_breakdown.slice(0, 6).map((r) =>
                                         `  @${r.streamer_login || r.label}: ${Number(r.count || 0).toLocaleString('de-DE')}`
@@ -6355,7 +6435,7 @@ document.getElementById('co-network-range').addEventListener('change', loadCoNet
 
     // ─── Tab: Entwicklung (Repo-Aktivität) ───────────
     (function () {
-        const REPO_COLORS = ['#4dabf7', '#845ef7', '#ff922b', '#51cf66', '#ff6b6b', '#22b8cf', '#fcc419'];
+        const REPO_COLORS = [DASHBOARD_CHART_COLORS.blue, DASHBOARD_CHART_COLORS.purple, DASHBOARD_CHART_COLORS.orange, DASHBOARD_CHART_COLORS.teal, DASHBOARD_CHART_COLORS.rose, DASHBOARD_CHART_COLORS.neutral, DASHBOARD_CHART_COLORS.gold];
         let data = null;
         let period = 30;     // Tage; 0 = Gesamt
         let metric = 'c';    // 'c' | 'lines' | 'f'
@@ -6467,7 +6547,7 @@ document.getElementById('co-network-range').addEventListener('change', loadCoNet
                 stack: 'all',
             }));
             if (chart) chart.destroy();
-            chart = new Chart(canvas, {
+            chart = createDashboardChart(canvas, {
                 type: 'bar',
                 data: { labels: keys.map(bucketLabel), datasets },
                 options: {
@@ -7130,17 +7210,16 @@ document.getElementById('co-network-range').addEventListener('change', loadCoNet
 
 /* ── Farbrollen (validierte kategoriale Palette, dunkle Fläche) ── */
 const SOURCES = [
-  { key: "personal", label: "Einladung",        color: "#d95926" },
-  { key: "website",  label: "Website",          color: "#199e70" },
-  { key: "vanity",   label: "Vanity-Link",      color: "#c98500" },
-  { key: "twitch",   label: "Twitch",           color: "#9085e9" },
-  { key: "public",   label: "Server entdecken", color: "#008300" },
-  { key: "unknown",  label: "Unbekannt",        color: "#8ea8bb" }, // neutral, bewusst grau
+  { key: "personal", label: "Einladung",        color: DASHBOARD_CHART_COLORS.orange },
+  { key: "website",  label: "Website",          color: DASHBOARD_CHART_COLORS.blue },
+  { key: "vanity",   label: "Server-Link",       color: DASHBOARD_CHART_COLORS.rose },
+  { key: "twitch",   label: "Twitch",           color: DASHBOARD_CHART_COLORS.purple },
+  { key: "public",   label: "Server entdecken", color: DASHBOARD_CHART_COLORS.teal },
+  { key: "unknown",  label: "Unbekannt",        color: DASHBOARD_CHART_COLORS.neutral },
 ];
 const SURFACE = "#15161b";
-const ACCENT = "#d2b474";
-const TEAL_RAMP = ["#a7dcd4", "#5cb9ad", "#23948a", "#0e6b63"];
-const AMBER_RAMP = ["#f2c879", "#d99a2b", "#a06f10"];
+const ACCENT = DASHBOARD_CHART_COLORS.gold;
+const AUDIENCE_COLORS = [DASHBOARD_CHART_COLORS.blue, DASHBOARD_CHART_COLORS.orange, DASHBOARD_CHART_COLORS.teal, DASHBOARD_CHART_COLORS.purple];
 
 const nf = new Intl.NumberFormat("de-DE");
 const nf1 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
@@ -7148,7 +7227,7 @@ const nf1 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
 const charts = {};
 function renderChart(id, config) {
   if (charts[id]) charts[id].destroy();
-  charts[id] = new Chart(document.getElementById(id), config);
+  charts[id] = createDashboardChart(document.getElementById(id), config);
 }
 
 /* ── Daten laden ── */
@@ -7193,7 +7272,7 @@ function fmtPeriod(iso, interval) {
 
 /* ── Kennzahlen ── */
 const KPI_META = {
-  new_members:         { label: "Neue Mitglieder" },
+  new_members:         { label: "Beigetretene Mitglieder" },
   new_contributors:    { label: "Neue Beiträger" },
   week1_retention:     { label: "Bindung neuer Mitglieder", pct: true },
   visitors:            { label: "Besucher", approx: true },
@@ -7274,8 +7353,8 @@ function renderGrowth(growth, interval) {
       datasets: [{
         label: "Mitglieder",
         data: periods.map(p => p.member_total),
-        borderColor: ACCENT,
-        backgroundColor: "rgba(16, 183, 173, 0.12)",
+        borderColor: DASHBOARD_CHART_COLORS.blue,
+        backgroundColor: "rgba(101, 181, 239, 0.12)",
         borderWidth: 2,
         pointRadius: 3,
         pointHoverRadius: 5,
@@ -7291,9 +7370,9 @@ function renderGrowth(growth, interval) {
   });
 
   const leaveSeries = [
-    { key: "lt_1_month", label: "Unter 1 Monat dabei", color: "#c98500" },
-    { key: "ge_1_month", label: "1 Monat+ dabei", color: "#199e70" },
-    { key: "unknown", label: "Unbekannt", color: "#8ea8bb" },
+    { key: "lt_1_month", label: "Unter 1 Monat dabei", color: DASHBOARD_CHART_COLORS.orange },
+    { key: "ge_1_month", label: "1 Monat+ dabei", color: DASHBOARD_CHART_COLORS.blue },
+    { key: "unknown", label: "Unbekannt", color: DASHBOARD_CHART_COLORS.neutral },
   ];
   renderChart("insights-leavesChart", {
     type: "bar",
@@ -7323,22 +7402,54 @@ function renderGrowth(growth, interval) {
 }
 
 /* ── Aktivierung ── */
+function ratePercent(row, key) {
+  return row.data_available === false || !Number.isFinite(row[key]) ? null : row[key] * 100;
+}
+function rateCount(value) {
+  return Number.isFinite(value) ? nf.format(value) : 'Nicht verfügbar';
+}
+function rateDataAvailable(row, countKey, totalKey) {
+  return row.data_available !== false && Number.isFinite(row[countKey]) && Number.isFinite(row[totalKey]);
+}
+function renderRateCounts(rows, {target, dateKey, countKey, totalKey, rateKey, interval, action}) {
+  const missing = rows.some(row => !rateDataAvailable(row, countKey, totalKey));
+  const measured = rows.filter(row => rateDataAvailable(row, countKey, totalKey) && ratePercent(row, rateKey) !== null);
+  const latest = measured[measured.length - 1];
+  const summary = document.getElementById(`insights-${target}-counts`);
+  summary.innerHTML = latest
+    ? `<strong>${rateCount(latest[countKey])} von ${rateCount(latest[totalKey])}</strong> ${esc(action)} · ${target === 'retention' ? 'Beitrittswoche ' : ''}${esc(fmtPeriod(latest[dateKey], interval))} (${nf1.format(ratePercent(latest, rateKey))} %).${missing ? ' Für weitere Zeiträume fehlen vollständige Rohdaten.' : ''}`
+    : missing ? 'Keine vollständigen Rohdaten – die Aktivität und ihre Quote sind nicht verfügbar.'
+    : rows.length && rows.every(row => row[totalKey] === 0) ? 'Keine Beitritte in diesem Zeitraum – keine Quote berechenbar.'
+    : 'Für diesen Zeitraum ist noch keine Quote messbar.';
+  const values = document.getElementById(`insights-${target}-values`);
+  if (!rows.length) { values.textContent = 'Für diesen Zeitraum sind keine Beitritte erfasst.'; return; }
+  values.innerHTML = '<table><thead><tr><th>Zeitraum</th><th>Beigetreten</th><th>Davon ' + esc(action) + '</th><th>Anteil</th></tr></thead><tbody>'
+    + [...rows].reverse().map(row => {
+      const available = rateDataAvailable(row, countKey, totalKey);
+      const percent = ratePercent(row, rateKey);
+      const rateLabel = !available ? 'Keine vollständigen Rohdaten' : row[totalKey] === 0 ? 'Keine Beitritte' : percent === null ? 'Noch nicht messbar' : nf1.format(percent) + ' %';
+      return `<tr><td>${esc(fmtPeriod(row[dateKey], interval))}</td><td>${rateCount(row[totalKey])}</td><td>${available ? rateCount(row[countKey]) : 'Nicht verfügbar'}</td><td>${rateLabel}</td></tr>`;
+    }).join('')
+    + '</tbody></table>';
+}
+
 function renderActivation(activation, interval) {
   const rows = activation.live.periods;
+  renderRateCounts(rows, {target:'activation', dateKey:'period_start', countKey:'same_day_interaction_count', totalKey:'new_members', rateKey:'same_day_interaction_rate', interval, action:'am Beitrittstag aktiv'});
   const labels = rows.map(r => fmtPeriod(r.period_start, interval));
   renderChart("insights-activationChart", {
     type: "line",
     data: {
       labels,
       datasets: [{
-        label: "% mit Interaktion am Beitrittstag",
-        data: rows.map(r => r.same_day_interaction_rate === null ? null : r.same_day_interaction_rate * 100),
-        borderColor: ACCENT,
-        backgroundColor: ACCENT,
+        label: "% mit Nachricht oder Voice am Beitrittstag",
+        data: rows.map(r => ratePercent(r, 'same_day_interaction_rate')),
+        borderColor: DASHBOARD_CHART_COLORS.blue,
+        backgroundColor: DASHBOARD_CHART_COLORS.blue,
         borderWidth: 2,
         pointRadius: 3,
         pointHoverRadius: 5,
-        spanGaps: true,
+        spanGaps: false,
         tension: 0.25,
       }],
     },
@@ -7346,7 +7457,7 @@ function renderActivation(activation, interval) {
       responsive: true, maintainAspectRatio: false,
       scales: {
         x: { grid: { display: false } },
-        y: { min: 0, max: 100, ticks: { callback: v => v + " %" } },
+        y: { min: 0, max: 100, ticks: { callback: v => nf1.format(v) + " %" } },
       },
       plugins: {
         legend: { display: false },
@@ -7354,10 +7465,12 @@ function renderActivation(activation, interval) {
           callbacks: {
             label: ctx => {
               const r = rows[ctx.dataIndex];
+              if (!rateDataAvailable(r, 'same_day_interaction_count', 'new_members')) return ['Keine vollständigen Rohdaten', `Beigetreten: ${rateCount(r.new_members)}`];
+              if (r.new_members === 0) return ['Keine Beitritte – keine Quote berechenbar.'];
               return [
-                `Aktiviert: ${nf1.format(ctx.parsed.y)} %`,
-                `Neue Mitglieder: ${nf.format(r.new_members)}`,
-                `Davon aktiviert: ${nf.format(r.same_day_interaction_count)}`,
+                `Am Beitrittstag aktiv: ${ratePercent(r, 'same_day_interaction_rate') === null ? 'Nicht verfügbar' : nf1.format(ratePercent(r, 'same_day_interaction_rate')) + ' %'}`,
+                `Beigetretene Mitglieder: ${rateCount(r.new_members)}`,
+                `Davon mit Nachricht oder Voice: ${rateCount(r.same_day_interaction_count)}`,
               ];
             },
           },
@@ -7371,6 +7484,7 @@ function renderActivation(activation, interval) {
 /* ── Woche-1-Bindung ── */
 function renderRetention(retention) {
   const rows = retention.live.cohorts;
+  renderRateCounts(rows, {target:'retention', dateKey:'cohort_week', countKey:'retained', totalKey:'joined', rateKey:'retention_rate', interval:'weekly', action:'in der Folgewoche zurück'});
   const labels = rows.map(r => "KW ab " + fmtPeriod(r.cohort_week, "daily"));
   renderChart("insights-retentionChart", {
     type: "line",
@@ -7378,13 +7492,13 @@ function renderRetention(retention) {
       labels,
       datasets: [{
         label: "Woche-1-Bindung",
-        data: rows.map(r => r.retention_rate === null ? null : r.retention_rate * 100),
-        borderColor: ACCENT,
-        backgroundColor: ACCENT,
+        data: rows.map(r => ratePercent(r, 'retention_rate')),
+        borderColor: DASHBOARD_CHART_COLORS.teal,
+        backgroundColor: DASHBOARD_CHART_COLORS.teal,
         borderWidth: 2,
         pointRadius: 3,
         pointHoverRadius: 5,
-        spanGaps: true,
+        spanGaps: false,
         tension: 0.25,
       }],
     },
@@ -7392,7 +7506,7 @@ function renderRetention(retention) {
       responsive: true, maintainAspectRatio: false,
       scales: {
         x: { grid: { display: false } },
-        y: { min: 0, max: 100, ticks: { callback: v => v + " %" } },
+        y: { min: 0, max: 100, ticks: { callback: v => nf1.format(v) + " %" } },
       },
       plugins: {
         legend: { display: false },
@@ -7400,10 +7514,12 @@ function renderRetention(retention) {
           callbacks: {
             label: ctx => {
               const r = rows[ctx.dataIndex];
+              if (!rateDataAvailable(r, 'retained', 'joined')) return ['Keine vollständigen Rohdaten', `Beigetreten: ${rateCount(r.joined)}`];
+              if (r.joined === 0) return ['Keine Beitritte – keine Quote berechenbar.'];
               return [
-                `Bindung: ${nf1.format(ctx.parsed.y)} %`,
-                `Beigetreten: ${nf.format(r.joined)}`,
-                `Zurückgekehrt: ${nf.format(r.retained)}`,
+                `Bindung: ${ratePercent(r, 'retention_rate') === null ? 'Nicht verfügbar' : nf1.format(ratePercent(r, 'retention_rate')) + ' %'}`,
+                `Beigetreten: ${rateCount(r.joined)}`,
+                `Zurückgekehrt: ${rateCount(r.retained)}`,
               ];
             },
           },
@@ -7427,14 +7543,14 @@ function renderEngagement(engagement, interval) {
         {
           label: "Besucher",
           data: rows.map(r => r.visitors),
-          backgroundColor: "#199e70",
+          backgroundColor: DASHBOARD_CHART_COLORS.blue,
           borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
           maxBarThickness: 22,
         },
         {
           label: "Beiträger",
           data: rows.map(r => r.contributors),
-          backgroundColor: "#d95926",
+          backgroundColor: DASHBOARD_CHART_COLORS.teal,
           borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
           maxBarThickness: 22,
         },
@@ -7467,7 +7583,7 @@ function renderEngagement(engagement, interval) {
       datasets: [{
         label: "Nachrichten",
         data: rows.map(r => r.messages_total),
-        backgroundColor: ACCENT,
+        backgroundColor: DASHBOARD_CHART_COLORS.orange,
         borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
         maxBarThickness: 28,
       }],
@@ -7498,7 +7614,7 @@ function renderEngagement(engagement, interval) {
       datasets: [{
         label: "Sprachminuten",
         data: rows.map(r => Math.round(r.voice_minutes_total)),
-        backgroundColor: "#9085e9",
+        backgroundColor: DASHBOARD_CHART_COLORS.purple,
         borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
         maxBarThickness: 28,
       }],
@@ -7522,14 +7638,14 @@ function donut(id, entries, ramp) {
         data: entries.map(e => e.count),
         backgroundColor: entries.map((_, i) => ramp[i % ramp.length]),
         borderColor: SURFACE,
-        borderWidth: 2,
+        borderWidth: 3,
       }],
     },
     options: {
       responsive: true, maintainAspectRatio: false, cutout: "62%",
       plugins: {
         legend: {
-          position: "right",
+          position: "bottom",
           labels: {
             generateLabels: chart => chart.data.labels.map((label, i) => ({
               text: total > 0
@@ -7568,7 +7684,7 @@ function renderAudience(audience) {
   const tenure = audience.live.member_tenure ?? {};
   donut("insights-tenureChart",
     TENURE_ORDER.map(t => ({ label: t.label, count: tenure[t.key] ?? 0 })),
-    TEAL_RAMP);
+    AUDIENCE_COLORS);
   const tenureBasis = audience.live.basis?.member_tenure;
   if (tenureBasis) {
     document.getElementById("insights-tenureBasis").textContent =
@@ -7579,7 +7695,7 @@ function renderAudience(audience) {
   const age = audience.live.new_member_account_age_28d ?? {};
   donut("insights-accountAgeChart",
     ACCOUNT_AGE_ORDER.map(a => ({ label: a.label, count: age[a.key] ?? 0 })),
-    AMBER_RAMP);
+    AUDIENCE_COLORS);
 }
 
 /* ── Top-Invites ── */
@@ -7760,6 +7876,10 @@ async function loadAll() {
     const empty = document.getElementById('insights-importedEmpty');
     empty.hidden = false; empty.textContent = 'Keine aktuellen Daten verfügbar. Bitte erneut laden.';
     document.querySelector('#insights-invitesTable tbody').innerHTML = '<tr><td colspan="3">Keine aktuellen Daten verfügbar.</td></tr>';
+    for (const target of ['activation', 'retention']) {
+      document.getElementById(`insights-${target}-counts`).textContent = 'Anzahlen konnten nicht geladen werden.';
+      document.getElementById(`insights-${target}-values`).replaceChildren();
+    }
     document.getElementById("insights-importStatus").textContent = 'Daten konnten nicht geladen werden: ' + err.message;
     document.getElementById("insights-kpiGrid").innerHTML =
       `<div class="empty">Daten konnten nicht geladen werden: ${esc(err.message)}</div>`;

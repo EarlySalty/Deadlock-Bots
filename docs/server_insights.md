@@ -59,9 +59,11 @@ letzte 8 Wochen), optional `guild_id`:
 
 `/api/insights/overview` (Kennzahlen-Kacheln + Vorperioden-Vergleich) ·
 `/growth` (Joins nach Quelle, Leaves nach Mitgliedsdauer, Mitgliederverlauf) ·
-`/activation` (Interaktion am Beitrittstag) · `/retention` (Woche-1-Bindung:
-Kohorte = Beitrittswoche Mo–So UTC, gebunden = Aktivität in W+1, nur abgeschlossene
-Kohorten) · `/engagement` (Besucher/Beiträger ≥3 Nachrichten oder Voice, Nachrichten,
+`/activation` (echte Nachricht oder Voice nach Beitritt bis Mitternacht UTC) ·
+`/retention` (Woche-1-Bindung: eindeutige Person je Guild/Beitrittswoche Mo–So UTC,
+Rückkehr = Nachricht oder Voice in W+1, keine Presence oder Pflichtknöpfe,
+nur vollständig ausgewählte und abgeschlossene Kohorten; spätere Ausgetretene
+bleiben im Nenner) · `/engagement` (Besucher/Beiträger ≥3 Nachrichten oder Voice, Nachrichten,
 Sprachminuten) · `/audience` (Mitgliedsdauer, Kontoalter der Neuzugänge) ·
 `/top-invites` (28 Tage) · `POST /import` (guard_mutate + CSRF).
 
