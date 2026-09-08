@@ -9,6 +9,8 @@ const {JSDOM, VirtualConsole} = require(process.argv[2] || 'jsdom');
 const html = fs.readFileSync(path.join(__dirname, '../service/static/dashboard.html'), 'utf8');
 const ID_A = '1411350229747241010';
 const ID_B = '1118439769626648601';
+const GUILD_A = '1289721245281292288';
+const GUILD_B = '1289721245281292299';
 const calls = [], errors = [], chartCalls = [];
 const backend = fs.readFileSync(path.join(__dirname,'../rust/crates/dl-dashboard/src/web.rs'),'utf8');
 const routes = [...backend.matchAll(/\.route\(\s*"([^"]+)"/g)].map(match=>new RegExp('^'+match[1].replace(/\{[^}]+\}/g,'[^/]+')+'$'));
@@ -22,7 +24,7 @@ let authResolvedAt = null;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 function payload(url) {
     const uri = new URL(url, 'https://admin.example.test');
-    const membershipBase = uri.searchParams.get('from') === '2026-09-01' ? 200 : 100;
+    const membershipBase = uri.searchParams.get('guild_id') === GUILD_B ? 900 : uri.searchParams.get('from') === '2026-09-01' ? 200 : 100;
     if (uri.pathname === '/api/auth/me') return {authenticated:true,csrf_token:'fixture-csrf-test-only',user:{display_name:'Testadmin'}};
     if (uri.pathname === '/api/user-retention') return {summary:{},candidates:[{user_id:ID_A,display_name:'Philipp <img src=x onerror=alert(1)>',days_inactive:14,last_active_at:'2026-09-01T12:00:00Z',membership_status:'left',last_message_status:'failed',last_message_at:'2026-09-02T12:00:00Z'}]};
     if (uri.pathname === '/api/voice-history') {
@@ -43,6 +45,7 @@ function payload(url) {
     if (uri.pathname === '/api/brain/wiki') return {pages:['wissen/Team.md'],index:'Siehe [[Team|Team-Wissen]].',log:'Letzter Lauf'};
     if (uri.pathname === '/api/brain/wiki/page') return {path:uri.searchParams.get('path'),content:'Gespeichertes Team-Wissen.'};
     if (uri.pathname.startsWith('/api/insights/')) {
+        if (uri.pathname.endsWith('/import')) return {files:1,rows:1,results:[]};
         if (uri.pathname.endsWith('/overview')) return {live:{cards:[]},imported:[{import_kind:'membership',period_start:'2026-09-04',dimension:'total_membership',value:membershipBase},{import_kind:'membership',period_start:'2026-09-05',dimension:'total_membership',value:membershipBase+3},{import_kind:'retention',period_start:'2026-08-30',dimension:'pct_retained',value:12}],import_status:{rows:3,last_import_at:'2026-09-07T05:16:00Z',latest_period:'2026-09-05',kinds:['membership','retention']}};
         if(uri.pathname.endsWith('/growth')) return {live:{periods:[],member_total_basis:'directory'}};
         if(uri.pathname.endsWith('/retention')) return {live:{cohorts:[]}};
@@ -67,6 +70,7 @@ const dom = new JSDOM(html.replace(/<script src=[^>]+><\/script>/g,''), {
             calls.push({url:String(url),method:options.method||'GET',headers:options.headers,at:Date.now()});
             const uri=new URL(url,'https://admin.example.test');
             assert.ok(routes.some(route=>route.test(uri.pathname)), 'fixture request must exist in Rust router: '+uri.pathname);
+            if (uri.pathname.startsWith('/api/insights/')) assert.ok([GUILD_A,GUILD_B].includes(uri.searchParams.get('guild_id')), 'every Insights request must carry an exact server ID');
             if (uri.pathname === '/api/auth/me') { await wait(180); authResolvedAt = Date.now(); }
             if (insightsDelay && uri.pathname.startsWith('/api/insights/') && uri.searchParams.get('from') === '2026-08-01') await wait(70);
             if (voiceDelay && uri.pathname==='/api/voice-history' && uri.searchParams.get('user_id')===ID_A) await wait(70);
@@ -108,6 +112,24 @@ async function tab(name) {document.querySelector('.tab-btn[data-tab="'+name+'"]'
     const newestImport=chartCalls.filter(chart=>chart.id==='insights-importedChart').at(-1);
     assert.deepEqual(Array.from(newestImport.config.data.datasets[0].data),[200,203],'slower old Insights range cannot replace new range');
     insightsDelay=false;
+    const insightsReads=()=>calls.filter(call=>call.method==='GET' && call.url.startsWith('/api/insights/'));
+    $('insights-guildId').value=GUILD_B;$('insights-guildId').dispatchEvent(new window.Event('change'));await wait(20);
+    assert.deepEqual(Array.from(chartCalls.filter(chart=>chart.id==='insights-importedChart').at(-1).config.data.datasets[0].data),[900,903],'second server shows its own snapshots');
+    assert.equal(insightsReads().slice(-7).every(call=>new URL(call.url,'https://admin.example.test').searchParams.get('guild_id')===GUILD_B),true,'all seven read endpoints follow the selected server');
+    const importInput=$('insights-fileInput');
+    Object.defineProperty(importInput,'files',{value:[new window.File(['date,members\n2026-09-05,903'],'insights.csv',{type:'text/csv'})],configurable:true});
+    importInput.dispatchEvent(new window.Event('change'));await wait(30);
+    const upload=calls.find(call=>call.url.startsWith('/api/insights/import?') && call.method==='POST');
+    assert.equal(new URL(upload.url,'https://admin.example.test').searchParams.get('guild_id'),GUILD_B,'upload uses the same exact server ID');
+    assert.equal(insightsReads().slice(-7).every(call=>new URL(call.url,'https://admin.example.test').searchParams.get('guild_id')===GUILD_B),true,'refresh after upload stays within its server');
+    for(const invalid of ['', 'not-an-id', '9223372036854775808']) {
+        const before=insightsReads().length;
+        $('insights-guildId').value=invalid;$('insights-guildId').dispatchEvent(new window.Event('change'));await wait(20);
+        assert.equal(insightsReads().length,before,'invalid or overflowing server IDs never issue unfiltered requests');
+        assert.match($('insights-importStatus').textContent,/gültige Server-ID/);assert.equal($('insights-importMetric').disabled,true);
+    }
+    $('insights-guildId').value=GUILD_A;$('insights-guildId').dispatchEvent(new window.Event('change'));await wait(20);
+    assert.deepEqual(Array.from(chartCalls.filter(chart=>chart.id==='insights-importedChart').at(-1).config.data.datasets[0].data),[200,203],'switching back restores only the first server');
     await tab('activity');
     $('voice-history-user').value='Alex';$('voice-user-apply').click();await wait(20);
     let results=[...document.querySelectorAll('.search-result')];assert.equal(results.length,2,'duplicate names remain distinct results');
@@ -146,7 +168,7 @@ async function tab(name) {document.querySelector('.tab-btn[data-tab="'+name+'"]'
     $('scrim-team-a').value='1';$('scrim-team-b').value='2';$('scrim-create-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await wait(210);
     assert.match($('scrim-message').textContent,/melde dich|Anmeldung/i,'expired session has useful feedback');
     assert.deepEqual(errors,[],'no unhandled DOM/script errors');
-    const nonRead=calls.filter(call=>call.method!=='GET');assert.equal(nonRead.length,2,'only the two explicit fixture form submits mutate');
+    const nonRead=calls.filter(call=>call.method!=='GET');assert.equal(nonRead.length,3,'only the two explicit Scrim submits and CSV fixture upload mutate');
     assert.ok(calls.every(call=>!/^\/api\/(status|cogs|logs|standalone|bot\/restart|dashboard\/restart)/.test(call.url)),'removed Legacy routes are never called');
     console.log('PASS: native Insights, date filters, snapshots, all 8 tabs, initial Auth→Scrim mutation/CSRF, 401/403 errors, Rust-route inventory, Insights race, exact IDs, name duplicates/XSS, stale request guard, search errors, AFK membership, Scrims, Brain and load failure.');
     window.close();

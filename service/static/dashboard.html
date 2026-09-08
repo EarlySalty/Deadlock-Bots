@@ -2553,8 +2553,8 @@ details[open] > summary { margin-bottom: 18px; }
     <div class="card">
       <div class="import-row">
         <div>
-          <label class="controls" style="display:block" for="insights-guildId">Guild-ID</label>
-          <input type="text" id="insights-guildId" value="1289721245281292288" spellcheck="false">
+          <label class="controls" style="display:block" for="insights-guildId">Server-ID</label>
+          <input type="text" id="insights-guildId" value="1289721245281292288" inputmode="numeric" spellcheck="false">
         </div>
         <button class="btn primary" id="insights-pickFiles">Dateien wählen…</button>
         <input type="file" id="insights-fileInput" accept=".csv,text/csv" multiple hidden>
@@ -7164,11 +7164,22 @@ async function fetchJson(url) {
 
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
+function insightsGuildId() {
+  const field = document.getElementById("insights-guildId");
+  const value = field.value.trim();
+  if (!/^[1-9][0-9]{16,18}$/.test(value) || BigInt(value) > 9223372036854775807n) {
+    field.setAttribute('aria-invalid', 'true');
+    throw new Error('Bitte trage unter „CSV-Dateien manuell nachladen“ eine gültige Server-ID ein.');
+  }
+  field.removeAttribute('aria-invalid');
+  return value;
+}
+
 function qs() {
   const interval = document.getElementById("insights-interval").value;
   const from = document.getElementById("insights-from").value;
   const to = document.getElementById("insights-to").value;
-  const p = new URLSearchParams({ interval });
+  const p = new URLSearchParams({ interval, guild_id: insightsGuildId() });
   if (from) p.set("from", from);
   if (to) p.set("to", to);
   return p.toString();
@@ -7595,9 +7606,11 @@ async function ensureCsrf() {
 
 async function uploadCsvs(files) {
   const log = document.getElementById("insights-importLog");
-  const guildId = document.getElementById("insights-guildId").value.trim();
-  if (!guildId) {
-    log.innerHTML = '<div class="err">Guild-ID fehlt.</div>';
+  let guildId;
+  try {
+    guildId = insightsGuildId();
+  } catch (error) {
+    log.innerHTML = `<div class="err">${esc(error.message)}</div>`;
     return;
   }
   const csvs = [...files].filter(f => /\.csv$/i.test(f.name));
@@ -7711,9 +7724,9 @@ let insightsSequence = 0;
 async function loadAll() {
   const sequence = ++insightsSequence;
   const interval = document.getElementById("insights-interval").value;
-  const query = qs();
   document.querySelector('.insights-panel').classList.add("loading");
   try {
+    const query = qs();
     const [overview, growth, activation, retention, engagement, audience, invites] = await Promise.all([
       fetchJson(`/api/insights/overview?${query}`),
       fetchJson(`/api/insights/growth?${query}`),
@@ -7755,7 +7768,7 @@ async function loadAll() {
   }
 }
 
-for (const id of ["insights-interval", "insights-from", "insights-to"]) {
+for (const id of ["insights-interval", "insights-from", "insights-to", "insights-guildId"]) {
   document.getElementById(id).addEventListener("change", loadAll);
 }
 wireImport();
