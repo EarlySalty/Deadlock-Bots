@@ -1,0 +1,5 @@
+{
+  "socket": "/var/run/postgresql",
+  "user": "postgres",
+  "database": "postgres"
+}

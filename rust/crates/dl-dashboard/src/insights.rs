@@ -8,7 +8,7 @@ use axum::extract::{Multipart, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
@@ -162,7 +162,8 @@ fn pct_change(current: Option<f64>, previous: Option<f64>) -> Value {
 async fn imported(pool: &PgPool, query: &InsightQuery) -> DashboardDbResult<Vec<Value>> {
     let rows = sqlx::query(
         r#"
-        SELECT import_kind, period_start::text AS period_start, dimension, value::float8 AS value
+        SELECT import_kind, period_start::text AS period_start, dimension, value::float8 AS value,
+               imported_at
           FROM activity.insights_imports
          WHERE ($1::BIGINT IS NULL OR guild_id = $1)
            AND period_start >= $2
@@ -183,9 +184,20 @@ async fn imported(pool: &PgPool, query: &InsightQuery) -> DashboardDbResult<Vec<
                 "period_start": row.get::<String, _>("period_start"),
                 "dimension": row.get::<String, _>("dimension"),
                 "value": row.get::<f64, _>("value"),
+                "imported_at": row.get::<DateTime<Utc>, _>("imported_at").to_rfc3339(),
             })
         })
         .collect())
+}
+
+async fn with_imported(pool: &PgPool, query: &InsightQuery, live: Value) -> Response {
+    match imported(pool, query).await {
+        Ok(rows) => ok_json(json!({ "live": live, "imported": rows })),
+        Err(err) => {
+            tracing::error!(%err, "Insights-Importdaten nicht lesbar");
+            err_text(500, "Discord-Zahlen konnten nicht geladen werden")
+        }
+    }
 }
 
 async fn scalar_i64(
@@ -371,9 +383,34 @@ pub async fn overview(
     }
     .await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": live, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => {
+            let imports = async {
+                let rows = imported(app.pool(), &query).await?;
+                let status = sqlx::query_scalar::<_, Value>(
+                    "SELECT jsonb_build_object(
+                        'last_import_at', max(imported_at),
+                        'latest_period', max(period_start),
+                        'rows', count(*),
+                        'kinds', count(DISTINCT import_kind))
+                     FROM activity.insights_imports
+                     WHERE ($1::BIGINT IS NULL OR guild_id = $1)",
+                )
+                .bind(query.guild_id)
+                .fetch_one(app.pool())
+                .await?;
+                Ok::<_, crate::db::DashboardDbError>((rows, status))
+            }
+            .await;
+            match imports {
+                Ok((rows, status)) => ok_json(json!({
+                    "live": live, "imported": rows, "import_status": status,
+                })),
+                Err(err) => {
+                    tracing::error!(%err, "Insights-Importdaten nicht lesbar");
+                    err_text(500, "Discord-Zahlen konnten nicht geladen werden")
+                }
+            }
+        }
         Err(err) => {
             tracing::error!(%err, "insights overview fehlgeschlagen");
             err_text(500, "Insights overview unavailable")
@@ -481,9 +518,7 @@ pub async fn growth(
     };
     let read = growth_live(app.pool(), &query).await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": live, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => with_imported(app.pool(), &query, live).await,
         Err(err) => {
             tracing::error!(%err, "insights growth fehlgeschlagen");
             err_text(500, "Insights growth unavailable")
@@ -759,9 +794,7 @@ pub async fn activation(
     }
     .await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": { "periods": live }, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => with_imported(app.pool(), &query, json!({ "periods": live })).await,
         Err(err) => {
             tracing::error!(%err, "insights activation fehlgeschlagen");
             err_text(500, "Insights activation unavailable")
@@ -843,9 +876,7 @@ pub async fn retention(
     }
     .await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": { "cohorts": live }, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => with_imported(app.pool(), &query, json!({ "cohorts": live })).await,
         Err(err) => {
             tracing::error!(%err, "insights retention fehlgeschlagen");
             err_text(500, "Insights retention unavailable")
@@ -885,9 +916,7 @@ pub async fn engagement(
     }
     .await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": { "periods": live }, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => with_imported(app.pool(), &query, json!({ "periods": live })).await,
         Err(err) => {
             tracing::error!(%err, "insights engagement fehlgeschlagen");
             err_text(500, "Insights engagement unavailable")
@@ -940,9 +969,7 @@ pub async fn audience(
     }
     .await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": live, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => with_imported(app.pool(), &query, live).await,
         Err(err) => {
             tracing::error!(%err, "insights audience fehlgeschlagen");
             err_text(500, "Insights audience unavailable")
@@ -1007,9 +1034,7 @@ pub async fn top_invites(
     }
     .await;
     match read {
-        Ok(live) => ok_json(
-            json!({ "live": { "top_invites": live }, "imported": imported(app.pool(), &query).await.unwrap_or_default() }),
-        ),
+        Ok(live) => with_imported(app.pool(), &query, json!({ "top_invites": live })).await,
         Err(err) => {
             tracing::error!(%err, "insights top-invites fehlgeschlagen");
             err_text(500, "Insights top invites unavailable")
@@ -1188,9 +1213,16 @@ pub async fn import_csv_text(
     }
     let file_rows = parsed.len();
     for (period_start, dimension, value) in &parsed {
-        upsert_import(&mut tx, guild_id, spec.kind, *period_start, dimension, *value)
-            .await
-            .map_err(|err| err.to_string())?;
+        upsert_import(
+            &mut tx,
+            guild_id,
+            spec.kind,
+            *period_start,
+            dimension,
+            *value,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
     }
     tx.commit().await.map_err(|err| err.to_string())?;
     Ok((spec.kind, file_rows))
@@ -1462,19 +1494,15 @@ mod tests {
 
     /// Der Wochenjob darf nur seinen eigenen Zeitraum ersetzen. Frueher loeschte
     /// er die komplette joins_by_source-Historie der Guild.
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn joins_by_source_import_laesst_aeltere_wochen_stehen(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let db = dl_central_db::testing::test_pool().await?;
+        let db = crate::db::test_pool().await?;
         let pool = db.pool();
         let guild = 7001i64;
 
-        import_csv_text(
-            pool,
-            guild,
-            "Week,Join Source,Joins\n2026-01-05,Vanity,5\n",
-        )
-        .await?;
+        import_csv_text(pool, guild, "Week,Join Source,Joins\n2026-01-05,Vanity,5\n").await?;
         import_csv_text(
             pool,
             guild,
@@ -1512,6 +1540,39 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn importierte_reihen_liefern_zeitpunkt_und_nur_die_gewaehlte_guild(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = crate::db::test_pool().await?;
+        for (guild, value) in [(7001, 12), (7002, 99)] {
+            import_csv_text(
+                db.pool(),
+                guild,
+                &format!("Week,Join Source,Joins\n2026-06-01,Vanity,{value}\n"),
+            )
+            .await?;
+        }
+        let rows = imported(
+            db.pool(),
+            &InsightQuery {
+                guild_id: Some(7001),
+                interval: Interval::Weekly,
+                from: NaiveDate::from_ymd_opt(2026, 6, 1).expect("gültige Testdaten"),
+                to: NaiveDate::from_ymd_opt(2026, 6, 8).expect("gültige Testdaten"),
+            },
+        )
+        .await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["value"], 12.0);
+        assert!(!rows[0]["imported_at"]
+            .as_str()
+            .expect("gültige Testdaten")
+            .is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
     async fn insights_rows(
         pool: &PgPool,
         guild_id: i64,

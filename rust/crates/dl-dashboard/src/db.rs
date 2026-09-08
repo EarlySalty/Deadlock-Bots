@@ -28,6 +28,24 @@ pub enum DashboardDbError {
 
 pub type DashboardDbResult<T> = Result<T, DashboardDbError>;
 
+/// Lokale Integrationstests nutzen Peer-Auth, keine Secrets oder ENV-Konfiguration.
+#[cfg(all(test, feature = "testing"))]
+pub async fn test_pool() -> Result<dl_central_db::TestDb, dl_central_db::CentralDbError> {
+    #[derive(serde::Deserialize)]
+    struct TestConfig {
+        socket: String,
+        user: String,
+        database: String,
+    }
+    let config: TestConfig = serde_json::from_str(include_str!("../tests/postgres.json"))
+        .map_err(|err| dl_central_db::CentralDbError::TestHarness(err.to_string()))?;
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host(&config.socket)
+        .username(&config.user)
+        .database(&config.database);
+    dl_central_db::testing::test_pool_with_options(options).await
+}
+
 pub fn unix_to_utc(value: i64) -> DashboardDbResult<DateTime<Utc>> {
     DateTime::from_timestamp(value, 0).ok_or(DashboardDbError::TimestampOutOfRange(value))
 }

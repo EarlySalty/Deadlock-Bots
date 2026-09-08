@@ -202,6 +202,26 @@ pub async fn overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Re
         }
     };
 
+    let report_stale = report
+        .as_ref()
+        .is_none_or(|r| now - r.period_end > Duration::days(8));
+    let effectiveness = load_effectiveness(pool, start, now).await;
+    let plan_usage = sqlx::query_scalar::<_, Value>(
+        "SELECT jsonb_build_object('total', count(*),
+             'open', count(*) FILTER (WHERE status = 'offen'),
+             'decided', count(entschieden_am),
+             'commented', count(*) FILTER (WHERE nullif(trim(kommentar), '') IS NOT NULL))
+         FROM brain.plan_items",
+    )
+    .fetch_one(pool)
+    .await;
+    let (effectiveness, plan_usage) = match (effectiveness, plan_usage) {
+        (Ok(effectiveness), Ok(plan_usage)) => (effectiveness, plan_usage),
+        (Err(err), _) | (_, Err(err)) => {
+            tracing::error!(%err, "Zweitgehirn-Wirkungsübersicht nicht lesbar");
+            return err_text(500, "Zweitgehirn-Auswertung konnte nicht geladen werden");
+        }
+    };
     let report = report.map(|r| {
         json!({
             "period_start": r.period_start.to_rfc3339(),
@@ -236,7 +256,33 @@ pub async fn overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Re
         "top_reasons": top_reasons,
         "schema_missing": schema_missing,
         "feeder_stale": feeder_stale,
+        "report_stale": report_stale,
+        "effectiveness_week": effectiveness,
+        "plan_usage": plan_usage,
     }))
+}
+
+/// Shadow-Urteile sind keine ausgeführten Aktionen. Auch ein später gemessenes
+/// Treffen belegt nur Korrelation, nicht die Wirkung eines Vorschlags.
+async fn load_effectiveness(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'period_start', $1::timestamptz, 'period_end', $2::timestamptz,
+            'decisions', count(*),
+            'shadow_decisions', count(*) FILTER (WHERE action_taken = 'shadow'),
+            'snapshots_created', count(*) FILTER (WHERE action_taken = 'snapshot_created'),
+            'measured_outcomes', count(*) FILTER (WHERE outcome IN ('met', 'not_met')),
+            'successful_outcomes', count(*) FILTER (WHERE outcome = 'met'))
+         FROM bot.ai_decision_ledger WHERE decided_at >= $1 AND decided_at < $2",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_one(pool)
+    .await
 }
 
 async fn load_ledger(
@@ -519,17 +565,21 @@ pub async fn wiki(State(app): State<DashboardApp>, headers: HeaderMap) -> Respon
     }
     let root = wiki_root();
     // ponytail: kleines Markdown-Repo, synchroner Walk genügt; spawn_blocking erst bei >10k Dateien.
-    let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap_or_default();
-    let pages = match collect_md_pages(&root) {
-        Ok(pages) => pages,
+    let contents = (|| -> std::io::Result<_> {
+        let index = std::fs::read_to_string(root.join("index.md"))?;
+        let log = std::fs::read_to_string(root.join("log.md"))?;
+        Ok((index, log, collect_md_pages(&root)?))
+    })();
+    let (index, log, pages) = match contents {
+        Ok(contents) => contents,
         Err(err) => {
-            tracing::warn!(%err, "Wiki-Seiten konnten nicht gelistet werden");
-            Vec::new()
+            tracing::warn!(%err, "Wiki konnte nicht gelesen werden");
+            return err_text(503, "Das Wissensarchiv ist gerade nicht erreichbar");
         }
     };
     ok_json(json!({
-        "index": read("index.md"),
-        "log": read("log.md"),
+        "index": index,
+        "log": log,
         "pages": pages,
     }))
 }
@@ -539,11 +589,13 @@ fn collect_md_pages(root: &Path) -> std::io::Result<Vec<String>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
+        let entries = std::fs::read_dir(&dir)?;
+        for entry in entries {
+            let entry = entry?;
+            // Keine fremden Verzeichnisse auflisten und keine Symlink-Zyklen.
+            if entry.file_type()?.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             let name = entry.file_name();
             if name == ".git" {
@@ -666,6 +718,12 @@ mod tests {
     }
 
     #[test]
+    fn fehlendes_wiki_ist_ein_fehler_statt_leerer_erfolg() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(collect_md_pages(&dir.path().join("fehlt")).is_err());
+    }
+
+    #[test]
     fn rejects_symlink_escape() {
         let dir = tmp_wiki();
         let outside = tempfile::tempdir().expect("outside");
@@ -769,6 +827,32 @@ mod plan_tests {
     use crate::now_unix_f64;
     use crate::web::{router, SESSION_COOKIE};
 
+    #[tokio::test]
+    async fn shadow_und_treffen_sind_keine_ausgefuehrten_aktionen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = crate::db::test_pool().await?;
+        sqlx::raw_sql(
+            "INSERT INTO bot.ai_decision_ledger
+            (decided_at, source, input_summary, decision, reason, action_taken, outcome)
+            VALUES
+                (now(), 'test', '', 'yes', '', 'shadow', 'met'),
+                (now(), 'test', '', 'yes', '', 'shadow', 'not_met'),
+                (now(), 'test', '', 'yes', '', 'snapshot_created', NULL),
+                (now() - interval '10 days', 'test', '', 'yes', '', 'shadow', 'met');",
+        )
+        .execute(db.pool())
+        .await?;
+        let now = Utc::now();
+        let result = load_effectiveness(db.pool(), now - Duration::days(7), now).await?;
+        assert_eq!(result["decisions"], 3);
+        assert_eq!(result["shadow_decisions"], 2);
+        assert_eq!(result["snapshots_created"], 1);
+        assert_eq!(result["measured_outcomes"], 2);
+        assert_eq!(result["successful_outcomes"], 1);
+        assert!(result.get("executed_actions").is_none());
+        Ok(())
+    }
+
     struct NoMemberLookup;
 
     #[async_trait::async_trait]
@@ -801,7 +885,7 @@ mod plan_tests {
         ),
         Box<dyn std::error::Error>,
     > {
-        let db = dl_central_db::testing::test_pool().await?;
+        let db = crate::db::test_pool().await?;
         sqlx::query("CREATE SCHEMA IF NOT EXISTS brain")
             .execute(db.pool())
             .await?;
@@ -969,6 +1053,8 @@ mod plan_tests {
         for (method, uri) in [
             ("GET", "/api/brain/plan"),
             ("GET", "/api/brain/plan/runs"),
+            ("GET", "/api/brain/overview"),
+            ("GET", "/api/brain/wiki"),
             ("POST", "/api/brain/plan/item/1"),
         ] {
             let body = if method == "POST" {
@@ -991,6 +1077,49 @@ mod plan_tests {
                 StatusCode::UNAUTHORIZED,
                 "{method} {uri}"
             );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turnier_only_sieht_keine_internen_brain_daten(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, _, _) = plan_app(false).await?;
+        let now = now_unix_f64();
+        dl_central_db::kv::set(
+            db.pool(),
+            "dl_dashboard_admin_session",
+            "limited",
+            &json!({
+                "user_id": 42, "username": "limited", "display_name": "Limited",
+                "reason": "test", "access_level": AccessLevel::TurnierOnly.as_str(),
+                "csrf_token": "test-csrf", "created_at": now, "last_seen_at": now,
+                "expires_at": now + 3600.0,
+            })
+            .to_string(),
+        )
+        .await?;
+        // Persistente Sessions werden beim Start in den Store geladen.
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let app = router(
+            DashboardApp::new(
+                cfg,
+                db.pool().clone(),
+                Arc::new(NoMemberLookup),
+                Arc::new(NoNameResolver),
+            )
+            .await?,
+        );
+        for uri in ["/api/brain/overview", "/api/brain/plan", "/api/brain/wiki"] {
+            let response = app
+                .clone()
+                .oneshot(auth_request("GET", uri, "limited", "test-csrf", json!({}))?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
         }
         Ok(())
     }

@@ -1,8 +1,10 @@
 # Server-Einblicke (Admin-Dashboard)
 
-Eigene Nachbildung der Discord-Server-Insights auf Basis unserer Bot-Daten.
-Seite: `GET /insights` im dl-web-Dashboard (gleiche Discord-OAuth-Session wie `/admin`),
-statisches Frontend `service/static/insights.html`, Daten über `/api/insights/*`.
+Discord-CSV-Auswertungen und eigene Bot-Messungen im gemeinsamen Admin-Dashboard.
+Seite: `/admin#insights`; `GET /insights` leitet nach derselben Auth-Prüfung dorthin weiter.
+Frontend: `service/static/dashboard.html`, Daten über `/api/insights/*`.
+Originale Discord-Werte stehen oben als einzelne Kennzahl mit Verlauf und Wertetabelle;
+Bot-Messungen folgen separat. Import- und Kennzahlen-Datenstand bleiben sichtbar.
 
 ## Datenpfade
 

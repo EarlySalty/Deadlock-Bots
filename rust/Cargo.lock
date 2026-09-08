@@ -1192,6 +1192,7 @@ dependencies = [
  "dl-central-db",
  "dl-dashboard",
  "futures-util",
+ "rand 0.8.6",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.26.2",

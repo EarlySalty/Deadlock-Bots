@@ -655,8 +655,7 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
     render_spa(html, &display_name, "%2Fadmin")
 }
 
-/// `/insights` — Server-Einblicke-Seite (statisch, Daten via `/api/insights/*`).
-/// Gleiches Auth-Verhalten wie `index`.
+/// Alte Insights-Adresse: gleiche Auth wie bisher, anschließend gemeinsame Shell.
 async fn insights_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
     if app.cfg().auth_misconfigured() {
         return auth_misconfigured_response();
@@ -668,14 +667,7 @@ async fn insights_page(State(app): State<DashboardApp>, headers: HeaderMap) -> R
     if app.cfg().auth_enforced() && session.is_none() {
         return redirect("/auth/discord/login?next=%2Finsights", None);
     }
-    let display_name = session
-        .as_ref()
-        .map(|s| s.display_name.clone())
-        .unwrap_or_else(|| "Nicht angemeldet".to_string());
-    let Some(html) = load_static_html(&app, "insights.html").await else {
-        return err_text(500, "insights.html nicht ladbar");
-    };
-    render_spa(html, &display_name, "%2Finsights")
+    redirect("/admin#insights", None)
 }
 
 async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {

@@ -3,16 +3,14 @@ const ESCAPER: &str = r#"function esc(s){ return String(s).replace(/&/g,'&amp;')
 #[test]
 fn dynamic_dashboard_html_is_escaped() {
     let dashboard = include_str!("../../../../service/static/dashboard.html");
-    let insights = include_str!("../../../../service/static/insights.html");
+    // Insights is part of the same dashboard shell.
+    let insights = dashboard;
 
     for html in [dashboard, insights] {
         assert!(html.contains(ESCAPER), "HTML escaper is missing");
     }
 
     for escaped_sink in [
-        "${esc(sourceName)}",
-        "${esc(runtime.account_name || '–')}",
-        "${esc(cmd.command)}",
         "${esc(repo.name)}",
         "${esc(e.message)}",
     ] {

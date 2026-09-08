@@ -172,6 +172,22 @@ impl Drop for TestDb {
 pub async fn test_pool() -> Result<TestDb, CentralDbError> {
     let dsn = test_dsn_from_env()?;
     let admin_options = PgConnectOptions::from_str(&dsn)?;
+    test_pool_with_options(admin_options).await
+}
+
+/// Explizite Testverbindung, etwa Unix-Socket mit Peer-Authentifizierung.
+/// Erstellt dieselbe isolierte Wegwerf-Datenbank mit garantiertem Drop-Cleanup.
+pub async fn test_pool_with_options(
+    admin_options: PgConnectOptions,
+) -> Result<TestDb, CentralDbError> {
+    if admin_options
+        .get_database()
+        .is_some_and(|database| PROD_DB_NAMES.contains(&database))
+    {
+        return Err(CentralDbError::TestHarness(
+            "Testlauf mit einer Produktionsdatenbank als Ausgangspunkt verweigert".into(),
+        ));
+    }
     let db_name = unique_db_name();
 
     let admin_pool = PgPoolOptions::new()
