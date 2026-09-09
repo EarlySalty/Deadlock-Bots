@@ -1,21 +1,21 @@
 [leitfaden]
 titel = "Dein Leitfaden als Pate"
-was_du_machst = "Du nimmst einen neuen Menschen an die Hand und zeigst ihm, wie hier alles laeuft. Du beantwortest seine Fragen, drehst mit ihm die ersten Runden und sorgst dafuer, dass er sich willkommen fuehlt. Du musst kein Coach sein und keine festen Zeiten einhalten, es reicht, ansprechbar und freundlich zu sein."
-was_nicht = "Du bist kein Support und kein Moderator. Bei Regelverstoessen, Streit oder Meldungen holst du das Team dazu, statt selbst einzugreifen. Und du gibst nie weiter, was dir dein Patenkind privat schreibt."
-so_uebernimmst = "Wenn ein Neuling einen Paten moechte, erscheint hier im Kanal eine Karte mit einem Uebernehmen-Knopf. Wer zuerst drueckt, bekommt die Patenschaft. Der Bot legt danach einen privaten Kanal nur fuer euch beide an, dort geht es weiter."
-dein_limit = "Du kannst hoechstens drei Patenkinder gleichzeitig haben, damit fuer jeden genug Zeit bleibt. Ist ein Einstieg geschafft, wird ein Platz wieder frei."
+was_du_machst = "Du nimmst einen neuen Menschen an die Hand und zeigst ihm, wie hier alles läuft. Du beantwortest seine Fragen, drehst mit ihm die ersten Runden und sorgst dafür, dass er sich willkommen fühlt. Du musst kein Coach sein und keine festen Zeiten einhalten, es reicht, ansprechbar und freundlich zu sein."
+was_nicht = "Du bist kein Support und kein Moderator. Bei Regelverstößen, Streit oder Meldungen holst du das Team dazu, statt selbst einzugreifen. Und du gibst nie weiter, was dir dein Patenkind privat schreibt."
+so_uebernimmst = "Wenn ein Neuling einen Paten möchte, erscheint hier im Kanal eine Karte mit einem Übernehmen-Knopf. Wer zuerst drückt, bekommt die Patenschaft. Der Bot legt danach einen privaten Kanal nur für euch beide an, dort geht es weiter."
+dein_limit = "Du kannst höchstens drei Patenkinder gleichzeitig haben, damit für jeden genug Zeit bleibt. Ist ein Einstieg geschafft, wird ein Platz wieder frei."
 wenn_du_nicht_weiterkommst = "Frag mich einfach mit einem @ hier im Kanal oder in eurem Patenkanal, ich ziehe die Antwort direkt aus unserer Wissensbasis. Bei allem, was Moderation braucht, wendest du dich ans Team."
 ecken_titel = "Die wichtigsten Ecken"
 ecken = """
 Deadlock Router (Voice, verteilt automatisch in eine Lane): <#1513468587195633674>
 Neue-Spieler-Lane: <#1470126503252721845>
 Kostenloses Coaching: <#1494373349944459355>
-Rang verknuepfen: <#1398021105339334666>
+Rang verknüpfen: <#1398021105339334666>
 Regelwerk: <#1315684135175716975>
 Support und Tickets: <#1459628609705738539>
 Mitspieler suchen: <#1522769149208821881>
 Custom Games: <#1412411665713987635>
 Scrims: <#1520842755037855975>
 Fragen an die Community: <#1426220702054355077>"""
-eskalation = "Kommst du selbst nicht weiter oder braucht eine Situation einen Mod, meldest du dich beim Team, statt es allein zu loesen."
-datenschutz = "Was im Patenkanal oder in DMs besprochen wird, bleibt unter euch. Gib keine privaten Nachrichten weiter und poste nichts aus euren Gespraechen oeffentlich."
+eskalation = "Kommst du selbst nicht weiter oder braucht eine Situation einen Mod, meldest du dich beim Team, statt es allein zu lösen."
+datenschutz = "Was im Patenkanal oder in DMs besprochen wird, bleibt unter euch. Gib keine privaten Nachrichten weiter und poste nichts aus euren Gesprächen öffentlich."
