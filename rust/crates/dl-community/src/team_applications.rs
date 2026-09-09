@@ -1383,6 +1383,9 @@ impl TeamApplications {
                 .await
             {
                 tracing::warn!(%error, id, "Paten-Rolle konnte nach Annahme nicht vergeben werden");
+                return safe_reply(
+                    "Die Annahme wurde gespeichert, aber die Paten-Rolle konnte nicht vergeben werden. Bitte nimm die Bewerbung gleich noch einmal an, dann versucht der Bot die Rolle erneut. Erst danach geht die Willkommensnachricht raus.",
+                );
             }
         }
 

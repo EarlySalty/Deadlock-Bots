@@ -2859,7 +2859,10 @@ impl ConciergeStore {
             }
             PateEscalationStage::TwentyFourHours => {
                 "UPDATE bot.concierge_pate_requests
-                    SET escalated_24h_at = $2, updated_at = $2
+                    SET escalated_24h_at = $2,
+                        status = 'closed_unbesetzt',
+                        closed_at = $2,
+                        updated_at = $2
                   WHERE id = $1 AND status = 'open' AND escalated_24h_at IS NULL
                   RETURNING id"
             }
@@ -2870,23 +2873,6 @@ impl ConciergeStore {
             .fetch_optional(&self.pool)
             .await?;
         Ok(claimed.is_some())
-    }
-
-    async fn close_pate_request_unbesetzt(
-        &self,
-        id: i64,
-        now: DateTime<Utc>,
-    ) -> CommunityDbResult<()> {
-        sqlx::query(
-            "UPDATE bot.concierge_pate_requests
-                SET status = 'closed_unbesetzt', closed_at = $2, updated_at = $2
-              WHERE id = $1",
-        )
-        .bind(id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     async fn latest_pate_request_status(&self, user_id: u64) -> CommunityDbResult<Option<String>> {
@@ -5325,7 +5311,7 @@ impl Concierge {
                     .claim_pate_escalation_stage(row.id, PateEscalationStage::TwentyFourHours, now)
                     .await
                 {
-                    Ok(true) => self.escalate_pate_unbesetzt(&row, now).await,
+                    Ok(true) => self.escalate_pate_unbesetzt(&row).await,
                     Ok(false) => {}
                     Err(err) => {
                         tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Eskalationsstufe konnte nicht reserviert werden");
@@ -5373,7 +5359,7 @@ impl Concierge {
         }
     }
 
-    async fn escalate_pate_unbesetzt(&self, row: &PateRequestRow, now: DateTime<Utc>) {
+    async fn escalate_pate_unbesetzt(&self, row: &PateRequestRow) {
         let opted_out = match u64_to_i64(row.user_id, "concierge_pate_requests.user_id") {
             Ok(db_user_id) => crate::privacy::is_opted_out(self.store.pool(), db_user_id).await,
             Err(err) => {
@@ -5406,9 +5392,6 @@ impl Concierge {
         .unwrap_or_else(|_| Err("Zeitlimit ueberschritten".to_string()))
         {
             tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Kartenmarkierung fehlgeschlagen");
-        }
-        if let Err(err) = self.store.close_pate_request_unbesetzt(row.id, now).await {
-            tracing::warn!(%err, request_id = row.id, "Concierge: Paten-Anfrage konnte nicht als unbesetzt geschlossen werden");
         }
     }
 
