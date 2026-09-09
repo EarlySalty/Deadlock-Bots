@@ -36,6 +36,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         hero: "Willkommen",
         navigation: "Kanal-Navigation",
         team: "Community-Team",
+        paten: "Paten",
         socials: "Links & Socials",
         quickstart: "Schnellstart",
     },
@@ -215,6 +216,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         bot_description:
             "unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub.",
     },
+    paten_intro: "Ein Pate ist jemand aus der Community, der dir den Einstieg leicht macht. Er zeigt dir den Server, beantwortet deine Fragen und dreht mit dir die ersten Runden. Waehlst du beim Start die Option, dass dich jemand an die Hand nimmt, bekommst du direkt einen Paten angeboten. Du kannst mir aber auch jederzeit per DM schreiben \"ich haette gern einen Paten\", dann kuemmere ich mich darum.",
     socials_intro: "Die Community gibt es auch außerhalb von Discord:",
     quickstart_intro: "Die drei wichtigsten Klicks für den Start:",
     buttons: WelcomeButtonLabels {
@@ -283,6 +285,11 @@ const WELCOME_SECTION_DEFINITIONS: &[WelcomeSectionDefinition] = &[
         banner_filename: Some("team.png"),
     },
     WelcomeSectionDefinition {
+        id: "paten",
+        message_key: "welcome:paten",
+        banner_filename: None,
+    },
+    WelcomeSectionDefinition {
         id: "socials",
         message_key: "welcome:socials",
         banner_filename: Some("socials.png"),
@@ -313,6 +320,7 @@ pub struct WelcomeTextTable {
     pub channel_descriptions: &'static [WelcomeChannelDescription],
     pub empty_team_role_members: &'static str,
     pub team: WelcomeTeamTexts,
+    pub paten_intro: &'static str,
     pub socials_intro: &'static str,
     pub quickstart_intro: &'static str,
     pub buttons: WelcomeButtonLabels,
@@ -323,6 +331,7 @@ pub struct WelcomeSectionTitles {
     pub hero: &'static str,
     pub navigation: &'static str,
     pub team: &'static str,
+    pub paten: &'static str,
     pub socials: &'static str,
     pub quickstart: &'static str,
 }
@@ -376,6 +385,7 @@ struct ResolvedWelcomeTextTable {
     channel_descriptions: Vec<ResolvedWelcomeChannelDescription>,
     empty_team_role_members: String,
     team: ResolvedWelcomeTeamTexts,
+    paten_intro: String,
     socials_intro: String,
     quickstart_intro: String,
     buttons: ResolvedWelcomeButtonLabels,
@@ -386,6 +396,7 @@ struct ResolvedWelcomeSectionTitles {
     hero: String,
     navigation: String,
     team: String,
+    paten: String,
     socials: String,
     quickstart: String,
 }
@@ -437,6 +448,7 @@ struct WelcomeTitlesToml {
     hero: Option<String>,
     navigation: Option<String>,
     team: Option<String>,
+    paten: Option<String>,
     socials: Option<String>,
     quickstart: Option<String>,
 }
@@ -449,6 +461,7 @@ struct WelcomeBodyTextsToml {
     navigation_intro: Option<String>,
     default_channel_description: Option<String>,
     empty_team_role_members: Option<String>,
+    paten_intro: Option<String>,
     socials_intro: Option<String>,
     quickstart_intro: Option<String>,
 }
@@ -637,6 +650,7 @@ impl ResolvedWelcomeConfig {
             file.titles.navigation,
         );
         apply_optional(&mut self.texts.section_titles.team, file.titles.team);
+        apply_optional(&mut self.texts.section_titles.paten, file.titles.paten);
         apply_optional(&mut self.texts.section_titles.socials, file.titles.socials);
         apply_optional(
             &mut self.texts.section_titles.quickstart,
@@ -668,6 +682,7 @@ impl ResolvedWelcomeConfig {
             &mut self.texts.team.bot_description,
             file.team.bot_description,
         );
+        apply_optional(&mut self.texts.paten_intro, file.texts.paten_intro);
         apply_optional(&mut self.texts.socials_intro, file.texts.socials_intro);
         apply_optional(
             &mut self.texts.quickstart_intro,
@@ -725,6 +740,7 @@ impl ResolvedWelcomeTextTable {
                 hero: WELCOME_TEXTS.section_titles.hero.to_string(),
                 navigation: WELCOME_TEXTS.section_titles.navigation.to_string(),
                 team: WELCOME_TEXTS.section_titles.team.to_string(),
+                paten: WELCOME_TEXTS.section_titles.paten.to_string(),
                 socials: WELCOME_TEXTS.section_titles.socials.to_string(),
                 quickstart: WELCOME_TEXTS.section_titles.quickstart.to_string(),
             },
@@ -745,6 +761,7 @@ impl ResolvedWelcomeTextTable {
                 bot_group_title: WELCOME_TEXTS.team.bot_group_title.to_string(),
                 bot_description: WELCOME_TEXTS.team.bot_description.to_string(),
             },
+            paten_intro: WELCOME_TEXTS.paten_intro.to_string(),
             socials_intro: WELCOME_TEXTS.socials_intro.to_string(),
             quickstart_intro: WELCOME_TEXTS.quickstart_intro.to_string(),
             buttons: ResolvedWelcomeButtonLabels {
@@ -881,6 +898,7 @@ pub fn build_welcome_publish_output(
                 definition,
                 &mut warnings,
             )],
+            "paten" => vec![paten_message(repo_root, texts, definition, &mut warnings)],
             "socials" => vec![socials_message(
                 repo_root,
                 texts,
@@ -1121,6 +1139,27 @@ fn team_message(
         used_text_chars += block.chars().count();
         components.push(text_display(block));
     }
+
+    WelcomeBuiltMessage {
+        banner,
+        payload: welcome_payload(vec![container(components)], attachments),
+    }
+}
+
+fn paten_message(
+    repo_root: &Path,
+    texts: &ResolvedWelcomeTextTable,
+    definition: &WelcomeSectionDefinition,
+    warnings: &mut Vec<String>,
+) -> WelcomeBuiltMessage {
+    let banner = section_banner(repo_root, definition, warnings);
+    let mut attachments = Vec::new();
+    let mut components = Vec::new();
+    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    components.push(text_display(format!(
+        "## {}\n{}",
+        texts.section_titles.paten, texts.paten_intro
+    )));
 
     WelcomeBuiltMessage {
         banner,
