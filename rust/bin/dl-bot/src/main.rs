@@ -640,6 +640,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
     concierge_config.ai_timeout =
         std::time::Duration::from_secs(operating.concierge.timeout_seconds);
+    concierge_config.bot_user_id = adapter
+        .http
+        .get_current_user()
+        .await
+        .ok()
+        .map(|user| user.id.get());
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
@@ -1153,6 +1159,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         shared_answers.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
+    if concierge.enabled() {
+        concierge.ensure_pate_leitfaden(repository_root).await;
+        let paten_inventar = concierge.paten_inventar(our_guild_id).await;
+        tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));
+    }
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
     dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
