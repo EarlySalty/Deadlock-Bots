@@ -1838,7 +1838,11 @@ mod tests {
     #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl TeamApplicationPort for RecordingTeamPort {
-        async fn post_panel(&self, _channel_id: u64, _body: Map<String, Value>) -> Result<u64, String> {
+        async fn post_panel(
+            &self,
+            _channel_id: u64,
+            _body: Map<String, Value>,
+        ) -> Result<u64, String> {
             Ok(1)
         }
         async fn edit_panel(
@@ -1872,7 +1876,7 @@ mod tests {
             Ok(())
         }
         async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String> {
-            self.sent_dms.lock().unwrap().push((user_id, body));
+            self.sent_dms.lock().expect("sent_dms lock").push((user_id, body));
             Ok(())
         }
         async fn add_role(
@@ -1884,7 +1888,7 @@ mod tests {
         ) -> Result<(), String> {
             self.added_roles
                 .lock()
-                .unwrap()
+                .expect("added_roles lock")
                 .push((guild_id, user_id, role_id));
             Ok(())
         }
@@ -1893,7 +1897,9 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn angenommene_paten_bewerbung_vergibt_paten_rolle_und_schickt_leitfaden_dm() {
-        let db = dl_central_db::testing::test_pool().await.expect("test_pool");
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let pool = db.pool().clone();
         let guild_id: u64 = 1_289_721_245_281_292_288;
         let applicant: u64 = 424_242;
@@ -1906,9 +1912,9 @@ mod tests {
                     '{\"experience\":\"kenne den Server gut\",\"availability\":\"abends\"}'::jsonb,
                     'open', $3, 0, now(), now())",
         )
-        .bind(i64::try_from(guild_id).unwrap())
-        .bind(i64::try_from(applicant).unwrap())
-        .bind(i64::try_from(moderator_message_id).unwrap())
+        .bind(i64::try_from(guild_id).expect("guild_id i64"))
+        .bind(i64::try_from(applicant).expect("applicant i64"))
+        .bind(i64::try_from(moderator_message_id).expect("message_id i64"))
         .execute(&pool)
         .await
         .expect("Pate-Bewerbung seeden");
@@ -1934,14 +1940,20 @@ mod tests {
         let reply = service.change_status(&interaction, 1, "accept", "").await;
         assert!(reply.content.is_some());
 
-        let roles = port.added_roles.lock().unwrap();
+        let roles = port.added_roles.lock().expect("added_roles lock");
         assert_eq!(roles.len(), 1);
-        assert_eq!(roles[0], (guild_id, applicant, crate::concierge::PATE_ROLE_ID));
+        assert_eq!(
+            roles[0],
+            (guild_id, applicant, crate::concierge::PATE_ROLE_ID)
+        );
         drop(roles);
 
-        let dms = port.sent_dms.lock().unwrap();
+        let dms = port.sent_dms.lock().expect("sent_dms lock");
         assert_eq!(dms.len(), 1);
         let raw = serde_json::to_string(&dms[0].1).expect("dm json");
-        assert!(raw.contains("Paten-Zentrale") || raw.contains("1524083665838276860"), "{raw}");
+        assert!(
+            raw.contains("Paten-Zentrale") || raw.contains("1524083665838276860"),
+            "{raw}"
+        );
     }
 }
