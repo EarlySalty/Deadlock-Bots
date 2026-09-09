@@ -91,3 +91,34 @@ Toolchain und Testweg unveraendert (rustc/cargo 1.97.1, central_test_db.sh, --fe
 - clippy -D warnings fuer dl-community (--features testing) und dl-bot je --all-targets: RC=0, keine Warnungen.
 
 TESTNACHWEIS[TW-1]: 461 passed, 0 ignored | Rot-Gegenprobe: B 1 failed statt 0 (ohne Reset), D 1 failed statt 0 (ohne pate_offered-Gate)
+
+## Fixer-Runde 2 (Merge-Kritiker-Hinweise 1 bis 4, 2026-09-10)
+
+Toolchain und Testweg unveraendert (rustc/cargo 1.97.1, central_test_db.sh, --features testing, SQLX_OFFLINE=1, CARGO_INCREMENTAL=0).
+
+Umsetzung je Hinweis:
+- Hinweis 1 (team_applications.rs): ModalSpec traegt nur Text-Eingabefelder (ModalField), kein type:10-Display; das Modalformat des Repos kann den Intro-Text nicht rendern. Deshalb Vorschalt-Nachricht (ephemere Components V2 mit Knopf "Weiter zum Formular", custom_id team_apply:form:pate); der Formular-Zweig oeffnet danach das bestehende Modal. Andere Bereiche unveraendert (open liefert weiter direkt das Modal).
+- Hinweise 2 und 3 (concierge.rs claim_pate): Uebernahme nur noch atomar ueber die Nachrichten-ID der geklickten Karte (claim_open_pate_request_by_message_tx: UPDATE ... WHERE message_id = $2 AND user_id = $1 AND status = 'open' RETURNING id) und zwar vor der Kanalanlage; null Zeilen bricht mit Rollback und PATE_REQUEST_CLOSED_TEXT ab (keine Patenschaft, kein Kanal). Der Vor-Transaktions-Check latest_pate_request_status wurde entfernt (samt Store-Methode).
+- Hinweis 4 (ensure_pate_leitfaden): Fingerprint wird erst nach erfolgreichem Pin gespeichert (message_id vorher, damit kein Doppelpost); beim naechsten Start ohne Fingerprint wird die vorhandene Nachricht editiert und erneut gepinnt.
+
+Bestandsanpassung: valid_pate_claim_interaction traegt jetzt eine Karten-Nachrichten-ID (PATE_CLAIM_TEST_MESSAGE_ID = 900); die neun Erfolgspfad-Claim-Tests seeden dazu eine offene Anfrage (seed_open_pate_request). Die REQ-9-Tests bleiben unveraendert.
+
+Befund: Der partielle Unique-Index concierge_pate_requests_one_open_per_user erlaubt nur eine offene Anfrage je Nutzer, ein zweiter offener Datensatz ist nicht seedbar. Der rein sequentielle Fall "Anfrage vor dem Claim geschlossen" faengt der alte Vor-Transaktions-Check bereits ab (gruen), ist also nicht rot-vor-dem-Fix. Der Hinweis-3-Test klickt darum eine Karte, deren Anfrage bereits als 'claimed' vergeben ist (ein Status, den der alte Check nicht abfing), und weist so die geerbte 0-Zeilen-Toleranz nach.
+
+Neue Regressionstests:
+- pate_vorschalt_zeigt_intro_und_knopf_zum_formular (Hinweis 1, reiner Unit-Test)
+- uebernehmen_uebernimmt_nur_die_angeklickte_offene_anfrage (Hinweis 2)
+- claim_gegen_direkt_uebernommene_anfrage_erzeugt_keine_zweite_patenschaft (Hinweis 3)
+- leitfaden_pin_fehler_wird_beim_naechsten_start_nachgeholt (Hinweis 4)
+
+Rot-Gegenproben (Sabotage der jeweiligen Produktionsstelle, danach wiederhergestellt):
+- Hinweise 2 und 3: claim_open_pate_request_by_message_tx auf altes Verhalten (WHERE user_id ... status='open', Ok(true) statt RETURNING) -> test result FAILED, 0 passed, 2 failed; beide neuen Claim-Tests bekommen reply None (Claim laeuft durch) statt PATE_REQUEST_CLOSED_TEXT.
+- Hinweis 1: Intro-Text aus pate_intro_reply entfernt -> pate_vorschalt_zeigt_intro_und_knopf_zum_formular FAILED (raw.contains(intro) false).
+- Hinweis 4: Fingerprint vor dem Pin gespeichert -> leitfaden_pin_fehler_wird_beim_naechsten_start_nachgeholt FAILED (stored_fingerprint.is_none() false, kein Re-Pin beim zweiten Start).
+
+Gruene Laeufe:
+- Vier neue Tests einzeln: test result ok, 4 passed, 0 failed (3,40 s).
+- Voller dl-community --features testing: test result FAILED, 465 passed, 2 failed (167,75 s). Die zwei roten sind exakt die vorbestehende Baseline (globaler_optout_antwortet_stateless_ohne_neue_daten_oder_cooldown, reaction_roles::tests::scrim_pool_upsert_fehler_bleibt_fail_open); 461 + 4 neue = 465.
+- dl-bot (central_test_db.sh): test result ok, 269 passed, 0 failed (56,30 s); der seed_scrim-Bin hat 0 Tests und ist ok (ein zwischenzeitliches "No such file or directory" auf target/debug/deps war ein Umgebungs-Flake beim Wegraeumen der Testbinaries, kein Testfehler, im Einzellauf ok).
+- rustfmt --edition 2021 --check fuer concierge.rs und team_applications.rs sauber (cargo fmt --all ist per Guardrail gesperrt).
+- clippy -D warnings: dl-community --features testing --all-targets und dl-bot --all-targets je RC=0, keine Warnungen.
