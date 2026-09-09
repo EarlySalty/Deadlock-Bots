@@ -153,8 +153,8 @@ pub const PATE_REQUEST_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch 
 pub const PATE_CLAIM_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und bereits angelegte Discord-Schritte konnten möglicherweise nicht vollständig zurückgenommen werden. Bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
 pub const FRESHLING_T0_PATE_TEXT: &str = "Und weil du hier ganz neu bist: Ich kann dir direkt einen Paten an die Seite stellen. Das ist ein Mensch aus der Community, der dir alles zeigt und mit dir die ersten Runden dreht. Kein Programm, kein fester Termin, einfach jemand, der dir den Anfang leicht macht. Magst du?";
 pub const PATE_ESCALATION_2H_TEXT: &str = "Seit zwei Stunden wartet <@{user_id}> noch auf einen Paten. <@662995601738170389>, magst du kurz schauen, ob jemand Zeit hat?";
-pub const PATE_ESCALATION_24H_CARD_TEXT: &str = "Diese Anfrage haben wir nach 24 Stunden ohne Uebernahme geschlossen. Wir haben uns direkt bei der Person gemeldet.";
-pub const PATE_UNBESETZT_DM_TEXT: &str = "Hey, ich will ehrlich zu dir sein: gerade hat sich noch kein Pate fuer dich frei gemacht. Das liegt nicht an dir, manchmal ist einfach viel los. Damit du trotzdem sofort weiterkommst, hier die drei Ecken, wo dir direkt geholfen wird. In <#1426220702054355077> stellst du deine Fragen an die ganze Community, in <#1522769149208821881> findest du Mitspieler fuer eine Runde, und wenn du besser werden willst, melden sich in <#1494373349944459355> unsere Coaches bei dir. Und wenn du magst, schreib mir einfach nochmal, ich bleib dran.";
+pub const PATE_ESCALATION_24H_CARD_TEXT: &str = "Diese Anfrage haben wir nach 24 Stunden ohne Übernahme geschlossen. Wir haben uns direkt bei der Person gemeldet.";
+pub const PATE_UNBESETZT_DM_TEXT: &str = "Hey, ich will ehrlich zu dir sein: gerade hat sich noch kein Pate für dich frei gemacht. Das liegt nicht an dir, manchmal ist einfach viel los. Damit du trotzdem sofort weiterkommst, hier die drei Ecken, wo dir direkt geholfen wird. In <#1426220702054355077> stellst du deine Fragen an die ganze Community, in <#1522769149208821881> findest du Mitspieler für eine Runde, und wenn du besser werden willst, melden sich in <#1494373349944459355> unsere Coaches bei dir. Und wenn du magst, schreib mir einfach nochmal, ich bleib dran.";
 pub const PATE_REQUEST_CLOSED_TEXT: &str = "Diese Patenanfrage wurde bereits geschlossen, weil sie 24 Stunden offen war. Die Person hat schon eine Nachricht von uns bekommen, hier ist gerade nichts mehr zu tun.";
 
 pub const T7_TEXT: &str = "Hey, du bist jetzt eine Woche dabei. Eine Frage hab ich noch, dann bin ich auch still: War irgendwas verwirrend oder hat dich was abgeschreckt? Du kannst mir ehrlich schreiben, das landet direkt beim Team und macht den Server für die Nächsten besser.\n\nUnd wie immer gilt, wenn du mich brauchst, bin ich da.";
@@ -455,6 +455,7 @@ pub fn cadence_due(profile: &ConciergeProfile, now: DateTime<Utc>) -> Vec<Cadenc
     let null_activity = profile.first_message_at.is_none() && profile.first_voice_at.is_none();
     if profile.unsolicited_contact_count < 3
         && profile.t2_sent_at.is_none()
+        && !profile.pate_offered
         && null_activity
         && now >= t0 + Duration::days(2)
     {
@@ -2012,7 +2013,7 @@ fn render_pate_leitfaden_content(text: &PateLeitfadenText) -> String {
         "**Was nicht deine Aufgabe ist**\n{}",
         text.was_nicht
     ));
-    parts.push(format!("**So uebernimmst du**\n{}", text.so_uebernimmst));
+    parts.push(format!("**So übernimmst du**\n{}", text.so_uebernimmst));
     parts.push(format!("**Dein Limit**\n{}", text.dein_limit));
     parts.push(format!(
         "**Wenn du nicht weiterkommst**\n{}",
@@ -2850,29 +2851,52 @@ impl ConciergeStore {
         stage: PateEscalationStage,
         now: DateTime<Utc>,
     ) -> CommunityDbResult<bool> {
-        let query = match stage {
+        match stage {
             PateEscalationStage::TwoHours => {
-                "UPDATE bot.concierge_pate_requests
-                    SET escalated_2h_at = $2, updated_at = $2
-                  WHERE id = $1 AND status = 'open' AND escalated_2h_at IS NULL
-                  RETURNING id"
+                let claimed = sqlx::query_scalar::<_, i64>(
+                    "UPDATE bot.concierge_pate_requests
+                        SET escalated_2h_at = $2, updated_at = $2
+                      WHERE id = $1 AND status = 'open' AND escalated_2h_at IS NULL
+                      RETURNING id",
+                )
+                .bind(id)
+                .bind(now)
+                .fetch_optional(&self.pool)
+                .await?;
+                Ok(claimed.is_some())
             }
             PateEscalationStage::TwentyFourHours => {
-                "UPDATE bot.concierge_pate_requests
-                    SET escalated_24h_at = $2,
-                        status = 'closed_unbesetzt',
-                        closed_at = $2,
-                        updated_at = $2
-                  WHERE id = $1 AND status = 'open' AND escalated_24h_at IS NULL
-                  RETURNING id"
+                let mut tx = self.pool.begin().await?;
+                let claimed = sqlx::query_scalar::<_, i64>(
+                    "UPDATE bot.concierge_pate_requests
+                        SET escalated_24h_at = $2,
+                            status = 'closed_unbesetzt',
+                            closed_at = $2,
+                            updated_at = $2
+                      WHERE id = $1 AND status = 'open' AND escalated_24h_at IS NULL
+                      RETURNING user_id",
+                )
+                .bind(id)
+                .bind(now)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some(user_id) = claimed {
+                    sqlx::query(
+                        "UPDATE bot.concierge_profiles
+                            SET pate_requested = FALSE,
+                                pate_request_uncertain = FALSE,
+                                updated_at = $2
+                          WHERE user_id = $1",
+                    )
+                    .bind(user_id)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(claimed.is_some())
             }
-        };
-        let claimed = sqlx::query_scalar::<_, i64>(query)
-            .bind(id)
-            .bind(now)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(claimed.is_some())
+        }
     }
 
     async fn latest_pate_request_status(&self, user_id: u64) -> CommunityDbResult<Option<String>> {
@@ -5355,7 +5379,7 @@ impl Concierge {
         .await
         .unwrap_or_else(|_| Err("Zeitlimit ueberschritten".to_string()))
         {
-            tracing::warn!(%err, request_id = row.id, "Concierge: 2h-Kartenupdate fehlgeschlagen");
+            tracing::warn!(%err, user_id = row.user_id, stufe = "2h", request_id = row.id, "Concierge: 2h-Kartenupdate fehlgeschlagen");
         }
     }
 
@@ -5368,12 +5392,34 @@ impl Concierge {
             }
         };
         if !opted_out {
-            let _ = tokio::time::timeout(
+            match tokio::time::timeout(
                 CONCIERGE_DISCORD_IO_TIMEOUT,
                 self.port
                     .send_dm_v2(row.user_id, v2_body(PATE_UNBESETZT_DM_TEXT, Vec::new())),
             )
-            .await;
+            .await
+            {
+                Ok(ConciergeDmDelivery::Sent { .. }) => {}
+                Ok(ConciergeDmDelivery::CannotSend50007) => {
+                    tracing::warn!(
+                        user_id = row.user_id,
+                        stufe = "24h",
+                        request_id = row.id,
+                        "Concierge: 24h-DM nicht zustellbar, DMs sind gesperrt"
+                    );
+                }
+                Ok(ConciergeDmDelivery::Failed(err)) => {
+                    tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-DM fehlgeschlagen");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        user_id = row.user_id,
+                        stufe = "24h",
+                        request_id = row.id,
+                        "Concierge: 24h-DM hat Zeitlimit ueberschritten"
+                    );
+                }
+            }
         }
         let closed_card = v2_body(
             PATE_ESCALATION_24H_CARD_TEXT,
@@ -5391,7 +5437,7 @@ impl Concierge {
         .await
         .unwrap_or_else(|_| Err("Zeitlimit ueberschritten".to_string()))
         {
-            tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Kartenmarkierung fehlgeschlagen");
+            tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-Kartenmarkierung fehlgeschlagen");
         }
     }
 
@@ -9235,6 +9281,16 @@ mod tests {
         profile.first_message_at = None;
         profile.unsolicited_contact_count = 3;
         assert!(!cadence_due(&profile, Utc::now()).contains(&CadenceAction::T2));
+    }
+
+    #[test]
+    fn kadenz_t2_entfaellt_wenn_pate_schon_angeboten_wurde() {
+        let t0 = Utc::now() - Duration::days(8);
+        let mut profile = profile_at(t0);
+        profile.pate_offered = true;
+        let actions = cadence_due(&profile, Utc::now());
+        assert!(!actions.contains(&CadenceAction::T2));
+        assert!(actions.contains(&CadenceAction::T7));
     }
 
     #[test]
@@ -15229,5 +15285,48 @@ mod tests {
         .expect("Patenschaften");
         assert_eq!(patenschaften, 0);
         assert!(port.created_private_channels.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn reaktiver_wunsch_nach_24h_schliessung_erzeugt_neue_anfrage() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let mut config = test_config(true, &[]);
+        config.pater_channel_id = Some(PATE_REQUEST_CHANNEL_ID);
+        let guild_id = config.main_guild_id;
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let now = Utc::now();
+
+        seed_current_pate_request(&pool, 42).await;
+        seed_open_pate_request(&pool, 42, 559, now - Duration::minutes(24 * 60 + 5)).await;
+        concierge.run_pate_escalations(now).await;
+
+        let closed = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.concierge_pate_requests WHERE user_id = 42 ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert_eq!(closed, "closed_unbesetzt");
+        assert!(port.sent_channel_ids.lock().unwrap().is_empty());
+
+        let reply = concierge.request_pate(42, guild_id, "Nani").await;
+
+        assert_eq!(bridge_reply_text(&reply), Some(PATE_YES_TEXT));
+        assert_eq!(
+            *port.sent_channel_ids.lock().unwrap(),
+            vec![PATE_REQUEST_CHANNEL_ID]
+        );
+        let offen = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE user_id = 42 AND status = 'open'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("offene Anfragen");
+        assert_eq!(offen, 1);
     }
 }
