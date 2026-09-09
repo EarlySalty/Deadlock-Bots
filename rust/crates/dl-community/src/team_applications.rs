@@ -346,6 +346,25 @@ pub fn pate_application_modal(text: &PateText) -> ModalSpec {
     }
 }
 
+const EPHEMERAL_FLAG: u64 = 64;
+
+pub fn pate_intro_reply(text: &PateText) -> BridgeReply {
+    let components = json!([{"type": 17, "accent_color": 0xC8A86B, "components": [
+        display(format!("## Pate werden\n\n{}", text.intro)),
+        {"type": 14, "divider": true, "spacing": 1},
+        {"type": 1, "components": [
+            {"type": 2, "style": 1, "label": "Weiter zum Formular",
+             "custom_id": format!("team_apply:form:{}", ApplicationKind::Pate.slug())}
+        ]}
+    ]}]);
+    BridgeReply {
+        components: Some(components),
+        message_flags: Some(COMPONENTS_V2_FLAG | EPHEMERAL_FLAG),
+        allowed_mentions: Some(json!({"parse": []})),
+        ..BridgeReply::default()
+    }
+}
+
 fn modal_placeholder(text: &str) -> String {
     text.chars().take(100).collect()
 }
@@ -1607,6 +1626,24 @@ impl InteractionHandler for Handler {
             return ApplicationKind::from_slug(slug).map_or_else(
                 || safe_reply("Unbekannter Bewerbungsbereich."),
                 |kind| {
+                    if kind == ApplicationKind::Pate {
+                        pate_intro_reply(&self.service.pate_text)
+                    } else {
+                        BridgeReply {
+                            modal: Some(application_modal(kind)),
+                            ..BridgeReply::default()
+                        }
+                    }
+                },
+            );
+        }
+        if let Some(slug) = interaction.custom_id.strip_prefix("team_apply:form:") {
+            if !self.service.publish_enabled {
+                return safe_reply("Das Bewerbungsportal ist noch nicht freigeschaltet.");
+            }
+            return ApplicationKind::from_slug(slug).map_or_else(
+                || safe_reply("Unbekannter Bewerbungsbereich."),
+                |kind| {
                     let modal = if kind == ApplicationKind::Pate {
                         pate_application_modal(&self.service.pate_text)
                     } else {
@@ -1715,6 +1752,38 @@ mod tests {
                 .iter()
                 .all(|field| field.max_length as usize <= APPLICATION_ANSWER_MAX_LENGTH));
         }
+    }
+
+    #[test]
+    fn pate_vorschalt_zeigt_intro_und_knopf_zum_formular() {
+        let text = PateText::default();
+        let reply = pate_intro_reply(&text);
+        let raw = serde_json::to_string(&reply.components.clone().expect("components"))
+            .expect("components json");
+        assert!(raw.contains(text.intro.as_str()));
+        assert!(raw.contains("team_apply:form:pate"));
+        assert_eq!(reply.message_flags, Some(COMPONENTS_V2_FLAG | 64));
+
+        for kind in [
+            ApplicationKind::Moderation,
+            ApplicationKind::Coach,
+            ApplicationKind::Caster,
+            ApplicationKind::Tournament,
+            ApplicationKind::Coder,
+            ApplicationKind::Other,
+        ] {
+            let modal = application_modal(kind);
+            assert!(modal
+                .fields
+                .iter()
+                .all(|field| !field.placeholder.contains(text.intro.as_str())
+                    && !field.label.contains(text.intro.as_str())));
+        }
+        assert!(pate_application_modal(&text)
+            .fields
+            .iter()
+            .all(|field| !field.placeholder.contains(text.intro.as_str())
+                && !field.label.contains(text.intro.as_str())));
     }
 
     #[test]
@@ -1879,7 +1948,10 @@ mod tests {
             Ok(())
         }
         async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String> {
-            self.sent_dms.lock().expect("sent_dms lock").push((user_id, body));
+            self.sent_dms
+                .lock()
+                .expect("sent_dms lock")
+                .push((user_id, body));
             Ok(())
         }
         async fn add_role(
