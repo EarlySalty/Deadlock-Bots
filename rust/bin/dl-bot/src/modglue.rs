@@ -2443,6 +2443,38 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         );
         self.adapter.send_raw_public(channel_id, &body).await
     }
+
+    async fn edit_channel_v2(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .pin_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("Paten-Leitfaden"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
 }
 
 // ── Anonymes-Feedback-Anbindung ────────────────────────────────────────────
@@ -3110,6 +3142,25 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
             .send_raw_public(channel.id.get(), &body)
             .await
             .map(|_| ())
+    }
+
+    async fn add_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                serenity::all::RoleId::new(role_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|err| err.to_string())
     }
 }
 

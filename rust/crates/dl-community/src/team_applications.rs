@@ -28,16 +28,18 @@ pub enum ApplicationKind {
     Caster,
     Tournament,
     Coder,
+    Pate,
     Other,
 }
 
 impl ApplicationKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Moderation,
         Self::Coach,
         Self::Caster,
         Self::Tournament,
         Self::Coder,
+        Self::Pate,
         Self::Other,
     ];
 
@@ -48,6 +50,7 @@ impl ApplicationKind {
             Self::Caster => "caster",
             Self::Tournament => "turnier",
             Self::Coder => "coder",
+            Self::Pate => "pate",
             Self::Other => "sonstiges",
         }
     }
@@ -59,6 +62,7 @@ impl ApplicationKind {
             Self::Caster => "Caster",
             Self::Tournament => "Turnier-Organisation",
             Self::Coder => "Coder",
+            Self::Pate => "Pate",
             Self::Other => "Eigene Idee",
         }
     }
@@ -122,12 +126,32 @@ impl Default for PanelText {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PateText {
+    pub intro: String,
+    pub frage_erfahrung: String,
+    pub frage_verfuegbarkeit: String,
+}
+
+impl Default for PateText {
+    fn default() -> Self {
+        Self {
+            intro: "Als Pate nimmst du neue Mitglieder an die Hand und zeigst ihnen unseren Server und die ersten Schritte im Spiel. Du brauchst keine festen Zeiten, nur Lust, ansprechbar und freundlich zu sein. Rechne mit ein paar Minuten hier und da, wenn ein Neuling Fragen hat.".to_string(),
+            frage_erfahrung: "Wie gut kennst du Deadlock und unseren Server schon?".to_string(),
+            frage_verfuegbarkeit: "Wann bist du meistens da und wie schnell kannst du auf Fragen antworten?".to_string(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TextFile {
     #[serde(default)]
     publish: PublishConfig,
     panel: PanelText,
+    #[serde(default)]
+    pate: PateText,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -140,6 +164,7 @@ struct PublishConfig {
 struct LoadedPanelText {
     enabled: bool,
     text: PanelText,
+    pate: PateText,
 }
 
 fn load_panel_text(repo_root: &Path) -> LoadedPanelText {
@@ -149,6 +174,7 @@ fn load_panel_text(repo_root: &Path) -> LoadedPanelText {
             Ok(file) => LoadedPanelText {
                 enabled: file.publish.enabled,
                 text: file.panel,
+                pate: file.pate,
             },
             Err(error) => {
                 tracing::error!(%error, path = %runtime_path.display(), "Team-Bewerbungstexte sind ungültig; Veröffentlichung bleibt gesperrt");
@@ -163,14 +189,17 @@ fn load_panel_text(repo_root: &Path) -> LoadedPanelText {
 }
 
 fn embedded_disabled_panel() -> LoadedPanelText {
-    let text = toml::from_str::<TextFile>(include_str!(
+    let file = toml::from_str::<TextFile>(include_str!(
         "../../../../assets/team_application_texts.toml"
     ))
-    .map(|file| file.panel)
-    .unwrap_or_default();
+    .ok();
     LoadedPanelText {
         enabled: false,
-        text,
+        text: file
+            .as_ref()
+            .map(|file| file.panel.clone())
+            .unwrap_or_default(),
+        pate: file.map(|file| file.pate).unwrap_or_default(),
     }
 }
 
@@ -191,9 +220,19 @@ fn publication_placeholder() -> Map<String, Value> {
     body
 }
 
+const PATE_PANEL_EMOJI: (&str, &str) = ("dl_crown", "1522518265421631538");
+
 fn button(kind: ApplicationKind, emoji: &str) -> Value {
     json!({
         "type": 2, "style": 2, "label": kind.label(), "emoji": {"name": emoji},
+        "custom_id": format!("team_apply:open:{}", kind.slug())
+    })
+}
+
+fn brand_button(kind: ApplicationKind, emoji: (&str, &str)) -> Value {
+    json!({
+        "type": 2, "style": 2, "label": kind.label(),
+        "emoji": {"name": emoji.0, "id": emoji.1},
         "custom_id": format!("team_apply:open:{}", kind.slug())
     })
 }
@@ -207,6 +246,7 @@ pub fn panel_body(text: &PanelText) -> Map<String, Value> {
     ]});
     let second = json!({"type": 1, "components": [
         button(ApplicationKind::Coder, "💻"),
+        brand_button(ApplicationKind::Pate, PATE_PANEL_EMOJI),
         button(ApplicationKind::Other, "💡"),
         {"type": 2, "style": 5, "label": "Streamer-Partner", "emoji": {"name": "📺"}, "url": STREAMER_PARTNER_URL}
     ]});
@@ -246,6 +286,7 @@ pub fn application_modal(kind: ApplicationKind) -> ModalSpec {
         ApplicationKind::Caster => "Streams, Turniere oder beides?",
         ApplicationKind::Tournament => "Custom, Grind, Funny oder eigene Formate?",
         ApplicationKind::Coder => "Technologien und Projekte",
+        ApplicationKind::Pate => "Erfahrung und Verfügbarkeit als Pate",
         ApplicationKind::Other => "Wie möchtest du dich einbringen?",
     };
     ModalSpec {
@@ -282,6 +323,31 @@ pub fn application_modal(kind: ApplicationKind) -> ModalSpec {
             modal_field("focus", focus, "Kurz und konkret", false),
         ],
     }
+}
+
+pub fn pate_application_modal(text: &PateText) -> ModalSpec {
+    ModalSpec {
+        custom_id: format!("team_apply:submit:{}", ApplicationKind::Pate.slug()),
+        title: "Bewerbung: Pate".to_string(),
+        fields: vec![
+            modal_field(
+                "experience",
+                "Erfahrung",
+                &modal_placeholder(&text.frage_erfahrung),
+                true,
+            ),
+            modal_field(
+                "availability",
+                "Verfügbarkeit",
+                &modal_placeholder(&text.frage_verfuegbarkeit),
+                true,
+            ),
+        ],
+    }
+}
+
+fn modal_placeholder(text: &str) -> String {
+    text.chars().take(100).collect()
 }
 
 fn decision_modal(action: &str, id: i64) -> Option<ModalSpec> {
@@ -440,6 +506,13 @@ pub trait TeamApplicationPort: Send + Sync {
         message_id: u64,
     ) -> Result<(), String>;
     async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String>;
+    async fn add_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String>;
 }
 
 pub struct TeamApplications {
@@ -447,6 +520,7 @@ pub struct TeamApplications {
     port: Arc<dyn TeamApplicationPort>,
     guild_id: u64,
     panel_text: PanelText,
+    pate_text: PateText,
     publish_enabled: bool,
 }
 
@@ -463,6 +537,7 @@ impl TeamApplications {
             port,
             guild_id,
             panel_text: loaded.text,
+            pate_text: loaded.pate,
             publish_enabled: loaded.enabled,
         })
     }
@@ -739,14 +814,16 @@ impl TeamApplications {
             "availability": answer("availability"), "contribution": answer("contribution"),
             "focus": answer("focus")
         });
-        if ["motivation", "experience", "availability", "contribution"]
-            .iter()
-            .any(|key| {
-                answers[*key]
-                    .as_str()
-                    .is_none_or(|v| v.chars().count() < 10)
-            })
-        {
+        let required_keys: &[&str] = if kind == ApplicationKind::Pate {
+            &["experience", "availability"]
+        } else {
+            &["motivation", "experience", "availability", "contribution"]
+        };
+        if required_keys.iter().any(|key| {
+            answers[*key]
+                .as_str()
+                .is_none_or(|v| v.chars().count() < 10)
+        }) {
             return safe_reply("Bitte fülle alle Pflichtfelder mit mindestens 10 Zeichen aus.");
         }
         let mut applicant_name = sanitize_text(
@@ -1294,6 +1371,21 @@ impl TeamApplications {
             return safe_reply("Der Status wurde gespeichert, aber die Anzeige ist unvollständig.");
         };
 
+        if target == ApplicationStatus::Accepted && kind == ApplicationKind::Pate {
+            if let Err(error) = self
+                .port
+                .add_role(
+                    self.guild_id,
+                    applicant_user_id,
+                    crate::concierge::PATE_ROLE_ID,
+                    "team-bewerbung:pate-angenommen",
+                )
+                .await
+            {
+                tracing::warn!(%error, id, "Paten-Rolle konnte nach Annahme nicht vergeben werden");
+            }
+        }
+
         let mut delivery_warning = None;
         if !dm_already_sent {
             let claimed_now = if dm_already_claimed {
@@ -1412,7 +1504,17 @@ impl TeamApplications {
     }
 }
 
+pub const PATE_ACCEPTED_DM_TEXT: &str = "Schoen, dass du dabei bist. Ab jetzt bist du Pate in der Deutschen Deadlock Community. Wie alles laeuft, steht in deinem Leitfaden in der Paten-Zentrale: <#1524083665838276860>. Schau kurz rein, dann kann es losgehen.";
+
 fn status_dm_text(status: ApplicationStatus, kind: ApplicationKind, note: &str) -> String {
+    if status == ApplicationStatus::Accepted && kind == ApplicationKind::Pate {
+        let note = if note.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{note}")
+        };
+        return format!("{PATE_ACCEPTED_DM_TEXT}{note}");
+    }
     let heading = match status {
         ApplicationStatus::Review => "Deine Bewerbung wird jetzt geprüft.",
         ApplicationStatus::Question => "Wir haben eine Rückfrage zu deiner Bewerbung.",
@@ -1501,9 +1603,16 @@ impl InteractionHandler for Handler {
             }
             return ApplicationKind::from_slug(slug).map_or_else(
                 || safe_reply("Unbekannter Bewerbungsbereich."),
-                |kind| BridgeReply {
-                    modal: Some(application_modal(kind)),
-                    ..BridgeReply::default()
+                |kind| {
+                    let modal = if kind == ApplicationKind::Pate {
+                        pate_application_modal(&self.service.pate_text)
+                    } else {
+                        application_modal(kind)
+                    };
+                    BridgeReply {
+                        modal: Some(modal),
+                        ..BridgeReply::default()
+                    }
                 },
             );
         }
@@ -1572,12 +1681,13 @@ mod tests {
 
     #[test]
     fn alle_teamwege_sind_vollstaendig_und_streamer_bleibt_externer_link() {
-        assert_eq!(ApplicationKind::ALL.len(), 6);
+        assert_eq!(ApplicationKind::ALL.len(), 7);
         assert_eq!(ApplicationKind::Moderation.slug(), "moderation");
         assert_eq!(ApplicationKind::Coach.slug(), "coach");
         assert_eq!(ApplicationKind::Caster.slug(), "caster");
         assert_eq!(ApplicationKind::Tournament.slug(), "turnier");
         assert_eq!(ApplicationKind::Coder.slug(), "coder");
+        assert_eq!(ApplicationKind::Pate.slug(), "pate");
         assert_eq!(ApplicationKind::Other.slug(), "sonstiges");
 
         let panel = panel_body(&PanelText::default());
@@ -1707,5 +1817,131 @@ mod tests {
         assert!(!raw.contains("applicant"));
         assert!(!raw.contains("motivation"));
         assert!(!raw.contains("user_id"));
+    }
+
+    #[test]
+    fn pate_bewerbungsformular_stellt_erfahrung_und_verfuegbarkeit() {
+        let modal = pate_application_modal(&PateText::default());
+        assert_eq!(modal.custom_id, "team_apply:submit:pate");
+        assert_eq!(modal.fields.len(), 2);
+        assert_eq!(modal.fields[0].custom_id, "experience");
+        assert_eq!(modal.fields[1].custom_id, "availability");
+    }
+
+    #[cfg(feature = "testing")]
+    #[derive(Default)]
+    struct RecordingTeamPort {
+        added_roles: std::sync::Mutex<Vec<(u64, u64, u64)>>,
+        sent_dms: std::sync::Mutex<Vec<(u64, Map<String, Value>)>>,
+    }
+
+    #[cfg(feature = "testing")]
+    #[async_trait::async_trait]
+    impl TeamApplicationPort for RecordingTeamPort {
+        async fn post_panel(&self, _channel_id: u64, _body: Map<String, Value>) -> Result<u64, String> {
+            Ok(1)
+        }
+        async fn edit_panel(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _body: Map<String, Value>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn post_moderator_application(
+            &self,
+            _channel_id: u64,
+            _body: Map<String, Value>,
+        ) -> Result<u64, String> {
+            Ok(1)
+        }
+        async fn edit_moderator_application(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _body: Map<String, Value>,
+        ) -> Result<(), ModeratorEditError> {
+            Ok(())
+        }
+        async fn delete_moderator_application(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String> {
+            self.sent_dms.lock().unwrap().push((user_id, body));
+            Ok(())
+        }
+        async fn add_role(
+            &self,
+            guild_id: u64,
+            user_id: u64,
+            role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            self.added_roles
+                .lock()
+                .unwrap()
+                .push((guild_id, user_id, role_id));
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn angenommene_paten_bewerbung_vergibt_paten_rolle_und_schickt_leitfaden_dm() {
+        let db = dl_central_db::testing::test_pool().await.expect("test_pool");
+        let pool = db.pool().clone();
+        let guild_id: u64 = 1_289_721_245_281_292_288;
+        let applicant: u64 = 424_242;
+        let moderator_message_id: u64 = 999_001;
+        sqlx::query(
+            "INSERT INTO community.team_applications(
+                 id, guild_id, applicant_user_id, applicant_name, kind, answers, status,
+                 moderator_message_id, status_version, created_at, updated_at)
+             VALUES(1, $1, $2, 'Testpate', 'pate',
+                    '{\"experience\":\"kenne den Server gut\",\"availability\":\"abends\"}'::jsonb,
+                    'open', $3, 0, now(), now())",
+        )
+        .bind(i64::try_from(guild_id).unwrap())
+        .bind(i64::try_from(applicant).unwrap())
+        .bind(i64::try_from(moderator_message_id).unwrap())
+        .execute(&pool)
+        .await
+        .expect("Pate-Bewerbung seeden");
+
+        let port = Arc::new(RecordingTeamPort::default());
+        let service = Arc::new(TeamApplications {
+            pool: pool.clone(),
+            port: port.clone(),
+            guild_id,
+            panel_text: PanelText::default(),
+            pate_text: PateText::default(),
+            publish_enabled: true,
+        });
+
+        let interaction = BridgeInteraction {
+            guild_id,
+            channel_id: TEAM_APPLICATION_NOTIFY_CHANNEL_ID,
+            user_id: 777,
+            message_id: Some(moderator_message_id),
+            author_can_manage_messages: true,
+            ..BridgeInteraction::default()
+        };
+        let reply = service.change_status(&interaction, 1, "accept", "").await;
+        assert!(reply.content.is_some());
+
+        let roles = port.added_roles.lock().unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0], (guild_id, applicant, crate::concierge::PATE_ROLE_ID));
+        drop(roles);
+
+        let dms = port.sent_dms.lock().unwrap();
+        assert_eq!(dms.len(), 1);
+        let raw = serde_json::to_string(&dms[0].1).expect("dm json");
+        assert!(raw.contains("Paten-Zentrale") || raw.contains("1524083665838276860"), "{raw}");
     }
 }
