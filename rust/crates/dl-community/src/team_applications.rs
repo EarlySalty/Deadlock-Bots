@@ -1507,7 +1507,7 @@ impl TeamApplications {
     }
 }
 
-pub const PATE_ACCEPTED_DM_TEXT: &str = "Schoen, dass du dabei bist. Ab jetzt bist du Pate in der Deutschen Deadlock Community. Wie alles laeuft, steht in deinem Leitfaden in der Paten-Zentrale: <#1524083665838276860>. Schau kurz rein, dann kann es losgehen.";
+pub const PATE_ACCEPTED_DM_TEXT: &str = "Schön, dass du dabei bist. Ab jetzt bist du Pate in der Deutschen Deadlock Community. Wie alles läuft, steht in deinem Leitfaden in der Paten-Zentrale: <#1524083665838276860>. Schau kurz rein, dann kann es losgehen.";
 
 fn status_dm_text(status: ApplicationStatus, kind: ApplicationKind, note: &str) -> String {
     if status == ApplicationStatus::Accepted && kind == ApplicationKind::Pate {
