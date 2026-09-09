@@ -5389,13 +5389,18 @@ impl Concierge {
             )
             .await;
         }
+        let closed_card = v2_body(
+            PATE_ESCALATION_24H_CARD_TEXT,
+            vec![button(
+                PATE_CLAIM_BUTTON_LABEL,
+                1,
+                &format!("concierge:pate:claim:{}", row.user_id),
+            )],
+        );
         if let Err(err) = tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
-            self.port.edit_channel_v2(
-                row.channel_id,
-                row.message_id,
-                v2_body(PATE_ESCALATION_24H_CARD_TEXT, Vec::new()),
-            ),
+            self.port
+                .edit_channel_v2(row.channel_id, row.message_id, closed_card),
         )
         .await
         .unwrap_or_else(|_| Err("Zeitlimit ueberschritten".to_string()))
@@ -7915,11 +7920,13 @@ mod tests {
             .map(u64::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        ConciergeConfig::from_env(|key| match key {
+        let mut config = ConciergeConfig::from_env(|key| match key {
             "DL_CONCIERGE_ENABLED" => Some(if enabled { "1" } else { "0" }.to_string()),
             "DL_CONCIERGE_TEST_USER_ALLOWLIST" => Some(allowlist.clone()),
             _ => None,
-        })
+        });
+        config.frischling_lookup_retry = StdDuration::from_millis(1);
+        config
     }
 
     #[test]
