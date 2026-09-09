@@ -6007,7 +6007,8 @@ fn weiche_prompt(
                 id: None,
                 title: "Ich bin ganz neu — nehmt mich an die Hand".to_string(),
                 description: Some(
-                    "Ich bin ganz neu und will's lernen — nehmt mich an die Hand".to_string(),
+                    "Ich bin ganz neu und will's lernen, ein Pate aus der Community zeigt mir alles"
+                        .to_string(),
                 ),
                 emoji: Some(json!({ "name": "🌱" })),
                 role_ids: frischling_role
