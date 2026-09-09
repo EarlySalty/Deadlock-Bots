@@ -222,3 +222,50 @@ Alle vier blockierenden Mängel und die zwei Sollte-Punkte sind sauber behoben.
 Offene Punkte: keine im Code. Einzige Auflage ist der Deploy-Schritt aus Mangel 1
 (DL_CONCIERGE_PROACTIVE=1 in der host-lokalen Startdatei), ohne den REQ-1 live nicht
 feuert.
+
+## Nachreview 2, 2026-09-10
+
+geprüfter Stand: origin/feat/paten-programm-live HEAD a6c257eb (Nachdiff
+b68da8f2..a6c257eb; neue Commits 82bde414, 4af7406b, a6c257eb)
+
+### Ergebnis: FREIGABE
+
+Alle vier Punkte der zweiten Merge-Kritiker-Runde sind sauber umgesetzt.
+
+- Punkt 1 (Intro-Vorschalt, INV-7): Panel-Buttons aller Bereiche nutzen weiter
+  `team_apply:open:<slug>` (team_applications.rs:228/236). Im Handler geht nur
+  kind==Pate auf `pate_intro_reply` (ephemer, Knopf "Weiter zum Formular",
+  team_applications.rs:351), alle anderen Kinds öffnen wie bisher direkt
+  `application_modal(kind)`. Der neue Prefix `team_apply:form:` (Handler ~1640)
+  öffnet dann pate_application_modal; kein anderer Bereich erzeugt einen form-Knopf.
+  Test pate_vorschalt_zeigt_intro_und_knopf_zum_formular prüft Intro plus
+  form:pate-Knopf plus Ephemeral-Flag und dass der Intro-Text in keinem
+  Modalfeld irgendeines Kinds steckt. INV-7 gewahrt.
+- Punkt 2 (Übernehmen nur für die geklickte Karte): claim_open_pate_request_by_message_tx
+  (concierge.rs:1936) fährt `UPDATE ... WHERE message_id = $2 AND user_id = $1
+  AND status = 'open' RETURNING id`; die message_id kommt aus der Interaction
+  (concierge.rs:6443). Stale Karte oder fremde message_id ergibt 0 Zeilen und
+  PATE_REQUEST_CLOSED_TEXT. Fehlende message_id bindet SQL-NULL und schlägt sicher
+  fehl (kein Claim). Test uebernehmen_uebernimmt_nur_die_angeklickte_offene_anfrage.
+- Punkt 3 (atomarer Claim, Rollback ohne Nebenwirkung): der Claim-UPDATE läuft in
+  derselben tx (concierge.rs:6558); bei Ok(false) `drop(tx)` = Rollback, bei Err
+  ebenso. Die Kanalanlage (`pate-<user_id>`, create_private) steht erst NACH dem
+  erfolgreichen UPDATE, es wird also kein Kanal und keine Patenschaft vor dem
+  Claim angelegt; auch der claim_once-Dedup-Eintrag rollt zurück und lässt einen
+  sauberen Retry zu. INV-3 intakt: Guild/Kanal-Gate, Paten-Rolle, Last-Limit 3,
+  claim_pate bleibt der einzige Weg. Test
+  claim_gegen_direkt_uebernommene_anfrage_erzeugt_keine_zweite_patenschaft.
+- Punkt 4 (Fingerprint erst nach Pin): ensure_pate_leitfaden setzt beim Neupost
+  zuerst message_id, pinnt (concierge.rs:5496) und schreibt den Fingerprint erst
+  nach erfolgreichem Pin (concierge.rs:5433). Schlägt der Pin fehl, bleibt der
+  Fingerprint leer, message_id ist aber gespeichert, sodass der nächste Start die
+  vorhandene Nachricht editiert statt neu zu posten und den Pin nachholt. Kein
+  Doppelpost. Test leitfaden_pin_fehler_wird_beim_naechsten_start_nachgeholt.
+
+Die vier neuen Tests sind echte Verhaltenstests (DB-Seeds, Prüfung auf
+Kanalanlage, Patenschaften und Anfragestatus bzw. Modal-/Komponenten-Inhalt).
+Bestehende Tests wurden nicht verändert oder abgeschwächt (einzige Minus-Zeile ist
+ein rustfmt-Umbruch in einem Mock-send_dm, team_applications.rs:1948). INV-5 gewahrt.
+
+Offene Punkte: keine im Code. Es bleibt allein die Deploy-Auflage aus Mangel 1
+(DL_CONCIERGE_PROACTIVE=1 in der host-lokalen scripts/run_dl_bot_service.sh).
