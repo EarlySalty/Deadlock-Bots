@@ -1,3 +1,6 @@
+-- Additive Migration fuer den Scrim-Draft-Warteraum und die Lobby-Automatik:
+-- legt nur Spalten auf turnier.draft_sessions an, Bestandszeilen bleiben
+-- unberuehrt (lobby_status 'keine' heisst: alter Vertrag, kein Warteraum).
 ALTER TABLE turnier.draft_sessions
     ADD COLUMN IF NOT EXISTS bans_per_team INTEGER NOT NULL DEFAULT 2,
     ADD COLUMN IF NOT EXISTS team1_claimed_at TIMESTAMPTZ,
