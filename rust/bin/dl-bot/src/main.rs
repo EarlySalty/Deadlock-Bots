@@ -870,19 +870,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
 
-    // Mitspieler-Umfrage nach gemeinsamen Sessions ("Wieder mit XY spielen?").
-    // Kill-Switch: DL_MATE_SURVEY_ENABLED=0.
-    let mate_survey_enabled = env_bool_default("DL_MATE_SURVEY_ENABLED", true);
-    let mate_survey =
-        dl_voice::mate_survey::MateSurvey::new(Arc::new(dl_voice::glue::MateSurveyGlue {
-            adapter: adapter.clone(),
-            pool: central_pool.clone(),
-        }));
-    if mate_survey_enabled {
-        dl_voice::mate_survey::register(&mut router, mate_survey.clone());
-    } else {
-        tracing::warn!("Mitspieler-Umfrage deaktiviert (DL_MATE_SURVEY_ENABLED=0)");
-    }
+    tracing::info!("Mitspieler-Umfrage deaktiviert");
 
     // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
     // nur die Wellen-Planung läuft hinter dem Opt-in-Flag.
@@ -1427,13 +1415,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(central_pool.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
-        if mate_survey_enabled {
-            voice_tracker.set_mate_survey(mate_survey.clone()).await;
-            tracing::info!(
-                min_sekunden = dl_voice::mate_survey::MIN_SECONDS,
-                "Mitspieler-Umfrage aktiv"
-            );
-        }
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
         // Rollen, Guild-Name). Bewusst ohne Admin-Gate (jeder darf abfragen).
