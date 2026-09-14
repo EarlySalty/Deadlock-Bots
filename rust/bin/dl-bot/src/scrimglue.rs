@@ -3073,6 +3073,19 @@ enum DiscordEffectTarget {
     Dm { recipient_user_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchRequestEffectContext {
+    batch_id: i32,
+    request_id: i32,
+    team_id: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchStatusEffectContext {
+    request_id: i32,
+    team_id: i32,
+}
+
 #[derive(Debug, Clone)]
 struct ClaimedDiscordEffect {
     id: i64,
@@ -3082,6 +3095,8 @@ struct ClaimedDiscordEffect {
     operation: DiscordEffectOperation,
     target: DiscordEffectTarget,
     message_id: Option<u64>,
+    match_request_context: Option<MatchRequestEffectContext>,
+    match_status_context: Option<MatchStatusEffectContext>,
     body: Map<String, Value>,
 }
 
@@ -3134,6 +3149,7 @@ async fn mark_expired_discord_effect_leases_uncertain(
             "leased outbox effect expired before delivery proof",
         )
         .await?;
+        mark_match_request_effect_failed_tx(&mut tx, id).await?;
     }
     tx.commit().await?;
     for row in rows {
@@ -3267,12 +3283,29 @@ fn parse_discord_effect_payload(
     {
         return Err(anyhow!("discord dm effect erlaubt nur post"));
     }
+    let match_request_context = if message_kind == "match_request" {
+        Some(parse_match_request_effect_context(payload)?)
+    } else {
+        None
+    };
+    let match_status_context = if message_kind == "match_status" && payload.get("context").is_some()
+    {
+        Some(parse_match_status_effect_context(payload)?)
+    } else {
+        None
+    };
     let body = payload
         .get("body")
         .and_then(Value::as_object)
         .cloned()
         .ok_or_else(|| anyhow!("discord effect body fehlt"))?;
     validate_discord_effect_body(message_kind, operation, &target, &body)?;
+    if let Some(context) = match_request_context {
+        validate_match_request_effect_body(&body, context)?;
+    }
+    if let Some(context) = match_status_context {
+        validate_match_status_effect_body(&body, context)?;
+    }
     Ok(ClaimedDiscordEffect {
         id,
         attempts,
@@ -3281,7 +3314,61 @@ fn parse_discord_effect_payload(
         operation,
         target,
         message_id,
+        match_request_context,
+        match_status_context,
         body,
+    })
+}
+
+fn parse_match_request_effect_context(
+    payload: &Value,
+) -> anyhow::Result<MatchRequestEffectContext> {
+    let context = payload
+        .get("context")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("match_request context fehlt"))?;
+    let parse = |field: &str| -> anyhow::Result<i32> {
+        let value = context
+            .get(field)
+            .ok_or_else(|| anyhow!("match_request context.{field} fehlt"))?;
+        let parsed = match value {
+            Value::String(raw) => raw.parse::<i64>().ok(),
+            Value::Number(raw) => raw.as_i64(),
+            _ => None,
+        }
+        .filter(|value| *value > 0)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| anyhow!("match_request context.{field} ungueltig"))?;
+        Ok(parsed)
+    };
+    Ok(MatchRequestEffectContext {
+        batch_id: parse("batch_id")?,
+        request_id: parse("request_id")?,
+        team_id: parse("team_id")?,
+    })
+}
+
+fn parse_match_status_effect_context(payload: &Value) -> anyhow::Result<MatchStatusEffectContext> {
+    let context = payload
+        .get("context")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("match_status context fehlt"))?;
+    let parse = |field: &str| -> anyhow::Result<i32> {
+        let value = context
+            .get(field)
+            .ok_or_else(|| anyhow!("match_status context.{field} fehlt"))?;
+        match value {
+            Value::String(raw) => raw.parse::<i64>().ok(),
+            Value::Number(raw) => raw.as_i64(),
+            _ => None,
+        }
+        .filter(|value| *value > 0)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| anyhow!("match_status context.{field} ungueltig"))
+    };
+    Ok(MatchStatusEffectContext {
+        request_id: parse("request_id")?,
+        team_id: parse("team_id")?,
     })
 }
 
@@ -3315,6 +3402,13 @@ fn validate_discord_effect_body(
     }
     validate_allowed_mentions(body.get("allowed_mentions"))?;
     match message_kind {
+        "match_request" => {
+            require_channel_target(target)?;
+            if operation != DiscordEffectOperation::Post {
+                return Err(anyhow!("match_request erlaubt nur post"));
+            }
+            validate_structured_scrim_body(body)
+        }
         "match_status" => {
             require_channel_target(target)?;
             validate_structured_scrim_body(body)
@@ -3444,6 +3538,128 @@ fn validate_structured_scrim_body(body: &Map<String, Value>) -> anyhow::Result<(
     Ok(())
 }
 
+fn validate_match_request_effect_body(
+    body: &Map<String, Value>,
+    context: MatchRequestEffectContext,
+) -> anyhow::Result<()> {
+    validate_no_direct_mentions(body.get("allowed_mentions"))?;
+    let containers = body
+        .get("components")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("match_request braucht components"))?;
+    let mut slot_indexes = BTreeSet::new();
+    let mut none_count = 0_usize;
+    for container in containers {
+        let Some(container_components) = container.get("components").and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for component in container_components {
+            if component.get("type").and_then(Value::as_u64) != Some(1) {
+                continue;
+            }
+            let row_components = component
+                .get("components")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("match_request action row ungueltig"))?;
+            for button in row_components {
+                let button = button
+                    .as_object()
+                    .ok_or_else(|| anyhow!("match_request button ist kein Objekt"))?;
+                if button.get("type").and_then(Value::as_u64) != Some(2) {
+                    return Err(anyhow!("match_request action row erlaubt nur Buttons"));
+                }
+                let custom_id = button
+                    .get("custom_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("match_request button custom_id fehlt"))?;
+                let parsed = parse_match_request_response_custom_id(custom_id)
+                    .ok_or_else(|| anyhow!("match_request button custom_id ungueltig"))?;
+                if parsed.request_id != i64::from(context.request_id)
+                    || parsed.team_id != i64::from(context.team_id)
+                {
+                    return Err(anyhow!("match_request button passt nicht zum context"));
+                }
+                if parsed.slot_index == -1 {
+                    none_count += 1;
+                } else if !slot_indexes.insert(parsed.slot_index) {
+                    return Err(anyhow!("match_request slot button doppelt"));
+                }
+            }
+        }
+    }
+    if slot_indexes.len() < 2 || none_count != 1 {
+        return Err(anyhow!(
+            "match_request braucht mindestens zwei Slot-Buttons und genau einen Kein-Slot-Button"
+        ));
+    }
+    let expected = (0..i32::try_from(slot_indexes.len())?).collect::<BTreeSet<_>>();
+    if slot_indexes != expected {
+        return Err(anyhow!(
+            "match_request slot button indizes muessen lueckenlos sein"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_match_status_effect_body(
+    body: &Map<String, Value>,
+    context: MatchStatusEffectContext,
+) -> anyhow::Result<()> {
+    validate_no_direct_mentions(body.get("allowed_mentions"))?;
+    let containers = body
+        .get("components")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("match_status braucht components"))?;
+    let mut slot_buttons = 0_usize;
+    let mut none_buttons = 0_usize;
+    for container in containers {
+        let Some(container_components) = container.get("components").and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for component in container_components {
+            if component.get("type").and_then(Value::as_u64) != Some(1) {
+                continue;
+            }
+            let Some(row_components) = component.get("components").and_then(Value::as_array) else {
+                continue;
+            };
+            for button in row_components {
+                let Some(custom_id) = button.get("custom_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !custom_id.starts_with(MATCH_REQUEST_RESPONSE_PREFIX) {
+                    continue;
+                }
+                let parsed = parse_match_request_response_custom_id(custom_id)
+                    .ok_or_else(|| anyhow!("match_status bestaetigungs-button ungueltig"))?;
+                if parsed.request_id != i64::from(context.request_id)
+                    || parsed.team_id != i64::from(context.team_id)
+                {
+                    return Err(anyhow!(
+                        "match_status bestaetigungs-button passt nicht zum context"
+                    ));
+                }
+                if parsed.slot_index == -1 {
+                    none_buttons += 1;
+                } else {
+                    slot_buttons += 1;
+                }
+            }
+        }
+    }
+    if slot_buttons == 0 && none_buttons == 0 {
+        return Ok(());
+    }
+    if slot_buttons != 1 || none_buttons != 1 {
+        return Err(anyhow!(
+            "match_status braucht genau einen Dabei- und einen Ausfall-Button"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_replacement_request_body(body: &Map<String, Value>) -> anyhow::Result<()> {
     validate_structured_scrim_body(body)?;
     if body.contains_key("message_reference") {
@@ -3517,7 +3733,7 @@ fn validate_no_direct_mentions(value: Option<&Value>) -> anyhow::Result<()> {
         if let Some(values) = allowed.get(key).and_then(Value::as_array) {
             if !values.is_empty() {
                 return Err(anyhow!(
-                    "replacement_request dm darf keine Mentions erlauben"
+                    "scrim effect darf keine direkten Mentions erlauben"
                 ));
             }
         }
@@ -3689,6 +3905,263 @@ impl DiscordDeliveryReceipt {
     }
 }
 
+async fn record_match_request_effect_delivery_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    context: MatchRequestEffectContext,
+    channel_id: u64,
+    message_id: u64,
+) -> anyhow::Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT batch_id, team_a_id, team_b_id, status, team_query_message_ids
+          FROM scrim.match_requests
+         WHERE id = $1
+         FOR UPDATE
+        "#,
+    )
+    .bind(context.request_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| anyhow!("match_request outbox target {} fehlt", context.request_id))?;
+    let batch_id = row.get::<i32, _>("batch_id");
+    let team_a_id = row.get::<i32, _>("team_a_id");
+    let team_b_id = row.get::<Option<i32>, _>("team_b_id");
+    if batch_id != context.batch_id {
+        return Err(anyhow!("match_request outbox batch context passt nicht"));
+    }
+    if context.team_id != team_a_id && Some(context.team_id) != team_b_id {
+        return Err(anyhow!("match_request outbox team context passt nicht"));
+    }
+    let mut message_ids = row
+        .get::<Value, _>("team_query_message_ids")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    message_ids.insert(
+        context.team_id.to_string(),
+        json!({
+            "channel_id": i64::try_from(channel_id)?,
+            "message_id": i64::try_from(message_id)?,
+        }),
+    );
+    let has_target = |team_id: i32| {
+        message_ids
+            .get(&team_id.to_string())
+            .and_then(Value::as_object)
+            .is_some_and(|entry| {
+                entry.get("channel_id").and_then(Value::as_i64).is_some()
+                    && entry.get("message_id").and_then(Value::as_i64).is_some()
+            })
+    };
+    let complete = has_target(team_a_id) && team_b_id.is_none_or(has_target);
+    let current_status = row.get::<String, _>("status");
+    let workflow_active = matches!(
+        current_status.as_str(),
+        MATCH_REQUEST_STATUS_DRAFT
+            | MATCH_REQUEST_STATUS_POSTING
+            | MATCH_REQUEST_STATUS_POST_FAILED
+            | MATCH_REQUEST_STATUS_OPEN
+    );
+    let next_status = if !workflow_active {
+        current_status.as_str()
+    } else if complete {
+        MATCH_REQUEST_STATUS_OPEN
+    } else if current_status == MATCH_REQUEST_STATUS_POST_FAILED {
+        MATCH_REQUEST_STATUS_POST_FAILED
+    } else {
+        MATCH_REQUEST_STATUS_POSTING
+    };
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_requests
+           SET team_query_message_ids = $2::jsonb,
+               status = $3,
+               posted_at = CASE WHEN $4 THEN COALESCE(posted_at, now()) ELSE posted_at END,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(context.request_id)
+    .bind(Value::Object(message_ids))
+    .bind(next_status)
+    .bind(complete)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_batches batch
+           SET status = CASE
+                   WHEN batch.status NOT IN ('draft', 'posting', 'post_failed', 'open')
+                       THEN batch.status
+                   WHEN EXISTS (
+                       SELECT 1 FROM scrim.match_requests request
+                        WHERE request.batch_id = batch.id
+                          AND request.status = 'post_failed'
+                   ) THEN 'post_failed'
+                   WHEN NOT EXISTS (
+                       SELECT 1 FROM scrim.match_requests request
+                        WHERE request.batch_id = batch.id
+                          AND request.status <> 'open'
+                   ) THEN 'open'
+                   ELSE 'posting'
+               END,
+               updated_at = now()
+         WHERE batch.id = $1
+        "#,
+    )
+    .bind(batch_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn record_match_status_effect_delivery_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    context: MatchStatusEffectContext,
+    channel_id: u64,
+    message_id: u64,
+) -> anyhow::Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT team_a_id, team_b_id, team_status_message_ids, status_message_state
+          FROM scrim.match_requests
+         WHERE id = $1
+         FOR UPDATE
+        "#,
+    )
+    .bind(context.request_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| anyhow!("match_status outbox target {} fehlt", context.request_id))?;
+    let team_a_id = row.get::<i32, _>("team_a_id");
+    let team_b_id = row.get::<Option<i32>, _>("team_b_id");
+    if context.team_id != team_a_id && Some(context.team_id) != team_b_id {
+        return Err(anyhow!("match_status outbox team context passt nicht"));
+    }
+    let mut message_ids = row
+        .get::<Value, _>("team_status_message_ids")
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    message_ids.insert(
+        context.team_id.to_string(),
+        json!({
+            "channel_id": i64::try_from(channel_id)?,
+            "message_id": i64::try_from(message_id)?,
+        }),
+    );
+    let has_target = |team_id: i32| {
+        message_ids
+            .get(&team_id.to_string())
+            .and_then(Value::as_object)
+            .is_some_and(|entry| {
+                entry.get("channel_id").and_then(Value::as_i64).is_some()
+                    && entry.get("message_id").and_then(Value::as_i64).is_some()
+            })
+    };
+    let complete = has_target(team_a_id) && team_b_id.is_none_or(has_target);
+    let current_state = row.get::<String, _>("status_message_state");
+    let next_state = if complete {
+        MATCH_STATUS_MESSAGE_STATE_POSTED
+    } else if current_state == MATCH_STATUS_MESSAGE_STATE_POST_FAILED {
+        MATCH_STATUS_MESSAGE_STATE_POST_FAILED
+    } else {
+        MATCH_STATUS_MESSAGE_STATE_POSTING
+    };
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_requests
+           SET team_status_message_ids = $2::jsonb,
+               status_message_state = $3,
+               status_message_last_error = CASE WHEN $4 THEN NULL ELSE status_message_last_error END,
+               status_message_posted_at = CASE WHEN $4 THEN COALESCE(status_message_posted_at, now()) ELSE status_message_posted_at END,
+               status_message_updated_at = now(),
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(context.request_id)
+    .bind(Value::Object(message_ids))
+    .bind(next_state)
+    .bind(complete)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn mark_match_request_effect_failed_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+) -> anyhow::Result<()> {
+    let payload =
+        sqlx::query_scalar::<_, Value>("SELECT payload FROM scrim.outbox_effects WHERE id=$1")
+            .bind(outbox_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(payload) = payload else {
+        return Ok(());
+    };
+    let message_kind = payload.get("message_kind").and_then(Value::as_str);
+    if message_kind == Some("match_status") {
+        let Ok(context) = parse_match_status_effect_context(&payload) else {
+            return Ok(());
+        };
+        sqlx::query(
+            r#"
+            UPDATE scrim.match_requests
+               SET status_message_state='post_failed',
+                   status_message_last_error='Discord-Zustellung fehlgeschlagen oder unklar.',
+                   status_message_updated_at=now(),
+                   updated_at=now()
+             WHERE id=$1
+               AND (team_a_id=$2 OR team_b_id=$2)
+               AND status_message_state IN ('pending','queued','posting','post_failed')
+            "#,
+        )
+        .bind(context.request_id)
+        .bind(context.team_id)
+        .execute(&mut **tx)
+        .await?;
+        return Ok(());
+    }
+    if message_kind != Some("match_request") {
+        return Ok(());
+    }
+    let Ok(context) = parse_match_request_effect_context(&payload) else {
+        return Ok(());
+    };
+    let updated = sqlx::query(
+        r#"
+        UPDATE scrim.match_requests
+           SET status = 'post_failed', updated_at = now()
+         WHERE id = $1
+           AND batch_id = $2
+           AND (team_a_id = $3 OR team_b_id = $3)
+           AND status IN ('draft', 'posting', 'post_failed')
+        "#,
+    )
+    .bind(context.request_id)
+    .bind(context.batch_id)
+    .bind(context.team_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() > 0 {
+        sqlx::query(
+            r#"
+            UPDATE scrim.match_request_batches
+               SET status = 'post_failed', updated_at = now()
+             WHERE id = $1
+               AND status IN ('draft', 'posting', 'post_failed', 'open')
+            "#,
+        )
+        .bind(context.batch_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn mark_discord_effect_delivered(
     pool: &PgPool,
     effect: &ClaimedDiscordEffect,
@@ -3720,6 +4193,26 @@ async fn mark_discord_effect_delivered(
             "discord effect {} konnte nicht delivered markiert werden",
             effect.id
         ));
+    }
+    if let (
+        Some(context),
+        DiscordDeliveryReceipt::Channel {
+            channel_id,
+            message_id,
+        },
+    ) = (effect.match_request_context, &delivery)
+    {
+        record_match_request_effect_delivery_tx(&mut tx, context, *channel_id, *message_id).await?;
+    }
+    if let (
+        Some(context),
+        DiscordDeliveryReceipt::Channel {
+            channel_id,
+            message_id,
+        },
+    ) = (effect.match_status_context, &delivery)
+    {
+        record_match_status_effect_delivery_tx(&mut tx, context, *channel_id, *message_id).await?;
     }
     reconcile_discord_effect_links_tx(&mut tx, effect.id).await?;
     sqlx::query(
@@ -3783,6 +4276,7 @@ async fn mark_discord_effect_dead(
         error,
     )
     .await?;
+    mark_match_request_effect_failed_tx(&mut tx, outbox_id).await?;
     tx.commit().await?;
     tracing::warn!(outbox_effect_id = outbox_id, error_code, error = %error.chars().take(200).collect::<String>(), "Scrim-Discord-Outbox-Payload dead");
     Ok(())
@@ -3829,6 +4323,7 @@ async fn mark_discord_effect_uncertain(
         error,
     )
     .await?;
+    mark_match_request_effect_failed_tx(&mut tx, effect.id).await?;
     tx.commit().await?;
     report_uncertain_discord_effect(
         sender,
@@ -3950,6 +4445,30 @@ fn discord_effect_payload(
         "channel_id": channel_id.to_string(),
         "recipient_user_id": null,
         "message_id": message_id.map(|value| value.to_string()),
+        "body": body,
+    })
+}
+
+#[cfg(test)]
+fn match_request_discord_effect_payload(
+    batch_id: i32,
+    request_id: i32,
+    team_id: i32,
+    channel_id: u64,
+    body: &Map<String, Value>,
+) -> Value {
+    json!({
+        "schema_version": "discord-scrim-effect:v1",
+        "message_kind": "match_request",
+        "operation": "post",
+        "channel_id": channel_id.to_string(),
+        "recipient_user_id": null,
+        "message_id": null,
+        "context": {
+            "batch_id": batch_id.to_string(),
+            "request_id": request_id.to_string(),
+            "team_id": team_id.to_string(),
+        },
         "body": body,
     })
 }
@@ -6239,6 +6758,8 @@ mod tests {
                     channel_id: target.channel_id,
                 },
                 message_id: None,
+                match_request_context: None,
+                match_status_context: None,
                 body,
             },
         )
@@ -6654,6 +7175,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn match_request_outbox_oeffnet_request_erst_nach_beiden_team_posts() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        sqlx::query("UPDATE scrim.match_request_batches SET status='posting' WHERE id=30")
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='posting' WHERE id=31")
+            .execute(pool)
+            .await?;
+        let slots = json!([
+            {"day":"sat","from":960,"to":1080},
+            {"day":"sun","from":960,"to":1080}
+        ]);
+        let body_a = match_request_body(31, 1, "Terminabfrage A", &slots)?;
+        let body_b = match_request_body(31, 2, "Terminabfrage B", &slots)?;
+        let payload_a = match_request_discord_effect_payload(30, 31, 1, 100, &body_a);
+        let payload_b = match_request_discord_effect_payload(30, 31, 2, 200, &body_b);
+        insert_discord_effect(pool, "discord:test_query_a", &payload_a, "pending").await?;
+        insert_discord_effect(pool, "discord:test_query_b", &payload_b, "pending").await?;
+        let sender = RecordingDiscordSender::new(false);
+
+        process_one_discord_outbox(pool, &sender).await?;
+        let first_status: String =
+            sqlx::query_scalar("SELECT status FROM scrim.match_requests WHERE id=31")
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(first_status, MATCH_REQUEST_STATUS_POSTING);
+
+        process_one_discord_outbox(pool, &sender).await?;
+        let request = sqlx::query(
+            "SELECT status, team_query_message_ids FROM scrim.match_requests WHERE id=31",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            request.get::<String, _>("status"),
+            MATCH_REQUEST_STATUS_OPEN
+        );
+        let ids = request.get::<Value, _>("team_query_message_ids");
+        assert_eq!(ids["1"]["channel_id"], json!(100));
+        assert_eq!(ids["1"]["message_id"], json!(9001));
+        assert_eq!(ids["2"]["channel_id"], json!(200));
+        assert_eq!(ids["2"]["message_id"], json!(9001));
+        let batch_status: String =
+            sqlx::query_scalar("SELECT status FROM scrim.match_request_batches WHERE id=30")
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(batch_status, MATCH_REQUEST_STATUS_OPEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_outbox_fehler_markiert_request_und_batch_post_failed() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        sqlx::query("UPDATE scrim.match_request_batches SET status='posting' WHERE id=30")
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='posting' WHERE id=31")
+            .execute(pool)
+            .await?;
+        let body = match_request_body(
+            31,
+            1,
+            "Terminabfrage A",
+            &json!([
+                {"day":"sat","from":960,"to":1080},
+                {"day":"sun","from":960,"to":1080}
+            ]),
+        )?;
+        let payload = match_request_discord_effect_payload(30, 31, 1, 100, &body);
+        insert_discord_effect(pool, "discord:test_query_failed", &payload, "pending").await?;
+        let sender = RecordingDiscordSender::new(true);
+
+        process_one_discord_outbox(pool, &sender).await?;
+
+        let request_status: String =
+            sqlx::query_scalar("SELECT status FROM scrim.match_requests WHERE id=31")
+                .fetch_one(pool)
+                .await?;
+        let batch_status: String =
+            sqlx::query_scalar("SELECT status FROM scrim.match_request_batches WHERE id=30")
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(request_status, MATCH_REQUEST_STATUS_POST_FAILED);
+        assert_eq!(batch_status, MATCH_REQUEST_STATUS_POST_FAILED);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn discord_outbox_invalid_payload_wird_dead_vor_send() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
@@ -6686,6 +7303,75 @@ mod tests {
         let body = match_status_body("Status ist bereit");
         let valid = discord_effect_payload("match_status", "post", 100, None, &body);
         assert!(parse_discord_effect_payload(1, 1, vec![0; 32], &valid).is_ok());
+        let mut status_with_context = valid.clone();
+        status_with_context["context"] = json!({"request_id":"31","team_id":"1"});
+        let parsed_status = parse_discord_effect_payload(8, 1, vec![0; 32], &status_with_context)
+            .expect("match status context");
+        assert_eq!(
+            parsed_status.match_status_context,
+            Some(MatchStatusEffectContext {
+                request_id: 31,
+                team_id: 1
+            })
+        );
+        let mut attendance_status = status_with_context.clone();
+        attendance_status["body"]["components"][0]["components"]
+            .as_array_mut()
+            .expect("status container")
+            .push(json!({
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 3,
+                        "label": "Dabei",
+                        "custom_id": "scrimreq:v1:slot:31:1:0"
+                    },
+                    {
+                        "type": 2,
+                        "style": 4,
+                        "label": "Falle aus",
+                        "custom_id": "scrimreq:v1:none:31:1"
+                    }
+                ]
+            }));
+        assert!(parse_discord_effect_payload(19, 1, vec![0; 32], &attendance_status).is_ok());
+        let mut wrong_attendance_team = attendance_status.clone();
+        wrong_attendance_team["body"]["components"][0]["components"][1]["components"][0]
+            ["custom_id"] = json!("scrimreq:v1:slot:31:2:0");
+        assert!(parse_discord_effect_payload(20, 1, vec![0; 32], &wrong_attendance_team).is_err());
+
+        let query_body = match_request_body(
+            31,
+            1,
+            "Terminabfrage",
+            &json!([
+                {"day":"sat","from":960,"to":1080},
+                {"day":"sun","from":960,"to":1080}
+            ]),
+        )
+        .expect("match request body");
+        let query_payload = match_request_discord_effect_payload(30, 31, 1, 100, &query_body);
+        let parsed_query = parse_discord_effect_payload(9, 1, vec![0; 32], &query_payload)
+            .expect("canonical match request effect");
+        assert_eq!(
+            parsed_query.match_request_context,
+            Some(MatchRequestEffectContext {
+                batch_id: 30,
+                request_id: 31,
+                team_id: 1,
+            })
+        );
+        let mut missing_context = query_payload.clone();
+        missing_context
+            .as_object_mut()
+            .expect("payload object")
+            .remove("context");
+        assert!(parse_discord_effect_payload(17, 1, vec![0; 32], &missing_context).is_err());
+        let mut wrong_button_team = query_payload.clone();
+        wrong_button_team["body"]["components"][0]["components"][1]["components"][0]["custom_id"] =
+            json!("scrimreq:v1:slot:31:2:0");
+        assert!(parse_discord_effect_payload(18, 1, vec![0; 32], &wrong_button_team).is_err());
 
         let reminder_body = match_request_reminder_body("Antwort fehlt", 9001, &[555]);
         let reminder =
