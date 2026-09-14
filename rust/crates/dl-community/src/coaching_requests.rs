@@ -334,9 +334,72 @@ pub const COACHING_ACCENT_DONE: u64 = 0x2ECC71;
 /// Abgebrochen.
 pub const COACHING_ACCENT_CANCELLED: u64 = 0xE74C3C;
 
+/// Gold-COACHING-Banner oben auf jeder Anfrage-Karte. Dateiname beim
+/// Multipart-Upload (`files[0]`), Bytes kommen aus `assets/welcome-banners/`
+/// und sind in das Binary einkompiliert.
+pub const REQUEST_BANNER_FILENAME: &str = "coaching-anfrage.png";
+pub const REQUEST_BANNER_BYTES: &[u8] =
+    include_bytes!("../../../../assets/welcome-banners/divider-coaching.png");
+
+/// Server-Logo als Thumbnail rechts neben dem Kopf der Karte (`files[1]`).
+pub const REQUEST_LOGO_FILENAME: &str = "logo-badge.png";
+pub const REQUEST_LOGO_BYTES: &[u8] =
+    include_bytes!("../../../../assets/welcome-banners/logo-badge.png");
+
+/// Rang-Emojis des Servers, Stand 2026-09-10 live gegen
+/// `GET /guilds/{id}/emojis` geprüft. Für Alchemist, Arcanist und Archon
+/// existiert im Server kein Emoji — diese Ränge fallen auf das reine Label
+/// zurück, statt ein nicht vorhandenes `<:name:id>` zu referenzieren.
+pub const RANK_EMOJIS: [(&str, &str); 11] = [
+    ("initiate", "1546480749845418037"),
+    ("acolyte", "1546480764093202542"),
+    ("seeker", "1546480757155827752"),
+    ("mystic", "1546480778496581734"),
+    ("sentinel", "1546480771131514991"),
+    ("ritualist", "1546480786763415567"),
+    ("emissary", "1546480793961107476"),
+    ("oracle", "1546480801032704000"),
+    ("phantom", "1546480809433763902"),
+    ("ascendant", "1546480817046298675"),
+    ("eternus", "1546480824222748674"),
+];
+
+/// Findet das Server-Emoji zu einem Freitext-Rang wie "Seeker" oder
+/// "Eternus 6"; Groß-/Kleinschreibung ist egal, es reicht das Rangwort am
+/// Anfang. `None` = kein Emoji vorhanden (Label ohne Badge).
+pub fn rank_emoji(rank: &str) -> Option<(&'static str, &'static str)> {
+    let rank = rank.trim().to_lowercase();
+    RANK_EMOJIS
+        .iter()
+        .copied()
+        .find(|(name, _)| rank == *name || rank.starts_with(&format!("{name} ")))
+}
+
+/// Banner-Datei einer Anfrage-Karte als Multipart-Upload. Muss bei jedem
+/// Senden UND Editieren mitgeschickt werden, sonst wirft Discord die Referenz
+/// `attachment://…` aus den Komponenten.
+pub fn request_banner_attachments() -> Vec<RequestAttachment> {
+    vec![
+        RequestAttachment {
+            filename: REQUEST_BANNER_FILENAME.to_string(),
+            bytes: REQUEST_BANNER_BYTES.to_vec(),
+        },
+        RequestAttachment {
+            filename: REQUEST_LOGO_FILENAME.to_string(),
+            bytes: REQUEST_LOGO_BYTES.to_vec(),
+        },
+    ]
+}
+
+/// Lokale Datei, die zusammen mit dem Components-V2-Body hochgeladen wird.
+pub struct RequestAttachment {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Sichtbarer Zustand einer Anfrage-Nachricht.
 pub struct RequestView<'a> {
-    /// Überschrift im Container, z. B. "🎮 Neue Coaching-Anfrage".
+    /// Überschrift im Container, z. B. "Neue Coaching-Anfrage".
     pub headline: &'a str,
     /// Statuszeile darunter, z. B. "🟢 offen für alle Coaches".
     pub status_line: String,
@@ -357,39 +420,43 @@ fn separator() -> Value {
     json!({ "type": 14, "divider": true, "spacing": 1 })
 }
 
+fn media_gallery(filename: &str) -> Value {
+    json!({
+        "type": 12,
+        "items": [{ "media": { "url": format!("attachment://{filename}") } }]
+    })
+}
+
+/// Kleines Bild rechts neben einem Textblock (Sektion Typ 9 + Thumbnail Typ 11).
+fn section_with_thumbnail(content: String, filename: &str) -> Value {
+    json!({
+        "type": 9,
+        "components": [text_display(content)],
+        "accessory": { "type": 11, "media": { "url": format!("attachment://{filename}") } }
+    })
+}
+
 /// Baut die komplette Anfrage-Nachricht als Components-V2-Body zum **Senden**.
 ///
 /// Enthält bewusst weder `content` noch `embeds`: Discord lehnt einen
 /// Create-Request mit `IS_COMPONENTS_V2` ab, sobald eins der beiden Felder
 /// überhaupt mitgeschickt wird. Zum Editieren siehe [`request_edit_body_v2`].
+///
+/// Die Karte referenziert den COACHING-Banner und das Server-Logo per
+/// `attachment://` — der Aufrufer lädt beide über
+/// [`request_banner_attachments`] als Multipart-Dateien mit hoch.
 pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String, Value> {
-    let mut lines = vec![
-        format!("## {}", view.headline),
-        format!("**{}** · <@{}>", request.username, request.user_id),
-        view.status_line.clone(),
-    ];
-    lines.push(String::new());
-    lines.push(format!(
-        "🏅 **Rang** {}",
-        normalize_inline(&request.rank, "N/A", 256)
-    ));
-    lines.push(format!(
-        "🦸 **Hero** {}",
-        normalize_inline(&request.hero, "Nicht angegeben", 256)
-    ));
-    lines.push(format!(
-        "🎮 **Games / Stunden** {}",
-        normalize_inline(&request.games_played, "N/A", 256)
-    ));
-    lines.push(format!(
-        "📅 **Bevorzugter Slot** {}",
-        normalize_inline(
-            &format_scheduled_slot_for_embed(&request.scheduled_slot),
-            "Nicht angegeben",
-            256
+    let rank_line = if let Some((emoji_name, emoji_id)) = rank_emoji(&request.rank) {
+        format!(
+            "<:{emoji_name}:{emoji_id}> **Rang** {}",
+            normalize_inline(&request.rank, "N/A", 256)
         )
-    ));
-
+    } else {
+        format!(
+            "🏅 **Rang** {}",
+            normalize_inline(&request.rank, "N/A", 256)
+        )
+    };
     let mut detail_lines = vec![format!(
         "📝 **Probleme**\n{}",
         normalize_inline(&request.current_problems, "Keine Beschreibung", 1024)
@@ -407,7 +474,40 @@ pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String,
     }
 
     let mut container = vec![
-        text_display(lines.join("\n")),
+        media_gallery(REQUEST_BANNER_FILENAME),
+        section_with_thumbnail(
+            [
+                format!("## {}", view.headline),
+                format!("**{}** · <@{}>", request.username, request.user_id),
+                view.status_line.clone(),
+            ]
+            .join("\n"),
+            REQUEST_LOGO_FILENAME,
+        ),
+        separator(),
+        text_display(rank_line),
+        separator(),
+        text_display(
+            [
+                format!(
+                    "🦸 **Hero** {}",
+                    normalize_inline(&request.hero, "Nicht angegeben", 256)
+                ),
+                format!(
+                    "🎮 **Games / Stunden** {}",
+                    normalize_inline(&request.games_played, "N/A", 256)
+                ),
+                format!(
+                    "📅 **Bevorzugter Slot** {}",
+                    normalize_inline(
+                        &format_scheduled_slot_for_embed(&request.scheduled_slot),
+                        "Nicht angegeben",
+                        256
+                    )
+                ),
+            ]
+            .join("\n"),
+        ),
         separator(),
         text_display(detail_lines.join("\n\n")),
     ];
@@ -432,6 +532,15 @@ pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String,
             "accent_color": view.accent,
             "components": container,
         }]),
+    );
+    // Multipart-Upload: Banner (files[0]) + Logo (files[1]); filename muss
+    // exakt zur attachment://-Referenz in den Komponenten passen.
+    body.insert(
+        "attachments".into(),
+        json!([
+            { "id": 0, "filename": REQUEST_BANNER_FILENAME },
+            { "id": 1, "filename": REQUEST_LOGO_FILENAME },
+        ]),
     );
     body
 }
@@ -559,17 +668,20 @@ pub trait CoachingPort: Send + Sync {
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64>;
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String;
     async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool;
-    /// Anfrage-Nachricht senden; `body` ist der fertige Components-V2-Payload.
+    /// Anfrage-Nachricht senden; `body` ist der fertige Components-V2-Payload,
+    /// `files` die Banner-/Logo-Dateien dazu (Multipart-Upload).
     async fn send_request_message(
         &self,
         channel_id: u64,
         body: Map<String, Value>,
+        files: Vec<RequestAttachment>,
     ) -> Result<u64, String>;
     async fn edit_request_message(
         &self,
         channel_id: u64,
         message_id: u64,
         body: Map<String, Value>,
+        files: Vec<RequestAttachment>,
     );
     async fn send_channel_text(&self, channel_id: u64, content: &str);
     async fn send_dm(&self, user_id: u64, content: &str) -> bool;
@@ -953,7 +1065,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         );
         let message_id = self
             .port
-            .send_request_message(REQUEST_CHANNEL_ID, body)
+            .send_request_message(REQUEST_CHANNEL_ID, body, request_banner_attachments())
             .await?;
         let request_id = request.id;
         let assigned_coach_id = assigned.map(|coach| coach.to_string());
@@ -1266,7 +1378,12 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             },
         );
         self.port
-            .edit_request_message(REQUEST_CHANNEL_ID, message_id, body)
+            .edit_request_message(
+                REQUEST_CHANNEL_ID,
+                message_id,
+                body,
+                request_banner_attachments(),
+            )
             .await;
         // Website-Mirror (Python `_open_request_to_all`:742) — nur die Anfrage,
         // ohne Coach-/Session-Felder; status ist inzwischen wieder 'analyzed'
@@ -1304,7 +1421,12 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             },
         );
         self.port
-            .edit_request_message(REQUEST_CHANNEL_ID, message_id, body)
+            .edit_request_message(
+                REQUEST_CHANNEL_ID,
+                message_id,
+                body,
+                request_banner_attachments(),
+            )
             .await;
     }
 
@@ -2321,7 +2443,12 @@ impl InteractionHandler for CoachingHandler {
                     },
                 );
                 c.port
-                    .edit_request_message(REQUEST_CHANNEL_ID, message_id, body)
+                    .edit_request_message(
+                        REQUEST_CHANNEL_ID,
+                        message_id,
+                        body,
+                        request_banner_attachments(),
+                    )
                     .await;
             }
             // Website-Mirror (Python `CoachClaimButton.callback`:380):
@@ -2779,13 +2906,23 @@ mod tests {
     }
 
     fn v2_text(body: &Map<String, Value>) -> String {
-        body["components"][0]["components"]
-            .as_array()
-            .expect("container")
-            .iter()
-            .filter_map(|c| c["content"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut out: Vec<&str> = Vec::new();
+        fn walk<'a>(component: &'a Value, out: &mut Vec<&'a str>) {
+            if let Some(content) = component["content"].as_str() {
+                out.push(content);
+            }
+            if let Some(children) = component["components"].as_array() {
+                for child in children {
+                    walk(child, out);
+                }
+            }
+        }
+        if let Some(children) = body["components"][0]["components"].as_array() {
+            for child in children {
+                walk(child, &mut out);
+            }
+        }
+        out.join("\n")
     }
 
     #[test]
@@ -2825,6 +2962,18 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Midgame und etwas Farm"), "{text}");
+
+        // Karte trägt Banner + Logo als attachment://-Referenzen; Multipart-
+        // Gegenstück liefert request_banner_attachments() an den Port.
+        let serialized = serde_json::to_string(&body).expect("body serialisiert");
+        assert!(
+            serialized.contains("attachment://coaching-anfrage.png"),
+            "{serialized}"
+        );
+        assert!(
+            serialized.contains("attachment://logo-badge.png"),
+            "{serialized}"
+        );
 
         let rows: Vec<&Value> = body["components"][0]["components"]
             .as_array()
@@ -2931,6 +3080,17 @@ mod tests {
     }
 
     #[test]
+    fn rank_emoji_findet_rangwort_gross_klein_unabhaengig() {
+        let (name, id) = rank_emoji("Seeker").expect("Seeker hat Emoji");
+        assert_eq!(name, "seeker");
+        assert_eq!(id, "1546480757155827752");
+        assert!(rank_emoji("eternus 6").is_some(), "Subrank bleibt hängen");
+        assert!(rank_emoji("ARCANIST 1").is_none(), "kein Server-Emoji");
+        assert!(rank_emoji("").is_none());
+        assert!(rank_emoji("N/A").is_none());
+    }
+
+    #[test]
     fn survey_dm_text_entspricht_python_verbatim() {
         let embed = survey_embed("CoachName", 1);
         assert_eq!(embed["title"], "🎮 Coaching abgeschlossen!");
@@ -2989,15 +3149,26 @@ mod pg_tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
-    /// Sichtbarer Text aller TextDisplays im V2-Container.
+    /// Sichtbarer Text aller TextDisplays im V2-Container, inklusive Blöcken
+    /// in Sections (Typ 9).
     fn container_text(body: &Map<String, Value>) -> String {
-        body["components"][0]["components"]
-            .as_array()
-            .expect("container components")
-            .iter()
-            .filter_map(|c| c["content"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut out: Vec<&str> = Vec::new();
+        fn walk<'a>(component: &'a Value, out: &mut Vec<&'a str>) {
+            if let Some(content) = component["content"].as_str() {
+                out.push(content);
+            }
+            if let Some(children) = component["components"].as_array() {
+                for child in children {
+                    walk(child, out);
+                }
+            }
+        }
+        if let Some(children) = body["components"][0]["components"].as_array() {
+            for child in children {
+                walk(child, &mut out);
+            }
+        }
+        out.join("\n")
     }
 
     /// Buttons im Container (leer = Endzustand ohne Aktionen).
@@ -3112,6 +3283,7 @@ mod pg_tests {
             &self,
             channel_id: u64,
             body: Map<String, Value>,
+            _files: Vec<RequestAttachment>,
         ) -> Result<u64, String> {
             let mut messages = self.request_messages.lock().expect("request_messages lock");
             let message_id = 9000 + u64::try_from(messages.len()).expect("message count fits u64");
@@ -3124,6 +3296,7 @@ mod pg_tests {
             channel_id: u64,
             message_id: u64,
             body: Map<String, Value>,
+            _files: Vec<RequestAttachment>,
         ) {
             self.request_edits
                 .lock()
@@ -4538,9 +4711,10 @@ mod pg_tests {
         let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
         let now = chrono::Utc::now();
 
-        for (bot_request_id, website_request_id, message_id) in
-            [(9i32, "web-complete-1", 8809i64), (10i32, "web-complete-2", 8810i64)]
-        {
+        for (bot_request_id, website_request_id, message_id) in [
+            (9i32, "web-complete-1", 8809i64),
+            (10i32, "web-complete-2", 8810i64),
+        ] {
             sqlx::query(
                 r#"
                 INSERT INTO coaching.requests(
@@ -4600,7 +4774,8 @@ mod pg_tests {
         assert!(
             removed
                 .iter()
-                .any(|(_, user_id, role_id, _)| *user_id == 904 && *role_id == COACHING_ACTIVE_ROLE_ID),
+                .any(|(_, user_id, role_id, _)| *user_id == 904
+                    && *role_id == COACHING_ACTIVE_ROLE_ID),
             "complete_session haette die Rolle direkt entfernen muessen: {removed:?}"
         );
 

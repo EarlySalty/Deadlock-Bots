@@ -1724,12 +1724,25 @@ impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
         crate::solo_watch::set_never_ask_db(&self.pool, user_id).await
     }
 
-    async fn post_lfg(&self, channel_id: u64, body: Value) -> Result<u64, String> {
-        let body = body
+    async fn post_lfg(
+        &self,
+        channel_id: u64,
+        body: Value,
+        attachments: &[crate::lfg_panel::LfgPanelAttachment],
+    ) -> Result<u64, String> {
+        let mut body = body
             .as_object()
             .cloned()
             .ok_or_else(|| "Solo-LFG-Post ist kein JSON-Objekt".to_string())?;
-        self.adapter.send_raw_public(channel_id, &body).await
+        if attachments.is_empty() {
+            return self.adapter.send_raw_public(channel_id, &body).await;
+        }
+        let files = lfg_panel_files(attachments)?;
+        body.insert("attachments".to_string(), json!(attachments));
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let response = send_router_message_payload(&self.adapter, "POST", url, body, files).await?;
+        let message: DiscordMessageWriteResponse = router_discord_json_response(response, "POST")?;
+        parse_router_message_id(&message.id)
     }
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {

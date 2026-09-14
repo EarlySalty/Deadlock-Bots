@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+use crate::lfg_panel::{LfgPanelAttachment, LFG_BANNER_DIR, LFG_EMOJI_SEARCH};
 // Marken-Look und Emojis kommen aus dem Router — eine Quelle für alle Panels.
 use crate::router::{
     ROUTER_ACCENT_GOLD, ROUTER_COMPONENTS_V2_FLAG, ROUTER_EMOJI_BRAWL, ROUTER_EMOJI_CASUAL,
@@ -49,6 +50,14 @@ pub const DAILY_SUMMARY_PREFIX: &str = "🎙️ Solo-LFG — Tagesbilanz";
 
 pub const JOIN_BUTTON_LABEL: &str = "Beitreten";
 pub const LANE_LINK_LABEL: &str = "Lane öffnen";
+pub const SOLO_LFG_BANNER_FILENAME: &str = "divider-mitspieler-finden.png";
+pub const SOLO_LFG_LOGO_FILENAME: &str = "logo-badge.png";
+pub const SOLO_LFG_TITLE: &str = "Mitspieler gesucht";
+pub const JOIN_CTA_LINE: &str =
+    "**Lust?** **Beitreten** zieht dich direkt in die Lane, **Lane öffnen** zeigt sie dir vorher.";
+// Der Wortlaut hält sich an MAX_POST_AGE (3 Stunden); bei einer Änderung dort
+// den Text hier mitziehen.
+pub const POST_FOOTER_LINE: &str = "-# Automatischer Eintrag · läuft maximal 3 Stunden";
 pub const JOIN_MOVED_REPLY: &str = "Ab in die Lane mit dir — viel Spaß!";
 pub const JOIN_NOT_IN_VOICE_REPLY: &str =
     "Geh in irgendeinen Sprachkanal, dann zieh ich dich rüber. Oder klick die Lane oben direkt an.";
@@ -106,7 +115,12 @@ pub trait SoloWatchPort: Send + Sync {
     async fn verified_rank(&self, user_id: u64) -> Result<Option<String>, String>;
     async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String>;
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String>;
-    async fn post_lfg(&self, channel_id: u64, body: Value) -> Result<u64, String>;
+    async fn post_lfg(
+        &self,
+        channel_id: u64,
+        body: Value,
+        attachments: &[LfgPanelAttachment],
+    ) -> Result<u64, String>;
     /// Sprachkanal, in dem das Mitglied gerade sitzt — Discord verschiebt nur,
     /// wer schon irgendwo verbunden ist.
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
@@ -655,16 +669,20 @@ impl SoloWatch {
                 .unwrap_or_default()
                 .trim()
         };
+        let attachments = solo_post_attachments();
         let body = lfg_post(
             user_id,
             guild_id,
             channel_id,
             &lane,
-            value("time"),
-            value("rank"),
-            value("note"),
+            EintragText {
+                time: value("time"),
+                rank: value("rank"),
+                note: value("note"),
+            },
+            &attachments,
         );
-        let message_id = match self.port.post_lfg(LFG_CHANNEL_ID, body).await {
+        let message_id = match self.port.post_lfg(LFG_CHANNEL_ID, body, &attachments).await {
             Ok(message_id) => message_id,
             Err(error) => {
                 self.decision(
@@ -871,46 +889,101 @@ fn solo_modal(guild_id: u64, channel_id: u64, rank: Option<String>) -> ModalSpec
     }
 }
 
-/// Gold-Karte statt Rohtext: Der Beitreten-Knopf zieht den Klickenden direkt in
-/// die Lane, der Link daneben bleibt für alle, die lieber selbst klicken.
+/// Freitext-Angaben aus dem Modal, wie der Suchende sie eingetippt hat.
+struct EintragText<'a> {
+    time: &'a str,
+    rank: &'a str,
+    note: &'a str,
+}
+
+/// Gold-Karte statt Rohtext: Banner und Logo geben dem Eintrag den Markenlook,
+/// der CTA-Absatz sagt, was der Beitreten-Knopf tut. Der Knopf zieht den
+/// Klickenden direkt in die Lane, der Link daneben bleibt für alle, die lieber
+/// selbst klicken.
 fn lfg_post(
     user_id: u64,
     guild_id: u64,
     channel_id: u64,
     lane: &LaneSnapshot,
-    time: &str,
-    rank: &str,
-    note: &str,
+    text: EintragText<'_>,
+    attachments: &[LfgPanelAttachment],
 ) -> Value {
     let (mode, (emoji_name, emoji_id)) = mode_and_emoji(lane.category_id);
-    let mut headline = format!("## <:{emoji_name}:{emoji_id}> {mode}");
-    if !rank.is_empty() {
-        headline.push_str(&format!(" · {rank}"));
+    let mut mode_line = format!("<:{emoji_name}:{emoji_id}> **{mode}**");
+    if let Some(rank) = clean_rank(text.rank) {
+        mode_line.push_str(" · ");
+        mode_line.push_str(rank);
     }
-    let mut lines = vec![
-        headline,
-        match free_slots(lane) {
-            Some(free) => format!("<@{user_id}> sitzt in <#{channel_id}> — noch **{free}** frei"),
-            None => format!("<@{user_id}> sitzt in <#{channel_id}>"),
-        },
-    ];
+    let kopf = format!(
+        "## <:{}:{}> {SOLO_LFG_TITLE}\n{mode_line}",
+        LFG_EMOJI_SEARCH.0, LFG_EMOJI_SEARCH.1
+    );
+
+    let mut blocks: Vec<Value> = Vec::new();
+    let hat_banner = attachments
+        .iter()
+        .any(|attachment| attachment.filename == SOLO_LFG_BANNER_FILENAME);
+    let hat_logo = attachments
+        .iter()
+        .any(|attachment| attachment.filename == SOLO_LFG_LOGO_FILENAME);
+    if hat_banner {
+        blocks.push(json!({
+            "type": 12,
+            "items": [{
+                "media": { "url": format!("attachment://{SOLO_LFG_BANNER_FILENAME}") },
+            }],
+        }));
+    }
+    if hat_logo {
+        blocks.push(json!({
+            "type": 9,
+            "components": [{ "type": 10, "content": kopf }],
+            "accessory": {
+                "type": 11,
+                "media": { "url": format!("attachment://{SOLO_LFG_LOGO_FILENAME}") },
+            },
+        }));
+    } else {
+        blocks.push(json!({ "type": 10, "content": kopf }));
+    }
+
+    let mut fakten = vec![match free_slots(lane) {
+        Some(free) => format!("<@{user_id}> sitzt in <#{channel_id}>, noch **{free}** Plätze frei"),
+        None => format!("<@{user_id}> sitzt in <#{channel_id}>"),
+    }];
     let mut details = Vec::new();
-    if !time.is_empty() {
-        details.push(time.to_string());
+    if !text.time.is_empty() {
+        details.push(text.time.to_string());
     }
-    if !note.is_empty() {
+    if !text.note.is_empty() {
         // Die Notiz kommt aus einem mehrzeiligen Modalfeld. Zeilenumbrueche
         // wuerden die `-#`-Subtext-Zeile aufbrechen und den Rest als normalen
         // Markdown rendern, deshalb faltet sie hier auf eine Zeile.
-        let note = note
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let note = text.note.split_whitespace().collect::<Vec<_>>().join(" ");
         details.push(format!("„{note}“"));
     }
     if !details.is_empty() {
-        lines.push(format!("-# {}", details.join(" · ")));
+        fakten.push(format!("-# {}", details.join(" · ")));
     }
+    blocks.push(json!({ "type": 10, "content": fakten.join("\n") }));
+
+    blocks.push(json!({ "type": 14, "divider": true, "spacing": 1 }));
+    blocks.push(json!({ "type": 10, "content": JOIN_CTA_LINE }));
+    blocks.push(json!({ "type": 10, "content": POST_FOOTER_LINE }));
+    blocks.push(json!({ "type": 1, "components": [
+        {
+            "type": 2,
+            "style": 1,
+            "label": JOIN_BUTTON_LABEL,
+            "custom_id": format!("{JOIN_CUSTOM_ID}:{guild_id}:{channel_id}"),
+        },
+        {
+            "type": 2,
+            "style": 5,
+            "label": LANE_LINK_LABEL,
+            "url": format!("https://discord.com/channels/{guild_id}/{channel_id}"),
+        }
+    ]}));
 
     json!({
         "flags": ROUTER_COMPONENTS_V2_FLAG,
@@ -919,26 +992,35 @@ fn lfg_post(
         "components": [{
             "type": 17,
             "accent_color": ROUTER_ACCENT_GOLD,
-            "components": [
-                { "type": 10, "content": lines.join("\n") },
-                { "type": 14, "divider": true, "spacing": 1 },
-                { "type": 1, "components": [
-                    {
-                        "type": 2,
-                        "style": 1,
-                        "label": JOIN_BUTTON_LABEL,
-                        "custom_id": format!("{JOIN_CUSTOM_ID}:{guild_id}:{channel_id}"),
-                    },
-                    {
-                        "type": 2,
-                        "style": 5,
-                        "label": LANE_LINK_LABEL,
-                        "url": format!("https://discord.com/channels/{guild_id}/{channel_id}"),
-                    }
-                ]}
-            ]
+            "components": blocks,
         }]
     })
+}
+
+/// Platzelfüllungen aus dem Rangfeld zählen als leer: Der Titel zeigt dann
+/// keinen Rang, statt „Casual · n/a“ anzuzeigen.
+fn clean_rank(rank: &str) -> Option<&str> {
+    let rank = rank.trim();
+    match rank.to_lowercase().as_str() {
+        "" | "n/a" | "na" | "-" | "–" | "?" | "egal" => None,
+        _ => Some(rank),
+    }
+}
+
+/// Banner und Logo für den Post, vom Repo-Root gelesen. Fehlt eine Datei,
+/// fällt der Post auf den Textaufbau ohne Bilder zurück.
+pub fn solo_post_attachments() -> Vec<LfgPanelAttachment> {
+    let repo_root = crate::lfg_panel::lfg_repo_root();
+    [SOLO_LFG_BANNER_FILENAME, SOLO_LFG_LOGO_FILENAME]
+        .into_iter()
+        .enumerate()
+        .filter(|(_, filename)| repo_root.join(LFG_BANNER_DIR).join(filename).is_file())
+        .map(|(id, filename)| LfgPanelAttachment {
+            id: u8::try_from(id).unwrap_or(u8::MAX),
+            filename: filename.to_string(),
+            relative_path: format!("{LFG_BANNER_DIR}/{filename}"),
+        })
+        .collect()
 }
 
 fn free_slots(lane: &LaneSnapshot) -> Option<usize> {
@@ -1158,7 +1240,7 @@ mod tests {
         last_prompt_at: Option<DateTime<Utc>>,
         persisted_posts: HashMap<u64, (u64, u64, DateTime<Utc>)>,
         dms: Vec<(u64, Value)>,
-        posts: Vec<(u64, Value)>,
+        posts: Vec<(u64, Value, Vec<LfgPanelAttachment>)>,
         deletes: Vec<(u64, u64, String)>,
         voice_channels: HashMap<u64, u64>,
         moves: Vec<(u64, u64)>,
@@ -1238,9 +1320,14 @@ mod tests {
             Ok(())
         }
 
-        async fn post_lfg(&self, channel_id: u64, body: Value) -> Result<u64, String> {
+        async fn post_lfg(
+            &self,
+            channel_id: u64,
+            body: Value,
+            attachments: &[LfgPanelAttachment],
+        ) -> Result<u64, String> {
             let mut state = self.state.lock().expect("lock");
-            state.posts.push((channel_id, body));
+            state.posts.push((channel_id, body, attachments.to_vec()));
             Ok(700 + state.posts.len() as u64)
         }
 
@@ -1562,11 +1649,25 @@ mod tests {
         &body["components"][0]
     }
 
+    fn sammle_texte(value: &Value, texte: &mut Vec<String>) {
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| sammle_texte(item, texte)),
+            Value::Object(map) => {
+                if map.get("type").and_then(Value::as_i64) == Some(10) {
+                    if let Some(content) = map.get("content").and_then(Value::as_str) {
+                        texte.push(content.to_string());
+                    }
+                }
+                map.values().for_each(|child| sammle_texte(child, texte));
+            }
+            _ => {}
+        }
+    }
+
     fn post_text(body: &Value) -> String {
-        container(body)["components"][0]["content"]
-            .as_str()
-            .expect("Textblock")
-            .to_string()
+        let mut texte = Vec::new();
+        sammle_texte(&body["components"], &mut texte);
+        texte.join("\n")
     }
 
     fn post_buttons(body: &Value) -> &Vec<Value> {
@@ -1595,15 +1696,48 @@ mod tests {
 
         let text = post_text(body);
         assert!(
+            text.contains(LFG_EMOJI_SEARCH.0),
+            "Suche-Emoji fehlt: {text}"
+        );
+        assert!(text.contains(SOLO_LFG_TITLE), "Titel fehlt: {text}");
+        assert!(
             text.contains(ROUTER_EMOJI_CASUAL.0),
             "Modus-Emoji fehlt: {text}"
         );
-        assert!(text.contains("Casual · Ascendant 2"), "Kopfzeile: {text}");
+        assert!(
+            text.contains("**Casual** · Ascendant 2"),
+            "Kopfzeile: {text}"
+        );
         assert!(text.contains("<@42>") && text.contains("<#99>"), "{text}");
-        assert!(text.contains("noch **5** frei"), "Platzstand fehlt: {text}");
+        assert!(
+            text.contains("noch **5** Plätze frei"),
+            "Platzstand fehlt: {text}"
+        );
         assert!(
             text.contains("eine Runde") && text.contains("chill, kein Sweat"),
             "{text}"
+        );
+        assert!(text.contains(JOIN_CTA_LINE), "CTA fehlt: {text}");
+        assert!(text.contains(POST_FOOTER_LINE), "Fusszeile fehlt: {text}");
+
+        let bloecke = container(body)["components"].as_array().expect("Bloecke");
+        let galerie_pos = bloecke
+            .iter()
+            .position(|block| block["type"] == 12)
+            .expect("Banner-Galerie");
+        assert_eq!(galerie_pos, 0, "Galerie ist der oberste Block");
+        let galerie = &bloecke[galerie_pos];
+        assert_eq!(
+            galerie["items"][0]["media"]["url"],
+            format!("attachment://{SOLO_LFG_BANNER_FILENAME}")
+        );
+        let section = bloecke
+            .iter()
+            .find(|block| block["type"] == 9)
+            .expect("Kopf-Section");
+        assert_eq!(
+            section["accessory"]["media"]["url"],
+            format!("attachment://{SOLO_LFG_LOGO_FILENAME}")
         );
 
         let buttons = post_buttons(body);
@@ -1616,6 +1750,145 @@ mod tests {
             buttons[1]["url"],
             format!("https://discord.com/channels/{GUILD}/{CHANNEL}")
         );
+
+        let anhaenge = &state.posts[0].2;
+        assert_eq!(anhaenge.len(), 2, "Banner und Logo erwartet");
+        assert_eq!(anhaenge[0].filename, SOLO_LFG_BANNER_FILENAME);
+        assert_eq!(anhaenge[1].filename, SOLO_LFG_LOGO_FILENAME);
+    }
+
+    #[tokio::test]
+    async fn post_ohne_assets_faellt_auf_text_zurueck() {
+        let lane = test_lane();
+        let body = lfg_post(
+            USER,
+            GUILD,
+            CHANNEL,
+            &lane,
+            EintragText {
+                time: "eine Runde",
+                rank: "Ascendant 2",
+                note: "",
+            },
+            &[],
+        );
+
+        let bloecke = container(&body)["components"].as_array().expect("Bloecke");
+        assert!(
+            bloecke.iter().all(|block| block["type"] != 12),
+            "keine Galerie ohne Banner"
+        );
+        assert!(
+            bloecke.iter().all(|block| block["type"] != 9),
+            "keine Section ohne Logo"
+        );
+        let text = post_text(&body);
+        assert!(text.contains(SOLO_LFG_TITLE), "{text}");
+        assert!(text.contains("**Casual** · Ascendant 2"), "{text}");
+        assert!(text.contains(JOIN_CTA_LINE), "{text}");
+    }
+
+    #[tokio::test]
+    async fn fehlt_nur_ein_asset_faellt_nur_dessen_block_weg() {
+        let lane = test_lane();
+        let nur_banner = [LfgPanelAttachment {
+            id: 0,
+            filename: SOLO_LFG_BANNER_FILENAME.to_string(),
+            relative_path: String::new(),
+        }];
+        let body = lfg_post(
+            USER,
+            GUILD,
+            CHANNEL,
+            &lane,
+            EintragText {
+                time: "",
+                rank: "",
+                note: "",
+            },
+            &nur_banner,
+        );
+        let bloecke = container(&body)["components"].as_array().expect("Bloecke");
+        assert!(
+            bloecke.iter().any(|block| block["type"] == 12),
+            "Galerie mit Banner erwartet"
+        );
+        assert!(
+            bloecke.iter().all(|block| block["type"] != 9),
+            "keine Section ohne Logo"
+        );
+        assert!(post_text(&body).contains(SOLO_LFG_TITLE));
+
+        let nur_logo = [LfgPanelAttachment {
+            id: 0,
+            filename: SOLO_LFG_LOGO_FILENAME.to_string(),
+            relative_path: String::new(),
+        }];
+        let body = lfg_post(
+            USER,
+            GUILD,
+            CHANNEL,
+            &lane,
+            EintragText {
+                time: "",
+                rank: "",
+                note: "",
+            },
+            &nur_logo,
+        );
+        let bloecke = container(&body)["components"].as_array().expect("Bloecke");
+        assert!(
+            bloecke.iter().all(|block| block["type"] != 12),
+            "keine Galerie ohne Banner"
+        );
+        let section = bloecke
+            .iter()
+            .find(|block| block["type"] == 9)
+            .expect("Kopf-Section mit Logo");
+        assert_eq!(
+            section["accessory"]["media"]["url"],
+            format!("attachment://{SOLO_LFG_LOGO_FILENAME}")
+        );
+    }
+
+    #[tokio::test]
+    async fn platzhalter_rang_erscheint_nicht_im_titel() {
+        let lane = test_lane();
+        for junk in ["n/a", "N/A", "na", "-", "–", "?", "egal", "Egal", "   "] {
+            let body = lfg_post(
+                USER,
+                GUILD,
+                CHANNEL,
+                &lane,
+                EintragText {
+                    time: "",
+                    rank: junk,
+                    note: "",
+                },
+                &[],
+            );
+            let text = post_text(&body);
+            let zeilen: Vec<&str> = text.lines().collect();
+            let kopf = zeilen[..2].join("\n");
+            let junk = junk.trim();
+            assert!(
+                junk.is_empty() || !kopf.contains(junk),
+                "Junk-Rang im Titel: {kopf}"
+            );
+            assert!(
+                kopf.contains("**Casual**"),
+                "Modus ohne Rang-Suffix erwartet: {kopf}"
+            );
+        }
+    }
+
+    fn test_lane() -> LaneSnapshot {
+        LaneSnapshot {
+            category_id: CHILL,
+            name: "Chill Lane".to_string(),
+            non_bot_members: vec![USER],
+            user_limit: Some(6),
+        }
     }
 
     #[tokio::test]

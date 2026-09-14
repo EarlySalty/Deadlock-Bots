@@ -3218,11 +3218,44 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
         &self,
         channel_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
+        files: Vec<dl_community::coaching_requests::RequestAttachment>,
     ) -> Result<u64, String> {
-        self.adapter
-            .send_raw_public(channel_id, &body)
+        // Multipart statt serenity: der Body trägt attachment://-Referenzen
+        // (Banner + Logo), die nur als files[N]-Parts mitgeschickt werden.
+        let payload_text =
+            serde_json::to_string(&body).map_err(|err| format!("Coaching-Body: {err}"))?;
+        let mut form = reqwest::multipart::Form::new().text("payload_json", payload_text);
+        for (id, file) in files.into_iter().enumerate() {
+            let part = reqwest::multipart::Part::bytes(file.bytes)
+                .file_name(file.filename)
+                .mime_str("image/png")
+                .map_err(|err| err.to_string())?;
+            form = form.part(format!("files[{id}]"), part);
+        }
+        let response = reqwest::Client::new()
+            .post(format!(
+                "https://discord.com/api/v10/channels/{channel_id}/messages"
+            ))
+            .header(reqwest::header::AUTHORIZATION, self.adapter.http.token())
+            .multipart(form)
+            .send()
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|err| err.to_string())?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "Coaching-Anfrage POST fehlgeschlagen: HTTP {}: {}",
+                status.as_u16(),
+                text.chars().take(300).collect::<String>()
+            ));
+        }
+        let parsed: Value =
+            serde_json::from_str(&text).map_err(|err| format!("Antwort kein JSON: {err}"))?;
+        parsed["id"]
+            .as_str()
+            .and_then(|id| id.parse::<u64>().ok())
+            .ok_or_else(|| "Antwort ohne Message-ID".to_string())
     }
 
     async fn edit_request_message(
@@ -3230,22 +3263,50 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
         channel_id: u64,
         message_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
+        files: Vec<dl_community::coaching_requests::RequestAttachment>,
     ) {
-        // Ohne Log bliebe ein abgelehnter Edit unsichtbar: die Anfrage haengt
-        // dann im alten Zustand, und niemand erfaehrt warum.
-        if let Err(err) = self
-            .adapter
-            .http
-            .edit_message(
-                ChannelId::new(channel_id),
-                serenity::all::MessageId::new(message_id),
-                &body,
-                Vec::new(),
-            )
+        // Edit ersetzt alle Attachments: Banner + Logo müssen bei jedem
+        // PATCH neu hoch, sonst wirft Discord die attachment://-Referenzen
+        // aus den Komponenten und die Karte verliert Bilder.
+        let payload_text = match serde_json::to_string(&body) {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::warn!(%err, "Coaching: Anfrage-Body nicht serialisierbar");
+                return;
+            }
+        };
+        let mut form = reqwest::multipart::Form::new().text("payload_json", payload_text);
+        for (id, file) in files.into_iter().enumerate() {
+            let Ok(part) = reqwest::multipart::Part::bytes(file.bytes)
+                .file_name(file.filename)
+                .mime_str("image/png")
+            else {
+                tracing::warn!("Coaching: MIME für Anhang konnte nicht gesetzt werden");
+                return;
+            };
+            form = form.part(format!("files[{id}]"), part);
+        }
+        let response = match reqwest::Client::new()
+            .patch(format!(
+                "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+            ))
+            .header(reqwest::header::AUTHORIZATION, self.adapter.http.token())
+            .multipart(form)
+            .send()
             .await
         {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, message_id, "Coaching: Edit-Request fehlgeschlagen");
+                return;
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
             tracing::warn!(
-                %err,
+                status = status.as_u16(),
+                body = %text.chars().take(300).collect::<String>(),
                 channel_id,
                 message_id,
                 "Coaching: Anfrage-Nachricht konnte nicht aktualisiert werden"
