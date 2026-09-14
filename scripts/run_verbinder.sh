@@ -6,6 +6,11 @@
 # optional DL_VERBINDER_STAFF_CHANNEL_ID + DISCORD_TOKEN für Staff-Posts.
 set -euo pipefail
 
+# 2026-09-14: Verbinder vorerst vollständig deaktiviert. Der bestehende Timer
+# darf weiter auslösen, beendet sich aber hier vor Secrets, DB- oder LLM-Zugriff.
+printf '%s\n' 'dl-verbinder ist deaktiviert' >&2
+exit 0
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_FILE="${INFISICAL_CONFIG_FILE:-$HOME/.config/deadlock-bots/infisical.conf}"
 
