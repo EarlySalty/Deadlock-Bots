@@ -927,6 +927,26 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
             .is_ok()
     }
 
+    async fn send_moderation_notice(&self, channel_id: u64, user_id: u64, text: &str) -> bool {
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "content".into(),
+            Value::String(format!("<@{user_id}> {text}")),
+        );
+        body.insert(
+            "allowed_mentions".into(),
+            json!({
+                "parse": [],
+                "users": [user_id.to_string()],
+            }),
+        );
+        self.adapter
+            .http
+            .send_message(ChannelId::new(channel_id), Vec::new(), &body)
+            .await
+            .is_ok()
+    }
+
     async fn mirror_evidence_images(
         &self,
         image_urls: &[String],

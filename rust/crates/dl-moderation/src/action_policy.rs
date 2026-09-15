@@ -24,6 +24,7 @@ impl Default for ActionPolicyConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModerationAction {
+    DeleteOnly,
     Timeout,
     Ban,
 }
@@ -224,13 +225,17 @@ fn decision_rank(decision: &PolicyDecision) -> u8 {
         PolicyDecision::Ignore => 0,
         PolicyDecision::Proposal { .. } => 1,
         PolicyDecision::AutoExecute {
-            action: ModerationAction::Timeout,
+            action: ModerationAction::DeleteOnly,
             ..
         } => 2,
         PolicyDecision::AutoExecute {
-            action: ModerationAction::Ban,
+            action: ModerationAction::Timeout,
             ..
         } => 3,
+        PolicyDecision::AutoExecute {
+            action: ModerationAction::Ban,
+            ..
+        } => 4,
     }
 }
 

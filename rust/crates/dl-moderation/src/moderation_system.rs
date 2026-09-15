@@ -19,6 +19,8 @@ use crate::moderation_verdict::{
 use crate::store::{CaseAttachment, CaseDraft, CaseRecord, ModerationStore};
 use crate::ReviewOutcome;
 
+const FOREIGN_INVITE_NOTICE: &str = "Fremde Discord-Einladungen sind hier nicht erlaubt.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModerationSystemConfig {
     pub scan_channel_ids: Vec<u64>,
@@ -39,6 +41,7 @@ impl Default for ModerationSystemConfig {
 #[async_trait]
 pub trait ModerationPort: Send + Sync {
     async fn delete_message(&self, channel_id: u64, message_id: u64, reason: &str) -> bool;
+    async fn send_moderation_notice(&self, channel_id: u64, user_id: u64, text: &str) -> bool;
     async fn mirror_evidence_images(&self, image_urls: &[String]) -> Vec<ModerationEvidenceFile>;
     async fn timeout_member(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str)
         -> bool;
@@ -202,9 +205,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 // und erscheint sonst nirgends. Der Zaehler haelt fest, wie viele
                 // Wellennachrichten nach dem Haupt-Case zusaetzlich entfernt wurden.
                 let wave_deleted = if let Some(detector) = &self.behavior_detector {
-                    detector
-                        .note_cleanup_delete(event.author_id, deleted)
-                        .await
+                    detector.note_cleanup_delete(event.author_id, deleted).await
                 } else {
                     0
                 };
@@ -237,6 +238,30 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             return;
         }
         let behavior_signal = behavior_outcome.into_signal();
+        let foreign_invite_verdict = behavior_signal
+            .as_ref()
+            .filter(|signal| {
+                signal.trigger_type == BehaviorTriggerType::ForeignInvite
+                    && self.config.scan_channel_ids.contains(&event.channel_id)
+            })
+            .map(behavior_verdict);
+        if let Some(verdict) = foreign_invite_verdict {
+            let decision = PolicyDecision::AutoExecute {
+                action: ModerationAction::DeleteOnly,
+                timeout_minutes: 0,
+            };
+            log_judge_decision(
+                event,
+                &decision,
+                Some(PolicyDecisionSource::Behavior),
+                None,
+                behavior_signal.as_ref(),
+            );
+            self.persist_execute_and_post(guild_id, event, verdict, behavior_signal, decision)
+                .await;
+            return;
+        }
+
         let content_input = if (self.config.scan_channel_ids.contains(&event.channel_id)
             || behavior_signal.is_some())
             && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
@@ -431,6 +456,24 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                     format!("delete:{deleted_count}/{}", delete_targets.len())
                 });
                 let action_ok = match action {
+                    ModerationAction::DeleteOnly => {
+                        let notice_sent = if deleted {
+                            self.port
+                                .send_moderation_notice(
+                                    event.channel_id,
+                                    event.author_id,
+                                    FOREIGN_INVITE_NOTICE,
+                                )
+                                .await
+                        } else {
+                            false
+                        };
+                        executed_actions.push(format!(
+                            "notice:{}",
+                            if notice_sent { "ok" } else { "failed" }
+                        ));
+                        true
+                    }
                     ModerationAction::Timeout => {
                         let timed_out = self
                             .port
@@ -458,8 +501,10 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                     }
                 };
                 let final_action = match (action, deleted && action_ok) {
+                    (ModerationAction::DeleteOnly, true) => "auto_delete",
                     (ModerationAction::Timeout, true) => "auto_timeout",
                     (ModerationAction::Ban, true) => "auto_ban",
+                    (ModerationAction::DeleteOnly, false) => "auto_delete_failed",
                     (ModerationAction::Timeout, false) => "auto_timeout_failed",
                     (ModerationAction::Ban, false) => "auto_ban_failed",
                 };
@@ -787,6 +832,10 @@ fn policy_decision_label(decision: &PolicyDecision) -> &'static str {
         PolicyDecision::Ignore => "ignore",
         PolicyDecision::Proposal { .. } => "proposal",
         PolicyDecision::AutoExecute {
+            action: ModerationAction::DeleteOnly,
+            ..
+        } => "auto_delete",
+        PolicyDecision::AutoExecute {
             action: ModerationAction::Timeout,
             ..
         } => "auto_timeout",
@@ -968,12 +1017,14 @@ mod tests {
     #[derive(Default)]
     struct CountingPort {
         deletes: AtomicUsize,
+        notices: AtomicUsize,
         timeouts: AtomicUsize,
         bans: AtomicUsize,
         untimeouts: AtomicUsize,
         unbans: AtomicUsize,
         posts: AtomicUsize,
         delete_targets: Mutex<Vec<(u64, u64)>>,
+        notice_payloads: Mutex<Vec<(u64, u64, String)>>,
         mirrored_urls: Mutex<Vec<String>>,
         posted_file_counts: Mutex<Vec<usize>>,
         timeout_minutes: Mutex<Vec<i64>>,
@@ -988,6 +1039,15 @@ mod tests {
                 .lock()
                 .await
                 .push((channel_id, message_id));
+            true
+        }
+
+        async fn send_moderation_notice(&self, channel_id: u64, user_id: u64, text: &str) -> bool {
+            self.notices.fetch_add(1, Ordering::Relaxed);
+            self.notice_payloads
+                .lock()
+                .await
+                .push((channel_id, user_id, text.to_string()));
             true
         }
 
@@ -1710,7 +1770,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_uses_timeout_minutes_from_behavior_proposal() {
+    async fn foreign_invite_in_scan_channel_is_deleted_noticed_and_logged() {
+        let detector =
+            crate::behavior_detector::BehaviorDetector::new(Arc::new(StaticInviteBehaviorPort {
+                guild_id: Some(2),
+            }));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![42], true).await;
+
+        moderator
+            .handle_message(&scanned_text_event(1200, "join https://discord.gg/FOREIGN"))
+            .await;
+
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
+        assert_eq!(port.notices.load(Ordering::Relaxed), 1);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.notice_payloads.lock().await.as_slice(),
+            &[(42, 200, FOREIGN_INVITE_NOTICE.to_string())]
+        );
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.category, "foreign_invite");
+        assert_eq!(draft.reason, "behavior:foreign_invite");
+        assert_eq!(draft.source, "behavior");
+        assert_eq!(draft.timeout_minutes, Some(0));
+        assert_eq!(
+            moderator.store.actions.lock().await.as_slice(),
+            &["auto_delete".to_string()]
+        );
+        let embed = port.posted_embeds.lock().await.pop().expect("embed");
+        let serialized = embed.to_string();
+        assert!(serialized.contains("foreign_invite"));
+        assert!(serialized.contains("delete:ok"));
+        assert!(serialized.contains("notice:ok"));
+    }
+
+    #[tokio::test]
+    async fn own_server_invite_in_scan_channel_is_not_deleted() {
+        let detector =
+            crate::behavior_detector::BehaviorDetector::new(Arc::new(StaticInviteBehaviorPort {
+                guild_id: Some(1),
+            }));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![42], true).await;
+
+        moderator
+            .handle_message(&scanned_text_event(1201, "https://discord.gg/OURS"))
+            .await;
+
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.notices.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn foreign_invite_outside_scan_channel_keeps_existing_review_flow() {
         let detector =
             crate::behavior_detector::BehaviorDetector::new(Arc::new(StaticInviteBehaviorPort {
                 guild_id: Some(2),
@@ -1719,19 +1835,22 @@ mod tests {
             &[r#"{"category":"other","confidence":0.7,"reason":"Invite-Kontext"}"#],
             &[r#"{"confirmed":true,"category":"other","confidence":0.72,"reason":"Bestätigt"}"#],
             Some(detector),
-            vec![42],
+            vec![999],
             true,
         )
         .await;
 
         moderator
-            .handle_message(&scanned_text_event(1200, "join https://discord.gg/FOREIGN"))
+            .handle_message(&scanned_text_event(1202, "join https://discord.gg/FOREIGN"))
             .await;
-        let outcome = moderator.accept_case("case-1200", 999).await;
 
-        assert!(matches!(outcome, ReviewOutcome::Done(_)));
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
-        assert_eq!(port.timeout_minutes.lock().await.as_slice(), &[60]);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.notices.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.action, "proposed");
+        assert_eq!(draft.timeout_minutes, Some(60));
     }
 
     #[tokio::test]

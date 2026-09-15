@@ -116,6 +116,7 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
 pub fn build_case_components(case_id: &str, policy_decision: &PolicyDecision) -> Value {
     let buttons = match policy_decision {
         PolicyDecision::AutoExecute { action, .. } => match action {
+            ModerationAction::DeleteOnly => Vec::new(),
             ModerationAction::Timeout => vec![json!({
                 "type": 2,
                 "style": 3,
