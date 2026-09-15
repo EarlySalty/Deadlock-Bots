@@ -240,7 +240,10 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         let behavior_signal = behavior_outcome.into_signal();
         let foreign_invite_verdict = behavior_signal
             .as_ref()
-            .filter(|signal| signal.trigger_type == BehaviorTriggerType::ForeignInvite)
+            .filter(|signal| {
+                signal.trigger_type == BehaviorTriggerType::ForeignInvite
+                    && self.config.scan_channel_ids.contains(&event.channel_id)
+            })
             .map(behavior_verdict);
         if let Some(verdict) = foreign_invite_verdict {
             let decision = PolicyDecision::AutoExecute {
@@ -1823,34 +1826,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreign_invite_outside_scan_channel_is_also_deleted_noticed_and_logged() {
+    async fn foreign_invite_outside_scan_channel_keeps_existing_review_flow() {
         let detector =
             crate::behavior_detector::BehaviorDetector::new(Arc::new(StaticInviteBehaviorPort {
                 guild_id: Some(2),
             }));
-        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"other","confidence":0.7,"reason":"Invite-Kontext"}"#],
+            &[r#"{"confirmed":true,"category":"other","confidence":0.72,"reason":"Bestätigt"}"#],
+            Some(detector),
+            vec![999],
+            true,
+        )
+        .await;
 
         moderator
             .handle_message(&scanned_text_event(1202, "join https://discord.gg/FOREIGN"))
             .await;
 
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
-        assert_eq!(port.notices.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.notices.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
-        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            port.notice_payloads.lock().await.as_slice(),
-            &[(42, 200, FOREIGN_INVITE_NOTICE.to_string())]
-        );
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
-        assert_eq!(draft.category, "foreign_invite");
-        assert_eq!(draft.action, "auto_execute");
-        assert_eq!(draft.timeout_minutes, Some(0));
-        assert_eq!(
-            moderator.store.actions.lock().await.as_slice(),
-            &["auto_delete".to_string()]
-        );
+        assert_eq!(draft.action, "proposed");
+        assert_eq!(draft.timeout_minutes, Some(60));
     }
 
     #[tokio::test]
