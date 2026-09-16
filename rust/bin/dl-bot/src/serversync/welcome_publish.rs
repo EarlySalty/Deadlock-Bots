@@ -24,9 +24,10 @@ const NAVIGATION_ATTACHMENT_BUDGET: usize = 9;
 const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 
 pub const WELCOME_LINK_URLS: WelcomeLinkUrls = WelcomeLinkUrls {
-    website: "https://earlysalty.com",
+    website: "https://deutsche-deadlock-community.de",
     twitch: "https://www.twitch.tv/earlysalty",
-    coaching: "https://earlysalty.com/coaching",
+    coaching: "https://deutsche-deadlock-community.de/coaching",
+    streamer: "https://deutsche-deadlock-community.de/streamer",
     server_invite: "https://discord.gg/deutsche-deadlock-community-1289721245281292288",
 };
 
@@ -220,6 +221,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         website: "Website",
         twitch: "Twitch",
         coaching: "Coaching",
+        streamer: "Streamer werden",
         server_invite: "Einladungslink",
         rules: "📜 Regelwerk lesen",
         rank: "🔗 Rang verknüpfen",
@@ -297,6 +299,7 @@ pub struct WelcomeLinkUrls {
     pub website: &'static str,
     pub twitch: &'static str,
     pub coaching: &'static str,
+    pub streamer: &'static str,
     pub server_invite: &'static str,
 }
 
@@ -341,6 +344,7 @@ pub struct WelcomeButtonLabels {
     pub website: &'static str,
     pub twitch: &'static str,
     pub coaching: &'static str,
+    pub streamer: &'static str,
     pub server_invite: &'static str,
     pub rules: &'static str,
     pub rank: &'static str,
@@ -358,6 +362,7 @@ struct ResolvedWelcomeLinkUrls {
     website: String,
     twitch: String,
     coaching: String,
+    streamer: String,
     server_invite: String,
 }
 
@@ -402,6 +407,7 @@ struct ResolvedWelcomeButtonLabels {
     website: String,
     twitch: String,
     coaching: String,
+    streamer: String,
     server_invite: String,
     rules: String,
     rank: String,
@@ -460,6 +466,7 @@ struct WelcomeUrlsToml {
     website: Option<String>,
     twitch: Option<String>,
     coaching: Option<String>,
+    streamer: Option<String>,
     server_invite: Option<String>,
 }
 
@@ -469,6 +476,7 @@ struct WelcomeButtonsToml {
     website: Option<String>,
     twitch: Option<String>,
     coaching: Option<String>,
+    streamer: Option<String>,
     server_invite: Option<String>,
     rules: Option<String>,
     rank: Option<String>,
@@ -669,11 +677,13 @@ impl ResolvedWelcomeConfig {
         apply_optional(&mut self.urls.website, file.urls.website);
         apply_optional(&mut self.urls.twitch, file.urls.twitch);
         apply_optional(&mut self.urls.coaching, file.urls.coaching);
+        apply_optional(&mut self.urls.streamer, file.urls.streamer);
         apply_optional(&mut self.urls.server_invite, file.urls.server_invite);
 
         apply_optional(&mut self.texts.buttons.website, file.buttons.website);
         apply_optional(&mut self.texts.buttons.twitch, file.buttons.twitch);
         apply_optional(&mut self.texts.buttons.coaching, file.buttons.coaching);
+        apply_optional(&mut self.texts.buttons.streamer, file.buttons.streamer);
         apply_optional(
             &mut self.texts.buttons.server_invite,
             file.buttons.server_invite,
@@ -702,6 +712,7 @@ impl ResolvedWelcomeLinkUrls {
             website: WELCOME_LINK_URLS.website.to_string(),
             twitch: WELCOME_LINK_URLS.twitch.to_string(),
             coaching: WELCOME_LINK_URLS.coaching.to_string(),
+            streamer: WELCOME_LINK_URLS.streamer.to_string(),
             server_invite: WELCOME_LINK_URLS.server_invite.to_string(),
         }
     }
@@ -740,6 +751,7 @@ impl ResolvedWelcomeTextTable {
                 website: WELCOME_TEXTS.buttons.website.to_string(),
                 twitch: WELCOME_TEXTS.buttons.twitch.to_string(),
                 coaching: WELCOME_TEXTS.buttons.coaching.to_string(),
+                streamer: WELCOME_TEXTS.buttons.streamer.to_string(),
                 server_invite: WELCOME_TEXTS.buttons.server_invite.to_string(),
                 rules: WELCOME_TEXTS.buttons.rules.to_string(),
                 rank: WELCOME_TEXTS.buttons.rank.to_string(),
@@ -1132,6 +1144,7 @@ fn socials_message(
         link_button(&texts.buttons.website, &urls.website),
         link_button(&texts.buttons.twitch, &urls.twitch),
         link_button(&texts.buttons.coaching, &urls.coaching),
+        link_button(&texts.buttons.streamer, &urls.streamer),
         link_button(&texts.buttons.server_invite, &urls.server_invite),
     ]));
 

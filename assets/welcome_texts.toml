@@ -27,9 +27,10 @@ bot_description = "unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coachin
 
 # Link-Ziele der Social-Buttons.
 [urls]
-website = "https://earlysalty.com"
+website = "https://deutsche-deadlock-community.de"
 twitch = "https://www.twitch.tv/earlysalty"
-coaching = "https://earlysalty.com/coaching"
+coaching = "https://deutsche-deadlock-community.de/coaching"
+streamer = "https://deutsche-deadlock-community.de/streamer"
 server_invite = "https://discord.gg/deutsche-deadlock-community-1289721245281292288"
 
 # Button-Beschriftungen fuer Socials und Schnellstart.
@@ -37,6 +38,7 @@ server_invite = "https://discord.gg/deutsche-deadlock-community-1289721245281292
 website = "Website"
 twitch = "Twitch"
 coaching = "Coaching"
+streamer = "Streamer werden"
 server_invite = "Einladungslink"
 rules = "📜 Regelwerk lesen"
 rank = "🔗 Rang verknüpfen"
