@@ -221,7 +221,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         website: "Website",
         twitch: "Twitch",
         coaching: "Coaching",
-        streamer: "Streamer werden",
+        streamer: "🎥 Streamer werden",
         server_invite: "Einladungslink",
         rules: "📜 Regelwerk lesen",
         rank: "🔗 Rang verknüpfen",
