@@ -857,7 +857,7 @@ pub fn build_welcome_publish_output(
     let team_roles = resolve_team_roles(model, team_members, &mut warnings);
     let bot_team = bot_team_output(bot_user_id, texts, &mut warnings);
     let navigation_messages = navigation_messages(model, repo_root, texts, &mut warnings);
-    let quickstart_buttons = quickstart_buttons(model, texts)?;
+    let quickstart_buttons = quickstart_buttons(model, texts, urls)?;
     let hero_message_id = stored_message_ids
         .get("hero")
         .and_then(|ids| ids.first())
@@ -1144,7 +1144,6 @@ fn socials_message(
         link_button(&texts.buttons.website, &urls.website),
         link_button(&texts.buttons.twitch, &urls.twitch),
         link_button(&texts.buttons.coaching, &urls.coaching),
-        link_button(&texts.buttons.streamer, &urls.streamer),
         link_button(&texts.buttons.server_invite, &urls.server_invite),
     ]));
 
@@ -1463,6 +1462,7 @@ fn divider_filename_for_category(category_name: &str) -> Option<&'static str> {
 fn quickstart_buttons(
     model: &GuildModel,
     texts: &ResolvedWelcomeTextTable,
+    urls: &ResolvedWelcomeLinkUrls,
 ) -> Result<Vec<Value>, String> {
     Ok(vec![
         channel_link_button(
@@ -1480,6 +1480,7 @@ fn quickstart_buttons(
             model.guild_id,
             WELCOME_SUPPORT_TICKET_CHANNEL_ID,
         ),
+        link_button(&texts.buttons.streamer, &urls.streamer),
     ])
 }
 
@@ -2190,6 +2191,32 @@ description = "Custom allgemein"
     }
 
     #[test]
+    fn welcome_streamer_link_steht_im_schnellstart_statt_socials() {
+        let model = base_model();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = build_test_output(&model, &[], temp.path(), &BTreeMap::new());
+
+        let socials = first_section(&output, "socials");
+        let socials_buttons = first_action_row_buttons(&socials.payload);
+        assert!(!socials_buttons.iter().any(|button| {
+            button.get("label").and_then(Value::as_str) == Some(WELCOME_TEXTS.buttons.streamer)
+        }));
+
+        let quickstart = first_section(&output, "quickstart");
+        let quickstart_buttons = first_action_row_buttons(&quickstart.payload);
+        let streamer = quickstart_buttons
+            .iter()
+            .find(|button| {
+                button.get("label").and_then(Value::as_str) == Some(WELCOME_TEXTS.buttons.streamer)
+            })
+            .expect("Streamer-werden-Button im Schnellstart");
+        assert_eq!(
+            streamer.get("url").and_then(Value::as_str),
+            Some(WELCOME_LINK_URLS.streamer)
+        );
+    }
+
+    #[test]
     fn welcome_banner_steht_vor_text_im_container() {
         let model = base_model();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2409,9 +2436,14 @@ description = "Custom allgemein"
         );
         let quickstart = first_section(&output, "quickstart");
         let buttons = first_action_row_buttons(&quickstart.payload);
-        assert_eq!(buttons.len(), 4);
-        assert_eq!(buttons[3]["label"], WELCOME_QUICKSTART_JUMP_LABEL);
-        assert_eq!(buttons[3]["url"], "https://discord.com/channels/1/20/7001");
+        assert_eq!(buttons.len(), 5);
+        let jump = buttons
+            .iter()
+            .find(|button| {
+                button.get("label").and_then(Value::as_str) == Some(WELCOME_QUICKSTART_JUMP_LABEL)
+            })
+            .expect("Zum-Anfang-Button");
+        assert_eq!(jump["url"], "https://discord.com/channels/1/20/7001");
 
         let mut without_hero = build_test_output(&model, &[], temp.path(), &BTreeMap::new());
         assert!(without_hero
@@ -2421,7 +2453,13 @@ description = "Custom allgemein"
         refresh_quickstart_jump_button(&mut without_hero, Some(7002));
         let quickstart = first_section(&without_hero, "quickstart");
         let buttons = first_action_row_buttons(&quickstart.payload);
-        assert_eq!(buttons[3]["url"], "https://discord.com/channels/1/20/7002");
+        let jump = buttons
+            .iter()
+            .find(|button| {
+                button.get("label").and_then(Value::as_str) == Some(WELCOME_QUICKSTART_JUMP_LABEL)
+            })
+            .expect("Zum-Anfang-Button");
+        assert_eq!(jump["url"], "https://discord.com/channels/1/20/7002");
         assert!(!without_hero
             .warnings
             .iter()
@@ -2547,7 +2585,13 @@ description = "Custom allgemein"
         refresh_quickstart_jump_button(&mut output, Some(8001));
         let quickstart = first_section(&output, "quickstart");
         let buttons = first_action_row_buttons(&quickstart.payload);
-        assert_eq!(buttons[3]["url"], "https://discord.com/channels/1/20/8001");
+        let jump = buttons
+            .iter()
+            .find(|button| {
+                button.get("label").and_then(Value::as_str) == Some(WELCOME_QUICKSTART_JUMP_LABEL)
+            })
+            .expect("Zum-Anfang-Button");
+        assert_eq!(jump["url"], "https://discord.com/channels/1/20/8001");
     }
 
     #[test]
