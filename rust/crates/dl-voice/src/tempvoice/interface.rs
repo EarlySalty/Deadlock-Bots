@@ -1856,33 +1856,24 @@ impl InteractionHandler for PanelHandler {
             }
 
             // ── Rename ────────────────────────────────────────────────
-            "tv_rename_btn" => {
-                if let Err(reply) = self.owned_lane_of(&interaction).await {
-                    return reply;
-                }
-                BridgeReply {
-                    modal: Some(ModalSpec {
-                        custom_id: "tv_rename_modal".to_string(),
-                        title: "Lane umbenennen".to_string(),
-                        fields: vec![ModalField {
-                            custom_id: "name".to_string(),
-                            label: "Neuer Name".to_string(),
-                            placeholder: "z. B. Lane 1".to_string(),
-                            value: None,
-                            required: true,
-                            min_length: 1,
-                            max_length: 90,
-                            paragraph: false,
-                        }],
-                    }),
-                    ..BridgeReply::default()
-                }
-            }
+            "tv_rename_btn" => BridgeReply {
+                modal: Some(ModalSpec {
+                    custom_id: "tv_rename_modal".to_string(),
+                    title: "Lane-Name ändern".to_string(),
+                    fields: vec![ModalField {
+                        custom_id: "name".to_string(),
+                        label: "Name".to_string(),
+                        placeholder: "z. B. Chill mit Mates".to_string(),
+                        value: None,
+                        required: true,
+                        min_length: 1,
+                        max_length: 90,
+                        paragraph: false,
+                    }],
+                }),
+                ..BridgeReply::default()
+            },
             "tv_rename_modal" => {
-                let lane = match self.owned_lane_of(&interaction).await {
-                    Ok(lane) => lane,
-                    Err(reply) => return reply,
-                };
                 let Some(name) = interaction
                     .options
                     .get("name")
@@ -1892,18 +1883,32 @@ impl InteractionHandler for PanelHandler {
                 else {
                     return BridgeReply::ephemeral_text("Bitte einen Namen eingeben.");
                 };
-                match engine
-                    .port
-                    .rename_channel(lane, &name, "TempVoice: Owner-Rename")
-                    .await
-                {
-                    Ok(()) => {
-                        engine.set_base_name(lane, &name).await;
-                        BridgeReply::ephemeral_text(format!("Lane heißt jetzt **{name}**."))
-                    }
-                    Err(err) => {
-                        BridgeReply::ephemeral_text(format!("Rename fehlgeschlagen: {err}"))
-                    }
+
+                if let Ok(lane) = self.owned_lane_of(&interaction).await {
+                    return match engine
+                        .port
+                        .rename_channel(lane, &name, "TempVoice: Owner-Rename")
+                        .await
+                    {
+                        Ok(()) => {
+                            engine.set_base_name(lane, &name).await;
+                            BridgeReply::ephemeral_text(format!("Lane heißt jetzt **{name}**."))
+                        }
+                        Err(err) => {
+                            BridgeReply::ephemeral_text(format!("Rename fehlgeschlagen: {err}"))
+                        }
+                    };
+                }
+
+                let mut record = self.current_or_new_default(interaction.user_id, None).await;
+                record.base_name = name.clone();
+                match engine.store.save_default_preset(record).await {
+                    Ok(()) => BridgeReply::ephemeral_text(format!(
+                        "Standard-Name **{name}** gespeichert. Deine nächste eigene Lane startet mit diesem Namen."
+                    )),
+                    Err(err) => BridgeReply::ephemeral_text(format!(
+                        "Standard-Name konnte nicht gespeichert werden: {err}"
+                    )),
                 }
             }
 
@@ -3271,7 +3276,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verwaltungs_handler_fremde_lane_liefert_owner_fehler() {
+    async fn rename_button_oeffnet_modal_auch_ohne_eigene_lane() {
+        let (_db, handler) = panel_handler_ohne_lane_for_test().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_rename_btn".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let modal = reply.modal.expect("rename modal");
+        assert_eq!(modal.custom_id, "tv_rename_modal");
+        assert_eq!(modal.title, "Lane-Name ändern");
+    }
+
+    #[tokio::test]
+    async fn rename_modal_ohne_eigene_lane_speichert_standard_name() {
+        let (_db, handler) = panel_handler_ohne_lane_for_test().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_rename_modal".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                options: HashMap::from([("name".to_string(), json!("Chill mit Mates"))]),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("Standard-Name **Chill mit Mates** gespeichert. Deine nächste eigene Lane startet mit diesem Namen.")
+        );
+        let default = handler
+            .engine
+            .store
+            .get_default_preset(42)
+            .await
+            .expect("default query")
+            .expect("default preset");
+        assert_eq!(default.base_name, "Chill mit Mates");
+    }
+
+    #[tokio::test]
+    async fn rename_modal_in_fremder_lane_aendert_nur_eigenen_standard() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3312,14 +3364,30 @@ mod tests {
 
         let reply = handler
             .handle(BridgeInteraction {
-                custom_id: "tv_rename_btn".to_string(),
+                custom_id: "tv_rename_modal".to_string(),
                 guild_id: 1,
                 user_id: 42,
+                options: HashMap::from([("name".to_string(), json!("Meine nächste Lane"))]),
                 ..BridgeInteraction::default()
             })
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(NOT_OWNER));
+        assert!(reply
+            .content
+            .as_deref()
+            .is_some_and(|value| value.contains("Standard-Name")));
+        assert_eq!(
+            handler.engine.lane_snapshot(4242).await,
+            Some(("Lane 1".to_string(), 1289721245281292290))
+        );
+        let default = handler
+            .engine
+            .store
+            .get_default_preset(42)
+            .await
+            .expect("default query")
+            .expect("default preset");
+        assert_eq!(default.base_name, "Meine nächste Lane");
     }
 }
