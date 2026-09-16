@@ -659,7 +659,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         &concierge_config,
     );
 
-    // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
+    // Steam-Link-Nudge (4c) — standardmäßig deaktiviert. Der Close-Button bleibt
+    // registriert, damit bereits versandte DMs weiterhin geschlossen werden können.
+    let steam_voice_nudge_enabled = env_bool_default("DL_STEAM_VOICE_NUDGE_ENABLED", false);
     let nudge = dl_voice::nudge::VoiceNudge::new(
         central_pool.clone(),
         Arc::new(modglue::VoiceNudgeGlue {
@@ -1464,11 +1466,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::rank::spawn(rank_manager, &dispatcher);
         dl_voice::rank::spawn_command(rank_commands, &dispatcher, adapter.clone());
 
-        // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
-        dl_voice::nudge::spawn_restore(nudge.clone());
-        dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
-        // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
-        dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());
+        // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag.
+        // Opt-in, damit der automatische DM-Nudge produktiv standardmäßig aus bleibt.
+        if steam_voice_nudge_enabled {
+            dl_voice::nudge::spawn_restore(nudge.clone());
+            dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
+            // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
+            dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());
+        } else {
+            tracing::info!(
+                "Steam-Link-Voice-Nudge deaktiviert (DL_STEAM_VOICE_NUDGE_ENABLED nicht gesetzt)"
+            );
+        }
         dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
         if lane_pairing_enabled {
             dl_voice::pairing::spawn(lane_pairing.clone());
