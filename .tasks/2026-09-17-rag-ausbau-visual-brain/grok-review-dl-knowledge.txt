@@ -1,0 +1,78 @@
+Ich prüfe die interne Doku gegen den Quellcode. Zuerst lade ich die Pflicht-Skills und die Doku, danach stichprobe ich die Zeilenangaben.Die Doku und der Graph zum Knowledge-Engine-Code kommen als Nächstes. Anschließend prüfe ich die Zeilenangaben stichprobenartig.Graphify hat die Kernstellen. Als Nächstes prüfe ich die genannten Zeilenbereiche mit gezielten `sed`-Ausschnitten.Die Symbol-Lagen passen grob. Jetzt ziehe ich die konkreten Zeilenbereiche für Konstanten, Abstain, Retrieval und Korpus.Die Doku ist als interne Referenz **brauchbar**. Retrieval (BM25 plus Alias-Expansion), Abstain und Korpuspfad stehen im Code so da, wie der Fließtext sie beschreibt. Es gibt keine erfundenen Kernmechanismen. Es gibt unscharfe Wortwahl, ein paar verrutschte Tabellenzeilen und inhaltliche Lücken.
+
+Geprüfte Stellen in `main.rs` (4383 Zeilen, das stimmt): 19–20, 22–38, 50–54, 609–620, 711–721, 760–890, 892–1001, 1108–1207, 1765–1965, 2006–2014, 2289–2291, 2376–2378, 4102.
+
+## 1. Falsche oder erfundene Aussagen
+
+Keine erfundenen Bausteine: Loopback `127.0.0.1:8896`, Default-Korpus `/home/naniadm/.local/share/dl-knowledge/current/public/`, reines BM25, ID-Auswahl statt Freitext, Fail-Closed über `unanswerable()`, Produktionsverbot von CLI- und `DL_DOCS_PATH`-Override.
+
+Eine Formulierung ist falsch im Wortsinn:
+
+- **Doku Zeile 30:** Grounding prüfe „nicht die semantisch erweiterte Suchanfrage“. `expand_query` (Code 1797–1846) ist keine semantische Suche. Es sind fest verdrahtete Teilstring-Aliase (`steambot`, `twitchbot`, `heroes`, …) plus eine Paarregel zu Deadlock-Rang. Das Retrieval bleibt lexikalisch.
+
+Kleinere Überdehnung, nicht erfunden:
+
+- **Doku Zeile 42:** Der Collector „folgt beim Sammeln keinen Datei- oder Verzeichnis-Symlinks“. In `collect_corpus_files` (1185–1207) steht kein expliziter Symlink-Test. Übersprungen wird, weil nur `is_dir()` und `is_file()` zählen. Funktional stimmt der Effekt, die Begründung in der Doku klingt nach eigener Regel.
+
+## 2. Zeilenangaben, die nicht passen
+
+Die kritischen Handler-, Abstain- und Korpuszeilen stimmen (Ask 760–890, `no_retrieval` 765–768, `grounded_response` 892, `candidate_is_relevant` 951, `DEFAULT_DOCS_PATH` 19, `resolve_production_docs_path` 711, Test `ask_handler_ohne_bm25_treffer_ruft_generator_nicht` 4102, Golden-Konstanten 2006–2014, `#[ignore]` 2289–2291 und 2376–2378).
+
+Daneben verrutscht:
+
+| Doku | Behauptete Zeilen | Im Code |
+|---|---|---|
+| Tabelle „Bm25Index::new und Ranking“ | 1849–1953 | `new` ab 1849, Ranking/`search` 1889–1928. Ab 1931 kommt `tokenize`/`push_token`. |
+| Tabelle „Golden-Test-Infrastruktur“ | 1976–2430 | `golden_live_api` läuft bis knapp vor 2465 (`system_prompt_erzwingt_grenzen_und_breite_uebersicht`). |
+| Fließtext Korpus vs. Tabelle | 1108–1211 bzw. 1108–1207 | `collect_corpus_files` endet um 1207. 1213 ist bereits `parse_html_file`. |
+| „KnowledgeBase::search und expand_query“ | 1759–1847 / 1759–1846 | `search` ist 1765–1772, `expand_query` 1797–1846. 1759–1764 ist `from_chunks`, 1774–1795 ist `source_stats`. |
+
+Die Offsets sind klein. Wer die Tabelle als Sprungmarke nutzt, landet bei BM25-Ranking im Tokenizer.
+
+## 3. Fehlende wichtige Punkte
+
+**Retrieval**
+
+- Die Rang-Sonderregel feuert nicht immer: sie bleibt aus, wenn die Frage `twitch` enthält oder ein isoliertes `!rank` vorkommt (Code 1803–1816, 1840–1846).
+- Alias-Zündung läuft über `to_ascii_lowercase().contains(needle)`, also Roh-Teilstring, nicht über die Tokenliste.
+- Doppelte Tokens aus der Rohfrage bleiben und werden in BM25 mehrfach addiert. Nur injizierte Aliase sind dedupliziert.
+
+**Abstain / Generator**
+
+- `parse_llm_selection` (1041–1043) macht nur `trim` plus JSON. Markdown-Zäune oder Text um das Objekt herum landen in `model_invalid_json`.
+- Der eine Generatoraufruf setzt neben `model: None` auch `max_output_tokens: Some(2000)`, `temperature: 0.0`, `reasoning_effort: Some("none")` (814–820). In der Doku steht davon nur `model: None`.
+- Der System-Prompt verlangt bei belegter Breitübersicht die Kandidaten aller Produktbereiche. Abschnitt 4 nennt Injektion, Aktion und interne Daten, diese Übersichtspflicht nicht.
+
+**Korpus / Chunking**
+
+- Listen und Tabellen direkt unter `main` (Intro) werden weder Passage noch Intro-BM25-Text. BM25-Intro ist nur direktes `h1` plus `p` (1266–1273). Der Satz zu „nicht unterstützten Elementen“ gilt so nur in `section`.
+- `main` braucht außerdem genau ein `h1` insgesamt, nicht nur als direktes Kind (1248–1251 und 1258–1262).
+- Markdown-Fallback: ein Abschnitt wird eine Passage `PassageKind::Markdown`. Grounding behandelt Markdown wie Absatz. Produktion lehnt Nicht-HTML danach ab.
+- Tabellen: mindestens Header plus Datenzeile, keine leeren Zellen, Headerzeile ohne `td`, Datenzeile ohne `th`.
+
+**Sonst**
+
+- Routen haben in dieser Datei keine Auth. Schutz ist die Bind-Adresse.
+- `health` liefert konkret `chunks`, `html_sources`, `non_html_sources`, `internal_sources`.
+- Serverseitiges Rendern lässt doppelten Passagentext weg, behält aber beide Quellen. Die Reihenfolge folgt der Kandidatenliste (`P1`, `P2`, …), nicht der ID-Reihenfolge des Modells.
+
+## 4. Urteil
+
+**Ja**, brauchbar als interne Referenz.
+
+Für den Auftrag (BM25-Pfad, Abstain, Korpuspfad) ist der Fließtext an den geprüften Stellen mit dem Code deckungsgleich. Man kann damit den Dienst erklären und Zeilen anspringen. Vor einem Hybrid-Ausbau die Lücken in Abschnitt 3 nachziehen, sonst wird die Rang-Regel und das Intro-Chunking falsch verstanden.
+
+## 5. Konkrete Korrekturen
+
+1. „semantisch erweitert“ ersetzen durch „alias-erweiterte Suchanfrage“ oder „lexikalisch expandierte Anfrage“.
+2. Bei der Deadlock-Rang-Regel die Ausnahmen `twitch` und `!rank` nennen.
+3. Tabellenzeile Ranking auf 1849–1928 begrenzen; Tokenizer 1931–1965 steht schon separat.
+4. Golden-Infrastruktur bis Ende von `golden_live_api` (ca. 2463) setzen, nicht 2430.
+5. Search-Block splittten: `from_chunks` 1760, `search` 1765, `expand_query` 1797, `Bm25Index::search` 1889.
+6. Intro-Chunking klarziehen: nur direkte `h1`/`p`; Listen und Tabellen erst in `section`.
+7. Generator-Request um Timeout 7s, `max_output_tokens` 2000, `temperature` 0, `reasoning_effort` none ergänzen.
+8. JSON-Parse als Fail-Closed ohne Fence-Stripping beschreiben.
+9. Symlink-Satz auf das tatsächliche `is_file`/`is_dir`-Verhalten zurückstufen.
+10. Optional, aber nützlich: keine Auth außer Loopback; Health-Felder; Markdown-Passagekind; Render-Dedup.
+
+TEXTNACHWEIS[DR-1]: Gedankenstriche 0 | ae/oe/ue/ss-Ersatz 0 | Absolutwörter 0 belegt | Senke: Chat-Befund, keine Dateiänderung

@@ -1,0 +1,72 @@
+Ich prüfe die interne Doku gegen den echten Code, ohne Dateien zu ändern. Zuerst lade ich die Such- und Review-Regeln und die Doku, dann gehe ich die vier Behauptungen gezielt im Quellcode nach.Doku ist geladen. Als Nächstes frage ich den Wissensgraphen nach den genannten Symbolen, danach lese ich nur die Fundstellen im Code.Graphify hat die Einstiege. Als Nächstes lese ich die genannten Zeilenbereiche mit `sed` und gleiche sie mit den Doku-Behauptungen ab.`lib.rs` bestätigt Default-Modell, 60-Sekunden-Timeout und `reasoning_effort` im direkten Client. Als Nächstes prüfe ich Fabrik, Timeouts und Adapter in `chat_provider.rs` und `chat_text.rs`.Timeouts und Adapter passen bisher. Als Nächstes prüfe ich Discovery, Timeout-Env, `reasoning_effort` und die tatsächliche Nutzung in dl-knowledge und Concierge.Die vier Kernbehauptungen zur `dl-ai`-Schicht stimmen im Quellcode. Falsch ist vor allem die Vorstellung, dl-knowledge und Concierge teilten denselben Trait und denselben Bauweg.
+
+## Urteil zu den vier Prüfpunkten
+
+**1. Modellauflösung: ja.** Einkompilierter Default ist `accounts/fireworks/models/deepseek-v4-flash-0731` (`lib.rs:42`). Überschreibung über Anfragefeld, Env und Konstruktorparameter. Kein `/models`-Listing, keine Namensübersetzung. Fireworks-Wege POSTEN die Zeichenkette nach `/chat/completions`.
+
+**2. Timeouts 110 / 45 / 60: ja, Werte stimmen.** `BOT_PATE_REQUEST_TIMEOUT` 110 s (`chat_provider.rs:24`, gesetzt in `retry_for_use_case` bei `LlmUseCase::BotPate`, Zeile 565). Alle anderen Fabrikfälle einschließlich Faq und BrainAntwort: 45 s (`chat_provider.rs:11`, Zweig `_` in Zeile 566). Direkter `FireworksClient::new`: Literal 60 s (`lib.rs:459`). In diesen Bauwegen gibt es keine Timeout-Env.
+
+**3. `reasoning_effort`: ja, in `dl-ai`.** Nur `FireworksClient::generate_text` schreibt das JSON-Feld (`lib.rs:520–521`). `ChatTextGenerator` warnt und lässt es weg (`chat_text.rs:61–67`). `ChatParams` hat kein solches Feld (`chat_provider.rs:94–100`). Der OpenAI-/Fireworks-`ChatProvider` sendet es nicht (`chat_provider.rs:769–789`). `openai_uses_reasoning_parameters` ist ein anderer Schalter (gpt-5/o1/o3/o4).
+
+**4. Gemeinsame Trait-Schnittstelle: nur halb.** Die Traits existieren wie beschrieben. Die zwei genannten Konsumenten nutzen sie nicht gemeinsam.
+
+- dl-knowledge: `Arc<dyn TextGenerator>` über `FireworksClient::from_env` (`dl-knowledge/src/main.rs:689–691`). Fabrik, Retry, Transparenz und Adapter werden umgangen. Setzt `reasoning_effort: Some("none")` (`main.rs:819`).
+- Concierge: `Option<Arc<dyn ChatProvider>>` über `build_provider_for_env(LlmUseCase::BotPate)` (`dl-bot/src/main.rs:1075–1077`, `concierge.rs:2813–2825`). Kein `TextGenerator`, kein `ChatTextGenerator`.
+- Faq und BrainAntwort im Bot: Fabrik plus `ChatTextGenerator` (`dl-bot/src/main.rs:196–223, 983, 1066`).
+
+Die Kurzantwort fasst das als eine Textschnittstelle zusammen. Der Geltungsbereich warnt zwar, nicht vom Konsumentennamen auf den Bauweg zu schließen; die Kurzantwort macht genau das trotzdem.
+
+---
+
+## 1) Falsche oder erfundene Aussagen
+
+Keine erfundenen Timeout-, Modell- oder Denkmodus-Werte in `dl-ai`.
+
+Die Kurzantwort (Doku Zeile 10) nennt `TextGenerator::generate_text` als gemeinsame Textschnittstelle. Concierge ruft `ChatProvider::chat` auf, nicht `generate_text`. Das ist die einzige inhaltliche Schieflage, die einen Support-Agenten in den falschen Bauweg schickt.
+
+Die Angabe „äußere Concierge-Abbruchlogik wurde hier nicht geprüft“ (Doku Zeile 141) ist als Arbeitshinweis wahr, als Lagebild aber unvollständig: der 100-Sekunden-Wert steht nicht nur im Kommentar von `chat_provider.rs:12–16`, sondern als `CONCIERGE_AI_TIMEOUT_DEFAULT_SECS = 100` in `concierge.rs:93`, überschreibbar mit `DL_CONCIERGE_AI_TIMEOUT_SECS`, gedeckelt auf 110 (`concierge.rs:100, 304–308`).
+
+---
+
+## 2) Nicht passende Zeilenangaben
+
+| Doku | Behauptung | Tatsächliche Stelle | Problem |
+|---|---|---|---|
+| Kurzantwort Z. 7: `chat_provider.rs:594–612` | Anbieter und Modell lassen sich überschreiben | `594–629` ist `default_provider_for` (Defaults). Override: `from_env` `377–398`, Modell `700–703` | Zitat belegt den Default, nicht die Überschreibung |
+| Z. 9 / 137 / 145: `chat_provider.rs:1066–1088` | RetryConfig und HTTP-Timeout | `RetryConfig` ab `1067`, `http_client` `1084–1088` | `1066` ist `MiniMaxAuthHeader::Standard` |
+| Z. 141: `chat_provider.rs:1756–1766` | Test 100 s Concierge vs 110 s HTTP | Test `1758–1769`, Assertion `1765–1768` | `1756–1757` gehören zu `spawn_json_server` |
+| Z. 70: `chat_provider.rs:114–151` | Vertrag `ChatProvider` | Trait `178–202`; `114–151` ist `TokenUsage` plus `ChatResponse` plus `ChatProviderError` | Trait-Zitat liegt daneben; die zweite Spanne `178–202` stimmt |
+| Z. 171: `chat_provider.rs:488–521` | Startinventar | `inventory()` `494–521` | `488–493` sind noch der Doc-Kommentar |
+
+Die übrigen genannten Spannen (Modell `42`, `572–583`, `687–711`, `765–768`; Timeouts `11–26`, `562–569`, `lib.rs:459`; Denkmodus `520–522`, `chat_text.rs:61–67`; Traits `lib.rs:55–63, 117–121`) treffen.
+
+---
+
+## 3) Fehlende wichtige Punkte
+
+1. Zwei Konsumenten, zwei Bauwege. Knowledge: Direktclient, 60 s HTTP, immer `response_format: json_object`, `reasoning_effort` geht raus, kein Retry. Concierge: Fabrik BotPate, 110 s HTTP, Retry bei 429/5xx, kein `reasoning_effort`.
+2. Knowledge hat zusätzlich `MODEL_TIMEOUT = 7` Sekunden um `generate_text` (`dl-knowledge/src/main.rs:36, 813–819`). Die 60 s des HTTP-Clients sind dort nicht das wirksame Limit.
+3. Der Direktclient umgeht Compliance-Gate, Transparenz-Wrapper und `DL_LLM_MODEL_<USE_CASE>`.
+4. `ChatTextGenerator` hat keinen Test, der ein gesetztes `reasoning_effort` als verworfen prüft. Die Tests setzen das Feld auf `None` (`chat_text.rs:138`). Das Weglassen steht nur im Produktivpfad.
+5. `strip_think` hängt am MiniMax-Pfad (`lib.rs:394, 1112`), nicht an Fireworks. Das steht, könnte in der Kurzantwort aber explizit bleiben, weil DeepSeek-Antworten Denktext enthalten können.
+
+---
+
+## 4) Brauchbar?
+
+**Ja**, als interne Karte der `dl-ai`-Schicht. Die drei technischen Behauptungen zu Modell, Timeout und Denkmodus in `dl-ai` sind korrekt und nah am Code. Vor Nutzung durch Support muss die Kurzantwort die Konsumentenpfade trennen, sonst wird Knowledge mit Concierge-Timeouts und Adapter-Denkmodus vermischt.
+
+---
+
+## 5) Konkrete Korrekturen
+
+1. Kurzantwort umbauen: drei Zeilen „BotPate / Concierge = Fabrik + ChatProvider, 110 s, kein reasoning_effort“, „Faq und BrainAntwort = Fabrik + ChatTextGenerator, 45 s, reasoning_effort wird verworfen“, „dl-knowledge = FireworksClient::from_env, 60 s HTTP plus 7 s Anwendungs-Timeout, sendet reasoning_effort none“.
+2. Zitat `594–612` für Überschreibung ersetzen durch `377–398` und `700–703`.
+3. RetryConfig-Zitate auf `1067–1088` bzw. `1084–1088` ziehen.
+4. Concierge-Test auf `1758–1769` ziehen.
+5. Trait-Vertrag nur mit `chat_provider.rs:178–202` belegen; `114–151` höchstens für Fehlerarten.
+6. Inventar auf `494–521` ziehen.
+7. Satz zur ungeprüften Concierge-Notbremse ersetzen: Default 100 s, Env `DL_CONCIERGE_AI_TIMEOUT_SECS`, Deckel 110 s (`concierge.rs:93–100, 304–308`). Die Warnung „nicht Concierge wartet 110 s“ kann bleiben.
+8. Ergänzen: Knowledge liest kein `DL_LLM_MODEL_*` und hängt nicht am Transparenz-Log.
+
+TEXTNACHWEIS[DR-1]: Gedankenstriche 0 | ae/oe/ue/ss-Ersatz 0 | Absolutwörter 2 belegt (kein `/models`-Listing in den Fireworks-Wegen; `ChatParams` ohne `reasoning_effort`) | Senke: Chat-Befund, keine Dateiänderung

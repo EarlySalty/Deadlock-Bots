@@ -7,7 +7,7 @@ Auftrag: RAG-Ausbau + Visual Brain (AUFTRAG.md). Orchestrator: Hauptsession.
 | Phase | Inhalt | Modell | Status |
 |---|---|---|---|
 | 0 | Bestandssuche, Spec, Union-Alpha-Einbindung | - | fertig 2026-09-17 |
-| 1 | Korpus-Regeneration internal/ + FAQ-Entwurf | Union Alpha (frei) | in Arbeit: 3 Docs auf main (Deadlock-Docs 6348586) |
+| 1 | Korpus-Regeneration internal/ + FAQ-Entwurf | Union Alpha schreibt, Grok CLI prueft | in Arbeit: 5 Docs auf main (Deadlock-Docs ab8cae8), 2 Grok-geprueft und korrigiert |
 | 2 | dl-knowledge: Hybrid + Dense + Reranker | Opus 4.8 | offen |
 | 3 | Eval Golden-Set + Blue/Green | guenstig | offen |
 | 4 | Visual Brain (Force-Graph auf graphify) | Opus 4.8 | offen |
@@ -43,9 +43,23 @@ Auftrag: RAG-Ausbau + Visual Brain (AUFTRAG.md). Orchestrator: Hauptsession.
 
 - 5db29f15085a: deadlock-brain-retrieval.md, fertig, committet.
 
+## Docs auf main (Stand 2026-09-17)
+
+1. dl-knowledge-engine.md (Grok-geprueft, korrigiert)
+2. concierge-frontend.md
+3. deadlock-brain-retrieval.md
+4. dl-ai-provider.md (Grok-geprueft, korrigiert)
+5. faq-korpus-abdeckung.md (109 HTML, 8 Gruppen, 36 Heldenguides)
+
+## Grok-Review-Befunde (Autor-Prüfer-Paar)
+
+- Pipeline steht: Union Alpha schreibt, Grok CLI prueft headless gegen den Code, ich fixe. Prompts und Reviews liegen im Akte-Ordner (grok-review-*.md/.txt).
+- dl-ai-Kernbefund: dl-ai loest Modelle NICHT dynamisch auf (einkompilierter Default deepseek-v4-flash-0731 plus Env/Param-Override), anders als tb-llm im Twitch-Bot. Drei getrennte Konsumentenpfade: dl-knowledge Direktclient (60s HTTP + 7s App, reasoning_effort none, umgeht Fabrik/Retry/Transparenz), Concierge Fabrik BotPate (110s, Retry, eigener 100s-Timeout DL_CONCIERGE_AI_TIMEOUT_SECS Deckel 110), Faq/BrainAntwort Fabrik+ChatTextGenerator (45s, reasoning_effort verworfen).
+- FAQ-Luecken (public-Korpus): Spielmechaniken/Matchablauf, eigenstaendige Item-Referenz mit patchbezogenen Build-Begruendungen, Ranks/Matchmaking-Erklaerung. Heldenwissen ist stark (36 Guides).
+
 ## Naechster Schritt
 
-Phase 1 weiter: internal-Docs fuer tb-llm/dl-ai (zentraler Provider), dl-bot-Kern und die uebrigen Kern-Crates, je chunked ueber Union Alpha. Danach FAQ-Entwurf (nur Entwurf, nie public/ automatisch). Dann Phase 2 als normaler Rust-Build mit Review, Gate und Live-Beweis; vor dem Merge kurzer Hinweis an den Nutzer, da Produktionscode am Community-Bot.
+Phase 1 weiter: internal-Docs fuer dl-bot-Kern und die uebrigen Kern-Crates, je chunked ueber Union Alpha, je Grok-geprueft. Danach FAQ-Entwurf (nur Entwurf, nie public/ automatisch), der die drei Luecken schliesst. Dann Phase 2 als normaler Rust-Build mit Review, Gate und Live-Beweis; vor dem Merge kurzer Hinweis an den Nutzer, da Produktionscode am Community-Bot.
 
 ## Getrennte Aufträge
 
