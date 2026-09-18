@@ -1,0 +1,33 @@
+{
+  "baseline": "508419ee",
+  "functions": {
+    "candidate_is_relevant": {
+      "unchanged": true,
+      "sha256": "6687f581961f6f59691973fbb10b5da3d93c3b4e06623df759b9dc4f7db53399"
+    },
+    "grounded_response": {
+      "unchanged": true,
+      "sha256": "caeb01cb23ac0b446f681424741ca1588db102b9d9c1f198ee018cba733b2a0b"
+    },
+    "candidates_for": {
+      "unchanged": true,
+      "sha256": "bc07852b575080b74585371e38fc910b9ef41aa811ad097a228ba3efde46fe22"
+    },
+    "build_prompt": {
+      "unchanged": true,
+      "sha256": "cd42af8658e460b87681700916c2a1278e21e134df42387bce27c7abf366fff6"
+    },
+    "parse_html_file": {
+      "unchanged": true,
+      "sha256": "d7fdc2fae00b80563f0d241f26341d0b0c33f1b913166ba2b5ae10a5c07d41e7"
+    },
+    "parse_llm_selection": {
+      "unchanged": true,
+      "sha256": "5da11b7d82dcb26e373fd9dfa7fb6926ebdfe5d51a57627b968b190184b9bc35"
+    },
+    "grounding_terms": {
+      "unchanged": true,
+      "sha256": "7498910f5911bbb21c79cb9ba5d70b39a42f89dae91fea7f17dac34b32278259"
+    }
+  }
+}

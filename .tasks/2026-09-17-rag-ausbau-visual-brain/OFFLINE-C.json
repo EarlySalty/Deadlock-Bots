@@ -1,0 +1,19 @@
+{
+  "network": "none",
+  "read_only": true,
+  "unchanged_files": true,
+  "checks": [
+    {
+      "missing_model": false,
+      "exit_code": 0,
+      "stdout": "{\"model_fingerprint\":\"bd099a320eab5c9057da5846f286ba3e5a34139b10dad63b13723d3d08560bee\",\"scores\":[-7.40859317779541,-10.915433883666992]}\n",
+      "stderr": ""
+    },
+    {
+      "missing_model": true,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "Error: Lokale Reranker-Datei fehlt: model.onnx; Setup vor dem Dienststart ausführen\n\nCaused by:\n    No such file or directory (os error 2)\n"
+    }
+  ]
+}

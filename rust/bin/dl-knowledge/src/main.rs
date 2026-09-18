@@ -1,4 +1,5 @@
 mod dense;
+mod hybrid;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -50,6 +51,7 @@ const STOPWORDS: &[&str] = &[
 
 #[derive(Clone)]
 struct AppState {
+    hybrid: Option<Arc<hybrid::Runtime>>,
     docs_path: PathBuf,
     knowledge: Arc<RwLock<KnowledgeBase>>,
     generator: Option<Arc<dyn TextGenerator>>,
@@ -677,7 +679,7 @@ struct PromptCandidate<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if dense::cli::run().await? {
+    if dense::cli::run().await? || hybrid::cli::run().await? {
         return Ok(());
     }
     dl_core::observability::init_tracing("info");
@@ -701,6 +703,7 @@ async fn main() -> Result<()> {
     }
 
     let state = AppState {
+        hybrid: hybrid::Runtime::from_env().await?,
         docs_path,
         knowledge: Arc::new(RwLock::new(knowledge)),
         generator,
@@ -765,7 +768,25 @@ async fn reload(State(state): State<AppState>) -> Response {
 }
 
 async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> Json<AskResponse> {
-    let ranked = {
+    let ranked = if let Some(hybrid) = &state.hybrid {
+        match hybrid
+            .retrieve(&request.question, state.knowledge.clone())
+            .await
+        {
+            Ok(ranked) => ranked,
+            Err(_) => {
+                log_decision(
+                    "error",
+                    "none",
+                    None,
+                    "hybrid_failed",
+                    (0, 0, 0),
+                    Some("retrieval_unavailable"),
+                );
+                return Json(unanswerable());
+            }
+        }
+    } else {
         let knowledge = state.knowledge.read().await;
         knowledge.search(&request.question, 6)
     };
@@ -2821,6 +2842,7 @@ mod tests {
     ) -> (Router, Arc<RwLock<KnowledgeBase>>) {
         let knowledge = Arc::new(RwLock::new(KnowledgeBase::from_chunks(chunks)));
         let state = AppState {
+            hybrid: None,
             docs_path: PathBuf::from("/does/not/matter"),
             knowledge: knowledge.clone(),
             generator,
@@ -2834,7 +2856,7 @@ mod tests {
     /// Level-Cache das `decision`-Log ein und der Capture bleibt leer (`count == 0`). Eine
     /// tokio-`Mutex` (kein extra Crate, `sync`-Feature ist an) hält das Rennen aus dem Cache
     /// heraus; sie darf über `await` gehalten werden, ohne `clippy::await_holding_lock`.
-    static ASK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(super) static ASK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Ungesperrter Request-Kern — Basis für gesperrte wie ungesperrte Aufrufer.
     async fn post_json(app: Router, path: &str, body: Value) -> Result<(u16, Value)> {
@@ -3228,6 +3250,7 @@ mod tests {
         let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
+            hybrid: None,
             docs_path: public,
             knowledge: knowledge.clone(),
             generator: None,
@@ -3258,6 +3281,7 @@ mod tests {
         let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
+            hybrid: None,
             docs_path: internal,
             knowledge: knowledge.clone(),
             generator: None,

@@ -8,7 +8,8 @@ repository.workspace = true
 version = "0.1.0"
 
 [features]
-default = ["dense-fastembed"]
+default = ["dense-fastembed", "rerank-fastembed"]
+rerank-fastembed = ["dep:fastembed"]
 dense-fastembed = ["dep:fastembed"]
 dense-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
 
