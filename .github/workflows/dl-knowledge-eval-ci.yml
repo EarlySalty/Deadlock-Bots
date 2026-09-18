@@ -3,6 +3,7 @@ name: dl-knowledge eval CI
 on:
   push:
     branches:
+      - main
       - feat/dl-knowledge-eval
   pull_request:
     branches:
