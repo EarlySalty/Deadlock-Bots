@@ -18,7 +18,9 @@ pub struct Plan {
 impl Plan {
     pub fn range(&self, total: usize) -> Result<std::ops::Range<usize>> {
         ensure!((1..=5).contains(&self.rounds), "Ungültige Messauswahl");
-        let count = self.count.unwrap_or_else(|| total.saturating_sub(self.first));
+        let count = self
+            .count
+            .unwrap_or_else(|| total.saturating_sub(self.first));
         ensure!(count > 0, "Ungültige Messauswahl");
         let end = self
             .first
