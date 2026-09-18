@@ -1990,8 +1990,8 @@ mod tests {
         context_terms: Vec<String>,
         answer_terms: Vec<String>,
         forbidden_terms: Vec<String>,
-        #[serde(default)]
-        herkunft: Option<String>,
+        #[serde(default, rename = "herkunft")]
+        _herkunft: Option<String>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2203,7 +2203,7 @@ mod tests {
                 .map(|term| (*term).to_string())
                 .collect(),
             forbidden_terms: vec![],
-            herkunft: None,
+            _herkunft: None,
         };
 
         let five_candidates = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
