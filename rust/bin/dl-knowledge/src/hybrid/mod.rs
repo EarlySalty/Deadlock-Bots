@@ -19,6 +19,7 @@ mod search;
 mod worker;
 
 use config::Config;
+use rank::Catalog;
 
 pub struct Models {
     pub embedder: Box<dyn Embedder>,
@@ -64,6 +65,7 @@ fn model_path(variable: &str, name: &str) -> Result<PathBuf> {
 pub struct Runtime {
     config: Config,
     models: Arc<Mutex<Models>>,
+    catalog: Arc<Mutex<Option<(u64, Arc<Catalog>)>>>,
     pool: PgPool,
     worker: worker::Worker,
 }
@@ -82,6 +84,7 @@ impl Runtime {
             worker: worker::Worker::new(config.timeout_ms),
             config,
             models: Arc::new(Mutex::new(models)),
+            catalog: Arc::new(Mutex::new(None)),
             pool,
         })))
     }
@@ -98,11 +101,28 @@ impl Runtime {
         let question = question.to_string();
         let config = self.config.clone();
         let models = self.models.clone();
+        let catalog_cache = self.catalog.clone();
         let pool = self.pool.clone();
         let handle = tokio::runtime::Handle::current();
         self.worker
             .run(move |deadline| {
-                let knowledge = knowledge.blocking_read().clone();
+                let knowledge = knowledge.blocking_read();
+                let catalog = {
+                    let mut cache = catalog_cache
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Hybrid-Katalogzustand unbrauchbar"))?;
+                    if let Some((generation, catalog)) = cache
+                        .as_ref()
+                        .filter(|(generation, _)| *generation == knowledge.generation)
+                    {
+                        let _ = generation;
+                        catalog.clone()
+                    } else {
+                        let catalog = Arc::new(Catalog::new(&knowledge, &config)?);
+                        *cache = Some((knowledge.generation, catalog.clone()));
+                        catalog
+                    }
+                };
                 let mut models = models
                     .lock()
                     .map_err(|_| anyhow::anyhow!("Hybrid-Modellzustand unbrauchbar"))?;
@@ -110,6 +130,7 @@ impl Runtime {
                     &pool,
                     &mut models,
                     &knowledge,
+                    &catalog,
                     &question,
                     &config,
                     deadline,

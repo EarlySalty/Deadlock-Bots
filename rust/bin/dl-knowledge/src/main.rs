@@ -4,6 +4,7 @@ mod hybrid;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +40,8 @@ Antwortformat, strikt (nur das JSON-Objekt, nichts drumherum):
 const MODEL_TIMEOUT: Duration = Duration::from_secs(7);
 const MAX_SELECTED_CANDIDATES: usize = 4;
 const MAX_ANSWER_UTF16: usize = 1800;
+
+static NEXT_KNOWLEDGE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 const STOPWORDS: &[&str] = &[
     "aber", "als", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis", "da", "das", "dass",
@@ -609,6 +612,7 @@ struct Candidate {
 struct KnowledgeBase {
     chunks: Vec<Chunk>,
     index: Bm25Index,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1793,7 +1797,12 @@ fn relative_path(root: &Path, path: &Path) -> String {
 impl KnowledgeBase {
     fn from_chunks(chunks: Vec<Chunk>) -> Self {
         let index = Bm25Index::new(&chunks);
-        Self { chunks, index }
+        let generation = NEXT_KNOWLEDGE_GENERATION.fetch_add(1, AtomicOrdering::Relaxed);
+        Self {
+            chunks,
+            index,
+            generation,
+        }
     }
 
     fn search(&self, query: &str, limit: usize) -> Vec<(Chunk, f64)> {

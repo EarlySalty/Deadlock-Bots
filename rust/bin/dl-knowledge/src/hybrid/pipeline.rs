@@ -34,6 +34,7 @@ pub async fn run(
     pool: &PgPool,
     models: &mut Models,
     knowledge: &KnowledgeBase,
+    catalog: &Catalog,
     question: &str,
     config: &Config,
     deadline: Instant,
@@ -44,7 +45,6 @@ pub async fn run(
         "Hybrid-Frage ist leer oder zu lang"
     );
     config.validate()?;
-    let catalog = Catalog::new(knowledge, config)?;
     let mut timing = Timing {
         prepare_ms: elapsed(start),
         ..Timing::default()
@@ -63,7 +63,7 @@ pub async fn run(
         );
         let (generation, hits) = tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
-            search::dense(pool, &fingerprint, &vectors[0], &catalog, config.dense_k),
+            search::dense(pool, &fingerprint, &vectors[0], catalog, config.dense_k),
         )
         .await
         .context("Dense-Suche hat ihr Zeitbudget überschritten")??;
@@ -73,7 +73,7 @@ pub async fn run(
     };
     timing.dense_ms = elapsed(stage);
     let stage = Instant::now();
-    let fused = rank::fuse(&bm25, &dense, &catalog, config);
+    let fused = rank::fuse(&bm25, &dense, catalog, config);
     timing.fusion_ms = elapsed(stage);
     timing.without_rerank_ms = elapsed(start);
     ensure!(Instant::now() < deadline, "Hybrid-Zeitbudget überschritten");
@@ -93,7 +93,7 @@ pub async fn run(
             reranker.fingerprint() == fingerprint,
             "Reranker wurde während der Suche gewechselt"
         );
-        rank::apply_rerank(&fused, &logits, &catalog, config)?
+        rank::apply_rerank(&fused, &logits, catalog, config)?
     } else {
         fused.clone()
     };

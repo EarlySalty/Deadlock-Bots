@@ -36,6 +36,7 @@ fn state(
                 embedder: Box::new(TestEmbedder),
                 reranker,
             })),
+            catalog: Arc::new(Mutex::new(None)),
             pool,
         })),
         docs_path: PathBuf::from("/unused/public"),

@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{ensure, Result};
@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-use super::{config::Config, pipeline, quality, Models};
+use super::{config::Config, pipeline, quality, rank::Catalog, Models};
 
 pub struct Plan {
     pub rounds: usize,
@@ -56,11 +56,15 @@ pub async fn run(
         .fetch_one(pool)
         .await?;
     ensure!(existing == 0, "Messung benötigt eine frische Testdatenbank");
-    let root = Path::new(crate::DEFAULT_DOCS_PATH).canonicalize()?;
+    let root = std::env::var_os("DL_KNOWLEDGE_BENCH_DOCS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(crate::DEFAULT_DOCS_PATH))
+        .canonicalize()?;
     let knowledge = crate::load_production_corpus(&root)?;
-    let records = crate::dense::from_chunks(&knowledge.chunks)?;
+    let catalog = Catalog::new(&knowledge, config)?;
+    let records = &catalog.records;
     let cases = quality::load(eval_dir, &root)?;
-    let corpus_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&records)?));
+    let corpus_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(records)?));
     let cases_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&cases)?));
     let suite_cases = cases.len();
     let selected = plan.range(suite_cases)?;
@@ -77,12 +81,21 @@ pub async fn run(
     )?;
     let start = Instant::now();
     let built =
-        crate::dense::store::build_generation(pool, models.embedder.as_mut(), &records).await?;
+        crate::dense::store::build_generation(pool, models.embedder.as_mut(), records).await?;
     let index_ms = start.elapsed().as_secs_f64() * 1000.0;
     crate::dense::store::activate(pool, built.index_generation, None).await?;
     let deadline = || Instant::now() + Duration::from_millis(config.timeout_ms);
     for (_, _, case) in cases.iter().take(3) {
-        pipeline::run(pool, models, &knowledge, &case.question, config, deadline()).await?;
+        pipeline::run(
+            pool,
+            models,
+            &knowledge,
+            &catalog,
+            &case.question,
+            config,
+            deadline(),
+        )
+        .await?;
     }
     let mut bm25_samples = Vec::new();
     let mut hybrid_samples = Vec::new();
@@ -98,8 +111,16 @@ pub async fn run(
                 .map(|(chunk, _)| chunk)
                 .collect::<Vec<_>>();
             bm25_samples.push(start.elapsed().as_secs_f64() * 1000.0);
-            let result =
-                pipeline::run(pool, models, &knowledge, &case.question, config, deadline()).await?;
+            let result = pipeline::run(
+                pool,
+                models,
+                &knowledge,
+                &catalog,
+                &case.question,
+                config,
+                deadline(),
+            )
+            .await?;
             hybrid_samples.push(result.timing.without_rerank_ms);
             reranked_samples.push(result.timing.total_ms);
             rerank_samples.push(result.timing.rerank_ms);
