@@ -160,11 +160,10 @@ pub fn run() -> Result<bool> {
     let results = if mode == EvalMode::Bm25 {
         run_bm25(&cases, &docs_path)?
     } else {
-        run_hybrid_report(
-            mode,
-            &cases,
-            retrieval_report.as_deref().expect("oben geprüft"),
-        )?
+        let report_path = retrieval_report
+            .as_deref()
+            .context("Retrieval-Bericht fehlt")?;
+        run_hybrid_report(mode, &cases, report_path)?
     };
     let report = build_report(mode, &cases, results)?;
     write_report(&report, &json_path, &markdown_path)?;
