@@ -258,6 +258,8 @@ impl Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
+        self.adapter.community_gateway.ready(ctx.shard_id.0,
+            ready.guilds.iter().any(|guild| guild.id.get() == 1289721245281292288));
         self.recording_readiness.store(
             ready_contains_guild(
                 ready.guilds.iter().map(|guild| guild.id.get()),
@@ -271,6 +273,15 @@ impl EventHandler for Handler {
             guild_count: ready.guilds.len(),
         });
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
+    }
+
+    async fn resume(&self, ctx: Context, _event: serenity::all::ResumedEvent) {
+        self.adapter.community_gateway.resume(ctx.shard_id.0);
+    }
+
+    async fn shard_stage_update(&self, _ctx: Context, event: serenity::gateway::ShardStageUpdateEvent) {
+        self.adapter.community_gateway.stage(event.shard_id.0,
+            event.new == serenity::gateway::ConnectionStage::Connected);
     }
 
     async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {

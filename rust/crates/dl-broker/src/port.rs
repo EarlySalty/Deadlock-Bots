@@ -182,6 +182,21 @@ pub enum MemberPresence {
     Unknown,
 }
 
+/// Aggregated, permission-filtered voice lobby. No member identities or audio.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommunityLobby {
+    pub channel_id: String,
+    pub name: String,
+    pub member_count: usize,
+    pub user_limit: Option<u32>,
+    pub mode: Option<String>,
+    pub intent: Option<String>,
+    pub rank_average: Option<f64>,
+    pub rank_samples: usize,
+    pub requester_present: bool,
+    pub is_streamer_vc: bool,
+}
+
 #[async_trait::async_trait]
 pub trait DiscordPort: Send + Sync {
     async fn is_ready(&self) -> bool;
@@ -251,6 +266,12 @@ pub trait DiscordPort: Send + Sync {
         channel_id: Option<u64>,
     ) -> Result<(), PortError>;
     async fn voice_members(&self, channel_id: u64) -> Result<Vec<MemberInfo>, PortError>;
+    /// Read-only directory for a verified Discord member; implementations must
+    /// enforce effective VIEW_CHANNEL + CONNECT permissions, including bans.
+    async fn community_lobbies(&self, _guild_id: u64, _user_id: u64) -> Result<Vec<CommunityLobby>, PortError> {
+        Err(PortError::GuildUnavailable)
+    }
+
     async fn create_invite(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, PortError>;
     /// Diagnose: guild_id None = erste Guild des Bots.
     async fn list_roles(&self, guild_id: Option<u64>) -> Result<GuildRoles, PortError>;

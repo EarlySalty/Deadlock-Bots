@@ -30,6 +30,7 @@ pub struct DiscordAdapter {
     cache: OnceLock<Arc<Cache>>,
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
+    pub(crate) community_gateway: crate::community::GatewayFreshness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,7 @@ impl DiscordAdapter {
             http: Arc::new(Http::new(token)),
             cache: OnceLock::new(),
             gateway_ready: Arc::new(AtomicBool::new(false)),
+            community_gateway: crate::community::GatewayFreshness::default(),
         })
     }
 
@@ -993,6 +995,10 @@ impl DiscordPort for DiscordAdapter {
             })
             .collect();
         Ok(members)
+    }
+
+    async fn community_lobbies(&self, guild_id: u64, user_id: u64) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
+        crate::community::directory(self, guild_id, user_id)
     }
 
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError> {
