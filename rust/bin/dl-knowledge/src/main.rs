@@ -2134,7 +2134,7 @@ mod tests {
         }
         ensure!(
             cases.len() >= GOLDEN_CASE_COUNT,
-            "Golden-Suite hat {} statt mindestens {GOLDEN_CASE_COUNT} Faellen",
+            "Golden-Suite hat {} statt mindestens {GOLDEN_CASE_COUNT} Fällen",
             cases.len()
         );
         Ok(cases)
