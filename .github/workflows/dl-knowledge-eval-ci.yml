@@ -18,10 +18,11 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-        with:
-          components: clippy,rustfmt
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.88.0
       - name: Format own eval file
         run: rustfmt --edition 2021 --check bin/dl-knowledge/src/eval.rs
       - name: Test dl-knowledge
