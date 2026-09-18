@@ -1,3 +1,5 @@
+mod dense;
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -555,6 +557,8 @@ struct Chunk {
     section: String,
     path: String,
     tags: Vec<String>,
+    stand: String,
+    quelle: String,
     text: String,
     passages: Vec<Passage>,
 }
@@ -673,6 +677,9 @@ struct PromptCandidate<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if dense::cli::run().await? {
+        return Ok(());
+    }
     dl_core::observability::init_tracing("info");
 
     let docs_path = resolve_production_docs_path(
@@ -1226,8 +1233,8 @@ fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
     ensure!(!title.is_empty(), "HTML-Titel ist leer");
 
     let tags_raw = required_meta(&document, &meta_selector, "tags")?;
-    let _stand = required_meta(&document, &meta_selector, "stand")?;
-    let _quelle = required_meta(&document, &meta_selector, "quelle")?;
+    let stand = required_meta(&document, &meta_selector, "stand")?;
+    let quelle = required_meta(&document, &meta_selector, "quelle")?;
     let tags = tags_raw
         .split(',')
         .map(str::trim)
@@ -1291,6 +1298,8 @@ fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
         section: h1,
         path: rel_path.clone(),
         tags: tags.clone(),
+        stand: stand.clone(),
+        quelle: quelle.clone(),
         text: intro_text,
         passages: intro_passages,
     }];
@@ -1357,6 +1366,8 @@ fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
             section: section_name,
             path: rel_path.clone(),
             tags: tags.clone(),
+            stand: stand.clone(),
+            quelle: quelle.clone(),
             text,
             passages,
         });
@@ -1641,6 +1652,8 @@ fn push_chunk(
         section: section.to_string(),
         path: path.to_string(),
         tags: tags.to_vec(),
+        stand: String::new(),
+        quelle: String::new(),
         text: text.clone(),
         passages: vec![Passage {
             heading: None,
@@ -2649,6 +2662,8 @@ mod tests {
             section: section.to_string(),
             path: path.to_string(),
             tags: Vec::new(),
+            stand: String::new(),
+            quelle: String::new(),
             text: text.to_string(),
             passages: vec![Passage {
                 heading: None,

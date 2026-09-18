@@ -1,0 +1,867 @@
+{
+  "backend": "candle",
+  "binary_bytes": 20373584,
+  "case_results": [
+    {
+      "expected_sources": [
+        "discord-server/module/serverstruktur.html",
+        "discord-server/rules-und-channels.html",
+        "discord-server/ueber-bot-und-server.html"
+      ],
+      "file": "public-discord-core.json",
+      "first_relevant_rank": null,
+      "question": "Wo finde ich den richtigen Bereich für meine Frage?",
+      "ranked_paths": [
+        "discord-server/faq-bot-selbst.html",
+        "discord-server/faq-bot-selbst.html",
+        "discord-server/faq-bot-selbst.html",
+        "discord-server/workflows/onboarding-beitritt.html",
+        "twitch-bot/faq-support.html",
+        "discord-server/dm-concierge.html"
+      ],
+      "row": 1
+    },
+    {
+      "expected_sources": [
+        "discord-server/rules-und-channels.html",
+        "discord-server/module/serverstruktur.html"
+      ],
+      "file": "public-discord-core.json",
+      "first_relevant_rank": 1,
+      "question": "Welcher Kanal oder welche Rolle ist für mein Anliegen gedacht?",
+      "ranked_paths": [
+        "discord-server/rules-und-channels.html",
+        "discord-server/rules-und-channels.html",
+        "discord-server/rules-und-channels.html",
+        "discord-server/rules-und-channels.html",
+        "discord-server/rules-und-channels.html",
+        "discord-server/module/serverstruktur.html"
+      ],
+      "row": 2
+    },
+    {
+      "expected_sources": [
+        "discord-server/regeln.html",
+        "discord-server/workflows/moderationsfall-einspruch.html"
+      ],
+      "file": "public-discord-core.json",
+      "first_relevant_rank": 1,
+      "question": "Wie melde ich einen Regelverstoß?",
+      "ranked_paths": [
+        "discord-server/regeln.html",
+        "discord-server/workflows/moderationsfall-einspruch.html",
+        "discord-server/regeln.html",
+        "discord-server/module/moderation.html",
+        "discord-server/workflows/moderationsfall-einspruch.html",
+        "discord-server/regeln.html"
+      ],
+      "row": 3
+    },
+    {
+      "expected_sources": [
+        "discord-server/workflows/moderationsfall-einspruch.html",
+        "discord-server/regeln.html"
+      ],
+      "file": "public-discord-core.json",
+      "first_relevant_rank": 5,
+      "question": "An wen wende ich mich, wenn ich eine Moderationsentscheidung für falsch halte?",
+      "ranked_paths": [
+        "discord-server/module/moderation.html",
+        "discord-server/module/moderation.html",
+        "discord-server/module/moderation.html",
+        "discord-server/module/moderation.html",
+        "discord-server/regeln.html",
+        "discord-server/module/tierlist-builds.html"
+      ],
+      "row": 4
+    },
+    {
+      "expected_sources": [
+        "discord-server/team-und-ansprechpartner.html"
+      ],
+      "file": "public-discord-core.json",
+      "first_relevant_rank": 1,
+      "question": "Wie erreiche ich das Community-Team?",
+      "ranked_paths": [
+        "discord-server/team-und-ansprechpartner.html",
+        "discord-server/community-tools.html",
+        "discord-server/community-tools.html",
+        "discord-server/team-und-ansprechpartner.html",
+        "discord-server/team-und-ansprechpartner.html",
+        "turniere/turniere.html"
+      ],
+      "row": 5
+    },
+    {
+      "expected_sources": [
+        "discord-server/voice-features.html",
+        "discord-server/module/voice-lanes.html"
+      ],
+      "file": "public-discord-tools.json",
+      "first_relevant_rank": 3,
+      "question": "Wie erstelle ich eine Casual- oder Ranked-Lane?",
+      "ranked_paths": [
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html",
+        "discord-server/voice-features.html",
+        "discord-server/module/voice-lanes.html",
+        "discord-server/module/voice-lanes.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html"
+      ],
+      "row": 1
+    },
+    {
+      "expected_sources": [
+        "discord-server/voice-features.html",
+        "discord-server/module/voice-lanes.html"
+      ],
+      "file": "public-discord-tools.json",
+      "first_relevant_rank": 1,
+      "question": "Was passiert, wenn ich dem Voice-Router beitrete?",
+      "ranked_paths": [
+        "discord-server/voice-features.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html",
+        "discord-server/module/voice-lanes.html",
+        "discord-server/voice-features.html",
+        "discord-server/tempvoice-guide.html"
+      ],
+      "row": 2
+    },
+    {
+      "expected_sources": [
+        "discord-server/tempvoice-guide.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html"
+      ],
+      "file": "public-discord-tools.json",
+      "first_relevant_rank": 1,
+      "question": "Was kann ich als Owner meiner Voice-Lane einstellen?",
+      "ranked_paths": [
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html",
+        "discord-server/voice-features.html",
+        "discord-server/voice-features.html",
+        "discord-server/module/voice-lanes.html",
+        "discord-server/module/voice-lanes.html"
+      ],
+      "row": 3
+    },
+    {
+      "expected_sources": [
+        "discord-server/tempvoice-guide.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html"
+      ],
+      "file": "public-discord-tools.json",
+      "first_relevant_rank": 1,
+      "question": "Was passiert mit der Lane, wenn der Owner geht?",
+      "ranked_paths": [
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html",
+        "discord-server/voice-features.html",
+        "discord-server/tempvoice-guide.html",
+        "discord-server/module/voice-lanes.html",
+        "discord-server/haeufige-probleme.html",
+        "discord-server/module/voice-lanes.html"
+      ],
+      "row": 4
+    },
+    {
+      "expected_sources": [
+        "discord-server/module/voice-lanes.html",
+        "discord-server/workflows/voice-lane-erstellen-verwalten.html"
+      ],
+      "file": "public-discord-tools.json",
+      "first_relevant_rank": 3,
+      "question": "Brauche ich für jede Ranked-Lane einen verifizierten Rang?",
+      "ranked_paths": [
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "discord-server/module/mitspielersuche-lfg.html",
+        "discord-server/module/voice-lanes.html",
+        "discord-server/voice-features.html",
+        "discord-server/steam-integration.html",
+        "discord-server/tempvoice-guide.html"
+      ],
+      "row": 5
+    },
+    {
+      "expected_sources": [
+        "discord-server/bots-und-dienste.html",
+        "discord-server/ueber-bot-und-server.html"
+      ],
+      "file": "public-integration.json",
+      "first_relevant_rank": 1,
+      "question": "Welche Bots und Dienste gibt es auf dem Server?",
+      "ranked_paths": [
+        "discord-server/ueber-bot-und-server.html",
+        "discord-server/ueber-bot-und-server.html",
+        "discord-server/dm-concierge.html",
+        "discord-server/bots-und-dienste.html",
+        "discord-server/ueber-bot-und-server.html",
+        "discord-server/ueber-bot-und-server.html"
+      ],
+      "row": 1
+    },
+    {
+      "expected_sources": [
+        "discord-server/bots-und-dienste.html",
+        "discord-server/ueber-bot-und-server.html"
+      ],
+      "file": "public-integration.json",
+      "first_relevant_rank": 1,
+      "question": "Was kann die Community alles für mich erledigen?",
+      "ranked_paths": [
+        "discord-server/bots-und-dienste.html",
+        "discord-server/haeufige-probleme.html",
+        "discord-server/community-tools.html",
+        "twitch-bot/faq-einstieg.html",
+        "index.html",
+        "discord-server/community-tools.html"
+      ],
+      "row": 2
+    },
+    {
+      "expected_sources": [
+        "index.html",
+        "steam-bot/steam-bot.html"
+      ],
+      "file": "public-integration.json",
+      "first_relevant_rank": 1,
+      "question": "Wofür ist der Steam-Bot da?",
+      "ranked_paths": [
+        "steam-bot/steam-bot.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/bots-und-dienste.html",
+        "index.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/steam-integration.html"
+      ],
+      "row": 3
+    },
+    {
+      "expected_sources": [
+        "index.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/steam-integration.html"
+      ],
+      "file": "public-integration.json",
+      "first_relevant_rank": 1,
+      "question": "Wo finde ich Hilfe zu Steam-Verknüpfung, Rang oder Invite?",
+      "ranked_paths": [
+        "discord-server/steam-integration.html",
+        "discord-server/steam-integration.html",
+        "discord-server/steam-integration.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "discord-server/steam-integration.html",
+        "discord-server/steam-integration.html"
+      ],
+      "row": 4
+    },
+    {
+      "expected_sources": [
+        "index.html",
+        "twitch-bot/twitchbot-ueberblick.html",
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/faq-einstieg.html"
+      ],
+      "file": "public-integration.json",
+      "first_relevant_rank": 1,
+      "question": "Was kann der Twitch-Bot und wie fange ich an?",
+      "ranked_paths": [
+        "twitch-bot/twitchbot-ueberblick.html",
+        "twitch-bot/twitchbot-ueberblick.html",
+        "twitch-bot/faq-einstieg.html",
+        "twitch-bot/faq-funktionen.html",
+        "discord-server/bots-und-dienste.html",
+        "twitch-bot/twitchbot-ueberblick.html"
+      ],
+      "row": 5
+    },
+    {
+      "expected_sources": [
+        "patchnotes-bot/patchnotes-bot.html"
+      ],
+      "file": "public-patchnotes-turniere.json",
+      "first_relevant_rank": 1,
+      "question": "Woher nimmt der Bot die Patchnotes?",
+      "ranked_paths": [
+        "patchnotes-bot/patchnotes-bot.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "discord-server/bots-und-dienste.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "discord-server/module/changelog-ankuendigungen.html",
+        "index.html"
+      ],
+      "row": 1
+    },
+    {
+      "expected_sources": [
+        "patchnotes-bot/patchnotes-bot.html"
+      ],
+      "file": "public-patchnotes-turniere.json",
+      "first_relevant_rank": null,
+      "question": "Wie kommen offizielle Deadlock-Änderungen übersetzt auf Discord?",
+      "ranked_paths": [
+        "discord-server/deadlock-grundlagen.html",
+        "discord-server/deadlock-grundlagen.html",
+        "discord-server/deadlock-grundlagen.html",
+        "index.html",
+        "discord-server/deadlock-grundlagen.html",
+        "dokus/index.html"
+      ],
+      "row": 2
+    },
+    {
+      "expected_sources": [
+        "patchnotes-bot/patchnotes-bot.html"
+      ],
+      "file": "public-patchnotes-turniere.json",
+      "first_relevant_rank": 1,
+      "question": "Kann ich alte Patchnotes durchsuchen?",
+      "ranked_paths": [
+        "patchnotes-bot/patchnotes-bot.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "discord-server/module/changelog-ankuendigungen.html",
+        "discord-server/module/changelog-ankuendigungen.html",
+        "index.html"
+      ],
+      "row": 3
+    },
+    {
+      "expected_sources": [
+        "patchnotes-bot/patchnotes-bot.html"
+      ],
+      "file": "public-patchnotes-turniere.json",
+      "first_relevant_rank": 1,
+      "question": "Wo filtere ich Patches nach Helden oder Gegenständen?",
+      "ranked_paths": [
+        "patchnotes-bot/patchnotes-bot.html",
+        "discord-server/module/changelog-ankuendigungen.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "website/website-portale.html"
+      ],
+      "row": 4
+    },
+    {
+      "expected_sources": [
+        "patchnotes-bot/patchnotes-bot.html"
+      ],
+      "file": "public-patchnotes-turniere.json",
+      "first_relevant_rank": 2,
+      "question": "Warum ist ein neuer Patch noch nicht auf Discord?",
+      "ranked_paths": [
+        "discord-server/module/changelog-ankuendigungen.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "discord-server/module/changelog-ankuendigungen.html",
+        "patchnotes-bot/patchnotes-bot.html",
+        "discord-server/module/changelog-ankuendigungen.html"
+      ],
+      "row": 5
+    },
+    {
+      "expected_sources": [
+        "steam-bot/steam-bot.html"
+      ],
+      "file": "public-steam-website.json",
+      "first_relevant_rank": 1,
+      "question": "Wie verbinde ich meinen Steam-Account?",
+      "ranked_paths": [
+        "steam-bot/steam-bot.html",
+        "steam-bot/steam-bot.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/steam-integration.html",
+        "discord-server/steam-integration.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html"
+      ],
+      "row": 1
+    },
+    {
+      "expected_sources": [
+        "steam-bot/steam-bot.html"
+      ],
+      "file": "public-steam-website.json",
+      "first_relevant_rank": 1,
+      "question": "Muss ich dem Bot mein Steam-Passwort geben?",
+      "ranked_paths": [
+        "steam-bot/steam-bot.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/bots-und-dienste.html",
+        "index.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "discord-server/ueber-bot-und-server.html"
+      ],
+      "row": 2
+    },
+    {
+      "expected_sources": [
+        "steam-bot/steam-bot.html"
+      ],
+      "file": "public-steam-website.json",
+      "first_relevant_rank": 3,
+      "question": "Kann ich mehrere Steam-Konten verknüpfen und eines als primär setzen?",
+      "ranked_paths": [
+        "discord-server/steam-integration.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/module/steam-twitch-verknuepfung.html",
+        "steam-bot/steam-bot.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html"
+      ],
+      "row": 3
+    },
+    {
+      "expected_sources": [
+        "steam-bot/steam-bot.html"
+      ],
+      "file": "public-steam-website.json",
+      "first_relevant_rank": 6,
+      "question": "Wie sehe oder entferne ich meine verknüpften Steam-Konten?",
+      "ranked_paths": [
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "discord-server/steam-integration.html",
+        "discord-server/module/steam-twitch-verknuepfung.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html",
+        "discord-server/steam-integration.html",
+        "steam-bot/steam-bot.html"
+      ],
+      "row": 4
+    },
+    {
+      "expected_sources": [
+        "steam-bot/steam-bot.html"
+      ],
+      "file": "public-steam-website.json",
+      "first_relevant_rank": 1,
+      "question": "Wie finde ich SteamID und Persona-Namen zu einem Steam-Profil-Link?",
+      "ranked_paths": [
+        "steam-bot/steam-bot.html",
+        "discord-server/steam-integration.html",
+        "steam-bot/steam-bot.html",
+        "steam-bot/steam-bot.html",
+        "index.html",
+        "discord-server/steam-integration.html"
+      ],
+      "row": 5
+    },
+    {
+      "expected_sources": [
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/faq-einstieg.html"
+      ],
+      "file": "public-twitch.json",
+      "first_relevant_rank": 1,
+      "question": "Wie verbinde ich meinen Twitch-Kanal sicher?",
+      "ranked_paths": [
+        "twitch-bot/faq-einstieg.html",
+        "twitch-bot/twitchbot-ueberblick.html",
+        "discord-server/workflows/streamer-partner-werden.html",
+        "twitch-bot/twitchbot-ueberblick.html",
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/einrichtung.html"
+      ],
+      "row": 1
+    },
+    {
+      "expected_sources": [
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/faq-einstieg.html"
+      ],
+      "file": "public-twitch.json",
+      "first_relevant_rank": 1,
+      "question": "Wie widerrufe ich den Zugriff des Bots wieder?",
+      "ranked_paths": [
+        "twitch-bot/faq-einstieg.html",
+        "twitch-bot/faq-einstieg.html",
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/faq-funktionen.html",
+        "discord-server/ueber-bot-und-server.html",
+        "discord-server/ueber-bot-und-server.html"
+      ],
+      "row": 2
+    },
+    {
+      "expected_sources": [
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/vertrauen-seriositaet.html"
+      ],
+      "file": "public-twitch.json",
+      "first_relevant_rank": 4,
+      "question": "Ist meine Twitch-Verbindung sicher und wie trenne ich sie wieder?",
+      "ranked_paths": [
+        "twitch-bot/faq-einstieg.html",
+        "twitch-bot/twitchbot-ueberblick.html",
+        "discord-server/workflows/streamer-partner-werden.html",
+        "twitch-bot/einrichtung.html",
+        "twitch-bot/faq-einstieg.html",
+        "twitch-bot/twitchbot-ueberblick.html"
+      ],
+      "row": 3
+    },
+    {
+      "expected_sources": [
+        "twitch-bot/chat-befehle.html",
+        "twitch-bot/faq-stats-overlay.html"
+      ],
+      "file": "public-twitch.json",
+      "first_relevant_rank": 3,
+      "question": "Welche Befehle kann ich als Zuschauer benutzen?",
+      "ranked_paths": [
+        "twitch-bot/faq-support.html",
+        "deadlock-helden/bebop.html",
+        "twitch-bot/chat-befehle.html",
+        "twitch-bot/chat-befehle.html",
+        "twitch-bot/chat-befehle.html",
+        "deadlock-helden/bebop.html"
+      ],
+      "row": 4
+    },
+    {
+      "expected_sources": [
+        "twitch-bot/chat-befehle.html"
+      ],
+      "file": "public-twitch.json",
+      "first_relevant_rank": null,
+      "question": "Gibt es Aliase für Rank, letzten Match oder Clip?",
+      "ranked_paths": [
+        "discord-server/community-tools.html",
+        "twitch-bot/faq-stats-overlay.html",
+        "deadlock-helden/yamato.html",
+        "twitch-bot/faq-stats-overlay.html",
+        "discord-server/module/tierlist-builds.html",
+        "discord-server/workflows/steam-verknuepfen-rang.html"
+      ],
+      "row": 5
+    }
+  ],
+  "cases": 30,
+  "chunks": 603,
+  "corpus_hash": "0b49cedcf95529b13013d407a71186214ae332b0fdb467cffa8aef055ffdd6ce",
+  "corpus_load_ms": 47.181925,
+  "corpus_root": "/home/nathanael/.local/share/dl-knowledge/ab8cae892c186bba4a0a097ea505cef880a87d6e/public",
+  "embedding_samples_ms": [
+    35.020534999999995,
+    51.439068,
+    32.163405,
+    37.699217,
+    16.289450000000002,
+    20.618039,
+    31.284584999999996,
+    26.011928,
+    24.495,
+    27.747284,
+    27.496237,
+    20.624339,
+    18.599859,
+    22.84984,
+    22.539314,
+    20.837287999999997,
+    41.020413999999995,
+    19.08676,
+    23.340327000000002,
+    29.592364,
+    46.781725,
+    34.673513,
+    40.836577999999996,
+    50.211625000000005,
+    25.282632999999997,
+    28.13119,
+    20.006621,
+    35.0436,
+    31.423815,
+    26.574422000000002,
+    34.360454,
+    38.39994,
+    60.934105,
+    39.101202,
+    20.257447000000003,
+    23.393366,
+    28.719313,
+    25.678768,
+    36.04929,
+    31.823113,
+    30.981370000000002,
+    54.182998000000005,
+    30.12198,
+    35.620264999999996,
+    41.07762,
+    26.883157,
+    58.102793999999996,
+    27.849237,
+    25.71367,
+    32.960171,
+    23.514638,
+    27.245060000000002,
+    61.101396,
+    30.720458,
+    29.087777,
+    33.069676,
+    46.487563,
+    33.789957,
+    23.340216,
+    32.709715,
+    59.538019,
+    50.001619,
+    36.331823,
+    35.919525,
+    34.39158,
+    30.169791,
+    58.040420000000005,
+    32.836084,
+    27.739442,
+    48.339244,
+    42.408148,
+    24.904705,
+    20.503867,
+    32.007110999999995,
+    26.336476,
+    21.288024999999998,
+    51.19379,
+    20.647854,
+    22.009767999999998,
+    23.374879,
+    40.694735,
+    28.087404,
+    34.51753,
+    45.379829,
+    31.360768999999998,
+    19.564527000000002,
+    30.278975,
+    33.028273,
+    46.007442000000005,
+    63.575571999999994,
+    42.948018,
+    57.675993,
+    36.317651999999995,
+    35.797963,
+    25.031956,
+    40.087082,
+    28.405112,
+    35.620255,
+    38.620711,
+    24.794841,
+    27.865009999999998,
+    30.827317999999998,
+    36.862531,
+    24.396912999999998,
+    32.883887,
+    29.661668,
+    55.863211,
+    35.112063,
+    44.431096000000004,
+    31.797615,
+    28.411291000000002,
+    25.891507,
+    29.081948,
+    23.676902,
+    33.847053,
+    40.375296,
+    30.867328999999998,
+    34.953374000000004,
+    26.085338999999998,
+    29.026855,
+    24.42124,
+    34.833795,
+    31.686969,
+    37.885818,
+    29.27641,
+    40.622265999999996,
+    33.783046999999996,
+    24.842851999999997,
+    28.223138,
+    31.844776,
+    38.243705000000006,
+    43.125014,
+    19.608542999999997,
+    38.052437000000005,
+    39.335775000000005,
+    22.130209,
+    29.84905,
+    37.795241,
+    29.02405,
+    33.342846,
+    43.664855,
+    27.892862,
+    33.357517,
+    40.429477,
+    36.39582,
+    35.334855999999995,
+    32.075202999999995,
+    32.737257,
+    36.303852,
+    38.716834999999996
+  ],
+  "hit_at_1": 0.6333333333333333,
+  "hit_at_6": 0.9,
+  "html_sources": 109,
+  "index_computed": 603,
+  "index_ms": 192765.08294300002,
+  "index_reused": 0,
+  "model_fingerprint": "c5458294041f776b9a3ef3222372ce00c1c6b5e2f459d1c655ece4ae715d2f2b",
+  "model_load_ms": 196.476348,
+  "mrr_at_6": 0.715,
+  "peak_rss_kib": 451312,
+  "query_embedding_p50_ms": 32.007110999999995,
+  "query_embedding_p95_ms": 55.863211,
+  "query_samples": 150,
+  "query_total_p50_ms": 51.145708,
+  "query_total_p95_ms": 73.152963,
+  "rounds": 5,
+  "rss_kib": 114496,
+  "selected_cases_hash": "6242304b39c3c961e0e5c424528332c70886c4d00fee3dbab85c90dd8d753e2e",
+  "source_recall_at_6": 0.7611111111111112,
+  "timestamp_unix": 1789721547,
+  "total_samples_ms": [
+    58.245849,
+    68.49970499999999,
+    50.781841,
+    50.548702,
+    29.605283999999997,
+    36.871283999999996,
+    57.814061,
+    42.889921,
+    37.344344,
+    44.546108000000004,
+    44.908552,
+    34.876899,
+    31.613259,
+    35.956219999999995,
+    47.785572,
+    43.040586999999995,
+    55.389419000000004,
+    33.37863,
+    38.956796000000004,
+    46.320852,
+    65.42265499999999,
+    50.454359,
+    57.859669000000004,
+    65.13772700000001,
+    37.677024,
+    44.287509,
+    35.8761,
+    51.534492,
+    47.451421,
+    46.70568,
+    51.72666,
+    58.594913,
+    78.031848,
+    52.555955000000004,
+    37.726638,
+    40.109026,
+    45.589605,
+    49.836602,
+    53.215465,
+    47.391861,
+    53.896618000000004,
+    73.152963,
+    48.6834,
+    54.087975,
+    57.209122,
+    41.366714,
+    75.739627,
+    45.314391,
+    40.041884,
+    49.070822,
+    40.72482,
+    42.765925,
+    84.467572,
+    45.948933999999994,
+    46.553000999999995,
+    59.620643,
+    63.212066,
+    51.212437,
+    37.841581,
+    48.523159,
+    79.579182,
+    64.918638,
+    57.453819,
+    53.497078,
+    50.982703,
+    52.715484,
+    73.832983,
+    49.769451,
+    48.784842000000005,
+    66.409337,
+    57.110113,
+    40.45837,
+    38.285717,
+    54.697792,
+    44.153529,
+    58.231127,
+    65.764719,
+    53.780564000000005,
+    36.11631,
+    41.999945,
+    58.387111,
+    45.283445,
+    49.711144,
+    60.573664,
+    44.526889,
+    35.113454000000004,
+    53.85778,
+    48.308928,
+    63.606798000000005,
+    79.71315299999999,
+    62.279875999999994,
+    89.70157099999999,
+    57.787611000000005,
+    57.557455,
+    61.343540000000004,
+    66.830248,
+    51.145708,
+    53.476828,
+    55.267727,
+    41.625383,
+    43.924955000000004,
+    52.983205999999996,
+    53.691851,
+    50.303613,
+    49.022369000000005,
+    45.482624,
+    70.378376,
+    51.688903,
+    61.827797,
+    48.879204,
+    46.637868999999995,
+    41.460435,
+    44.74838200000001,
+    39.763086,
+    52.03286,
+    59.029406,
+    58.054441999999995,
+    56.277143,
+    42.564453,
+    45.515764,
+    42.982731,
+    52.511348,
+    45.904067,
+    57.80706,
+    44.473759,
+    58.174321,
+    46.921735,
+    39.761273,
+    48.238452,
+    52.461403,
+    54.000795,
+    57.881361,
+    39.468303000000006,
+    54.221506000000005,
+    59.413412,
+    38.918808,
+    46.600573,
+    57.348461,
+    52.939621,
+    53.441485,
+    64.113299,
+    43.251723999999996,
+    51.22727,
+    56.523202000000005,
+    60.799203000000006,
+    58.147240000000004,
+    45.665738999999995,
+    51.530245,
+    52.140291,
+    54.832604
+  ]
+}
