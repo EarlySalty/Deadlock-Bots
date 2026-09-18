@@ -227,6 +227,15 @@ fn load_golden_cases(golden_dir: &Path, docs_path: &Path) -> Result<Vec<GoldenCa
         "Golden-Suite hat {} Fälle, erwartet mindestens {BASELINE_GOLDEN_CASES}",
         cases.len()
     );
+    let synthetic_cases = cases
+        .iter()
+        .filter(|case| case.herkunft.as_deref() == Some("synthetisch"))
+        .count();
+    ensure!(
+        synthetic_cases == cases.len() - BASELINE_GOLDEN_CASES,
+        "Golden-Erweiterung braucht für jeden Fall herkunft=synthetisch: {} Erweiterungen, {synthetic_cases} markiert",
+        cases.len() - BASELINE_GOLDEN_CASES
+    );
     Ok(cases)
 }
 
@@ -257,6 +266,20 @@ fn validate_case(case: &GoldenCase, docs_path: &Path) -> Result<()> {
             origin,
             case.question
         );
+    }
+
+    for (field, terms) in [
+        ("context_terms", &case.context_terms),
+        ("answer_terms", &case.answer_terms),
+        ("forbidden_terms", &case.forbidden_terms),
+    ] {
+        for term in terms {
+            ensure!(
+                !term.trim().is_empty(),
+                "Leerer Eintrag in {field} bei {:?}",
+                case.question
+            );
+        }
     }
 
     for source in &case.expected_sources {

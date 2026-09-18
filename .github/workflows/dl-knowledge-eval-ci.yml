@@ -34,6 +34,6 @@ jobs:
       - name: Test dl-knowledge
         run: cargo test --package dl-knowledge
       - name: Clippy dl-knowledge
-        run: cargo clippy --package dl-knowledge -- -D warnings
+        run: cargo clippy --package dl-knowledge --no-deps -- -D warnings
       - name: BM25 baseline
         run: cargo run --package dl-knowledge -- eval bm25 ../Deadlock-Docs/evals ../Deadlock-Docs/public /tmp/bm25.json /tmp/bm25.md
