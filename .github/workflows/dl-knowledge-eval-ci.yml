@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - feat/dl-knowledge-eval
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
