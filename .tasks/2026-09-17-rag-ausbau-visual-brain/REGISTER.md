@@ -57,9 +57,36 @@ Auftrag: RAG-Ausbau + Visual Brain (AUFTRAG.md). Orchestrator: Hauptsession.
 - dl-ai-Kernbefund: dl-ai loest Modelle NICHT dynamisch auf (einkompilierter Default deepseek-v4-flash-0731 plus Env/Param-Override), anders als tb-llm im Twitch-Bot. Drei getrennte Konsumentenpfade: dl-knowledge Direktclient (60s HTTP + 7s App, reasoning_effort none, umgeht Fabrik/Retry/Transparenz), Concierge Fabrik BotPate (110s, Retry, eigener 100s-Timeout DL_CONCIERGE_AI_TIMEOUT_SECS Deckel 110), Faq/BrainAntwort Fabrik+ChatTextGenerator (45s, reasoning_effort verworfen).
 - FAQ-Luecken (public-Korpus): Spielmechaniken/Matchablauf, eigenstaendige Item-Referenz mit patchbezogenen Build-Begruendungen, Ranks/Matchmaking-Erklaerung. Heldenwissen ist stark (36 Guides).
 
+## Paketierung (2026-09-18)
+
+Der Nutzer hat entschieden: das Programm wird in Pakete geteilt und an Codex (Astra) in T3 übergeben. Aufteilung in PAKETE.md, Briefings PAKET-A bis PAKET-E. Codex-Kontingent (astra, luna, sol) ist bis 19.09. 13:23 gesperrt; die Threads werden danach gestartet.
+
+## Thread-Register (T3)
+
+Intent-Thread: keiner, Orchestrator ist die Claude-Hauptsession; Meldungen gehen in den jeweiligen Paket-Thread.
+
+| Paket | Thread-ID | Modell | Status | Worktree | letzte Meldung |
+|---|---|---|---|---|---|
+| A | - | astra | wartet auf Kontingent | ~/.worktrees/deadlock-docs-wissensbasis | - |
+| B | - | astra | wartet auf Kontingent | ~/.worktrees/dl-knowledge-hybrid | - |
+| C | - | astra | startet nach B | ~/.worktrees/dl-knowledge-hybrid | - |
+| D | - | astra | wartet auf Kontingent | ~/.worktrees/dl-knowledge-eval | - |
+| E | - | astra | wartet auf Kontingent | ~/.worktrees/claude-config-visual-brain | - |
+
+Startbefehle (je einer, ab 19.09. 13:23, vorher `t3-thread.py kontingent status`):
+
+```
+python3 ~/Documents/tools/t3-thread.py new --project Deadlock-Docs --model astra --title "RAG-Ausbau (A) Korpus-Rest und FAQ-Entwurf" "[Orchestrator] Briefing: /home/nathanael/repos/Deadlock-Bots/.tasks/2026-09-17-rag-ausbau-visual-brain/PAKET-A.md, Regeln in PAKETE.md daneben. Worktree ~/.worktrees/deadlock-docs-wissensbasis, Branch docs/wissensbasis-phase-1-rest ab origin/main. Du bist der einzige Thread für dieses Paket, keine Unter-Threads oder Unter-Agenten. Fertigmeldung hier im Thread, kein Merge."
+python3 ~/Documents/tools/t3-thread.py new --project Deadlock-Bots --model astra --title "RAG-Ausbau (B) Embedding und pgvector" "[Orchestrator] Briefing: /home/nathanael/repos/Deadlock-Bots/.tasks/2026-09-17-rag-ausbau-visual-brain/PAKET-B.md, Spec PHASE-2-SPEC.md, Regeln PAKETE.md daneben. Worktree ~/.worktrees/dl-knowledge-hybrid, Branch feat/dl-knowledge-hybrid (zuerst auf origin/main rebasen). Du bist der einzige Thread für dieses Paket, keine Unter-Threads oder Unter-Agenten. Fertigmeldung hier im Thread, kein Merge."
+python3 ~/Documents/tools/t3-thread.py new --project Deadlock-Bots --model astra --title "RAG-Ausbau (D) Eval-Harness" "[Orchestrator] Briefing: /home/nathanael/repos/Deadlock-Bots/.tasks/2026-09-17-rag-ausbau-visual-brain/PAKET-D.md, Regeln PAKETE.md daneben. Worktree ~/.worktrees/dl-knowledge-eval, Branch feat/dl-knowledge-eval ab origin/main. Du bist der einzige Thread für dieses Paket, keine Unter-Threads oder Unter-Agenten. Fertigmeldung hier im Thread, kein Merge."
+python3 ~/Documents/tools/t3-thread.py new --project claude-config --model astra --title "RAG-Ausbau (E) Visual Brain" "[Orchestrator] Briefing: /home/nathanael/repos/Deadlock-Bots/.tasks/2026-09-17-rag-ausbau-visual-brain/PAKET-E.md, Regeln PAKETE.md daneben. Worktree ~/.worktrees/claude-config-visual-brain, Branch feat/visual-brain ab origin/main. Du bist der einzige Thread für dieses Paket, keine Unter-Threads oder Unter-Agenten. Fertigmeldung hier im Thread, kein Merge."
+```
+
+Paket C wird erst nach der Fertigmeldung von B gestartet (gleicher Worktree, Briefing PAKET-C.md).
+
 ## Naechster Schritt
 
-Phase 1 weiter: internal-Docs fuer dl-bot-Kern und die uebrigen Kern-Crates, je chunked ueber Union Alpha, je Grok-geprueft. Danach FAQ-Entwurf (nur Entwurf, nie public/ automatisch), der die drei Luecken schliesst. Dann Phase 2 als normaler Rust-Build mit Review, Gate und Live-Beweis; vor dem Merge kurzer Hinweis an den Nutzer, da Produktionscode am Community-Bot.
+Threads starten, sobald das Codex-Kontingent frei ist; Wache alle 20 bis 30 Minuten je Thread, Register nachziehen. A und D nach Review einzeln mergen, B und C zusammen (Hinweis an den Nutzer vor dem Merge), Umschaltung nur mit belegtem Mehrwert aus D.
 
 ## Getrennte Aufträge
 
