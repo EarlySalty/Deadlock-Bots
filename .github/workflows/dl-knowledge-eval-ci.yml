@@ -1,0 +1,27 @@
+name: dl-knowledge eval CI
+
+on:
+  push:
+    branches:
+      - feat/dl-knowledge-eval
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy,rustfmt
+      - name: Format own eval file
+        run: rustfmt --edition 2021 --check bin/dl-knowledge/src/eval.rs
+      - name: Test dl-knowledge
+        run: cargo test --package dl-knowledge
+      - name: Clippy dl-knowledge
+        run: cargo clippy --package dl-knowledge -- -D warnings
