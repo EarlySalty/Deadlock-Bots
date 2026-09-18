@@ -124,9 +124,7 @@ pub fn run() -> Result<bool> {
         return Ok(false);
     }
 
-    if args.get(1).is_none()
-        || matches!(args.get(1).map(String::as_str), Some("help" | "--help"))
-    {
+    if args.get(1).is_none() || matches!(args.get(1).map(String::as_str), Some("help" | "--help")) {
         print_help();
         return Ok(true);
     }
@@ -183,9 +181,7 @@ fn load_golden_cases(golden_dir: &Path, docs_path: &Path) -> Result<Vec<GoldenCa
         .with_context(|| format!("Golden-Verzeichnis lesen: {}", golden_dir.display()))?
         .map(|entry| entry.map(|value| value.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
-    files.retain(|path| {
-        path.is_file() && path.extension() == Some(OsStr::new("json"))
-    });
+    files.retain(|path| path.is_file() && path.extension() == Some(OsStr::new("json")));
     files.sort();
 
     let names = files
@@ -265,7 +261,10 @@ fn validate_case(case: &GoldenCase, docs_path: &Path) -> Result<()> {
 
     for source in &case.expected_sources {
         let relative = Path::new(source);
-        ensure!(!relative.is_absolute(), "Absolute Golden-Quelle: {source:?}");
+        ensure!(
+            !relative.is_absolute(),
+            "Absolute Golden-Quelle: {source:?}"
+        );
         ensure!(
             relative.extension() == Some(OsStr::new("html")),
             "Golden-Quelle ist kein HTML: {source:?}"
@@ -416,10 +415,7 @@ fn build_report(
     let hit_rate = |k: usize| {
         answerable
             .iter()
-            .filter(|case| {
-                case.first_relevant_rank
-                    .is_some_and(|rank| rank <= k)
-            })
+            .filter(|case| case.first_relevant_rank.is_some_and(|rank| rank <= k))
             .count() as f64
             / answerable.len() as f64
     };
@@ -455,8 +451,7 @@ fn build_report(
             mrr,
             citation_correctness: hit_rate(RETRIEVAL_LIMIT),
             abstain_rate: abstained as f64 / unanswerable.len() as f64,
-            false_answer_rate: (unanswerable.len() - abstained) as f64
-                / unanswerable.len() as f64,
+            false_answer_rate: (unanswerable.len() - abstained) as f64 / unanswerable.len() as f64,
         },
         cases: results,
     })
