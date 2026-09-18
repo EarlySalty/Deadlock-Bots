@@ -19,6 +19,12 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Checkout Golden corpus
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: EarlySalty/Deadlock-Docs
+          ref: main
+          path: Deadlock-Docs
       - name: Rust 1.88
         run: |
           rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
@@ -29,3 +35,5 @@ jobs:
         run: cargo test --package dl-knowledge
       - name: Clippy dl-knowledge
         run: cargo clippy --package dl-knowledge -- -D warnings
+      - name: BM25 baseline
+        run: cargo run --package dl-knowledge -- eval bm25 ../Deadlock-Docs/evals ../Deadlock-Docs/public /tmp/bm25.json /tmp/bm25.md
