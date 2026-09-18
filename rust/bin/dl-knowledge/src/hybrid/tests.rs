@@ -226,6 +226,7 @@ fn messung_trennt_quellentreffer_von_lexikalisch_zulaessigem_beleg() {
         context_terms: vec!["Steam".into()],
         answer_terms: vec!["Steam".into()],
         forbidden_terms: Vec::new(),
+        herkunft: None,
     };
     let mut chunks = vec![chunk("a.html", "2026-09-18", "Steam verknüpfen")];
     let valid = quality::measure(&case, &chunks);
@@ -255,18 +256,33 @@ fn messbereiche_verweigern_luecken_ausserhalb_der_golden_suite() -> Result<()> {
         bench::Plan {
             rounds: 1,
             first: 112,
-            count: 112
+            count: Some(142)
         }
-        .range(224)?,
-        112..224
+        .range(254)?,
+        112..254
     );
-    for (first, count) in [(0, 0), (0, 225), (224, 1), (usize::MAX, 1)] {
+    assert_eq!(
+        bench::Plan {
+            rounds: 1,
+            first: 112,
+            count: None
+        }
+        .range(254)?,
+        112..254
+    );
+    for (first, count) in [
+        (0, Some(0)),
+        (0, Some(255)),
+        (254, None),
+        (254, Some(1)),
+        (usize::MAX, Some(1)),
+    ] {
         assert!(bench::Plan {
             rounds: 1,
             first,
             count
         }
-        .range(224)
+        .range(254)
         .is_err());
     }
     Ok(())

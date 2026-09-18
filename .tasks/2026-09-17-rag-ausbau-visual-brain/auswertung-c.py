@@ -39,10 +39,13 @@ def merge(inputs):
     same = ['config', 'corpus_root', 'corpus_hash', 'golden_hash', 'chunks', 'html_sources',
             'embedding_fingerprint', 'reranker_fingerprint', 'rounds', 'suite_cases', 'generation_calls',
             'latency_scope', 'quality_scope']
+    suite_cases = parts[0]['suite_cases']
+    if suite_cases < 224:
+        raise ValueError('Unerwartete Messbasis')
     for part in parts:
         if any(part[key] != parts[0][key] for key in same):
             raise ValueError('Teilberichte verwenden verschiedene Modelle, Korpora oder Messkonfigurationen')
-        if part['suite_cases'] != 224 or part['generation_calls'] != 0:
+        if part['generation_calls'] != 0:
             raise ValueError('Unerwartete Messbasis')
         expected = list(range(part['range_start'] + 1, part['range_end'] + 1))
         if [row['suite_position'] for row in part['case_results']] != expected or len(expected) != part['cases']:
@@ -52,10 +55,10 @@ def merge(inputs):
             if len(samples) != part['cases'] * part['rounds'] or not all(math.isfinite(value) and value >= 0 for value in samples):
                 raise ValueError('Ungültige Latenzmessungen')
     rows = sorted([row for part in parts for row in part['case_results']], key=lambda row: row['suite_position'])
-    if [row['suite_position'] for row in rows] != list(range(1, 225)) or len({row['question'] for row in rows}) != 224:
+    if [row['suite_position'] for row in rows] != list(range(1, suite_cases + 1)) or len({row['question'] for row in rows}) != suite_cases:
         raise ValueError('Die Teilberichte müssen jeden Golden-Fall genau einmal abdecken')
     result = {key: parts[0][key] for key in same}
-    result.update({'cases': 224, 'range_start': 0, 'range_end': 224, 'complete_suite': True,
+    result.update({'cases': suite_cases, 'range_start': 0, 'range_end': suite_cases, 'complete_suite': True,
                    'case_results': rows, 'timestamp_unix': max(part['timestamp_unix'] for part in parts),
                    'rss_kib': max(part['rss_kib'] for part in parts),
                    'peak_rss_kib': max(part['peak_rss_kib'] for part in parts),

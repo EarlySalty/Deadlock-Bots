@@ -21,7 +21,7 @@ pub async fn run() -> Result<bool> {
     }
     let command = args.get(1).map(String::as_str).unwrap_or("help");
     if matches!(command, "help" | "--help") {
-        println!("dl-knowledge hybrid check < paare.json\ndl-knowledge hybrid bench <eval-verzeichnis> <bericht.json> [runden=1] [start=0] [anzahl=224]\ncheck benötigt nur lokale Reranker-Dateien; bench ausschließlich in einer frischen Wegwerf-Testdatenbank.\nOptionen: DL_KNOWLEDGE_HYBRID_OPTIONS als JSON; Modelle: DL_KNOWLEDGE_MODELS und DL_KNOWLEDGE_RERANK_MODELS.\nDer Dienstschalter DL_KNOWLEDGE_HYBRID bleibt standardmäßig false.");
+        println!("dl-knowledge hybrid check < paare.json\ndl-knowledge hybrid bench <eval-verzeichnis> <bericht.json> [runden=1] [start=0] [anzahl=alle]\ncheck benötigt nur lokale Reranker-Dateien; bench ausschließlich in einer frischen Wegwerf-Testdatenbank.\nOptionen: DL_KNOWLEDGE_HYBRID_OPTIONS als JSON; Modelle: DL_KNOWLEDGE_MODELS und DL_KNOWLEDGE_RERANK_MODELS.\nDer Dienstschalter DL_KNOWLEDGE_HYBRID bleibt standardmäßig false.");
         return Ok(true);
     }
     ensure!(
@@ -74,14 +74,12 @@ pub async fn run() -> Result<bool> {
     let count = args
         .get(6)
         .map(|value| value.parse::<usize>())
-        .transpose()?
-        .unwrap_or(224);
+        .transpose()?;
     let plan = bench::Plan {
         rounds,
         first,
         count,
     };
-    plan.range(224)?;
     let started = Instant::now();
     let mut models = Models::load(&config)?;
     let model_load_ms = started.elapsed().as_secs_f64() * 1000.0;

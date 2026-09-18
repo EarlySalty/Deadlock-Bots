@@ -10,13 +10,13 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
-def fixture(first, count):
+def fixture(first, count, suite_cases=254):
     metric = {'hit': True, 'source_recall': 1.0, 'reciprocal_rank': 1.0, 'relevant_candidates': 1,
               'missing_context_terms': [], 'forbidden_context_terms': [], 'grounded_selection_possible': True,
               'expected_source_lost_to_relevance': False, 'answer_terms_lost_to_relevance': False}
     result = {'config': {'fixture': True}, 'corpus_root': '/fixture', 'corpus_hash': 'fixture-corpus',
               'golden_hash': 'fixture-golden', 'chunks': 3, 'html_sources': 3, 'embedding_fingerprint': 'fixture-embedder',
-              'reranker_fingerprint': 'fixture-reranker', 'rounds': 1, 'suite_cases': 224, 'generation_calls': 0,
+              'reranker_fingerprint': 'fixture-reranker', 'rounds': 1, 'suite_cases': suite_cases, 'generation_calls': 0,
               'latency_scope': 'fixture', 'quality_scope': 'fixture', 'cases': count, 'range_start': first,
               'range_end': first + count, 'timestamp_unix': 0, 'rss_kib': 1, 'peak_rss_kib': 1,
               'model_load_ms': 1.0, 'index_ms': 1.0,
@@ -39,24 +39,24 @@ class MergeTests(unittest.TestCase):
             return module.merge(paths)
 
     def test_vollstaendige_suite_wird_einmal_aggregiert(self):
-        result = self.merge(fixture(0, 112), fixture(112, 112))
+        result = self.merge(fixture(0, 127), fixture(127, 127))
         self.assertTrue(result['complete_suite'])
-        self.assertEqual(result['bm25']['query_samples'], 224)
-        self.assertEqual(result['reranked']['hit_cases'], 224)
+        self.assertEqual(result['bm25']['query_samples'], 254)
+        self.assertEqual(result['reranked']['hit_cases'], 254)
 
     def test_luecken_werden_abgelehnt(self):
         with self.assertRaises(ValueError):
-            self.merge(fixture(0, 112))
+            self.merge(fixture(0, 127))
 
     def test_doppelte_bereiche_werden_abgelehnt(self):
         with self.assertRaises(ValueError):
-            self.merge(fixture(0, 112), fixture(0, 112))
+            self.merge(fixture(0, 127), fixture(0, 127))
 
     def test_verschiedene_korpora_werden_abgelehnt(self):
-        second = fixture(112, 112)
+        second = fixture(127, 127)
         second['corpus_hash'] = 'anderer-fixture-korpus'
         with self.assertRaises(ValueError):
-            self.merge(fixture(0, 112), second)
+            self.merge(fixture(0, 127), second)
 
 
 if __name__ == '__main__':

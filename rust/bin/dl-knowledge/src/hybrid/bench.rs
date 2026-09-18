@@ -12,18 +12,17 @@ use super::{config::Config, pipeline, quality, Models};
 pub struct Plan {
     pub rounds: usize,
     pub first: usize,
-    pub count: usize,
+    pub count: Option<usize>,
 }
 
 impl Plan {
     pub fn range(&self, total: usize) -> Result<std::ops::Range<usize>> {
-        ensure!(
-            (1..=5).contains(&self.rounds) && self.count > 0,
-            "Ungültige Messauswahl"
-        );
+        ensure!((1..=5).contains(&self.rounds), "Ungültige Messauswahl");
+        let count = self.count.unwrap_or_else(|| total.saturating_sub(self.first));
+        ensure!(count > 0, "Ungültige Messauswahl");
         let end = self
             .first
-            .checked_add(self.count)
+            .checked_add(count)
             .ok_or_else(|| anyhow::anyhow!("Messbereich ist zu groß"))?;
         ensure!(
             end <= total,
@@ -48,8 +47,8 @@ pub async fn run(
         "C-Messung nur über scripts/central_test_db.sh"
     );
     ensure!(
-        config.rerank && (1..=5).contains(&plan.rounds),
-        "Messung benötigt Reranker und 1 bis 5 Runden"
+        (1..=5).contains(&plan.rounds),
+        "Messung benötigt 1 bis 5 Runden"
     );
     let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge.index_generations")
         .fetch_one(pool)

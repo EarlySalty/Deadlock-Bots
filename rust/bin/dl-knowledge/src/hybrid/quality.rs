@@ -15,6 +15,8 @@ pub struct Case {
     pub context_terms: Vec<String>,
     pub answer_terms: Vec<String>,
     pub forbidden_terms: Vec<String>,
+    #[serde(default)]
+    pub herkunft: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +185,12 @@ pub fn load(dir: &Path, root: &Path) -> Result<Vec<(String, usize, Case)>> {
                 },
                 "Ungültige Golden-Labels"
             );
+            ensure!(
+                case.herkunft
+                    .as_deref()
+                    .is_none_or(|value| value == "synthetisch"),
+                "Unbekannte Golden-Herkunft"
+            );
             for source in &case.expected_sources {
                 let path = Path::new(source);
                 ensure!(path.extension().is_some_and(|ext| ext == "html") && !source.contains('\\')
@@ -192,9 +200,18 @@ pub fn load(dir: &Path, root: &Path) -> Result<Vec<(String, usize, Case)>> {
             result.push((name.to_string(), row + 1, case));
         }
     }
+    const BASELINE_GOLDEN_CASES: usize = 224;
     ensure!(
-        result.len() == 224,
-        "Messung benötigt die unveränderte 224er-Golden-Suite"
+        result.len() >= BASELINE_GOLDEN_CASES,
+        "Messung benötigt mindestens die 224 Golden-Fälle der Ausgangsbasis"
+    );
+    let synthetic_cases = result
+        .iter()
+        .filter(|(_, _, case)| case.herkunft.as_deref() == Some("synthetisch"))
+        .count();
+    ensure!(
+        synthetic_cases == result.len() - BASELINE_GOLDEN_CASES,
+        "Golden-Erweiterungen müssen vollständig mit herkunft=synthetisch markiert sein"
     );
     Ok(result)
 }
