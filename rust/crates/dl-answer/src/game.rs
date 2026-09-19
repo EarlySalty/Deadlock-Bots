@@ -28,28 +28,21 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
             build.to_string(),
         );
     }
-    if let Some(ground) = value.get("ground_truth").and_then(Value::as_object) {
-        for key in ["item", "patch_overview", "stats", "timeline", "lineage"] {
-            if let Some(mut data) = ground.get(key).and_then(prune) {
-                if key == "item" {
-                    apply_item_overrides(&mut data);
-                }
-                let historical = matches!(key, "timeline" | "lineage" | "patch_overview");
-                let title = if historical {
-                    format!("Historische Deadlock-Patchänderungen: {key}")
-                } else {
-                    format!("Deadlock-Spieldaten: {key}")
-                };
-                let data = if historical {
-                    serde_json::json!({"temporal_scope":"historical", "facts":data})
-                } else {
-                    data
-                };
-                push(&mut result, Source::GameData { title }, data.to_string());
-            }
-        }
-    }
+    add_ground_fields(value, &["item"], &mut result);
     add_game_wiki(value, &mut result);
+    add_ground_fields(value, &["stats"], &mut result);
+    let history_requested = value["intent"] == "patch_changes"
+        || value
+            .pointer("/retrieval_meta/route")
+            .and_then(Value::as_str)
+            == Some("patch_overview");
+    if history_requested {
+        add_ground_fields(
+            value,
+            &["patch_overview", "timeline", "lineage"],
+            &mut result,
+        );
+    }
     if let Some(claims) = value
         .pointer("/creator_knowledge/verified")
         .and_then(Value::as_array)
@@ -87,6 +80,30 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
         }
     }
     Ok(result)
+}
+
+fn add_ground_fields(value: &Value, keys: &[&str], result: &mut Retrieved) {
+    if let Some(ground) = value.get("ground_truth").and_then(Value::as_object) {
+        for key in keys {
+            if let Some(mut data) = ground.get(*key).and_then(prune) {
+                if *key == "item" {
+                    apply_item_overrides(&mut data);
+                }
+                let historical = matches!(*key, "timeline" | "lineage" | "patch_overview");
+                let title = if historical {
+                    format!("Historische Deadlock-Patchänderungen: {key}")
+                } else {
+                    format!("Deadlock-Spieldaten: {key}")
+                };
+                let data = if historical {
+                    serde_json::json!({"temporal_scope":"historical", "facts":data})
+                } else {
+                    data
+                };
+                push(result, Source::GameData { title }, data.to_string());
+            }
+        }
+    }
 }
 
 fn push(result: &mut Retrieved, source: Source, text: String) {
@@ -564,8 +581,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn aktuelle_fachkarten_werden_nicht_von_historie_verdraengt() {
+        let matches: Vec<_> = (0..5).map(|index| json!({"title":format!("Fachkarte {index}"),"content":format!("````json\n{{\"Name\":\"Fachkarte {index}\",\"Description\":\"Aktuelle Funktion\"}}\n````")})).collect();
+        let result = from_context(&json!({"intent":"hero_overview","ground_truth":{"timeline":{"recent_events":[{"raw_line":"ALTE_GLOBALE_REGEL".repeat(1500)}]},"game_knowledge":{"available":true,"matches":matches}}})).expect("fixture");
+        assert_eq!(result.evidence.len(), 5);
+        assert!(!serde_json::to_string(&result.evidence)
+            .expect("json")
+            .contains("ALTE_GLOBALE_REGEL"));
+    }
+
+    #[test]
     fn tooltip_hilfswerte_sind_keine_mechanik_und_timeline_bleibt_historisch() {
-        let result = from_context(&json!({"intent":"item_question","ground_truth":{"item":{"properties":[{"name":"NonHeroAbilityLifestealTooltipOnly","value":"3"},{"name":"AbilityLifestealPercentHero","value":"13"}]},"timeline":{"recent_events":[{"raw_line":"Historische globale Änderung","posted_at":"2024-01-01"}]}}})).expect("fixture");
+        let result = from_context(&json!({"intent":"patch_changes","ground_truth":{"item":{"properties":[{"name":"NonHeroAbilityLifestealTooltipOnly","value":"3"},{"name":"AbilityLifestealPercentHero","value":"13"}]},"timeline":{"recent_events":[{"raw_line":"Historische globale Änderung","posted_at":"2024-01-01"}]}}})).expect("fixture");
         assert!(!result.evidence[0].text.contains("TooltipOnly"));
         assert!(result.evidence[0].text.contains("13"));
         assert_eq!(
