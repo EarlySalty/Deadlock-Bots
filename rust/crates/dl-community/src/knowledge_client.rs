@@ -167,17 +167,7 @@ fn logged_lookup(
 
 pub(crate) async fn ask(base_url: &str, question: &str, timeout: Duration) -> KnowledgeLookup {
     let mut url = match reqwest::Url::parse(base_url) {
-        Ok(url)
-            if matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some_and(|host| {
-                    host.eq_ignore_ascii_case("localhost")
-                        || host
-                            .parse::<std::net::IpAddr>()
-                            .is_ok_and(|address| address.is_loopback())
-                }) =>
-        {
-            url
-        }
+        Ok(url) if matches!(url.scheme(), "http" | "https") && is_loopback_url(&url) => url,
         _ => {
             return logged_lookup(
                 question,
@@ -943,12 +933,7 @@ impl dl_answer::Retriever for CommunityRetriever {
         use dl_answer::AnswerError;
         let mut url =
             reqwest::Url::parse(&self.base_url).map_err(|_| AnswerError::InvalidEvidence)?;
-        let loopback = url.host_str().is_some_and(|host| {
-            host == "localhost"
-                || host
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        });
+        let loopback = is_loopback_url(&url);
         if !loopback
             || !matches!(url.scheme(), "http" | "https")
             || !url.username().is_empty()
@@ -1032,4 +1017,39 @@ fn validate_retrieval(wire: RetrievalWire) -> Result<dl_answer::Retrieved, dl_an
         truncated: wire.truncated,
         out_of_domain: false,
     })
+}
+
+/// Prüft den bereits geparsten Host ohne DNS-Auflösung, einschließlich IPv6.
+pub fn is_loopback_url(url: &reqwest::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod loopback_host_tests {
+    #[test]
+    fn parsed_loopback_hosts_accept_ipv4_ipv6_and_reject_external_targets() {
+        for base in [
+            "http://127.0.0.1:8896",
+            "http://[::1]:8896",
+            "http://localhost:8896",
+        ] {
+            assert!(super::is_loopback_url(
+                &reqwest::Url::parse(base).expect("URL")
+            ));
+        }
+        for base in [
+            "http://[::2]:8896",
+            "http://192.0.2.1",
+            "http://example.org",
+        ] {
+            assert!(!super::is_loopback_url(
+                &reqwest::Url::parse(base).expect("URL")
+            ));
+        }
+    }
 }

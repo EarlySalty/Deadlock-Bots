@@ -11,6 +11,19 @@ struct MeasuredProvider {
     elapsed_ms: std::sync::atomic::AtomicU64,
     show_evidence: bool,
 }
+struct ElapsedMeasurement<'a> {
+    start: Instant,
+    total: &'a std::sync::atomic::AtomicU64,
+}
+impl Drop for ElapsedMeasurement<'_> {
+    fn drop(&mut self) {
+        self.total.fetch_add(
+            self.start.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 #[async_trait::async_trait]
 impl ChatProvider for MeasuredProvider {
     async fn chat(
@@ -18,7 +31,10 @@ impl ChatProvider for MeasuredProvider {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<dl_ai::ChatResponse, dl_ai::ChatProviderError> {
-        let start = Instant::now();
+        let _elapsed = ElapsedMeasurement {
+            start: Instant::now(),
+            total: &self.elapsed_ms,
+        };
         if self.show_evidence {
             for message in messages {
                 if message.role == dl_ai::ChatRole::User {
@@ -60,10 +76,6 @@ impl ChatProvider for MeasuredProvider {
             };
             eprintln!("{}", json!({"provider_error_category": category}));
         }
-        self.elapsed_ms.fetch_add(
-            start.elapsed().as_millis() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
         result
     }
 }
@@ -184,10 +196,7 @@ async fn legacy_concierge(
     };
     let url = reqwest::Url::parse(base)?;
     anyhow::ensure!(
-        url.host_str().is_some_and(|host| host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())),
+        dl_community::knowledge_client::is_loopback_url(&url),
         "Nur Loopback"
     );
     let client = reqwest::Client::builder()
@@ -275,4 +284,25 @@ async fn legacy_brain(
     )
     .await??;
     Ok(json!({"answer":answer.content,"sources":context["sources"],"retrieval_ms":retrieval_ms}))
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn cancelled_measurement_keeps_provider_wait_time() {
+        let total = std::sync::atomic::AtomicU64::new(0);
+        let pending = async {
+            let _elapsed = super::ElapsedMeasurement {
+                start: std::time::Instant::now(),
+                total: &total,
+            };
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), pending)
+                .await
+                .is_err()
+        );
+        assert!(total.load(std::sync::atomic::Ordering::Relaxed) >= 15);
+    }
 }

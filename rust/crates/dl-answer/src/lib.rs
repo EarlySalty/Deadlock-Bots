@@ -252,6 +252,8 @@ impl AnswerEngine {
                     ChatMessage::user(payload.to_string()),
                 ],
                 ChatParams {
+                    // Nutzervertrag: ausschließlich Deepseek V4 Flash 0731.
+                    // Legacy-Modellkonfiguration darf keine nicht freigegebene Alternative aktivieren.
                     model: Some(MODEL.to_owned()),
                     max_tokens: match scope {
                         Scope::GameOnly => Some(900),
