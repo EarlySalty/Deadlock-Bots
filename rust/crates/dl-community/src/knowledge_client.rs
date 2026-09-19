@@ -919,3 +919,117 @@ mod tests {
         );
     }
 }
+
+/// Reiner Abruf öffentlicher Passagen für die gemeinsame Antwortinstanz.
+pub struct CommunityRetriever {
+    pub base_url: String,
+    pub timeout: Duration,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrievalWire {
+    status: String,
+    evidence: Vec<dl_answer::Evidence>,
+    truncated: bool,
+}
+
+#[async_trait::async_trait]
+impl dl_answer::Retriever for CommunityRetriever {
+    async fn retrieve(
+        &self,
+        question: &str,
+    ) -> Result<dl_answer::Retrieved, dl_answer::AnswerError> {
+        use dl_answer::AnswerError;
+        let mut url =
+            reqwest::Url::parse(&self.base_url).map_err(|_| AnswerError::InvalidEvidence)?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !loopback
+            || !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(AnswerError::InvalidEvidence);
+        }
+        url.set_path(&format!(
+            "{}/public/v1/retrieve",
+            url.path().trim_end_matches('/')
+        ));
+        url.set_query(None);
+        url.set_fragment(None);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(self.timeout)
+            .build()
+            .map_err(|_| AnswerError::Retrieval)?;
+        let mut response = client
+            .post(url)
+            .json(&KnowledgeQuestion { question })
+            .send()
+            .await
+            .map_err(map_retrieval_error)?;
+        if !response.status().is_success() {
+            return Err(AnswerError::Retrieval);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(map_retrieval_error)? {
+            if bytes.len() + chunk.len() > 256 * 1024 {
+                return Err(AnswerError::InvalidEvidence);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let wire: RetrievalWire =
+            serde_json::from_slice(&bytes).map_err(|_| AnswerError::InvalidEvidence)?;
+        validate_retrieval(wire)
+    }
+}
+
+fn map_retrieval_error(error: reqwest::Error) -> dl_answer::AnswerError {
+    if error.is_timeout() {
+        dl_answer::AnswerError::Timeout
+    } else {
+        dl_answer::AnswerError::Retrieval
+    }
+}
+
+fn validate_retrieval(wire: RetrievalWire) -> Result<dl_answer::Retrieved, dl_answer::AnswerError> {
+    use dl_answer::{AnswerError, Source};
+    let mut ids = HashSet::new();
+    let units: usize = wire
+        .evidence
+        .iter()
+        .map(|item| item.text.encode_utf16().count())
+        .sum();
+    let valid = match wire.status.as_str() {
+        "ready" => !wire.evidence.is_empty(),
+        "no_evidence" => wire.evidence.is_empty(),
+        _ => false,
+    };
+    if !valid
+        || wire.evidence.len() > 12
+        || units > 12_000
+        || wire.evidence.iter().any(|item| {
+            !matches!(item.source, Source::CommunityPage { .. })
+                || !item.source.valid()
+                || item.text.trim().is_empty()
+                || !item
+                    .id
+                    .strip_prefix('C')
+                    .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+                || !ids.insert(item.id.clone())
+        })
+    {
+        return Err(AnswerError::InvalidEvidence);
+    }
+    Ok(dl_answer::Retrieved {
+        evidence: wire.evidence,
+        truncated: wire.truncated,
+        out_of_domain: false,
+    })
+}

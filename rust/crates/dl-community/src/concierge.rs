@@ -19,7 +19,7 @@ use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
-use crate::knowledge_client::{self, KnowledgeLookup};
+use crate::knowledge_client;
 
 /// Rate-Limit fuer DM-Antworten: max. Aufrufe pro Fenster, Fensterlaenge,
 /// Mindestabstand (Sekunden). Uebernommen aus dem geloeschten DM-Assistenten,
@@ -174,6 +174,8 @@ pub const PATE_ALREADY_CLAIMED_TEXT: &str =
     "Da war jemand schneller, die Patenschaft ist schon vergeben. Danke dir fürs Draufdrücken.";
 pub const PATE_LOAD_LIMIT_TEXT: &str = "Du begleitest gerade schon drei Neulinge, das reicht erstmal. Lass diesmal jemand anderem den Vortritt und danke, dass du so aktiv bist.";
 pub const PATE_REQUEST_FALLBACK_TEXT: &str = "Klingt, als würde dir ein fester Ansprechpartner guttun. Soll ich einen unserer Paten für dich suchen?";
+/// Nur Tonfall für beleggebundene Antworten, keine Fakten oder Handlungsanweisungen.
+pub const ANSWER_PERSONA: &str = "Du bist der freundliche Ansprechpartner der Deutschen Deadlock Community. Sprich natürliches Deutsch, locker, direkt und bei passendem Anlass humorvoll, nie herablassend. Antworte so ausführlich wie die Frage es braucht. Erfinde keine eigenen Spielerlebnisse. Deine Aufgabe hier ist ausschließlich Erklären; Aktionen und persönliche Angebote übernimmt die Anwendung separat.";
 pub const PATE_REQUEST_RULE: &str = "Wenn der User sich einen Paten, Mentor oder eine feste Bezugsperson wünscht, setze \"pate_request\": true. Setze es nicht, wenn er nur wissen will, was ein Pate ist.";
 pub const ANTI_INVENT_RULE: &str = "Nenne nur Befehle, Kanäle, Rollen und Features, die im Wissenskontext oder in deinen Anweisungen vorkommen. Wenn du etwas nicht sicher weißt, sag das ehrlich und verweise auf <#1491953161747955853>. Erfinde niemals Befehle oder Abläufe.";
 pub const STEAM_NUDGE_MEMORY_MARKER: &str =
@@ -1186,6 +1188,16 @@ fn knowledge_question_from_user_history(history: &[String], current: &str) -> St
         .rev()
         .take(4)
         .collect::<Vec<_>>();
+    let mut length = current.chars().count();
+    questions.retain(|prior| {
+        let added = prior.chars().count() + 1;
+        if length + added > 4000 {
+            false
+        } else {
+            length += added;
+            true
+        }
+    });
     questions.reverse();
     if !current.is_empty() {
         questions.push(current);
@@ -2811,6 +2823,7 @@ pub struct Concierge {
     store: ConciergeStore,
     port: Arc<dyn ConciergePort>,
     ai: Option<Arc<dyn ChatProvider>>,
+    answers: Arc<dl_answer::AnswerEngine>,
     config: ConciergeConfig,
     cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
     user_actions: Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
@@ -2825,10 +2838,33 @@ impl Concierge {
         ai: Option<Arc<dyn ChatProvider>>,
         config: ConciergeConfig,
     ) -> Arc<Self> {
+        let answers = Arc::new(
+            dl_answer::AnswerEngine::new(
+                ai.clone(),
+                Arc::new(knowledge_client::CommunityRetriever {
+                    base_url: config.knowledge_url.clone(),
+                    timeout: KNOWLEDGE_TIMEOUT,
+                }),
+                None,
+                config.ai_timeout,
+            )
+            .with_persona(ANSWER_PERSONA.to_string()),
+        );
+        Self::with_answers(pool, port, ai, config, answers)
+    }
+
+    pub fn with_answers(
+        pool: PgPool,
+        port: Arc<dyn ConciergePort>,
+        ai: Option<Arc<dyn ChatProvider>>,
+        config: ConciergeConfig,
+        answers: Arc<dl_answer::AnswerEngine>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: ConciergeStore::new(pool),
             port,
             ai,
+            answers,
             config,
             cooldowns: Mutex::new(HashMap::new()),
             user_actions: Mutex::new(HashMap::new()),
@@ -4405,132 +4441,104 @@ impl Concierge {
             log_concierge_answer_decision(route, &decision, question, stateful);
             return decision;
         }
-        // Der Wissensdienst ist der EINZIGE Faktenpfad des Concierge. B07: eine belegte legitime
-        // Frage mit vorangestellter Manipulation wird beantwortet, die Manipulation verworfen;
-        // reine Injektion/Interna liefern hier keine Antwort (Knowledge ist fail-closed).
-        let retrieval_question = history.map_or_else(
-            || question.to_string(),
-            |history| knowledge_question_from_user_history(history, question),
-        );
-        let (knowledge, knowledge_outcome) = match knowledge_client::ask(
-            &self.config.knowledge_url,
-            &retrieval_question,
-            KNOWLEDGE_TIMEOUT,
-        )
-        .await
-        {
-            KnowledgeLookup::Answer(answer) => (
-                answer
-                    .answer
-                    .map(|text| text.trim().to_string())
-                    .filter(|text| !text.is_empty()),
-                ConciergeAnswerOutcome::Answered,
-            ),
-            KnowledgeLookup::Unanswerable => (None, ConciergeAnswerOutcome::NoAnswer),
-            KnowledgeLookup::Timeout => (None, ConciergeAnswerOutcome::Timeout),
-            KnowledgeLookup::Transport | KnowledgeLookup::InvalidResponse => {
-                (None, ConciergeAnswerOutcome::Error)
-            }
-        };
-        let knowledge_hit = knowledge.is_some();
-
-        if !self.config.free_voice {
-            let source = if knowledge_hit {
-                "knowledge_llm"
-            } else {
-                "gap_llm"
+        // Reiner Smalltalk behält seine Persona, hat aber keinen zweiten Faktenaufruf.
+        let lower = question.trim().to_lowercase();
+        if self.config.free_voice && pure_smalltalk(&lower) {
+            let lookup = self
+                .llm_answer_with_patience(
+                    question,
+                    GAP_GUIDANCE,
+                    conversation,
+                    patience_channel.map(|channel| (channel, AI_GEDULD_HINWEIS_NACH)),
+                )
+                .await;
+            let (answer, outcome) = match lookup {
+                LlmLookup::Answer(answer) => (answer, ConciergeAnswerOutcome::Answered),
+                LlmLookup::Timeout => (
+                    LlmAnswer {
+                        reply: Some(SMALLTALK_TEXT.into()),
+                        ..Default::default()
+                    },
+                    ConciergeAnswerOutcome::Timeout,
+                ),
+                _ => (
+                    LlmAnswer {
+                        reply: Some(SMALLTALK_TEXT.into()),
+                        ..Default::default()
+                    },
+                    ConciergeAnswerOutcome::Error,
+                ),
             };
             let decision = AnswerDecision {
-                answer: LlmAnswer {
-                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
-                    intent: Some(classify_intent(question)),
-                    ..LlmAnswer::default()
-                },
-                source,
-                knowledge_hit,
-                outcome: knowledge_outcome,
+                answer,
+                source: "conversation_llm",
+                knowledge_hit: false,
+                outcome,
             };
             log_concierge_answer_decision(route, &decision, question, stateful);
             return decision;
         }
-
-        let extra_system = knowledge.as_ref().map_or_else(
-            || GAP_GUIDANCE.to_string(),
-            |answer| format!("Wissenskontext aus dl-knowledge:\n{answer}"),
+        let retrieval_question = history.map_or_else(
+            || question.to_string(),
+            |history| knowledge_question_from_user_history(history, question),
         );
-        let llm = self
-            .llm_answer_with_patience(
-                question,
-                &extra_system,
-                conversation,
-                patience_channel.map(|channel_id| (channel_id, AI_GEDULD_HINWEIS_NACH)),
-            )
-            .await;
-        let (answer, source, outcome) = match llm {
-            LlmLookup::Answer(answer) => (
-                answer,
-                if knowledge_hit {
-                    "knowledge_llm"
-                } else {
-                    "gap_llm"
-                },
-                ConciergeAnswerOutcome::Answered,
+        let answer = self.answers.answer_with_context(
+            question,
+            &retrieval_question,
+            dl_answer::Scope::CommunityAndGame,
+        );
+        let mut answer = std::pin::pin!(answer);
+        let result = if let Some(channel) = patience_channel {
+            tokio::select! {
+                result = &mut answer => result,
+                () = tokio::time::sleep(AI_GEDULD_HINWEIS_NACH) => {
+                    self.send_patience_notice(channel).await;
+                    answer.await
+                }
+            }
+        } else {
+            answer.await
+        };
+        let mut reply_intent = None;
+        let mut pate_request = false;
+        let (reply, knowledge_hit, outcome) = match result {
+            Ok(dl_answer::Answer::Grounded {
+                text,
+                intent,
+                pate_request: requested,
+                ..
+            }) => {
+                reply_intent = intent.as_deref().and_then(ConciergeIntent::from_str);
+                pate_request = requested && explicit_pate_request(question);
+                (text, true, ConciergeAnswerOutcome::Answered)
+            }
+            Ok(dl_answer::Answer::NoEvidence | dl_answer::Answer::OutOfDomain) => (
+                KNOWLEDGE_GAP_TEXT.into(),
+                false,
+                ConciergeAnswerOutcome::NoAnswer,
             ),
-            LlmLookup::NoAnswer => (
-                LlmAnswer {
-                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
-                    intent: Some(classify_intent(question)),
-                    ..LlmAnswer::default()
-                },
-                if knowledge_hit {
-                    "llm_error_verbatim"
-                } else {
-                    "llm_error_gap"
-                },
-                knowledge_outcome,
+            Err(dl_answer::AnswerError::Timeout) => (
+                "Das Nachschlagen dauert gerade zu lange. Versuch es bitte gleich noch einmal."
+                    .into(),
+                false,
+                ConciergeAnswerOutcome::Timeout,
             ),
-            LlmLookup::Timeout => (
-                LlmAnswer {
-                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
-                    intent: Some(classify_intent(question)),
-                    ..LlmAnswer::default()
-                },
-                if knowledge_hit {
-                    "llm_error_verbatim"
-                } else {
-                    "llm_error_gap"
-                },
-                if knowledge_hit {
-                    ConciergeAnswerOutcome::Answered
-                } else {
-                    ConciergeAnswerOutcome::Timeout
-                },
-            ),
-            LlmLookup::Error => (
-                LlmAnswer {
-                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
-                    intent: Some(classify_intent(question)),
-                    ..LlmAnswer::default()
-                },
-                if knowledge_hit {
-                    "llm_error_verbatim"
-                } else {
-                    "llm_error_gap"
-                },
-                if knowledge_hit {
-                    ConciergeAnswerOutcome::Answered
-                } else if route == AnswerRoute::OnboardingTour
-                    && knowledge_outcome == ConciergeAnswerOutcome::Timeout
-                {
-                    ConciergeAnswerOutcome::Timeout
-                } else {
-                    ConciergeAnswerOutcome::Error
-                },
-            ),
+            Err(error) => {
+                tracing::warn!(%error, "Concierge: gemeinsame Wissensantwort fehlgeschlagen");
+                ("Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into(), false, ConciergeAnswerOutcome::Error)
+            }
         };
         let decision = AnswerDecision {
-            answer,
-            source,
+            answer: LlmAnswer {
+                reply: Some(reply),
+                intent: reply_intent.or_else(|| Some(classify_intent(question))),
+                pate_request,
+            },
+            source: if knowledge_hit {
+                "shared_knowledge"
+            } else {
+                "shared_gap"
+            },
             knowledge_hit,
             outcome,
         };
@@ -4610,6 +4618,7 @@ impl Concierge {
         let params = ChatParams {
             model: self.config.model.clone(),
             max_tokens: None,
+            reasoning_effort: Some("none".into()),
             json_mode: true,
             temperature: 0.2,
             system_prompt: None,
@@ -5409,6 +5418,7 @@ impl Concierge {
                     ChatParams {
                         model: self.config.model.clone(),
                         max_tokens: Some(180),
+                        reasoning_effort: Some("none".into()),
                         json_mode: false,
                         temperature: 0.2,
                         system_prompt: None,
@@ -6735,6 +6745,69 @@ fn link_only(text: &str) -> bool {
         && !text.contains(char::is_whitespace)
 }
 
+fn pure_smalltalk(input: &str) -> bool {
+    // Nur vollständige Alltagsäußerungen: angehängte Sachfragen bleiben im Quellenpfad.
+    let lower = input.to_lowercase();
+    let normalized = lower
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '\'')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = normalized.as_str();
+    short_smalltalk(text)
+        || matches!(
+            text,
+            "wie geht es dir"
+                | "wie geht's dir"
+                | "wie gehts dir"
+                | "was machst du"
+                | "wer ist dein lieblingsspieler"
+                | "hast du einen lieblingsspieler"
+                | "wen magst du am liebsten"
+                | "wer ist dein favorit"
+                | "danke"
+                | "danke dir"
+                | "danke schön"
+                | "dankeschön"
+                | "vielen dank"
+                | "vielen lieben dank"
+                | "besten dank"
+                | "tausend dank"
+                | "danke sehr"
+                | "alles klar danke"
+                | "super danke"
+                | "perfekt danke"
+                | "okay danke"
+                | "guten morgen"
+                | "guten tag"
+                | "guten abend"
+                | "gute nacht"
+                | "morgen"
+                | "servus"
+                | "grüß dich"
+                | "hallöchen"
+                | "hallo zusammen"
+                | "moin moin"
+                | "na wie geht's"
+                | "na wie gehts"
+                | "tschüss"
+                | "tschüssi"
+                | "ciao"
+                | "bis später"
+                | "bis bald"
+                | "bis morgen"
+                | "bis dann"
+                | "mach's gut"
+                | "machs gut"
+                | "auf wiedersehen"
+                | "schönen abend"
+                | "schönen tag noch"
+                | "schönes wochenende"
+                | "danke bis später"
+                | "danke und bis später"
+        )
+}
+
 fn short_smalltalk(lower: &str) -> bool {
     matches!(
         lower.trim(),
@@ -7762,6 +7835,42 @@ mod tests {
         provider.requests()[0].0[0].content.clone()
     }
 
+    /// Deterministic final generation for HTTP/Privacy fixtures. The actual
+    /// shared engine still retrieves, validates and selects source IDs.
+    struct EvidenceFixtureProvider;
+
+    #[async_trait::async_trait]
+    impl ChatProvider for EvidenceFixtureProvider {
+        async fn chat(
+            &self,
+            messages: &[ChatMessage],
+            params: ChatParams,
+        ) -> Result<dl_ai::ChatResponse, dl_ai::ChatProviderError> {
+            assert_eq!(params.reasoning_effort.as_deref(), Some("none"));
+            assert_eq!(
+                params.model.as_deref(),
+                Some(dl_ai::DEFAULT_FIREWORKS_MODEL)
+            );
+            let payload: Value =
+                serde_json::from_str(&messages.last().expect("user payload").content)
+                    .expect("structured evidence payload");
+            let evidence = payload["evidence"].as_array().expect("evidence");
+            let first = evidence.first().expect("no generation without evidence");
+            Ok(dl_ai::ChatResponse::text(
+                json!({
+                    "answerable": true,
+                    "answer": first["text"],
+                    "source_ids": [first["id"]],
+                })
+                .to_string(),
+            ))
+        }
+    }
+
+    fn fixture_ai() -> Arc<dyn ChatProvider> {
+        Arc::new(EvidenceFixtureProvider)
+    }
+
     async fn knowledge_server(
         json: &'static str,
     ) -> (
@@ -7878,14 +7987,14 @@ mod tests {
             .await
             .expect("test_pool");
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Tour-Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Tour-Antwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = knowledge_url;
         config.free_voice = false;
         let port = mock_port();
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         let capture = crate::knowledge_client::test_logging::LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
@@ -7921,7 +8030,7 @@ mod tests {
             .await
             .expect("test_pool");
         let (knowledge_url, _requests, server) =
-            knowledge_server(r#"{"answerable":false,"answer":null,"sources":[]}"#).await;
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = knowledge_url;
         config.free_voice = false;
@@ -7957,14 +8066,14 @@ mod tests {
             .await
             .expect("opt out"));
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Stateless","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = knowledge_url;
         config.free_voice = false;
         let port = mock_port();
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         let outcome = concierge
             .answer_tour_dm_question(
@@ -8000,7 +8109,7 @@ mod tests {
             .await
             .expect("opt out"));
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Nicht zugestellt","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Nicht zugestellt","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
@@ -8009,7 +8118,7 @@ mod tests {
         let port = mock_port();
         port.channel_send_failures_remaining
             .store(1, Ordering::SeqCst);
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         let outcome = concierge
             .answer_tour_dm_question(
@@ -8062,7 +8171,10 @@ mod tests {
                 .expect("tour task"),
             ConciergeAnswerOutcome::Timeout
         );
-        assert_eq!(provider.requests().len(), 1);
+        assert!(
+            provider.requests().is_empty(),
+            "Retrieval-Timeout startet keine Generierung"
+        );
         server.abort();
     }
 
@@ -8090,7 +8202,10 @@ mod tests {
                 .expect("tour decision task"),
             ConciergeAnswerOutcome::Timeout
         );
-        assert_eq!(provider.requests().len(), 1);
+        assert!(
+            provider.requests().is_empty(),
+            "Retrieval-Timeout startet keine Generierung"
+        );
         server.abort();
     }
 
@@ -8101,7 +8216,7 @@ mod tests {
             .await
             .expect("test_pool");
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Nicht zugestellt","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Nicht zugestellt","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
@@ -8110,7 +8225,7 @@ mod tests {
         let port = mock_port();
         port.channel_send_failures_remaining
             .store(1, Ordering::SeqCst);
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         let outcome = concierge
             .answer_tour_dm_question(
@@ -8132,14 +8247,14 @@ mod tests {
     #[tokio::test]
     async fn tour_frage_interner_fehler_ist_error() {
         let (knowledge_url, requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Stateless nach Fehler","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless nach Fehler","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = knowledge_url;
         config.free_voice = false;
         let port = mock_port();
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(fixture_ai()), config);
 
         let outcome = concierge
             .answer_tour_dm_question(
@@ -8306,6 +8421,10 @@ mod tests {
             };
             let body_start = header_end + 4;
             let headers = String::from_utf8_lossy(&request[..header_end]);
+            assert_eq!(
+                headers.lines().next(),
+                Some("POST /public/v1/retrieve HTTP/1.1")
+            );
             let content_length = headers
                 .lines()
                 .filter_map(|line| line.split_once(':'))
@@ -8340,8 +8459,7 @@ mod tests {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
-            let mut buf = [0; 4096];
-            let _ = socket.read(&mut buf).await;
+            let _ = read_http_request_body(&mut socket).await;
             task_started.notify_one();
             task_release.notified().await;
             let response = format!(
@@ -8408,12 +8526,15 @@ mod tests {
 
     #[tokio::test]
     async fn handle_user_message_ohne_db_bleibt_stateless_aber_erkennt_stopp() {
+        let (url, _, evidence_server) =
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         let provider = dl_ai::MockChatProvider::single(
             r#"{"reply":"LLM","intent":"learn","opted_out":false,"forget":false}"#,
         );
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = Arc::new(MockConciergePort::default());
         let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
         config.free_voice = false;
         let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), config);
 
@@ -8425,14 +8546,17 @@ mod tests {
         );
         assert!(concierge.handle_user_message(10, None, 42, "stopp").await);
 
-        let sent = port.sent_channel_v2.lock().unwrap();
-        assert_eq!(sent_v2_content(&sent[0]), SMALLTALK_TEXT);
-        assert_eq!(sent_v2_content(&sent[1]), KNOWLEDGE_GAP_TEXT);
-        // "stopp" wird als Opt-out erkannt, aber der Test-Pool ist unerreichbar: fail-closed meldet
-        // ehrlich den Persistenzfehler, statt einen nie gespeicherten Opt-out zu bestätigen.
-        assert_eq!(sent_v2_content(&sent[2]), OPTOUT_PERSIST_ERROR_TEXT);
-        assert_ne!(sent_v2_content(&sent[2]), OPTOUT_TEXT);
+        {
+            let sent = port.sent_channel_v2.lock().unwrap();
+            assert_eq!(sent_v2_content(&sent[0]), SMALLTALK_TEXT);
+            assert_eq!(sent_v2_content(&sent[1]), KNOWLEDGE_GAP_TEXT);
+            // "stopp" wird als Opt-out erkannt, aber der Test-Pool ist unerreichbar: fail-closed meldet
+            // ehrlich den Persistenzfehler, statt einen nie gespeicherten Opt-out zu bestätigen.
+            assert_eq!(sent_v2_content(&sent[2]), OPTOUT_PERSIST_ERROR_TEXT);
+            assert_ne!(sent_v2_content(&sent[2]), OPTOUT_TEXT);
+        }
         assert!(provider.requests().is_empty());
+        evidence_server.await.expect("retrieval server");
     }
 
     #[tokio::test]
@@ -8738,12 +8862,16 @@ mod tests {
 
     #[tokio::test]
     async fn brain_plus_reine_paraphrasierte_injektion_gibt_gap_ohne_brain() {
+        let (url, _, evidence_server) =
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         // Exaktes !brain plus eine rein paraphrasierte Injektion, die kein Stichwort der alten
         // Sperre trifft. Nach einer Knowledge-Nichtantwort landet sie in der sicheren
         // Wissenslücke; das Gameplay-Brain wird nie gefragt. Genau diese paraphrasierte Form
         // rutschte früher am Stichwortblock vorbei bis ins Brain.
         let port = mock_port();
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
 
         assert!(
             concierge
@@ -8760,15 +8888,20 @@ mod tests {
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
             KNOWLEDGE_GAP_TEXT
         );
+        evidence_server.await.expect("retrieval server");
     }
 
     #[tokio::test]
     async fn brain_plus_legitime_gameplay_frage_wird_nicht_geblockt_ohne_brain() {
+        let (url, _, evidence_server) =
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         // "Anweisungen" ist ein legitimer Gameplay-Begriff. Die alte Stichwortsperre hätte hier
         // fälschlich geblockt. Jetzt läuft die Frage zum Wissensdienst und fällt bei einer
         // Nichtantwort in die sichere Wissenslücke, ohne das Brain zu fragen.
         let port = mock_port();
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
 
         assert!(
             concierge
@@ -8785,6 +8918,7 @@ mod tests {
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
             KNOWLEDGE_GAP_TEXT
         );
+        evidence_server.await.expect("retrieval server");
     }
 
     #[tokio::test]
@@ -8794,11 +8928,11 @@ mod tests {
         let port = mock_port();
         let mut config = fast_knowledge_config();
         let (knowledge_url, _requests, handle) = knowledge_server(
-            r#"{"answerable":true,"answer":"Abrams findest du im Helden-Guide.","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Abrams findest du im Helden-Guide.","observed_at":null}],"truncated":false}"#,
         )
         .await;
         config.knowledge_url = knowledge_url;
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -8821,7 +8955,7 @@ mod tests {
             .expect("test_pool");
         let store = ConciergeStore::new(db.pool().clone());
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Wissensantwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
@@ -8831,7 +8965,7 @@ mod tests {
             .record_conversation(42, guild_id, "user", "Bestehender Verlauf", Utc::now())
             .await
             .expect("existing conversation"));
-        let concierge = Concierge::new(db.pool().clone(), mock_port(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -8860,7 +8994,7 @@ mod tests {
             .expect("test_pool");
         let store = ConciergeStore::new(db.pool().clone());
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Wissensantwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
@@ -8870,7 +9004,7 @@ mod tests {
             .ensure_profile(42, guild_id, Utc::now())
             .await
             .expect("profile"));
-        let concierge = Concierge::new(db.pool().clone(), mock_port(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -8893,12 +9027,16 @@ mod tests {
 
     #[tokio::test]
     async fn brainfoo_wird_nicht_gestript_und_ruft_brain_nie() {
+        let (url, _, evidence_server) =
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         // "!brainfoo" ist NICHT der !brain-Befehl: der Präfix wird nicht abgetrennt und das Brain
         // wird nie gefragt. Die Frage läuft als ganz normaler Text in den Wissenspfad.
         assert_eq!(parse_brain_command("!brainfoo"), (false, "!brainfoo"));
 
         let port = mock_port();
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
 
         assert!(
             concierge
@@ -8910,14 +9048,18 @@ mod tests {
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
             KNOWLEDGE_GAP_TEXT
         );
+        evidence_server.await.expect("retrieval server");
     }
 
     #[tokio::test]
     async fn brain_none_nutzt_fallback_ohne_llm() {
+        let (url, _, evidence_server) =
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         let provider = dl_ai::MockChatProvider::new(Vec::new());
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port();
         let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
         config.free_voice = false;
         let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), config);
 
@@ -8932,16 +9074,19 @@ mod tests {
             KNOWLEDGE_GAP_TEXT
         );
         assert!(provider.requests().is_empty());
+        evidence_server.await.expect("retrieval server");
     }
 
     #[tokio::test]
-    async fn wissensdienst_treffer_geht_direkt_raus_ohne_llm_und_brain() {
-        let provider = dl_ai::MockChatProvider::new(Vec::new());
+    async fn wissensdienst_treffer_nutzt_genau_eine_belegte_generierung() {
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"answerable":true,"answer":"Die Regeln stehen in <#1315684135175716975>.","source_ids":["C1"]}"#,
+        );
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port();
         let mut config = fast_knowledge_config();
         let (knowledge_url, _requests, handle) = knowledge_server(
-            r#"{"answerable":true,"answer":"Die Regeln stehen in <#1315684135175716975>.","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Die Regeln stehen in <#1315684135175716975>.","observed_at":null}],"truncated":false}"#,
         )
         .await;
         config.knowledge_url = knowledge_url;
@@ -8959,19 +9104,19 @@ mod tests {
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
             "Die Regeln stehen in <#1315684135175716975>."
         );
-        assert!(provider.requests().is_empty());
+        assert_eq!(provider.requests().len(), 1);
     }
 
     #[tokio::test]
     async fn free_voice_wissensfund_wird_mit_persona_formuliert() {
         let provider = dl_ai::MockChatProvider::single(
-            r#"{"reply":"Locker formuliert","intent":"learn","pate_request":false}"#,
+            r#"{"answerable":true,"answer":"Locker formuliert","source_ids":["C1"]}"#,
         );
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port();
         let mut config = fast_knowledge_config();
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Belegter Fakt","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Belegter Fakt","observed_at":null}],"truncated":false}"#,
         )
         .await;
         config.knowledge_url = knowledge_url;
@@ -8988,12 +9133,124 @@ mod tests {
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
             "Locker formuliert"
         );
-        let system = first_system_prompt(&provider);
-        assert!(system.contains("Wissenskontext aus dl-knowledge:\nBelegter Fakt"));
-        assert!(system.contains("Du bist der Concierge des deutschen Deadlock-Discord-Servers"));
-        let params = &provider.requests()[0].1;
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1, "kein zweiter Persona-Aufruf");
+        let payload: Value = serde_json::from_str(&requests[0].0[1].content).unwrap();
+        assert_eq!(payload["evidence"][0]["text"], "Belegter Fakt");
+        assert_eq!(payload["evidence"][0]["id"], "C1");
+        let params = &requests[0].1;
         assert_eq!(params.max_tokens, None);
+        assert_eq!(params.reasoning_effort.as_deref(), Some("none"));
         assert!(params.json_mode);
+    }
+
+    #[tokio::test]
+    async fn alter_patenwunsch_im_verlauf_wird_nicht_zur_aktuellen_aktion() {
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"answerable":true,"answer":"Ein Pate hilft beim Einstieg.","source_ids":["C1"],"intent":"learn","pate_request":true}"#,
+        );
+        let (url, retrieval_requests, server) = knowledge_server(
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Paten","path":"paten.html"},"text":"Ein Pate hilft beim Einstieg.","observed_at":null}],"truncated":false}"#,
+        ).await;
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), mock_port(), Some(provider.clone()), config);
+        let history = vec!["Ich möchte einen Paten".to_string()];
+        let decision = concierge
+            .answer_decision(
+                "Was ist ein Pate?",
+                Some(&history),
+                None,
+                AnswerRoute::Concierge,
+                None,
+            )
+            .await;
+        server.await.unwrap();
+        assert_eq!(
+            decision.answer.reply.as_deref(),
+            Some("Ein Pate hilft beim Einstieg.")
+        );
+        assert!(
+            !decision.answer.pate_request,
+            "Vergangener Wunsch autorisiert keine aktuelle Aktion"
+        );
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        let payload: Value = serde_json::from_str(&requests[0].0[1].content).unwrap();
+        assert_eq!(payload["question"], "Was ist ein Pate?");
+        let retrieval: Value =
+            serde_json::from_str(&retrieval_requests.lock().unwrap()[0]).unwrap();
+        assert!(retrieval["question"]
+            .as_str()
+            .unwrap()
+            .contains("Ich möchte einen Paten"));
+        assert!(retrieval["question"]
+            .as_str()
+            .unwrap()
+            .contains("Was ist ein Pate?"));
+    }
+
+    #[test]
+    fn reine_hoeflichkeit_bleibt_smalltalk_angehaengte_sachfrage_nicht() {
+        for text in [
+            "DANKE!",
+            "Vielen lieben Dank.",
+            "  Guten   Morgen!  ",
+            "Tschüss!",
+            "Danke und bis später!",
+        ] {
+            assert!(pure_smalltalk(text), "{text}");
+        }
+        for text in [
+            "Danke, wie funktioniert Lifesteal?",
+            "Hallo, wo stehen die Regeln?",
+            "Mein Favorit ist Warden, welche Items helfen?",
+            "Was ist ein Pate?",
+        ] {
+            assert!(!pure_smalltalk(text), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lange_historie_behaelt_die_aktuelle_wissensfrage_vollstaendig() {
+        let current = "Was ist ein Pate?";
+        let newer = format!("Neu {}", "ö".repeat(2400));
+        let history = vec![
+            format!("Alt {}", "ä".repeat(2400)),
+            newer.clone(),
+            "Letzte Rückfrage".into(),
+        ];
+        let expected = format!("{newer}\nLetzte Rückfrage\n{current}");
+        assert_eq!(
+            knowledge_question_from_user_history(&history, current),
+            expected
+        );
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"answerable":true,"answer":"Ein Pate hilft beim Einstieg.","source_ids":["C1"]}"#,
+        );
+        let (url, retrieval_requests, server) = knowledge_server(
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Paten","path":"paten.html"},"text":"Ein Pate hilft beim Einstieg.","observed_at":null}],"truncated":false}"#,
+        ).await;
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), mock_port(), Some(provider.clone()), config);
+        let decision = concierge
+            .answer_decision(current, Some(&history), None, AnswerRoute::Concierge, None)
+            .await;
+        server.await.unwrap();
+        assert_eq!(
+            decision.answer.reply.as_deref(),
+            Some("Ein Pate hilft beim Einstieg.")
+        );
+        let retrieval: Value =
+            serde_json::from_str(&retrieval_requests.lock().unwrap()[0]).unwrap();
+        assert_eq!(retrieval["question"], expected);
+        assert!(retrieval["question"].as_str().unwrap().chars().count() <= 4000);
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        let payload: Value = serde_json::from_str(&requests[0].0[1].content).unwrap();
+        assert_eq!(payload["question"], current);
+        assert_eq!(payload["conversation_context"], expected);
     }
 
     #[tokio::test]
@@ -9006,11 +9263,7 @@ mod tests {
         let concierge =
             Concierge::new(lazy_pool(), port.clone(), Some(ai), fast_knowledge_config());
 
-        assert!(
-            concierge
-                .handle_user_message(10, None, 42, "Hallo dort")
-                .await
-        );
+        assert!(concierge.handle_user_message(10, None, 42, "Hallo").await);
 
         assert_eq!(
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
@@ -9020,13 +9273,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn free_voice_llm_fehler_mit_wissensfund_liefert_fakt_wortgetreu() {
+    async fn free_voice_llm_fehler_mit_belegen_bestaetigt_keinen_ungeprueften_fakt() {
         let provider = dl_ai::MockChatProvider::new(Vec::new());
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port();
         let mut config = fast_knowledge_config();
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Wörtlicher Fakt","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Wörtlicher Fakt","observed_at":null}],"truncated":false}"#,
         )
         .await;
         config.knowledge_url = knowledge_url;
@@ -9041,13 +9294,13 @@ mod tests {
 
         assert_eq!(
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
-            "Wörtlicher Fakt"
+            "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal."
         );
         assert_eq!(provider.requests().len(), 1);
     }
 
     #[tokio::test]
-    async fn free_voice_llm_fehler_ohne_wissensfund_liefert_gap() {
+    async fn free_voice_retrievalausfall_startet_keine_freie_generierung() {
         let provider = dl_ai::MockChatProvider::new(Vec::new());
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port();
@@ -9062,17 +9315,17 @@ mod tests {
 
         assert_eq!(
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
-            KNOWLEDGE_GAP_TEXT
+            "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal."
         );
-        assert_eq!(provider.requests().len(), 1);
+        assert_eq!(provider.requests().len(), 0);
     }
 
     #[tokio::test]
-    async fn free_voice_ohne_ai_liefert_wissensfund_wortgetreu() {
+    async fn free_voice_ohne_ai_bestaetigt_keinen_ungeprueften_fakt() {
         let port = mock_port();
         let mut config = fast_knowledge_config();
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Wörtlicher Fakt ohne AI","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Wörtlicher Fakt ohne AI","observed_at":null}],"truncated":false}"#,
         )
         .await;
         config.knowledge_url = knowledge_url;
@@ -9087,7 +9340,7 @@ mod tests {
 
         assert_eq!(
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
-            "Wörtlicher Fakt ohne AI"
+            "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal."
         );
     }
 
@@ -9150,8 +9403,12 @@ mod tests {
         let provider = dl_ai::MockChatProvider::single(r#"{"repl"#);
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port();
-        let concierge =
-            Concierge::new(lazy_pool(), port.clone(), Some(ai), fast_knowledge_config());
+        let (url, _, server) = knowledge_server(
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"test.html"},"text":"Belegter Fakt","observed_at":null}],"truncated":false}"#,
+        ).await;
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), config);
 
         assert!(
             concierge
@@ -9159,10 +9416,14 @@ mod tests {
                 .await
         );
 
-        let sent = port.sent_channel_v2.lock().unwrap();
-        let reply = sent_v2_content(&sent[0]);
-        assert_eq!(reply, KNOWLEDGE_GAP_TEXT);
-        assert_ne!(reply, r#"{"repl"#);
+        {
+            let sent = port.sent_channel_v2.lock().unwrap();
+            let reply = sent_v2_content(&sent[0]);
+            assert_eq!(reply, "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.");
+            assert_ne!(reply, r#"{"repl"#);
+        }
+        assert_eq!(provider.requests().len(), 1);
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -9170,17 +9431,17 @@ mod tests {
         for (question, response, expected) in [
             (
                 "Was ist ein Pate?",
-                r#"{"answerable":true,"answer":"Ein Pate hilft beim Einstieg.","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+                r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Ein Pate hilft beim Einstieg.","observed_at":null}],"truncated":false}"#,
                 "Ein Pate hilft beim Einstieg.",
             ),
             (
                 "Was macht ein Mentor?",
-                r#"{"answerable":true,"answer":"Ein Mentor begleitet Neulinge.","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+                r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Ein Mentor begleitet Neulinge.","observed_at":null}],"truncated":false}"#,
                 "Ein Mentor begleitet Neulinge.",
             ),
             (
                 "Ich möchte wissen, was ein Pate macht.",
-                r#"{"answerable":true,"answer":"Paten beantworten Fragen.","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+                r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Paten beantworten Fragen.","observed_at":null}],"truncated":false}"#,
                 "Paten beantworten Fragen.",
             ),
         ] {
@@ -9188,7 +9449,7 @@ mod tests {
             let mut config = fast_knowledge_config();
             let (knowledge_url, requests, server) = knowledge_server(response).await;
             config.knowledge_url = knowledge_url;
-            let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+            let concierge = Concierge::new(lazy_pool(), port.clone(), Some(fixture_ai()), config);
 
             assert!(concierge.handle_user_message(10, None, 42, question).await);
             tokio::time::timeout(StdDuration::from_secs(1), server)
@@ -9249,10 +9510,10 @@ mod tests {
         let mut config = fast_knowledge_config();
         let main_guild_id = config.main_guild_id;
         let (knowledge_url, _requests, handle) =
-            knowledge_server(r#"{"answerable":true,"answer":"Antwort aus der Wissensbasis.","sources":[{"title":"Test","path":"public/test.html"}]}"#)
+            knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Antwort aus der Wissensbasis.","observed_at":null}],"truncated":false}"#)
                 .await;
         config.knowledge_url = knowledge_url;
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -9300,14 +9561,14 @@ mod tests {
             .await
             .expect("test_pool");
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Öffentliche Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Öffentliche Wissensantwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = knowledge_url;
         let guild_id = config.main_guild_id;
         let port = mock_port();
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -9347,7 +9608,7 @@ mod tests {
             .expect("test_pool");
         let store = ConciergeStore::new(db.pool().clone());
         let (knowledge_url, _requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Öffentliche Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Öffentliche Wissensantwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
@@ -9357,7 +9618,7 @@ mod tests {
             .record_conversation(42, guild_id, "user", "Privater Verlauf", Utc::now())
             .await
             .expect("private history"));
-        let concierge = Concierge::new(db.pool().clone(), mock_port(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -9394,7 +9655,7 @@ mod tests {
             .expect("test_pool");
         let store = ConciergeStore::new(db.pool().clone());
         let (knowledge_url, requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Öffentliche Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Öffentliche Wissensantwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
@@ -9404,7 +9665,7 @@ mod tests {
             .record_conversation(42, guild_id, "user", "Privates Geheimthema", Utc::now(),)
             .await
             .expect("private history"));
-        let concierge = Concierge::new(db.pool().clone(), mock_port(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -9479,15 +9740,15 @@ mod tests {
             _requests,
             server,
         ) = gated_two_response_knowledge_server(
-            r#"{"answerable":true,"answer":"Erste Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
-            r#"{"answerable":true,"answer":"Zweite Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Erste Antwort","observed_at":null}],"truncated":false}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Zweite Antwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = knowledge_url;
         let guild_id = config.main_guild_id;
         let port = mock_port();
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(fixture_ai()), config);
         let first_concierge = concierge.clone();
         let first = tokio::spawn(async move {
             first_concierge
@@ -9569,11 +9830,11 @@ mod tests {
         let port = mock_port();
         let mut config = fast_knowledge_config();
         let (knowledge_url, _requests, handle) = knowledge_server(
-            r#"{"answerable":true,"answer":"Steam verknüpfst du über das Panel.","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Steam verknüpfst du über das Panel.","observed_at":null}],"truncated":false}"#,
         )
         .await;
         config.knowledge_url = knowledge_url;
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -9595,10 +9856,14 @@ mod tests {
 
     #[tokio::test]
     async fn wissensluecke_ohne_brain_nutzt_sichere_gap_ohne_brain_aufruf() {
+        let (url, _, evidence_server) =
+            knowledge_server(r#"{"status":"no_evidence","evidence":[],"truncated":false}"#).await;
         // Ohne !brain darf eine Knowledge-Nichtantwort NICHT mehr generisch in den Brain
         // fallen; sie landet in der sicheren Wissenslücke, Brain wird nie gefragt.
         let port = mock_port();
-        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+        let mut config = fast_knowledge_config();
+        config.knowledge_url = url;
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
 
         assert!(
             concierge
@@ -9610,6 +9875,7 @@ mod tests {
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
             KNOWLEDGE_GAP_TEXT
         );
+        evidence_server.await.expect("retrieval server");
     }
 
     #[test]
@@ -10619,10 +10885,10 @@ mod tests {
                 .expect("history"));
         }
         let (url, requests, server) =
-            knowledge_server(r#"{"answerable":true,"answer":"Belegt","sources":[{"title":"Test","path":"public/test.html"}]}"#).await;
+            knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Belegt","observed_at":null}],"truncated":false}"#).await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
-        let concierge = Concierge::new(pool, mock_port(), None, config);
+        let concierge = Concierge::new(pool, mock_port(), Some(fixture_ai()), config);
         let (db_user_id, mut tx) = store
             .begin_privacy_action(42)
             .await
@@ -10680,10 +10946,10 @@ mod tests {
                 .expect("history"));
         }
         let (url, requests, server) =
-            knowledge_server(r#"{"answerable":true,"answer":"Belegt","sources":[{"title":"Test","path":"public/test.html"}]}"#).await;
+            knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Belegt","observed_at":null}],"truncated":false}"#).await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
-        let concierge = Concierge::new(pool, mock_port(), None, config);
+        let concierge = Concierge::new(pool, mock_port(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -11044,7 +11310,7 @@ mod tests {
             .expect("test_pool");
         let pool = db.pool().clone();
         let (url, started, release, server) =
-            gated_knowledge_server(r#"{"answerable":true,"answer":"Router-Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#)
+            gated_knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Router-Antwort","observed_at":null}],"truncated":false}"#)
                 .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
@@ -11114,14 +11380,14 @@ mod tests {
             .await
             .unwrap());
         let (url, started, release, calls, requests, server) = gated_two_response_knowledge_server(
-            r#"{"answerable":true,"answer":"Verlaufsantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
-            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Verlaufsantwort","observed_at":null}],"truncated":false}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless Antwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
         let port = Arc::new(MockConciergePort::default());
-        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let concierge = Concierge::new(pool.clone(), port.clone(), Some(fixture_ai()), config);
         let chat_concierge = concierge.clone();
         let chat = tokio::spawn(async move {
             chat_concierge
@@ -11182,13 +11448,13 @@ mod tests {
             .await
             .expect("seed"));
         let (url, requests, server) = knowledge_server(
-            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless Antwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
         let port = Arc::new(MockConciergePort::default());
-        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let concierge = Concierge::new(pool.clone(), port.clone(), Some(fixture_ai()), config);
 
         let mut erase_tx = pool.begin().await.expect("erase tx");
         crate::privacy::lock_user_privacy(&mut erase_tx, 42)
@@ -11269,12 +11535,12 @@ mod tests {
         .await
         .expect("failure trigger");
         let (url, _requests, server) =
-            knowledge_server(r#"{"answerable":true,"answer":"Belegte Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#)
+            knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Belegte Antwort","observed_at":null}],"truncated":false}"#)
                 .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
         let port = mock_port();
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -11325,13 +11591,13 @@ mod tests {
         .await
         .expect("failure trigger");
         let (url, _requests, server) =
-            knowledge_server(r#"{"answerable":true,"answer":"Belegte Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#)
+            knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Belegte Antwort","observed_at":null}],"truncated":false}"#)
                 .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
         let port = mock_port();
         *port.delete_message_fails.lock().unwrap() = true;
-        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
         assert!(
             concierge
@@ -11361,13 +11627,13 @@ mod tests {
             .await
             .unwrap());
         let (url, _requests, server) =
-            knowledge_server(r#"{"answerable":true,"answer":"Verlaufsantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#)
+            knowledge_server(r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Verlaufsantwort","observed_at":null}],"truncated":false}"#)
                 .await;
         let mut config = test_config(true, &[]);
         config.knowledge_url = url;
         let port = Arc::new(MockConciergePort::default());
         let (send_started, send_release) = block_next_port_call(&port);
-        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let concierge = Concierge::new(pool.clone(), port.clone(), Some(fixture_ai()), config);
         let chat_concierge = concierge.clone();
         let chat = tokio::spawn(async move {
             chat_concierge

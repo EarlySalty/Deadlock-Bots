@@ -43,6 +43,7 @@ impl ChatTextGenerator {
     fn params_for(&self, request: &GenerateRequest) -> ChatParams {
         ChatParams {
             model: request.model.clone(),
+            reasoning_effort: request.reasoning_effort.clone(),
             max_tokens: Some(
                 request
                     .max_output_tokens
@@ -58,13 +59,6 @@ impl ChatTextGenerator {
 #[async_trait::async_trait]
 impl TextGenerator for ChatTextGenerator {
     async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
-        if let Some(effort) = request.reasoning_effort.as_deref() {
-            tracing::warn!(
-                use_case = self.use_case.as_str(),
-                reasoning_effort = effort,
-                "reasoning_effort wird vom ChatProvider-Weg nicht durchgereicht"
-            );
-        }
         let params = self.params_for(&request);
         let model = params.model.clone();
         let messages = [ChatMessage::user(request.prompt)];
@@ -72,7 +66,11 @@ impl TextGenerator for ChatTextGenerator {
             Ok(response) if response.content.trim().is_empty() => {
                 tracing::warn!(
                     use_case = self.use_case.as_str(),
-                    model = response.model.as_deref().or(model.as_deref()).unwrap_or("default"),
+                    model = response
+                        .model
+                        .as_deref()
+                        .or(model.as_deref())
+                        .unwrap_or("default"),
                     "LLM-Antwort war leer"
                 );
                 None
@@ -80,7 +78,11 @@ impl TextGenerator for ChatTextGenerator {
             Ok(response) => {
                 tracing::debug!(
                     use_case = self.use_case.as_str(),
-                    model = response.model.as_deref().or(model.as_deref()).unwrap_or("default"),
+                    model = response
+                        .model
+                        .as_deref()
+                        .or(model.as_deref())
+                        .unwrap_or("default"),
                     chars = response.content.len(),
                     "LLM-Antwort erhalten"
                 );
@@ -148,7 +150,9 @@ mod tests {
         });
         let generator = ChatTextGenerator::new(provider.clone(), LlmUseCase::TurnierVorschlag);
 
-        let answer = generator.generate_text(request(Some("gpt-eigenes-modell"))).await;
+        let answer = generator
+            .generate_text(request(Some("gpt-eigenes-modell")))
+            .await;
 
         assert_eq!(answer.as_deref(), Some("Antwort"));
         let seen = provider.seen.lock().expect("Spy-Aufzeichnung");
