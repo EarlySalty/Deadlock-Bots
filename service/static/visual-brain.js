@@ -264,7 +264,7 @@
             const totals=status.totals;
             summary.textContent=totals.public_documents+' öffentliche Dokumente · '+totals.verified_documents+' sachlich geprüft · '+totals.pending_review+' noch zu prüfen · '+totals.excluded_documents+' ausgeschlossen.';
             const generated=new Date(status.generated_at);
-            stamp.textContent='Statuslauf: '+generated.toLocaleString('de-DE')+'. Indexstand: '+(status.active_snapshot || 'nicht belegt')+'. Der Statuslauf ist keine neue fachliche Prüfung.'+(status.refresh_status==='failed'?' Der letzte Aktualisierungslauf ist fehlgeschlagen; die Angaben beziehen sich auf den vorhandenen Stand.':'');
+            stamp.textContent='Statuslauf: '+generated.toLocaleString('de-DE')+'. Zuletzt bestätigter Indexstand: '+(status.active_snapshot || 'nicht belegt')+'. Der Statuslauf ist keine neue fachliche Prüfung.'+(status.refresh_status==='failed'?' Der letzte Aktualisierungslauf ist fehlgeschlagen; die Angaben beziehen sich auf den vorhandenen Stand.':'');
             for(const repo of status.repositories) {
                 const section=document.createElement('section');
                 const title=document.createElement('h5');title.textContent=repo.label;
