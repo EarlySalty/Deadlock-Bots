@@ -57,6 +57,27 @@ impl Catalog {
     }
 }
 
+pub fn relevant_dense(
+    dense: &[usize],
+    knowledge: &KnowledgeBase,
+    question: &str,
+    limit: usize,
+) -> Vec<usize> {
+    dense
+        .iter()
+        .copied()
+        .filter(|index| {
+            knowledge.chunks.get(*index).is_some_and(|chunk| {
+                let candidates = crate::candidates_for(std::slice::from_ref(chunk));
+                candidates
+                    .iter()
+                    .any(|candidate| crate::candidate_is_relevant(question, candidate))
+            })
+        })
+        .take(limit)
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Scored {
     pub index: usize,
