@@ -1518,6 +1518,127 @@ pub async fn voice_members(
     }
 }
 
+/// Resolve the voice from the connected gateway, never from a caller-provided
+/// channel. Both allowlists are checked before the adapter may mutate Discord.
+pub async fn streamer_voice_invite(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (rid, payload, idem) = match begin_action(&state, &peer, &headers, &body) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let guild_id = match payload::positive_int(&payload, "guild_id") {
+        Ok(value) => value,
+        Err(message) => return bad_request(&rid, &message),
+    };
+    let streamer_id = match payload::positive_int(&payload, "streamer_id") {
+        Ok(value) => value,
+        Err(message) => return bad_request(&rid, &message),
+    };
+    if guild_id != 1289721245281292288 {
+        return bad_request(&rid, "unsupported community");
+    }
+    if let Err(response) =
+        allowlist_check(&rid, Some(&idem), "guild", guild_id, &state.guild_allowlist)
+    {
+        return response;
+    }
+    if !state.port.is_ready().await {
+        return respond(
+            503,
+            error_body(
+                &rid,
+                Some(&idem),
+                "unavailable",
+                "Discord gateway unavailable",
+            ),
+        );
+    }
+    let channel_id = match state.port.community_lobbies(guild_id, streamer_id).await {
+        Ok(lobbies) => lobbies
+            .into_iter()
+            .find(|lobby| lobby.requester_present)
+            .and_then(|lobby| lobby.channel_id.parse::<u64>().ok()),
+        Err(PortError::MemberNotFound) => None,
+        Err(_) => {
+            return respond(
+                503,
+                error_body(
+                    &rid,
+                    Some(&idem),
+                    "unavailable",
+                    "Discord voice unavailable",
+                ),
+            )
+        }
+    };
+    let Some(channel_id) = channel_id else {
+        return respond(
+            200,
+            success_body(&rid, Some(&idem), json!({"available": false})),
+        );
+    };
+    if let Err(response) = allowlist_check(
+        &rid,
+        Some(&idem),
+        "channel",
+        channel_id,
+        &state.channel_allowlist,
+    ) {
+        return response;
+    }
+    let mut operation = Map::new();
+    operation.insert("guild_id".into(), json!(guild_id));
+    operation.insert("streamer_id".into(), json!(streamer_id));
+    operation.insert("channel_id".into(), json!(channel_id));
+    let hash = payload_hash(&operation);
+    run_idempotent(
+        &state,
+        &rid,
+        "discord.streamer_voice_invite",
+        &idem,
+        &hash,
+        || async {
+            match state
+                .port
+                .streamer_voice_invite(guild_id, streamer_id, channel_id)
+                .await
+            {
+                Ok(Some(invite)) => (
+                    200,
+                    success_body(
+                        &rid,
+                        Some(&idem),
+                        json!({
+                            "available": true,
+                            "invite_url": invite.invite_url,
+                            "channel_id": invite.channel_id,
+                            "slot_added": invite.slot_added,
+                        }),
+                    ),
+                ),
+                Ok(None) => (
+                    200,
+                    success_body(&rid, Some(&idem), json!({"available": false})),
+                ),
+                Err(_) => (
+                    503,
+                    error_body(
+                        &rid,
+                        Some(&idem),
+                        "unavailable",
+                        "Discord voice invitation unavailable",
+                    ),
+                ),
+            }
+        },
+    )
+    .await
+}
+
 pub async fn create_invite(
     State(state): State<SharedBroker>,
     peer: Peer,
@@ -1772,17 +1893,50 @@ mod tests {
         add_reaction_calls: Mutex<Vec<(u64, u64, String)>>,
         delete_message_calls: Mutex<Vec<(u64, u64, String)>>,
         delete_message_result: Result<(), PortError>,
+        voice_invite_calls: Mutex<Vec<(u64, u64, u64)>>,
     }
 
     #[async_trait::async_trait]
     impl DiscordPort for UnusedDiscordPort {
-        async fn community_lobbies(&self, _guild_id: u64, user_id: u64) -> Result<Vec<crate::port::CommunityLobby>, PortError> {
-            if user_id == 99 { return Err(PortError::MemberNotFound); }
-            Ok([42_u64,43].into_iter().map(|id| crate::port::CommunityLobby {
-                channel_id: id.to_string(), name: "Visible voice".into(), member_count: 2,
-                user_limit: Some(6), mode: Some("normal".into()), intent: None,
-                rank_average: None, rank_samples: 0, requester_present: false, is_streamer_vc: false,
-            }).collect())
+        async fn streamer_voice_invite(
+            &self,
+            guild: u64,
+            streamer: u64,
+            channel: u64,
+        ) -> Result<Option<crate::port::StreamerVoiceInvite>, PortError> {
+            self.voice_invite_calls
+                .lock()
+                .expect("voice calls")
+                .push((guild, streamer, channel));
+            Ok(Some(crate::port::StreamerVoiceInvite {
+                invite_url: "https://discord.gg/voiceTest".into(),
+                channel_id: channel.to_string(),
+                slot_added: true,
+            }))
+        }
+        async fn community_lobbies(
+            &self,
+            _guild_id: u64,
+            user_id: u64,
+        ) -> Result<Vec<crate::port::CommunityLobby>, PortError> {
+            if user_id == 99 {
+                return Err(PortError::MemberNotFound);
+            }
+            Ok([42_u64, 43]
+                .into_iter()
+                .map(|id| crate::port::CommunityLobby {
+                    channel_id: id.to_string(),
+                    name: "Visible voice".into(),
+                    member_count: 2,
+                    user_limit: Some(6),
+                    mode: Some("normal".into()),
+                    intent: None,
+                    rank_average: None,
+                    rank_samples: 0,
+                    requester_present: user_id == 7 && id == 42,
+                    is_streamer_vc: false,
+                })
+                .collect())
         }
 
         async fn is_ready(&self) -> bool {
@@ -2012,6 +2166,97 @@ mod tests {
         assert!(!String::from_utf8(bytes.to_vec()).unwrap().contains("user_id"));
     }
 
+    #[tokio::test]
+    async fn voice_invite_auth_and_allowlists_precede_mutation() {
+        let (state, port) = reaction_test_state("42").expect("state");
+        let peer = peer("127.0.0.1:12345").expect("peer");
+        let body =
+            axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
+        assert_eq!(
+            streamer_voice_invite(State(state.clone()), peer, HeaderMap::new(), body.clone())
+                .await
+                .status(),
+            401
+        );
+        let mut token_only = HeaderMap::new();
+        token_only.insert(crate::TOKEN_HEADER, "secret".parse().expect("header"));
+        assert_eq!(
+            streamer_voice_invite(State(state.clone()), peer, token_only, body.clone())
+                .await
+                .status(),
+            400
+        );
+        assert!(port.voice_invite_calls.lock().expect("calls").is_empty());
+        let (denied, port) = reaction_test_state("43").expect("state");
+        assert_eq!(
+            streamer_voice_invite(
+                State(denied),
+                peer,
+                action_headers("voice-denied").expect("headers"),
+                body
+            )
+            .await
+            .status(),
+            403
+        );
+        assert!(port.voice_invite_calls.lock().expect("calls").is_empty());
+    }
+
+    #[tokio::test]
+    async fn voice_invite_resolves_current_channel_and_deduplicates_writes() {
+        let (state, port) = reaction_test_state("42").expect("state");
+        let peer = peer("127.0.0.1:12345").expect("peer");
+        // A caller-provided channel must not select a different room.
+        let body = axum::body::Bytes::from(
+            r#"{"guild_id":"1289721245281292288","streamer_id":"7","channel_id":"999"}"#,
+        );
+        for _ in 0..2 {
+            let response = streamer_voice_invite(
+                State(state.clone()),
+                peer,
+                action_headers("voice-same-message").expect("headers"),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), 200);
+            let bytes = axum::body::to_bytes(response.into_body(), 10000)
+                .await
+                .expect("body");
+            let data: Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(data["result"]["channel_id"], "42");
+            assert_eq!(data["result"]["available"], true);
+        }
+        assert_eq!(
+            *port.voice_invite_calls.lock().expect("calls"),
+            vec![(1289721245281292288, 7, 42)]
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_invite_without_streamer_in_voice_never_mutates() {
+        let (state, port) = reaction_test_state("42").expect("state");
+        let peer = peer("127.0.0.1:12345").expect("peer");
+        for user in [99, 123] {
+            let body = axum::body::Bytes::from(
+                json!({"guild_id": "1289721245281292288", "streamer_id": user}).to_string(),
+            );
+            let response = streamer_voice_invite(
+                State(state.clone()),
+                peer,
+                action_headers("voice-absent").expect("headers"),
+                body,
+            )
+            .await;
+            assert_eq!(response.status(), 200);
+            let bytes = axum::body::to_bytes(response.into_body(), 10000)
+                .await
+                .expect("body");
+            let data: Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(data["result"], json!({"available": false}));
+        }
+        assert!(port.voice_invite_calls.lock().expect("calls").is_empty());
+    }
+
     fn test_state() -> Result<SharedBroker, String> {
         test_state_with_reactions(Err(PortError::Discord("unused".to_string())))
     }
@@ -2024,6 +2269,7 @@ mod tests {
                 message_reactions,
                 add_reaction_calls: Mutex::new(Vec::new()),
                 delete_message_calls: Mutex::new(Vec::new()),
+                voice_invite_calls: Mutex::new(Vec::new()),
                 delete_message_result: Err(PortError::Discord("unused".to_string())),
             }),
             Arc::new(MockChannelInfoPort),
@@ -2039,6 +2285,7 @@ mod tests {
             message_reactions: Err(PortError::Discord("unused".to_string())),
             add_reaction_calls: Mutex::new(Vec::new()),
             delete_message_calls: Mutex::new(Vec::new()),
+            voice_invite_calls: Mutex::new(Vec::new()),
             delete_message_result: Err(PortError::Discord("unused".to_string())),
         });
         let allowed_channel_ids = allowed_channel_ids.to_string();
@@ -2060,6 +2307,7 @@ mod tests {
             message_reactions: Err(PortError::Discord("unused".to_string())),
             add_reaction_calls: Mutex::new(Vec::new()),
             delete_message_calls: Mutex::new(Vec::new()),
+            voice_invite_calls: Mutex::new(Vec::new()),
             delete_message_result: result,
         });
         let state = crate::BrokerState::new_with_channel_info(

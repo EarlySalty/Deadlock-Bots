@@ -31,6 +31,7 @@ pub struct DiscordAdapter {
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
     pub(crate) community_gateway: crate::community::GatewayFreshness,
+    pub(crate) streamer_voice_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,7 @@ impl DiscordAdapter {
             cache: OnceLock::new(),
             gateway_ready: Arc::new(AtomicBool::new(false)),
             community_gateway: crate::community::GatewayFreshness::default(),
+            streamer_voice_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -771,6 +773,15 @@ impl DiscordPort for DiscordAdapter {
             return Ok(members);
         }
         Err(PortError::ChannelNotFound)
+    }
+
+    async fn streamer_voice_invite(
+        &self,
+        guild_id: u64,
+        streamer_id: u64,
+        expected_channel_id: u64,
+    ) -> Result<Option<dl_broker::port::StreamerVoiceInvite>, PortError> {
+        crate::streamer_voice::invite(self, guild_id, streamer_id, expected_channel_id).await
     }
 
     async fn create_invite(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, PortError> {
