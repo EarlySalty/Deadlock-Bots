@@ -310,7 +310,8 @@
             ui.layout.hidden = false;
             showResults();
             const initial = data.nodes.find(node => node.id === selected) || data.nodes.find(node => node.kind === 'document' && /concierge/.test(node.source_file) && (neighbors.get(node.id)?.length || 0) > 0) || data.nodes.find(node => node.kind === 'document' && (neighbors.get(node.id)?.length || 0) > 0) || data.nodes.find(node => node.kind === 'document') || data.nodes[0];
-            if (view.type === 'node') select(initial.id); else { selected = null; showResults(); }
+            if (view.type === 'node') select(initial.id); else selected = null;
+            showResults();
             try { await loadLibrary(); const current = nodes.get(selected) || initial; draw(current, neighbors.get(current.id) || []); }
             catch (error) { ui.error.textContent = error.message + ' Suche und Verbindungsliste bleiben bedienbar.'; ui.error.hidden = false; }
         } catch (error) {
