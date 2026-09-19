@@ -209,6 +209,13 @@ fn nullgewicht_entfernt_einen_retrievalzweig() -> Result<()> {
 }
 
 #[test]
+fn dense_vorfilter_entfernt_spaeter_ohnehin_unbelegbare_chunks() {
+    let knowledge = knowledge();
+    let filtered = rank::relevant_dense(&[2, 0, 1], &knowledge, "Steam verknüpfen", 2);
+    assert_eq!(filtered, vec![0, 1]);
+}
+
+#[test]
 fn aktualitaet_und_quellenprioritaet_werden_rangsignal() -> Result<()> {
     let mut config = Config::default();
     config.metadata.recency_weight = 1.0;
