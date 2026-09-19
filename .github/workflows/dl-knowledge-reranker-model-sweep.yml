@@ -60,6 +60,29 @@ jobs:
           echo "DL_KNOWLEDGE_RERANK_MODELS=$rerank_dir" >> "$GITHUB_ENV"
       - name: Release Binary bauen
         run: cargo build --release --package dl-knowledge --jobs 2
+      - name: Metadaten Gewichtung auf 254 Fällen messen
+        env:
+          DL_KNOWLEDGE_EMBEDDER: fastembed
+          DL_KNOWLEDGE_BENCH_DOCS: ${{ github.workspace }}/Deadlock-Docs/public
+        run: |
+          set -euo pipefail
+          evals="${{ github.workspace }}/Deadlock-Docs/evals"
+          out="$RUNNER_TEMP/metadata-sweep"
+          mkdir -p "$out"
+          variants=(
+            'meta-source|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"dense_relevance_filter":true,"timeout_ms":3000,"metadata":{"source_weights":{"Produktdokumentation und geprüftes Live-Verhalten":1.05,"Produktdokumentation und geprüftes sichtbares Verhalten":1.05,"Community-Build-Analyse, automatisch abgeleitet, ohne Gewähr":0.5}}}'
+            'meta-source-strong|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"dense_relevance_filter":true,"timeout_ms":3000,"metadata":{"source_weights":{"Produktdokumentation und geprüftes Live-Verhalten":1.1,"Produktdokumentation und geprüftes sichtbares Verhalten":1.1,"Community-Build-Analyse, automatisch abgeleitet, ohne Gewähr":0.25}}}'
+            'meta-recency|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"dense_relevance_filter":true,"timeout_ms":3000,"metadata":{"recency_weight":0.05,"recency_half_life_days":30.0,"source_weights":{"Produktdokumentation und geprüftes Live-Verhalten":1.05,"Produktdokumentation und geprüftes sichtbares Verhalten":1.05,"Community-Build-Analyse, automatisch abgeleitet, ohne Gewähr":0.5}}}'
+          )
+          for item in "${variants[@]}"; do
+            name="${item%%|*}"
+            config="${item#*|}"
+            report="$out/$name.json"
+            echo "::group::$name"
+            DL_KNOWLEDGE_HYBRID_OPTIONS="$config" bash scripts/central_test_db.sh target/release/dl-knowledge hybrid bench "$evals" "$report" 1
+            python3 ../.tasks/2026-09-17-rag-ausbau-visual-brain/session4_sweep_summary.py "$report" hybrid
+            echo "::endgroup::"
+          done
       - name: TinyBERT Schnittstelle prüfen
         env:
           DL_KNOWLEDGE_EMBEDDER: fastembed
