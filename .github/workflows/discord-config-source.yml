@@ -1,0 +1,32 @@
+name: Discord config source snapshot
+on:
+  push:
+    branches: [feat/discord-global-toml-20260920]
+    paths: [.github/workflows/discord-config-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Package tracked Rust source without runtime files
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess, zipfile
+          paths = subprocess.check_output(['git', 'ls-files', '-z', 'rust']).decode().split('\0')
+          with zipfile.ZipFile('discord-config-source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for name in paths:
+                  p = pathlib.Path(name)
+                  if name and (p.suffix == '.rs' or p.name in {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'}):
+                      z.write(p, name)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: discord-config-source
+          path: discord-config-source.zip
+          retention-days: 1
+          if-no-files-found: error
