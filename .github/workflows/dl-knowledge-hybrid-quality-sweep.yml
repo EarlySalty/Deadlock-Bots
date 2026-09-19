@@ -1,0 +1,108 @@
+name: dl-knowledge hybrid quality sweep
+
+on:
+  push:
+    branches:
+      - feat/dl-knowledge-hybrid
+    paths:
+      - .github/workflows/dl-knowledge-hybrid-quality-sweep.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Checkout aktueller Golden-Stand
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: EarlySalty/Deadlock-Docs
+          ref: main
+          path: Deadlock-Docs
+      - name: Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Lokales Embedding-Modell bereitstellen
+        run: |
+          set -euo pipefail
+          model_dir="$RUNNER_TEMP/all-MiniLM-L6-v2"
+          revision=1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+          base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$revision"
+          mkdir -p "$model_dir"
+          for file in config.json tokenizer.json tokenizer_config.json special_tokens_map.json; do
+            curl --proto '=https' --tlsv1.2 --fail --location "$base/$file" --output "$model_dir/$file"
+          done
+          curl --proto '=https' --tlsv1.2 --fail --location "$base/onnx/model.onnx" --output "$model_dir/model.onnx"
+          cd "$model_dir"
+          printf '%s  %s\n' \
+            '953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41' config.json \
+            '6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452' model.onnx \
+            '303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3' special_tokens_map.json \
+            'be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037' tokenizer.json \
+            'acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b' tokenizer_config.json \
+            | sha256sum --check -
+          echo "DL_KNOWLEDGE_MODELS=$model_dir" >> "$GITHUB_ENV"
+      - name: Release-Binary bauen
+        run: cargo build --release --package dl-knowledge --jobs 2
+      - name: 254-Fälle-Sweep ohne Cross-Encoder
+        env:
+          DL_KNOWLEDGE_EMBEDDER: fastembed
+          DL_KNOWLEDGE_BENCH_DOCS: ${{ github.workspace }}/Deadlock-Docs/public
+        run: |
+          set -euo pipefail
+          evals="${{ github.workspace }}/Deadlock-Docs/evals"
+          out="$RUNNER_TEMP/hybrid-sweep"
+          mkdir -p "$out"
+          variants=(
+            'equal|{"rerank":false,"bm25_k":24,"dense_k":24,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.0,"dense_weight":1.0,"timeout_ms":3000}'
+            'bm25-104|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"timeout_ms":3000}'
+            'bm25-108|{"rerank":false,"bm25_k":24,"dense_k":12,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.08,"dense_weight":1.0,"timeout_ms":3000}'
+            'rank-sensitive|{"rerank":false,"bm25_k":24,"dense_k":12,"fusion_k":12,"output_k":6,"rrf_k":20.0,"bm25_weight":1.12,"dense_weight":1.0,"timeout_ms":3000}'
+            'dense-small|{"rerank":false,"bm25_k":32,"dense_k":8,"fusion_k":12,"output_k":6,"rrf_k":40.0,"bm25_weight":1.06,"dense_weight":1.0,"timeout_ms":3000}'
+          )
+          for item in "${variants[@]}"; do
+            name="${item%%|*}"
+            config="${item#*|}"
+            report="$out/$name.json"
+            echo "::group::$name"
+            DL_KNOWLEDGE_HYBRID_OPTIONS="$config" \
+              bash scripts/central_test_db.sh \
+              target/release/dl-knowledge hybrid bench "$evals" "$report" 1
+            REPORT="$report" python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["REPORT"], encoding="utf-8") as handle:
+    data = json.load(handle)
+metrics = data["hybrid"]
+keys = [
+    "positive_cases", "negative_cases", "recall_at_1", "recall_at_3",
+    "recall_at_5", "mrr_at_k", "citation_correctness",
+    "retrieval_abstain_rate", "false_answer_rate",
+    "grounded_selection_possible_cases", "query_p50_ms", "query_p95_ms",
+]
+print("SESSION4_METRICS", json.dumps({key: metrics[key] for key in keys}, sort_keys=True))
+lost = []
+rescued = []
+for row in data["case_results"]:
+    if not row["answerable"]:
+        continue
+    bm25 = bool(row["bm25"]["grounded_selection_possible"])
+    hybrid = bool(row["hybrid"]["grounded_selection_possible"])
+    if bm25 and not hybrid:
+        lost.append(row["question"])
+    elif hybrid and not bm25:
+        rescued.append(row["question"])
+print("SESSION4_LOST", json.dumps(lost, ensure_ascii=False))
+print("SESSION4_RESCUED", json.dumps(rescued, ensure_ascii=False))
+PY
+            echo "::endgroup::"
+          done

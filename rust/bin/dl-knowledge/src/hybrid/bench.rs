@@ -225,13 +225,37 @@ fn summary(rows: &[Value], mode: &str, samples: &[f64]) -> Value {
             .sum::<f64>()
             / positives.len() as f64
     };
+    let recall = |limit: usize| {
+        positives
+            .iter()
+            .filter(|row| {
+                let expected = row["expected_sources"]
+                    .as_array()
+                    .expect("Messbericht enthält expected_sources");
+                row[mode]["ranked_paths"]
+                    .as_array()
+                    .expect("Messbericht enthält ranked_paths")
+                    .iter()
+                    .take(limit)
+                    .any(|path| expected.contains(path))
+            })
+            .count() as f64
+            / positives.len() as f64
+    };
+    let negative_abstains = negatives
+        .iter()
+        .filter(|row| row[mode]["relevant_candidates"] == 0)
+        .count();
     json!({"positive_cases":positives.len(), "negative_cases":negatives.len(), "hit_cases":count("hit"),
-        "source_recall_at_k":mean("source_recall"), "mrr_at_k":mean("reciprocal_rank"),
+        "recall_at_1":recall(1), "recall_at_3":recall(3), "recall_at_5":recall(5),
+        "citation_correctness":recall(6), "source_recall_at_k":mean("source_recall"), "mrr_at_k":mean("reciprocal_rank"),
+        "retrieval_abstain_rate":negative_abstains as f64 / negatives.len() as f64,
+        "false_answer_rate":(negatives.len()-negative_abstains) as f64 / negatives.len() as f64,
         "grounded_selection_possible_cases":count("grounded_selection_possible"),
         "expected_source_lost_to_relevance_cases":count("expected_source_lost_to_relevance"),
         "answer_terms_lost_to_relevance_cases":count("answer_terms_lost_to_relevance"),
         "positive_cases_without_relevant_candidates":positives.iter().filter(|row| row[mode]["relevant_candidates"] == 0).count(),
-        "negative_cases_without_relevant_candidates":negatives.iter().filter(|row| row[mode]["relevant_candidates"] == 0).count(),
+        "negative_cases_without_relevant_candidates":negative_abstains,
         "missing_context_cases":positives.iter().filter(|row| row[mode]["missing_context_terms"].as_array().is_some_and(|terms| !terms.is_empty())).count(),
         "forbidden_context_cases":rows.iter().filter(|row| row[mode]["forbidden_context_terms"].as_array().is_some_and(|terms| !terms.is_empty())).count(),
         "query_samples":samples.len(), "query_p50_ms":percentile(samples,0.5), "query_p95_ms":percentile(samples,0.95)})
