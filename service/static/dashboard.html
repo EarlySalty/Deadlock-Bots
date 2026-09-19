@@ -1500,25 +1500,44 @@ details[open] > summary { margin-bottom: 18px; }
 .brain-plan-group h4 { color: #d8bf8e; }
 .brain-technical { margin-bottom: 18px; }
 .brain-map { margin-bottom: 24px; }
+.brain-knowledge-status { margin:16px 0; padding:16px; border:1px solid #70542b; border-radius:10px; background:#11100e; box-shadow:0 5px 14px #0005; }
+.brain-knowledge-status h4 { margin:0 0 8px; }
+.brain-knowledge-status section { padding:10px 0; border:0; background:transparent; }
+.brain-knowledge-status p, .brain-knowledge-status li { overflow-wrap:anywhere; }
 .brain-map-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; }
 .brain-map-controls label { display: grid; gap: 6px; flex: 1 1 180px; }
 .brain-map-controls input, .brain-map-controls select { width: 100%; min-height: 44px; }
-.brain-map-layout { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(300px, 2fr) minmax(210px, 1fr); gap: 16px; }
+.brain-map-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(240px, 1fr); gap: 16px; align-items:start; }
 .brain-map-layout[hidden] { display: none; }
 .brain-map-results { max-height: 510px; overflow: auto; }
 .brain-map-results button, .brain-map-links button { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 10px 12px; white-space: normal; overflow-wrap: anywhere; }
-.brain-map-results button[aria-pressed="true"] { outline: 2px solid #e1b84f; outline-offset: -2px; background: #33260d; }
+.brain-map-results button[aria-pressed="true"] { outline: 2px solid #e1b84f; outline-offset: -2px; background: #24211b; }
 .brain-map-results small { display: block; color: #d5c4a0; margin-top: 4px; }
 .brain-map-stage { min-width: 0; background: #0d0806; border: 1px solid #8b6b25; border-radius: 12px; overflow: hidden; }
-#brain-map-canvas { height: 460px; }
+#brain-map-canvas { height: 560px; }
+.brain-map-layout > div:first-child { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid #60471e; padding-top: 16px; }
+.brain-map-results { display: grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap: 8px; }
+.brain-map-stage { grid-column: 1; grid-row: 1; }
+.brain-overview .brain-map-stage { grid-column:1 / -1; }
+.brain-map-detail[hidden] { display:none; }
+.brain-overview #brain-map-canvas { height:600px; }
+.brain-map-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:16px; border-bottom:1px solid #60471e; }
+.brain-map-toolbar h4 { flex:1 1 200px; margin:0; }
+.brain-map-toolbar button { min-height:40px; }
+.brain-map-topic-picker summary { padding:12px 16px; cursor:pointer; color:#ecd6a9; }
+.brain-map button { background:#181613; border-color:#63502d; }
+.brain-map button:hover { background:#24211c; border-color:#d6ad52; }
+.brain-map-topics { display:flex; flex-wrap:wrap; gap:8px; padding:12px; border-bottom:1px solid #44331c; }
+.brain-map-topics button { white-space:normal; max-width:100%; flex:0 0 auto; font-size:.8rem; min-height:38px; }
+.brain-map-topics button[aria-pressed="true"] { border-color:#edc66a; background:#24211b; }
 .brain-map-stage p { padding: 0 12px; font-size: .85rem; }
-.brain-map-detail { min-width: 0; max-height: 540px; overflow: auto; }
+.brain-map-detail { min-width: 0; max-height: 1000px; overflow: auto; }
 .brain-map-detail h4 { overflow-wrap: anywhere; margin-top: 0; }
 .brain-map-source { display: block; width: 100%; min-height: 74px; resize: vertical; margin: 8px 0; font-size: .85rem; }
 .brain-map-links { margin-top: 12px; }
 .brain-map :focus-visible { outline: 2px solid #ffe299; outline-offset: 3px; }
-@media (max-width: 1150px) { .brain-map-layout { grid-template-columns: minmax(180px, 1fr) minmax(300px, 2fr); } .brain-map-detail { grid-column: 1 / -1; max-height: none; } }
-@media (max-width: 720px) { .brain-map-layout { display: flex; flex-direction: column; } .brain-map-results { max-height: 240px; } #brain-map-canvas { height: 330px; } }
+@media (max-width: 1150px) { .brain-map-layout { grid-template-columns: minmax(0, 1fr); } .brain-map-detail { grid-column:1; grid-row:2; max-height:500px; } .brain-map-layout > div:first-child { grid-row:3; } }
+@media (max-width: 720px) { .brain-map-layout { display: flex; flex-direction: column; } .brain-map-results { max-height: 240px; } #brain-map-canvas, .brain-overview #brain-map-canvas { height: 520px; } .brain-overview #brain-map-canvas { display:none; } .brain-map-topics { max-height:360px; overflow:auto; display:grid; grid-template-columns:1fr; } .brain-map-topics button { width:100%; text-align:left; } .brain-map-stage { order:0; } .brain-map-detail { order:1; } .brain-map-layout > div:first-child { order:2; } .brain-map-toolbar > div { display:flex; gap:6px; } }
 .insights-panel .page-head { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 .insights-panel .page-sub,.insights-panel .hint,.insights-panel .sub,.insights-panel .note { color: var(--muted); font-size: 13px; }
 .insights-panel .page-sub { margin-bottom: 24px; }
@@ -2280,8 +2299,18 @@ details[open] > summary { margin-bottom: 18px; }
             <div class="card brain-map" aria-labelledby="brain-map-heading">
                 <span class="eyebrow">Wissen und Zusammenhänge</span>
                 <h3 id="brain-map-heading">Wissenskarte</h3>
-                <p>Öffentliche Wissensquellen für den Concierge, interne Dokumentation und ihre Code-Bezüge. Interne Dokumentation gehört nicht zum Antwortwissen des Concierge.</p>
-                <p class="voice-meta" id="brain-map-summary">Wissenskarte wird beim Öffnen geladen.</p>
+                <p>Dokumente finden. Zusammenhänge öffnen. Quellen nachvollziehen.</p>
+                <div class="brain-knowledge-status" aria-labelledby="brain-knowledge-heading">
+                    <h4 id="brain-knowledge-heading">Öffentliches Antwortwissen</h4>
+                    <p id="brain-knowledge-summary" role="status">Prüfstand wird geladen …</p>
+                    <details><summary>Quellen, Prüfstand und offene Lücken</summary>
+                        <p id="brain-knowledge-stamp"></p>
+                        <div id="brain-knowledge-repositories"></div>
+                        <ul id="brain-knowledge-gaps"></ul>
+                    </details>
+                </div>
+                <details><summary>Was zeigt diese Karte?</summary><p>Die Karte verbindet öffentliche Dokumentation, interne Projektdokumente und Code. Sie ist keine Liste aller Inhalte, die die KI beantworten kann. Interne Dokumentation bleibt vom öffentlichen Antwortwissen getrennt.</p></details>
+                <details class="brain-map-data"><summary>Kartenstand und Abdeckung</summary><p class="voice-meta" id="brain-map-summary">Wissenskarte wird beim Öffnen geladen.</p></details>
                 <div class="brain-map-controls">
                     <label for="brain-map-search">Dokument oder Code suchen<input id="brain-map-search" type="search" placeholder="Zum Beispiel Concierge, Rollen oder Paten" autocomplete="off"></label>
                     <label for="brain-map-filter">Bereich<select id="brain-map-filter"><option value="all">Alle Bereiche</option><option value="documents">Nur Wissensdokumente</option><option value="discord">Discord und Concierge</option><option value="code">Nur Code</option></select></label>
@@ -2291,7 +2320,7 @@ details[open] > summary { margin-bottom: 18px; }
                 <div id="brain-map-error" role="alert" hidden></div>
                 <div class="brain-map-layout" id="brain-map-layout" hidden>
                     <div><p id="brain-map-count" role="status" aria-live="polite"></p><div class="brain-map-results" id="brain-map-results" role="group" aria-label="Suchergebnisse"></div><button type="button" id="brain-map-more" hidden>Weitere Treffer</button></div>
-                    <div class="brain-map-stage"><div id="brain-map-canvas" aria-hidden="true"></div><p id="brain-map-scope">Die Karte zeigt die direkten Verbindungen deiner Auswahl. Alle Knoten sind auch über die Treffer und Verbindungen per Tastatur erreichbar.</p></div>
+                    <div class="brain-map-stage"><div class="brain-map-toolbar"><button type="button" id="brain-map-overview">← Themenübersicht</button><h4 id="brain-map-view-title">Themen &amp; Quellbereiche</h4><div><button type="button" id="brain-map-zoom-out" aria-label="Karte verkleinern">−</button><button type="button" id="brain-map-zoom-in" aria-label="Karte vergrößern">+</button><button type="button" id="brain-map-fit">Alles einpassen</button></div></div><details class="brain-map-topic-picker"><summary>Bereich wählen oder Bündel aufklappen</summary><div id="brain-map-topics" class="brain-map-topics" role="group" aria-label="Themen öffnen"></div></details><div id="brain-map-canvas" aria-hidden="true"></div><p id="brain-map-scope">Die Karte zeigt die direkten Verbindungen deiner Auswahl. Alle Knoten sind auch über die Treffer und Verbindungen per Tastatur erreichbar.</p></div>
                     <div class="brain-map-detail" id="brain-map-detail" aria-label="Details zur Auswahl">
                         <h4 id="brain-map-title">Wähle einen Knoten</h4><p id="brain-map-meta"></p>
                         <label for="brain-map-source">Quellenpfad</label><textarea id="brain-map-source" class="brain-map-source" readonly></textarea>
