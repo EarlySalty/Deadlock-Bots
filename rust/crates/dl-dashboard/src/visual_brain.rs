@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -72,6 +72,7 @@ struct Node {
     kind: String,
     group: String,
     stand: String,
+    evidence_links: usize,
 }
 
 #[derive(Serialize)]
@@ -311,7 +312,7 @@ fn add_sorted_nodes(selected: &mut HashSet<String>, candidates: HashSet<String>)
     selected.extend(candidates.into_iter().take(MAX_NODES - selected.len()));
 }
 
-fn node_view(node: RawNode) -> Node {
+fn node_view(node: RawNode, evidence_links: usize) -> Node {
     Node {
         id: node.id,
         label: node.label,
@@ -325,11 +326,27 @@ fn node_view(node: RawNode) -> Node {
         .into(),
         group: node.metadata.doc_group,
         stand: node.metadata.stand,
+        evidence_links,
     }
+}
+
+fn evidence_counts(raw: &RawGraph, seeds: &HashSet<String>) -> HashMap<String, usize> {
+    let existing: HashSet<_> = raw.nodes.iter().map(|node| node.id.as_str()).collect();
+    let mut counts = HashMap::new();
+    for link in &raw.links {
+        if link.relation == "documents"
+            && seeds.contains(&link.source)
+            && existing.contains(link.target.as_str())
+        {
+            *counts.entry(link.source.clone()).or_default() += 1;
+        }
+    }
+    counts
 }
 
 fn reduce_graph(raw: RawGraph, modified: SystemTime) -> Result<Graph, &'static str> {
     let selection = select_nodes(&raw)?;
+    let evidence = evidence_counts(&raw, &selection.seeds);
     let source_nodes = raw.nodes.len();
     let source_links = raw.links.len();
     let mut links: Vec<_> = raw
@@ -349,16 +366,14 @@ fn reduce_graph(raw: RawGraph, modified: SystemTime) -> Result<Graph, &'static s
     });
     let omitted_links = links.len().saturating_sub(MAX_LINKS);
     links.truncate(MAX_LINKS);
-    let linked_documents: HashSet<_> = links
-        .iter()
-        .filter(|link| link.relation == "documents" && selection.seeds.contains(&link.source))
-        .map(|link| link.source.clone())
-        .collect();
     let mut nodes: Vec<_> = raw
         .nodes
         .into_iter()
         .filter(|node| selection.selected.contains(&node.id))
-        .map(node_view)
+        .map(|node| {
+            let count = evidence.get(&node.id).copied().unwrap_or(0);
+            node_view(node, count)
+        })
         .collect();
     nodes.sort_by(|a, b| (&a.kind, &a.label, &a.id).cmp(&(&b.kind, &b.label, &b.id)));
     Ok(Graph {
@@ -367,7 +382,7 @@ fn reduce_graph(raw: RawGraph, modified: SystemTime) -> Result<Graph, &'static s
         source_nodes,
         source_links,
         corpus_nodes: selection.seeds.len(),
-        unlinked_documents: selection.seeds.len() - linked_documents.len(),
+        unlinked_documents: selection.seeds.len() - evidence.len(),
         omitted_nodes: selection.omitted,
         omitted_links,
         generated_at: chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339(),
@@ -426,6 +441,15 @@ mod tests {
         assert_eq!(graph.nodes.len(), MAX_NODES);
         assert_eq!(graph.omitted_nodes, 101);
         assert_eq!(graph.unlinked_documents, 0);
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.id == "doc")
+                .unwrap()
+                .evidence_links,
+            1600
+        );
     }
 
     #[tokio::test]

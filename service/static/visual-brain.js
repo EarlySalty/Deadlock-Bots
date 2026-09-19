@@ -71,7 +71,7 @@
 
     function draw(node, incident) {
         if (!window.vis?.Network) return;
-        const ids = [node.id, ...new Set(incident.map(link => link.source === node.id ? link.target : link.source))].slice(0, 90);
+        const ids = [...new Set([node.id, ...incident.map(link => link.source === node.id ? link.target : link.source)])].slice(0, 90);
         const visible = new Set(ids);
         const links = incident.filter(link => visible.has(link.source) && visible.has(link.target)).slice(0, 400);
         const data = {
@@ -114,7 +114,7 @@
         const incident = neighbors.get(id) || [];
         const documents = incident.filter(link => link.relation === 'documents');
         ui.evidence.textContent = node.kind === 'document'
-            ? documents.length ? documents.length + ' belegte Code-Verbindungen. Die Linien stammen aus der vorhandenen Wissenskarte.' : 'Für dieses Dokument ist noch keine Code-Verbindung hinterlegt.'
+            ? documents.length ? documents.length + ' belegte Code-Verbindungen in diesem Ausschnitt.' + (node.evidence_links > documents.length ? ' Weitere Belege liegen außerhalb der begrenzten Ansicht.' : ' Die Linien stammen aus der vorhandenen Wissenskarte.') : node.evidence_links > 0 ? 'Die Code-Belege dieses Dokuments liegen außerhalb des begrenzten Ausschnitts.' : 'Für dieses Dokument ist in der Ausgangskarte noch keine Code-Verbindung hinterlegt.'
             : 'Verbindungen aus der bestehenden Codeanalyse. Abgeleitete Zusammenhänge sind als solche markiert.';
         ui.links.replaceChildren();
         const heading = document.createElement('h5');
@@ -161,7 +161,7 @@
                 if (link.source !== link.target) neighbors.get(link.target).push(link);
             }
             const stamp = new Date(data.generated_at).toLocaleString('de-DE');
-            ui.summary.textContent = data.corpus_nodes + ' Wissensdokumente · ' + data.nodes.length + ' Knoten · ' + data.links.length + ' Verbindungen. Ausschnitt: Wissensbasis, belegte Code-Bezüge und deren direkte Nachbarn. ' + data.unlinked_documents + ' Dokumente haben noch keine Code-Belege. Kartenstand: ' + stamp + '.' + (data.omitted_nodes || data.omitted_links ? ' Die Größe ist begrenzt; ' + data.omitted_nodes + ' weitere Nachbarn und ' + data.omitted_links + ' Verbindungen sind ausgeblendet.' : '');
+            ui.summary.textContent = data.corpus_nodes + ' Wissensdokumente · ' + data.nodes.length + ' Knoten · ' + data.links.length + ' Verbindungen. Ausschnitt: Wissensbasis, belegte Code-Bezüge und deren direkte Nachbarn. ' + data.unlinked_documents + ' Dokumente haben in der Ausgangskarte noch keine Code-Belege. Kartenstand: ' + stamp + '.' + (data.omitted_nodes || data.omitted_links ? ' Die Größe ist begrenzt; ' + data.omitted_nodes + ' weitere Nachbarn und ' + data.omitted_links + ' Verbindungen sind ausgeblendet.' : '');
             ui.layout.hidden = false;
             showResults();
             const initial = data.nodes.find(node => node.id === selected) || data.nodes.find(node => node.kind === 'document' && /concierge/.test(node.source_file) && (neighbors.get(node.id)?.length || 0) > 0) || data.nodes.find(node => node.kind === 'document' && (neighbors.get(node.id)?.length || 0) > 0) || data.nodes.find(node => node.kind === 'document') || data.nodes[0];
