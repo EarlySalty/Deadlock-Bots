@@ -1,0 +1,29 @@
+name: Discord config CI
+on:
+  push:
+    branches: [feat/discord-global-toml-20260920]
+  pull_request:
+    branches: [main]
+    paths:
+      - rust/crates/dl-core/**
+      - config/bot.toml
+      - .github/workflows/discord-config-ci.yml
+permissions:
+  contents: read
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+      - name: Test file configuration
+        working-directory: rust
+        run: cargo +1.88.0 test -j 2 -p dl-core
+      - name: Validate repository TOML
+        run: cargo +1.88.0 run -j 2 --manifest-path rust/Cargo.toml -p dl-core --bin dl-config-check -- --config config/bot.toml
+      - name: Check formatting
+        run: rustfmt +1.88.0 --edition 2021 --check rust/crates/dl-core/src/bot_config.rs rust/crates/dl-core/src/bin/dl-config-check.rs
