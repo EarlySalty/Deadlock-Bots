@@ -170,6 +170,7 @@
             catch (error) { ui.error.textContent = error.message + ' Suche und Verbindungsliste bleiben bedienbar.'; ui.error.hidden = false; }
         } catch (error) {
             graph = null;
+            ui.summary.textContent = 'Kein aktueller Kartenstand verfügbar.';
             network?.destroy();
             network = null;
             ui.layout.hidden = true;
