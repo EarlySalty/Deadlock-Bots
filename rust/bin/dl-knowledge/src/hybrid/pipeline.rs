@@ -61,12 +61,22 @@ pub async fn run(
             vectors.len() == 1 && models.embedder.fingerprint() == fingerprint,
             "Ungültiges Query-Embedding oder Modellwechsel"
         );
+        let dense_fetch_k = if config.dense_relevance_filter {
+            config.dense_k.saturating_mul(3).min(100)
+        } else {
+            config.dense_k
+        };
         let (generation, hits) = tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
-            search::dense(pool, &fingerprint, &vectors[0], catalog, config.dense_k),
+            search::dense(pool, &fingerprint, &vectors[0], catalog, dense_fetch_k),
         )
         .await
         .context("Dense-Suche hat ihr Zeitbudget überschritten")??;
+        let hits = if config.dense_relevance_filter {
+            rank::relevant_dense(&hits, knowledge, question, config.dense_k)
+        } else {
+            hits
+        };
         (Some(generation), hits)
     } else {
         (None, Vec::new())
