@@ -972,12 +972,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     };
     let shared_brain_bin =
         std::path::PathBuf::from(env("BRAIN_BIN").unwrap_or_else(default_brain_bin));
+    // Keep the configured source even when its binary is temporarily absent:
+    // retrieval failure must become explicit coverage, never silent omission.
     let shared_game: Option<Arc<dyn dl_answer::Retriever>> =
-        shared_brain_bin.is_file().then(|| {
-            Arc::new(modglue::BrainRetrieverGlue {
-                bin: shared_brain_bin.clone(),
-            }) as Arc<dyn dl_answer::Retriever>
-        });
+        Some(Arc::new(modglue::BrainRetrieverGlue {
+            bin: shared_brain_bin.clone(),
+        }));
     let shared_answers = Arc::new(
         dl_answer::AnswerEngine::new(
             concierge_ai.clone(),

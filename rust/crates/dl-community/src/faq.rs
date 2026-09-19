@@ -2624,6 +2624,10 @@ mod tests {
 
     #[test]
     fn shadow_nachricht_zeigt_sichere_entscheidung() {
+        let bounded = "🧠".repeat(900);
+        let payload = shadow_ticket_message(u64::MAX, "uncertain", &bounded);
+        assert!(payload.encode_utf16().count() <= 2000);
+        assert!(payload.ends_with(&bounded));
         let message = shadow_ticket_message(10, "no", "Antwort");
         assert!(message.starts_with("🧪 **FAQ-Shadow**\n"));
         assert!(message.contains("Urteil: no"));

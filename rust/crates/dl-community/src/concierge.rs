@@ -7220,6 +7220,22 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    #[test]
+    fn wissensantwort_utf16_budget_passt_in_v2_und_fallback() {
+        let text = "🧠".repeat(900);
+        let body = super::answer_body(&text, true, true, None);
+        let visible = body["components"][0]["components"][0]["content"]
+            .as_str()
+            .expect("text display");
+        assert_eq!(visible, text);
+        assert!(visible.encode_utf16().count() <= 2000);
+        let reply = super::v2_reply(body, &text);
+        assert_eq!(
+            reply.fallback.expect("fallback").content.as_deref(),
+            Some(text.as_str())
+        );
+    }
+
     use std::str::FromStr;
     #[cfg(feature = "testing")]
     use std::sync::atomic::AtomicUsize;

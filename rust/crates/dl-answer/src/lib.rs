@@ -112,6 +112,13 @@ pub enum Scope {
     CommunityAndGame,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeDomain {
+    Community,
+    Game,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
     Grounded {
@@ -119,6 +126,7 @@ pub enum Answer {
         sources: Vec<Source>,
         intent: Option<String>,
         pate_request: bool,
+        unavailable_sources: Vec<KnowledgeDomain>,
     },
     NoEvidence,
     OutOfDomain,
@@ -203,7 +211,7 @@ impl AnswerEngine {
         } else {
             retrieval_context
         };
-        let retrieved = self.retrieve(retrieval_context, scope).await?;
+        let (retrieved, unavailable_sources) = self.retrieve(retrieval_context, scope).await?;
         tracing::info!(
             retrieval_ms = started.elapsed().as_millis(),
             evidence_count = retrieved.evidence.len(),
@@ -211,6 +219,9 @@ impl AnswerEngine {
             "Gemeinsame Belege abgerufen"
         );
         if retrieved.evidence.is_empty() {
+            if !unavailable_sources.is_empty() {
+                return Err(AnswerError::Retrieval);
+            }
             return Ok(if retrieved.out_of_domain {
                 Answer::OutOfDomain
             } else {
@@ -219,15 +230,25 @@ impl AnswerEngine {
         }
         let evidence = bounded_evidence(retrieved.evidence)?;
         if evidence.is_empty() {
-            return Ok(Answer::NoEvidence);
+            return if unavailable_sources.is_empty() {
+                Ok(Answer::NoEvidence)
+            } else {
+                Err(AnswerError::Retrieval)
+            };
         }
+        let notice = coverage_notice(&unavailable_sources);
+        let max_units = match scope {
+            Scope::CommunityAndGame => 1800usize,
+            Scope::GameOnly => 3800usize,
+        };
+        let answer_budget = max_units.saturating_sub(notice.encode_utf16().count());
         let provider = self.provider.as_ref().ok_or(AnswerError::Provider)?;
-        let payload = serde_json::json!({"question": question, "conversation_context": retrieval_context, "evidence": evidence});
+        let payload = serde_json::json!({"question": question, "conversation_context": retrieval_context, "evidence": evidence, "unavailable_sources": unavailable_sources});
         let started = Instant::now();
         let response = provider
             .chat(
                 &[
-                    ChatMessage::system(format!("{}\n\n{}", self.persona, SYSTEM)),
+                    ChatMessage::system(format!("{}\n\n{}\nDein answer-Text darf höchstens {answer_budget} UTF-16-Einheiten enthalten. Verdichte in ganzen Sätzen, ohne notwendige Einschränkungen wegzulassen. Bei unavailable_sources erkläre nur den durch vorhandene Belege gedeckten Teil; die Anwendung ergänzt einen sichtbaren Ausfallhinweis.", self.persona, SYSTEM)),
                     ChatMessage::user(payload.to_string()),
                 ],
                 ChatParams {
@@ -248,13 +269,32 @@ impl AnswerEngine {
             generation_ms = started.elapsed().as_millis(),
             "Gemeinsame Wissensantwort generiert"
         );
-        validate_answer(&response.content, &evidence)
+        let mut answer = validate_answer(&response.content, &evidence, answer_budget)?;
+        if let Answer::Grounded {
+            text,
+            unavailable_sources: failed,
+            ..
+        } = &mut answer
+        {
+            text.push_str(&notice);
+            *failed = unavailable_sources;
+        } else if !unavailable_sources.is_empty() {
+            return Err(AnswerError::Retrieval);
+        }
+        Ok(answer)
     }
 
-    async fn retrieve(&self, question: &str, scope: Scope) -> Result<Retrieved, AnswerError> {
+    async fn retrieve(
+        &self,
+        question: &str,
+        scope: Scope,
+    ) -> Result<(Retrieved, Vec<KnowledgeDomain>), AnswerError> {
         match scope {
             Scope::GameOnly => match &self.game {
-                Some(game) => game.retrieve(question).await,
+                Some(game) => game
+                    .retrieve(question)
+                    .await
+                    .map(|items| (items, Vec::new())),
                 None => Err(AnswerError::Retrieval),
             },
             Scope::CommunityAndGame => {
@@ -266,15 +306,42 @@ impl AnswerEngine {
                     }
                 };
                 let (community, game) = tokio::join!(community, game);
-                // Keine Teilantwort, die eine ausgefallene Hälfte einer gemischten Frage verdeckt.
-                let mut community = community?;
-                let game = game?;
-                community.evidence.extend(game.evidence);
-                community.truncated |= game.truncated;
-                community.out_of_domain = false;
-                Ok(community)
+                let mut unavailable = Vec::new();
+                let mut first_error = None;
+                let mut combined = match community {
+                    Ok(items) => items,
+                    Err(error) => {
+                        first_error = Some(error);
+                        unavailable.push(KnowledgeDomain::Community);
+                        Retrieved::default()
+                    }
+                };
+                match game {
+                    Ok(items) => {
+                        combined.evidence.extend(items.evidence);
+                        combined.truncated |= items.truncated;
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        unavailable.push(KnowledgeDomain::Game);
+                    }
+                }
+                combined.out_of_domain = false;
+                if !unavailable.is_empty() && combined.evidence.is_empty() {
+                    return Err(first_error.unwrap_or(AnswerError::Retrieval));
+                }
+                Ok((combined, unavailable))
             }
         }
+    }
+}
+
+fn coverage_notice(unavailable: &[KnowledgeDomain]) -> String {
+    match unavailable {
+        [] => String::new(),
+        [KnowledgeDomain::Game] => "\n\nHinweis: Das Spielwissen konnte gerade nicht abgerufen werden. Dieser Wissensbereich ist deshalb nicht vollständig abgedeckt.".into(),
+        [KnowledgeDomain::Community] => "\n\nHinweis: Das Community-Wissen konnte gerade nicht abgerufen werden. Dieser Wissensbereich ist deshalb nicht vollständig abgedeckt.".into(),
+        _ => "\n\nHinweis: Die Wissensquellen konnten gerade nicht vollständig abgerufen werden.".into(),
     }
 }
 
@@ -311,7 +378,11 @@ struct WireAnswer {
     pate_request: bool,
 }
 
-fn validate_answer(raw: &str, evidence: &[Evidence]) -> Result<Answer, AnswerError> {
+fn validate_answer(
+    raw: &str,
+    evidence: &[Evidence],
+    max_units: usize,
+) -> Result<Answer, AnswerError> {
     let wire: WireAnswer =
         serde_json::from_str(&dl_ai::strip_think(raw)).map_err(|_| AnswerError::InvalidAnswer)?;
     if !wire.answerable {
@@ -319,7 +390,7 @@ fn validate_answer(raw: &str, evidence: &[Evidence]) -> Result<Answer, AnswerErr
     }
     let text = wire
         .answer
-        .filter(|text| !text.trim().is_empty() && text.chars().count() <= 6000)
+        .filter(|text| !text.trim().is_empty() && text.encode_utf16().count() <= max_units)
         .ok_or(AnswerError::InvalidAnswer)?;
     if wire.source_ids.is_empty() || text.contains("http://") || text.contains("https://") {
         return Err(AnswerError::InvalidAnswer);
@@ -357,6 +428,7 @@ fn validate_answer(raw: &str, evidence: &[Evidence]) -> Result<Answer, AnswerErr
             .intent
             .filter(|intent| matches!(intent.as_str(), "improve" | "mates" | "learn" | "casual")),
         pate_request: wire.pate_request,
+        unavailable_sources: Vec::new(),
     })
 }
 
@@ -407,18 +479,134 @@ mod tests {
             observed_at: None,
         }
     }
+    #[tokio::test]
+    async fn ein_quellenausfall_erhaelt_andere_belege_mit_unvermeidbarem_hinweis() {
+        for domain in [KnowledgeDomain::Game, KnowledgeDomain::Community] {
+            let id = if domain == KnowledgeDomain::Game {
+                "C1"
+            } else {
+                "G1"
+            };
+            let provider = Arc::new(Provider { calls: AtomicUsize::new(0), response: serde_json::json!({"answerable":true,"answer":"Belegter Sachteil.","source_ids":[id]}).to_string() });
+            let valid = Arc::new(Fixture {
+                items: Retrieved {
+                    evidence: vec![evidence(id)],
+                    ..Default::default()
+                },
+                fail: false,
+            });
+            let broken = Arc::new(Fixture {
+                items: Retrieved::default(),
+                fail: true,
+            });
+            let (community, game): (Arc<dyn Retriever>, Arc<dyn Retriever>) =
+                if domain == KnowledgeDomain::Game {
+                    (valid, broken)
+                } else {
+                    (broken, valid)
+                };
+            let engine = AnswerEngine::new(
+                Some(provider.clone()),
+                community,
+                Some(game),
+                Duration::from_secs(1),
+            );
+            let Answer::Grounded {
+                text,
+                unavailable_sources,
+                ..
+            } = engine
+                .answer("Gemeinschaft und Spiel?", Scope::CommunityAndGame)
+                .await
+                .expect("Teilantwort")
+            else {
+                panic!("belegter Sachteil fehlt")
+            };
+            assert_eq!(unavailable_sources, vec![domain]);
+            assert!(text.starts_with("Belegter Sachteil."));
+            assert!(text.contains("Hinweis:"));
+            assert!(text.contains("nicht vollständig abgedeckt"));
+            assert!(text.encode_utf16().count() <= 1800);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn antwortbudget_zaehlt_utf16_statt_rustzeichen_ohne_abzuschneiden() {
+        let items = [evidence("C1")];
+        let allowed =
+            serde_json::json!({"answerable":true,"answer":"🙂".repeat(900),"source_ids":["C1"]})
+                .to_string();
+        let too_long =
+            serde_json::json!({"answerable":true,"answer":"🙂".repeat(901),"source_ids":["C1"]})
+                .to_string();
+        assert!(matches!(
+            validate_answer(&allowed, &items, 1800),
+            Ok(Answer::Grounded { .. })
+        ));
+        assert_eq!(
+            validate_answer(&too_long, &items, 1800),
+            Err(AnswerError::InvalidAnswer)
+        );
+    }
+
+    #[tokio::test]
+    async fn ausfallhinweis_hat_reserviertes_budget_und_ueberlaenge_startet_keinen_neuversuch() {
+        let notice = coverage_notice(&[KnowledgeDomain::Game]);
+        let budget = 1800 - notice.encode_utf16().count();
+        let provider = Arc::new(Provider { calls: AtomicUsize::new(0), response: serde_json::json!({"answerable":true,"answer":"x".repeat(budget),"source_ids":["C1"]}).to_string() });
+        let valid = Arc::new(Fixture {
+            items: Retrieved {
+                evidence: vec![evidence("C1")],
+                ..Default::default()
+            },
+            fail: false,
+        });
+        let broken = Arc::new(Fixture {
+            items: Retrieved::default(),
+            fail: true,
+        });
+        let engine = AnswerEngine::new(
+            Some(provider.clone()),
+            valid.clone(),
+            Some(broken),
+            Duration::from_secs(1),
+        );
+        let Answer::Grounded { text, .. } = engine
+            .answer("Paten?", Scope::CommunityAndGame)
+            .await
+            .expect("Teilantwort")
+        else {
+            panic!("Antwort fehlt")
+        };
+        assert_eq!(text.encode_utf16().count(), 1800);
+        let oversized = Arc::new(Provider {
+            calls: AtomicUsize::new(0),
+            response:
+                serde_json::json!({"answerable":true,"answer":"🙂".repeat(901),"source_ids":["C1"]})
+                    .to_string(),
+        });
+        let engine =
+            AnswerEngine::new(Some(oversized.clone()), valid, None, Duration::from_secs(1));
+        assert_eq!(
+            engine.answer("Frage?", Scope::CommunityAndGame).await,
+            Err(AnswerError::InvalidAnswer)
+        );
+        assert_eq!(oversized.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn discord_kennungen_brauchen_zitierte_belege() {
         let raw =
             r#"{"answerable":true,"answer":"Frag in <#123456789012345678>.","source_ids":["C1"]}"#;
         let mut item = evidence("C1");
         assert!(matches!(
-            validate_answer(raw, &[item.clone()]),
+            validate_answer(raw, &[item.clone()], 1800),
             Err(AnswerError::InvalidAnswer)
         ));
         item.text.push_str(" Zuständig ist <#123456789012345678>.");
         assert!(matches!(
-            validate_answer(raw, &[item]),
+            validate_answer(raw, &[item], 1800),
             Ok(Answer::Grounded { .. })
         ));
     }
@@ -512,14 +700,15 @@ mod tests {
             r#"{"answerable":true,"answer":"Quelle fehlt","source_ids":[]}"#,
         ] {
             assert_eq!(
-                validate_answer(bad, &evidence),
+                validate_answer(bad, &evidence, 1800),
                 Err(AnswerError::InvalidAnswer)
             );
         }
         assert_eq!(
             validate_answer(
                 r#"{"answerable":false,"answer":null,"source_ids":[]}"#,
-                &evidence
+                &evidence,
+                1800
             ),
             Ok(Answer::NoEvidence)
         );

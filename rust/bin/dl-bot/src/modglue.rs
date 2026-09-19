@@ -393,13 +393,23 @@ fn truncate_brain_description(description: &str) -> String {
 }
 
 fn truncate_brain_chars(value: &str, max_chars: usize, suffix: &str) -> String {
-    if value.chars().count() <= max_chars {
+    if value.encode_utf16().count() <= max_chars {
         return value.to_string();
     }
 
-    let suffix_len = suffix.chars().count();
-    let take_chars = max_chars.saturating_sub(suffix_len);
-    let mut truncated = value.chars().take(take_chars).collect::<String>();
+    let suffix_len = suffix.encode_utf16().count();
+    let mut remaining = max_chars.saturating_sub(suffix_len);
+    let mut truncated: String = value
+        .chars()
+        .take_while(|ch| {
+            let units = ch.len_utf16();
+            if units > remaining {
+                return false;
+            }
+            remaining -= units;
+            true
+        })
+        .collect();
     truncated.push_str(suffix);
     truncated
 }
@@ -3624,6 +3634,19 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
+        let bounded = "🧠".repeat(1900);
+        let payload = brain_answer_embed_body(&"🧠".repeat(300), &bounded).expect("embed");
+        let embed = &payload["embeds"][0];
+        assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
+        assert!(
+            embed["title"]
+                .as_str()
+                .expect("title")
+                .encode_utf16()
+                .count()
+                <= 256
+        );
+        assert!(bounded.encode_utf16().count() <= 4096);
         let body = brain_answer_embed_body(
             "Wie spiel ich Seven?",
             "### Build\n\n✅ **Seven** startet stabil.",
@@ -3686,6 +3709,9 @@ mod tests {
             "🧠 ".chars().count() + BRAIN_EMBED_TITLE_QUESTION_LIMIT
         );
         assert!(title.ends_with('…'));
+        let emoji_title = brain_embed_title(&"🧠".repeat(300));
+        assert!(emoji_title.encode_utf16().count() <= 256);
+        assert!(emoji_title.ends_with('…'));
 
         let description =
             truncate_brain_description(&"ä".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT + 1));
@@ -3892,6 +3918,10 @@ mod tests {
 
     #[test]
     fn faq_message_body_deaktiviert_mentions() {
+        let bounded = "🧠".repeat(900);
+        let payload = faq_message_body(&bounded, None);
+        assert_eq!(payload["content"].as_str(), Some(bounded.as_str()));
+        assert!(bounded.encode_utf16().count() <= 2000);
         // Rohe Nutzerfrage, Modelltext und Shadow-Ausgabe laufen alle durch diesen einen
         // Sendepfad: er muss standardmäßig Rollen, @everyone und User-Pings unterbinden.
         let body = faq_message_body("@everyone <@123> <@&456>", None);
