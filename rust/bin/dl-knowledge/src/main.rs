@@ -1,4 +1,5 @@
 mod dense;
+mod eval;
 mod hybrid;
 
 use std::cmp::Ordering;
@@ -683,6 +684,9 @@ struct PromptCandidate<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if eval::run()? {
+        return Ok(());
+    }
     if dense::cli::run().await? || hybrid::cli::run().await? {
         return Ok(());
     }
@@ -2028,6 +2032,8 @@ mod tests {
         context_terms: Vec<String>,
         answer_terms: Vec<String>,
         forbidden_terms: Vec<String>,
+        #[serde(default, rename = "herkunft")]
+        _herkunft: Option<String>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2169,8 +2175,8 @@ mod tests {
             }
         }
         ensure!(
-            cases.len() == GOLDEN_CASE_COUNT,
-            "Golden-Suite hat {} statt exakt {GOLDEN_CASE_COUNT} Faellen",
+            cases.len() >= GOLDEN_CASE_COUNT,
+            "Golden-Suite hat {} statt mindestens {GOLDEN_CASE_COUNT} Fällen",
             cases.len()
         );
         Ok(cases)
@@ -2239,6 +2245,7 @@ mod tests {
                 .map(|term| (*term).to_string())
                 .collect(),
             forbidden_terms: vec![],
+            _herkunft: None,
         };
 
         let five_candidates = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
@@ -2295,13 +2302,17 @@ mod tests {
     }
 
     #[test]
-    fn golden_suite_verlangt_exakt_224_faelle() -> Result<()> {
+    fn golden_suite_verlangt_mindestens_224_faelle() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let (golden_dir, docs_path) = write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT)?;
         let cases = load_golden_cases(&golden_dir, &docs_path)?;
         assert_eq!(cases.len(), GOLDEN_CASE_COUNT);
 
         write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT + 1)?;
+        let cases = load_golden_cases(&golden_dir, &docs_path)?;
+        assert_eq!(cases.len(), GOLDEN_CASE_COUNT + 1);
+
+        write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT - 1)?;
         assert!(load_golden_cases(&golden_dir, &docs_path).is_err());
         Ok(())
     }
