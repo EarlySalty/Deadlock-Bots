@@ -8,10 +8,15 @@ on:
       - .github/workflows/dl-knowledge-hybrid-quality-sweep.yml
       - rust/bin/dl-knowledge/src/hybrid/config.rs
       - rust/bin/dl-knowledge/src/hybrid/rank.rs
+      - rust/bin/dl-knowledge/src/hybrid/pipeline.rs
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: dl-knowledge-hybrid-quality-sweep
+  cancel-in-progress: true
 
 jobs:
   sweep:
@@ -64,11 +69,11 @@ jobs:
           out="$RUNNER_TEMP/hybrid-sweep"
           mkdir -p "$out"
           variants=(
-            'source-010|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"source_consensus_weight":0.10,"timeout_ms":3000}'
-            'source-025|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"source_consensus_weight":0.25,"timeout_ms":3000}'
-            'source-050|{"rerank":false,"bm25_k":24,"dense_k":12,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.08,"dense_weight":1.0,"source_consensus_weight":0.50,"timeout_ms":3000}'
-            'source-100|{"rerank":false,"bm25_k":24,"dense_k":12,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.08,"dense_weight":1.0,"source_consensus_weight":1.0,"timeout_ms":3000}'
-            'source-rank|{"rerank":false,"bm25_k":24,"dense_k":12,"fusion_k":12,"output_k":6,"rrf_k":20.0,"bm25_weight":1.10,"dense_weight":1.0,"source_consensus_weight":0.25,"timeout_ms":3000}'
+            'filter-equal|{"rerank":false,"bm25_k":24,"dense_k":24,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.0,"dense_weight":1.0,"dense_relevance_filter":true,"timeout_ms":3000}'
+            'filter-bm25|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"dense_relevance_filter":true,"timeout_ms":3000}'
+            'filter-source-010|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"source_consensus_weight":0.10,"dense_relevance_filter":true,"timeout_ms":3000}'
+            'filter-source-025|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":60.0,"bm25_weight":1.04,"dense_weight":1.0,"source_consensus_weight":0.25,"dense_relevance_filter":true,"timeout_ms":3000}'
+            'filter-rank|{"rerank":false,"bm25_k":24,"dense_k":16,"fusion_k":12,"output_k":6,"rrf_k":20.0,"bm25_weight":1.08,"dense_weight":1.0,"source_consensus_weight":0.10,"dense_relevance_filter":true,"timeout_ms":3000}'
           )
           for item in "${variants[@]}"; do
             name="${item%%|*}"
