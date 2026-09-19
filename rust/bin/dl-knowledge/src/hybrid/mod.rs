@@ -62,7 +62,7 @@ fn model_path(variable: &str, name: &str) -> Result<PathBuf> {
     )
 }
 
-type CatalogCache = Arc<Mutex<Option<(u64, Arc<Catalog>)>>>;
+type CatalogCache = Arc<Mutex<Option<(u64, Arc<KnowledgeBase>, Arc<Catalog>)>>>;
 
 pub struct Runtime {
     config: Config,
@@ -108,20 +108,21 @@ impl Runtime {
         let handle = tokio::runtime::Handle::current();
         self.worker
             .run(move |deadline| {
-                let knowledge = knowledge.blocking_read();
-                let catalog = {
+                let (knowledge, catalog) = {
+                    let live = knowledge.blocking_read();
                     let mut cache = catalog_cache
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Hybrid-Katalogzustand unbrauchbar"))?;
-                    if let Some((_, catalog)) = cache
+                    if let Some((_, knowledge, catalog)) = cache
                         .as_ref()
-                        .filter(|(generation, _)| *generation == knowledge.generation)
+                        .filter(|(generation, _, _)| *generation == live.generation)
                     {
-                        catalog.clone()
+                        (knowledge.clone(), catalog.clone())
                     } else {
-                        let catalog = Arc::new(Catalog::new(&knowledge, &config)?);
-                        *cache = Some((knowledge.generation, catalog.clone()));
-                        catalog
+                        let snapshot = Arc::new(live.clone());
+                        let catalog = Arc::new(Catalog::new(&snapshot, &config)?);
+                        *cache = Some((snapshot.generation, snapshot.clone(), catalog.clone()));
+                        (snapshot, catalog)
                     }
                 };
                 let mut models = models
@@ -130,8 +131,8 @@ impl Runtime {
                 let result = handle.block_on(pipeline::run(
                     &pool,
                     &mut models,
-                    &knowledge,
-                    &catalog,
+                    knowledge.as_ref(),
+                    catalog.as_ref(),
                     &question,
                     &config,
                     deadline,
