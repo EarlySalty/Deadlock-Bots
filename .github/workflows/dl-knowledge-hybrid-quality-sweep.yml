@@ -76,33 +76,6 @@ jobs:
             DL_KNOWLEDGE_HYBRID_OPTIONS="$config" \
               bash scripts/central_test_db.sh \
               target/release/dl-knowledge hybrid bench "$evals" "$report" 1
-            REPORT="$report" python3 - <<'PY'
-import json
-import os
-
-with open(os.environ["REPORT"], encoding="utf-8") as handle:
-    data = json.load(handle)
-metrics = data["hybrid"]
-keys = [
-    "positive_cases", "negative_cases", "recall_at_1", "recall_at_3",
-    "recall_at_5", "mrr_at_k", "citation_correctness",
-    "retrieval_abstain_rate", "false_answer_rate",
-    "grounded_selection_possible_cases", "query_p50_ms", "query_p95_ms",
-]
-print("SESSION4_METRICS", json.dumps({key: metrics[key] for key in keys}, sort_keys=True))
-lost = []
-rescued = []
-for row in data["case_results"]:
-    if not row["answerable"]:
-        continue
-    bm25 = bool(row["bm25"]["grounded_selection_possible"])
-    hybrid = bool(row["hybrid"]["grounded_selection_possible"])
-    if bm25 and not hybrid:
-        lost.append(row["question"])
-    elif hybrid and not bm25:
-        rescued.append(row["question"])
-print("SESSION4_LOST", json.dumps(lost, ensure_ascii=False))
-print("SESSION4_RESCUED", json.dumps(rescued, ensure_ascii=False))
-PY
+            python3 ../.tasks/2026-09-17-rag-ausbau-visual-brain/session4_sweep_summary.py "$report"
             echo "::endgroup::"
           done
