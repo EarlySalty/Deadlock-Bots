@@ -1,4 +1,5 @@
 mod dense;
+mod eval;
 mod hybrid;
 
 use std::cmp::Ordering;
@@ -19,8 +20,6 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
-
-mod eval;
 
 const DEFAULT_DOCS_PATH: &str = "/home/naniadm/.local/share/dl-knowledge/current/public/";
 const BIND_ADDR: &str = "127.0.0.1:8896";

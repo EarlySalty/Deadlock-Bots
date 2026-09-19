@@ -73,9 +73,9 @@ Kein Merge und keine Produktionsumschaltung. Für D sind insbesondere die verlor
 
 ## Rohdaten und Reproduktion
 
-MESSUNG-C-1.json und MESSUNG-C-2.json sind die vollständigen Teilberichte. MESSUNG-C.json enthält alle 224 Fälle und neu aus sämtlichen Einzelwerten berechnete Perzentile, nicht gemittelte Teil-Perzentile. Die SHA-256-Werte der Teile sind dort gespeichert. auswertung-c.py lehnt verschiedene Modelle, Konfigurationen und Korpora sowie Lücken oder doppelte Fälle ab. Die fallweisen JSONL-Checkpoints bleiben lokale Ausführungsartefakte; vollständig sind ausschließlich die validierten JSON-Berichte.
+Die vollständigen JSON-Berichte wurden für die Messung erzeugt und validiert, aber nicht dauerhaft ins Repository übernommen. Sie umfassten mehr als zwei Megabyte und würden die Merge-Prüfung ohne zusätzlichen Betriebsnutzen belasten. Die reproduzierbaren Zusammenfassungen, Konfigurationen, Modellprüfsummen und Prüfregeln bleiben in dieser Akte erhalten.
 
-Die konkreten Kommandos und Modellinstallation stehen in BETRIEB-C.md. Die Paket- und Offline-Prüfungen stehen in TESTS-C.md und OFFLINE-C.json.
+`auswertung-c.py` lehnt verschiedene Modelle, Konfigurationen und Korpora sowie Lücken oder doppelte Fälle ab. Die konkreten Kommandos und Modellinstallation stehen in `BETRIEB-C.md`. Die Paket- und Offline-Prüfungen stehen in `TESTS-C.md` und `OFFLINE-C.json`. Die aktuelle Produktionsentscheidung auf dem 254-Fälle-Stand steht in `ENTSCHEIDUNG-SESSION4.md`.
 
 Korpus-SHA-256: `0b49cedcf95529b13013d407a71186214ae332b0fdb467cffa8aef055ffdd6ce`
 
