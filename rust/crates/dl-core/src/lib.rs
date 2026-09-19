@@ -1,10 +1,10 @@
-//! Fundament-Crate des Rust-Rewrites.
+//! Gemeinsame Bausteine des Rust-Workspace.
 //!
-//! Enthält ausschließlich Querschnitts-Bausteine ohne Domänenlogik:
-//! - [`config`]: die EINE typisierte Laufzeit-Konfiguration (ersetzt die
-//!   166 verstreuten `os.getenv`-Aufrufe des Python-Originals)
-//! - [`observability`]: Tracing-Initialisierung für die Binaries
+//! `bot_config` stellt den TOML-Lader für den Discord-Config-Umbau bereit.
+//! Die Umstellung der bestehenden Laufzeit-Aufrufstellen ist noch offen.
+//! `config` bleibt bis dahin die bestehende ENV-Konfiguration.
 
+pub mod bot_config;
 pub mod config;
 pub mod observability;
 pub mod pyfloat;
