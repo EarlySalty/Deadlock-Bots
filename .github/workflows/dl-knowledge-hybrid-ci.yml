@@ -35,7 +35,7 @@ jobs:
             bin/dl-knowledge/src/hybrid/tests.rs \
             bin/dl-knowledge/src/hybrid/tests_http.rs
       - name: Test dl-knowledge
-        run: cargo test --package dl-knowledge --all-features -- --test-threads=2
+        run: bash scripts/central_test_db.sh cargo test --package dl-knowledge --all-features -- --test-threads=2
       - name: Clippy dl-knowledge
         run: cargo clippy --package dl-knowledge --all-features --no-deps -- -D warnings
       - name: Test Messbericht Merger
