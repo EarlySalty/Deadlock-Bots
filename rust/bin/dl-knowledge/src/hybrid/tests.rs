@@ -47,6 +47,7 @@ fn konfiguration_lehnt_tippfehler_und_unbegrenzte_last_ab() {
         r#"{"output_k":25}"#,
         r#"{"rrf_k":0}"#,
         r#"{"bm25_weight":0,"dense_weight":0}"#,
+        r#"{"source_consensus_weight":-1}"#,
         r#"{"timeout_ms":10001}"#,
         r#"{"rerank_batch_size":0}"#,
         r#"{"rerank_max_tokens":513}"#,
@@ -132,6 +133,50 @@ fn rrf_dedupliziert_und_sortiert_deterministisch() -> Result<()> {
             .iter()
             .map(|hit| (hit.index, hit.score))
             .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn quellenkonsens_bestaetigt_den_bm25_chunk_ohne_dense_chunk_zu_duplizieren() -> Result<()> {
+    let knowledge = KnowledgeBase::from_chunks(vec![
+        chunk("a.html", "2026-09-18", "Lexikalischer Treffer"),
+        chunk("a.html", "2026-09-18", "Semantischer Treffer"),
+        chunk("b.html", "2026-09-18", "Andere Quelle"),
+    ]);
+    let mut config = Config {
+        source_consensus_weight: 0.5,
+        ..Config::default()
+    };
+    let catalog = rank::Catalog::new(&knowledge, &config)?;
+    let boosted = rank::fuse(&[0, 2], &[1], &catalog, &config);
+    let boosted_bm25 = boosted
+        .iter()
+        .find(|hit| hit.index == 0)
+        .expect("BM25-Repräsentant fehlt")
+        .score;
+    let dense_same_source = boosted
+        .iter()
+        .find(|hit| hit.index == 1)
+        .expect("Dense-Treffer fehlt")
+        .score;
+
+    config.source_consensus_weight = 0.0;
+    let neutral = rank::fuse(&[0, 2], &[1], &catalog, &config);
+    let neutral_bm25 = neutral
+        .iter()
+        .find(|hit| hit.index == 0)
+        .expect("Neutraler BM25-Repräsentant fehlt")
+        .score;
+
+    assert!(boosted_bm25 > neutral_bm25);
+    assert_eq!(
+        dense_same_source,
+        neutral
+            .iter()
+            .find(|hit| hit.index == 1)
+            .expect("Neutraler Dense-Treffer fehlt")
+            .score
     );
     Ok(())
 }

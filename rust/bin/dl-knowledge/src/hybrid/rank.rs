@@ -79,6 +79,33 @@ pub fn fuse(bm25: &[usize], dense: &[usize], catalog: &Catalog, config: &Config)
             *scores.entry(*index).or_default() += weight / (config.rrf_k + rank as f64);
         }
     }
+    if config.source_consensus_weight > 0.0 {
+        let mut bm25_sources = HashMap::<&str, (usize, usize)>::new();
+        for (rank, index) in bm25.iter().copied().enumerate() {
+            if index < catalog.records.len() && catalog.allowed[index] {
+                bm25_sources
+                    .entry(catalog.records[index].doc_path.as_str())
+                    .or_insert((rank + 1, index));
+            }
+        }
+        let mut dense_sources = HashMap::<&str, usize>::new();
+        for (rank, index) in dense.iter().copied().enumerate() {
+            if index < catalog.records.len() && catalog.allowed[index] {
+                dense_sources
+                    .entry(catalog.records[index].doc_path.as_str())
+                    .or_insert(rank + 1);
+            }
+        }
+        for (source, (bm25_rank, representative)) in bm25_sources {
+            let Some(dense_rank) = dense_sources.get(source) else {
+                continue;
+            };
+            let bonus = config.source_consensus_weight
+                * (config.bm25_weight / (config.rrf_k + bm25_rank as f64)
+                    + config.dense_weight / (config.rrf_k + *dense_rank as f64));
+            *scores.entry(representative).or_default() += bonus;
+        }
+    }
     let mut ranked = scores
         .into_iter()
         .map(|(index, score)| Scored {

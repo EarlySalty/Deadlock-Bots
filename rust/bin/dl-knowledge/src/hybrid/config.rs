@@ -13,6 +13,7 @@ pub struct Config {
     pub rrf_k: f64,
     pub bm25_weight: f64,
     pub dense_weight: f64,
+    pub source_consensus_weight: f64,
     pub rerank: bool,
     pub rerank_max_tokens: usize,
     pub rerank_batch_size: usize,
@@ -30,6 +31,7 @@ impl Default for Config {
             rrf_k: 60.0,
             bm25_weight: 1.0,
             dense_weight: 1.0,
+            source_consensus_weight: 0.0,
             rerank: true,
             rerank_max_tokens: 256,
             rerank_batch_size: 4,
@@ -55,7 +57,11 @@ impl Config {
             self.rrf_k.is_finite() && self.rrf_k > 0.0 && self.rrf_k <= 10000.0,
             "Ungültiges RRF k"
         );
-        for weight in [self.bm25_weight, self.dense_weight] {
+        for weight in [
+            self.bm25_weight,
+            self.dense_weight,
+            self.source_consensus_weight,
+        ] {
             ensure!(
                 weight.is_finite() && (0.0..=100.0).contains(&weight),
                 "Ungültiges RRF-Gewicht"
