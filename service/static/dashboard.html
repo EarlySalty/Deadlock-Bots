@@ -1499,6 +1499,25 @@ details[open] > summary { margin-bottom: 18px; }
 .brain-plan-group { background: transparent; box-shadow: none; border: 0; padding: 0; }
 .brain-plan-group h4 { color: #d8bf8e; }
 .brain-technical { margin-bottom: 18px; }
+.brain-map { margin-bottom: 24px; }
+.brain-map-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; }
+.brain-map-controls label { display: grid; gap: 6px; flex: 1 1 180px; }
+.brain-map-controls input, .brain-map-controls select { width: 100%; min-height: 44px; }
+.brain-map-layout { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(300px, 2fr) minmax(210px, 1fr); gap: 16px; }
+.brain-map-results { max-height: 510px; overflow: auto; }
+.brain-map-results button, .brain-map-links button { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 10px 12px; white-space: normal; overflow-wrap: anywhere; }
+.brain-map-results button[aria-pressed="true"] { outline: 2px solid #e1b84f; outline-offset: -2px; background: #33260d; }
+.brain-map-results small { display: block; color: #d5c4a0; margin-top: 4px; }
+.brain-map-stage { min-width: 0; background: #0d0806; border: 1px solid #8b6b25; border-radius: 12px; overflow: hidden; }
+#brain-map-canvas { height: 460px; }
+.brain-map-stage p { padding: 0 12px; font-size: .85rem; }
+.brain-map-detail { min-width: 0; max-height: 540px; overflow: auto; }
+.brain-map-detail h4 { overflow-wrap: anywhere; margin-top: 0; }
+.brain-map-source { display: block; width: 100%; min-height: 74px; resize: vertical; margin: 8px 0; font-size: .85rem; }
+.brain-map-links { margin-top: 12px; }
+.brain-map :focus-visible { outline: 2px solid #ffe299; outline-offset: 3px; }
+@media (max-width: 1150px) { .brain-map-layout { grid-template-columns: minmax(180px, 1fr) minmax(300px, 2fr); } .brain-map-detail { grid-column: 1 / -1; max-height: none; } }
+@media (max-width: 720px) { .brain-map-layout { display: flex; flex-direction: column; } .brain-map-results { max-height: 240px; } #brain-map-canvas { height: 330px; } }
 .insights-panel .page-head { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 .insights-panel .page-sub,.insights-panel .hint,.insights-panel .sub,.insights-panel .note { color: var(--muted); font-size: 13px; }
 .insights-panel .page-sub { margin-bottom: 24px; }
@@ -1539,6 +1558,7 @@ details[open] > summary { margin-bottom: 18px; }
 @media (max-width: 720px) { .chart-container { height: 280px; } .insights-panel .chart-wrap.tall { height: 250px; } .insights-panel .insights-comparison-grid .chart-wrap { height: 220px; } .insights-panel .grid.three > .card { flex-basis: 100%; } }
 
     </style>
+<script src="/api/brain/graph-ui.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#dashboard-main">Zum Inhalt</a>
@@ -2253,6 +2273,30 @@ details[open] > summary { margin-bottom: 18px; }
                 <div class="section-actions">
                     <button class="reload" id="brain-refresh">Neu laden</button>
                     <span class="voice-meta" id="brain-status">–</span>
+                </div>
+            </div>
+
+            <div class="card brain-map" aria-labelledby="brain-map-heading">
+                <span class="eyebrow">Wissen und Zusammenhänge</span>
+                <h3 id="brain-map-heading">Wissenskarte</h3>
+                <p>Öffentliche Wissensquellen für den Concierge, interne Dokumentation und ihre Code-Bezüge. Interne Dokumentation gehört nicht zum Antwortwissen des Concierge.</p>
+                <p class="voice-meta" id="brain-map-summary">Wissenskarte wird beim Öffnen geladen.</p>
+                <div class="brain-map-controls">
+                    <label for="brain-map-search">Dokument oder Code suchen<input id="brain-map-search" type="search" placeholder="Zum Beispiel Concierge, Rollen oder Paten" autocomplete="off"></label>
+                    <label for="brain-map-filter">Bereich<select id="brain-map-filter"><option value="all">Alle Bereiche</option><option value="documents">Nur Wissensdokumente</option><option value="discord">Discord und Concierge</option><option value="code">Nur Code</option></select></label>
+                    <button type="button" id="brain-map-reload">Karte neu laden</button>
+                </div>
+                <p id="brain-map-status" role="status" aria-live="polite"></p>
+                <div id="brain-map-error" role="alert" hidden></div>
+                <div class="brain-map-layout" id="brain-map-layout" hidden>
+                    <div><p id="brain-map-count" role="status" aria-live="polite"></p><div class="brain-map-results" id="brain-map-results" role="group" aria-label="Suchergebnisse"></div><button type="button" id="brain-map-more" hidden>Weitere Treffer</button></div>
+                    <div class="brain-map-stage"><div id="brain-map-canvas" aria-hidden="true"></div><p id="brain-map-scope">Die Karte zeigt die direkten Verbindungen deiner Auswahl. Alle Knoten sind auch über die Treffer und Verbindungen per Tastatur erreichbar.</p></div>
+                    <div class="brain-map-detail" id="brain-map-detail" aria-label="Details zur Auswahl">
+                        <h4 id="brain-map-title">Wähle einen Knoten</h4><p id="brain-map-meta"></p>
+                        <label for="brain-map-source">Quellenpfad</label><textarea id="brain-map-source" class="brain-map-source" readonly></textarea>
+                        <button type="button" id="brain-map-copy">Pfad kopieren</button>
+                        <p id="brain-map-evidence"></p><div id="brain-map-links" class="brain-map-links" role="group" aria-label="Verbindungen der Auswahl"></div>
+                    </div>
                 </div>
             </div>
 
@@ -7190,12 +7234,14 @@ document.getElementById('co-network-range').addEventListener('change', loadCoNet
         }
 
         document.getElementById('brain-refresh').addEventListener('click', () => {
+            window.loadVisualBrain?.(true);
             loadPlan();
             loadOverview();
             loadWiki();
         });
 
         window.loadBrain = function() {
+            window.loadVisualBrain?.();
             if (initialized) return;
             initialized = true;
             loadPlan();

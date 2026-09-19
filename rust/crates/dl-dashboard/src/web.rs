@@ -379,6 +379,12 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/api/voice-stats", get(crate::analytics::voice_stats))
         .route("/api/audit-log", get(crate::audit::audit_log))
         .route("/api/brain/overview", get(crate::brain::overview))
+        .route("/api/brain/graph", get(crate::visual_brain::graph))
+        .route("/api/brain/graph-ui.js", get(crate::visual_brain::ui))
+        .route(
+            "/api/brain/graph-library.js",
+            get(crate::visual_brain::library),
+        )
         .route("/api/brain/plan", get(crate::brain::plan))
         .route("/api/brain/plan/runs", get(crate::brain::plan_runs))
         .route(
@@ -2193,5 +2199,99 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert_eq!(loc, "/admin");
+    }
+}
+
+#[cfg(test)]
+mod visual_brain_route_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn wissenskarte_prueft_jede_route_vor_dem_dateizugriff() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("test-id".into()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("test-secret".into()),
+            _ => None,
+        });
+        cfg.data_dir = dir.path().join("data");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused_test_database")
+            .unwrap();
+        let sessions = SessionStore::new(3600);
+        let mut cookies = Vec::new();
+        for access_level in [AccessLevel::TurnierOnly, AccessLevel::Full] {
+            cookies.push(
+                sessions
+                    .create(
+                        NewSession {
+                            user_id: 42,
+                            username: "Test".into(),
+                            display_name: "Test".into(),
+                            reason: "test".into(),
+                            access_level,
+                        },
+                        now_unix_f64(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let app = DashboardApp {
+            inner: Arc::new(Inner {
+                oauth: OAuthClient::new(
+                    cfg.discord_client_id.clone(),
+                    cfg.discord_client_secret.clone(),
+                    cfg.discord_api_base.clone(),
+                ),
+                states: OAuthStateStore::new(pool.clone(), cfg.oauth_state_ttl_secs),
+                data_dir: cfg.data_dir.clone(),
+                cfg,
+                pool,
+                sessions,
+                lookup: Arc::new(BrokerMemberLookup::new("http://127.0.0.1:1")),
+                names: Arc::new(BrokerNameResolver::new("http://127.0.0.1:1")),
+                ai: None,
+                login_states: Mutex::new(HashMap::new()),
+                rate: Mutex::new(HashMap::new()),
+                guild_stats_cache: Mutex::new(None),
+            }),
+        };
+        let routes = router(app);
+        for path in [
+            "/api/brain/graph",
+            "/api/brain/graph-ui.js",
+            "/api/brain/graph-library.js",
+        ] {
+            for (cookie, expected) in [
+                (None, 401),
+                (Some(&cookies[0]), 403),
+                (
+                    Some(&cookies[1]),
+                    if path.ends_with("graph-ui.js") {
+                        200
+                    } else {
+                        503
+                    },
+                ),
+            ] {
+                let mut request = axum::http::Request::builder().uri(path);
+                if let Some(cookie) = cookie {
+                    request = request.header(header::COOKIE, format!("{SESSION_COOKIE}={cookie}"));
+                }
+                let response = routes
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status().as_u16(), expected, "{path}");
+                assert_eq!(
+                    response.headers()[header::CACHE_CONTROL],
+                    "private, no-store"
+                );
+                assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+            }
+        }
     }
 }
