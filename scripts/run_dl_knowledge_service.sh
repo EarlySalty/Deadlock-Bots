@@ -39,4 +39,11 @@ fi
 unset DL_INFISICAL_READY
 unset INFISICAL_SERVICE_TOKEN
 
+if [[ "${FIREWORK_MODEL:-}" == "accounts/fireworks/models/deepseek-v4-flash" ]]; then
+  unset FIREWORK_MODEL
+fi
+if [[ "${FIREWORKS_MODEL:-}" == "accounts/fireworks/models/deepseek-v4-flash" ]]; then
+  unset FIREWORKS_MODEL
+fi
+
 exec "$ROOT_DIR/rust/target/release/dl-knowledge"
