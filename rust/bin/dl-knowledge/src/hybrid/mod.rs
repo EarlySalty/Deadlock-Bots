@@ -62,10 +62,12 @@ fn model_path(variable: &str, name: &str) -> Result<PathBuf> {
     )
 }
 
+type CatalogCache = Arc<Mutex<Option<(u64, Arc<Catalog>)>>>;
+
 pub struct Runtime {
     config: Config,
     models: Arc<Mutex<Models>>,
-    catalog: Arc<Mutex<Option<(u64, Arc<Catalog>)>>>,
+    catalog: CatalogCache,
     pool: PgPool,
     worker: worker::Worker,
 }
