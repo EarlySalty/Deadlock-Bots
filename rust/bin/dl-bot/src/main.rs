@@ -956,6 +956,41 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
+    let concierge_ai = {
+        match dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok())
+            .map_err(anyhow::Error::from)
+            .and_then(|cfg| {
+                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, |k| std::env::var(k).ok())
+                    .map_err(anyhow::Error::from)
+            }) {
+            Ok(provider) => Some(provider),
+            Err(err) => {
+                tracing::warn!(%err, "Concierge-LLM inaktiv");
+                None
+            }
+        }
+    };
+    let shared_brain_bin =
+        std::path::PathBuf::from(env("BRAIN_BIN").unwrap_or_else(default_brain_bin));
+    // Keep the configured source even when its binary is temporarily absent:
+    // retrieval failure must become explicit coverage, never silent omission.
+    let shared_game: Option<Arc<dyn dl_answer::Retriever>> =
+        Some(Arc::new(modglue::BrainRetrieverGlue {
+            bin: shared_brain_bin.clone(),
+        }));
+    let shared_answers = Arc::new(
+        dl_answer::AnswerEngine::new(
+            concierge_ai.clone(),
+            Arc::new(dl_community::knowledge_client::CommunityRetriever {
+                base_url: concierge_config.knowledge_url.clone(),
+                timeout: std::time::Duration::from_secs(20),
+            }),
+            shared_game,
+            concierge_config.ai_timeout,
+        )
+        .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
+    );
+
     // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
     // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).
     let brain_handler = {
@@ -980,12 +1015,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 );
             }
             channel_allowlist.map(|channel_allowlist| {
-                let client = chat_text_generator(dl_ai::LlmUseCase::BrainAntwort, false);
-                if client.is_none() {
-                    tracing::warn!(
-                        "Brain-Command registriert ohne LLM-Anbieter; Antworten liefern Backend-Fehler"
-                    );
-                }
                 let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
                 let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
                 tracing::info!(
@@ -999,17 +1028,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     max_question_len,
                     cooldown_secs,
                 });
-                let retriever: Arc<dyn dl_brain::BrainRetriever> =
-                    Arc::new(modglue::BrainRetrieverGlue {
-                        bin: brain_bin_path,
-                    });
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
-                    Arc::new(modglue::BrainAiGlue { client });
+                    Arc::new(modglue::SharedBrainAnswerer {
+                        engine: shared_answers.clone(),
+                    });
                 Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
                     config,
                     cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                    retriever,
                     answerer,
                     channel_allowlist: Some(channel_allowlist),
                 })
@@ -1058,39 +1084,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tokio::spawn(team_applications.clone().run_maintenance_loop());
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq = dl_community::faq::FaqChat::new_with_ticket_generator(
+    let faq = dl_community::faq::FaqChat::with_answers(
         central_pool.clone(),
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
-        chat_text_generator(dl_ai::LlmUseCase::Faq, false),
+        shared_answers.clone(),
     );
     dl_community::faq::register(&mut router, faq.clone());
 
     // Concierge-Onboarding Slice A: default AUS, T0 nur fuer Test-Allowlist.
-    let concierge_ai = if concierge_config.enabled {
-        match dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok())
-            .map_err(anyhow::Error::from)
-            .and_then(|cfg| {
-                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, |k| std::env::var(k).ok())
-                    .map_err(anyhow::Error::from)
-            }) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!(%err, "Concierge-LLM inaktiv");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let concierge = dl_community::concierge::Concierge::new(
+    let concierge = dl_community::concierge::Concierge::with_answers(
         central_pool.clone(),
         Arc::new(modglue::ConciergeGlue {
             adapter: adapter.clone(),
         }),
         concierge_ai,
         concierge_config.clone(),
+        shared_answers.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
@@ -1958,84 +1969,20 @@ mod tests {
         assert!(logs.contains("endpoint will reject every request with 401"));
     }
 
-    fn faq_constructor_third_argument_contains(source: &str, needle: &str) -> bool {
-        let constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
-        let Some((_, arguments)) = source.split_once(&constructor) else {
-            return false;
-        };
-        let mut depth = 0;
-        let mut separators = 0;
-        let mut third_start = None;
-        for (index, character) in arguments.char_indices() {
-            match character {
-                '(' | '[' | '{' => depth += 1,
-                ')' if depth == 0 => {
-                    return third_start
-                        .map(|start| arguments[start..index].contains(needle))
-                        .unwrap_or(false);
-                }
-                ')' | ']' | '}' => depth -= 1,
-                ',' if depth == 0 => {
-                    separators += 1;
-                    if separators == 2 {
-                        third_start = Some(index + 1);
-                    } else if separators == 3 {
-                        return third_start
-                            .map(|start| arguments[start..index].contains(needle))
-                            .unwrap_or(false);
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
     #[test]
-    fn faq_produktionsblock_bezieht_den_generator_ueber_das_gate() {
-        let source = include_str!("main.rs");
-        let start = ["// FAQ-", "Chat (6)"].concat();
-        let end = ["// Concierge-", "Onboarding Slice A"].concat();
-        let block = source
-            .split_once(start.as_str())
-            .and_then(|(_, rest)| {
-                rest.split_once(end.as_str())
-                    .map(|(faq_block, _)| faq_block)
-            })
-            .expect("FAQ-Produktionsblock");
-        let generator_constructor = ["FaqChat::new_with_ticket_", "generator("].concat();
-        let old_constructor = ["FaqChat::", "new("].concat();
-        let gate_call = ["chat_text_", "generator(dl_ai::LlmUseCase::Faq"].concat();
-
-        assert_eq!(
-            block.matches(generator_constructor.as_str()).count(),
-            1,
-            "FAQ-Produktionsblock muss genau den Generator-Konstruktor verwenden"
-        );
-        assert!(
-            faq_constructor_third_argument_contains(block, &gate_call),
-            "der FAQ-Generator muss im dritten Konstruktorargument über das Compliance-Gate kommen"
-        );
-        let synthetic_none = [
-            "            let generator = ",
-            &gate_call,
-            ", false);\n",
-            "            let faq = dl_community::faq::FaqChat::new_with_ticket_",
-            "generator(\n",
-            "                central_pool.clone(),\n",
-            "                port,\n",
-            "                None,\n",
-            "            );\n",
-        ]
-        .concat();
-        assert!(
-            !faq_constructor_third_argument_contains(&synthetic_none, &gate_call),
-            "ein separat gebauter Generator bei drittem Argument None muss abgelehnt werden"
-        );
-        assert!(
-            !block.contains(old_constructor.as_str()),
-            "FAQ-Produktionsblock darf den alten Konstruktor nicht verwenden"
-        );
+    fn alle_drei_wissenseingaenge_teilen_die_gegatete_antwortinstanz() {
+        let source = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("Quelldatei enthält Produktionsbereich");
+        assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 1);
+        assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
+        assert!(source.contains("FaqChat::with_answers("));
+        assert!(source.contains("Concierge::with_answers("));
+        assert!(source.contains("SharedBrainAnswerer"));
+        assert_eq!(source.matches("shared_answers.clone()").count(), 3);
+        assert!(!source.contains("BrainAiGlue"));
+        assert!(!source.contains("chat_text_generator(dl_ai::LlmUseCase::Faq"));
     }
 
     /// Der zweite KI-Weg ist zu, solange keine Quelle einen LLM-Client selbst

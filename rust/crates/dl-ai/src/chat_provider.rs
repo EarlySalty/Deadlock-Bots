@@ -94,6 +94,9 @@ impl ChatRole {
 pub struct ChatParams {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
+    /// `Some("none")` disables reasoning for short-budget Fireworks calls.
+    /// `None` preserves the provider default.
+    pub reasoning_effort: Option<String>,
     pub json_mode: bool,
     pub temperature: f64,
     pub system_prompt: Option<String>,
@@ -104,6 +107,7 @@ impl Default for ChatParams {
         Self {
             model: None,
             max_tokens: Some(DEFAULT_CHAT_MAX_TOKENS),
+            reasoning_effort: None,
             json_mode: false,
             temperature: 0.2,
             system_prompt: None,
@@ -786,6 +790,10 @@ impl ChatProvider for OpenAiChatProvider {
         }
         if params.json_mode {
             payload["response_format"] = json!({ "type": "json_object" });
+        }
+
+        if let Some(effort) = params.reasoning_effort {
+            payload["reasoning_effort"] = json!(effort);
         }
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -2102,6 +2110,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fireworks_transportiert_den_denkmodus_durch_den_text_generator() {
+        use crate::{GenerateRequest, TextGenerator};
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().expect("lock").push(body);
+                    Json(json!({"choices": [{"message": {"content": "Belegte Antwort"}}]}))
+                }
+            }),
+        );
+        let base = spawn_json_server(app).await;
+        let provider = OpenAiChatProvider::new_labeled(
+            base,
+            "synthetic-test-key",
+            crate::DEFAULT_FIREWORKS_MODEL,
+            fast_retry(0),
+            "fireworks",
+        );
+        let generator =
+            crate::chat_text::ChatTextGenerator::new(provider, LlmUseCase::BrainAntwort);
+        for effort in [Some("none".to_string()), None] {
+            assert!(generator
+                .generate_text(GenerateRequest {
+                    prompt: "Synthetische Frage".to_string(),
+                    system_prompt: None,
+                    model: None,
+                    max_output_tokens: Some(700),
+                    reasoning_effort: effort,
+                    temperature: 0.2,
+                })
+                .await
+                .is_some());
+        }
+        let captured = captured.lock().expect("lock");
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0]["reasoning_effort"], "none");
+        assert_eq!(captured[0]["max_tokens"], 700);
+        assert_eq!(captured[0]["model"], crate::DEFAULT_FIREWORKS_MODEL);
+        assert!(captured[1].get("reasoning_effort").is_none());
+    }
+
+    #[tokio::test]
     async fn openai_sendet_response_format_bei_json_mode() {
         use axum::{routing::post, Json, Router};
         let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2241,6 +2296,7 @@ mod tests {
                 ChatParams {
                     model: None,
                     max_tokens: Some(123),
+                    reasoning_effort: None,
                     json_mode: false,
                     temperature: 0.3,
                     system_prompt: Some("System".to_string()),

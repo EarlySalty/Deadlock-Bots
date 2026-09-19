@@ -15,6 +15,7 @@ members = [
     "crates/dl-voice",
     "crates/dl-activity",
     "crates/dl-ai",
+    "crates/dl-answer",
     "crates/dl-brain",
     "crates/dl-moderation",
     "crates/dl-squads",
@@ -46,6 +47,7 @@ repository = "https://github.com/NaniDerEchte2/Deadlock-Bots"
 # Eine gepinnte Version pro Dependency — einzige Quelle der Wahrheit für den
 # gesamten Workspace. Crates übernehmen via `<dep>.workspace = true`.
 [workspace.dependencies]
+dl-answer = { path = "crates/dl-answer" }
 # Async-Runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "fs"] }
 # Fehler-Typen (Domänen) / Fehler-Kontext (Binaries)

@@ -1,6 +1,8 @@
 mod dense;
 mod eval;
 mod hybrid;
+mod retrieval;
+mod server_config;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -692,10 +694,22 @@ async fn main() -> Result<()> {
     }
     dl_core::observability::init_tracing("info");
 
-    let docs_path = resolve_production_docs_path(
-        std::env::args_os().nth(1).map(PathBuf::from),
-        std::env::var_os("DL_DOCS_PATH").map(PathBuf::from),
-    )?;
+    let server_config =
+        server_config::ServerConfig::from_args(&std::env::args_os().skip(1).collect::<Vec<_>>())?;
+    let retrieval_only = server_config
+        .as_ref()
+        .is_some_and(|config| config.retrieval_only);
+    let bind = server_config
+        .as_ref()
+        .map(|config| config.bind.to_string())
+        .unwrap_or_else(|| BIND_ADDR.to_string());
+    // Config cannot select a different corpus. Shadow mode reads no provider
+    // settings or credentials; the approved snapshot and loader stay identical.
+    let docs_path = if server_config.is_some() {
+        PathBuf::from(DEFAULT_DOCS_PATH)
+    } else {
+        resolve_production_docs_path(None, std::env::var_os("DL_DOCS_PATH").map(PathBuf::from))?
+    };
     let knowledge = load_production_corpus(&docs_path)
         .with_context(|| format!("Korpus laden: {}", docs_path.display()))?;
     tracing::info!(
@@ -703,24 +717,31 @@ async fn main() -> Result<()> {
         "dl-knowledge Korpus geladen"
     );
 
-    let generator: Option<Arc<dyn TextGenerator>> =
+    let generator: Option<Arc<dyn TextGenerator>> = if retrieval_only {
+        None
+    } else {
         FireworksClient::from_env(|key| std::env::var(key).ok())
-            .map(|client| client as Arc<dyn TextGenerator>);
-    if generator.is_none() {
+            .map(|client| client as Arc<dyn TextGenerator>)
+    };
+    if generator.is_none() && !retrieval_only {
         tracing::warn!("Fireworks-Client nicht initialisiert; /ask antwortet fail-closed");
     }
 
     let state = AppState {
-        hybrid: hybrid::Runtime::from_env().await?,
+        hybrid: if retrieval_only {
+            None
+        } else {
+            hybrid::Runtime::from_env().await?
+        },
         docs_path,
         knowledge: Arc::new(RwLock::new(knowledge)),
         generator,
     };
-    let listener = tokio::net::TcpListener::bind(BIND_ADDR)
+    let listener = tokio::net::TcpListener::bind(&bind)
         .await
-        .with_context(|| format!("dl-knowledge binden: {BIND_ADDR}"))?;
-    tracing::info!(addr = BIND_ADDR, "dl-knowledge gebunden");
-    axum::serve(listener, router(state))
+        .with_context(|| format!("dl-knowledge binden: {bind}"))?;
+    tracing::info!(addr = %bind, retrieval_only, "dl-knowledge gebunden");
+    axum::serve(listener, router_with_mode(state, retrieval_only))
         .await
         .context("dl-knowledge Server")?;
     Ok(())
@@ -738,12 +759,37 @@ fn resolve_production_docs_path(
     Ok(PathBuf::from(DEFAULT_DOCS_PATH))
 }
 
+#[cfg(test)]
 fn router(state: AppState) -> Router {
+    router_with_mode(state, false)
+}
+
+fn router_with_mode(state: AppState, retrieval_only: bool) -> Router {
+    let ask_route = if retrieval_only {
+        post(ask_disabled)
+    } else {
+        post(ask)
+    };
     Router::new()
         .route("/healthz", get(health))
         .route("/internal/reload", post(reload))
-        .route("/public/v1/ask", post(ask))
+        .route("/public/v1/ask", ask_route)
+        .route(
+            "/public/v1/retrieve",
+            post(retrieval::retrieve).layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+        )
         .with_state(state)
+}
+
+async fn ask_disabled() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "retrieval_only",
+            "message": "Antwortgenerierung ist für diesen Dienst deaktiviert.",
+        })),
+    )
+        .into_response()
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {

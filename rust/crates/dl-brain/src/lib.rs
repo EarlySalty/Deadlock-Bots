@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -20,14 +19,6 @@ pub enum BrainOutcome {
     BackendError,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainContext {
-    pub intent: String,
-    pub prompt: String,
-    #[serde(default)]
-    pub sources: Vec<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrainConfig {
     pub max_question_len: usize,
@@ -43,13 +34,9 @@ pub enum BrainError {
 }
 
 #[async_trait::async_trait]
-pub trait BrainRetriever: Send + Sync {
-    async fn ask_context(&self, frage: &str) -> Result<BrainContext, BrainError>;
-}
-
-#[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
-    async fn answer(&self, prompt: &str) -> Result<Option<String>, BrainError>;
+    /// Führt Retrieval und genau eine gemeinsame Generierung aus.
+    async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
 }
 
 pub async fn handle_brain_query(
@@ -57,7 +44,6 @@ pub async fn handle_brain_query(
     user_id: u64,
     cfg: &BrainConfig,
     cooldowns: &BrainCooldowns,
-    retriever: &dyn BrainRetriever,
     answerer: &dyn AiAnswerer,
 ) -> BrainOutcome {
     let question = question.trim();
@@ -84,42 +70,17 @@ pub async fn handle_brain_query(
         }
     }
 
-    let context = match retriever.ask_context(question).await {
-        Ok(context) => context,
-        Err(err) => {
-            tracing::warn!(%err, "Brain-Retrieval fehlgeschlagen");
+    let outcome = match answerer.answer(question).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(%error, "Gemeinsame Brain-Antwort fehlgeschlagen");
             return BrainOutcome::BackendError;
         }
     };
-
-    if context.intent.trim() == "out_of_domain" {
+    if !matches!(outcome, BrainOutcome::BackendError) {
         register_cooldown(user_id, cfg, cooldowns).await;
-        return BrainOutcome::OutOfDomain;
     }
-
-    if context.prompt.trim().is_empty() {
-        tracing::warn!("Brain-Retrieval lieferte leeren Prompt");
-        return BrainOutcome::BackendError;
-    }
-
-    let answer = match answerer.answer(&context.prompt).await {
-        Ok(Some(answer)) => answer,
-        Ok(None) => {
-            register_cooldown(user_id, cfg, cooldowns).await;
-            return BrainOutcome::NoAnswer;
-        }
-        Err(err) => {
-            tracing::warn!(%err, "Brain-Antwort fehlgeschlagen");
-            return BrainOutcome::BackendError;
-        }
-    };
-    if answer.trim().is_empty() {
-        register_cooldown(user_id, cfg, cooldowns).await;
-        return BrainOutcome::NoAnswer;
-    }
-
-    register_cooldown(user_id, cfg, cooldowns).await;
-    BrainOutcome::Answer(answer)
+    outcome
 }
 
 fn remaining_secs(duration: std::time::Duration) -> u64 {
@@ -203,239 +164,81 @@ fn split_long_word(word: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{Duration, Instant};
 
     use super::*;
 
-    struct StaticRetriever {
-        result: Result<BrainContext, BrainError>,
-        seen_question: Arc<StdMutex<Option<String>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl BrainRetriever for StaticRetriever {
-        async fn ask_context(&self, frage: &str) -> Result<BrainContext, BrainError> {
-            *self.seen_question.lock().expect("seen_question lock") = Some(frage.to_string());
-            self.result.clone()
-        }
-    }
-
     struct CountingAnswerer {
-        result: Option<String>,
         calls: AtomicUsize,
-        seen_prompt: Arc<StdMutex<Option<String>>>,
+        fail: bool,
     }
-
     #[async_trait::async_trait]
     impl AiAnswerer for CountingAnswerer {
-        async fn answer(&self, prompt: &str) -> Result<Option<String>, BrainError> {
+        async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            *self.seen_prompt.lock().expect("seen_prompt lock") = Some(prompt.to_string());
-            Ok(self.result.clone())
+            if self.fail {
+                Err(BrainError::Backend("test".into()))
+            } else {
+                Ok(BrainOutcome::Answer(question.into()))
+            }
         }
     }
 
-    fn context(intent: &str, prompt: &str) -> BrainContext {
-        BrainContext {
-            intent: intent.to_string(),
-            prompt: prompt.to_string(),
-            sources: Vec::new(),
-        }
-    }
-
-    fn retriever(result: Result<BrainContext, BrainError>) -> StaticRetriever {
-        StaticRetriever {
-            result,
-            seen_question: Arc::new(StdMutex::new(None)),
-        }
-    }
-
-    fn answerer(result: Option<&str>) -> CountingAnswerer {
-        CountingAnswerer {
-            result: result.map(str::to_string),
-            calls: AtomicUsize::new(0),
-            seen_prompt: Arc::new(StdMutex::new(None)),
-        }
-    }
-
-    fn cfg() -> BrainConfig {
-        BrainConfig {
+    #[tokio::test]
+    async fn gemeinsame_antwort_erhaelt_frage_und_beachtet_grenzen_und_cooldown() {
+        let config = BrainConfig {
             max_question_len: 20,
             cooldown_secs: 20,
-        }
-    }
-
-    #[tokio::test]
-    async fn leere_frage_liefert_usage() {
+        };
         let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("general", "prompt")));
-        let answerer = answerer(Some("antwort"));
-
-        let out = handle_brain_query(" \n\t ", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
-
-        assert_eq!(out, BrainOutcome::Usage);
+        let answerer = CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        assert_eq!(
+            handle_brain_query("", 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::Usage
+        );
+        assert_eq!(
+            handle_brain_query(&"x".repeat(21), 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::TooLong { len: 21 }
+        );
         assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn zu_lange_frage_liefert_toolong() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("general", "prompt")));
-        let answerer = answerer(Some("antwort"));
-
-        let out = handle_brain_query(
-            "123456789012345678901",
-            1,
-            &cfg(),
-            &cooldowns,
-            &retriever,
-            &answerer,
-        )
-        .await;
-
-        assert_eq!(out, BrainOutcome::TooLong { len: 21 });
-        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn cooldown_blockt_zweiten_call_und_laeuft_ab() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("general", "prompt")));
-        let answerer = answerer(Some("antwort"));
-
-        let first =
-            handle_brain_query("frage", 42, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert!(matches!(first, BrainOutcome::Answer(_)));
-
-        let second =
-            handle_brain_query("frage", 42, &cfg(), &cooldowns, &retriever, &answerer).await;
+        assert_eq!(
+            handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::Answer("Frage".into())
+        );
         assert!(matches!(
-            second,
-            BrainOutcome::Cooldown {
-                remaining_secs: 1..=20
-            }
+            handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::Cooldown { .. }
         ));
-
         cooldowns
             .lock()
             .await
-            .insert(42, Instant::now() - Duration::from_secs(21));
-        let third =
-            handle_brain_query("frage", 42, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert!(matches!(third, BrainOutcome::Answer(_)));
+            .insert(1, Instant::now() - Duration::from_secs(21));
+        assert!(matches!(
+            handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::Answer(_)
+        ));
+        assert_eq!(answerer.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn backend_error_setzt_keinen_cooldown() {
+    async fn backendfehler_verbraucht_keinen_cooldown() {
+        let config = BrainConfig {
+            max_question_len: 20,
+            cooldown_secs: 20,
+        };
         let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Err(BrainError::Backend("kaputt".to_string())));
-        let answerer = answerer(Some("antwort"));
-
-        let first = handle_brain_query("frage", 7, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert_eq!(first, BrainOutcome::BackendError);
+        let answerer = CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: true,
+        };
+        assert_eq!(
+            handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::BackendError
+        );
         assert!(cooldowns.lock().await.is_empty());
-
-        let second =
-            handle_brain_query("frage", 7, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert_eq!(second, BrainOutcome::BackendError);
-    }
-
-    #[tokio::test]
-    async fn out_of_domain_ruft_ai_nicht_auf() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("out_of_domain", "prompt")));
-        let answerer = answerer(Some("soll nicht passieren"));
-
-        let out = handle_brain_query("wetter?", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
-
-        assert_eq!(out, BrainOutcome::OutOfDomain);
-        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn out_of_domain_setzt_cooldown() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("out_of_domain", "prompt")));
-        let answerer = answerer(Some("soll nicht passieren"));
-
-        let first =
-            handle_brain_query("wetter?", 9, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert_eq!(first, BrainOutcome::OutOfDomain);
-
-        let second =
-            handle_brain_query("wetter?", 9, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert!(matches!(second, BrainOutcome::Cooldown { .. }));
-    }
-
-    #[tokio::test]
-    async fn cooldown_setzen_prunt_abgelaufene_eintraege() {
-        let cooldowns = BrainCooldowns::default();
-        cooldowns
-            .lock()
-            .await
-            .insert(99, Instant::now() - Duration::from_secs(21));
-        let retriever = retriever(Ok(context("general", "prompt")));
-        let answerer = answerer(Some("antwort"));
-
-        let out = handle_brain_query("frage", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
-        assert!(matches!(out, BrainOutcome::Answer(_)));
-
-        let map = cooldowns.lock().await;
-        assert!(map.contains_key(&1));
-        assert!(!map.contains_key(&99));
-    }
-
-    #[tokio::test]
-    async fn normalpfad_liefert_answer_und_prompt_an_ai() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("build_recommendation", "brain prompt")));
-        let seen_prompt = retriever.seen_question.clone();
-        let answerer = answerer(Some("fertige antwort"));
-        let answerer_prompt = answerer.seen_prompt.clone();
-
-        let out =
-            handle_brain_query("Seven build", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
-
-        assert_eq!(out, BrainOutcome::Answer("fertige antwort".to_string()));
-        assert_eq!(
-            seen_prompt.lock().expect("seen_question lock").as_deref(),
-            Some("Seven build")
-        );
-        assert_eq!(
-            answerer_prompt.lock().expect("seen_prompt lock").as_deref(),
-            Some("brain prompt")
-        );
-        assert_eq!(answerer.calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn normalpfad_erhaelt_rohe_antwort_mit_newlines() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("build_recommendation", "brain prompt")));
-        let answerer = answerer(Some("- a\n- b\n- c"));
-
-        let out =
-            handle_brain_query("Seven build", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
-
-        assert_eq!(out, BrainOutcome::Answer("- a\n- b\n- c".to_string()));
-    }
-
-    #[tokio::test]
-    async fn ai_none_oder_leer_liefert_no_answer() {
-        let cooldowns = BrainCooldowns::default();
-        let retriever = retriever(Ok(context("general", "prompt")));
-        let none_answerer = answerer(None);
-
-        let out =
-            handle_brain_query("frage", 1, &cfg(), &cooldowns, &retriever, &none_answerer).await;
-        assert_eq!(out, BrainOutcome::NoAnswer);
-
-        cooldowns.lock().await.clear();
-        let empty_answerer = answerer(Some("   "));
-        let out =
-            handle_brain_query("frage", 1, &cfg(), &cooldowns, &retriever, &empty_answerer).await;
-        assert_eq!(out, BrainOutcome::NoAnswer);
     }
 
     #[test]
