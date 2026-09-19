@@ -26,10 +26,14 @@ jobs:
       - name: Format Hybrid Dateien
         run: |
           rustfmt --edition 2021 --check \
+            bin/dl-knowledge/src/main.rs \
+            bin/dl-knowledge/src/hybrid/mod.rs \
+            bin/dl-knowledge/src/hybrid/pipeline.rs \
             bin/dl-knowledge/src/hybrid/quality.rs \
             bin/dl-knowledge/src/hybrid/bench.rs \
             bin/dl-knowledge/src/hybrid/cli.rs \
-            bin/dl-knowledge/src/hybrid/tests.rs
+            bin/dl-knowledge/src/hybrid/tests.rs \
+            bin/dl-knowledge/src/hybrid/tests_http.rs
       - name: Test dl-knowledge
         run: cargo test --package dl-knowledge --all-features -- --test-threads=2
       - name: Clippy dl-knowledge

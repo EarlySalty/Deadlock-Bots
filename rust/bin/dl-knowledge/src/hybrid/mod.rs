@@ -111,11 +111,10 @@ impl Runtime {
                     let mut cache = catalog_cache
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Hybrid-Katalogzustand unbrauchbar"))?;
-                    if let Some((generation, catalog)) = cache
+                    if let Some((_, catalog)) = cache
                         .as_ref()
                         .filter(|(generation, _)| *generation == knowledge.generation)
                     {
-                        let _ = generation;
                         catalog.clone()
                     } else {
                         let catalog = Arc::new(Catalog::new(&knowledge, &config)?);
