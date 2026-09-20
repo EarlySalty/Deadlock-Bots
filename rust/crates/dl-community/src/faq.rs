@@ -852,7 +852,9 @@ impl FaqChat {
             .await
         {
             Ok(
-                dl_answer::Answer::Grounded { text, .. } | dl_answer::Answer::Restricted { text },
+                dl_answer::Answer::Grounded { text, .. }
+                | dl_answer::Answer::Restricted { text }
+                | dl_answer::Answer::Clarification { text },
             ) => KnowledgeLookup::Answer(KnowledgeAnswer {
                 answerable: true,
                 answer: Some(text),

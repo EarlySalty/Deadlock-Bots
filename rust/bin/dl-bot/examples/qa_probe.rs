@@ -189,6 +189,7 @@ async fn run(credential: Option<dl_ai::InheritedKnowledgeCredential>) -> anyhow:
         let (status, answer, sources) = match result {
             Ok(Answer::Grounded { text, sources, .. }) => ("answered", Some(text), sources),
             Ok(Answer::NoEvidence) => ("no_evidence", None, vec![]),
+            Ok(Answer::Clarification { text }) => ("clarification", Some(text), vec![]),
             Ok(Answer::Restricted { text }) => ("restricted", Some(text), vec![]),
             Ok(Answer::OutOfDomain) => ("out_of_domain", None, vec![]),
             Err(error) => ("error", Some(error.to_string()), vec![]),

@@ -120,8 +120,15 @@ pub(super) fn select_evidence(
                 .is_none_or(|score| !score.is_finite() || !(0.0..=1.0).contains(score))
         })
     {
-        return evidence;
+        return without_optional_code(evidence);
     }
+    let evidence = evidence
+        .into_iter()
+        .filter(|item| {
+            !matches!(item.source, Source::PublicCodeEvidence { .. })
+                || decision.relevance[&item.id] >= 0.95
+        })
+        .collect::<Vec<_>>();
     if !decision.relevance.values().any(|score| *score >= 0.95) {
         return evidence;
     }
@@ -146,9 +153,47 @@ pub(super) fn select_evidence(
     selected
 }
 
+pub(super) fn without_optional_code(evidence: Vec<Evidence>) -> Vec<Evidence> {
+    evidence
+        .into_iter()
+        .filter(|item| !matches!(item.source, Source::PublicCodeEvidence { .. }))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_code_requires_positive_selection_even_on_fallback() {
+        let mut code = evidence("P1");
+        code.source = Source::PublicCodeEvidence {
+            title: "FAQ".into(),
+            path: "faq.html".into(),
+            repository: "discord".into(),
+            release_commit: "a".repeat(40),
+            source_path: "rust/crates/dl-community/src/faq.rs".into(),
+            symbol: "register:faq".into(),
+            blob_sha256: "b".repeat(64),
+        };
+        for score in [0.0, 0.5, 0.94, 0.95, 1.0] {
+            let items = vec![evidence("C1"), evidence("G1"), code.clone()];
+            let decision = KnowledgeDecision {
+                relevance: [("C1".into(), 0.5), ("G1".into(), 0.5), ("P1".into(), score)]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            };
+            assert_eq!(
+                select_evidence(&decision, items.clone()).len(),
+                if score >= 0.95 { 3 } else { 2 }
+            );
+            assert_eq!(
+                select_evidence(&KnowledgeDecision::default(), items.clone()).len(),
+                2
+            );
+            assert_eq!(without_optional_code(items).len(), 2);
+        }
+    }
     #[test]
     fn restricted_decision_has_a_fixed_general_reply_but_uncertain_is_not_blocked() {
         let mut decision = KnowledgeDecision {
