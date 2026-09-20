@@ -35,6 +35,9 @@ async fn public_shadow(path: &Path) -> Result<()> {
     );
     let root = input.public_snapshot.canonicalize()?;
     let knowledge = crate::load_production_corpus(&root)?;
+    let listener = tokio::net::TcpListener::bind(input.bind)
+        .await
+        .context("Shadow-Port reservieren")?;
     let runtime = if let Some(settings) = &input.settings {
         settings.validate()?;
         let address = settings
@@ -61,7 +64,6 @@ async fn public_shadow(path: &Path) -> Result<()> {
         generator: None,
         hybrid: runtime,
     };
-    let listener = tokio::net::TcpListener::bind(input.bind).await?;
     println!(
         "{}",
         serde_json::json!({"shadow":"ready","bind":input.bind})

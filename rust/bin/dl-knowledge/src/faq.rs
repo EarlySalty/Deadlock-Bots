@@ -12,6 +12,14 @@ pub(crate) struct Entry {
     pub chunk: Chunk,
 }
 
+#[cfg(test)]
+pub(crate) fn fixture(question: &str, chunk: Chunk) -> Entry {
+    Entry {
+        question: normalize(question),
+        chunk,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {

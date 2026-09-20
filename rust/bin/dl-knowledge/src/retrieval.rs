@@ -51,7 +51,12 @@ pub(crate) async fn retrieve(
         ));
     }
     let knowledge = state.knowledge.read().await;
-    if let Some(chunk) = crate::faq::exact(&knowledge.faq, question) {
+    if let Some(chunk) = crate::faq::exact(&knowledge.faq, question).filter(|chunk| {
+        state
+            .hybrid
+            .as_ref()
+            .is_none_or(|runtime| runtime.accepts(chunk))
+    }) {
         return Ok(Json(merge_evidence(vec![evidence_from_ranked(
             question,
             vec![(chunk.clone(), 1.0)],

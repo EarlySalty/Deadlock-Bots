@@ -93,6 +93,10 @@ pub struct PreparedIndex {
 }
 
 impl Runtime {
+    pub(crate) fn accepts(&self, chunk: &Chunk) -> bool {
+        self.config.metadata.accepts(&chunk.stand, &chunk.quelle)
+    }
+
     /// Prepare a complete generation before publishing its corresponding BM25 snapshot.
     pub async fn prepare(&self, knowledge: &KnowledgeBase) -> Result<PreparedIndex> {
         let records = crate::dense::from_chunks(&knowledge.chunks)?;

@@ -737,6 +737,11 @@ async fn main() -> Result<()> {
         tracing::warn!("Fireworks-Client nicht initialisiert; /ask antwortet fail-closed");
     }
 
+    // Reserve the port before preparing or activating a shared index. A failed
+    // duplicate start must not change the generation serving the live process.
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("dl-knowledge binden: {bind}"))?;
     let hybrid = if let Some(settings) = server_config
         .as_ref()
         .and_then(|config| config.hybrid.as_ref())
@@ -758,9 +763,6 @@ async fn main() -> Result<()> {
         knowledge: Arc::new(RwLock::new(knowledge)),
         generator,
     };
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .with_context(|| format!("dl-knowledge binden: {bind}"))?;
     tracing::info!(addr = %bind, retrieval_only, "dl-knowledge gebunden");
     axum::serve(listener, router_with_mode(state, retrieval_only))
         .await

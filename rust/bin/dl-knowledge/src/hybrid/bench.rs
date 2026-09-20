@@ -28,8 +28,14 @@ async fn verify_snapshot_binding(
     let fingerprint = models.embedder.fingerprint().to_string();
     let mut revoked = knowledge.clone();
     ensure!(
-        revoked.chunks.len() > 1,
-        "Entzugstest benötigt mehrere öffentliche Chunks"
+        revoked
+            .chunks
+            .iter()
+            .map(|chunk| &chunk.path)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1,
+        "Entzugstest benötigt mehrere öffentliche Dokumente"
     );
     let removed_path = revoked.chunks[0].path.clone();
     revoked.chunks.retain(|chunk| chunk.path != removed_path);
@@ -57,7 +63,12 @@ async fn verify_snapshot_binding(
         "Alter Denseindex darf geänderten Text nicht bedienen"
     );
     let mut changed_metadata = knowledge.clone();
-    changed_metadata.chunks[0].stand = "2026-09-21".into();
+    changed_metadata.chunks[0].stand = if changed_metadata.chunks[0].stand == "2026-09-21" {
+        "2026-09-22"
+    } else {
+        "2026-09-21"
+    }
+    .into();
     ensure!(
         super::search::dense(
             pool,
@@ -182,7 +193,8 @@ pub(super) async fn run_snapshot(
         .collect::<Vec<_>>();
     let cases = selected_cases
         .iter()
-        .filter(|(_, _, case)| {
+        .enumerate()
+        .filter(|(_, (_, _, case))| {
             case.expected_sources
                 .iter()
                 .all(|path| root.join(path).is_file())
@@ -216,7 +228,7 @@ pub(super) async fn run_snapshot(
     // Offline quality measurement must retain slow/failed latency evidence;
     // this never changes the service worker's configured request deadline.
     let deadline = || Instant::now() + Duration::from_secs(60);
-    for (_, _, case) in cases.iter().take(3) {
+    for (_, (_, _, case)) in cases.iter().take(3) {
         pipeline::run(
             pool,
             models,
@@ -235,7 +247,7 @@ pub(super) async fn run_snapshot(
     let mut rerank_samples = Vec::new();
     let mut rows = Vec::new();
     for round in 0..rounds {
-        for (position, (file, row, case)) in cases.iter().enumerate() {
+        for (position, (suite_offset, (file, row, case))) in cases.iter().enumerate() {
             let start = Instant::now();
             let bm25 = knowledge
                 .search(&case.question, config.output_k)
@@ -281,7 +293,7 @@ pub(super) async fn run_snapshot(
                     .take(config.output_k)
                     .map(|&index| knowledge.chunks[index].clone())
                     .collect::<Vec<_>>();
-                rows.push(json!({"suite_position":selected.start+position+1,"file":file, "row":row, "question":case.question, "answerable":case.answerable,
+                rows.push(json!({"suite_position":selected.start+suite_offset+1,"file":file, "row":row, "question":case.question, "answerable":case.answerable,
                     "expected_sources":case.expected_sources, "bm25":quality::measure(case, &bm25),
                     "rerank_scores":result.reranked.iter().map(|hit| json!({"path":knowledge.chunks[hit.index].path,"section":knowledge.chunks[hit.index].section,"score":hit.score})).collect::<Vec<_>>(),
                     "bm25_sections":result.bm25.iter().map(|&index| json!({"path":knowledge.chunks[index].path,"section":knowledge.chunks[index].section})).collect::<Vec<_>>(),
@@ -296,7 +308,7 @@ pub(super) async fn run_snapshot(
                 checkpoint,
                 "{}",
                 json!({"kind":"sample", "round":round+1,
-                "suite_position":selected.start+position+1, "bm25_ms":bm25_samples.last(),
+                "suite_position":selected.start+suite_offset+1, "bm25_ms":bm25_samples.last(),
                 "hybrid_ms":hybrid_samples.last(), "reranked_ms":reranked_samples.last(), "rerank_ms":rerank_samples.last(),
                 "case_result":if round == 0 { rows.last() } else { None }})
             )?;
