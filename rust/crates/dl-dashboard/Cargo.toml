@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 dl-core.workspace = true
+dl-bridges.workspace = true
 dl-central-db.workspace = true
 dl-community.workspace = true
 dl-ai.workspace = true

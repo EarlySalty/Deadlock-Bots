@@ -77,6 +77,7 @@ impl Drop for ReadinessReset {
     }
 }
 
+#[cfg(test)]
 fn moderation_enforce_from_lookup<F>(lookup: F) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -472,6 +473,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let startup_text = master::startup_text_now();
 
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
+    let operating = dl_core::config::process_bot_config()?.snapshot();
     let _web_cfg = WebConfig::from_env();
     let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
     let central_pool = dl_central_db::connect_pool(&central_dsn)
@@ -644,8 +646,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
-    let concierge_config =
+    let mut concierge_config =
         dl_community::concierge::ConciergeConfig::from_env(|k| std::env::var(k).ok());
+    concierge_config.ai_timeout =
+        std::time::Duration::from_secs(operating.concierge.timeout_seconds);
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
@@ -949,7 +953,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         fallback_invites,
     ));
     behavior_glue.refresh_invite_allowlist().await;
-    let moderation_enforce = moderation_enforce_from_lookup(env);
+    let moderation_enforce = operating.moderation.enforce;
     tracing::info!(
         enforce = moderation_enforce,
         "Moderation Enforcement-Modus gelesen"

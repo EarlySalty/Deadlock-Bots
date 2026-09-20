@@ -315,6 +315,18 @@ impl DashboardApp {
 
 pub fn router(app: DashboardApp) -> Router {
     Router::new()
+        .route(
+            "/api/admin/betriebskonfiguration",
+            get(crate::operating_config::get).patch(crate::operating_config::save),
+        )
+        .route(
+            "/api/admin/steam-betriebskonfiguration",
+            get(crate::operating_config::steam_get).patch(crate::operating_config::steam_save),
+        )
+        .route(
+            "/api/admin/betriebskonfiguration.js",
+            get(crate::operating_config::ui),
+        )
         .route("/", get(index))
         .route("/admin", get(index))
         .route("/insights", get(insights_page))
@@ -2268,13 +2280,16 @@ mod visual_brain_route_tests {
             "/api/brain/graph-ui.js",
             "/api/brain/knowledge-status",
             "/api/brain/graph-library.js",
+            "/api/admin/betriebskonfiguration",
+            "/api/admin/steam-betriebskonfiguration",
+            "/api/admin/betriebskonfiguration.js",
         ] {
             for (cookie, expected) in [
                 (None, 401),
                 (Some(&cookies[0]), 403),
                 (
                     Some(&cookies[1]),
-                    if path.ends_with("graph-ui.js") {
+                    if path.ends_with("graph-ui.js") || path.ends_with("betriebskonfiguration.js") {
                         200
                     } else {
                         503
@@ -2296,6 +2311,34 @@ mod visual_brain_route_tests {
                     "private, no-store"
                 );
                 assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+            }
+        }
+        for path in [
+            "/api/admin/betriebskonfiguration",
+            "/api/admin/steam-betriebskonfiguration",
+        ] {
+            for (cookie, expected) in [
+                (None, 401),
+                (Some(&cookies[0]), 403),
+                (Some(&cookies[1]), 403),
+            ] {
+                let mut request = axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, "application/json");
+                if let Some(cookie) = cookie {
+                    request = request.header(header::COOKIE, format!("{SESSION_COOKIE}={cookie}"));
+                }
+                let response = routes
+                    .clone()
+                    .oneshot(request.body(Body::from("{}")).expect("Testrequest"))
+                    .await
+                    .expect("Testantwort");
+                assert_eq!(
+                    response.status().as_u16(),
+                    expected,
+                    "{path}: ohne CSRF nie schreiben"
+                );
             }
         }
     }

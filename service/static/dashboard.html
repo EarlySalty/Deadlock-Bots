@@ -1579,6 +1579,7 @@ details[open] > summary { margin-bottom: 18px; }
 
     </style>
 <script src="/api/brain/graph-ui.js" defer></script>
+<script src="/api/admin/betriebskonfiguration.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#dashboard-main">Zum Inhalt</a>
@@ -1601,6 +1602,7 @@ details[open] > summary { margin-bottom: 18px; }
         <span class="nav-group">Verwaltung</span>
         <button class="tab-btn" data-tab="deadlock">Helden &amp; Rollen</button>
         <button class="tab-btn" data-tab="audit">Audit-Log</button>
+        <button class="tab-btn" data-tab="betrieb">Betriebseinstellungen</button>
 
         <button class="tab-btn" data-tab="entwicklung">Entwicklung</button>
     </nav>
@@ -1609,6 +1611,10 @@ details[open] > summary { margin-bottom: 18px; }
     <!-- ════════════════════════════════════════════════
          Tab: Übersicht  –  Server Stats + Mitgliederbindung
          ════════════════════════════════════════════════ -->
+    <div class="tab-panel" data-tab="betrieb">
+        <p>Discord und Steam verwalten. Gespeicherte Änderungen werden nach dem Dienstneustart wirksam.</p>
+        <div id="operating-config-cards"></div>
+    </div>
     <div class="tab-panel active" data-tab="overview">
 
         <section>
@@ -7987,6 +7993,7 @@ document.getElementById("insights-refreshInsights").addEventListener("click", lo
             brain: 'Vorschläge prüfen und den bisherigen Nutzen bewerten.',
             deadlock: 'Helden, Builds und Reaktionsrollen verwalten.',
             audit: 'Änderungen und Verwaltungsaktionen nachvollziehen.',
+            betrieb: 'Betriebswerte speichern und den aktiven Stand je Dienst prüfen.',
             entwicklung: 'Die Entwicklung der Community-Projekte im Verlauf.',
         };
         function activate(target, updateHash = true) {
@@ -8004,6 +8011,7 @@ document.getElementById("insights-refreshInsights").addEventListener("click", lo
             if (target === 'deadlock') { loadDeadlockHeroes(); loadReactionRoles(); }
             if (target === 'scrims') loadScrims();
             if (target === 'audit') window.loadAuditLog?.();
+            if (target === 'betrieb') window.loadOperatingConfig?.();
             if (target === 'brain') window.loadBrain?.();
         }
         buttons.forEach(button => button.addEventListener('click', () => activate(button.dataset.tab)));

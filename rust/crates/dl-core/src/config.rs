@@ -17,7 +17,9 @@ use crate::bot_config::{BotConfig, BotConfigError, DEFAULT_CONFIG_PATH};
 pub enum ConfigError {
     #[error(transparent)]
     File(#[from] BotConfigError),
-    #[error("Config-Pfad ungültig: --config PFAD darf einmal mit einem nichtleeren Pfad vorkommen")]
+    #[error(
+        "Config-Pfad ungültig: --config PFAD darf einmal mit einem nichtleeren Pfad vorkommen"
+    )]
     Arguments,
 }
 
@@ -44,9 +46,13 @@ pub struct Config {
 pub struct ProcessBotConfig {
     source: PathBuf,
     config: Arc<BotConfig>,
+    fingerprint: String,
 }
 
 impl ProcessBotConfig {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
     pub fn source(&self) -> &Path {
         &self.source
     }
@@ -64,7 +70,12 @@ impl ProcessBotConfig {
                 .join(path)
         };
         let config = Arc::new(BotConfig::load(&source)?);
-        Ok(Self { source, config })
+        let fingerprint = crate::operating_config::fingerprint(&config)?;
+        Ok(Self {
+            source,
+            config,
+            fingerprint,
+        })
     }
 }
 
@@ -117,6 +128,7 @@ pub fn process_bot_config() -> Result<&'static ProcessBotConfig, ConfigError> {
         let loaded = ProcessBotConfig::load(path)?;
         tracing::info!(
             schema_version = loaded.config.schema_version,
+            fingerprint = loaded.fingerprint(),
             "DL_BOT_TOML_STARTUP_V1"
         );
         Ok(loaded)
@@ -305,7 +317,10 @@ mod tests {
         assert!(Arc::ptr_eq(&before, &unchanged));
         assert_eq!(unchanged.services.master_broker_port, 8770);
         assert_eq!(
-            Config::from_file(&path).expect("new startup").ports.master_broker,
+            Config::from_file(&path)
+                .expect("new startup")
+                .ports
+                .master_broker,
             9001
         );
     }

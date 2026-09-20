@@ -6,13 +6,13 @@
 
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::OpenOptions,
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 pub const DEFAULT_CONFIG_PATH: &str = "config/bot.toml";
@@ -34,7 +34,7 @@ pub enum BotConfigError {
     Lock,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BotConfig {
     pub schema_version: u32,
@@ -56,7 +56,7 @@ pub struct BotConfig {
     pub llm: LlmConfig,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
     /// Snowflakes als Dezimalstrings, damit der gesamte u64-Bereich nutzbar ist.
@@ -65,9 +65,10 @@ pub struct DiscordConfig {
     pub roles: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
+    pub steam_api_url: String,
     pub dashboard_port: u16,
     pub public_stats_port: u16,
     pub master_broker_port: u16,
@@ -78,6 +79,7 @@ pub struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
+            steam_api_url: "http://127.0.0.1:8783".into(),
             dashboard_port: 8766,
             public_stats_port: 8768,
             master_broker_port: 8770,
@@ -87,7 +89,7 @@ impl Default for ServiceConfig {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// Kompatibilitätsfeld für den bisherigen Config::db_path-Vertrag.
@@ -104,7 +106,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FeatureConfig {
     pub gateway: bool,
@@ -114,13 +116,13 @@ pub struct FeatureConfig {
     pub voice: bool,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModerationConfig {
     pub enforce: bool,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConciergeConfig {
     pub timeout_seconds: u64,
@@ -134,7 +136,7 @@ impl Default for ConciergeConfig {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalMode {
     #[default]
@@ -142,7 +144,7 @@ pub enum RetrievalMode {
     Hybrid,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct KnowledgeConfig {
     pub ask_url: String,
@@ -160,7 +162,7 @@ impl Default for KnowledgeConfig {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     #[default]
@@ -168,7 +170,7 @@ pub enum Provider {
     Openai,
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum UseCase {
     BotPate,
@@ -187,14 +189,14 @@ pub enum UseCase {
     VoiceHint,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     pub fireworks: FireworksConfig,
     pub use_cases: BTreeMap<UseCase, UseCaseConfig>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseCaseConfig {
     pub provider: Provider,
@@ -202,7 +204,7 @@ pub struct UseCaseConfig {
     pub model: Option<String>,
 }
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelSelection {
     #[default]
@@ -210,14 +212,14 @@ pub enum ModelSelection {
     Pinned,
 }
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelFamily {
     #[default]
     DeepseekFlash,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FireworksConfig {
     pub selection: ModelSelection,
@@ -268,7 +270,10 @@ fn flash_version(model: &str) -> Option<(u32, u32, u32)> {
     let (major, minor) = version.split_once('p').unwrap_or((version, "0"));
     if major.is_empty()
         || minor.is_empty()
-        || !major.bytes().chain(minor.bytes()).all(|b| b.is_ascii_digit())
+        || !major
+            .bytes()
+            .chain(minor.bytes())
+            .all(|b| b.is_ascii_digit())
     {
         return None;
     }
@@ -284,31 +289,65 @@ impl BotConfig {
         if text.len() as u64 > MAX_CONFIG_BYTES {
             return Err(BotConfigError::TooLarge);
         }
-        let config: Self = toml::from_str(text).map_err(|error: toml::de::Error| {
-            BotConfigError::Parse {
+        let config: Self =
+            toml::from_str(text).map_err(|error: toml::de::Error| BotConfigError::Parse {
                 offset: error.span().map_or(0, |span| span.start),
-            }
-        })?;
+            })?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, BotConfigError> {
+        Self::load_document(path).map(|(config, _)| config)
+    }
+
+    pub fn load_document(path: impl AsRef<Path>) -> Result<(Self, String), BotConfigError> {
         let mut bytes = Vec::new();
-        File::open(path)
-            .map_err(|_| BotConfigError::Read)?
-            .take(MAX_CONFIG_BYTES + 1)
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path).map_err(|_| BotConfigError::Read)?;
+        if !file.metadata().map_err(|_| BotConfigError::Read)?.is_file() {
+            return Err(BotConfigError::Read);
+        }
+        file.take(MAX_CONFIG_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| BotConfigError::Read)?;
         if bytes.len() as u64 > MAX_CONFIG_BYTES {
             return Err(BotConfigError::TooLarge);
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| BotConfigError::Encoding)?;
-        Self::parse(text)
+        Ok((Self::parse(text)?, text.to_owned()))
     }
 
     pub fn validate(&self) -> Result<(), BotConfigError> {
         let invalid = BotConfigError::Validation;
+        let steam = url::Url::parse(&self.services.steam_api_url)
+            .map_err(|_| invalid("services.steam_api_url ist ungültig"))?;
+        if !matches!(steam.scheme(), "http" | "https")
+            || !steam
+                .host_str()
+                .and_then(|host| {
+                    host.trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .ok()
+                })
+                .is_some_and(|ip| ip.is_loopback())
+            || !steam.username().is_empty()
+            || steam.password().is_some()
+            || steam.query().is_some()
+            || steam.fragment().is_some()
+            || steam.path() != "/"
+            || steam.port_or_known_default() == Some(0)
+        {
+            return Err(invalid(
+                "services.steam_api_url benötigt eine Loopback-Adresse ohne Zugangsdaten oder Pfad",
+            ));
+        }
         if self.schema_version != 1 {
             return Err(invalid("schema_version muss 1 sein"));
         }
@@ -602,9 +641,7 @@ mod tests {
     #[test]
     fn zero_negative_and_overflow_ids_are_rejected() {
         for id in ["0", "-1", "18446744073709551616", " 123", ""] {
-            rejected(&format!(
-                "schema_version = 1\n[discord]\nguild_id = '{id}'"
-            ));
+            rejected(&format!("schema_version = 1\n[discord]\nguild_id = '{id}'"));
         }
     }
 
@@ -640,9 +677,12 @@ mod tests {
 
     #[test]
     fn invalid_storage_paths_do_not_echo_values() {
-        for value in ["", "   ", "postgres://SYNTHETIC_SENSITIVE_VALUE@localhost/db"] {
-            let text =
-                format!("schema_version = 1\n[storage]\nlegacy_snapshot_path = '{value}'");
+        for value in [
+            "",
+            "   ",
+            "postgres://SYNTHETIC_SENSITIVE_VALUE@localhost/db",
+        ] {
+            let text = format!("schema_version = 1\n[storage]\nlegacy_snapshot_path = '{value}'");
             let error = BotConfig::parse(&text).err().expect("invalid");
             assert!(!format!("{error:?} {error}").contains("SYNTHETIC_SENSITIVE_VALUE"));
         }
@@ -788,15 +828,8 @@ mod tests {
         let before = store.snapshot().expect("snapshot");
         std::fs::write(&path, "broken = [").expect("write");
         assert!(store.reload().is_err());
-        assert!(Arc::ptr_eq(
-            &before,
-            &store.snapshot().expect("snapshot")
-        ));
-        std::fs::write(
-            &path,
-            "schema_version = 1\n[moderation]\nenforce = true",
-        )
-        .expect("write");
+        assert!(Arc::ptr_eq(&before, &store.snapshot().expect("snapshot")));
+        std::fs::write(&path, "schema_version = 1\n[moderation]\nenforce = true").expect("write");
         let after = store.reload().expect("reload");
         assert!(after.moderation.enforce);
         assert!(!before.moderation.enforce);
@@ -811,11 +844,8 @@ mod tests {
         let second = directory.path().join("second.toml");
         let link = directory.path().join("bot.toml");
         std::fs::write(&first, MINIMAL).expect("write first");
-        std::fs::write(
-            &second,
-            "schema_version = 1\n[moderation]\nenforce = true",
-        )
-        .expect("write second");
+        std::fs::write(&second, "schema_version = 1\n[moderation]\nenforce = true")
+            .expect("write second");
         symlink(&first, &link).expect("first link");
         let store = BotConfigStore::open(&link).expect("open");
         assert!(!store.snapshot().expect("snapshot").moderation.enforce);
