@@ -1022,12 +1022,7 @@ fn validate_retrieval(wire: RetrievalWire) -> Result<dl_answer::Retrieved, dl_an
     {
         return Err(AnswerError::InvalidEvidence);
     }
-    if wire.standard_answers.len() > 12
-        || wire
-            .standard_answers
-            .iter()
-            .any(|item| !item.valid(&wire.evidence))
-    {
+    if wire.standard_answers.len() > 32 || wire.standard_answers.iter().any(|item| !item.valid()) {
         return Err(AnswerError::InvalidEvidence);
     }
     Ok(dl_answer::Retrieved {

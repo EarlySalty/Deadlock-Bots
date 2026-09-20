@@ -15,6 +15,7 @@ pub(crate) struct Entry {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Standard {
+    pub source_sha256: String,
     pub id: String,
     pub question: String,
     pub scope: String,
@@ -164,6 +165,7 @@ pub(crate) fn load(
                     "Ungültige Standardantwort"
                 );
                 Some(Standard {
+                    source_sha256: source.source_sha256.clone(),
                     id,
                     question: source.question.clone(),
                     scope,

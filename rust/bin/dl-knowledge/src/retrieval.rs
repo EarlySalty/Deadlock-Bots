@@ -28,7 +28,8 @@ pub(crate) struct RetrievalResponse {
 #[derive(Debug, Serialize)]
 struct StandardAnswer {
     id: String,
-    evidence_id: String,
+    source: PublicSource,
+    source_sha256: String,
     question: String,
     scope: String,
     answer: String,
@@ -39,17 +40,18 @@ fn with_standards(mut response: RetrievalResponse, knowledge: &KnowledgeBase) ->
         let Some(standard) = &entry.standard else {
             continue;
         };
-        let Some(evidence) = response.evidence.iter().find(|item| {
-            item.source.path == entry.chunk.path && item.text.contains(&entry.chunk.section)
-        }) else {
-            continue;
-        };
-        if response.standard_answers.len() == 12 {
+        if response.standard_answers.len() == 32 {
             break;
         }
         response.standard_answers.push(StandardAnswer {
             id: standard.id.clone(),
-            evidence_id: evidence.id.clone(),
+            source: PublicSource {
+                kind: "community_page",
+                title: entry.chunk.title.clone(),
+                path: entry.chunk.path.clone(),
+                code: None,
+            },
+            source_sha256: standard.source_sha256.clone(),
             question: standard.question.clone(),
             scope: standard.scope.clone(),
             answer: standard.answer.clone(),
@@ -483,6 +485,45 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), 100_000).await.expect("body");
         (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn reviewed_standard_catalog_is_independent_from_passage_top_k() {
+        let reviewed = chunk("hilfe.html", &["Geprüfte Anleitung."]);
+        let mut entry = crate::faq::fixture("Wie geht das?", reviewed.clone());
+        entry.standard = Some(crate::faq::Standard {
+            id: "faq:hilfe.html#hilfe".into(),
+            source_sha256: "a".repeat(64),
+            question: "Wie geht das?".into(),
+            scope: "Allgemeine Anleitung".into(),
+            answer: "Geprüfte Anleitung.".into(),
+        });
+        let mut kb = KnowledgeBase::from_chunks(vec![reviewed]);
+        kb.faq.push(entry);
+        let response = with_standards(
+            RetrievalResponse {
+                status: "no_evidence",
+                evidence: vec![],
+                truncated: false,
+                standard_answers: vec![],
+            },
+            &kb,
+        );
+        assert!(response.evidence.is_empty());
+        assert_eq!(response.standard_answers.len(), 1);
+        assert_eq!(response.standard_answers[0].source.path, "hilfe.html");
+        assert_eq!(response.standard_answers[0].source_sha256, "a".repeat(64));
+        kb.faq.clear();
+        let withdrawn = with_standards(
+            RetrievalResponse {
+                status: "no_evidence",
+                evidence: vec![],
+                truncated: false,
+                standard_answers: vec![],
+            },
+            &kb,
+        );
+        assert!(withdrawn.standard_answers.is_empty());
     }
 
     #[tokio::test]

@@ -276,34 +276,7 @@ impl AnswerEngine {
             truncated = retrieved.truncated,
             "Gemeinsame Belege abgerufen"
         );
-        if retrieved.evidence.is_empty() {
-            if let Some(router) = &self.router {
-                let request = routing::request(question, retrieval_context, &[], &[]);
-                if let Ok(Ok(decision)) =
-                    tokio::time::timeout(Duration::from_secs(3), router.route(request)).await
-                {
-                    if let Some(answer) = routing::restricted_answer(&decision) {
-                        return Ok(answer);
-                    }
-                }
-            }
-            if !unavailable_sources.is_empty() {
-                return Err(AnswerError::Retrieval);
-            }
-            return Ok(if retrieved.out_of_domain {
-                Answer::OutOfDomain
-            } else {
-                Answer::NoEvidence
-            });
-        }
         let mut evidence = bounded_evidence(retrieved.evidence)?;
-        if evidence.is_empty() {
-            return if unavailable_sources.is_empty() {
-                Ok(Answer::NoEvidence)
-            } else {
-                Err(AnswerError::Retrieval)
-            };
-        }
         let notice = coverage_notice(&unavailable_sources);
         let max_units = match scope {
             Scope::CommunityAndGame => 1800usize,
@@ -313,7 +286,6 @@ impl AnswerEngine {
         if let Some(router) = &self.router {
             let standard_answers = routing::eligible_standards(
                 retrieved.standard_answers,
-                &evidence,
                 question == retrieval_context && unavailable_sources.is_empty(),
             );
             let request =
@@ -330,9 +302,10 @@ impl AnswerEngine {
                         );
                         return Ok(answer);
                     }
-                    if let Some(answer) =
-                        routing::direct_answer(&decision, &standard_answers, &evidence)
-                    {
+                    if decision.needs_context {
+                        return Ok(routing::clarification_answer());
+                    }
+                    if let Some(answer) = routing::direct_answer(&decision, &standard_answers) {
                         tracing::info!(
                             route = "standard",
                             decision_calls = 1,
@@ -355,7 +328,13 @@ impl AnswerEngine {
             evidence = routing::without_optional_code(evidence);
         }
         if evidence.is_empty() {
-            return Ok(Answer::NoEvidence);
+            return if !unavailable_sources.is_empty() {
+                Err(AnswerError::Retrieval)
+            } else if retrieved.out_of_domain {
+                Ok(Answer::OutOfDomain)
+            } else {
+                Ok(Answer::NoEvidence)
+            };
         }
         let provider = self.provider.as_ref().ok_or(AnswerError::Provider)?;
         tracing::info!(
@@ -545,7 +524,7 @@ fn validate_answer(
         {
             return Err(AnswerError::InvalidAnswer);
         }
-        return Ok(Answer::Clarification { text: "Worauf beziehst du dich genau? Sag mir bitte, was du machen möchtest und welchen Schritt du schon ausprobiert hast.".into() });
+        return Ok(routing::clarification_answer());
     }
     if !wire.answerable {
         return Ok(Answer::NoEvidence);
@@ -682,6 +661,7 @@ mod tests {
         fail: bool,
         slow: bool,
         restricted: bool,
+        needs_context: bool,
     }
     #[async_trait::async_trait]
     impl dl_ai::KnowledgeRouter for RouterFixture {
@@ -696,6 +676,7 @@ mod tests {
                 return Err(dl_ai::KnowledgeRouteError::Unavailable);
             }
             Ok(dl_ai::KnowledgeDecision {
+                needs_context: self.needs_context,
                 restricted: if self.restricted { 1.0 } else { 0.0 },
                 standard: Some(("faq:discord/paten.html#hilfe".into(), 1.0)),
                 ..Default::default()
@@ -717,7 +698,8 @@ mod tests {
                     evidence: vec![evidence("C1")],
                     standard_answers: vec![StandardAnswer {
                         id: "faq:discord/paten.html#hilfe".into(),
-                        evidence_id: "C1".into(),
+                        source: evidence("C1").source,
+                        source_sha256: "a".repeat(64),
                         question: "Was machen Paten?".into(),
                         scope: "Allgemeine Aufgabe".into(),
                         answer: "Paten helfen neuen Spielern.".into(),
@@ -735,6 +717,7 @@ mod tests {
                 fail,
                 slow,
                 restricted: false,
+                needs_context: false,
             }));
             let answer = engine
                 .answer_with_context(
@@ -767,6 +750,76 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn unclear_reference_takes_precedence_over_a_standard_without_generation() {
+        let engine = AnswerEngine::new(
+            None,
+            Arc::new(Fixture {
+                items: Retrieved {
+                    standard_answers: vec![StandardAnswer {
+                        id: "faq:discord/paten.html#hilfe".into(),
+                        source: evidence("C1").source,
+                        source_sha256: "a".repeat(64),
+                        question: "Was machen Paten?".into(),
+                        scope: "Allgemein".into(),
+                        answer: "Paten helfen.".into(),
+                    }],
+                    ..Default::default()
+                },
+                fail: false,
+            }),
+            None,
+            Duration::from_secs(5),
+        )
+        .with_router(Arc::new(RouterFixture {
+            fail: false,
+            slow: false,
+            restricted: false,
+            needs_context: true,
+        }));
+        assert!(matches!(
+            engine.answer("Und jetzt?", Scope::CommunityAndGame).await,
+            Ok(Answer::Clarification { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn optional_code_cannot_hide_a_failed_other_source() {
+        let code = Evidence {
+            id: "P1".into(),
+            source: Source::PublicCodeEvidence {
+                title: "FAQ".into(),
+                path: "hilfe.html".into(),
+                repository: "discord".into(),
+                release_commit: "a".repeat(40),
+                source_path: "rust/crates/dl-community/src/faq.rs".into(),
+                symbol: "register:faq".into(),
+                blob_sha256: "b".repeat(64),
+            },
+            text: "Nur optionaler Routerkandidat".into(),
+            observed_at: None,
+        };
+        let engine = AnswerEngine::new(
+            None,
+            Arc::new(Fixture {
+                items: Retrieved {
+                    evidence: vec![code],
+                    ..Default::default()
+                },
+                fail: false,
+            }),
+            Some(Arc::new(Fixture {
+                items: Retrieved::default(),
+                fail: true,
+            })),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            engine.answer("Frage?", Scope::CommunityAndGame).await,
+            Err(AnswerError::Retrieval)
+        );
+    }
+
+    #[tokio::test]
     async fn restricted_route_never_needs_generator_even_without_evidence() {
         let retriever = Arc::new(Fixture {
             items: Retrieved::default(),
@@ -777,6 +830,7 @@ mod tests {
                 fail: false,
                 slow: false,
                 restricted: true,
+                needs_context: false,
             }),
         );
         assert!(matches!(
