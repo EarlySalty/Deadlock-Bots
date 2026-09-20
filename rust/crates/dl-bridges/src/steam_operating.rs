@@ -112,6 +112,7 @@ impl super::steam::SteamBotClient {
             .ok_or(Error::Unavailable)?;
         let url = format!("{}/internal/config", self.base_url);
         let http = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| Error::Unavailable)?;

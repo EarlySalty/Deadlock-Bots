@@ -152,12 +152,13 @@ async fn steam_request(save: Option<dl_bridges::steam_operating::SaveRequest>) -
     // Bestehende Infisical-Secrets, kein zweiter Token oder Browserzugriff.
     let token = [
         "TWITCH_INTERNAL_API_TOKEN",
-        "MASTER_BROKER_TOKEN",
-        "MAIN_BOT_INTERNAL_TOKEN",
+        "STEAM_INTERNAL_API_TOKEN",
+        "INTERNAL_API_TOKEN",
     ]
     .into_iter()
     .filter_map(|name| std::env::var(name).ok())
-    .find(|value| !value.trim().is_empty());
+    .map(|value| value.trim().to_owned())
+    .find(|value| !value.is_empty());
     let client = dl_bridges::steam::SteamBotClient::new(&config.services.steam_api_url, token);
     match client.operating_config(save.as_ref()).await {
         Ok(value) => no_store(Json(value).into_response()),
