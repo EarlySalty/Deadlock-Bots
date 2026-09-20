@@ -169,7 +169,8 @@ pub struct LlmConfig {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UseCaseConfig {
-    pub provider: Provider,
+    /// Modell-Pin und Provider-Override bleiben unabhängig voneinander.
+    pub provider: Option<Provider>,
     /// Bewusster Pin für diesen Anwendungsfall.
     pub model: Option<String>,
 }
@@ -343,12 +344,13 @@ impl BotConfig {
                 "Fireworks-Pin liegt außerhalb der freigegebenen DeepSeek-Flash-Familie",
             ));
         }
-        for cfg in self.llm.use_cases.values() {
+        for (use_case, cfg) in &self.llm.use_cases {
             if cfg.model.as_deref().is_some_and(|id| {
                 id.is_empty()
                     || id.trim() != id
                     || id.chars().any(char::is_control)
-                    || (cfg.provider == Provider::Fireworks && flash_version(id).is_none())
+                    || (self.provider_for(*use_case) == Provider::Fireworks
+                        && flash_version(id).is_none())
             }) {
                 return Err(invalid("Modell-Pin für Anwendungsfall ist ungültig"));
             }
@@ -361,7 +363,7 @@ impl BotConfig {
         self.llm
             .use_cases
             .get(&use_case)
-            .map(|cfg| cfg.provider)
+            .and_then(|cfg| cfg.provider)
             .or(self.llm.default_provider)
             .unwrap_or(match use_case {
                 UseCase::ModerationVerify | UseCase::TurnierVorschlag | UseCase::VoiceHint => {

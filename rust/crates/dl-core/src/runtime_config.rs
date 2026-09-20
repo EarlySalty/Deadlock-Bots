@@ -552,13 +552,13 @@ impl BotConfig {
         if let Some(case) = llm_case {
             return self.llm.use_cases.get(&case).and_then(|config| {
                 if key.starts_with("DL_LLM_PROVIDER_") {
-                    Some(
-                        match config.provider {
+                    config.provider.map(|provider| {
+                        match provider {
                             Provider::Fireworks => "fireworks",
                             Provider::Openai => "openai",
                         }
-                        .into(),
-                    )
+                        .into()
+                    })
                 } else {
                     config.model.clone()
                 }

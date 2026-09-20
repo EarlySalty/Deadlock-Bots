@@ -1940,7 +1940,6 @@ scan_channel_ids=[111,222]
 [runtime.ai]
 transparency_enabled=false
 [llm.use_cases.bot_pate]
-provider="fireworks"
 model="accounts/fireworks/models/deepseek-v4-flash-0731"
 "#,
         )
@@ -1976,6 +1975,21 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             lookup("DL_LLM_MODEL_BOT_PATE").as_deref(),
             Some("accounts/fireworks/models/deepseek-v4-flash-0731")
         );
+        assert!(lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
+        let global = dl_core::bot_config::BotConfig::parse(&format!(
+            "schema_version=1\n[llm]\ndefault_provider='openai'\n[llm.use_cases.bot_pate]\nmodel='{}'\n",
+            dl_ai::DEFAULT_OPENAI_MODEL,
+        )).expect("reiner Pin mit bestehendem globalen Override");
+        let global_lookup = |key: &str| global.runtime_value(key);
+        let global_ai =
+            dl_ai::LlmProviderConfig::from_env(global_lookup).expect("globaler Anbieter");
+        assert_eq!(
+            global_ai
+                .provider_for(dl_ai::LlmUseCase::BotPate, global_lookup)
+                .expect("Anbieter"),
+            dl_ai::LlmProviderKind::OpenAi
+        );
+        assert!(global_lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
     }
 
     use super::{
