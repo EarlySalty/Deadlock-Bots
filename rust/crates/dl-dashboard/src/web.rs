@@ -380,6 +380,11 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/api/audit-log", get(crate::audit::audit_log))
         .route("/api/brain/overview", get(crate::brain::overview))
         .route("/api/brain/graph", get(crate::visual_brain::graph))
+        .route(
+            "/api/brain/retrieve",
+            post(crate::visual_brain::retrieve)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/api/brain/graph-ui.js", get(crate::visual_brain::ui))
         .route(
             "/api/brain/knowledge-status",

@@ -8,6 +8,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
@@ -19,6 +20,8 @@ use crate::web::{err_text, DashboardApp};
 const MAX_NODES: usize = 1500;
 const MAX_LINKS: usize = 6000;
 const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+const KNOWLEDGE_RETRIEVAL_URL: &str = "http://127.0.0.1:8896/public/v1/retrieve";
+const MAX_RETRIEVAL_BYTES: usize = 128 * 1024;
 
 #[derive(Deserialize)]
 struct Config {
@@ -290,6 +293,8 @@ struct Node {
     source_file: String,
     source_location: String,
     kind: String,
+    layer: String,
+    visibility: String,
     group: String,
     stand: String,
     evidence_links: usize,
@@ -354,6 +359,136 @@ fn private_response(mut response: Response) -> Response {
         .headers_mut()
         .insert(header::VARY, HeaderValue::from_static("Cookie"));
     response
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct RetrievalRequest {
+    question: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RetrievalResponse {
+    status: String,
+    evidence: Vec<RetrievalEvidence>,
+    truncated: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RetrievalEvidence {
+    id: String,
+    source: RetrievalSource,
+    text: String,
+    observed_at: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RetrievalSource {
+    kind: String,
+    title: String,
+    path: String,
+}
+
+fn safe_public_source(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && path.ends_with(".html")
+        && !path.starts_with('/')
+        && !path.contains(['\\', ':', '?', '#', '%'])
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        && !path
+            .split('/')
+            .any(|part| part.eq_ignore_ascii_case("internal"))
+}
+
+fn retrieval_response_valid(value: &RetrievalResponse) -> bool {
+    matches!(value.status.as_str(), "ready" | "no_evidence")
+        && value.evidence.len() <= 12
+        && value.evidence.iter().all(|item| {
+            !item.id.is_empty()
+                && item.id.len() <= 32
+                && item.source.kind == "community_page"
+                && !item.source.title.trim().is_empty()
+                && item.source.title.len() <= 512
+                && safe_public_source(&item.source.path)
+                && !item.text.trim().is_empty()
+                && item.text.encode_utf16().count() <= 12_000
+                && item
+                    .observed_at
+                    .as_deref()
+                    .is_none_or(|stamp| stamp.len() <= 64 && !stamp.chars().any(char::is_control))
+        })
+}
+
+pub(crate) async fn retrieve(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Json(request): Json<RetrievalRequest>,
+) -> Response {
+    if let Err(response) = app.guard_full(&headers).await {
+        return private_response(response);
+    }
+    let question = request.question.trim();
+    if question.is_empty() || question.chars().count() > 4000 {
+        return private_response(err_text(400, "Die Suche benötigt 1 bis 4000 Zeichen."));
+    }
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            return private_response(err_text(
+                503,
+                "Die Wissenssuche ist gerade nicht verfügbar.",
+            ))
+        }
+    };
+    let upstream = match client
+        .post(KNOWLEDGE_RETRIEVAL_URL)
+        .json(&RetrievalRequest {
+            question: question.to_string(),
+        })
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "Wissenssuche lieferte einen Fehlerstatus");
+            return private_response(err_text(
+                503,
+                "Die Wissenssuche ist gerade nicht verfügbar.",
+            ));
+        }
+        Err(error) => {
+            tracing::warn!(kind = ?error.status(), "Wissenssuche nicht erreichbar");
+            return private_response(err_text(
+                503,
+                "Die Wissenssuche ist gerade nicht verfügbar.",
+            ));
+        }
+    };
+    let bytes = match upstream.bytes().await {
+        Ok(bytes) if bytes.len() <= MAX_RETRIEVAL_BYTES => bytes,
+        _ => {
+            return private_response(err_text(
+                503,
+                "Die Wissenssuche lieferte keine gültige Antwort.",
+            ))
+        }
+    };
+    let value = match serde_json::from_slice::<RetrievalResponse>(&bytes) {
+        Ok(value) if retrieval_response_valid(&value) => value,
+        _ => {
+            return private_response(err_text(
+                503,
+                "Die Wissenssuche lieferte keine gültige Antwort.",
+            ))
+        }
+    };
+    private_response(Json(value).into_response())
 }
 
 pub async fn graph(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
@@ -533,17 +668,20 @@ fn add_sorted_nodes(selected: &mut HashSet<String>, candidates: HashSet<String>)
 }
 
 fn node_view(node: RawNode, evidence_links: usize) -> Node {
+    let is_document = node.metadata.kind == "corpus";
+    let visibility = if is_document && node.source_file.starts_with("public/") {
+        "public"
+    } else {
+        "internal"
+    };
     Node {
         id: node.id,
         label: node.label,
         source_file: node.source_file,
         source_location: node.source_location,
-        kind: if node.metadata.kind == "corpus" {
-            "document"
-        } else {
-            "code"
-        }
-        .into(),
+        kind: if is_document { "document" } else { "code" }.into(),
+        layer: if is_document { "knowledge" } else { "evidence" }.into(),
+        visibility: visibility.into(),
         group: node.metadata.doc_group,
         stand: node.metadata.stand,
         evidence_links,
@@ -634,9 +772,41 @@ mod tests {
         assert_eq!(graph.nodes.len(), 4);
         assert_eq!(graph.links.len(), 2);
         assert_eq!(graph.unlinked_documents, 1);
+        let document = graph.nodes.iter().find(|node| node.id == "doc").unwrap();
+        let code = graph.nodes.iter().find(|node| node.id == "code").unwrap();
+        assert_eq!(document.layer, "knowledge");
+        assert_eq!(document.visibility, "internal");
+        assert_eq!(code.layer, "evidence");
+        assert_eq!(code.visibility, "internal");
         let encoded = serde_json::to_string(&graph).unwrap();
         assert!(!encoded.contains("file://"));
         assert!(!encoded.contains("unrelated"));
+    }
+
+    #[test]
+    fn retrieval_proxy_akzeptiert_begrenzte_oeffentliche_belege() {
+        let mut response = RetrievalResponse {
+            status: "ready".into(),
+            evidence: vec![RetrievalEvidence {
+                id: "C1".into(),
+                source: RetrievalSource {
+                    kind: "community_page".into(),
+                    title: "Paten".into(),
+                    path: "discord/paten.html".into(),
+                },
+                text: "Paten helfen beim Einstieg.".into(),
+                observed_at: Some("2026-09-20".into()),
+            }],
+            truncated: false,
+        };
+        assert!(retrieval_response_valid(&response));
+        response.evidence[0].source.path = "internal/paten.html".into();
+        assert!(!retrieval_response_valid(&response));
+        response.evidence[0].source.path = "../paten.html".into();
+        assert!(!retrieval_response_valid(&response));
+        response.evidence[0].source.path = "discord/paten.html".into();
+        response.evidence[0].source.kind = "internal_page".into();
+        assert!(!retrieval_response_valid(&response));
     }
 
     #[test]
