@@ -80,8 +80,15 @@ impl ChatProvider for MeasuredProvider {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // SAFETY: first operation; the probe launcher exclusively reserves inherited FD9.
+    let credential = unsafe { dl_ai::take_knowledge_credential() };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(credential))
+}
+async fn run(credential: Option<dl_ai::InheritedKnowledgeCredential>) -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let base = args
         .next()
@@ -96,10 +103,32 @@ async fn main() -> anyhow::Result<()> {
     let legacy = flags.iter().any(|flag| flag == "--legacy");
     let show_evidence = flags.iter().any(|flag| flag == "--evidence");
     // Bestehender Connector/Infisical-Prozessvertrag; keine Ausgabe oder Ablage von Zugangsdaten.
-    let config = dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())?;
+    let router_config = flags
+        .windows(2)
+        .find(|pair| pair[0] == "--router-config")
+        .map(|pair| pair[1].as_str());
+    let (inner, router) = if let Some(path) = router_config {
+        let services = dl_ai::load_knowledge_services(std::path::Path::new(path), credential)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Wissensdienste deaktiviert"))?;
+        (
+            services
+                .generator
+                .ok_or_else(|| anyhow::anyhow!("Antwortdienst fehlt"))?,
+            Some(services.router),
+        )
+    } else {
+        drop(credential);
+        let config = dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())?;
+        (
+            config.build_provider_for_env(dl_ai::LlmUseCase::BotPate, |key| {
+                std::env::var(key).ok()
+            })?,
+            None,
+        )
+    };
     let provider = Arc::new(MeasuredProvider {
-        inner: config
-            .build_provider_for_env(dl_ai::LlmUseCase::BotPate, |key| std::env::var(key).ok())?,
+        inner,
         calls: Default::default(),
         elapsed_ms: Default::default(),
         show_evidence,
@@ -107,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     let game: Arc<dyn Retriever> = Arc::new(dl_answer::game::CliRetriever {
         bin: brain.clone().into(),
     });
-    let engine = AnswerEngine::new(
+    let mut engine = AnswerEngine::new(
         Some(provider.clone()),
         Arc::new(dl_community::knowledge_client::CommunityRetriever {
             base_url: base.clone(),
@@ -117,6 +146,11 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(100),
     )
     .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string());
+    if !flags.iter().any(|flag| flag == "--without-router") {
+        if let Some(router) = router {
+            engine = engine.with_router(router);
+        }
+    }
     let questions: Vec<serde_json::Value> =
         serde_json::from_slice(&tokio::fs::read(questions).await?)?;
     for item in questions {
@@ -150,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
         let (status, answer, sources) = match result {
             Ok(Answer::Grounded { text, sources, .. }) => ("answered", Some(text), sources),
             Ok(Answer::NoEvidence) => ("no_evidence", None, vec![]),
+            Ok(Answer::Restricted { text }) => ("restricted", Some(text), vec![]),
             Ok(Answer::OutOfDomain) => ("out_of_domain", None, vec![]),
             Err(error) => ("error", Some(error.to_string()), vec![]),
         };

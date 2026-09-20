@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "project_id": "2f5df3ca-12e5-4ae1-abf2-ca7fbd841705",
+  "environment": "prod",
+  "secret_path": "/",
+  "credential_fd": 9,
+  "socket_path": "/run/uplink-infisical/api.sock"
+}

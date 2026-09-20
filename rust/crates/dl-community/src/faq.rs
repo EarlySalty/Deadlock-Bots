@@ -851,13 +851,13 @@ impl FaqChat {
             .answer_with_context(question, context, dl_answer::Scope::CommunityAndGame)
             .await
         {
-            Ok(dl_answer::Answer::Grounded { text, .. }) => {
-                KnowledgeLookup::Answer(KnowledgeAnswer {
-                    answerable: true,
-                    answer: Some(text),
-                    sources: Vec::new(),
-                })
-            }
+            Ok(
+                dl_answer::Answer::Grounded { text, .. } | dl_answer::Answer::Restricted { text },
+            ) => KnowledgeLookup::Answer(KnowledgeAnswer {
+                answerable: true,
+                answer: Some(text),
+                sources: Vec::new(),
+            }),
             Ok(dl_answer::Answer::NoEvidence | dl_answer::Answer::OutOfDomain) => {
                 KnowledgeLookup::Unanswerable
             }

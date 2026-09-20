@@ -10,6 +10,15 @@ use crate::{dense, html_selector, html_text, Chunk};
 pub(crate) struct Entry {
     question: String,
     pub chunk: Chunk,
+    pub standard: Option<Standard>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Standard {
+    pub id: String,
+    pub question: String,
+    pub scope: String,
+    pub answer: String,
 }
 
 #[cfg(test)]
@@ -17,6 +26,7 @@ pub(crate) fn fixture(question: &str, chunk: Chunk) -> Entry {
     Entry {
         question: normalize(question),
         chunk,
+        standard: None,
     }
 }
 
@@ -26,6 +36,8 @@ struct Manifest {
     schema_version: u32,
     policy_revision: String,
     entries: Vec<Source>,
+    #[serde(default)]
+    public_code_sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -35,6 +47,12 @@ struct Source {
     path: String,
     section_id: String,
     source_sha256: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    standard_answer: Option<String>,
+    #[serde(default)]
+    standard_answer_scope: Option<String>,
 }
 
 fn normalize(question: &str) -> String {
@@ -58,7 +76,7 @@ pub(crate) fn load(
     root: &Path,
     chunks: &[Chunk],
     hashes: &HashMap<String, String>,
-) -> Result<(Vec<Entry>, Option<String>)> {
+) -> Result<(Vec<Entry>, Option<String>, Vec<crate::public_code::Entry>)> {
     let path = root
         .parent()
         .context("FAQ-Snapshotwurzel fehlt")?
@@ -66,7 +84,7 @@ pub(crate) fn load(
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), None))
+            return Ok((Vec::new(), None, Vec::new()))
         }
         Err(error) => return Err(error).context("FAQ-Manifest öffnen"),
     };
@@ -114,23 +132,57 @@ pub(crate) fn load(
             .map(|heading| html_text(&heading))
             .collect::<Vec<_>>();
         ensure!(
-            headings == [source.question.clone()],
+            headings.len() == 1
+                && (headings == [source.question.clone()] || source.standard_answer.is_some()),
             "FAQ-Frage passt nicht zum wörtlichen Abschnittstitel"
         );
         let matching = chunks
             .iter()
-            .filter(|chunk| chunk.path == source.path && chunk.section == source.question)
+            .filter(|chunk| chunk.path == source.path && chunk.section == headings[0])
             .collect::<Vec<_>>();
         ensure!(
             matching.len() == 1 && !matching[0].passages.is_empty(),
             "FAQ-Abschnitt nicht eindeutig im öffentlichen Index"
         );
+        if let Some(id) = &source.id {
+            ensure!(
+                *id == format!("faq:{}#{}", source.path, source.section_id),
+                "FAQ-ID gehört nicht zur Quelle"
+            );
+        }
+        let standard = match source.standard_answer {
+            Some(answer) => {
+                let id = source.id.context("Standardantwort benötigt FAQ-ID")?;
+                let scope = source
+                    .standard_answer_scope
+                    .context("Standardantwort benötigt Geltungsbereich")?;
+                ensure!(
+                    !answer.trim().is_empty()
+                        && answer.encode_utf16().count() <= 1600
+                        && !scope.trim().is_empty()
+                        && scope.encode_utf16().count() <= 800,
+                    "Ungültige Standardantwort"
+                );
+                Some(Standard {
+                    id,
+                    question: source.question.clone(),
+                    scope,
+                    answer,
+                })
+            }
+            None => None,
+        };
         entries.push(Entry {
             question: normalize(&source.question),
             chunk: matching[0].clone(),
+            standard,
         });
     }
-    Ok((entries, Some(dense::sha256(&bytes))))
+    let public_code = match manifest.public_code_sha256 {
+        Some(hash) => crate::public_code::load(root, &hash, hashes)?,
+        None => Vec::new(),
+    };
+    Ok((entries, Some(dense::sha256(&bytes)), public_code))
 }
 
 #[cfg(test)]
@@ -154,6 +206,28 @@ mod tests {
             kb.faq_generation,
             Some(dense::sha256(manifest.to_string().as_bytes()))
         );
+        let mut standard_manifest = manifest.clone();
+        standard_manifest["entries"][0]["id"] = serde_json::json!("faq:hilfe.html#pause");
+        standard_manifest["entries"][0]["standard_answer"] =
+            serde_json::json!("Öffne die Einstellungen und wähle Pause.");
+        standard_manifest["entries"][0]["standard_answer_scope"] =
+            serde_json::json!("Allgemeine Pause-Anleitung ohne Fehlermeldung.");
+        standard_manifest["entries"][0]["question"] =
+            serde_json::json!("Wie kann ich den Bot pausieren?");
+        std::fs::write(&manifest_path, standard_manifest.to_string())?;
+        let with_standard = crate::load_production_corpus(&root)?;
+        assert_eq!(
+            with_standard.faq[0]
+                .standard
+                .as_ref()
+                .expect("standard")
+                .answer,
+            "Öffne die Einstellungen und wähle Pause."
+        );
+        standard_manifest["entries"][0]["id"] = serde_json::json!("faq:fremd.html#pause");
+        std::fs::write(&manifest_path, standard_manifest.to_string())?;
+        assert!(crate::load_production_corpus(&root).is_err());
+        std::fs::write(&manifest_path, manifest.to_string())?;
         std::fs::remove_file(&manifest_path)?;
         let withdrawn = crate::load_production_corpus(&root)?;
         assert_eq!(withdrawn.corpus_digest, kb.corpus_digest);

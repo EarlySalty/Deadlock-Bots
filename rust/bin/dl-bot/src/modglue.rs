@@ -154,7 +154,8 @@ impl dl_brain::AiAnswerer for SharedBrainAnswerer {
             .answer(question, dl_answer::Scope::GameOnly)
             .await
             .map(|answer| match answer {
-                dl_answer::Answer::Grounded { text, .. } => dl_brain::BrainOutcome::Answer(text),
+                dl_answer::Answer::Grounded { text, .. }
+                | dl_answer::Answer::Restricted { text } => dl_brain::BrainOutcome::Answer(text),
                 dl_answer::Answer::NoEvidence => dl_brain::BrainOutcome::NoAnswer,
                 dl_answer::Answer::OutOfDomain => dl_brain::BrainOutcome::OutOfDomain,
             })

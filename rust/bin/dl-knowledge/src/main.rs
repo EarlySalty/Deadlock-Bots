@@ -2,6 +2,7 @@ mod dense;
 mod eval;
 mod faq;
 mod hybrid;
+mod public_code;
 mod retrieval;
 mod server_config;
 #[cfg(test)]
@@ -624,6 +625,7 @@ struct KnowledgeBase {
     corpus_digest: String,
     faq: Vec<faq::Entry>,
     faq_generation: Option<String>,
+    public_code: Vec<public_code::Entry>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -665,6 +667,8 @@ struct HealthResponse {
     html_sources: usize,
     non_html_sources: usize,
     internal_sources: usize,
+    public_code_sources: usize,
+    source_revision: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -825,6 +829,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         html_sources: stats.html_sources,
         non_html_sources: stats.non_html_sources,
         internal_sources: stats.internal_sources,
+        public_code_sources: knowledge.public_code.len(),
+        source_revision: public_code::SOURCE_REVISION,
     })
 }
 
@@ -1278,7 +1284,11 @@ fn load_corpus(root: &Path) -> Result<KnowledgeBase> {
     let mut knowledge = KnowledgeBase::from_chunks(chunks);
     knowledge.corpus_digest = dense::sha256(&manifest);
     if html_mode {
-        (knowledge.faq, knowledge.faq_generation) = faq::load(root, &knowledge.chunks, &hashes)?;
+        (
+            knowledge.faq,
+            knowledge.faq_generation,
+            knowledge.public_code,
+        ) = faq::load(root, &knowledge.chunks, &hashes)?;
     }
     Ok(knowledge)
 }
@@ -1925,6 +1935,7 @@ impl KnowledgeBase {
             corpus_digest: String::new(),
             faq: Vec::new(),
             faq_generation: None,
+            public_code: Vec::new(),
         }
     }
 

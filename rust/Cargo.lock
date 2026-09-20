@@ -1253,13 +1253,16 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dl-bridges",
+ "libc",
  "reqwest",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

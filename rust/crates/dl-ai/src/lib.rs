@@ -18,6 +18,13 @@ use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 
 mod chat_provider;
+mod knowledge_router;
+pub use knowledge_router::*;
+mod secrets;
+pub use secrets::{
+    load_knowledge_router, load_knowledge_services, take_knowledge_credential,
+    InheritedKnowledgeCredential, KnowledgeServices, SecretLoadError,
+};
 mod chat_text;
 mod transparency;
 mod transparency_log;

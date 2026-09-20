@@ -465,9 +465,40 @@ impl dl_discord::InteractionHandler for ChangelogPostCommand {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<std::process::ExitCode> {
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    // SAFETY: first operation before the runtime opens descriptors. Launcher reserves FD9.
+    let credential = unsafe { dl_ai::take_knowledge_credential() };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(credential))
+}
+
+async fn run(
+    credential: Option<dl_ai::InheritedKnowledgeCredential>,
+) -> anyhow::Result<std::process::ExitCode> {
     dl_core::observability::init_tracing("info");
+    let knowledge_router = match dl_ai::load_knowledge_router(
+        std::path::Path::new("/etc/deadlock-bots/knowledge-router.json"),
+        credential,
+    )
+    .await
+    {
+        Ok(Some(router)) => {
+            tracing::info!(
+                "Jev-Wissensauswahl aktiviert; Deepseek bleibt für offene Antworten zuständig"
+            );
+            Some(router)
+        }
+        Ok(None) => {
+            tracing::info!("Jev-Wissensauswahl ist in der Konfiguration deaktiviert");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Jev-Wissensauswahl inaktiv; bestehende Antwortverarbeitung bleibt aktiv");
+            None
+        }
+    };
     let _pid_lock = master::PidLock::acquire_default().context("Single-Instance-PID-Lock")?;
     let startup_text = master::startup_text_now();
 
@@ -978,18 +1009,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Some(Arc::new(modglue::BrainRetrieverGlue {
             bin: shared_brain_bin.clone(),
         }));
-    let shared_answers = Arc::new(
-        dl_answer::AnswerEngine::new(
-            concierge_ai.clone(),
-            Arc::new(dl_community::knowledge_client::CommunityRetriever {
-                base_url: concierge_config.knowledge_url.clone(),
-                timeout: std::time::Duration::from_secs(20),
-            }),
-            shared_game,
-            concierge_config.ai_timeout,
-        )
-        .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
-    );
+    let shared_answers = dl_answer::AnswerEngine::new(
+        concierge_ai.clone(),
+        Arc::new(dl_community::knowledge_client::CommunityRetriever {
+            base_url: concierge_config.knowledge_url.clone(),
+            timeout: std::time::Duration::from_secs(20),
+        }),
+        shared_game,
+        concierge_config.ai_timeout,
+    )
+    .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string());
+    let shared_answers = Arc::new(match knowledge_router {
+        Some(router) => shared_answers.with_router(router),
+        None => shared_answers,
+    });
 
     // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
     // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).

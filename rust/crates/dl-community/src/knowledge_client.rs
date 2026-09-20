@@ -922,6 +922,8 @@ struct RetrievalWire {
     status: String,
     evidence: Vec<dl_answer::Evidence>,
     truncated: bool,
+    #[serde(default)]
+    standard_answers: Vec<dl_answer::StandardAnswer>,
 }
 
 #[async_trait::async_trait]
@@ -997,23 +999,40 @@ fn validate_retrieval(wire: RetrievalWire) -> Result<dl_answer::Retrieved, dl_an
         _ => false,
     };
     if !valid
-        || wire.evidence.len() > 12
-        || units > 12_000
+        || wire.evidence.len() > 16
+        || units > 20_000
         || wire.evidence.iter().any(|item| {
-            !matches!(item.source, Source::CommunityPage { .. })
-                || !item.source.valid()
+            !matches!(
+                item.source,
+                Source::CommunityPage { .. } | Source::PublicCodeEvidence { .. }
+            ) || !item.source.valid()
                 || item.text.trim().is_empty()
                 || !item
                     .id
-                    .strip_prefix('C')
+                    .strip_prefix(
+                        if matches!(item.source, Source::PublicCodeEvidence { .. }) {
+                            'P'
+                        } else {
+                            'C'
+                        },
+                    )
                     .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
                 || !ids.insert(item.id.clone())
         })
     {
         return Err(AnswerError::InvalidEvidence);
     }
+    if wire.standard_answers.len() > 12
+        || wire
+            .standard_answers
+            .iter()
+            .any(|item| !item.valid(&wire.evidence))
+    {
+        return Err(AnswerError::InvalidEvidence);
+    }
     Ok(dl_answer::Retrieved {
         evidence: wire.evidence,
+        standard_answers: wire.standard_answers,
         truncated: wire.truncated,
         out_of_domain: false,
     })

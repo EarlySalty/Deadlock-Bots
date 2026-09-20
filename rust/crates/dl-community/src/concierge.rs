@@ -4502,6 +4502,9 @@ impl Concierge {
         let mut reply_intent = None;
         let mut pate_request = false;
         let (reply, knowledge_hit, outcome) = match result {
+            Ok(dl_answer::Answer::Restricted { text }) => {
+                (text, false, ConciergeAnswerOutcome::Answered)
+            }
             Ok(dl_answer::Answer::Grounded {
                 text,
                 intent,

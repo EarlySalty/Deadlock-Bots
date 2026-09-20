@@ -20,8 +20,11 @@ dl-bridges.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+libc = "0.2"
+zeroize = "1"
 
 [dev-dependencies]
 # test-util: pausierte Uhr fuer die Zeitfenster im Transparenz-Log, damit die

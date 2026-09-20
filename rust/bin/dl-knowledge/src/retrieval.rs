@@ -22,6 +22,62 @@ pub(crate) struct RetrievalResponse {
     status: &'static str,
     evidence: Vec<Evidence>,
     truncated: bool,
+    standard_answers: Vec<StandardAnswer>,
+}
+
+#[derive(Debug, Serialize)]
+struct StandardAnswer {
+    id: String,
+    evidence_id: String,
+    question: String,
+    scope: String,
+    answer: String,
+}
+
+fn with_standards(mut response: RetrievalResponse, knowledge: &KnowledgeBase) -> RetrievalResponse {
+    for entry in &knowledge.faq {
+        let Some(standard) = &entry.standard else {
+            continue;
+        };
+        let Some(evidence) = response.evidence.iter().find(|item| {
+            item.source.path == entry.chunk.path && item.text.contains(&entry.chunk.section)
+        }) else {
+            continue;
+        };
+        if response.standard_answers.len() == 12 {
+            break;
+        }
+        response.standard_answers.push(StandardAnswer {
+            id: standard.id.clone(),
+            evidence_id: evidence.id.clone(),
+            question: standard.question.clone(),
+            scope: standard.scope.clone(),
+            answer: standard.answer.clone(),
+        });
+    }
+    for entry in &knowledge.public_code {
+        response.evidence.push(Evidence {
+            id: entry.id.clone(),
+            source: PublicSource {
+                kind: "public_code_evidence",
+                title: entry.title.clone(),
+                path: entry.public_help_path.clone(),
+                code: Some(CodeProvenance {
+                    repository: entry.repository.clone(),
+                    release_commit: crate::public_code::SOURCE_REVISION.to_owned(),
+                    source_path: entry.source_path.clone(),
+                    symbol: entry.symbol.clone(),
+                    blob_sha256: entry.blob_sha256.clone(),
+                }),
+            },
+            text: format!("{}\n\n{}", entry.explanation, entry.excerpt),
+            observed_at: None,
+        });
+    }
+    if !response.evidence.is_empty() {
+        response.status = "ready";
+    }
+    response
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +93,17 @@ struct PublicSource {
     kind: &'static str,
     title: String,
     path: String,
+    #[serde(flatten)]
+    code: Option<CodeProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CodeProvenance {
+    repository: String,
+    release_commit: String,
+    source_path: String,
+    symbol: String,
+    blob_sha256: String,
 }
 
 pub(crate) async fn retrieve(
@@ -57,11 +124,14 @@ pub(crate) async fn retrieve(
             .as_ref()
             .is_none_or(|runtime| runtime.accepts(chunk))
     }) {
-        return Ok(Json(merge_evidence(vec![evidence_from_ranked(
-            question,
-            vec![(chunk.clone(), 1.0)],
-            false,
-        )])));
+        return Ok(Json(with_standards(
+            merge_evidence(vec![evidence_from_ranked(
+                question,
+                vec![(chunk.clone(), 1.0)],
+                false,
+            )]),
+            &knowledge,
+        )));
     }
     if let Some(runtime) = &state.hybrid {
         let mut queues = Vec::new();
@@ -78,9 +148,12 @@ pub(crate) async fn retrieve(
                 })?;
             queues.push(evidence_from_ranked(&query, ranked, false));
         }
-        return Ok(Json(merge_evidence(queues)));
+        return Ok(Json(with_standards(merge_evidence(queues), &knowledge)));
     }
-    Ok(Json(collect_evidence(&knowledge, question)))
+    Ok(Json(with_standards(
+        collect_evidence(&knowledge, question),
+        &knowledge,
+    )))
 }
 
 pub(crate) fn public_html_path(path: &str) -> bool {
@@ -137,6 +210,7 @@ fn merge_evidence(queues: Vec<Vec<Evidence>>) -> RetrievalResponse {
                     kind: item.source.kind,
                     title: item.source.title.clone(),
                     path: item.source.path.clone(),
+                    code: item.source.code.clone(),
                 },
                 text: item.text.clone(),
                 observed_at: item.observed_at.clone(),
@@ -151,6 +225,7 @@ fn merge_evidence(queues: Vec<Vec<Evidence>>) -> RetrievalResponse {
         },
         evidence,
         truncated,
+        standard_answers: Vec::new(),
     }
 }
 
@@ -315,6 +390,7 @@ fn evidence_from_ranked(
                     kind: "community_page",
                     title: candidate.title.clone(),
                     path: candidate.path.clone(),
+                    code: None,
                 },
                 text,
                 observed_at: observed_at.clone(),
