@@ -30,6 +30,16 @@ pub struct Retrieved {
     pub timing: Timing,
 }
 
+impl Retrieved {
+    pub fn chunks(&self, knowledge: &KnowledgeBase, limit: usize) -> Vec<(crate::Chunk, f64)> {
+        self.reranked
+            .iter()
+            .take(limit)
+            .map(|hit| (knowledge.chunks[hit.index].clone(), hit.score))
+            .collect()
+    }
+}
+
 pub async fn run(
     pool: &PgPool,
     models: &mut Models,
@@ -41,7 +51,7 @@ pub async fn run(
 ) -> Result<Retrieved> {
     let start = Instant::now();
     ensure!(
-        !question.trim().is_empty() && question.len() <= 4096,
+        !question.trim().is_empty() && question.chars().count() <= 4000,
         "Hybrid-Frage ist leer oder zu lang"
     );
     config.validate()?;
@@ -56,7 +66,7 @@ pub async fn run(
     let stage = Instant::now();
     let (generation, dense) = if config.dense_weight > 0.0 {
         let fingerprint = models.embedder.fingerprint().to_string();
-        let vectors = models.embedder.embed(&[question.to_string()])?;
+        let vectors = models.embedder.embed_queries(&[question.to_string()])?;
         ensure!(
             vectors.len() == 1 && models.embedder.fingerprint() == fingerprint,
             "Ungültiges Query-Embedding oder Modellwechsel"

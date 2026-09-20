@@ -93,7 +93,7 @@ async fn worker_fehler_wird_nicht_als_ergebnis_ausgegeben() {
 
 #[tokio::test]
 async fn dense_filter_und_korpusabgleich_greifen_vor_limit() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let knowledge = knowledge();
     let mut config = Config::default();
     config.metadata.stand_min = Some("2026-09-18".into());
@@ -113,26 +113,24 @@ async fn dense_filter_und_korpusabgleich_greifen_vor_limit() -> Result<()> {
     changed.chunks[1].text = "Neuer Text".into();
     let fresh = rank::Catalog::new(&changed, &config)?;
     assert!(
-        !search::dense(db.pool(), embedder.fingerprint(), &vector, &fresh, 100)
-            .await?
-            .1
-            .contains(&1)
+        search::dense(db.pool(), embedder.fingerprint(), &vector, &fresh, 100)
+            .await
+            .is_err()
     );
     changed.chunks[1] = knowledge.chunks[1].clone();
     changed.chunks[1].quelle = "Neue Quelle".into();
     let fresh = rank::Catalog::new(&changed, &config)?;
     assert!(
-        !search::dense(db.pool(), embedder.fingerprint(), &vector, &fresh, 100)
-            .await?
-            .1
-            .contains(&1)
+        search::dense(db.pool(), embedder.fingerprint(), &vector, &fresh, 100)
+            .await
+            .is_err()
     );
     Ok(())
 }
 
 #[tokio::test]
 async fn dense_fehlender_index_und_fremdes_modell_sind_fehler() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let catalog = rank::Catalog::new(&knowledge(), &Config::default())?;
     let mut embedder = TestEmbedder;
     let vector = embedder.embed(&["Steam".into()])?.remove(0);
@@ -154,7 +152,7 @@ async fn dense_fehlender_index_und_fremdes_modell_sind_fehler() -> Result<()> {
 
 #[tokio::test]
 async fn dense_gefaelschter_text_wird_nie_gerendert() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let catalog = rank::Catalog::new(&knowledge(), &Config::default())?;
     let mut embedder = TestEmbedder;
     let built =

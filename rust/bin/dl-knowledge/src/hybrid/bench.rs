@@ -10,9 +10,91 @@ use sqlx::PgPool;
 use super::{config::Config, pipeline, quality, rank::Catalog, Models};
 
 pub struct Plan {
+    pub holdout: bool,
     pub rounds: usize,
     pub first: usize,
     pub count: Option<usize>,
+}
+
+async fn verify_snapshot_binding(
+    pool: &PgPool,
+    models: &mut Models,
+    knowledge: &crate::KnowledgeBase,
+    config: &Config,
+    active: i64,
+) -> Result<Value> {
+    let mut vector = vec![0.0; crate::dense::DIMENSIONS];
+    vector[0] = 1.0;
+    let fingerprint = models.embedder.fingerprint().to_string();
+    let mut revoked = knowledge.clone();
+    ensure!(
+        revoked.chunks.len() > 1,
+        "Entzugstest benötigt mehrere öffentliche Chunks"
+    );
+    let removed_path = revoked.chunks[0].path.clone();
+    revoked.chunks.retain(|chunk| chunk.path != removed_path);
+    let revoked_catalog = Catalog::new(&revoked, config)?;
+    ensure!(
+        super::search::dense(pool, &fingerprint, &vector, &revoked_catalog, 1)
+            .await
+            .is_err(),
+        "Alter Denseindex darf nach Quellenentzug nicht passen"
+    );
+    let mut changed = knowledge.clone();
+    changed.chunks[0]
+        .text
+        .push_str(" Geänderter öffentlicher Text.");
+    ensure!(
+        super::search::dense(
+            pool,
+            &fingerprint,
+            &vector,
+            &Catalog::new(&changed, config)?,
+            1
+        )
+        .await
+        .is_err(),
+        "Alter Denseindex darf geänderten Text nicht bedienen"
+    );
+    let mut changed_metadata = knowledge.clone();
+    changed_metadata.chunks[0].stand = "2026-09-21".into();
+    ensure!(
+        super::search::dense(
+            pool,
+            &fingerprint,
+            &vector,
+            &Catalog::new(&changed_metadata, config)?,
+            1
+        )
+        .await
+        .is_err(),
+        "Alter Denseindex darf geänderte Versionsmetadaten nicht bedienen"
+    );
+    let built = crate::dense::store::build_generation(
+        pool,
+        models.embedder.as_mut(),
+        &revoked_catalog.records,
+    )
+    .await?;
+    crate::dense::store::activate(pool, built.index_generation, Some(active)).await?;
+    super::search::dense(pool, &fingerprint, &vector, &revoked_catalog, 1).await?;
+    ensure!(
+        super::search::dense(
+            pool,
+            &fingerprint,
+            &vector,
+            &Catalog::new(knowledge, config)?,
+            1
+        )
+        .await
+        .is_err(),
+        "Zurückgezogener Text darf nicht aus alter Speicherversion erscheinen"
+    );
+    crate::dense::store::activate(pool, active, Some(built.index_generation)).await?;
+    Ok(
+        json!({"revoked_source_rejected":true,"changed_content_rejected":true,
+        "rebuilt_generation_accepted":true,"old_catalog_rejected_after_swap":true}),
+    )
 }
 
 impl Plan {
@@ -60,15 +142,56 @@ pub async fn run(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(crate::DEFAULT_DOCS_PATH))
         .canonicalize()?;
-    let knowledge = crate::load_production_corpus(&root)?;
+    run_snapshot(
+        pool,
+        models,
+        config,
+        eval_dir,
+        output,
+        plan,
+        model_load_ms,
+        &root,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // Existing benchmark inputs plus an explicit immutable public snapshot.
+pub(super) async fn run_snapshot(
+    pool: &PgPool,
+    models: &mut Models,
+    config: &Config,
+    eval_dir: &Path,
+    output: &Path,
+    plan: Plan,
+    model_load_ms: f64,
+    root: &Path,
+) -> Result<()> {
+    let knowledge = crate::load_production_corpus(root)?;
     let catalog = Catalog::new(&knowledge, config)?;
     let records = &catalog.records;
-    let cases = quality::load(eval_dir, &root)?;
+    let cases = quality::load(eval_dir, root, plan.holdout)?;
     let corpus_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(records)?));
     let cases_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&cases)?));
     let suite_cases = cases.len();
     let selected = plan.range(suite_cases)?;
-    let cases = &cases[selected.clone()];
+    let selected_cases = &cases[selected.clone()];
+    let archived_coverage = selected_cases.iter().filter(|(_, _, case)|
+        case.expected_sources.iter().any(|path| !root.join(path).is_file()))
+        .map(|(file, row, case)| json!({"file":file,"row":row,"question":case.question,
+            "expected_sources":case.expected_sources,"reason":"expected source explicitly archived outside active public corpus"}))
+        .collect::<Vec<_>>();
+    let cases = selected_cases
+        .iter()
+        .filter(|(_, _, case)| {
+            case.expected_sources
+                .iter()
+                .all(|path| root.join(path).is_file())
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        !cases.is_empty(),
+        "Keine auf den aktiven Corpus anwendbaren Prüffälle"
+    );
     let rounds = plan.rounds;
     let mut checkpoint = std::fs::File::create(output.with_extension("jsonl"))?;
     writeln!(
@@ -83,8 +206,16 @@ pub async fn run(
     let built =
         crate::dense::store::build_generation(pool, models.embedder.as_mut(), records).await?;
     let index_ms = start.elapsed().as_secs_f64() * 1000.0;
-    crate::dense::store::activate(pool, built.index_generation, None).await?;
-    let deadline = || Instant::now() + Duration::from_millis(config.timeout_ms);
+    let previous: Option<i64> =
+        sqlx::query_scalar("SELECT index_generation FROM knowledge.active_index WHERE singleton")
+            .fetch_one(pool)
+            .await?;
+    crate::dense::store::activate(pool, built.index_generation, previous).await?;
+    let snapshot_checks =
+        verify_snapshot_binding(pool, models, &knowledge, config, built.index_generation).await?;
+    // Offline quality measurement must retain slow/failed latency evidence;
+    // this never changes the service worker's configured request deadline.
+    let deadline = || Instant::now() + Duration::from_secs(60);
     for (_, _, case) in cases.iter().take(3) {
         pipeline::run(
             pool,
@@ -99,6 +230,7 @@ pub async fn run(
     }
     let mut bm25_samples = Vec::new();
     let mut hybrid_samples = Vec::new();
+    let mut dense_samples = Vec::new();
     let mut reranked_samples = Vec::new();
     let mut rerank_samples = Vec::new();
     let mut rows = Vec::new();
@@ -122,6 +254,7 @@ pub async fn run(
             )
             .await?;
             hybrid_samples.push(result.timing.without_rerank_ms);
+            dense_samples.push(result.timing.dense_ms);
             reranked_samples.push(result.timing.total_ms);
             rerank_samples.push(result.timing.rerank_ms);
             if round == 0 {
@@ -132,10 +265,9 @@ pub async fn run(
                     .map(|hit| knowledge.chunks[hit.index].clone())
                     .collect::<Vec<_>>();
                 let reranked = result
-                    .reranked
-                    .iter()
-                    .take(config.output_k)
-                    .map(|hit| knowledge.chunks[hit.index].clone())
+                    .chunks(&knowledge, config.output_k)
+                    .into_iter()
+                    .map(|(chunk, _)| chunk)
                     .collect::<Vec<_>>();
                 let dense_only = result
                     .dense
@@ -143,9 +275,21 @@ pub async fn run(
                     .filter(|index| !result.bm25.contains(index))
                     .map(|index| knowledge.chunks[*index].clone())
                     .collect::<Vec<_>>();
+                let dense_ranked = result
+                    .dense
+                    .iter()
+                    .take(config.output_k)
+                    .map(|&index| knowledge.chunks[index].clone())
+                    .collect::<Vec<_>>();
                 rows.push(json!({"suite_position":selected.start+position+1,"file":file, "row":row, "question":case.question, "answerable":case.answerable,
                     "expected_sources":case.expected_sources, "bm25":quality::measure(case, &bm25),
+                    "rerank_scores":result.reranked.iter().map(|hit| json!({"path":knowledge.chunks[hit.index].path,"section":knowledge.chunks[hit.index].section,"score":hit.score})).collect::<Vec<_>>(),
+                    "bm25_sections":result.bm25.iter().map(|&index| json!({"path":knowledge.chunks[index].path,"section":knowledge.chunks[index].section})).collect::<Vec<_>>(),
+                    "dense":quality::measure(case, &dense_ranked),
                     "hybrid":quality::measure(case, &fused), "reranked":quality::measure(case, &reranked),
+                    "public_bm25":crate::retrieval::measure_projection(&case.question,&bm25,true,&case.expected_sources,&case.answer_terms),
+                    "public_hybrid":crate::retrieval::measure_projection(&case.question,&fused,false,&case.expected_sources,&case.answer_terms),
+                    "public_reranked":crate::retrieval::measure_projection(&case.question,&reranked,false,&case.expected_sources,&case.answer_terms),
                     "dense_only":quality::measure(case, &dense_only), "timing":result.timing}));
             }
             writeln!(
@@ -171,10 +315,14 @@ pub async fn run(
         "timestamp_unix":SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         "config":config, "corpus_root":root, "corpus_hash":corpus_hash, "golden_hash":cases_hash,
         "chunks":records.len(), "html_sources":knowledge.source_stats().html_sources, "cases":cases.len(), "rounds":rounds,
-        "suite_cases":suite_cases, "range_start":selected.start, "range_end":selected.end, "complete_suite":cases.len()==suite_cases,
+        "suite_cases":suite_cases, "holdout":plan.holdout, "range_start":selected.start, "range_end":selected.end, "complete_suite":cases.len()==suite_cases,
+        "archived_coverage_cases":archived_coverage,"complete_active_scope":cases.len()+archived_coverage.len()==selected_cases.len(),
         "embedding_fingerprint":models.embedder.fingerprint(), "reranker_fingerprint":models.reranker.as_ref().map(|model| model.fingerprint()),
         "model_load_ms":model_load_ms, "index_ms":index_ms,
+        "snapshot_binding":snapshot_checks,
+        "offline_deadline_ms":60000,"service_budget_exceeded_cases":reranked_samples.iter().filter(|ms| **ms > config.timeout_ms as f64).count(),
         "bm25":summary(&rows,"bm25",&bm25_samples), "hybrid":summary(&rows,"hybrid",&hybrid_samples), "reranked":summary(&rows,"reranked",&reranked_samples),
+        "dense":summary(&rows,"dense",&dense_samples),
         "rerank_p50_ms":percentile(&rerank_samples,0.5), "rerank_p95_ms":percentile(&rerank_samples,0.95),
         "case_results":rows, "bm25_samples_ms":bm25_samples, "hybrid_samples_ms":hybrid_samples,
         "reranked_samples_ms":reranked_samples, "rerank_samples_ms":rerank_samples,
@@ -248,9 +396,9 @@ fn summary(rows: &[Value], mode: &str, samples: &[f64]) -> Value {
         .count();
     json!({"positive_cases":positives.len(), "negative_cases":negatives.len(), "hit_cases":count("hit"),
         "recall_at_1":recall(1), "recall_at_3":recall(3), "recall_at_5":recall(5),
-        "citation_correctness":recall(6), "source_recall_at_k":mean("source_recall"), "mrr_at_k":mean("reciprocal_rank"),
-        "retrieval_abstain_rate":negative_abstains as f64 / negatives.len() as f64,
-        "false_answer_rate":(negatives.len()-negative_abstains) as f64 / negatives.len() as f64,
+        "source_hit_rate_at_k":recall(6), "source_recall_at_k":mean("source_recall"), "mrr_at_k":mean("reciprocal_rank"),
+        "negative_cases_without_candidate_rate":negative_abstains as f64 / negatives.len() as f64,
+        "negative_cases_with_candidate_rate":(negatives.len()-negative_abstains) as f64 / negatives.len() as f64,
         "grounded_selection_possible_cases":count("grounded_selection_possible"),
         "expected_source_lost_to_relevance_cases":count("expected_source_lost_to_relevance"),
         "answer_terms_lost_to_relevance_cases":count("answer_terms_lost_to_relevance"),

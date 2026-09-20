@@ -29,7 +29,9 @@ fn state(
     reranker: Option<Box<dyn rerank::Reranker>>,
 ) -> crate::AppState {
     crate::AppState {
+        reload_gate: Default::default(),
         hybrid: Some(Arc::new(Runtime {
+            index_model: ("fixture".into(), "/unused/model".into(), Default::default()),
             worker: worker::Worker::new(config.timeout_ms),
             config,
             models: Arc::new(Mutex::new(Models {
@@ -56,7 +58,7 @@ async fn indexed(pool: &PgPool) -> Result<()> {
 #[tokio::test]
 async fn hybrid_bewahrt_antwortvertrag_rendering_und_grounding() -> Result<()> {
     let _serial = crate::tests::ASK_SERIAL.lock().await;
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     indexed(db.pool()).await?;
     let generator = Arc::new(SelectionGenerator(AtomicUsize::new(0)));
     let config = Config {
@@ -105,7 +107,7 @@ async fn hybrid_bewahrt_antwortvertrag_rendering_und_grounding() -> Result<()> {
 #[tokio::test]
 async fn hybrid_filter_darf_nicht_auf_ungefiltertes_bm25_zurueckfallen() -> Result<()> {
     let _serial = crate::tests::ASK_SERIAL.lock().await;
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     indexed(db.pool()).await?;
     let generator = Arc::new(SelectionGenerator(AtomicUsize::new(0)));
     let mut config = Config {
@@ -130,7 +132,7 @@ async fn hybrid_filter_darf_nicht_auf_ungefiltertes_bm25_zurueckfallen() -> Resu
 #[tokio::test]
 async fn hybrid_rerankerfehler_bleibt_fail_closed() -> Result<()> {
     let _serial = crate::tests::ASK_SERIAL.lock().await;
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     indexed(db.pool()).await?;
     let generator = Arc::new(SelectionGenerator(AtomicUsize::new(0)));
     let app = state(

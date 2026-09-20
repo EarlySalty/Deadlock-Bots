@@ -58,7 +58,7 @@ pub async fn run() -> Result<bool> {
     let model_load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
     if command == "check" {
         let query = query_from_stdin()?;
-        let embeddings = embedder.embed(&[query])?;
+        let embeddings = embedder.embed_queries(&[query])?;
         ensure!(
             embeddings.len() == 1,
             "Embedding-Anzahl passt nicht zur Eingabe"

@@ -152,7 +152,7 @@ fn grounded_selection(case: &Case, candidates: &[Candidate], relevant: &[&Candid
     false
 }
 
-pub fn load(dir: &Path, root: &Path) -> Result<Vec<(String, usize, Case)>> {
+pub fn load(dir: &Path, root: &Path, holdout: bool) -> Result<Vec<(String, usize, Case)>> {
     let names = [
         "public-discord-core.json",
         "public-discord-tools.json",
@@ -161,10 +161,25 @@ pub fn load(dir: &Path, root: &Path) -> Result<Vec<(String, usize, Case)>> {
         "public-steam-website.json",
         "public-twitch.json",
     ];
+    let mut paths = if holdout {
+        std::fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>()
+    } else {
+        names.iter().map(|name| dir.join(name)).collect()
+    };
+    paths.sort();
     let mut questions = HashSet::new();
     let mut result = Vec::new();
-    for name in names {
-        let raw = std::fs::read(dir.join(name)).context("Golden-Datei fehlt")?;
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("Golden-Dateiname ist nicht UTF-8")?;
+        let raw = std::fs::read(&path).context("Golden-Datei fehlt")?;
         let cases: Vec<Case> = serde_json::from_slice(&raw)?;
         ensure!(!cases.is_empty(), "Leere Golden-Datei");
         for (row, case) in cases.into_iter().enumerate() {
@@ -195,12 +210,22 @@ pub fn load(dir: &Path, root: &Path) -> Result<Vec<(String, usize, Case)>> {
                 let path = Path::new(source);
                 ensure!(path.extension().is_some_and(|ext| ext == "html") && !source.contains('\\')
                     && path.components().all(|part| matches!(part, std::path::Component::Normal(name) if !name.to_string_lossy().eq_ignore_ascii_case("internal")))
-                    && root.join(path).is_file(), "Ungültige oder fehlende Golden-Quelle");
+                    && (root.join(path).is_file() || root.parent().is_some_and(|parent| parent.join("archive/public").join(path).is_file())), "Ungültige oder fehlende Golden-Quelle");
             }
             result.push((name.to_string(), row + 1, case));
         }
     }
     const BASELINE_GOLDEN_CASES: usize = 224;
+    if holdout {
+        ensure!(
+            !result.is_empty()
+                && result
+                    .iter()
+                    .all(|(_, _, case)| case.herkunft.as_deref() == Some("synthetisch")),
+            "Holdout muss vollständig als synthetisch gekennzeichnet sein"
+        );
+        return Ok(result);
+    }
     ensure!(
         result.len() >= BASELINE_GOLDEN_CASES,
         "Messung benötigt mindestens die 224 Golden-Fälle der Ausgangsbasis"
@@ -214,4 +239,29 @@ pub fn load(dir: &Path, root: &Path) -> Result<Vec<(String, usize, Case)>> {
         "Golden-Erweiterungen müssen vollständig mit herkunft=synthetisch markiert sein"
     );
     Ok(result)
+}
+
+#[cfg(test)]
+mod holdout_tests {
+    use super::*;
+
+    #[test]
+    fn separate_holdout_does_not_weaken_complete_baseline_contract() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("public");
+        let eval = dir.path().join("eval");
+        std::fs::create_dir(&root)?;
+        std::fs::create_dir(&eval)?;
+        let mut case = serde_json::json!({"question":"Was ist mein privates Passwort?","answerable":false,"expected_sources":[],"context_terms":[],"answer_terms":[],"forbidden_terms":[],"herkunft":"synthetisch"});
+        let file = eval.join("holdout.json");
+        std::fs::write(&file, serde_json::to_vec(&vec![case.clone()])?)?;
+        assert_eq!(load(&eval, &root, true)?.len(), 1);
+        assert!(load(&eval, &root, false).is_err());
+        case.as_object_mut()
+            .expect("Objektfixture")
+            .remove("herkunft");
+        std::fs::write(&file, serde_json::to_vec(&vec![case])?)?;
+        assert!(load(&eval, &root, true).is_err());
+        Ok(())
+    }
 }

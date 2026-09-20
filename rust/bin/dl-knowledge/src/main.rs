@@ -1,8 +1,11 @@
 mod dense;
 mod eval;
+mod faq;
 mod hybrid;
 mod retrieval;
 mod server_config;
+#[cfg(test)]
+mod test_database;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -57,6 +60,7 @@ const STOPWORDS: &[&str] = &[
 
 #[derive(Clone)]
 struct AppState {
+    reload_gate: Arc<tokio::sync::Mutex<()>>,
     hybrid: Option<Arc<hybrid::Runtime>>,
     docs_path: PathBuf,
     knowledge: Arc<RwLock<KnowledgeBase>>,
@@ -616,6 +620,10 @@ struct KnowledgeBase {
     chunks: Vec<Chunk>,
     index: Bm25Index,
     generation: u64,
+    /// Digest of the exact public HTML bytes parsed into this snapshot.
+    corpus_digest: String,
+    faq: Vec<faq::Entry>,
+    faq_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -651,6 +659,8 @@ struct Source {
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
+    generation: String,
+    faq_generation: Option<String>,
     chunks: usize,
     html_sources: usize,
     non_html_sources: usize,
@@ -727,12 +737,23 @@ async fn main() -> Result<()> {
         tracing::warn!("Fireworks-Client nicht initialisiert; /ask antwortet fail-closed");
     }
 
+    let hybrid = if let Some(settings) = server_config
+        .as_ref()
+        .and_then(|config| config.hybrid.as_ref())
+    {
+        Some(hybrid::Runtime::from_config(settings).await?)
+    } else if retrieval_only {
+        None
+    } else {
+        hybrid::Runtime::from_env().await?
+    };
+    if let Some(runtime) = &hybrid {
+        let prepared = runtime.prepare(&knowledge).await?;
+        runtime.activate(prepared).await?;
+    }
     let state = AppState {
-        hybrid: if retrieval_only {
-            None
-        } else {
-            hybrid::Runtime::from_env().await?
-        },
+        reload_gate: Default::default(),
+        hybrid,
         docs_path,
         knowledge: Arc::new(RwLock::new(knowledge)),
         generator,
@@ -796,6 +817,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let knowledge = state.knowledge.read().await;
     let stats = knowledge.source_stats();
     Json(HealthResponse {
+        generation: knowledge.corpus_digest.clone(),
+        faq_generation: knowledge.faq_generation.clone(),
         chunks: knowledge.chunks.len(),
         html_sources: stats.html_sources,
         non_html_sources: stats.non_html_sources,
@@ -804,12 +827,41 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn reload(State(state): State<AppState>) -> Response {
-    match load_production_corpus(&state.docs_path) {
-        Ok(knowledge) => {
-            let chunks = knowledge.chunks.len();
-            *state.knowledge.write().await = knowledge;
-            (StatusCode::OK, Json(json!({ "chunks": chunks }))).into_response()
+    let Ok(reload_guard) = state.reload_gate.clone().try_lock_owned() else {
+        return (StatusCode::CONFLICT, Json(json!({"error":"reload_busy"}))).into_response();
+    };
+    // The task owns the swap: disconnecting the HTTP caller must not leave a
+    // newly activated dense generation paired with the previous BM25 snapshot.
+    let result = tokio::spawn(async move {
+        let _reload_guard = reload_guard;
+        let path = state.docs_path.clone();
+        let knowledge = tokio::task::spawn_blocking(move || load_production_corpus(&path))
+            .await
+            .context("Korpus-Ladeworker verbinden")??;
+        let changed = state.knowledge.read().await.corpus_digest != knowledge.corpus_digest;
+        let prepared = if changed {
+            if let Some(runtime) = &state.hybrid {
+                Some(runtime.prepare(&knowledge).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut live = state.knowledge.write().await;
+        if let Some(prepared) = prepared {
+            if let Some(runtime) = &state.hybrid {
+                runtime.activate(prepared).await?;
+            }
         }
+        *live = knowledge;
+        Ok::<_, anyhow::Error>(live.chunks.len())
+    })
+    .await
+    .context("Korpuswechsel verbinden")
+    .and_then(|result| result);
+    match result {
+        Ok(chunks) => (StatusCode::OK, Json(json!({ "chunks": chunks }))).into_response(),
         Err(err) => {
             tracing::warn!(%err, "dl-knowledge Reload fehlgeschlagen");
             (
@@ -1200,17 +1252,33 @@ fn load_corpus(root: &Path) -> Result<KnowledgeBase> {
     files.sort();
 
     let mut chunks = Vec::new();
+    let mut manifest = Vec::new();
+    let mut hashes = HashMap::new();
     for path in files {
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("Korpusdatei lesen: {}", path.display()))?;
         if html_mode {
+            let relative = path
+                .strip_prefix(root)?
+                .to_str()
+                .context("Korpuspfad ist nicht UTF-8")?;
+            manifest.extend_from_slice(relative.as_bytes());
+            manifest.push(0);
+            manifest.extend_from_slice(dense::sha256(raw.as_bytes()).as_bytes());
+            manifest.push(b'\n');
+            hashes.insert(relative.to_string(), dense::sha256(raw.as_bytes()));
             chunks.extend(parse_html_file(root, &path, &raw)?);
         } else {
             chunks.extend(parse_markdown_file(root, &path, &raw));
         }
     }
     validate_passage_lengths(&chunks)?;
-    Ok(KnowledgeBase::from_chunks(chunks))
+    let mut knowledge = KnowledgeBase::from_chunks(chunks);
+    knowledge.corpus_digest = dense::sha256(&manifest);
+    if html_mode {
+        (knowledge.faq, knowledge.faq_generation) = faq::load(root, &knowledge.chunks, &hashes)?;
+    }
+    Ok(knowledge)
 }
 
 fn validate_passage_lengths(chunks: &[Chunk]) -> Result<()> {
@@ -1852,6 +1920,9 @@ impl KnowledgeBase {
             chunks,
             index,
             generation,
+            corpus_digest: String::new(),
+            faq: Vec::new(),
+            faq_generation: None,
         }
     }
 
@@ -2918,6 +2989,7 @@ mod tests {
     ) -> (Router, Arc<RwLock<KnowledgeBase>>) {
         let knowledge = Arc::new(RwLock::new(KnowledgeBase::from_chunks(chunks)));
         let state = AppState {
+            reload_gate: Default::default(),
             hybrid: None,
             docs_path: PathBuf::from("/does/not/matter"),
             knowledge: knowledge.clone(),
@@ -2961,6 +3033,14 @@ mod tests {
         generator: Option<Arc<dyn TextGenerator>>,
         question: &str,
     ) -> Result<String> {
+        Ok(ask_with_logs_timed(chunks, generator, question).await?.0)
+    }
+
+    async fn ask_with_logs_timed(
+        chunks: Vec<Chunk>,
+        generator: Option<Arc<dyn TextGenerator>>,
+        question: &str,
+    ) -> Result<(String, Duration)> {
         // Lock VOR set_default bis nach dem Request: schützt den thread-lokalen Subscriber vor
         // parallelen /ask-Tests, die sonst den globalen Interest-/Level-Cache der decision-
         // Callsite einfrieren. Danach der ungesperrte Kern (post_json), nie post_ask (Self-Deadlock).
@@ -2974,10 +3054,12 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
         let (app, _) = test_app(chunks, generator);
+        let started = std::time::Instant::now();
         let (status, _) = post_json(app, "/public/v1/ask", json!({"question": question})).await?;
+        let elapsed = started.elapsed();
         drop(guard);
         assert_eq!(status, 200);
-        Ok(log_capture.text())
+        Ok((log_capture.text(), elapsed))
     }
 
     fn assert_decision(
@@ -3326,6 +3408,7 @@ mod tests {
         let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
+            reload_gate: Default::default(),
             hybrid: None,
             docs_path: public,
             knowledge: knowledge.clone(),
@@ -3346,6 +3429,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reload_abbruch_beendet_den_snapshotwechsel_nicht() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        std::fs::create_dir(&public)?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+        let initial = load_corpus(&public)?;
+        let before = initial.corpus_digest.clone();
+        let state = AppState {
+            reload_gate: Default::default(),
+            hybrid: None,
+            docs_path: public.clone(),
+            knowledge: Arc::new(RwLock::new(initial)),
+            generator: None,
+        };
+        std::fs::write(public.join("new.html"), HTML_FIXTURE)?;
+        let expected = load_corpus(&public)?.corpus_digest;
+        assert_ne!(before, expected);
+        let hold_publication = state.knowledge.write().await;
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move { reload(State(caller_state)).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.reload_gate.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            reload(State(state.clone())).await.status(),
+            StatusCode::CONFLICT
+        );
+        caller.abort();
+        assert!(caller.await.is_err());
+        drop(hold_publication);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.knowledge.read().await.corpus_digest == expected
+                    && state.reload_gate.try_lock().is_ok()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(state.reload_gate.try_lock().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reload_lehnt_internal_root_mit_gueltigem_html_ab() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let public = temp.path().join("public");
@@ -3357,6 +3492,7 @@ mod tests {
         let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
+            reload_gate: Default::default(),
             hybrid: None,
             docs_path: internal,
             knowledge: knowledge.clone(),
@@ -4315,8 +4451,7 @@ Frag im Support.
         let generator = Arc::new(SlowGenerator {
             calls: AtomicUsize::new(0),
         });
-        let started = std::time::Instant::now();
-        let logs = ask_with_logs(
+        let (logs, elapsed) = ask_with_logs_timed(
             vec![test_chunk(
                 "CANDIDATE_TITLE_MUST_NOT_LEAK",
                 "Steam",
@@ -4327,7 +4462,6 @@ Frag im Support.
             "Wie Steam verknüpfen? QUESTION_MUST_NOT_LEAK",
         )
         .await?;
-        let elapsed = started.elapsed();
 
         assert!(elapsed >= MODEL_TIMEOUT, "Timeout kam zu früh: {elapsed:?}");
         assert!(

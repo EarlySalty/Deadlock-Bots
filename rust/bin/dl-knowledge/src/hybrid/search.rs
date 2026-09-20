@@ -26,6 +26,50 @@ pub async fn dense(
         active.try_get::<String, _>("model_fingerprint")? == fingerprint,
         "Query-Modell passt nicht zur aktiven Generation"
     );
+    // Never silently run dense on a previous partial corpus. The full current
+    // catalogue is checked before metadata filters and before nearest neighbours.
+    let all_ids = catalog
+        .records
+        .iter()
+        .map(|r| r.chunk_id.clone())
+        .collect::<Vec<_>>();
+    let all_hashes = catalog
+        .records
+        .iter()
+        .map(|r| r.content_hash.clone())
+        .collect::<Vec<_>>();
+    let all_dates = catalog
+        .records
+        .iter()
+        .map(|r| r.stand.clone())
+        .collect::<Vec<_>>();
+    let all_sources = catalog
+        .records
+        .iter()
+        .map(|r| r.quelle.clone())
+        .collect::<Vec<_>>();
+    let matching: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge.chunk_embeddings e
+         JOIN unnest($2::text[], $3::text[], $4::text[], $5::text[]) AS current(chunk_id, content_hash, stand, quelle)
+         USING (chunk_id, content_hash, stand, quelle) WHERE e.index_generation = $1",
+    )
+    .bind(generation)
+    .bind(&all_ids)
+    .bind(&all_hashes)
+    .bind(&all_dates)
+    .bind(&all_sources)
+    .fetch_one(pool)
+    .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge.chunk_embeddings WHERE index_generation = $1",
+    )
+    .bind(generation)
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        matching == i64::try_from(catalog.records.len())? && total == matching,
+        "Dense-Index gehört nicht vollständig zum aktiven öffentlichen Korpus"
+    );
     let eligible = catalog
         .records
         .iter()

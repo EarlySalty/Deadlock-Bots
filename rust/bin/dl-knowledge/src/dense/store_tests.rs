@@ -73,7 +73,7 @@ async fn active(pool: &PgPool) -> Result<Option<i64>> {
 
 #[tokio::test]
 async fn neuer_index_bleibt_bis_zur_expliziten_aktivierung_green() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let mut embedder = MockEmbedder::new("v1");
     let built = build_generation(db.pool(), &mut embedder, &records()).await?;
     assert_eq!((built.chunks, built.computed, built.reused), (2, 2, 0));
@@ -88,7 +88,7 @@ async fn neuer_index_bleibt_bis_zur_expliziten_aktivierung_green() -> Result<()>
 
 #[tokio::test]
 async fn inkrementell_kopiert_hash_aktualisiert_metadaten_und_entfernt_alte_chunks() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let mut embedder = MockEmbedder::new("v1");
     let old = build_generation(db.pool(), &mut embedder, &records()).await?;
     activate(db.pool(), old.index_generation, None).await?;
@@ -116,7 +116,7 @@ async fn inkrementell_kopiert_hash_aktualisiert_metadaten_und_entfernt_alte_chun
 
 #[tokio::test]
 async fn fehlgeschlagener_lauf_rollt_zurueck_und_behaelt_blue() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let mut embedder = MockEmbedder::new("v1");
     let old = build_generation(db.pool(), &mut embedder, &records()).await?;
     activate(db.pool(), old.index_generation, None).await?;
@@ -136,7 +136,7 @@ async fn fehlgeschlagener_lauf_rollt_zurueck_und_behaelt_blue() -> Result<()> {
 
 #[tokio::test]
 async fn cosine_suche_nutzt_nur_aktive_generation_und_passendes_modell() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let mut embedder = MockEmbedder::new("v1");
     let old = build_generation(db.pool(), &mut embedder, &records()).await?;
     activate(db.pool(), old.index_generation, None).await?;
@@ -160,7 +160,7 @@ async fn cosine_suche_nutzt_nur_aktive_generation_und_passendes_modell() -> Resu
 
 #[tokio::test]
 async fn aktivierung_verweigert_unfertigen_index_und_veraltetes_compare_and_swap() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let mut embedder = MockEmbedder::new("v1");
     let old = build_generation(db.pool(), &mut embedder, &records()).await?;
     activate(db.pool(), old.index_generation, None).await?;
@@ -182,7 +182,7 @@ async fn aktivierung_verweigert_unfertigen_index_und_veraltetes_compare_and_swap
 
 #[tokio::test]
 async fn index_und_suche_funktionieren_mit_reiner_dml_rolle() -> Result<()> {
-    let db = dl_central_db::test_pool().await?;
+    let db = crate::test_database::pool().await?;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .after_connect(|connection, _| {
