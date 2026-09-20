@@ -25,3 +25,12 @@ Router und führen zum bestehenden Antwortpfad.
 
 Der übrige bestehende Bot-Launcher enthält Legacy-ENV-Pfade. Deren vollständiger
 Umbau ist nicht Teil dieses Jev-Anschlusses und wird hier nicht als erledigt behauptet.
+
+Der Drop-in behält den bestehenden produktiven Launcherpfad
+`/home/naniadm/Documents/Deadlock-Bots/scripts/run_dl_bot_service.sh` bei.
+Auf dem Host ist dies ein Alias derselben Datei unter
+`/home/nathanael/repos/Deadlock-Bots/scripts/run_dl_bot_service.sh`;
+`readlink -f` und `stat -L` bestätigen dieselbe Launcher- und Binary-Inode.
+Er setzt keinen zweiten Checkout oder einen Launcher im Feature-Worktree voraus.
+Vor Aktivierung werden der bestehende Launcher und die atomar ersetzte
+`rust/target/release/dl-bot` gegen das Releasepaket geprüft.
