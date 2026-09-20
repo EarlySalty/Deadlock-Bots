@@ -49,6 +49,7 @@ macro_rules! section {
 }
 
 section!(StartOptions {
+    log_filter: String => "RUST_LOG",
     owner_id: u64 => "OWNER_ID",
     command_prefix: String => "COMMAND_PREFIX",
     command_sync: bool => "DL_BOT_COMMAND_SYNC" | "COMMAND_SYNC_ON_START",
@@ -124,6 +125,70 @@ section!(WebOptions {
     tierlist_refresh: bool => "DL_TIERLIST_REFRESH",
 });
 
+section!(CommunityOptions {
+    steam_voice_nudge: bool => "DL_STEAM_VOICE_NUDGE_ENABLED",
+    lfg_forum_cutover: bool => "DL_LFG_FORUM_CUTOVER",
+    lfg_panel_channel_id: u64 => "DL_LFG_PANEL_CHANNEL_ID",
+    lfg_forum_channel_id: u64 => "DL_LFG_FORUM_CHANNEL_ID",
+    router_auto_move: bool => "DL_ROUTER_AUTO_MOVE_ENABLED",
+    router_auto_move_delay_seconds: u64 => "DL_ROUTER_AUTO_MOVE_DELAY_SECONDS",
+    lane_pairing: bool => "DL_LANE_PAIRING_ENABLED",
+    survey_pulse: bool => "SURVEY_PULSE_ENABLED",
+    survey_interval_days: i64 => "SURVEY_PULSE_INTERVAL_DAYS",
+    scrim_visible_vcs: bool => "DL_SCRIM_VISIBLE_VCS_ENABLED",
+    scrim_category_id: u64 => "DL_SCRIM_VISIBLE_VCS_CATEGORY_ID",
+    player_finder: bool => "PLAYER_FINDER_ENABLED",
+    lfg_freetext: bool => "DL_LFG_FREITEXT_ENABLED",
+    lfg_freetext_channel_id: u64 => "DL_LFG_FREITEXT_CHANNEL_ID",
+    voice_hint: bool => "DL_VOICE_HINT_ENABLED",
+    concierge_enabled: bool => "DL_CONCIERGE_ENABLED",
+    concierge_test_users: Vec<u64> => "DL_CONCIERGE_TEST_USER_ALLOWLIST",
+    concierge_fallback_category_id: u64 => "DL_CONCIERGE_FALLBACK_CATEGORY_ID",
+    concierge_pate_category_id: u64 => "DL_CONCIERGE_PATE_CATEGORY_ID",
+    concierge_pate_channel_id: u64 => "DL_CONCIERGE_PATE_CHANNEL_ID",
+    concierge_mod_role_id: u64 => "DL_CONCIERGE_MOD_PING_ROLE_ID",
+    concierge_active_minutes: i64 => "DL_CONCIERGE_ACTIVE_THRESHOLD_MINUTES",
+    concierge_brand_emoji: String => "DL_CONCIERGE_BRAND_EMOJI",
+    concierge_free_voice: bool => "CONCIERGE_FREE_VOICE",
+    concierge_proactive: bool => "DL_CONCIERGE_PROACTIVE",
+    recording_state_dir: PathBuf => "SCRIM_RECORD_STATE_DIR",
+    recording_rclone_path: PathBuf => "SCRIM_RECORD_RCLONE_PATH",
+    recording_archive_base: String => "SCRIM_RECORD_ARCHIVE_BASE",
+});
+
+section!(ModerationOptions {
+    channel_id: u64 => "MODERATION_CHANNEL_ID",
+    scan_channel_ids: Vec<u64> => "MOD_SCAN_CHANNEL_IDS" | "AI_MODERATOR_SCAN_CHANNEL_IDS",
+    invite_allowlist: Vec<String> => "INVITE_ALLOWLIST_FALLBACK",
+    analyze_flag_threshold: f64 => "MOD_ANALYZE_FLAG_THRESHOLD",
+    auto_verify_threshold: f64 => "MOD_AUTO_VERIFY_THRESHOLD",
+    propose_verify_threshold: f64 => "MOD_PROPOSE_VERIFY_THRESHOLD",
+    timeout_minutes: i64 => "MOD_TIMEOUT_MINUTES",
+    behavior_proposal_timeout_minutes: i64 => "MOD_BEHAVIOR_PROPOSAL_TIMEOUT_MINUTES",
+    ai_moderator: bool => "AI_MODERATOR_ENABLE",
+});
+
+section!(AiOptions {
+    openai_base_url: String => "OPENAI_BASE_URL",
+    openai_model: String => "OPENAI_MODEL" | "AI_OPENAI_MODEL",
+    fireworks_base_url: String => "FIREWORK_BASE_URL" | "FIREWORKS_BASE_URL",
+    turnier_model: String => "TURNIER_AI_MODEL",
+    moderation_text_model: String => "MOD_TEXT_ANALYZE_MODEL",
+    moderation_image_model: String => "MOD_IMAGE_ANALYZE_MODEL",
+    moderation_verify_model: String => "MOD_VERIFY_MODEL",
+    concierge_model: String => "DL_CONCIERGE_MODEL",
+    transparency_enabled: bool => "DL_AI_TRANSPARENCY_ENABLED",
+    transparency_channel_id: u64 => "DL_AI_TRANSPARENCY_CHANNEL_ID",
+    transparency_include_moderation: bool => "DL_AI_TRANSPARENCY_INCLUDE_MODERATION",
+    transparency_error_repeat_seconds: u64 => "DL_AI_TRANSPARENCY_ERROR_REPEAT_SECONDS",
+    transparency_error_followup_seconds: u64 => "DL_AI_TRANSPARENCY_ERROR_FOLLOWUP_SECONDS",
+    brain_bin: PathBuf => "BRAIN_BIN",
+    brain_command_enabled: bool => "BRAIN_CMD_ENABLED",
+    brain_channels: Vec<u64> => "BRAIN_CHANNEL_ALLOWLIST",
+    brain_cooldown_seconds: u64 => "BRAIN_COOLDOWN_SECS",
+    brain_max_question_len: usize => "BRAIN_MAX_QUESTION_LEN",
+});
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
@@ -131,6 +196,9 @@ pub struct RuntimeConfig {
     pub bridges: BridgeOptions,
     pub dashboard: DashboardOptions,
     pub web: WebOptions,
+    pub community: CommunityOptions,
+    pub moderation: ModerationOptions,
+    pub ai: AiOptions,
 }
 
 impl RuntimeConfig {
@@ -140,6 +208,9 @@ impl RuntimeConfig {
             .or_else(|| self.bridges.lookup(key))
             .or_else(|| self.dashboard.lookup(key))
             .or_else(|| self.web.lookup(key))
+            .or_else(|| self.community.lookup(key))
+            .or_else(|| self.moderation.lookup(key))
+            .or_else(|| self.ai.lookup(key))
     }
 
     pub fn resolve_paths(&mut self, base: &Path) {
@@ -151,6 +222,9 @@ impl RuntimeConfig {
             &mut self.dashboard.wiki_root,
             &mut self.dashboard.insights_archive_dir,
             &mut self.web.static_dir,
+            &mut self.community.recording_state_dir,
+            &mut self.community.recording_rclone_path,
+            &mut self.ai.brain_bin,
         ]
         .into_iter()
         .flatten()
@@ -163,6 +237,50 @@ impl RuntimeConfig {
 
     pub fn validate(&self) -> Result<(), BotConfigError> {
         let invalid = || BotConfigError::Validation("Ungültiger Betriebswert in runtime");
+        for seconds in [
+            self.community.router_auto_move_delay_seconds,
+            self.ai.transparency_error_repeat_seconds,
+            self.ai.transparency_error_followup_seconds,
+            self.ai.brain_cooldown_seconds,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seconds > 31_536_000 {
+                return Err(invalid());
+            }
+        }
+        if self
+            .ai
+            .brain_max_question_len
+            .is_some_and(|length| length == 0 || length > 65_536)
+        {
+            return Err(invalid());
+        }
+        for text in [
+            &self.ai.openai_model,
+            &self.ai.turnier_model,
+            &self.ai.moderation_text_model,
+            &self.ai.moderation_image_model,
+            &self.ai.moderation_verify_model,
+            &self.ai.concierge_model,
+            &self.community.recording_archive_base,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if text.trim().is_empty() || text.chars().any(char::is_control) {
+                return Err(invalid());
+            }
+        }
+        if self
+            .start
+            .log_filter
+            .as_deref()
+            .is_some_and(|filter| tracing_subscriber::EnvFilter::try_new(filter).is_err())
+        {
+            return Err(invalid());
+        }
         if self
             .dashboard
             .discord_client_id
@@ -238,7 +356,23 @@ impl RuntimeConfig {
         {
             return Err(invalid());
         }
+        for threshold in [
+            self.moderation.analyze_flag_threshold,
+            self.moderation.auto_verify_threshold,
+            self.moderation.propose_verify_threshold,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+                return Err(invalid());
+            }
+        }
         for ttl in [
+            self.community.survey_interval_days,
+            self.community.concierge_active_minutes,
+            self.moderation.timeout_minutes,
+            self.moderation.behavior_proposal_timeout_minutes,
             self.dashboard.session_ttl_seconds,
             self.dashboard.oauth_state_ttl_seconds,
         ]
@@ -282,6 +416,16 @@ impl RuntimeConfig {
             self.dashboard.moderator_role_id,
             self.dashboard.audit_bot_user_id,
             self.dashboard.insights_guild_id,
+            self.community.lfg_panel_channel_id,
+            self.community.lfg_forum_channel_id,
+            self.community.lfg_freetext_channel_id,
+            self.community.scrim_category_id,
+            self.community.concierge_fallback_category_id,
+            self.community.concierge_pate_category_id,
+            self.community.concierge_pate_channel_id,
+            self.community.concierge_mod_role_id,
+            self.moderation.channel_id,
+            self.ai.transparency_channel_id,
         ]
         .into_iter()
         .flatten()
@@ -295,6 +439,9 @@ impl RuntimeConfig {
             &self.start.broker_guilds,
             &self.start.broker_roles,
             &self.dashboard.auth_guild_ids,
+            &self.community.concierge_test_users,
+            &self.moderation.scan_channel_ids,
+            &self.ai.brain_channels,
         ]
         .into_iter()
         .flatten()
@@ -311,6 +458,9 @@ impl RuntimeConfig {
             &self.dashboard.wiki_root,
             &self.dashboard.insights_archive_dir,
             &self.web.static_dir,
+            &self.community.recording_state_dir,
+            &self.community.recording_rclone_path,
+            &self.ai.brain_bin,
         ]
         .into_iter()
         .flatten()
@@ -333,6 +483,8 @@ impl RuntimeConfig {
             (&self.dashboard.discord_api_base, false),
             (&self.web.dashboard_base, true),
             (&self.web.callback_url, false),
+            (&self.ai.openai_base_url, false),
+            (&self.ai.fireworks_base_url, false),
         ] {
             if let Some(address) = address {
                 validate_url(address, local)?;
@@ -374,7 +526,50 @@ fn validate_url(raw: &str, local: bool) -> Result<(), BotConfigError> {
 
 impl BotConfig {
     pub fn runtime_value(&self, key: &str) -> Option<String> {
+        // Explizite Fälle entsprechen der bestehenden dl-ai-Fabrik. Keine neue
+        // Providerentscheidung und keine Katalog-/Latest-Auswahl beim Start.
+        use crate::bot_config::{Provider, UseCase};
+        let llm_case = key
+            .strip_prefix("DL_LLM_PROVIDER_")
+            .or_else(|| key.strip_prefix("DL_LLM_MODEL_"))
+            .and_then(|suffix| match suffix {
+                "BOT_PATE" => Some(UseCase::BotPate),
+                "FAQ" => Some(UseCase::Faq),
+                "LFG_FREITEXT" => Some(UseCase::LfgFreitext),
+                "SCRIM_LAGEBILD" => Some(UseCase::ScrimLagebild),
+                "VERBINDER_MATCH" => Some(UseCase::VerbinderMatch),
+                "VERBINDER_KRITIK" => Some(UseCase::VerbinderKritik),
+                "AI_ONBOARDING" => Some(UseCase::AiOnboarding),
+                "BRAIN_ANTWORT" => Some(UseCase::BrainAntwort),
+                "COACHING_ANFRAGE" => Some(UseCase::CoachingAnfrage),
+                "MODERATION_TEXT" => Some(UseCase::ModerationText),
+                "MODERATION_VERIFY" => Some(UseCase::ModerationVerify),
+                "STREAMER_MATCHER" => Some(UseCase::StreamerMatcher),
+                "TURNIER_VORSCHLAG" => Some(UseCase::TurnierVorschlag),
+                "VOICE_HINT" => Some(UseCase::VoiceHint),
+                _ => None,
+            });
+        if let Some(case) = llm_case {
+            return self.llm.use_cases.get(&case).and_then(|config| {
+                if key.starts_with("DL_LLM_PROVIDER_") {
+                    Some(
+                        match config.provider {
+                            Provider::Fireworks => "fireworks",
+                            Provider::Openai => "openai",
+                        }
+                        .into(),
+                    )
+                } else {
+                    config.model.clone()
+                }
+            });
+        }
         match key {
+            "DL_LLM_PROVIDER_DEFAULT" => self.llm.default_provider.map(|provider| match provider {
+                Provider::Fireworks => "fireworks".into(),
+                Provider::Openai => "openai".into(),
+            }),
+            "FIREWORK_MODEL" | "FIREWORKS_MODEL" => self.llm.fireworks.model.clone(),
             "MAIN_GUILD_ID" | "OUR_GUILD_ID" => self.discord.guild_id.clone(),
             "DL_BOT_GATEWAY" => Some(self.features.gateway.lookup_value()),
             "STEAM_BOT_API_URL" => Some(self.services.steam_api_url.clone()),

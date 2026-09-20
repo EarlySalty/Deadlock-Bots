@@ -74,16 +74,17 @@ struct LoginState {
 }
 
 fn build_scrim_lagebild_ai() -> Option<Arc<dyn dl_ai::ChatProvider>> {
-    let cfg = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok()) {
+    let cfg = match dl_ai::LlmProviderConfig::from_env(dl_core::runtime_config::lookup) {
         Ok(cfg) => cfg,
         Err(err) => {
             tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Dashboard ungueltig");
             return None;
         }
     };
-    match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
-        std::env::var(key).ok()
-    }) {
+    match cfg.build_provider_for_env(
+        dl_ai::LlmUseCase::ScrimLagebild,
+        dl_core::runtime_config::lookup,
+    ) {
         Ok(provider) => Some(provider),
         Err(err) => {
             tracing::warn!(%err, "Scrim-Lagebild-AI im Dashboard inaktiv");

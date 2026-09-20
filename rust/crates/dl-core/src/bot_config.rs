@@ -53,8 +53,6 @@ pub struct BotConfig {
     #[serde(default)]
     pub concierge: ConciergeConfig,
     #[serde(default)]
-    pub knowledge: KnowledgeConfig,
-    #[serde(default)]
     pub llm: LlmConfig,
 }
 
@@ -63,8 +61,6 @@ pub struct BotConfig {
 pub struct DiscordConfig {
     /// Snowflakes als Dezimalstrings, damit der gesamte u64-Bereich nutzbar ist.
     pub guild_id: Option<String>,
-    pub channels: BTreeMap<String, String>,
-    pub roles: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -112,10 +108,6 @@ impl Default for StorageConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FeatureConfig {
     pub gateway: bool,
-    pub onboarding: bool,
-    pub concierge: bool,
-    pub lfg: bool,
-    pub voice: bool,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -134,32 +126,6 @@ impl Default for ConciergeConfig {
     fn default() -> Self {
         Self {
             timeout_seconds: 100,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RetrievalMode {
-    #[default]
-    Bm25,
-    Hybrid,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct KnowledgeConfig {
-    pub ask_url: String,
-    pub timeout_seconds: u64,
-    pub retrieval: RetrievalMode,
-}
-
-impl Default for KnowledgeConfig {
-    fn default() -> Self {
-        Self {
-            ask_url: "http://127.0.0.1:8896/public/v1/ask".into(),
-            timeout_seconds: 7,
-            retrieval: RetrievalMode::Bm25,
         }
     }
 }
@@ -194,6 +160,8 @@ pub enum UseCase {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
+    /// Nur ein belegter bisheriger DL_LLM_PROVIDER_DEFAULT-Override.
+    pub default_provider: Option<Provider>,
     pub fireworks: FireworksConfig,
     pub use_cases: BTreeMap<UseCase, UseCaseConfig>,
 }
@@ -206,48 +174,11 @@ pub struct UseCaseConfig {
     pub model: Option<String>,
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelSelection {
-    #[default]
-    LatestStable,
-    Pinned,
-}
-
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelFamily {
-    #[default]
-    DeepseekFlash,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FireworksConfig {
-    pub selection: ModelSelection,
-    pub family: ModelFamily,
-    /// Ein eingetragener Pin deaktiviert die automatische Auswahl.
+    /// Ausschließlich ein bewusster Pin; keine automatische Modellwahl.
     pub model: Option<String>,
-    pub refresh_seconds: u64,
-    pub fallback_max_age_seconds: u64,
-}
-
-impl Default for FireworksConfig {
-    fn default() -> Self {
-        Self {
-            selection: ModelSelection::LatestStable,
-            family: ModelFamily::DeepseekFlash,
-            model: None,
-            refresh_seconds: 3600,
-            fallback_max_age_seconds: 86400,
-        }
-    }
-}
-
-impl FireworksConfig {
-    pub fn automatic(&self) -> bool {
-        self.selection == ModelSelection::LatestStable && self.model.is_none()
-    }
 }
 
 fn snowflake(value: &str) -> bool {
@@ -365,12 +296,6 @@ impl BotConfig {
             .guild_id
             .as_deref()
             .is_some_and(|id| !snowflake(id))
-            || self
-                .discord
-                .channels
-                .values()
-                .chain(self.discord.roles.values())
-                .any(|id| !snowflake(id))
         {
             return Err(invalid(
                 "Discord-IDs müssen positive u64-Dezimalstrings sein",
@@ -408,42 +333,7 @@ impl BotConfig {
                 "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
             ));
         }
-        if self.knowledge.timeout_seconds == 0
-            || self.knowledge.timeout_seconds >= self.concierge.timeout_seconds
-        {
-            return Err(invalid(
-                "Knowledge-Timeout muss positiv und kleiner als Concierge-Timeout sein",
-            ));
-        }
-        let url = url::Url::parse(&self.knowledge.ask_url)
-            .map_err(|_| invalid("knowledge.ask_url ist ungültig"))?;
-        let loopback = url
-            .host_str()
-            .and_then(|s| s.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
-            .is_some_and(|ip| ip.is_loopback());
-        if !loopback
-            || !matches!(url.scheme(), "http" | "https")
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.port_or_known_default() == Some(0)
-        {
-            return Err(invalid(
-                "knowledge.ask_url benötigt eine Loopback-IP ohne Zugangsdaten, Query oder Fragment",
-            ));
-        }
         let fireworks = &self.llm.fireworks;
-        if fireworks.refresh_seconds == 0
-            || fireworks.refresh_seconds > fireworks.fallback_max_age_seconds
-        {
-            return Err(invalid(
-                "Modell-Prüfintervall muss positiv und höchstens so lang wie die Rückfallfrist sein",
-            ));
-        }
-        if fireworks.selection == ModelSelection::Pinned && fireworks.model.is_none() {
-            return Err(invalid("llm.fireworks.model fehlt für pinned"));
-        }
         if fireworks
             .model
             .as_deref()
@@ -472,6 +362,7 @@ impl BotConfig {
             .use_cases
             .get(&use_case)
             .map(|cfg| cfg.provider)
+            .or(self.llm.default_provider)
             .unwrap_or(match use_case {
                 UseCase::ModerationVerify | UseCase::TurnierVorschlag | UseCase::VoiceHint => {
                     Provider::Openai
@@ -529,50 +420,6 @@ impl BotConfigStore {
     }
 }
 
-/// Vom Provider-Adapter gelieferte Metadaten. Erfolgreiche Probe ist gesondert
-/// zu belegen; ein Katalogeintrag ist kein Funktionsnachweis.
-pub struct ModelCandidate {
-    pub id: String,
-    pub published_at: u64,
-    pub ready: bool,
-    pub serverless: bool,
-    pub probe_passed: bool,
-}
-
-/// Reine Auswahlfunktion, kein Scheduler und kein Netzwerkaufruf.
-/// Pins benötigen keinen Katalog und deaktivieren die automatische Auswahl.
-pub fn select_model<'a>(
-    policy: &'a FireworksConfig,
-    candidates: &'a [ModelCandidate],
-    now: u64,
-) -> Option<&'a str> {
-    if let Some(pin) = policy.model.as_deref() {
-        return flash_version(pin).map(|_| pin);
-    }
-    if !policy.automatic() {
-        return None;
-    }
-    candidates
-        .iter()
-        .filter(|c| {
-            c.ready
-                && c.serverless
-                && c.probe_passed
-                && c.published_at > 0
-                && c.published_at <= now
-                && flash_version(&c.id).is_some()
-        })
-        .max_by_key(|c| {
-            (
-                flash_version(&c.id).map(|v| (v.0, v.1)),
-                c.published_at,
-                flash_version(&c.id).map(|v| v.2),
-                c.id.as_str(),
-            )
-        })
-        .map(|c| c.id.as_str())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,22 +429,11 @@ mod tests {
         assert!(BotConfig::parse(text).is_err());
     }
 
-    fn candidate(name: &str, at: u64) -> ModelCandidate {
-        ModelCandidate {
-            id: format!("accounts/fireworks/models/{name}"),
-            published_at: at,
-            ready: true,
-            serverless: true,
-            probe_passed: true,
-        }
-    }
-
     #[test]
     fn minimal_config_has_safe_defaults() {
         let c = BotConfig::parse(MINIMAL).expect("valid");
         assert!(!c.features.gateway);
-        assert!(c.knowledge.retrieval == RetrievalMode::Bm25);
-        assert!(c.llm.fireworks.automatic());
+        assert!(c.llm.fireworks.model.is_none());
     }
 
     #[test]
@@ -700,50 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn external_and_credential_urls_are_rejected() {
-        for endpoint in [
-            "http://example.com/ask",
-            "http://localhost/ask",
-            "http://user:pass@127.0.0.1/ask",
-            "http://127.0.0.1/ask?key=value",
-            "http://127.0.0.1/ask#fragment",
-            "http://127.0.0.1:0/public/v1/ask",
-        ] {
-            rejected(&format!(
-                "schema_version = 1\n[knowledge]\nask_url = '{endpoint}'"
-            ));
-        }
-    }
-
-    #[test]
-    fn ipv6_loopback_is_supported() {
-        assert!(BotConfig::parse(
-            "schema_version = 1\n[knowledge]\nask_url = 'http://[::1]:8896/public/v1/ask'"
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn timeout_order_is_checked() {
-        rejected("schema_version = 1\n[knowledge]\ntimeout_seconds = 100");
-    }
-
-    #[test]
-    fn pin_disables_auto_selection() {
-        let c = BotConfig::parse(
-            "schema_version = 1\n[llm.fireworks]\nmodel = 'accounts/fireworks/models/deepseek-v4p1-flash'",
-        )
-        .expect("valid");
-        assert!(!c.llm.fireworks.automatic());
-        assert!(select_model(&c.llm.fireworks, &[], 100).is_some());
-    }
-
-    #[test]
-    fn pinned_without_model_is_rejected() {
-        rejected("schema_version = 1\n[llm.fireworks]\nselection = 'pinned'");
-    }
-
-    #[test]
     fn pro_preview_and_foreign_accounts_are_rejected() {
         for name in [
             "accounts/fireworks/models/deepseek-v4-pro",
@@ -767,48 +559,6 @@ mod tests {
         let c = BotConfig::parse(MINIMAL).expect("valid");
         assert!(c.provider_for(UseCase::VoiceHint) == Provider::Openai);
         assert!(c.provider_for(UseCase::BotPate) == Provider::Fireworks);
-    }
-
-    #[test]
-    fn numeric_versions_are_not_lexically_sorted() {
-        let models = [
-            candidate("deepseek-v9-flash", 50),
-            candidate("deepseek-v10-flash", 60),
-        ];
-        assert_eq!(
-            select_model(&FireworksConfig::default(), &models, 100),
-            Some(models[1].id.as_str())
-        );
-    }
-
-    #[test]
-    fn newer_upload_of_old_version_does_not_downgrade() {
-        let models = [
-            candidate("deepseek-v4p1-flash", 50),
-            candidate("deepseek-v4-flash-0731", 60),
-        ];
-        assert_eq!(
-            select_model(&FireworksConfig::default(), &models, 100),
-            Some(models[0].id.as_str())
-        );
-    }
-
-    #[test]
-    fn candidate_must_be_ready_serverless_probed_and_not_future() {
-        let mut models = [
-            candidate("deepseek-v4-flash", 50),
-            candidate("deepseek-v5-flash", 60),
-            candidate("deepseek-v6-flash", 70),
-            candidate("deepseek-v7-flash", 80),
-            candidate("deepseek-v8-flash", 200),
-        ];
-        models[1].ready = false;
-        models[2].serverless = false;
-        models[3].probe_passed = false;
-        assert_eq!(
-            select_model(&FireworksConfig::default(), &models, 100),
-            Some(models[0].id.as_str())
-        );
     }
 
     #[test]

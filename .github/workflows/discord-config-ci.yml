@@ -10,6 +10,7 @@ on:
       - rust/crates/dl-bridges/**
       - rust/crates/dl-broker/**
       - rust/crates/dl-webcore/**
+      - rust/crates/dl-server-as-code/**
       - service/static/dashboard.html
       - service/static/operating-config.js
       - rust/bin/dl-bot/**
@@ -38,6 +39,10 @@ jobs:
         run: |
           cargo +1.88.0 test -j 2 -p dl-bridges --lib steam_operating
           cargo +1.88.0 test -j 2 -p dl-dashboard --lib visual_brain_route_tests
+          cargo +1.88.0 test -j 2 -p dl-dashboard --lib broker_evidence_requires_authenticated_fresh_envelope_and_pid
+          cargo +1.88.0 test -j 2 -p dl-bridges --lib typed_toml_host_reaches_actual_twitch_constructor
+          cargo +1.88.0 test -j 2 -p dl-bot --bin dl-bot typed_operating_snapshot_reaches_community_moderation_and_ai_constructors
+          cargo +1.88.0 test -j 2 -p dl-bot --bin dl-bot dl_bot_baut_keine_llm_clients_mehr_selbst
       - name: Check dashboard script
         run: node --check service/static/operating-config.js
       - name: Check existing runtime consumers

@@ -54,6 +54,10 @@ async fn active_bot_fingerprint() -> Option<(String, u64)> {
     ]
     .into_iter()
     .find_map(dl_core::runtime_config::secret_value)?;
+    fetch_bot_fingerprint(&url, &token).await
+}
+
+async fn fetch_bot_fingerprint(url: &str, token: &str) -> Option<(String, u64)> {
     let http = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -90,6 +94,66 @@ async fn active_bot_fingerprint() -> Option<(String, u64)> {
         .as_str()
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(|fingerprint| (fingerprint.to_owned(), process_id))
+}
+
+#[cfg(test)]
+mod active_tests {
+    use super::fetch_bot_fingerprint;
+    use axum::{http::HeaderMap, routing::get, Json, Router};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn broker_evidence_requires_authenticated_fresh_envelope_and_pid() {
+        for (body, expected) in [
+            (
+                json!({"ok":true,"result":{"config_fingerprint":"a".repeat(64),"process_id":1234}}),
+                Some(("a".repeat(64), 1234)),
+            ),
+            (
+                json!({"ok":true,"result":{"config_fingerprint":"a".repeat(64)}}),
+                None,
+            ),
+            (
+                json!({"ok":false,"result":{"config_fingerprint":"a".repeat(64),"process_id":1234}}),
+                None,
+            ),
+            (
+                json!({"ok":true,"result":{"config_fingerprint":"broken","process_id":1234}}),
+                None,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("Testport");
+            let address = listener.local_addr().expect("Testadresse");
+            let app = Router::new().route(
+                "/internal/master/v1/health",
+                get(move |headers: HeaderMap| {
+                    let body = body.clone();
+                    async move {
+                        assert_eq!(
+                            headers.get("X-Internal-Token").expect("interner Token"),
+                            "synthetic-token"
+                        );
+                        Json(body)
+                    }
+                }),
+            );
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("Testserver");
+            });
+            let url = format!("http://{address}/internal/master/v1/health");
+            assert_eq!(
+                fetch_bot_fingerprint(&url, "synthetic-token").await,
+                expected
+            );
+            server.abort();
+            let _ = server.await;
+            assert!(fetch_bot_fingerprint(&url, "synthetic-token")
+                .await
+                .is_none());
+        }
+    }
 }
 
 async fn output(saved: SavedConfig, active: &str) -> Response {

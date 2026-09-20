@@ -1666,6 +1666,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dl-central-db",
+ "dl-core",
  "hex",
  "http",
  "regex",

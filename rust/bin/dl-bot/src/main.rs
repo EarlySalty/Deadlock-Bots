@@ -31,8 +31,7 @@ use dl_core::runtime_config::lookup as operating_value;
 use dl_webcore::WebConfig;
 
 fn env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
+    operating_value(name)
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
@@ -104,29 +103,11 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
 }
 
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
-    match std::env::var("DL_LFG_PANEL_CHANNEL_ID") {
-        Ok(raw) => lfg_panel_channel_id_from_value(Some(raw.as_str())),
-        Err(std::env::VarError::NotPresent) => lfg_panel_channel_id_from_value(None),
-        Err(err) => (
-            None,
-            Some(format!(
-                "DL_LFG_PANEL_CHANNEL_ID konnte nicht gelesen werden: {err}"
-            )),
-        ),
-    }
+    lfg_panel_channel_id_from_value(operating_value("DL_LFG_PANEL_CHANNEL_ID").as_deref())
 }
 
 fn lfg_forum_channel_id_from_env() -> (Option<u64>, Option<String>) {
-    match std::env::var("DL_LFG_FORUM_CHANNEL_ID") {
-        Ok(raw) => lfg_forum_channel_id_from_value(Some(raw.as_str())),
-        Err(std::env::VarError::NotPresent) => lfg_forum_channel_id_from_value(None),
-        Err(err) => (
-            None,
-            Some(format!(
-                "DL_LFG_FORUM_CHANNEL_ID konnte nicht gelesen werden: {err}"
-            )),
-        ),
-    }
+    lfg_forum_channel_id_from_value(operating_value("DL_LFG_FORUM_CHANNEL_ID").as_deref())
 }
 
 fn lfg_panel_channel_id_from_value(raw: Option<&str>) -> (Option<u64>, Option<String>) {
@@ -192,7 +173,7 @@ fn chat_text_generator(
     use_case: dl_ai::LlmUseCase,
     json_mode: bool,
 ) -> Option<Arc<dyn dl_ai::TextGenerator>> {
-    chat_text_generator_with(use_case, json_mode, |key| std::env::var(key).ok())
+    chat_text_generator_with(use_case, json_mode, operating_value)
 }
 
 fn chat_text_generator_with(
@@ -236,8 +217,8 @@ fn chat_text_generator_with(
     }
 }
 
-/// Modellwahl aus der Umgebung. Der Anbieter kommt aus dem Gate, das Modell
-/// weiterhin aus der bisherigen Env — es wandert als `GenerateRequest::model`
+/// Modellwahl aus dem geprüften Betriebssnapshot. Der Anbieter kommt aus dem Gate,
+/// das bestehende Modell wandert als `GenerateRequest::model`
 /// bis in die Anfrage.
 fn model_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
@@ -469,9 +450,20 @@ impl dl_discord::InteractionHandler for ChangelogPostCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
-    dl_core::observability::init_tracing("info");
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let operating = dl_core::config::process_bot_config()?.snapshot();
+    dl_core::observability::init_tracing(
+        operating
+            .runtime
+            .start
+            .log_filter
+            .as_deref()
+            .unwrap_or("info"),
+    );
+    tracing::info!(
+        config_fingerprint = dl_core::config::process_bot_config()?.fingerprint(),
+        "Betriebskonfiguration geladen"
+    );
     let _pid_lock = master::PidLock::acquire_default().context("Single-Instance-PID-Lock")?;
     let startup_text = master::startup_text_now();
 
@@ -501,7 +493,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // KI-Transparenz-Log: jede Modellantwort wird im Transparenz-Kanal mitlesbar.
     // Die Senke wird bei jedem chat()-Aufruf neu aufgeloest, deshalb ist es
     // ungefaehrlich, sie hier vor dem Bau der Provider zu registrieren.
-    let transparency_config = dl_ai::TransparencyConfig::from_env(|k| std::env::var(k).ok());
+    let transparency_config = dl_ai::TransparencyConfig::from_env(operating_value);
     let _transparency_log = transparency_config.enabled.then(|| {
         let log = dl_ai::TransparencyLog::spawn(
             Arc::new(aiglue::DiscordTransparencyMessenger {
@@ -606,11 +598,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         false,
                         |key| match (key, override_provider.as_deref()) {
                             ("DL_LLM_PROVIDER_STREAMER_MATCHER", Some(provider)) => {
-                                std::env::var(key)
-                                    .ok()
-                                    .or_else(|| Some(provider.to_string()))
+                                operating_value(key).or_else(|| Some(provider.to_string()))
                             }
-                            _ => std::env::var(key).ok(),
+                            _ => operating_value(key),
                         },
                     );
                     match generator {
@@ -646,8 +636,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
-    let mut concierge_config =
-        dl_community::concierge::ConciergeConfig::from_env(|k| std::env::var(k).ok());
+    let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
     concierge_config.ai_timeout =
         std::time::Duration::from_secs(operating.concierge.timeout_seconds);
     let concierge_memory_store = concierge_config
@@ -657,8 +646,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Startinventar: nach dem Hochfahren steht im Journal, welcher Anbieter
     // welchen KI-Pfad bedient und welcher Pfad still ohne Modell weiterlaeuft.
     aiglue::log_ai_startup_inventory(
-        &dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok()),
-        |k| std::env::var(k).ok(),
+        &dl_ai::LlmProviderConfig::from_env(operating_value),
+        operating_value,
         &transparency_config,
         &concierge_config,
     );
@@ -716,8 +705,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     // Nicht XDG_RUNTIME_DIR: das ist eine tmpfs von rund 1,5 GB, und eine sechsstuendige
     // Aufnahme braucht 2,1 GB. Der Zwischenspeicher gehoert deshalb auf die Platte.
-    let recording_state_dir = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
+    let recording_state_dir = operating
+        .runtime
+        .community
+        .recording_state_dir
+        .clone()
+        .or_else(|| std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from))
         .or_else(|| {
             std::env::var_os("HOME")
                 .map(std::path::PathBuf::from)
@@ -740,10 +733,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .context("Scrim-Record-Temp-Verzeichnis erstellen")?;
     // Ziel der Aufnahmen ist der Google-Drive-Ordner hinter dem rclone-Remote; beides
     // ist konfigurierbar, damit ein Umzug keinen Rebuild braucht.
-    let rclone_path = std::env::var("SCRIM_RECORD_RCLONE_PATH")
-        .unwrap_or_else(|_| "/usr/local/bin/rclone".to_string());
-    let archive_base = std::env::var("SCRIM_RECORD_ARCHIVE_BASE")
-        .unwrap_or_else(|_| "gdrive:Deadlock/Scrim-Aufnahmen".to_string());
+    let rclone_path = operating_value("SCRIM_RECORD_RCLONE_PATH")
+        .unwrap_or_else(|| "/usr/local/bin/rclone".to_string());
+    let archive_base = operating_value("SCRIM_RECORD_ARCHIVE_BASE")
+        .unwrap_or_else(|| "gdrive:Deadlock/Scrim-Aufnahmen".to_string());
     let scrim_recorder = dl_voice::scrim_record::ScrimRecorder::new(
         cache_snapshot.clone(),
         recording_backend,
@@ -919,10 +912,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     let moderation_channel_id =
         dl_moderation::moderation_channel::moderation_channel_id_from_lookup(|k| {
-            std::env::var(k).ok()
+            operating_value(k)
         });
     let moderation_scan_channel_ids =
-        dl_moderation::moderation_channel::scan_channel_ids_from_lookup(|k| std::env::var(k).ok());
+        dl_moderation::moderation_channel::scan_channel_ids_from_lookup(operating_value);
 
     // Text-Analyse und Verify-Text laufen ueber das Gate; die Bildpfade haengen
     // am VisionGenerator, den der ChatProvider (noch) nicht kann, und bleiben
@@ -961,10 +954,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
     let concierge_ai = {
-        match dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok())
+        match dl_ai::LlmProviderConfig::from_env(operating_value)
             .map_err(anyhow::Error::from)
             .and_then(|cfg| {
-                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, |k| std::env::var(k).ok())
+                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, operating_value)
                     .map_err(anyhow::Error::from)
             }) {
             Ok(provider) => Some(provider),
@@ -1011,7 +1004,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
             None
         } else {
-            let raw_allowlist = std::env::var("BRAIN_CHANNEL_ALLOWLIST").ok();
+            let raw_allowlist = operating_value("BRAIN_CHANNEL_ALLOWLIST");
             let channel_allowlist = brain_channel_allowlist_from_value(raw_allowlist.as_deref());
             if channel_allowlist.is_none() {
                 tracing::warn!(
@@ -1252,17 +1245,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
     );
 
-    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())
-    {
-        Ok(cfg) => match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
-            std::env::var(key).ok()
-        }) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
-                None
+    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(operating_value) {
+        Ok(cfg) => {
+            match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, operating_value) {
+                Ok(provider) => Some(provider),
+                Err(err) => {
+                    tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
+                    None
+                }
             }
-        },
+        }
         Err(err) => {
             tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Bot ungueltig");
             None
@@ -1508,7 +1500,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
 
         // Player-Finder (5): portiert, aber per Flag deaktiviert (Redesign geplant)
-        if dl_activity::player_finder::enabled(|k| std::env::var(k).ok()) {
+        if dl_activity::player_finder::enabled(operating_value) {
             let _finder = dl_activity::player_finder::PlayerFinder::new(central_pool.clone());
             tracing::warn!(
                 "PLAYER_FINDER_ENABLED=1 gesetzt — Kern portiert, Message-Flow folgt mit dem Redesign"
@@ -1674,7 +1666,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
         let voice_hint_enabled =
-            dl_community::voice_change_hint::enabled_from_lookup(|k| std::env::var(k).ok());
+            dl_community::voice_change_hint::enabled_from_lookup(operating_value);
         let voice_hint_classifier = if voice_hint_enabled {
             chat_text_generator(dl_ai::LlmUseCase::VoiceHint, false).map(|generator| {
                 Arc::new(dl_community::voice_change_hint::OpenAiVoiceHintClassifier::new(generator))
@@ -1927,6 +1919,65 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_operating_snapshot_reaches_community_moderation_and_ai_constructors() {
+        let config = dl_core::bot_config::BotConfig::parse(
+            r#"
+schema_version=1
+[discord]
+guild_id="1234"
+[runtime.community]
+concierge_enabled=true
+concierge_test_users=[55,66]
+concierge_free_voice=false
+survey_pulse=true
+survey_interval_days=30
+lfg_freetext=true
+lfg_freetext_channel_id=777
+[runtime.moderation]
+channel_id=888
+scan_channel_ids=[111,222]
+[runtime.ai]
+transparency_enabled=false
+[llm.use_cases.bot_pate]
+provider="fireworks"
+model="accounts/fireworks/models/deepseek-v4-flash-0731"
+"#,
+        )
+        .expect("synthetische Betriebskonfiguration");
+        let lookup = |key: &str| config.runtime_value(key);
+        let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
+        assert!(concierge.enabled);
+        assert!(!concierge.free_voice);
+        assert_eq!(concierge.main_guild_id, 1234);
+        assert_eq!(concierge.test_user_allowlist.len(), 2);
+        let survey = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(lookup);
+        assert!(survey.enabled);
+        assert_eq!(survey.interval_days, 30);
+        assert!(dl_activity::lfg_freetext::config_from_lookup(lookup)
+            .expect("LFG-Konfiguration")
+            .is_some());
+        assert_eq!(
+            dl_moderation::moderation_channel::moderation_channel_id_from_lookup(lookup),
+            888
+        );
+        assert_eq!(
+            dl_moderation::moderation_channel::scan_channel_ids_from_lookup(lookup),
+            vec![111, 222]
+        );
+        assert!(!dl_ai::TransparencyConfig::from_env(lookup).enabled);
+        let ai = dl_ai::LlmProviderConfig::from_env(lookup).expect("bestehender Anbieter");
+        assert_eq!(
+            ai.provider_for(dl_ai::LlmUseCase::BotPate, lookup)
+                .expect("Anbieter"),
+            dl_ai::LlmProviderKind::Fireworks
+        );
+        assert_eq!(
+            lookup("DL_LLM_MODEL_BOT_PATE").as_deref(),
+            Some("accounts/fireworks/models/deepseek-v4-flash-0731")
+        );
+    }
+
     use super::{
         brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
         lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,

@@ -1,13 +1,12 @@
 # Discord-Konfiguration für den laufenden Umbau.
-# WIP: Dienste/Ports und der Snapshot-Pfad werden vom dl-core-Startpfad gelesen.
-# Die weiteren Modulbereiche und die KI-Auswahl sind noch nicht durchgängig angebunden.
+# Prüfbeispiel für Bot/Web. Keine produktive Betriebsmatrix.
 # Vor einem Deploy müssen die vorhandenen Betriebswerte übernommen werden.
 # Zugangsdaten bleiben in Infisical und gehören nicht in diese Datei.
 # Änderungen der angebundenen Startwerte werden beim Prozessneustart wirksam.
 schema_version = 1
 
 [discord]
-# guild_id, channels und roles vor dem produktiven Cutover inventarisieren.
+# guild_id vor dem produktiven Cutover inventarisieren.
 # Discord-IDs werden als Dezimalstrings eingetragen.
 
 [services]
@@ -23,12 +22,8 @@ changelog_port = 8899
 legacy_snapshot_path = "data/deadlock.sqlite3"
 
 [features]
-# Diese Prüfdefaults steuern die laufenden Module noch nicht.
+# Konkrete weitere Modulschalter stehen unter runtime.community.
 gateway = false
-onboarding = false
-concierge = false
-lfg = false
-voice = false
 
 [moderation]
 enforce = false
@@ -36,18 +31,8 @@ enforce = false
 [concierge]
 timeout_seconds = 100
 
-[knowledge]
-ask_url = "http://127.0.0.1:8896/public/v1/ask"
-timeout_seconds = 7
-retrieval = "bm25"
-
 [llm.fireworks]
-selection = "latest_stable"
-family = "deepseek_flash"
-refresh_seconds = 3600
-fallback_max_age_seconds = 86400
-# Ein eingetragenes model deaktiviert die automatische Auswahl im Auswahlkern.
-# Die Katalogabfrage, Probe und Aktualisierung der Clients sind noch anzubinden.
+# Optionaler ausdrücklich freigegebener Modell-Pin. Keine automatische Auswahl.
 
 [llm.use_cases.moderation_verify]
 provider = "openai"

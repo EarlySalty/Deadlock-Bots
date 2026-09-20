@@ -32,3 +32,11 @@ Explizite relative neue Pfade beziehen sich auf das Verzeichnis der gewählten C
 Noch folgende Bereiche2+3+6: Community/Voice/LFG/Scrim-Aufnahme, übrige Moderationsgrenzen/IDs, vorhandene KI-/Knowledge-Betriebsparameter. Bis dahin kein Vollmigrations-/Deploylabel. Keine automatische Modellwahl oder neue Modelle aktivieren.
 
 Prüfung Runtimepaket 1: Bot/Web-Check und Produktions-Clippy für dl-bot, dl-web, dl-core, dl-broker und dl-webcore mit -D warnings bestanden. 97 Tests (Core54, Broker32, Webcore11) bestanden; Kommentar-/CAS-Test enthält nun einen relativen Datenpfad, damit gespeicherter und erneut geladener Fingerprint gleich bleiben. Zusätzliche ID-/Präfixvalidierung anschließend gezielt geprüft. UI unverändert, weiterhin kein Browsernachweis. Selbstgate und unabhängiger Paketreview folgen auf dem festen Commit.
+
+## Runtimepaket 2: Bot/Web-Verbraucher vollständig anschließen
+
+Gemeinsame Projektion um Community, Voice/LFG, Moderation und vorhandene KI-/Brain-Parameter erweitert; Botmain und Dashboard-AI verwenden überall die typisierten Werte. Auch der LFG-Regelleser in dl-server-as-code und der bisher über EnvFilter versteckte RUST_LOG-Leser sind angeschlossen. Start lädt und validiert vor Logging/Clients/PID-Nebenwirkungen. Secretvertrag unverändert, kein neuer Provider oder Modellname. Separate Knowledge-Fristen bleiben 8 beziehungsweise 20 Sekunden, keine neue Retrievalauswahl.
+
+Unverdrahtete ursprüngliche WIP-Sammelfelder, generische ID-Maps und automatische Modellauflösung entfernt. Details und vollständige Verbraucherbereiche: VERBRAUCHER.md. Aufnahmen behalten ohne expliziten Pfad den bestehenden HOME/XDG-Standard; keine Bestandsdatei wird verschoben. Aktive Nebenjobs werden von separatem Integrationsworker bearbeitet und vor Rollout gemeinsam geprüft.
+
+Gezielter synthetischer Brokerstatus-Test bestanden: Authheader, gültiger Fingerprint mit PID, ungültige/fehlende Daten und nicht erreichbarer Broker. Core-/Bot-Konstruktor-/Guardtests und endgültiges Produktions-Clippy laufen auf dem neuen Stand; erster Clippylauf fand eine redundante Closure, sie ist korrigiert. Kein neuer Release-Build und kein Deploy.
