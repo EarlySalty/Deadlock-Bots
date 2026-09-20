@@ -382,6 +382,10 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/api/brain/graph", get(crate::visual_brain::graph))
         .route("/api/brain/graph-ui.js", get(crate::visual_brain::ui))
         .route(
+            "/api/brain/knowledge-status",
+            get(crate::visual_brain::knowledge_status),
+        )
+        .route(
             "/api/brain/graph-library.js",
             get(crate::visual_brain::library),
         )
@@ -2262,6 +2266,7 @@ mod visual_brain_route_tests {
         for path in [
             "/api/brain/graph",
             "/api/brain/graph-ui.js",
+            "/api/brain/knowledge-status",
             "/api/brain/graph-library.js",
         ] {
             for (cookie, expected) in [

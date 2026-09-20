@@ -306,6 +306,7 @@ fn messung_trennt_quellentreffer_von_lexikalisch_zulaessigem_beleg() {
 fn messbereiche_verweigern_luecken_ausserhalb_der_golden_suite() -> Result<()> {
     assert_eq!(
         bench::Plan {
+            holdout: false,
             rounds: 1,
             first: 112,
             count: Some(142)
@@ -315,6 +316,7 @@ fn messbereiche_verweigern_luecken_ausserhalb_der_golden_suite() -> Result<()> {
     );
     assert_eq!(
         bench::Plan {
+            holdout: false,
             rounds: 1,
             first: 112,
             count: None
@@ -330,6 +332,7 @@ fn messbereiche_verweigern_luecken_ausserhalb_der_golden_suite() -> Result<()> {
         (usize::MAX, Some(1)),
     ] {
         assert!(bench::Plan {
+            holdout: false,
             rounds: 1,
             first,
             count

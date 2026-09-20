@@ -1,3 +1,5 @@
 {
-  "site_root": "/home/nathanael/.graphify/site"
+  "site_root": "/home/nathanael/.graphify/site",
+  "knowledge_status_path": "/home/nathanael/.local/share/dl-knowledge/status-summary.json",
+  "game_status_path": "/home/nathanael/.local/share/deadlock-brain/game-wiki/current/status.json"
 }

@@ -65,7 +65,7 @@ pub async fn run(
     for round in 0..5 {
         for (file, row, case) in &cases {
             let start = Instant::now();
-            let vector = embedder.embed(std::slice::from_ref(&case.question))?;
+            let vector = embedder.embed_queries(std::slice::from_ref(&case.question))?;
             ensure!(vector.len() == 1, "Query-Embedding-Anzahl ist ungültig");
             embedding_times.push(start.elapsed().as_secs_f64() * 1000.0);
             let hits = store::search_vector(pool, embedder.fingerprint(), &vector[0], 6).await?;

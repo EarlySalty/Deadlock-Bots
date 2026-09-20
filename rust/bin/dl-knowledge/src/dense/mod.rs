@@ -18,7 +18,12 @@ pub const MAX_TOKENS: usize = 256;
 
 pub trait Embedder: Send {
     fn fingerprint(&self) -> &str;
+    /// Encode indexed documents according to the model's passage contract.
     fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// Encode search questions; asymmetric encoders override their query prefix.
+    fn embed_queries(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -96,7 +101,7 @@ pub fn validate_embedding(embedding: &[f32]) -> Result<()> {
     Ok(())
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(super) fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 

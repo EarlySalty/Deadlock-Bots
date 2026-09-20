@@ -1,0 +1,3 @@
+{
+  "database_url": "postgresql:///dl_knowledge_eval_local?host=/var/run/postgresql"
+}

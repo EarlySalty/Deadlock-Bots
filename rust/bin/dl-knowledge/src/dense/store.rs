@@ -159,7 +159,7 @@ pub async fn dense_search(
         "Dense top_k muss zwischen 1 und 100 liegen"
     );
     let fingerprint = embedder.fingerprint().to_string();
-    let embeddings = embedder.embed(&[query.to_string()])?;
+    let embeddings = embedder.embed_queries(&[query.to_string()])?;
     ensure!(embeddings.len() == 1, "Query-Embedding-Anzahl ist ungültig");
     ensure!(
         fingerprint == embedder.fingerprint(),

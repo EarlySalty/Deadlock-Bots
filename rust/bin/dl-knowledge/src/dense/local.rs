@@ -4,6 +4,82 @@ use anyhow::{bail, Result};
 
 use super::Embedder;
 
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    #[default]
+    MiniLm,
+    MultilingualE5Small,
+}
+
+#[cfg(any(feature = "dense-fastembed", feature = "dense-candle"))]
+impl Profile {
+    fn max_tokens(self) -> usize {
+        match self {
+            Self::MiniLm => super::MAX_TOKENS,
+            Self::MultilingualE5Small => 512,
+        }
+    }
+
+    fn contract(self, backend: &str) -> String {
+        match self {
+            Self::MiniLm => format!("all-MiniLM-L6-v2:{backend}:256:masked-mean:l2:v1"),
+            Self::MultilingualE5Small => format!("multilingual-e5-small:{backend}:512:masked-mean:l2:query-prefix=query: :passage-prefix=passage: :v1"),
+        }
+    }
+
+    fn texts(self, texts: &[String], query: bool) -> Vec<String> {
+        match self {
+            Self::MiniLm => texts.to_vec(),
+            Self::MultilingualE5Small => texts
+                .iter()
+                .map(|text| format!("{}: {text}", if query { "query" } else { "passage" }))
+                .collect(),
+        }
+    }
+}
+
+pub fn load_profile(backend: &str, root: &Path, profile: Profile) -> Result<Box<dyn Embedder>> {
+    match profile {
+        Profile::MiniLm => load(backend, root),
+        #[cfg(feature = "dense-fastembed")]
+        Profile::MultilingualE5Small if backend == "fastembed" => {
+            Ok(Box::new(FastEmbedder::load_profile(root, profile)?))
+        }
+        Profile::MultilingualE5Small => {
+            bail!("Mehrsprachiges E5 benötigt den vorhandenen FastEmbed-Laufweg")
+        }
+    }
+}
+
+#[cfg(all(test, feature = "dense-fastembed"))]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn e5_contract_separates_query_and_passage_without_changing_legacy() {
+        let texts = vec!["Wie finde ich Mitspieler?".to_string()];
+        assert_eq!(Profile::MiniLm.texts(&texts, false), texts);
+        assert_eq!(Profile::MiniLm.texts(&texts, true), texts);
+        assert_eq!(
+            Profile::MultilingualE5Small.texts(&texts, true),
+            ["query: Wie finde ich Mitspieler?"]
+        );
+        assert_eq!(
+            Profile::MultilingualE5Small.texts(&texts, false),
+            ["passage: Wie finde ich Mitspieler?"]
+        );
+        assert_ne!(
+            Profile::MiniLm.contract("fastembed-5.2.0"),
+            Profile::MultilingualE5Small.contract("fastembed-5.2.0")
+        );
+        assert_eq!(
+            Profile::MiniLm.contract("fastembed-5.2.0"),
+            "all-MiniLM-L6-v2:fastembed-5.2.0:256:masked-mean:l2:v1"
+        );
+    }
+}
+
 pub fn load(backend: &str, root: &Path) -> Result<Box<dyn Embedder>> {
     match backend {
         #[cfg(feature = "dense-fastembed")]
@@ -29,12 +105,22 @@ struct ModelFiles {
 
 #[cfg(any(feature = "dense-fastembed", feature = "dense-candle"))]
 impl ModelFiles {
+    #[cfg(feature = "dense-candle")]
     fn load(root: &Path, backend: &str, weights_name: &str) -> Result<Self> {
+        Self::load_profile(root, backend, weights_name, Profile::MiniLm)
+    }
+
+    fn load_profile(
+        root: &Path,
+        backend: &str,
+        weights_name: &str,
+        profile: Profile,
+    ) -> Result<Self> {
         use anyhow::{ensure, Context};
         use sha2::{Digest, Sha256};
 
         let mut hash = Sha256::new();
-        hash.update(format!("all-MiniLM-L6-v2:{backend}:256:masked-mean:l2:v1"));
+        hash.update(profile.contract(backend));
         let mut read = |name: &str| -> Result<Vec<u8>> {
             let bytes = std::fs::read(root.join(name))
                 .with_context(|| format!("Lokale Modelldatei fehlt oder ist unlesbar: {name}; Setup vor dem Dienststart ausführen"))?;
@@ -56,8 +142,12 @@ impl ModelFiles {
             "Modell ist nicht 384-dimensional"
         );
         ensure!(
-            parsed["num_hidden_layers"].as_u64() == Some(6),
-            "Modell hat nicht sechs Transformer-Layer"
+            parsed["num_hidden_layers"].as_u64()
+                == Some(match profile {
+                    Profile::MiniLm => 6,
+                    Profile::MultilingualE5Small => 12,
+                }),
+            "Transformer-Layer passen nicht zum expliziten Embeddingprofil"
         );
         Ok(Self {
             weights,
@@ -74,12 +164,17 @@ impl ModelFiles {
 struct FastEmbedder {
     model: fastembed::TextEmbedding,
     fingerprint: String,
+    profile: Profile,
 }
 
 #[cfg(feature = "dense-fastembed")]
 impl FastEmbedder {
     fn load(root: &Path) -> Result<Self> {
-        let files = ModelFiles::load(root, "fastembed-5.2.0", "model.onnx")?;
+        Self::load_profile(root, Profile::MiniLm)
+    }
+
+    fn load_profile(root: &Path, profile: Profile) -> Result<Self> {
+        let files = ModelFiles::load_profile(root, "fastembed-5.2.0", "model.onnx", profile)?;
         let tokenizer = fastembed::TokenizerFiles {
             tokenizer_file: files.tokenizer,
             config_file: files.config,
@@ -88,10 +183,12 @@ impl FastEmbedder {
         };
         let model = fastembed::UserDefinedEmbeddingModel::new(files.weights, tokenizer)
             .with_pooling(fastembed::Pooling::Mean);
-        let options = fastembed::InitOptionsUserDefined::new().with_max_length(super::MAX_TOKENS);
+        let options =
+            fastembed::InitOptionsUserDefined::new().with_max_length(profile.max_tokens());
         Ok(Self {
             model: fastembed::TextEmbedding::try_new_from_user_defined(model, options)?,
             fingerprint: files.fingerprint,
+            profile,
         })
     }
 }
@@ -106,7 +203,22 @@ impl Embedder for FastEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let embeddings = self.model.embed(texts.to_vec(), Some(16))?;
+        let embeddings = self
+            .model
+            .embed(self.profile.texts(texts, false), Some(16))?;
+        for embedding in &embeddings {
+            super::validate_embedding(embedding)?;
+        }
+        Ok(embeddings)
+    }
+
+    fn embed_queries(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let embeddings = self
+            .model
+            .embed(self.profile.texts(texts, true), Some(16))?;
         for embedding in &embeddings {
             super::validate_embedding(embedding)?;
         }

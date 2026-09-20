@@ -46,4 +46,4 @@ if [[ "${FIREWORKS_MODEL:-}" == "accounts/fireworks/models/deepseek-v4-flash" ]]
   unset FIREWORKS_MODEL
 fi
 
-exec "$ROOT_DIR/rust/target/release/dl-knowledge"
+exec "$ROOT_DIR/rust/target/release/dl-knowledge" "$@"

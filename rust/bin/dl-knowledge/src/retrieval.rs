@@ -50,13 +50,40 @@ pub(crate) async fn retrieve(
             "Die Frage muss 1 bis 4000 Zeichen enthalten.",
         ));
     }
-    // Deliberately use the currently approved lexical search, not state.hybrid
-    // or state.generator. Retrieval must never trigger another paid model call.
     let knowledge = state.knowledge.read().await;
+    if let Some(chunk) = crate::faq::exact(&knowledge.faq, question).filter(|chunk| {
+        state
+            .hybrid
+            .as_ref()
+            .is_none_or(|runtime| runtime.accepts(chunk))
+    }) {
+        return Ok(Json(merge_evidence(vec![evidence_from_ranked(
+            question,
+            vec![(chunk.clone(), 1.0)],
+            false,
+        )])));
+    }
+    if let Some(runtime) = &state.hybrid {
+        let mut queues = Vec::new();
+        for query in retrieval_questions(question) {
+            let ranked = runtime
+                .retrieve_snapshot(&query, &knowledge)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "Öffentliches Hybrid-Retrieval fehlgeschlagen");
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Wissenssuche ist vorübergehend nicht verfügbar.",
+                    )
+                })?;
+            queues.push(evidence_from_ranked(&query, ranked, false));
+        }
+        return Ok(Json(merge_evidence(queues)));
+    }
     Ok(Json(collect_evidence(&knowledge, question)))
 }
 
-fn public_html_path(path: &str) -> bool {
+pub(crate) fn public_html_path(path: &str) -> bool {
     !path.is_empty()
         && path.trim() == path
         && path.ends_with(".html")
@@ -80,6 +107,10 @@ fn collect_evidence(knowledge: &KnowledgeBase, question: &str) -> RetrievalRespo
         .iter()
         .map(|query| evidence_for_question(knowledge, query))
         .collect::<Vec<_>>();
+    merge_evidence(queues)
+}
+
+fn merge_evidence(queues: Vec<Vec<Evidence>>) -> RetrievalResponse {
     let mut evidence = Vec::new();
     let mut text_size = 0;
     let mut truncated = false;
@@ -172,8 +203,53 @@ fn retrieval_questions(question: &str) -> Vec<String> {
 }
 
 fn evidence_for_question(knowledge: &KnowledgeBase, question: &str) -> Vec<Evidence> {
-    let mut evidence = Vec::new();
-    for (chunk, _) in knowledge.search(question, 6) {
+    evidence_from_ranked(question, knowledge.search(question, 6), true)
+}
+
+/// Measure the actual whole-passage projection, separately from generator quality.
+pub(crate) fn measure_projection(
+    question: &str,
+    ranked: &[crate::Chunk],
+    lexical: bool,
+    expected_sources: &[String],
+    answer_terms: &[String],
+) -> serde_json::Value {
+    let response = merge_evidence(vec![evidence_from_ranked(
+        question,
+        ranked.iter().cloned().map(|chunk| (chunk, 1.0)).collect(),
+        lexical,
+    )]);
+    let text = response
+        .evidence
+        .iter()
+        .map(|e| e.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    let paths = response
+        .evidence
+        .iter()
+        .map(|e| e.source.path.as_str())
+        .collect::<HashSet<_>>();
+    let missing_terms = answer_terms
+        .iter()
+        .filter(|term| !text.contains(&term.to_lowercase()))
+        .collect::<Vec<_>>();
+    serde_json::json!({"provided_paths":paths,"evidence_count":response.evidence.len(),
+        "truncated":response.truncated,"source_hit":expected_sources.iter().any(|path| paths.contains(path.as_str())),
+        "all_expected_sources":expected_sources.iter().all(|path| paths.contains(path.as_str())),
+        "missing_answer_terms":missing_terms,"all_answer_terms":missing_terms.is_empty(),
+        "scope":"single-query public passage projection; no generated-answer claim"})
+}
+
+fn evidence_from_ranked(
+    question: &str,
+    ranked: Vec<(crate::Chunk, f64)>,
+    lexical: bool,
+) -> Vec<Evidence> {
+    let mut queues = Vec::new();
+    for (chunk, _) in ranked {
+        let mut evidence = Vec::new();
         // Defense in depth: the production loader already rejects non-public
         // corpora; an accidental future in-memory caller cannot bypass this.
         if !public_html_path(&chunk.path) {
@@ -186,7 +262,7 @@ fn evidence_for_question(knowledge: &KnowledgeBase, question: &str) -> Vec<Evide
             if used.contains(&index) {
                 continue;
             }
-            if !candidate_is_relevant(question, &candidate) {
+            if lexical && !candidate_is_relevant(question, candidate) {
                 continue;
             }
             let mut indices = vec![index];
@@ -229,7 +305,7 @@ fn evidence_for_question(knowledge: &KnowledgeBase, question: &str) -> Vec<Evide
             // well as its anchor; all passage text remains verbatim.
             let mut contextual = candidate.clone();
             contextual.passage.body = text.clone();
-            if !candidate_is_relevant(question, &contextual) {
+            if lexical && !candidate_is_relevant(question, &contextual) {
                 continue;
             }
             used.extend(indices);
@@ -243,6 +319,26 @@ fn evidence_for_question(knowledge: &KnowledgeBase, question: &str) -> Vec<Evide
                 text,
                 observed_at: observed_at.clone(),
             });
+        }
+        queues.push(evidence);
+    }
+    if lexical {
+        return queues.into_iter().flatten().collect();
+    }
+    // A long high-ranked section must not spend the entire evidence budget
+    // before another selected section can supply its conditions or answer.
+    let mut queues = queues.into_iter().map(Vec::into_iter).collect::<Vec<_>>();
+    let mut evidence = Vec::new();
+    loop {
+        let mut added = false;
+        for queue in &mut queues {
+            if let Some(item) = queue.next() {
+                evidence.push(item);
+                added = true;
+            }
+        }
+        if !added {
+            break;
         }
     }
     evidence
@@ -293,6 +389,7 @@ mod tests {
 
     async fn request(question: &str, chunks: Vec<Chunk>) -> (StatusCode, Value) {
         let state = AppState {
+            reload_gate: Default::default(),
             hybrid: None,
             docs_path: "public".into(),
             knowledge: Arc::new(RwLock::new(KnowledgeBase::from_chunks(chunks))),
@@ -315,6 +412,7 @@ mod tests {
     #[tokio::test]
     async fn retrieval_only_disables_ask_explicitly_and_keeps_evidence_available() {
         let state = AppState {
+            reload_gate: Default::default(),
             hybrid: None,
             docs_path: "public".into(),
             knowledge: Arc::new(RwLock::new(KnowledgeBase::from_chunks(vec![chunk(
@@ -334,13 +432,15 @@ mod tests {
                     Request::post(format!("/public/v1/{route}"))
                         .header("content-type", "application/json")
                         .body(Body::from(r#"{"question":"Paten"}"#))
-                        .unwrap(),
+                        .expect("Gültige Testfixture erwartet"),
                 )
                 .await
-                .unwrap();
+                .expect("Gültige Testfixture erwartet");
             assert_eq!(response.status(), expected);
-            let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
-            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let bytes = to_bytes(response.into_body(), 100_000)
+                .await
+                .expect("Gültige Testfixture erwartet");
+            let body: Value = serde_json::from_slice(&bytes).expect("Gültige Testfixture erwartet");
             if route == "ask" {
                 assert_eq!(body["error"], "retrieval_only");
             } else {
@@ -486,6 +586,34 @@ mod tests {
     }
 
     #[test]
+    fn semantic_projection_preserves_later_sources_before_extra_neighbors() {
+        let paragraphs = (0..20)
+            .map(|n| format!("Vollständiger Kontextabsatz {n}."))
+            .collect::<Vec<_>>();
+        let refs = paragraphs.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = merge_evidence(vec![evidence_from_ranked(
+            "Ablauf",
+            vec![
+                (chunk("lange-quelle.html", &refs), 1.0),
+                (
+                    chunk(
+                        "zweite-quelle.html",
+                        &["Die Leitung muss vorher zustimmen. Ohne Zustimmung nicht starten."],
+                    ),
+                    0.9,
+                ),
+            ],
+            false,
+        )]);
+        assert!(result.truncated);
+        assert_eq!(result.evidence[1].source.path, "zweite-quelle.html");
+        assert_eq!(
+            result.evidence[1].text,
+            "Die Leitung muss vorher zustimmen. Ohne Zustimmung nicht starten."
+        );
+    }
+
+    #[test]
     fn duplicate_questions_do_not_repeat_evidence() {
         let knowledge =
             KnowledgeBase::from_chunks(vec![chunk("alpha.html", &["Alpha erklärt den Ablauf."])]);
@@ -508,7 +636,8 @@ mod tests {
     #[test]
     #[ignore = "Explizite Abnahme gegen den freigegebenen öffentlichen Produktionssnapshot"]
     fn six_live_questions_against_approved_snapshot() {
-        let knowledge = crate::load_production_corpus(Path::new(crate::DEFAULT_DOCS_PATH)).unwrap();
+        let knowledge = crate::load_production_corpus(Path::new(crate::DEFAULT_DOCS_PATH))
+            .expect("Gültige Testfixture erwartet");
         let cases = [
             ("C01", "Wie finde ich einen Paten in der Community?"),
             ("C02", "Wie verknüpfe ich meinen Steam-Account mit Discord?"),
@@ -531,10 +660,13 @@ mod tests {
             let response = collect_evidence(&knowledge, question);
             let value = json!({"id":id,"question":question,"retrieval_ms":start.elapsed().as_millis(),"response":response});
             if matches!(id, "C01" | "C04" | "M01") {
-                assert!(value["response"]["evidence"].as_array().unwrap().iter().any(|item| item["text"].as_str().unwrap().contains("ausdrücklich selbst einen Paten")), "{id}: Anforderungsabsatz fehlt");
+                assert!(value["response"]["evidence"].as_array().expect("Gültige Testfixture erwartet").iter().any(|item| item["text"].as_str().expect("Gültige Testfixture erwartet").contains("ausdrücklich selbst einen Paten")), "{id}: Anforderungsabsatz fehlt");
             }
             value
         }).collect::<Vec<_>>();
-        println!("{}", serde_json::to_string_pretty(&results).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&results).expect("Gültige Testfixture erwartet")
+        );
     }
 }

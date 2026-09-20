@@ -6,6 +6,7 @@ use url::Url;
 pub const INFISICAL_BASE_URL: &str = "http://127.0.0.1:8080";
 
 const KNOWLEDGE_KEYS: &[&str] = &[
+    "DEADLOCK_CENTRAL_DSN",
     "DL_LLM_MODEL_BOT_PATE",
     "FIREWORK_API_KEY",
     "FIREWORK_BASE_URL",
@@ -305,11 +306,15 @@ mod tests {
     fn knowledge_profile_keeps_only_allowed_names() {
         let fetched = BTreeMap::from([
             ("FIREWORK_MODEL".to_owned(), "model".to_owned()),
+            ("DEADLOCK_CENTRAL_DSN".to_owned(), "test-dsn".to_owned()),
             ("UNRELATED_SECRET".to_owned(), "hidden".to_owned()),
         ]);
         assert_eq!(
             selected_secrets(Profile::Knowledge, &fetched),
-            BTreeMap::from([("FIREWORK_MODEL".to_owned(), "model".to_owned())]),
+            BTreeMap::from([
+                ("FIREWORK_MODEL".to_owned(), "model".to_owned()),
+                ("DEADLOCK_CENTRAL_DSN".to_owned(), "test-dsn".to_owned()),
+            ]),
         );
         let command = command_with_secrets(
             Profile::Knowledge,

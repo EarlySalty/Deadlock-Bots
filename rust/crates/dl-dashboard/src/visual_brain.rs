@@ -9,6 +9,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -22,6 +23,225 @@ const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Deserialize)]
 struct Config {
     site_root: PathBuf,
+    #[serde(default)]
+    knowledge_status_path: Option<PathBuf>,
+    #[serde(default)]
+    game_status_path: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct KnowledgeStatus {
+    schema_version: u32,
+    generated_at: String,
+    active_snapshot: String,
+    refresh_status: RefreshStatus,
+    repositories: Vec<RepositoryStatus>,
+    totals: KnowledgeCounts,
+    gaps: Vec<KnowledgeGap>,
+    #[serde(skip_deserializing, default)]
+    game_snapshot: Option<GameSnapshot>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct GameSnapshot {
+    schema_version: u32,
+    state: GameSnapshotState,
+    generation: String,
+    rendered_at: String,
+    entries: u64,
+    provenance: std::collections::BTreeMap<String, GameSourceStatus>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GameSnapshotState {
+    Ready,
+}
+
+#[derive(Deserialize, Serialize)]
+struct GameSourceStatus {
+    entries: u64,
+    latest_fetched_at: Option<String>,
+    revisions: std::collections::BTreeMap<String, Option<String>>,
+}
+
+fn timestamp_valid(value: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+fn hex_digest_valid(value: &str, size: usize) -> bool {
+    value.len() == size && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+async fn read_game_status(path: &Path) -> Result<GameSnapshot, ()> {
+    let status: GameSnapshot = read_status_json(path).await?;
+    if status.schema_version != 1
+        || !hex_digest_valid(&status.generation, 64)
+        || !timestamp_valid(&status.rendered_at)
+        || status.provenance.len() > 32
+        || status.provenance.iter().any(|(name, source)| {
+            name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                || source
+                    .latest_fetched_at
+                    .as_deref()
+                    .is_some_and(|value| !timestamp_valid(value))
+                || source.revisions.len() > 64
+                || source.revisions.iter().any(|(sha, date)| {
+                    !hex_digest_valid(sha, 40)
+                        || date.as_deref().is_some_and(|value| !timestamp_valid(value))
+                })
+        })
+    {
+        return Err(());
+    }
+    Ok(status)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RefreshStatus {
+    Ok,
+    Failed,
+}
+
+#[derive(Deserialize, Serialize)]
+struct KnowledgeCounts {
+    public_documents: u64,
+    verified_documents: u64,
+    pending_review: u64,
+    excluded_documents: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RepositoryStatus {
+    id: String,
+    label: String,
+    revision: String,
+    #[serde(flatten)]
+    counts: KnowledgeCounts,
+    last_verified_at: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GapStatus {
+    PendingReview,
+    Excluded,
+}
+
+#[derive(Deserialize, Serialize)]
+struct KnowledgeGap {
+    source_id: String,
+    title: String,
+    reason: String,
+    status: GapStatus,
+}
+
+/// A fixed, configured snapshot; never accepts a caller-supplied file path.
+pub async fn knowledge_status(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if let Err(response) = app.guard_full(&headers).await {
+        return private_response(response);
+    }
+    match load_knowledge_status(&app).await {
+        Ok(status) => private_response(axum::Json(status).into_response()),
+        Err(()) => private_response(err_text(
+            503,
+            "Noch kein belegter Wissensprüfstand verfügbar.",
+        )),
+    }
+}
+
+async fn load_knowledge_status(app: &DashboardApp) -> Result<KnowledgeStatus, ()> {
+    let repo = app.repo_root().ok_or(())?;
+    let config = tokio::fs::read(repo.join("assets/visual-brain.json"))
+        .await
+        .map_err(|_| ())?;
+    let config: Config = serde_json::from_slice(&config).map_err(|_| ())?;
+    let path = config
+        .knowledge_status_path
+        .filter(|path| path.is_absolute())
+        .ok_or(())?;
+    let mut status = read_knowledge_status(&path).await?;
+    if let Some(path) = config.game_status_path.filter(|path| path.is_absolute()) {
+        status.game_snapshot = read_game_status(&path).await.ok();
+    }
+    Ok(status)
+}
+
+async fn read_status_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ()> {
+    let file = tokio::fs::File::open(path).await.map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| ())?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| ())
+}
+
+async fn read_knowledge_status(path: &Path) -> Result<KnowledgeStatus, ()> {
+    let status: KnowledgeStatus = read_status_json(path).await?;
+    if status.schema_version != 1
+        || chrono::DateTime::parse_from_rfc3339(&status.generated_at).is_err()
+    {
+        return Err(());
+    }
+    Ok(status)
+}
+
+#[cfg(test)]
+mod knowledge_status_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spielstatus_uebernimmt_nur_validierte_oeffentliche_provenienz() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("game-status.json");
+        let mut value = serde_json::json!({"schema_version":1,"state":"ready","generation":"a".repeat(64),"rendered_at":"2026-09-20T00:00:00Z","entries":1,"provenance":{"deadlock_data":{"entries":1,"latest_fetched_at":"2026-09-16T00:00:00Z","revisions":{"0123456789012345678901234567890123456789":"2026-09-12T00:00:00Z"}}},"snapshot":"/private/source"});
+        std::fs::write(&path, value.to_string()).expect("fixture");
+        let output =
+            serde_json::to_value(read_game_status(&path).await.expect("status")).expect("JSON");
+        assert!(output.get("snapshot").is_none());
+        assert_eq!(
+            output["provenance"]["deadlock_data"]["latest_fetched_at"],
+            "2026-09-16T00:00:00Z"
+        );
+        value["provenance"]["deadlock_data"]["latest_fetched_at"] = serde_json::json!("heute");
+        std::fs::write(&path, value.to_string()).expect("fixture");
+        assert!(read_game_status(&path).await.is_err());
+        assert!(read_game_status(&dir.path().join("missing.json"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn status_ist_typisiert_begrenzt_und_keine_rohdatei() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("status.json");
+        let value = serde_json::json!({
+            "schema_version": 1, "generated_at": "2026-09-20T00:00:00Z",
+            "active_snapshot":"abc123", "refresh_status":"ok",
+            "repositories":[], "gaps":[],
+            "totals":{"public_documents":3,"verified_documents":1,"pending_review":2,"excluded_documents":0},
+            "debug_private_path":"must-not-be-returned"
+        });
+        std::fs::write(&path, value.to_string()).expect("fixture");
+        let status = read_knowledge_status(&path).await.expect("status");
+        let output = serde_json::to_value(status).expect("json");
+        assert_eq!(output["totals"]["verified_documents"], 1);
+        assert!(output["game_snapshot"].is_null());
+        assert!(output.get("debug_private_path").is_none());
+        std::fs::write(&path, vec![b' '; 1024 * 1024 + 1]).expect("oversize fixture");
+        assert!(read_knowledge_status(&path).await.is_err());
+        std::fs::write(&path, "{}").expect("invalid fixture");
+        assert!(read_knowledge_status(&path).await.is_err());
+    }
 }
 
 #[derive(Default, Deserialize)]
