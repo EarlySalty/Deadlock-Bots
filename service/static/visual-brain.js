@@ -247,12 +247,27 @@
         draw(node, incident);
     }
 
+    function renderGameStatus(snapshot) {
+        const summary=byId('brain-game-summary'), sources=byId('brain-game-sources');
+        sources.replaceChildren();
+        if(!snapshot) { summary.textContent='Kein bestätigter Spielquellenstand verfügbar. Community- und Spielwissen haben getrennte Quellenstände.'; return; }
+        const date=value=>value?new Date(value).toLocaleString('de-DE'):'nicht belegt';
+        summary.textContent=snapshot.entries+' Wissenseinträge. Darstellung erstellt: '+date(snapshot.rendered_at)+'. Das ist kein neuer Abruf der Spielquellen und keine Bestätigung des heutigen Spielstands.';
+        for(const [name,source] of Object.entries(snapshot.provenance)) {
+            const item=document.createElement('p');
+            const revisions=Object.entries(source.revisions).map(([sha,at])=>date(at)+' · Revision '+sha.slice(0,12)).join('; ') || 'Quellrevision nicht belegt';
+            const label=name==='deadlock_data'?'Spieldaten':name==='deadlock_wiki'?'Spiel-Wiki':name;
+            item.textContent=label+': '+source.entries+' Einträge. Quellstand: '+revisions+'. Zuletzt abgerufen: '+date(source.latest_fetched_at)+'.';sources.append(item);
+        }
+    }
+
     async function loadKnowledgeStatus() {
         const generation=++statusGeneration;
         statusController?.abort();
         const summary=byId('brain-knowledge-summary'), stamp=byId('brain-knowledge-stamp');
         const repositories=byId('brain-knowledge-repositories'), gaps=byId('brain-knowledge-gaps');
         summary.textContent='Prüfstand wird geladen …';stamp.textContent='';repositories.replaceChildren();gaps.replaceChildren();
+        byId('brain-game-summary').textContent='Quellenstand wird geladen …';byId('brain-game-sources').replaceChildren();
         const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),10000);
         statusController=controller;
         try {
@@ -262,6 +277,7 @@
             if(generation!==statusGeneration) return;
             if(status.schema_version!==1 || !status.totals || !Array.isArray(status.repositories) || !Array.isArray(status.gaps)) throw new Error('invalid');
             const totals=status.totals;
+            renderGameStatus(status.game_snapshot);
             summary.textContent=totals.public_documents+' öffentliche Dokumente · '+totals.verified_documents+' sachlich geprüft · '+totals.pending_review+' noch zu prüfen · '+totals.excluded_documents+' ausgeschlossen.';
             const generated=new Date(status.generated_at);
             stamp.textContent='Statuslauf: '+generated.toLocaleString('de-DE')+'. Zuletzt bestätigter Indexstand: '+(status.active_snapshot || 'nicht belegt')+'. Der Statuslauf ist keine neue fachliche Prüfung.'+(status.refresh_status==='failed'?' Der letzte Aktualisierungslauf ist fehlgeschlagen; die Angaben beziehen sich auf den vorhandenen Stand.':'');
@@ -277,7 +293,7 @@
                 item.textContent=gap.title+': '+gap.reason+' ('+(gap.status==='excluded'?'ausgeschlossen':'noch zu prüfen')+').';gaps.append(item);
             }
             if(!status.gaps.length) { const item=document.createElement('li');item.textContent='In diesem Statuslauf sind keine einzelnen Lücken aufgeführt. Das ist keine Zusage vollständigen Wissens.';gaps.append(item); }
-        } catch (_) { if(generation!==statusGeneration) return; repositories.replaceChildren();gaps.replaceChildren();summary.textContent='Noch kein belegter Wissensprüfstand verfügbar.';stamp.textContent='Die Wissenskarte darunter bleibt eine separate Systemübersicht. Daraus lässt sich kein aktueller fachlicher Prüfstand ableiten.'; }
+        } catch (_) { if(generation!==statusGeneration) return; renderGameStatus(null);repositories.replaceChildren();gaps.replaceChildren();summary.textContent='Noch kein belegter Wissensprüfstand verfügbar.';stamp.textContent='Die Wissenskarte darunter bleibt eine separate Systemübersicht. Daraus lässt sich kein aktueller fachlicher Prüfstand ableiten.'; }
         finally {clearTimeout(timer);}
     }
 
