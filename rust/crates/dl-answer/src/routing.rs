@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use dl_ai::{KnowledgeDecision, KnowledgeRouteRequest};
 use serde::{Deserialize, Serialize};
@@ -105,18 +105,23 @@ pub(super) fn direct_answer(
 pub(super) fn select_evidence(
     decision: &KnowledgeDecision,
     evidence: Vec<Evidence>,
-) -> Vec<Evidence> {
+) -> (Vec<Evidence>, Option<BTreeMap<String, dl_ai::EvidenceRole>>) {
     if decision.relevance.len() != evidence.len()
         || evidence
             .iter()
             .any(|item| !decision.relevance.contains_key(&item.id))
     {
-        return without_optional_code(evidence);
+        return (without_optional_code(evidence), None);
     }
-    evidence
+    let selected = evidence
         .into_iter()
         .filter(|item| decision.relevance[&item.id].supports_question())
-        .collect()
+        .collect::<Vec<_>>();
+    let roles = selected
+        .iter()
+        .map(|item| (item.id.clone(), decision.relevance[&item.id]))
+        .collect();
+    (selected, Some(roles))
 }
 
 pub(super) fn clarification_answer() -> Answer {
@@ -220,7 +225,7 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        let selected = select_evidence(
+        let (selected, roles) = select_evidence(
             &decision,
             vec![evidence("C1"), evidence("C2"), evidence("G1")],
         );
@@ -228,13 +233,20 @@ mod tests {
             selected.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
             vec!["C1", "G1"]
         );
+        let roles = roles.expect("validated roles retained");
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles["C1"], Partial);
+        assert_eq!(roles["G1"], Full);
+        assert!(!roles.contains_key("C2"));
         let empty = KnowledgeDecision {
             relevance: [("C1".into(), Related)].into_iter().collect(),
             ..Default::default()
         };
-        assert!(select_evidence(&empty, vec![evidence("C1")]).is_empty());
+        assert!(select_evidence(&empty, vec![evidence("C1")]).0.is_empty());
         assert_eq!(
-            select_evidence(&KnowledgeDecision::default(), vec![evidence("C1")]).len(),
+            select_evidence(&KnowledgeDecision::default(), vec![evidence("C1")])
+                .0
+                .len(),
             1
         );
     }

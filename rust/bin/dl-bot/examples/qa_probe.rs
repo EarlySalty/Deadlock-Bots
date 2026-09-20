@@ -41,7 +41,10 @@ impl ChatProvider for MeasuredProvider {
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&message.content)
                     {
                         if let Some(evidence) = payload.get("evidence") {
-                            eprintln!("{}", json!({"normalized_evidence": evidence}));
+                            eprintln!(
+                                "{}",
+                                json!({"normalized_evidence": evidence, "evidence_roles": payload.get("evidence_roles")})
+                            );
                         }
                     }
                 }
