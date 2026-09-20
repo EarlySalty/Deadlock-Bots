@@ -1,11 +1,17 @@
 name: Discord config CI
 on:
   push:
-    branches: [feat/discord-global-toml-20260920]
+    branches: [feat/discord-global-toml-20260920, feat/discord-toml-rollout-20260920]
   pull_request:
     branches: [main]
     paths:
       - rust/crates/dl-core/**
+      - rust/crates/dl-dashboard/**
+      - rust/crates/dl-bridges/**
+      - rust/crates/dl-broker/**
+      - rust/crates/dl-webcore/**
+      - service/static/dashboard.html
+      - service/static/operating-config.js
       - rust/bin/dl-bot/**
       - rust/bin/dl-web/**
       - rust/Cargo.toml
@@ -27,6 +33,13 @@ jobs:
       - name: Test file configuration and process startup
         working-directory: rust
         run: cargo +1.88.0 test -j 2 -p dl-core
+      - name: Test authenticated editor and Steam proxy
+        working-directory: rust
+        run: |
+          cargo +1.88.0 test -j 2 -p dl-bridges --lib steam_operating
+          cargo +1.88.0 test -j 2 -p dl-dashboard --lib visual_brain_route_tests
+      - name: Check dashboard script
+        run: node --check service/static/operating-config.js
       - name: Check existing runtime consumers
         working-directory: rust
         run: cargo +1.88.0 check -j 2 -p dl-bot -p dl-web

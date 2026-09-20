@@ -147,7 +147,8 @@ impl BotConfigStore {
             document[section][key] = replacement;
         }
         let text = document.to_string();
-        let checked = BotConfig::parse(&text)?;
+        let mut checked = BotConfig::parse(&text)?;
+        checked.runtime.resolve_paths(directory);
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let temporary = directory.join(format!(
             ".bot.toml.{}.{}.tmp",

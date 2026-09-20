@@ -27,6 +27,7 @@ use std::{
 };
 
 use anyhow::Context;
+use dl_core::runtime_config::lookup as operating_value;
 use dl_webcore::WebConfig;
 
 fn env(name: &str) -> Option<String> {
@@ -469,11 +470,11 @@ impl dl_discord::InteractionHandler for ChangelogPostCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_core::observability::init_tracing("info");
+    let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
+    let operating = dl_core::config::process_bot_config()?.snapshot();
     let _pid_lock = master::PidLock::acquire_default().context("Single-Instance-PID-Lock")?;
     let startup_text = master::startup_text_now();
 
-    let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
-    let operating = dl_core::config::process_bot_config()?.snapshot();
     let _web_cfg = WebConfig::from_env();
     let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
     let central_pool = dl_central_db::connect_pool(&central_dsn)
@@ -513,7 +514,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     });
 
     let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
-    let owner_id = master::owner_id_from_lookup(env);
+    let owner_id = master::owner_id_from_lookup(operating_value);
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
@@ -543,10 +544,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
         turnier_generator,
         turnier_model,
-        env,
+        operating_value,
     ));
     turnierglue::register(&mut router, turnier_proposals.clone());
-    let steam_client = dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok());
+    let steam_client = dl_bridges::steam::SteamBotClient::from_env(operating_value);
     dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), central_pool.clone());
     router.on_command(
         "changelog post",
@@ -561,7 +562,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
         scrim_adapter::ScrimRuntimeGate::with_default_ttl(central_pool.clone());
-    let scrim_relay_handler = scrim_adapter::relay_handler(central_pool.clone(), env);
+    let scrim_relay_handler = scrim_adapter::relay_handler(central_pool.clone(), operating_value);
     tracing::info!("Scrim-Ownership wird ueber scrim.runtime_control entschieden");
     scrimglue::register(
         &mut router,
@@ -570,7 +571,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         scrim_relay_handler,
     );
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
-    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
+    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(operating_value);
     let matcher = match &twitch_client {
         Some(twitch_client) => {
             dl_bridges::twitch::register(
@@ -582,8 +583,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             dl_bridges::twitch::register_crew_ban(&mut router, twitch_client.clone(), owner_id);
             // Streamer-Link-Matcher (Review-Buttons immer registrieren —
             // offene Vorschläge überleben Neustarts über den State-File)
-            let matcher_config =
-                dl_bridges::matcher::MatcherConfig::from_env(|k| std::env::var(k).ok());
+            let matcher_config = dl_bridges::matcher::MatcherConfig::from_env(operating_value);
             let glue = Arc::new(dl_bridges::glue::AdapterGlue {
                 adapter: adapter.clone(),
                 notify_channel_id: matcher_config.notify_channel_id,
@@ -671,7 +671,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::VoiceNudgeGlue {
             inner: dl_voice::glue::NudgeGlue {
                 adapter: adapter.clone(),
-                steam: dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+                steam: dl_bridges::steam::SteamBotClient::from_env(operating_value),
                 log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
             },
             concierge_store: concierge_memory_store.clone(),
@@ -1052,8 +1052,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
     // Der Website-Client wird weiter für CoachingSync (Roster/Termin-DMs)
     // geteilt. None = kein interner Token → Sync inaktiv.
-    let coaching_website =
-        dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
+    let coaching_website = dl_community::coaching::WebsiteClient::from_env(operating_value);
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         central_pool.clone(),
         Arc::new(modglue::CoachingReqGlue {
@@ -1156,7 +1155,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Alt-Buttons bleiben klickbar (kein Rollen-Grant). Steam-Login bleibt.
     onboardglue::register(
         &mut router,
-        dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+        dl_bridges::steam::SteamBotClient::from_env(operating_value),
     );
 
     // Moderation (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated.
@@ -1235,7 +1234,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     };
 
     let router = Arc::new(router);
-    let command_sync_config = master::CommandSyncStartupConfig::from_lookup(env);
+    let command_sync_config = master::CommandSyncStartupConfig::from_lookup(operating_value);
     let command_sync = Arc::new(master::DiscordCommandSync::new(
         adapter.clone(),
         router.clone(),
@@ -1281,10 +1280,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter: adapter.clone(),
         }),
         broker_token.clone(),
-        |key| std::env::var(key).ok(),
+        operating_value,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
-    let broker_host = env("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
+    let broker_host =
+        operating_value("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let broker_addr = format!("{broker_host}:{}", cfg.ports.master_broker);
     let broker_listener = tokio::net::TcpListener::bind(&broker_addr)
         .await
@@ -1350,9 +1350,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Läuft mit der Bot-Identität (DISCORD_TOKEN aus dem Prozess-Env, via
     // Infisical/systemd-creds) — kein eigener Secrets-Weg nötig.
     let mcp_state = Arc::new(
-        mcp::McpState::from_env(discord_token.clone(), env).context("MCP-Connector-State")?,
+        mcp::McpState::from_env(discord_token.clone(), operating_value)
+            .context("MCP-Connector-State")?,
     );
-    let mcp_addr = mcp::McpState::bind_addr(env);
+    let mcp_addr = mcp::McpState::bind_addr(operating_value);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
         .await
         .with_context(|| format!("MCP-Connector-Port binden: {mcp_addr}"))?;
@@ -1374,14 +1375,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Gateway: user-gated — Python hält die Session bis zum Cutover
-    let gateway_enabled = env("DL_BOT_GATEWAY").as_deref() == Some("1");
+    let gateway_enabled = operating_value("DL_BOT_GATEWAY").as_deref() == Some("1");
     let mut gateway_task = if gateway_enabled {
         let voice_worker_token = env("DISCORD_TOKEN_RANKED");
         let voice_worker_token =
             validate_voice_worker_token(&discord_token, voice_worker_token.as_deref())
                 .map(str::to_owned)
                 .map_err(anyhow::Error::msg)?;
-        let presence_intent_enabled = env_bool_default("DL_ENABLE_PRESENCE_INTENT", false);
+        let presence_intent_enabled = operating.runtime.start.presence_intent.unwrap_or(false);
         if presence_intent_enabled {
             tracing::info!("GUILD_PRESENCES-Intent aktiviert via DL_ENABLE_PRESENCE_INTENT");
         }
@@ -1775,7 +1776,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 })),
                 pool: central_pool.clone(),
                 feature_module_count: master::FEATURE_MODULES.len(),
-                command_prefix: env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
+                command_prefix: operating_value("COMMAND_PREFIX")
+                    .unwrap_or_else(|| "!".to_string()),
                 enable_presence_intent: presence_intent_enabled,
                 recording_readiness: recording_main_readiness.clone(),
                 recording_guild_id: dl_server_as_code::DEFAULT_GUILD_ID,

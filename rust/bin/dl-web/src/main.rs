@@ -66,8 +66,8 @@ async fn main() -> anyhow::Result<()> {
     let dashboard = dl_dashboard::DashboardApp::from_config(dashboard_cfg, central_pool.clone())
         .await
         .context("Dashboard-App initialisieren")?;
-    let dashboard_host =
-        std::env::var("DASHBOARD_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let dashboard_host = dl_core::runtime_config::lookup("DASHBOARD_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     let dashboard_addr = format!("{dashboard_host}:{}", cfg.ports.dashboard);
     let dashboard_listener = tokio::net::TcpListener::bind(&dashboard_addr)
         .await

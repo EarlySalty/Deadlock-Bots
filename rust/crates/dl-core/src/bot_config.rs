@@ -39,6 +39,8 @@ pub enum BotConfigError {
 pub struct BotConfig {
     pub schema_version: u32,
     #[serde(default)]
+    pub runtime: crate::runtime_config::RuntimeConfig,
+    #[serde(default)]
     pub discord: DiscordConfig,
     #[serde(default)]
     pub services: ServiceConfig,
@@ -310,7 +312,9 @@ impl BotConfig {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NONBLOCK);
         }
-        let file = options.open(path).map_err(|_| BotConfigError::Read)?;
+        let file = options
+            .open(path.as_ref())
+            .map_err(|_| BotConfigError::Read)?;
         if !file.metadata().map_err(|_| BotConfigError::Read)?.is_file() {
             return Err(BotConfigError::Read);
         }
@@ -321,10 +325,15 @@ impl BotConfig {
             return Err(BotConfigError::TooLarge);
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| BotConfigError::Encoding)?;
-        Ok((Self::parse(text)?, text.to_owned()))
+        let mut config = Self::parse(text)?;
+        if let Some(base) = path.as_ref().parent() {
+            config.runtime.resolve_paths(base);
+        }
+        Ok((config, text.to_owned()))
     }
 
     pub fn validate(&self) -> Result<(), BotConfigError> {
+        self.runtime.validate()?;
         let invalid = BotConfigError::Validation;
         let steam = url::Url::parse(&self.services.steam_api_url)
             .map_err(|_| invalid("services.steam_api_url ist ungültig"))?;

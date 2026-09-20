@@ -9,7 +9,7 @@ fn editor_preserves_comments_and_rejects_stale_bytes() {
     let path = temp.path().join("bot.toml");
     std::fs::write(
         &path,
-        "schema_version=1\n# Betreiberhinweis\n[moderation]\nenforce=false # bewusst\n",
+        "schema_version=1\n# Betreiberhinweis\n[moderation]\nenforce=false # bewusst\n[runtime.dashboard]\ndata_dir='state'\n",
     )
     .expect("isolierte Testdaten gültig");
     let store = BotConfigStore::open(&path).expect("isolierte Testdaten gültig");

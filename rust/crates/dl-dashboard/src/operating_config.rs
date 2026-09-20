@@ -42,15 +42,66 @@ pub async fn ui(State(app): State<DashboardApp>, headers: HeaderMap) -> Response
     )
 }
 
-fn output(saved: SavedConfig, active: &str) -> Response {
+async fn active_bot_fingerprint() -> Option<(String, u64)> {
+    let url = format!(
+        "{}/internal/master/v1/health",
+        dl_core::runtime_config::lookup("MASTER_BROKER_BASE_URL")?.trim_end_matches('/')
+    );
+    let token = [
+        "MASTER_BROKER_TOKEN",
+        "MAIN_BOT_INTERNAL_TOKEN",
+        "TWITCH_INTERNAL_API_TOKEN",
+    ]
+    .into_iter()
+    .find_map(dl_core::runtime_config::secret_value)?;
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let mut response = http
+        .get(url)
+        .header("X-Internal-Token", token)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > 4096 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if body.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let process_id = body
+        .get("result")?
+        .get("process_id")?
+        .as_u64()
+        .filter(|pid| *pid > 0)?;
+    body.get("result")?
+        .get("config_fingerprint")?
+        .as_str()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|fingerprint| (fingerprint.to_owned(), process_id))
+}
+
+async fn output(saved: SavedConfig, active: &str) -> Response {
+    let bot = active_bot_fingerprint().await;
     no_store(
         Json(json!({
             "revision": saved.revision,
             "saved_fingerprint": saved.fingerprint,
             "options": OperatingOptions::from(&saved.config),
             "services": [
-                {"name": "Discord-Web", "restart_required": saved.fingerprint != active},
-                {"name": "Discord-Bot", "restart_required": null}
+                {"name": "Discord-Web", "restart_required": saved.fingerprint != active, "process_id": std::process::id(), "observed_at": crate::now_unix()},
+                {"name": "Discord-Bot", "restart_required": bot.as_ref().map(|(fingerprint, _)| fingerprint != &saved.fingerprint), "process_id": bot.as_ref().map(|(_, pid)| pid), "observed_at": bot.as_ref().map(|_| crate::now_unix())}
             ]
         }))
         .into_response(),
@@ -78,7 +129,7 @@ pub async fn get(State(app): State<DashboardApp>, headers: HeaderMap) -> Respons
         Err(response) => return no_store(response),
     };
     match store.read_versioned() {
-        Ok(saved) => output(saved, active),
+        Ok(saved) => output(saved, active).await,
         Err(_) => no_store(err_text(
             503,
             "Die gespeicherten Einstellungen sind nicht lesbar.",
@@ -122,7 +173,7 @@ pub async fn save(State(app): State<DashboardApp>, headers: HeaderMap, body: Byt
     })
     .await;
     match result {
-        Ok(Ok(saved)) => output(saved, active),
+        Ok(Ok(saved)) => output(saved, active).await,
         Ok(Err(error)) => {
             let status = match error {
                 EditError::Conflict => 409,

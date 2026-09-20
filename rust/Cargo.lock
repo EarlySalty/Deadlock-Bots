@@ -1394,6 +1394,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "dl-core",
  "hex",
  "rand 0.8.6",
  "serde",
@@ -1816,6 +1817,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "dl-core",
  "hex",
  "hmac",
  "reqwest",

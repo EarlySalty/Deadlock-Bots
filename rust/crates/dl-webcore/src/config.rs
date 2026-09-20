@@ -31,7 +31,7 @@ pub struct WebConfig {
 
 impl WebConfig {
     pub fn from_env() -> Self {
-        Self::from_lookup(|key| std::env::var(key).ok())
+        Self::from_lookup(dl_core::runtime_config::lookup)
     }
 
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {

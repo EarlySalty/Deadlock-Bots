@@ -14,9 +14,10 @@ fn main() -> ExitCode {
     match Config::from_process() {
         Ok(config) => {
             println!(
-                "Config-Syntax und Schema gültig. master_broker_port={} changelog_port={}. \
+                "Config-Syntax und Schema gültig. master_broker_port={} changelog_port={} fingerprint={}. \
                  Dienstfunktion und weitere Modulkonfigurationen wurden nicht geprüft.",
-                config.ports.master_broker, config.ports.changelog_api
+                config.ports.master_broker, config.ports.changelog_api,
+                dl_core::config::process_bot_config().expect("bereits geladene Konfiguration").fingerprint()
             );
             ExitCode::SUCCESS
         }
