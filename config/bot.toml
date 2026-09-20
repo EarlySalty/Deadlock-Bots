@@ -1,7 +1,9 @@
 # Discord-Konfiguration für den laufenden Umbau.
-# WIP: dl-bot und dl-knowledge verwenden diesen Lader noch nicht.
-# Vor Aktivierung müssen die vorhandenen Betriebswerte übernommen werden.
+# WIP: Dienste/Ports und der Snapshot-Pfad werden vom dl-core-Startpfad gelesen.
+# Die weiteren Modulbereiche und die KI-Auswahl sind noch nicht durchgängig angebunden.
+# Vor einem Deploy müssen die vorhandenen Betriebswerte übernommen werden.
 # Zugangsdaten bleiben in Infisical und gehören nicht in diese Datei.
+# Änderungen der angebundenen Startwerte werden beim Prozessneustart wirksam.
 schema_version = 1
 
 [discord]
@@ -9,10 +11,19 @@ schema_version = 1
 # Discord-IDs werden als Dezimalstrings eingetragen.
 
 [services]
+dashboard_port = 8766
+public_stats_port = 8768
 master_broker_port = 8770
+tierlist_public_port = 8771
 changelog_port = 8899
 
+[storage]
+# Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.
+# Relative Pfade beziehen sich auf das WorkingDirectory des Dienstes.
+legacy_snapshot_path = "data/deadlock.sqlite3"
+
 [features]
+# Diese Prüfdefaults steuern die laufenden Module noch nicht.
 gateway = false
 onboarding = false
 concierge = false
@@ -35,7 +46,7 @@ selection = "latest_stable"
 family = "deepseek_flash"
 refresh_seconds = 3600
 fallback_max_age_seconds = 86400
-# Ein eingetragenes model deaktiviert die automatische Auswahl.
+# Ein eingetragenes model deaktiviert die automatische Auswahl im Auswahlkern.
 # Die Katalogabfrage, Probe und Aktualisierung der Clients sind noch anzubinden.
 
 [llm.use_cases.moderation_verify]

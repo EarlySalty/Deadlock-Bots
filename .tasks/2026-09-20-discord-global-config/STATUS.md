@@ -1,57 +1,48 @@
 # Discord: zentrale TOML-Konfiguration
 
-Stand: 20.09.2026, Europe/Berlin.
+Stand: 20.09.2026, Europe/Berlin. Fortsetzung des WIP ab `78cbac58`.
 
-## Auftrag
+## Auftrag und Abnahmestand
 
-Eine bearbeitbare `config/bot.toml` für den Discord-Bot und seine zugehörige Knowledge-Anbindung. Globale nicht geheime Betriebseinstellungen aus der Datei, Zugangsdaten weiter über Infisical. Keine TOML-zu-ENV-Brücke. Andere Bots bleiben in eigenen Aufträgen.
+Eine bearbeitbare `config/bot.toml` für den Discord-Bot und seine zugehörigen Dienste. Globale Betriebseinstellungen aus der Datei, Zugangsdaten weiter über Infisical. Keine TOML-zu-ENV-Brücke. Andere Bots bleiben in eigenen Aufträgen.
 
-## WIP, nicht produktiv integriert
+Branch: `feat/discord-global-toml-20260920`. PR: `#447`, weiterhin Draft.
+Der vollständige Auftrag ist nicht abgeschlossen und nicht produktiv ausgerollt.
 
-Feature-Branch: `feat/discord-global-toml-20260920`.
-Ausgangsstand: `371a90e8bcf3a1a6cae8cd285867b0e1dffcd0e7`.
+## In dieser Fortsetzung implementiert
 
-Vorbereitet sind:
+Der bestehende `dl_core::Config::from_env()`-Aufruf in `dl-bot` und `dl-web` führt jetzt zu einer prozessweiten TOML-Momentaufnahme statt zur bisherigen ENV-Auswertung. Der Methodenname bleibt für die vorhandenen Aufrufstellen erhalten; seine Implementierung liest keine Konfigurationswerte aus ENV. Eine fehlende oder ungültige Datei beendet diesen Startpfad mit einem wertfreien Fehler.
 
-- `dl_core::bot_config`: typisierter TOML-Lader, Schema-Prüfung, begrenztes Einlesen, wertfreie Fehlermeldungen, validierte Momentaufnahmen und Reload ohne Überschreiben des letzten gültigen Stands bei Parse-/Validierungsfehlern.
-- `config/bot.toml`: WIP-Konfiguration mit Bereichen für Discord, Dienste, Features, Moderation, Concierge, Knowledge und KI. Die ausgeschalteten Features sind sichere Prüfdefaults, keine übernommenen Live-Werte.
-- `dl-config-check`: Prüfbinary, das Syntax und Schema prüft, aber keine Dienstfunktion behauptet.
-- Reiner Modellauswahlkern für die freigegebene DeepSeek-Flash-Namensfamilie, numerische Versionen, Serverless-/Bereitschafts-/Probe-Status und Pins.
-- 25 neue Testfälle und ein schreibgeschützter GitHub-Actions-Testworkflow.
+Die fünf bisherigen Dienstports stehen in `[services]`; der bestehende `Config::db_path`-Vertrag kommt aus `[storage].legacy_snapshot_path`. Dies ist keine Umstellung von Postgres auf SQLite. Der Zugang zur zentralen Postgres-Datenbank bleibt unverändert. Relative Snapshot-Pfade beziehen sich wie zuvor auf das WorkingDirectory.
 
-Wichtig: `dl-bot`, `dl-knowledge` und die Provider lesen die neue Config noch nicht. Die bisherigen ENV-Leser wurden nicht umgestellt. Es gibt noch keinen Katalog-HTTP-Adapter, Probe-Runner, periodischen Refresh, persistenten Last-known-good-Status oder Austausch der laufenden Clients. Der Auswahlkern führt keine Netzwerkaufrufe aus.
+Dateiauswahl: `config/bot.toml` relativ zum WorkingDirectory oder ein explizites `--config PFAD` beziehungsweise `--config=PFAD`. Doppelte, leere und fehlende Config-Pfade werden abgelehnt. Der Startstand bleibt bis zum Prozessneustart fest. Der separate BotConfigStore ist dadurch kein Hot-Reload für laufende Dienste.
 
-## Prüfstand
+Das Prüfbinary verwendet denselben Startpfad. Seine Ausgabe nennt die beiden projizierten Broker-/Changelog-Ports, aber keine vollständige Config und keine Zugangsdaten. Die Meldung grenzt die Prüfung ausdrücklich von der Dienstfunktion und den noch nicht migrierten Modulen ab.
 
-Im verfügbaren Container fehlen Rust-Toolchain und Produktions-Checkout. Der Host-/Codespace-Terminalzugriff ist über die angebotenen Integrationen nicht verfügbar.
+Zusätzlich sind die Kollisions-/Bereichsprüfung der fünf Ports, die Validierung des Snapshot-Pfads und die Ablehnung von Knowledge-Port 0 ergänzt. Beim separat verwendbaren BotConfigStore bleibt der gewählte Dateiname erhalten, damit ein ausgetauschter Symlink bei reload nicht auf dem alten Ziel festhängt.
 
-Ein GitHub-Actions-Lauf zur Bereitstellung des versionierten Rust-Bestands schlug vor ausgeführten Schritten fehl:
+## Tests und überprüfbare Grenzen
 
-- Run: `35476007818`
-- Job: `105985258882`
-- Ergebnis: failure, keine Job-Schritte und keine abrufbaren Job-Logs.
+In den bearbeiteten Rust-Config-Dateien stehen 47 Testfunktionen: 28 für Schema/Auswahl/Store, 11 für den Startpfad und acht neue Prozess-Integrationstests. Diese Zahlen sind Quelltextzählungen, keine erfolgreichen Testläufe.
 
-Die Ursache wurde nicht abschließend festgestellt. Das ist kein Nachweis eines grünen Tests und keine Aussage über einen Compilerfehler. Der temporäre Source-Snapshot-Workflow wird mit diesem Stand wieder entfernt.
+Die Prozess-Tests prüfen vergiftete alte Port-/Pfad-ENV-Werte, fehlende Dateien, den Standardpfad, Änderungen beim nächsten Prozessstart, wertfreie Fehler, ungültige CLI-Argumente, die Gleichheitsform von --config sowie das unveränderte Betreiber-TOML nach der Prüfung.
 
-Die 25 neuen Rust-Tests, rustfmt, Workspace-Integration und der finale Cargo.lock-Abgleich sind noch offen. Der zusätzliche Config-CI-Lauf muss ebenfalls anhand seines Ergebnisses geprüft werden.
+Sieben lokale Python-Strukturprüfungen waren erfolgreich: TOML-Syntax und bisherige Portdefaults, Schemafeld-Abgleich, Projektion der fünf Ports, fehlende ENV-Wertleser/-Schreiber im neuen Startcode, keine Credential-Felder in der Beispieldatei und BM25-Erhalt, CI-Testpfade sowie Erhalt der bestehenden Modellauswahl-Testnamen. Das ersetzt weder Rust-Kompilation noch das Test-Gate.
 
-## Nächster Implementierungsschritt
+Der CI-Workflow enthält jetzt außerdem `cargo check -p dl-bot -p dl-web`, Clippy für dl-core und die zusätzlichen Formatprüfungen. Der neue CI-Lauf muss anhand seines Ergebnisses bewertet werden.
 
-1. Tatsächliche Live-Einstellungen redigiert inventarisieren. Die Prüfdefaults nicht als Produktionswerte ausrollen.
-2. Vollständiges Mapping nicht geheimer Einstellungen erstellen, inklusive dynamischer Schlüssel, direkter ENV-Leser und Wrapper. Den Schema-Entwurf an die belegten Verbraucher anpassen.
-3. Discord- und Knowledge-Einstieg auf einen zentralen Config-Lader umstellen; die zugehörigen Bibliotheken erhalten dieselbe validierte Konfiguration. Kein `set_var` oder Shell-Export als Ersatz für die Umstellung.
-4. Geheimnisse über die bestehende Infisical-Anbindung beziehen und getrennt an Clients geben. Nicht geheime ENV-Overrides aus diesen Pfaden entfernen.
-5. Beide Fireworks-Pfade, direkte Textgenerierung und Chat-Provider-Fabrik, auf dieselbe Modellauflösung umstellen. Aktuellen `dl-answer`-Pfad aus dem Ausgangsstand berücksichtigen.
-6. Offiziellen Katalog mit Paginierung und Zeitlimit anbinden. Kandidaten vor Umschaltung funktional prüfen. Letzten geprüften Stand policygebunden und befristet außerhalb der Config speichern. Pins und anwendungsfallspezifische Prioritäten vollständig testen.
-7. Schema für noch fehlende echte Module/Parameter ergänzen. Die vorliegende Feature-Auswahl ist kein vollständiges Inventar des Discord-Bots.
-8. Prüfen, welche Änderungen wirklich reloadfähig sind und welche einen Neustart benötigen. Ein getauschtes Config-Objekt allein aktualisiert keine Clients oder Scheduler.
-9. Rust formatieren, Cargo.lock abgleichen, Unit-/Integrations-/Regressionstests ausführen. ENV-Unwirksamkeit und tatsächliche Weitergabe der Werte an Verbraucher mit Tests belegen.
-10. Test-Gate und Merge-Kritiker durchlaufen, erst danach nach main integrieren und pushen. Kein API-Merge als Ersatz für das Host-Gate.
-11. Discord- und Knowledge-Dienste aus dem geprüften Main-Stand bauen und deployen. Knowledge/Concierge-E2E, effektives Modell, PID/Binary, Fehlerjournal und Heartbeat prüfen. BM25 nicht ungeprüft auf Hybrid umstellen.
-12. Dev-/Support-Doku in Deadlock-Docs nachziehen. Den Branch nach erfolgreichem Merge und Live-Nachweis sicher bereinigen, nicht vorher.
+In dieser Sitzung sind kein Produktions-Checkout, kein Host-/Codespace-Terminal und keine Rust-Toolchain verfügbar. Die Codex-MCP-Discovery liefert kein entsprechendes Werkzeug. Ein Toolchain-Download aus dem Arbeitscontainer scheitert an fehlender DNS-Auflösung. Deshalb wurden Rust-Tests, rustfmt und der Workspace-Build lokal nicht ausgeführt.
+
+Der bisherige Config-Lauf `35476278927`, Job `105985964781`, endete mit failure und ohne ausgeführte Job-Schritte. Die Fehlerursache ist nicht abschließend festgestellt. Der GitGuardian-Erfolg dieses alten Commits ist kein Compiler- oder Laufzeitnachweis.
+
+## Vor Main und Deploy offen
+
+- Live-Betriebswerte redigiert inventarisieren und das vollständige Setting-Inventar erstellen. Die Feature-Schalter, Moderation, Concierge, Gateway und übrigen Modulkonfigurationen sind noch nicht durchgängig angebunden. Auch Hostadressen und WebConfig haben noch getrennte ENV-Leser. Die Prüfdefaults in der TOML nicht als Produktionswerte ausrollen.
+- Den aktuellen dl-answer-/Knowledge-Pfad und beide Fireworks-Konstruktoren direkt anbinden. Katalog-HTTP-Adapter, Paginierung, Funktionsproben, Refresh, policygebundener befristeter letzter geprüfter Modellstand und Austausch laufender Clients fehlen weiterhin. Der vorhandene Auswahlkern führt keine Netzwerkanfragen aus. BM25 beibehalten.
+- Rust-Formatierung, Cargo.lock-Abgleich aus dem ersten WIP, Unit-/Prozess-/Workspace-Regressionstests und beide Host-Merge-Gates ausführen. Danach Main-Integration und Push, Release-Builds mit -j 2, betroffene Dienste restarten, Knowledge-/Concierge-E2E, Modellstatus, PID/Binary, Fehlerjournal und Heartbeat prüfen. Dev-/Support-Doku nach Deadlock-Docs übernehmen. Branch/Worktree erst nach Merge und Live-Nachweis bereinigen.
 
 ## Nachweise
 
-MERGEPROTOKOLL[MS-1]: 0 Main-Git-Schritte | Anläufe: 0 | Gate: nicht ausgeführt, WIP auf Feature-Branch
-LIVEBEWEIS[DV-1]: nicht ausgeführt | keine Produktionsänderung | Laufzeitintegration, Build, Restart und Funktionsnachweis offen
+MERGEPROTOKOLL[MS-1]: 0 Main-Git-Schritte einzeln | Anläufe: 0 | Gate: nicht ausgeführt, WIP auf Feature-Branch
+LIVEBEWEIS[DV-1]: nicht ausgeführt | keine Produktionsänderung | Build, Restart und Funktionsnachweis offen
 TEXTNACHWEIS[DR-1]: Gedankenstriche 0 | ae/oe/ue/ss-Ersatz 0 | Absolutwörter 0 belegt | Senke: repo-nahe Task-Akte
