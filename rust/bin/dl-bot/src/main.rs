@@ -2043,7 +2043,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     #[test]
     fn alle_drei_wissenseingaenge_teilen_die_gegatete_antwortinstanz() {
         let source = include_str!("main.rs")
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("Quelldatei enthält Produktionsbereich");
         assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 1);
