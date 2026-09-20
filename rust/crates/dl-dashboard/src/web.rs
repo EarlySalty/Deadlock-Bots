@@ -325,6 +325,11 @@ pub fn router(app: DashboardApp) -> Router {
             get(crate::operating_config::steam_get).patch(crate::operating_config::steam_save),
         )
         .route(
+            "/api/admin/patchnotes-betriebskonfiguration",
+            get(crate::operating_config::patchnotes_get)
+                .patch(crate::operating_config::patchnotes_save),
+        )
+        .route(
             "/api/admin/betriebskonfiguration.js",
             get(crate::operating_config::ui),
         )
@@ -2322,6 +2327,7 @@ mod visual_brain_route_tests {
         for path in [
             "/api/admin/betriebskonfiguration",
             "/api/admin/steam-betriebskonfiguration",
+            "/api/admin/patchnotes-betriebskonfiguration",
         ] {
             for (cookie, expected) in [
                 (None, 401),
@@ -2346,6 +2352,23 @@ mod visual_brain_route_tests {
                     "{path}: ohne CSRF nie schreiben"
                 );
             }
+        }
+        for (cookie, expected) in [(None, 401u16), (Some(&cookies[0]), 403)] {
+            let mut request = axum::http::Request::builder()
+                .uri("/api/admin/patchnotes-betriebskonfiguration");
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, format!("{SESSION_COOKIE}={cookie}"));
+            }
+            let response = routes
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "Patchnotes-Lesen");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "private, no-store"
+            );
         }
     }
 }

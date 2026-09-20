@@ -31,6 +31,10 @@ tracing.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
+toml.workspace = true
+toml_edit = "0.22"
+fs2 = "0.4"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

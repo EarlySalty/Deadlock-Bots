@@ -14,6 +14,30 @@
             ['core.presence_chunk_delay_ms', 'Pause zwischen Statusabfragen (Millisekunden)', 'number', 1, 60000],
             ['rank.batch_size', 'Ränge pro Abfrage', 'number', 1, 100],
         ] },
+        { key: 'patchnotes', title: 'Patchnotes', endpoint: '/api/admin/patchnotes-betriebskonfiguration', fields: [
+            ['discord.retranslate_cooldown_seconds', 'Wartezeit zwischen Nachübersetzungen (Sekunden)', 'number', 1, 86400],
+            ['polling.interval_seconds', 'Abstand der Forum-Prüfung (Sekunden)', 'number', 1, 86400],
+            ['polling.steam_news_enabled', 'Steam-News prüfen', 'checkbox'],
+            ['polling.steam_news_interval_seconds', 'Abstand der Steam-News-Prüfung (Sekunden)', 'number', 1, 86400],
+            ['polling.steam_version_enabled', 'Steam-Spielversion prüfen', 'checkbox'],
+            ['polling.steam_version_check_seconds', 'Abstand der Versionsprüfung (Sekunden)', 'number', 1, 86400],
+            ['polling.burst_duration_seconds', 'Dauer der Sammelperiode (Sekunden)', 'number', 1, 86400],
+            ['polling.burst_interval_seconds', 'Abstand innerhalb der Sammelperiode (Sekunden)', 'number', 1, 86400],
+            ['publishing.max_auto_post_age_days', 'Höchstalter automatischer Beiträge (Tage)', 'number', 1, 365],
+            ['publishing.max_catchup_posts', 'Höchstzahl nachgeholter Beiträge', 'number', 1, 100],
+            ['publishing.include_ping', 'Beim Veröffentlichen die Rolle pingen', 'checkbox'],
+            ['publishing.force_latest_on_start', 'Beim Start den neuesten Beitrag nachreichen', 'checkbox'],
+            ['publishing.dry_run', 'Probelauf ohne Veröffentlichen', 'checkbox'],
+            ['prepared.post_on_start', 'Vorbereiteten Beitrag beim Start veröffentlichen', 'checkbox'],
+            ['prepared.include_ping', 'Vorbereiteten Beitrag mit Rolle pingen', 'checkbox'],
+            ['prepared.translate', 'Vorbereiteten Beitrag übersetzen', 'checkbox'],
+            ['prepared.use_logs_channel', 'Vorbereiteten Beitrag im Log-Kanal veröffentlichen', 'checkbox'],
+            ['prepared.only_mode', 'Ausschließlich vorbereitete Beiträge veröffentlichen', 'checkbox'],
+            ['formatting.embed_v2', 'Neue Einbettungsdarstellung verwenden', 'checkbox'],
+            ['formatting.chunk_limit', 'Zeichen pro Nachrichtenteil', 'number', 100, 2000],
+            ['formatting.char_budget', 'Zeichenbudget pro Nachricht', 'number', 500, 4000],
+            ['formatting.component_budget', 'Komponenten pro Nachricht', 'number', 10, 40],
+        ] },
     ];
     const mounted = new Map();
     function element(tag, text, className) {
@@ -56,7 +80,7 @@
         }
         function render(data) {
             state.loaded = data; state.dirty = false; state.inputs = []; fieldset.replaceChildren();
-            const settings = definition.key === 'discord' ? data.options : data.editable;
+            const settings = definition.key === 'steam' ? data.editable : data.options;
             for (const [path, label, type, min, max] of definition.fields) {
                 const value = path.split('.').reduce((current, key) => current[key], settings);
                 input(path, label, type, min, max, value);
@@ -68,10 +92,10 @@
                 input(`accounts.${account.id}.catalog_maintenance_enabled`, `${label}: Katalog pflegen`, 'checkbox', null, null, account.catalog_maintenance_enabled);
             }
             if (definition.key === 'steam') fieldset.append(element('p', 'Höchstens ein Konto darf den Katalog pflegen. Bei einem Wechsel der Katalogwartung zuerst beide Steam-Cores stoppen, danach beide starten.'));
-            const services = definition.key === 'discord' ? data.services : data.active.map(item => ({
+            const services = definition.key === 'steam' ? data.active.map(item => ({
                 name: item.service === 'steam-bot' ? 'Steam-Bot' : item.service.replace('steam-core-', 'Steam-Konto '),
                 restart_required: item.state === 'unknown' ? null : item.state === 'restart_required',
-            }));
+            })) : data.services;
             status.textContent = services.map(item => `${item.name}: ${item.restart_required === null ? 'aktiver Stand nicht bestätigt' : item.restart_required ? 'Neustart ausstehend' : 'gespeicherter Stand aktiv'}`).join(' · ');
             reload.textContent = 'Stand neu laden'; submit.disabled = true;
         }
@@ -99,7 +123,7 @@
             }
             busy(true); error.textContent = '';
             try {
-                const body = { revision: state.loaded.revision, [definition.key === 'discord' ? 'options' : 'patch']: values };
+                const body = { revision: state.loaded.revision, [definition.key === 'steam' ? 'patch' : 'options']: values };
                 render(await fetchJSON(definition.endpoint, { method: 'PATCH', body: JSON.stringify(body) }));
                 status.textContent = `Gespeichert. ${status.textContent}`;
             } catch (problem) { error.textContent = problem.message; }
