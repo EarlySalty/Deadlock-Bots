@@ -147,7 +147,12 @@ async fn run(credential: Option<dl_ai::InheritedKnowledgeCredential>) -> anyhow:
     )
     .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string());
     if !flags.iter().any(|flag| flag == "--without-router") {
-        if let Some(router) = router {
+        if flags.iter().any(|flag| flag == "--router-error") {
+            // Read-only fault injection: a real rejected HTTP request, never a valid key.
+            engine = engine.with_router(Arc::new(dl_ai::JevKnowledgeRouter::new(
+                "invalid-readonly-probe".into(),
+            )?));
+        } else if let Some(router) = router {
             engine = engine.with_router(router);
         }
     }
