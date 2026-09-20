@@ -229,6 +229,15 @@ impl RuntimeConfig {
                 return Err(invalid());
             }
         }
+        if self.bridges.twitch_api_url.is_none()
+            && !self.bridges.twitch_allow_non_loopback.unwrap_or(false)
+            && self
+                .bridges
+                .twitch_host
+                .is_some_and(|host| !host.is_loopback())
+        {
+            return Err(invalid());
+        }
         for ttl in [
             self.dashboard.session_ttl_seconds,
             self.dashboard.oauth_state_ttl_seconds,

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use reqwest::Url;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 pub const TWITCH_INTERNAL_API_BASE_PATH: &str = "/internal/twitch/v1";
@@ -455,6 +455,7 @@ fn is_loopback_host(host: &str) -> bool {
         return true;
     }
     normalized
+        .trim_matches(['[', ']'])
         .parse::<IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
@@ -909,6 +910,28 @@ pub fn register_crew_ban(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_toml_host_reaches_actual_twitch_constructor() {
+        for host in ["127.0.0.1", "::1"] {
+            let config = dl_core::bot_config::BotConfig::parse(&format!(
+                "schema_version=1\n[runtime.bridges]\ntwitch_host='{host}'\n"
+            ))
+            .expect("Loopback-Konfiguration");
+            let client = super::TwitchApiClient::from_env(|key| {
+                if key == "TWITCH_INTERNAL_API_TOKEN" {
+                    Some("synthetic-test-token".into())
+                } else {
+                    config.runtime_value(key)
+                }
+            });
+            assert!(client.is_some(), "gültiger Host {host}");
+        }
+        assert!(dl_core::bot_config::BotConfig::parse(
+            "schema_version=1\n[runtime.bridges]\ntwitch_host='192.0.2.1'\n"
+        )
+        .is_err());
+    }
+
     use super::*;
     use std::net::SocketAddr;
     use std::sync::Mutex;

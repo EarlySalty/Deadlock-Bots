@@ -590,9 +590,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             });
             // AI-Scoring: STREAMER_LINK_AI_PROVIDER waehlt weiter den Anbieter,
             // aber ueber das Compliance-Gate statt ueber eigene Clients.
-            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> = match matcher_provider_choice(env(
-                "STREAMER_LINK_AI_PROVIDER",
-            )) {
+            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> = match matcher_provider_choice(
+                operating_value("STREAMER_LINK_AI_PROVIDER"),
+            ) {
                 MatcherProviderChoice::Off(raw) => {
                     tracing::info!(
                         provider = %raw,
