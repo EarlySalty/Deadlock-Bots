@@ -10,9 +10,21 @@ use dl_webcore::{DashboardClient, WebConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dl_core::observability::init_tracing("info");
-
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
+    let operating = dl_core::config::process_bot_config()?;
+    dl_core::observability::init_tracing(
+        operating
+            .snapshot()
+            .runtime
+            .start
+            .log_filter
+            .as_deref()
+            .unwrap_or("info"),
+    );
+    tracing::info!(
+        config_fingerprint = operating.fingerprint(),
+        "Betriebskonfiguration geladen"
+    );
     let web_cfg = WebConfig::from_env();
     let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
     let central_pool = dl_central_db::connect_pool(&central_dsn)
@@ -66,8 +78,8 @@ async fn main() -> anyhow::Result<()> {
     let dashboard = dl_dashboard::DashboardApp::from_config(dashboard_cfg, central_pool.clone())
         .await
         .context("Dashboard-App initialisieren")?;
-    let dashboard_host =
-        std::env::var("DASHBOARD_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let dashboard_host = dl_core::runtime_config::lookup("DASHBOARD_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     let dashboard_addr = format!("{dashboard_host}:{}", cfg.ports.dashboard);
     let dashboard_listener = tokio::net::TcpListener::bind(&dashboard_addr)
         .await

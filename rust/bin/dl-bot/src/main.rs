@@ -27,11 +27,11 @@ use std::{
 };
 
 use anyhow::Context;
+use dl_core::runtime_config::lookup as operating_value;
 use dl_webcore::WebConfig;
 
 fn env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
+    operating_value(name)
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
@@ -77,6 +77,7 @@ impl Drop for ReadinessReset {
     }
 }
 
+#[cfg(test)]
 fn moderation_enforce_from_lookup<F>(lookup: F) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -102,29 +103,11 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
 }
 
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
-    match std::env::var("DL_LFG_PANEL_CHANNEL_ID") {
-        Ok(raw) => lfg_panel_channel_id_from_value(Some(raw.as_str())),
-        Err(std::env::VarError::NotPresent) => lfg_panel_channel_id_from_value(None),
-        Err(err) => (
-            None,
-            Some(format!(
-                "DL_LFG_PANEL_CHANNEL_ID konnte nicht gelesen werden: {err}"
-            )),
-        ),
-    }
+    lfg_panel_channel_id_from_value(operating_value("DL_LFG_PANEL_CHANNEL_ID").as_deref())
 }
 
 fn lfg_forum_channel_id_from_env() -> (Option<u64>, Option<String>) {
-    match std::env::var("DL_LFG_FORUM_CHANNEL_ID") {
-        Ok(raw) => lfg_forum_channel_id_from_value(Some(raw.as_str())),
-        Err(std::env::VarError::NotPresent) => lfg_forum_channel_id_from_value(None),
-        Err(err) => (
-            None,
-            Some(format!(
-                "DL_LFG_FORUM_CHANNEL_ID konnte nicht gelesen werden: {err}"
-            )),
-        ),
-    }
+    lfg_forum_channel_id_from_value(operating_value("DL_LFG_FORUM_CHANNEL_ID").as_deref())
 }
 
 fn lfg_panel_channel_id_from_value(raw: Option<&str>) -> (Option<u64>, Option<String>) {
@@ -190,7 +173,7 @@ fn chat_text_generator(
     use_case: dl_ai::LlmUseCase,
     json_mode: bool,
 ) -> Option<Arc<dyn dl_ai::TextGenerator>> {
-    chat_text_generator_with(use_case, json_mode, |key| std::env::var(key).ok())
+    chat_text_generator_with(use_case, json_mode, operating_value)
 }
 
 fn chat_text_generator_with(
@@ -234,8 +217,8 @@ fn chat_text_generator_with(
     }
 }
 
-/// Modellwahl aus der Umgebung. Der Anbieter kommt aus dem Gate, das Modell
-/// weiterhin aus der bisherigen Env — es wandert als `GenerateRequest::model`
+/// Modellwahl aus dem geprüften Betriebssnapshot. Der Anbieter kommt aus dem Gate,
+/// das bestehende Modell wandert als `GenerateRequest::model`
 /// bis in die Anfrage.
 fn model_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
@@ -467,11 +450,23 @@ impl dl_discord::InteractionHandler for ChangelogPostCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
-    dl_core::observability::init_tracing("info");
+    let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
+    let operating = dl_core::config::process_bot_config()?.snapshot();
+    dl_core::observability::init_tracing(
+        operating
+            .runtime
+            .start
+            .log_filter
+            .as_deref()
+            .unwrap_or("info"),
+    );
+    tracing::info!(
+        config_fingerprint = dl_core::config::process_bot_config()?.fingerprint(),
+        "Betriebskonfiguration geladen"
+    );
     let _pid_lock = master::PidLock::acquire_default().context("Single-Instance-PID-Lock")?;
     let startup_text = master::startup_text_now();
 
-    let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let _web_cfg = WebConfig::from_env();
     let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
     let central_pool = dl_central_db::connect_pool(&central_dsn)
@@ -498,7 +493,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // KI-Transparenz-Log: jede Modellantwort wird im Transparenz-Kanal mitlesbar.
     // Die Senke wird bei jedem chat()-Aufruf neu aufgeloest, deshalb ist es
     // ungefaehrlich, sie hier vor dem Bau der Provider zu registrieren.
-    let transparency_config = dl_ai::TransparencyConfig::from_env(|k| std::env::var(k).ok());
+    let transparency_config = dl_ai::TransparencyConfig::from_env(operating_value);
     let _transparency_log = transparency_config.enabled.then(|| {
         let log = dl_ai::TransparencyLog::spawn(
             Arc::new(aiglue::DiscordTransparencyMessenger {
@@ -511,7 +506,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     });
 
     let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
-    let owner_id = master::owner_id_from_lookup(env);
+    let owner_id = master::owner_id_from_lookup(operating_value);
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
@@ -541,10 +536,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
         turnier_generator,
         turnier_model,
-        env,
+        operating_value,
     ));
     turnierglue::register(&mut router, turnier_proposals.clone());
-    let steam_client = dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok());
+    let steam_client = dl_bridges::steam::SteamBotClient::from_env(operating_value);
     dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), central_pool.clone());
     router.on_command(
         "changelog post",
@@ -559,7 +554,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
         scrim_adapter::ScrimRuntimeGate::with_default_ttl(central_pool.clone());
-    let scrim_relay_handler = scrim_adapter::relay_handler(central_pool.clone(), env);
+    let scrim_relay_handler = scrim_adapter::relay_handler(central_pool.clone(), operating_value);
     tracing::info!("Scrim-Ownership wird ueber scrim.runtime_control entschieden");
     scrimglue::register(
         &mut router,
@@ -568,7 +563,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         scrim_relay_handler,
     );
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
-    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
+    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(operating_value);
     let matcher = match &twitch_client {
         Some(twitch_client) => {
             dl_bridges::twitch::register(
@@ -580,17 +575,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             dl_bridges::twitch::register_crew_ban(&mut router, twitch_client.clone(), owner_id);
             // Streamer-Link-Matcher (Review-Buttons immer registrieren —
             // offene Vorschläge überleben Neustarts über den State-File)
-            let matcher_config =
-                dl_bridges::matcher::MatcherConfig::from_env(|k| std::env::var(k).ok());
+            let matcher_config = dl_bridges::matcher::MatcherConfig::from_env(operating_value);
             let glue = Arc::new(dl_bridges::glue::AdapterGlue {
                 adapter: adapter.clone(),
                 notify_channel_id: matcher_config.notify_channel_id,
             });
             // AI-Scoring: STREAMER_LINK_AI_PROVIDER waehlt weiter den Anbieter,
             // aber ueber das Compliance-Gate statt ueber eigene Clients.
-            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> = match matcher_provider_choice(env(
-                "STREAMER_LINK_AI_PROVIDER",
-            )) {
+            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> = match matcher_provider_choice(
+                operating_value("STREAMER_LINK_AI_PROVIDER"),
+            ) {
                 MatcherProviderChoice::Off(raw) => {
                     tracing::info!(
                         provider = %raw,
@@ -604,11 +598,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         false,
                         |key| match (key, override_provider.as_deref()) {
                             ("DL_LLM_PROVIDER_STREAMER_MATCHER", Some(provider)) => {
-                                std::env::var(key)
-                                    .ok()
-                                    .or_else(|| Some(provider.to_string()))
+                                operating_value(key).or_else(|| Some(provider.to_string()))
                             }
-                            _ => std::env::var(key).ok(),
+                            _ => operating_value(key),
                         },
                     );
                     match generator {
@@ -644,8 +636,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
-    let concierge_config =
-        dl_community::concierge::ConciergeConfig::from_env(|k| std::env::var(k).ok());
+    let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
+    concierge_config.ai_timeout =
+        std::time::Duration::from_secs(operating.concierge.timeout_seconds);
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
@@ -653,8 +646,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Startinventar: nach dem Hochfahren steht im Journal, welcher Anbieter
     // welchen KI-Pfad bedient und welcher Pfad still ohne Modell weiterlaeuft.
     aiglue::log_ai_startup_inventory(
-        &dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok()),
-        |k| std::env::var(k).ok(),
+        &dl_ai::LlmProviderConfig::from_env(operating_value),
+        operating_value,
         &transparency_config,
         &concierge_config,
     );
@@ -667,7 +660,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::VoiceNudgeGlue {
             inner: dl_voice::glue::NudgeGlue {
                 adapter: adapter.clone(),
-                steam: dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+                steam: dl_bridges::steam::SteamBotClient::from_env(operating_value),
                 log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
             },
             concierge_store: concierge_memory_store.clone(),
@@ -712,8 +705,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     // Nicht XDG_RUNTIME_DIR: das ist eine tmpfs von rund 1,5 GB, und eine sechsstuendige
     // Aufnahme braucht 2,1 GB. Der Zwischenspeicher gehoert deshalb auf die Platte.
-    let recording_state_dir = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
+    let recording_state_dir = operating
+        .runtime
+        .community
+        .recording_state_dir
+        .clone()
+        .or_else(|| std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from))
         .or_else(|| {
             std::env::var_os("HOME")
                 .map(std::path::PathBuf::from)
@@ -736,10 +733,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .context("Scrim-Record-Temp-Verzeichnis erstellen")?;
     // Ziel der Aufnahmen ist der Google-Drive-Ordner hinter dem rclone-Remote; beides
     // ist konfigurierbar, damit ein Umzug keinen Rebuild braucht.
-    let rclone_path = std::env::var("SCRIM_RECORD_RCLONE_PATH")
-        .unwrap_or_else(|_| "/usr/local/bin/rclone".to_string());
-    let archive_base = std::env::var("SCRIM_RECORD_ARCHIVE_BASE")
-        .unwrap_or_else(|_| "gdrive:Deadlock/Scrim-Aufnahmen".to_string());
+    let rclone_path = operating_value("SCRIM_RECORD_RCLONE_PATH")
+        .unwrap_or_else(|| "/usr/local/bin/rclone".to_string());
+    let archive_base = operating_value("SCRIM_RECORD_ARCHIVE_BASE")
+        .unwrap_or_else(|| "gdrive:Deadlock/Scrim-Aufnahmen".to_string());
     let scrim_recorder = dl_voice::scrim_record::ScrimRecorder::new(
         cache_snapshot.clone(),
         recording_backend,
@@ -915,10 +912,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     let moderation_channel_id =
         dl_moderation::moderation_channel::moderation_channel_id_from_lookup(|k| {
-            std::env::var(k).ok()
+            operating_value(k)
         });
     let moderation_scan_channel_ids =
-        dl_moderation::moderation_channel::scan_channel_ids_from_lookup(|k| std::env::var(k).ok());
+        dl_moderation::moderation_channel::scan_channel_ids_from_lookup(operating_value);
 
     // Text-Analyse und Verify-Text laufen ueber das Gate; die Bildpfade haengen
     // am VisionGenerator, den der ChatProvider (noch) nicht kann, und bleiben
@@ -949,7 +946,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         fallback_invites,
     ));
     behavior_glue.refresh_invite_allowlist().await;
-    let moderation_enforce = moderation_enforce_from_lookup(env);
+    let moderation_enforce = operating.moderation.enforce;
     tracing::info!(
         enforce = moderation_enforce,
         "Moderation Enforcement-Modus gelesen"
@@ -957,10 +954,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
     let concierge_ai = {
-        match dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok())
+        match dl_ai::LlmProviderConfig::from_env(operating_value)
             .map_err(anyhow::Error::from)
             .and_then(|cfg| {
-                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, |k| std::env::var(k).ok())
+                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, operating_value)
                     .map_err(anyhow::Error::from)
             }) {
             Ok(provider) => Some(provider),
@@ -1007,7 +1004,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
             None
         } else {
-            let raw_allowlist = std::env::var("BRAIN_CHANNEL_ALLOWLIST").ok();
+            let raw_allowlist = operating_value("BRAIN_CHANNEL_ALLOWLIST");
             let channel_allowlist = brain_channel_allowlist_from_value(raw_allowlist.as_deref());
             if channel_allowlist.is_none() {
                 tracing::warn!(
@@ -1048,8 +1045,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
     // Der Website-Client wird weiter für CoachingSync (Roster/Termin-DMs)
     // geteilt. None = kein interner Token → Sync inaktiv.
-    let coaching_website =
-        dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
+    let coaching_website = dl_community::coaching::WebsiteClient::from_env(operating_value);
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         central_pool.clone(),
         Arc::new(modglue::CoachingReqGlue {
@@ -1152,7 +1148,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Alt-Buttons bleiben klickbar (kein Rollen-Grant). Steam-Login bleibt.
     onboardglue::register(
         &mut router,
-        dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+        dl_bridges::steam::SteamBotClient::from_env(operating_value),
     );
 
     // Moderation (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated.
@@ -1231,7 +1227,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     };
 
     let router = Arc::new(router);
-    let command_sync_config = master::CommandSyncStartupConfig::from_lookup(env);
+    let command_sync_config = master::CommandSyncStartupConfig::from_lookup(operating_value);
     let command_sync = Arc::new(master::DiscordCommandSync::new(
         adapter.clone(),
         router.clone(),
@@ -1249,17 +1245,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
     );
 
-    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(|key| std::env::var(key).ok())
-    {
-        Ok(cfg) => match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, |key| {
-            std::env::var(key).ok()
-        }) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
-                None
+    let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(operating_value) {
+        Ok(cfg) => {
+            match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, operating_value) {
+                Ok(provider) => Some(provider),
+                Err(err) => {
+                    tracing::warn!(%err, "Scrim-Lagebild-AI im Bot inaktiv");
+                    None
+                }
             }
-        },
+        }
         Err(err) => {
             tracing::warn!(%err, "Scrim-Lagebild-AI-Konfiguration im Bot ungueltig");
             None
@@ -1277,10 +1272,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter: adapter.clone(),
         }),
         broker_token.clone(),
-        |key| std::env::var(key).ok(),
+        operating_value,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
-    let broker_host = env("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
+    let broker_host =
+        operating_value("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let broker_addr = format!("{broker_host}:{}", cfg.ports.master_broker);
     let broker_listener = tokio::net::TcpListener::bind(&broker_addr)
         .await
@@ -1346,9 +1342,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Läuft mit der Bot-Identität (DISCORD_TOKEN aus dem Prozess-Env, via
     // Infisical/systemd-creds) — kein eigener Secrets-Weg nötig.
     let mcp_state = Arc::new(
-        mcp::McpState::from_env(discord_token.clone(), env).context("MCP-Connector-State")?,
+        mcp::McpState::from_env(discord_token.clone(), operating_value)
+            .context("MCP-Connector-State")?,
     );
-    let mcp_addr = mcp::McpState::bind_addr(env);
+    let mcp_addr = mcp::McpState::bind_addr(operating_value);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
         .await
         .with_context(|| format!("MCP-Connector-Port binden: {mcp_addr}"))?;
@@ -1370,14 +1367,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Gateway: user-gated — Python hält die Session bis zum Cutover
-    let gateway_enabled = env("DL_BOT_GATEWAY").as_deref() == Some("1");
+    let gateway_enabled = operating_value("DL_BOT_GATEWAY").as_deref() == Some("1");
     let mut gateway_task = if gateway_enabled {
         let voice_worker_token = env("DISCORD_TOKEN_RANKED");
         let voice_worker_token =
             validate_voice_worker_token(&discord_token, voice_worker_token.as_deref())
                 .map(str::to_owned)
                 .map_err(anyhow::Error::msg)?;
-        let presence_intent_enabled = env_bool_default("DL_ENABLE_PRESENCE_INTENT", false);
+        let presence_intent_enabled = operating.runtime.start.presence_intent.unwrap_or(false);
         if presence_intent_enabled {
             tracing::info!("GUILD_PRESENCES-Intent aktiviert via DL_ENABLE_PRESENCE_INTENT");
         }
@@ -1503,7 +1500,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
 
         // Player-Finder (5): portiert, aber per Flag deaktiviert (Redesign geplant)
-        if dl_activity::player_finder::enabled(|k| std::env::var(k).ok()) {
+        if dl_activity::player_finder::enabled(operating_value) {
             let _finder = dl_activity::player_finder::PlayerFinder::new(central_pool.clone());
             tracing::warn!(
                 "PLAYER_FINDER_ENABLED=1 gesetzt — Kern portiert, Message-Flow folgt mit dem Redesign"
@@ -1669,7 +1666,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
         let voice_hint_enabled =
-            dl_community::voice_change_hint::enabled_from_lookup(|k| std::env::var(k).ok());
+            dl_community::voice_change_hint::enabled_from_lookup(operating_value);
         let voice_hint_classifier = if voice_hint_enabled {
             chat_text_generator(dl_ai::LlmUseCase::VoiceHint, false).map(|generator| {
                 Arc::new(dl_community::voice_change_hint::OpenAiVoiceHintClassifier::new(generator))
@@ -1771,7 +1768,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 })),
                 pool: central_pool.clone(),
                 feature_module_count: master::FEATURE_MODULES.len(),
-                command_prefix: env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
+                command_prefix: operating_value("COMMAND_PREFIX")
+                    .unwrap_or_else(|| "!".to_string()),
                 enable_presence_intent: presence_intent_enabled,
                 recording_readiness: recording_main_readiness.clone(),
                 recording_guild_id: dl_server_as_code::DEFAULT_GUILD_ID,
@@ -1921,6 +1919,79 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_operating_snapshot_reaches_community_moderation_and_ai_constructors() {
+        let config = dl_core::bot_config::BotConfig::parse(
+            r#"
+schema_version=1
+[discord]
+guild_id="1234"
+[runtime.community]
+concierge_enabled=true
+concierge_test_users=[55,66]
+concierge_free_voice=false
+survey_pulse=true
+survey_interval_days=30
+lfg_freetext=true
+lfg_freetext_channel_id=777
+[runtime.moderation]
+channel_id=888
+scan_channel_ids=[111,222]
+[runtime.ai]
+transparency_enabled=false
+[llm.use_cases.bot_pate]
+model="accounts/fireworks/models/deepseek-v4-flash-0731"
+"#,
+        )
+        .expect("synthetische Betriebskonfiguration");
+        let lookup = |key: &str| config.runtime_value(key);
+        let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
+        assert!(concierge.enabled);
+        assert!(!concierge.free_voice);
+        assert_eq!(concierge.main_guild_id, 1234);
+        assert_eq!(concierge.test_user_allowlist.len(), 2);
+        let survey = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(lookup);
+        assert!(survey.enabled);
+        assert_eq!(survey.interval_days, 30);
+        assert!(dl_activity::lfg_freetext::config_from_lookup(lookup)
+            .expect("LFG-Konfiguration")
+            .is_some());
+        assert_eq!(
+            dl_moderation::moderation_channel::moderation_channel_id_from_lookup(lookup),
+            888
+        );
+        assert_eq!(
+            dl_moderation::moderation_channel::scan_channel_ids_from_lookup(lookup),
+            vec![111, 222]
+        );
+        assert!(!dl_ai::TransparencyConfig::from_env(lookup).enabled);
+        let ai = dl_ai::LlmProviderConfig::from_env(lookup).expect("bestehender Anbieter");
+        assert_eq!(
+            ai.provider_for(dl_ai::LlmUseCase::BotPate, lookup)
+                .expect("Anbieter"),
+            dl_ai::LlmProviderKind::Fireworks
+        );
+        assert_eq!(
+            lookup("DL_LLM_MODEL_BOT_PATE").as_deref(),
+            Some("accounts/fireworks/models/deepseek-v4-flash-0731")
+        );
+        assert!(lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
+        let global = dl_core::bot_config::BotConfig::parse(&format!(
+            "schema_version=1\n[llm]\ndefault_provider='openai'\n[llm.use_cases.bot_pate]\nmodel='{}'\n",
+            dl_ai::DEFAULT_OPENAI_MODEL,
+        )).expect("reiner Pin mit bestehendem globalen Override");
+        let global_lookup = |key: &str| global.runtime_value(key);
+        let global_ai =
+            dl_ai::LlmProviderConfig::from_env(global_lookup).expect("globaler Anbieter");
+        assert_eq!(
+            global_ai
+                .provider_for(dl_ai::LlmUseCase::BotPate, global_lookup)
+                .expect("Anbieter"),
+            dl_ai::LlmProviderKind::OpenAi
+        );
+        assert!(global_lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
+    }
+
     use super::{
         brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
         lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
@@ -1972,7 +2043,7 @@ mod tests {
     #[test]
     fn alle_drei_wissenseingaenge_teilen_die_gegatete_antwortinstanz() {
         let source = include_str!("main.rs")
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("Quelldatei enthält Produktionsbereich");
         assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 1);

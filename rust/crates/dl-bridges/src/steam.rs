@@ -98,9 +98,9 @@ const ADMIN_COMMANDS: [&str; 6] = [
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
 pub struct SteamBotClient {
-    http: reqwest::Client,
-    base_url: String,
-    token: Option<String>,
+    pub(crate) http: reqwest::Client,
+    pub(crate) base_url: String,
+    pub(crate) token: Option<String>,
 }
 
 impl SteamBotClient {

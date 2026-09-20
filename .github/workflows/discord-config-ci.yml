@@ -1,0 +1,62 @@
+name: Discord config CI
+on:
+  push:
+    branches: [feat/discord-global-toml-20260920, feat/discord-toml-rollout-20260920]
+  pull_request:
+    branches: [main]
+    paths:
+      - rust/crates/dl-core/**
+      - rust/crates/dl-dashboard/**
+      - rust/crates/dl-bridges/**
+      - rust/crates/dl-broker/**
+      - rust/crates/dl-webcore/**
+      - rust/crates/dl-server-as-code/**
+      - service/static/dashboard.html
+      - service/static/operating-config.js
+      - rust/bin/dl-bot/**
+      - rust/bin/dl-web/**
+      - rust/Cargo.toml
+      - rust/Cargo.lock
+      - config/bot.toml
+      - .github/workflows/discord-config-ci.yml
+permissions:
+  contents: read
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+      - name: Test file configuration and process startup
+        working-directory: rust
+        run: cargo +1.88.0 test -j 2 -p dl-core
+      - name: Test authenticated editor and Steam proxy
+        working-directory: rust
+        run: |
+          cargo +1.88.0 test -j 2 -p dl-bridges --lib steam_operating
+          cargo +1.88.0 test -j 2 -p dl-dashboard --lib visual_brain_route_tests
+          cargo +1.88.0 test -j 2 -p dl-dashboard --lib broker_evidence_requires_authenticated_fresh_envelope_and_pid
+          cargo +1.88.0 test -j 2 -p dl-bridges --lib typed_toml_host_reaches_actual_twitch_constructor
+          cargo +1.88.0 test -j 2 -p dl-bot --bin dl-bot typed_operating_snapshot_reaches_community_moderation_and_ai_constructors
+          cargo +1.88.0 test -j 2 -p dl-bot --bin dl-bot dl_bot_baut_keine_llm_clients_mehr_selbst
+      - name: Check dashboard script
+        run: node --check service/static/operating-config.js
+      - name: Check existing runtime consumers
+        working-directory: rust
+        run: cargo +1.88.0 check -j 2 -p dl-bot -p dl-web
+      - name: Validate repository TOML
+        run: cargo +1.88.0 run -j 2 --manifest-path rust/Cargo.toml -p dl-core --bin dl-config-check -- --config config/bot.toml
+      - name: Lint configuration
+        working-directory: rust
+        run: cargo +1.88.0 clippy -j 2 -p dl-core --all-targets -- -D warnings
+      - name: Check formatting
+        run: |
+          rustfmt +1.88.0 --edition 2021 --check \
+            rust/crates/dl-core/src/config.rs \
+            rust/crates/dl-core/src/bot_config.rs \
+            rust/crates/dl-core/src/bin/dl-config-check.rs \
+            rust/crates/dl-core/tests/config_startup.rs
