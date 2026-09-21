@@ -257,6 +257,28 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
+        self.adapter.voice_cache_health.ready(
+            ctx.shard_id.0,
+            ready.guilds.iter().map(|guild| guild.id.get()),
+        );
+        // Serenity entfernt beim READY-Cache-Update die alten Guilds. Was hier
+        // bereits wieder im Cache steht, stammt aus einem frischen GUILD_CREATE.
+        // Dessen Callback kann auf einem anderen Tokio-Worker früher laufen.
+        let fresh_guilds: Vec<u64> = ready
+            .guilds
+            .iter()
+            .filter(|guild| {
+                ctx.cache
+                    .guild(guild.id)
+                    .is_some_and(|cached| !cached.unavailable)
+            })
+            .map(|guild| guild.id.get())
+            .collect();
+        for &guild_id in &fresh_guilds {
+            self.adapter
+                .voice_cache_health
+                .guild_loaded(ctx.shard_id.0, guild_id);
+        }
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
         self.adapter.community_gateway.ready(
             ctx.shard_id.0,
@@ -277,11 +299,19 @@ impl EventHandler for Handler {
         self.dispatcher.publish_gateway(GatewayEvent::Ready {
             guild_count: ready.guilds.len(),
         });
+        if !fresh_guilds.is_empty() {
+            self.dispatcher.publish_gateway(GatewayEvent::CacheReady {
+                guild_ids: fresh_guilds,
+            });
+        }
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
     }
 
     async fn resume(&self, ctx: Context, _event: serenity::all::ResumedEvent) {
         self.adapter.community_gateway.resume(ctx.shard_id.0);
+        let guild_ids = self.adapter.voice_cache_health.resumed(ctx.shard_id.0);
+        self.dispatcher
+            .publish_gateway(GatewayEvent::CacheReady { guild_ids });
     }
 
     async fn shard_stage_update(
@@ -293,9 +323,41 @@ impl EventHandler for Handler {
             event.shard_id.0,
             event.new == serenity::gateway::ConnectionStage::Connected,
         );
+        if event.new != serenity::gateway::ConnectionStage::Connected {
+            self.adapter
+                .voice_cache_health
+                .disconnected(event.shard_id.0);
+        }
+    }
+
+    async fn guild_create(&self, ctx: Context, guild: serenity::all::Guild, _is_new: Option<bool>) {
+        if !guild.unavailable {
+            self.adapter
+                .voice_cache_health
+                .guild_loaded(ctx.shard_id.0, guild.id.get());
+            self.dispatcher.publish_gateway(GatewayEvent::CacheReady {
+                guild_ids: vec![guild.id.get()],
+            });
+        }
+    }
+
+    async fn guild_delete(
+        &self,
+        _ctx: Context,
+        guild: serenity::all::UnavailableGuild,
+        _full: Option<serenity::all::Guild>,
+    ) {
+        self.adapter
+            .voice_cache_health
+            .guild_unavailable(guild.id.get());
     }
 
     async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {
+        for guild_id in &guilds {
+            self.adapter
+                .voice_cache_health
+                .guild_loaded(ctx.shard_id.0, guild_id.get());
+        }
         self.dispatcher.publish_gateway(GatewayEvent::CacheReady {
             guild_ids: guilds.iter().map(|gid| gid.get()).collect(),
         });

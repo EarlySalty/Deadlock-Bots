@@ -31,6 +31,7 @@ pub struct DiscordAdapter {
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
     pub(crate) community_gateway: crate::community::GatewayFreshness,
+    pub(crate) voice_cache_health: crate::voice_cache::VoiceCacheHealth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,7 @@ impl DiscordAdapter {
             cache: OnceLock::new(),
             gateway_ready: Arc::new(AtomicBool::new(false)),
             community_gateway: crate::community::GatewayFreshness::default(),
+            voice_cache_health: crate::voice_cache::VoiceCacheHealth::default(),
         })
     }
 
@@ -78,6 +80,14 @@ impl DiscordAdapter {
             static EMPTY: OnceLock<Cache> = OnceLock::new();
             EMPTY.get_or_init(Cache::new)
         })
+    }
+
+    /// Vollständig geladener und verbundener Guild-Cache, sonst unbekannt.
+    pub fn voice_cache_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Option<crate::voice_cache::GuildVoiceSnapshot> {
+        self.voice_cache_health.snapshot(self.cache(), guild_id)
     }
 
     pub async fn member_role_ids_or_fetch(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
@@ -997,7 +1007,11 @@ impl DiscordPort for DiscordAdapter {
         Ok(members)
     }
 
-    async fn community_lobbies(&self, guild_id: u64, user_id: u64) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
+    async fn community_lobbies(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
         crate::community::directory(self, guild_id, user_id)
     }
 

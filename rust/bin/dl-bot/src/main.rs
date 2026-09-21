@@ -756,8 +756,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         cache_snapshot.clone(),
         voice_pair_operations.clone(),
     );
+    let mut tempvoice_config = dl_voice::tempvoice::TempVoiceConfig::production();
+    tempvoice_config.empty_lane_grace_seconds = operating.tempvoice.empty_lane_grace_seconds;
     let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new_with_voice_pair_operations(
-        dl_voice::tempvoice::TempVoiceConfig::production(),
+        tempvoice_config,
         dl_voice::tempvoice::TempVoiceStore::new(central_pool.clone()),
         cache_snapshot.clone(),
         voice_pair_operations.clone(),
@@ -1425,6 +1427,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(central_pool.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
+        tempvoice.set_voice_tracker(&voice_tracker).await;
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
         // Rollen, Guild-Name). Bewusst ohne Admin-Gate (jeder darf abfragen).
