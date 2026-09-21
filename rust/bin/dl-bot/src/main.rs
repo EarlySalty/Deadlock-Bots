@@ -990,8 +990,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
-    // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
-    // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).
+    // Brain-RAG: Slash-Command plus bestehender Textcommand über MessageEvent-Subscriber.
     let brain_handler = {
         let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
         let brain_bin_path = std::path::PathBuf::from(&brain_bin);
@@ -1016,10 +1015,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             channel_allowlist.map(|channel_allowlist| {
                 let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
                 let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
+                let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
                 tracing::info!(
                     bin = %brain_bin_path.display(),
                     cooldown_secs,
                     max_question_len,
+                    open_test_mode,
                     channel_allowlist = channel_allowlist.len(),
                     "Brain-Command registriert"
                 );
@@ -1030,6 +1031,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
+                        open_test_mode,
                     });
                 Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
@@ -1041,6 +1043,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             })
         }
     };
+    if let Some(handler) = &brain_handler {
+        router.on_command(
+            "brain",
+            modglue::brain_command_spec(handler.config.max_question_len),
+            handler.clone(),
+        );
+    }
 
     // Coaching (7): Panel postet nur noch einen Link zur Website. Die frühere
     // Discord-Anfrageaufnahme samt KI-Analyse/Rollen-/Stale-Recovery bleibt im
