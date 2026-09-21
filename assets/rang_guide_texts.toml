@@ -25,6 +25,7 @@ step4_title = ""
 step4_body = ""
 extras_title = ""
 extras_body = """- Verknüpft, aber nichts passiert? Drück einmal auf „Rang prüfen“ — sonst läuft der Abgleich automatisch alle paar Minuten.
+- Wurdest du wegen längerer Inaktivität aus der Steam-Freundesliste entfernt? Über „Steam-Bot erneut hinzufügen“ kannst du dir eine neue Anfrage schicken lassen.
 - Klappt es trotzdem nicht? Prüf die Steam-Freundschaft mit dem Bot (Freundescode 820142646) oder sag den Mods Bescheid.
 - Über „Freundescode eingeben“ kannst du deinen Code jederzeit nachtragen oder korrigieren."""
 
@@ -33,6 +34,7 @@ steam_open = "🔗 Steam verknüpfen"
 linked_role = "✅ Discord-Verknüpfung herstellen"
 friend_code = "🔢 Freundescode eingeben"
 rankcheck = "📊 Rang prüfen"
+refriend = "🤝 Steam-Bot erneut hinzufügen"
 unlink = "🔓 Verknüpfung entfernen"
 
 [urls]

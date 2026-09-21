@@ -36,6 +36,7 @@ pub const RANG_GUIDE_COMPONENT_ID_EXTRAS_ACTION_ROW: u64 = 31_016;
 pub const RANG_GUIDE_COMPONENT_ID_FRIEND_CODE_BUTTON: u64 = 31_017;
 pub const RANG_GUIDE_COMPONENT_ID_RANKCHECK_BUTTON: u64 = 31_018;
 pub const RANG_GUIDE_COMPONENT_ID_UNLINK_BUTTON: u64 = 31_026;
+pub const RANG_GUIDE_COMPONENT_ID_REFRIEND_BUTTON: u64 = 31_027;
 pub const RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER: u64 = 31_019;
 pub const RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER: u64 = 31_020;
 pub const RANG_GUIDE_COMPONENT_ID_STEP1_MEDIA: u64 = 31_021;
@@ -75,6 +76,7 @@ pub const STEAM_LINK_OPEN_CUSTOM_ID: &str = "steam_link_panel:open";
 pub const STEAM_LINK_FRIEND_CODE_CUSTOM_ID: &str = "steam_link_panel:friend_code";
 pub const STEAM_LINK_RANKCHECK_CUSTOM_ID: &str = "steam_link_panel:rankcheck";
 pub const STEAM_LINK_UNLINK_CUSTOM_ID: &str = "steam_link_panel:unlink";
+pub const STEAM_LINK_REFRIEND_CUSTOM_ID: &str = "steam_link_panel:refriend";
 pub const LINKED_ROLE_LOGIN_URL_DEFAULT: &str =
     "https://deutsche-deadlock-community.de/coaching/api/auth/discord/linked-role/login";
 
@@ -92,6 +94,7 @@ pub const RANG_GUIDE_LINKED_ROLE_BUTTON_LABEL: &str = "✅ Discord-Verknüpfung 
 pub const RANG_GUIDE_FRIEND_CODE_BUTTON_LABEL: &str = "🔢 Freundescode eingeben";
 pub const RANG_GUIDE_RANKCHECK_BUTTON_LABEL: &str = "📊 Rang prüfen";
 pub const RANG_GUIDE_UNLINK_BUTTON_LABEL: &str = "🔓 Verknüpfung entfernen";
+pub const RANG_GUIDE_REFRIEND_BUTTON_LABEL: &str = "🤝 Steam-Bot erneut hinzufügen";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RangGuidePublishOutput {
@@ -203,6 +206,7 @@ struct ResolvedRangGuideButtons {
     linked_role: String,
     friend_code: String,
     rankcheck: String,
+    refriend: String,
     unlink: String,
 }
 
@@ -243,6 +247,7 @@ struct RangGuideButtonsToml {
     linked_role: Option<String>,
     friend_code: Option<String>,
     rankcheck: Option<String>,
+    refriend: Option<String>,
     unlink: Option<String>,
 }
 
@@ -512,6 +517,7 @@ impl ResolvedRangGuideConfig {
                 linked_role: RANG_GUIDE_LINKED_ROLE_BUTTON_LABEL.to_string(),
                 friend_code: RANG_GUIDE_FRIEND_CODE_BUTTON_LABEL.to_string(),
                 rankcheck: RANG_GUIDE_RANKCHECK_BUTTON_LABEL.to_string(),
+                refriend: RANG_GUIDE_REFRIEND_BUTTON_LABEL.to_string(),
                 unlink: RANG_GUIDE_UNLINK_BUTTON_LABEL.to_string(),
             },
             urls: ResolvedRangGuideUrls {
@@ -535,6 +541,7 @@ impl ResolvedRangGuideConfig {
         apply_optional(&mut self.buttons.linked_role, file.buttons.linked_role);
         apply_optional(&mut self.buttons.friend_code, file.buttons.friend_code);
         apply_optional(&mut self.buttons.rankcheck, file.buttons.rankcheck);
+        apply_optional(&mut self.buttons.refriend, file.buttons.refriend);
         apply_optional(&mut self.buttons.unlink, file.buttons.unlink);
 
         apply_optional(
@@ -661,6 +668,12 @@ fn rang_guide_messages(
                 &config.buttons.rankcheck,
                 2,
                 STEAM_LINK_RANKCHECK_CUSTOM_ID,
+            ),
+            button(
+                RANG_GUIDE_COMPONENT_ID_REFRIEND_BUTTON,
+                &config.buttons.refriend,
+                2,
+                STEAM_LINK_REFRIEND_CUSTOM_ID,
             ),
             button(
                 RANG_GUIDE_COMPONENT_ID_UNLINK_BUTTON,
@@ -1137,6 +1150,7 @@ linked_role_login = "https://example.invalid/linked-role"
                 STEAM_LINK_OPEN_CUSTOM_ID.to_string(),
                 STEAM_LINK_FRIEND_CODE_CUSTOM_ID.to_string(),
                 STEAM_LINK_RANKCHECK_CUSTOM_ID.to_string(),
+                STEAM_LINK_REFRIEND_CUSTOM_ID.to_string(),
                 STEAM_LINK_UNLINK_CUSTOM_ID.to_string(),
             ]
         );
@@ -1175,7 +1189,7 @@ linked_role_login = "https://example.invalid/linked-role"
         let help_buttons = payload.components[5]["components"][1]["components"]
             .as_array()
             .expect("help buttons");
-        assert_eq!(help_buttons.len(), 3);
+        assert_eq!(help_buttons.len(), 4);
         assert_eq!(
             help_buttons[0]["custom_id"],
             STEAM_LINK_FRIEND_CODE_CUSTOM_ID
@@ -1188,9 +1202,12 @@ linked_role_login = "https://example.invalid/linked-role"
         assert_eq!(help_buttons[1]["custom_id"], STEAM_LINK_RANKCHECK_CUSTOM_ID);
         assert_eq!(help_buttons[1]["label"], RANG_GUIDE_RANKCHECK_BUTTON_LABEL);
         assert_eq!(help_buttons[1]["style"], json!(2));
-        assert_eq!(help_buttons[2]["custom_id"], "steam_link_panel:unlink");
-        assert_eq!(help_buttons[2]["label"], "🔓 Verknüpfung entfernen");
-        assert_eq!(help_buttons[2]["style"], json!(4));
+        assert_eq!(help_buttons[2]["custom_id"], STEAM_LINK_REFRIEND_CUSTOM_ID);
+        assert_eq!(help_buttons[2]["label"], RANG_GUIDE_REFRIEND_BUTTON_LABEL);
+        assert_eq!(help_buttons[2]["style"], json!(2));
+        assert_eq!(help_buttons[3]["custom_id"], "steam_link_panel:unlink");
+        assert_eq!(help_buttons[3]["label"], "🔓 Verknüpfung entfernen");
+        assert_eq!(help_buttons[3]["style"], json!(4));
     }
 
     #[test]
@@ -1289,6 +1306,7 @@ step3_body = "{long_step3}"
                 STEAM_LINK_OPEN_CUSTOM_ID.to_string(),
                 STEAM_LINK_FRIEND_CODE_CUSTOM_ID.to_string(),
                 STEAM_LINK_RANKCHECK_CUSTOM_ID.to_string(),
+                STEAM_LINK_REFRIEND_CUSTOM_ID.to_string(),
                 STEAM_LINK_UNLINK_CUSTOM_ID.to_string(),
             ]
         );
@@ -1418,7 +1436,7 @@ step3_body = "{long_step3}"
                 .payload
                 .components
                 .last()
-                .expect("last component")["components"][1]["components"][2]["custom_id"],
+                .expect("last component")["components"][1]["components"][3]["custom_id"],
             STEAM_LINK_UNLINK_CUSTOM_ID
         );
     }

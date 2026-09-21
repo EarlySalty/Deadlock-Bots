@@ -268,7 +268,11 @@ pub trait DiscordPort: Send + Sync {
     async fn voice_members(&self, channel_id: u64) -> Result<Vec<MemberInfo>, PortError>;
     /// Read-only directory for a verified Discord member; implementations must
     /// enforce effective VIEW_CHANNEL + CONNECT permissions, including bans.
-    async fn community_lobbies(&self, _guild_id: u64, _user_id: u64) -> Result<Vec<CommunityLobby>, PortError> {
+    async fn community_lobbies(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Vec<CommunityLobby>, PortError> {
         Err(PortError::GuildUnavailable)
     }
 

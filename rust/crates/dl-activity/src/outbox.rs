@@ -224,11 +224,13 @@ impl OutboxDispatcher {
             }
             HandlerOutcome::Failed { error } => {
                 let error = truncate(error);
-                sqlx::query("UPDATE bot.action_outbox SET status = 'failed', error = $2 WHERE id = $1")
-                    .bind(row.id)
-                    .bind(&error)
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(
+                    "UPDATE bot.action_outbox SET status = 'failed', error = $2 WHERE id = $1",
+                )
+                .bind(row.id)
+                .bind(&error)
+                .execute(&mut *tx)
+                .await?;
             }
         }
         tx.commit().await?;
@@ -514,7 +516,10 @@ mod tests {
         assert_eq!(report.total, 2);
         assert_eq!(
             report.by_action_type,
-            vec![("connect_suggest".to_string(), 1), ("lfg_invite".to_string(), 1)]
+            vec![
+                ("connect_suggest".to_string(), 1),
+                ("lfg_invite".to_string(), 1)
+            ]
         );
         assert_eq!(report.summary(), "connect_suggest=1, lfg_invite=1");
     }
