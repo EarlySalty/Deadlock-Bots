@@ -42,10 +42,11 @@ const _: () = assert!(
 );
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
-pub const PANEL_CUSTOM_IDS: [&str; 7] = [
+pub const PANEL_CUSTOM_IDS: [&str; 8] = [
     "steam_link_panel:open",
     "steam_link_panel:friend_code",
     "steam_link_panel:rankcheck",
+    "steam_link_panel:refriend",
     "linkpanel_friend_code",
     "linkpanel_rank_check",
     "steam_link_panel:unlink",
@@ -606,6 +607,7 @@ fn steam_panel_components() -> Value {
         { "type": 2, "style": 1, "label": "🔗 Steam verknüpfen", "custom_id": "steam_link_panel:open" },
         { "type": 2, "style": 2, "label": "🔢 Freundescode eingeben", "custom_id": "steam_link_panel:friend_code" },
         { "type": 2, "style": 2, "label": "📊 Rang prüfen", "custom_id": "steam_link_panel:rankcheck" },
+        { "type": 2, "style": 2, "label": "🤝 Steam-Bot erneut hinzufügen", "custom_id": "steam_link_panel:refriend" },
         { "type": 2, "style": 4, "label": "🔓 Verknüpfung entfernen", "custom_id": "steam_link_panel:unlink" },
     ]}])
 }
@@ -1010,16 +1012,38 @@ mod tests {
     }
 
     #[test]
-    fn steam_panel_hat_unlink_button_als_vierten_button() {
+    fn steam_panel_hat_refriend_und_unlink_button() {
         assert_eq!(
             steam_panel_components(),
             json!([{ "type": 1, "components": [
                 { "type": 2, "style": 1, "label": "🔗 Steam verknüpfen", "custom_id": "steam_link_panel:open" },
                 { "type": 2, "style": 2, "label": "🔢 Freundescode eingeben", "custom_id": "steam_link_panel:friend_code" },
                 { "type": 2, "style": 2, "label": "📊 Rang prüfen", "custom_id": "steam_link_panel:rankcheck" },
+                { "type": 2, "style": 2, "label": "🤝 Steam-Bot erneut hinzufügen", "custom_id": "steam_link_panel:refriend" },
                 { "type": 2, "style": 4, "label": "🔓 Verknüpfung entfernen", "custom_id": "steam_link_panel:unlink" },
             ]}])
         );
+    }
+
+    #[tokio::test]
+    async fn refriend_button_wird_an_steam_bot_geforwardet() {
+        let custom_id = "steam_link_panel:refriend";
+        let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
+        let mut router = InteractionRouter::new();
+        register(&mut router, SteamBotClient::new(url, None));
+
+        let reply = router
+            .resolve_component(custom_id)
+            .expect("refriend route")
+            .handle(interaction(custom_id))
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("ok"));
+        assert_eq!(
+            received.lock().expect("lock")[0]["interaction"]["custom_id"],
+            custom_id
+        );
+        server.abort();
     }
 
     #[tokio::test]

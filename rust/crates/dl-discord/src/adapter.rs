@@ -997,7 +997,11 @@ impl DiscordPort for DiscordAdapter {
         Ok(members)
     }
 
-    async fn community_lobbies(&self, guild_id: u64, user_id: u64) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
+    async fn community_lobbies(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
         crate::community::directory(self, guild_id, user_id)
     }
 

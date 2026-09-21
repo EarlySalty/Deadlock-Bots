@@ -134,46 +134,6 @@ impl VoiceNudge {
         .unwrap_or(false)
     }
 
-    async fn is_refriend_returner(&self, user_id: u64) -> bool {
-        let Ok(user_id) = u64_to_i64("core.steam_links.discord_id", user_id) else {
-            return false;
-        };
-        sqlx::query_scalar!(
-            r#"
-            SELECT EXISTS(
-                SELECT 1
-                  FROM core.steam_links
-                 WHERE discord_id = $1
-                   AND is_steam_friend = FALSE
-                   -- MUSS mit find_refriend_candidates_for_user in Deadlock-Steam-Bot
-                   -- (crates/steam-persistence/src/friends.rs) synchron gehalten werden.
-                   AND unlink_reason IN ('inactive_purge', 'friend_missing', 'legacy_unlink')
-                   -- Mit REFRIEND_COOLDOWN_DAYS=30 auf der Steam-Seite gekoppelt.
-                   AND (
-                       refriend_attempted_at IS NULL
-                       OR refriend_attempted_at < NOW() - INTERVAL '30 days'
-                   )
-                 LIMIT 1
-            ) AS "exists!"
-            "#,
-            user_id,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false)
-    }
-
-    async fn trigger_voice_return(&self, user_id: u64) {
-        if self.is_refriend_returner(user_id).await {
-            // Schnelle Mehrfach-Joins dürfen bis zum Steam-seitigen Zeitstempel mehrfach feuern;
-            // upsert_friend_request ist dort idempotent, daher braucht es hier kein Dedup.
-            self.port.send_voice_return(user_id).await;
-            tracing::info!(user_id, "Rückkehrer erkannt, voice_return gefeuert");
-        } else {
-            tracing::debug!(user_id, "kein Rückkehr-Kandidat");
-        }
-    }
-
     #[cfg(test)]
     async fn has_active_nudge(&self, user_id: u64) -> bool {
         self.load_nudge_state(user_id)
@@ -204,10 +164,6 @@ impl VoiceNudge {
         if self.is_opted_out(user_id).await {
             return;
         }
-        // Nach dem Opt-out-Gate (Datenschutz gilt auch für Steam-Re-Friend),
-        // aber vor den Nudge-Frühausstiegen: Rückkehrer HABEN einen Steam-Link.
-        self.trigger_voice_return(user_id).await;
-
         let roles = self.port.member_role_ids(guild_id, user_id).await;
         if roles.iter().any(|r| EXEMPT_ROLE_IDS.contains(r)) {
             return;
@@ -761,12 +717,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refriend_returner_gate_filtert_exakt() {
-        let (_db, nudge, _port) = setup(None).await;
+    async fn inaktiver_returner_loest_beim_voice_join_keine_fa_mehr_aus() {
+        let (_db, nudge, port) = setup(None).await;
         sqlx::query!(
             r#"
             INSERT INTO core.users (discord_id)
-            VALUES (101), (102), (103), (104), (105), (106), (107)
+            VALUES (101)
             "#
         )
         .execute(&nudge.pool)
@@ -777,31 +733,27 @@ mod tests {
             INSERT INTO core.steam_links (
                 discord_id, steam_id, is_steam_friend, unlink_reason, refriend_attempted_at
             )
-            VALUES
-                (101, 'inactive-purge', FALSE, 'inactive_purge', NULL),
-                (102, 'friend-missing', FALSE, 'friend_missing', NULL),
-                (103, 'legacy-unlink', FALSE, 'legacy_unlink', NULL),
-                (104, 'no-reason', FALSE, NULL, NULL),
-                (105, 'unknown-reason', FALSE, 'user_removed_bot', NULL),
-                (106, 'cooldown', FALSE, 'inactive_purge', NOW()),
-                (107, 'friend', TRUE, 'inactive_purge', NULL)
+            VALUES (101, '76561198000000101', FALSE, 'inactive_purge', NULL)
             "#
         )
         .execute(&nudge.pool)
         .await
         .expect("links");
 
-        assert!(nudge.is_refriend_returner(101).await);
-        assert!(nudge.is_refriend_returner(102).await);
-        assert!(nudge.is_refriend_returner(103).await);
-        assert!(!nudge.is_refriend_returner(104).await);
-        assert!(!nudge.is_refriend_returner(105).await);
-        assert!(!nudge.is_refriend_returner(106).await);
-        assert!(!nudge.is_refriend_returner(107).await);
+        nudge
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 101,
+                channel_id: 5,
+            })
+            .await;
+
+        assert!(port.voice_returns.lock().expect("lock").is_empty());
+        assert!(port.dms.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]
-    async fn handle_event_feuert_voice_return_nur_fuer_berechtigte_rueckkehrer() {
+    async fn handle_event_feuert_voice_return_fuer_keinen_rueckkehrer_mehr() {
         let (_db, nudge, port) = setup(None).await;
         sqlx::query!(
             r#"
@@ -836,7 +788,7 @@ mod tests {
                 .await;
         }
 
-        assert_eq!(port.voice_returns.lock().expect("lock").as_slice(), &[200]);
+        assert!(port.voice_returns.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]

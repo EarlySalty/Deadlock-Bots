@@ -72,7 +72,11 @@ impl TextGenerator for ChatTextGenerator {
             Ok(response) if response.content.trim().is_empty() => {
                 tracing::warn!(
                     use_case = self.use_case.as_str(),
-                    model = response.model.as_deref().or(model.as_deref()).unwrap_or("default"),
+                    model = response
+                        .model
+                        .as_deref()
+                        .or(model.as_deref())
+                        .unwrap_or("default"),
                     "LLM-Antwort war leer"
                 );
                 None
@@ -80,7 +84,11 @@ impl TextGenerator for ChatTextGenerator {
             Ok(response) => {
                 tracing::debug!(
                     use_case = self.use_case.as_str(),
-                    model = response.model.as_deref().or(model.as_deref()).unwrap_or("default"),
+                    model = response
+                        .model
+                        .as_deref()
+                        .or(model.as_deref())
+                        .unwrap_or("default"),
                     chars = response.content.len(),
                     "LLM-Antwort erhalten"
                 );
@@ -148,7 +156,9 @@ mod tests {
         });
         let generator = ChatTextGenerator::new(provider.clone(), LlmUseCase::TurnierVorschlag);
 
-        let answer = generator.generate_text(request(Some("gpt-eigenes-modell"))).await;
+        let answer = generator
+            .generate_text(request(Some("gpt-eigenes-modell")))
+            .await;
 
         assert_eq!(answer.as_deref(), Some("Antwort"));
         let seen = provider.seen.lock().expect("Spy-Aufzeichnung");

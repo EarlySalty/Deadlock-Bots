@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use reqwest::Url;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 pub const TWITCH_INTERNAL_API_BASE_PATH: &str = "/internal/twitch/v1";
