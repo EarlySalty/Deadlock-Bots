@@ -103,4 +103,24 @@ Die zusätzliche Voice-/Gateway-Wiederholung mit `--test-threads=4` bestand eben
 
 Nachweise auf dem Arbeitsrechner: `/home/nathanael/buildlogs/voice-reconcile-20260921/{baseline,red,green2,full-tests,final-tests}.log`. Die ergänzenden Clippy- und SQL-Läufe liegen in den zugehörigen Codex-MCP-Joblogs. Produktive History wurde für diese Tests nicht verändert.
 
+## Veröffentlichte Übergabe und Gate-Hindernis
+
+Implementierungscommit: `58a0adcaab5bc2752e07db638ef99972b4160888`, auf `origin/fix/tempvoice-reconcile-history-20260921` veröffentlicht. GitHub-Draft-PR: **#448**, Ziel `main`. Ein Dokumentationscommit ergänzt diesen Abschlussbericht.
+
+Zwei Review-Anläufe gegen `origin/main` lieferten **Exit 2 und kein Codeurteil**. Der Einzelaufruf von `review_gate.py` scheiterte am fehlenden `grok`-Programm. Der anschließende Aufruf der bestehenden Funktion `run_review_gate` durchlief die konfigurierte Kette mit folgenden Werkzeugfehlern:
+
+| Reviewer | Ergebnis |
+| --- | --- |
+| glm-5.3-flash und grok-4.6 | Der konfigurierte CLI-Treiber `grok` fehlt. |
+| claude-opus-4-8 und claude-fable-5-1 | Claude-Code-Zugang der Reviewer-Organisation gesperrt. |
+| gpt-6-astra | Die Codex-Version des Reviewers unterstützt das konfigurierte Modell nicht. |
+
+Die Kette wurde weder umkonfiguriert noch übergangen. Das ist keine fachliche Freigabe und auch kein fachlicher BLOCK-Befund. Ein Merge, Main-Push, eigener Deploy und die produktive SQL-Ausführung fanden nicht statt. Der Branch und sein Worktree bleiben für den bestehenden Review-/Deploy-Prozess erhalten.
+
+Nächster Betriebsschritt ist die Wiederherstellung des Reviewer-Zugangs beziehungsweise der benötigten CLI-Versionen, danach ein erneuter regulärer Gate-Lauf. Eine konkrete Rücksetzzeit meldeten die Werkzeuge nicht. Der Draft-PR ersetzt das Gate nicht.
+
+Im folgenden Protokoll zählen die Git-Schritte Änderungen an `main`; die Feature-Commits sind separat veröffentlicht.
+
+MERGEPROTOKOLL[MS-1]: 0 Git-Schritte einzeln | Anläufe: 2 | Gate: kein Urteil (Exit 2), Main unverändert
+
 TEXTNACHWEIS[DR-1]: Gedankenstriche 0 | ae/oe/ue/ss-Ersatz 0 | Absolutwörter 0 belegt | Senke: .tasks/2026-09-21-tempvoice-reconcile/REPORT.md
