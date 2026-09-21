@@ -34,6 +34,7 @@ pub mod insights_sync;
 pub mod names;
 pub mod oauth;
 pub mod oauth_state;
+pub mod operating_config;
 pub mod public;
 pub mod reaction_roles;
 pub mod repo_activity;
@@ -42,6 +43,7 @@ pub mod server_stats;
 pub mod session;
 pub mod survey;
 pub mod token;
+pub mod visual_brain;
 pub mod web;
 
 pub use authority::{decide_access, AccessOutcome, MemberAccessInfo, MemberLookup};

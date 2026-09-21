@@ -8,6 +8,7 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+dl-answer.workspace = true
 serenity.workspace = true
 songbird.workspace = true
 serde.workspace = true

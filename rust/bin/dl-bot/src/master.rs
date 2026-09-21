@@ -563,8 +563,7 @@ pub struct PidLock {
 
 impl PidLock {
     pub fn acquire_default() -> Result<Self, PidLockError> {
-        let path = std::env::var("DL_BOT_PID_FILE")
-            .ok()
+        let path = dl_core::runtime_config::lookup("DL_BOT_PID_FILE")
             .map(|raw| raw.trim().to_string())
             .filter(|raw| !raw.is_empty())
             .map(PathBuf::from)

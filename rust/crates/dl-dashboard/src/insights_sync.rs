@@ -97,19 +97,18 @@ pub struct SyncReport {
 
 impl SyncConfig {
     pub fn from_env() -> Result<Self, String> {
-        let token = std::env::var(TOKEN_ENV)
+        let token = dl_core::runtime_config::secret_value(TOKEN_ENV)
             .map(|s| s.trim().to_string())
-            .map_err(|_| format!("{TOKEN_ENV} fehlt"))?;
+            .ok_or_else(|| format!("{TOKEN_ENV} fehlt"))?;
         if token.is_empty() {
             return Err(format!("{TOKEN_ENV} ist leer"));
         }
-        let guild_id = std::env::var(GUILD_ENV)
-            .ok()
+        let guild_id = dl_core::runtime_config::lookup(GUILD_ENV)
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_GUILD_ID);
-        let archive_dir = std::env::var(ARCHIVE_ENV)
+        let archive_dir = dl_core::runtime_config::lookup(ARCHIVE_ENV)
             .map(PathBuf::from)
-            .unwrap_or_else(|_| default_archive_dir());
+            .unwrap_or_else(default_archive_dir);
         Ok(Self {
             token,
             guild_id,

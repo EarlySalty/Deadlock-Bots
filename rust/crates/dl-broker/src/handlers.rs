@@ -63,6 +63,8 @@ pub async fn health(State(state): State<SharedBroker>, peer: Peer, headers: Head
         "status": "ok",
         "bot_ready": state.port.is_ready().await,
         "runtime_role": "master",
+        "config_fingerprint": dl_core::config::process_bot_config().ok().map(|config| config.fingerprint()),
+        "process_id": std::process::id(),
     });
     respond(200, success_body(&rid, None, result))
 }

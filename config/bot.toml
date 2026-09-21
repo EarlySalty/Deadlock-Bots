@@ -1,0 +1,44 @@
+# Discord-Konfiguration für den laufenden Umbau.
+# Prüfbeispiel für Bot/Web. Keine produktive Betriebsmatrix.
+# Vor einem Deploy müssen die vorhandenen Betriebswerte übernommen werden.
+# Zugangsdaten bleiben in Infisical und gehören nicht in diese Datei.
+# Änderungen der angebundenen Startwerte werden beim Prozessneustart wirksam.
+schema_version = 1
+
+[discord]
+# guild_id vor dem produktiven Cutover inventarisieren.
+# Discord-IDs werden als Dezimalstrings eingetragen.
+
+[services]
+dashboard_port = 8766
+public_stats_port = 8768
+master_broker_port = 8770
+tierlist_public_port = 8771
+changelog_port = 8899
+
+[storage]
+# Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.
+# Relative Pfade beziehen sich auf das WorkingDirectory des Dienstes.
+legacy_snapshot_path = "data/deadlock.sqlite3"
+
+[features]
+# Konkrete weitere Modulschalter stehen unter runtime.community.
+gateway = false
+
+[moderation]
+enforce = false
+
+[concierge]
+timeout_seconds = 100
+
+[llm.fireworks]
+# Optionaler ausdrücklich freigegebener Modell-Pin. Keine automatische Auswahl.
+
+[llm.use_cases.moderation_verify]
+provider = "openai"
+
+[llm.use_cases.turnier_vorschlag]
+provider = "openai"
+
+[llm.use_cases.voice_hint]
+provider = "openai"

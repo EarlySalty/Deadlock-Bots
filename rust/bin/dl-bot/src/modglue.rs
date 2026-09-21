@@ -1,8 +1,6 @@
 //! Discord-Glue für dl-moderation (ModPort + aimod:*-Review-Buttons).
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -18,8 +16,6 @@ use serenity::all::{
 };
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -34,7 +30,6 @@ const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
-const BRAIN_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 const BRAIN_USAGE: &str = "🧠 Frag mich was zu Deadlock! Z. B. `!brain wie spiel ich Vindicta?` oder `!brain ist Lash grad stark?`";
 const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig — eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
 const BRAIN_TOO_LONG: &str =
@@ -54,9 +49,6 @@ const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
 const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
 const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
-const BRAIN_MAX_OUTPUT_TOKENS: u32 = 700;
-const BRAIN_DIRECT_ANSWER_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für normale Fragen:\nBeantworte zuerst die konkrete Frage in 1-2 kurzen Sätzen. Wenn die Frage eine Rechnung enthält, nutze auch Zahlen aus der Nutzerfrage als Annahme und zeige höchstens eine kurze Formel plus Ergebnis. Keine Meta-Abschnitte wie \"Hinweis zur Verifikation\", \"Break-Even-Rechnung\" oder \"laut ground_truth\". Erwähne keine internen Datenquellen, Vertrauensstufen, JSON-Felder oder Faktensammlung. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende, außer der Nutzer fragt ausdrücklich danach. Gib keine Build-Tipps, wenn nicht nach Build oder Items gefragt wurde. Wenn etwas unsicher ist, sag es in einem Nebensatz statt als eigenen Abschnitt. Maximal 650 Zeichen, höchstens 4 Stichpunkte.\n---";
-const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für Build-Fragen:\nLiefere einen konkreten, spielbaren Build aus den gelieferten Daten. Beginne mit einem kurzen Satz zum Plan, danach early/mid/late mit knappen Stichpunkten. Nenne keine internen Datenquellen, JSON-Felder oder Vertrauensstufen. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende. Wenn Daten dünn sind, schreibe vorsichtig, aber ohne Verweigerungsabschnitt. Maximal 900 Zeichen und höchstens 8 Stichpunkte.\n---";
 
 pub struct LfgFreetextGlue {
     pub adapter: Arc<DiscordAdapter>,
@@ -149,204 +141,24 @@ pub struct ModGlue {
     pub tags: Arc<dl_community::tags::TagService>,
 }
 
-pub struct BrainRetrieverGlue {
-    pub bin: PathBuf,
+pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
+
+pub struct SharedBrainAnswerer {
+    pub engine: Arc<dl_answer::AnswerEngine>,
 }
 
 #[async_trait::async_trait]
-impl dl_brain::BrainRetriever for BrainRetrieverGlue {
-    async fn ask_context(
-        &self,
-        frage: &str,
-    ) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
-        let output = run_brain_cli(&self.bin, frage, BRAIN_SUBPROCESS_TIMEOUT).await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                status = ?output.status.code(),
-                stderr = %stderr.trim(),
-                "Brain-CLI lieferte Fehlerstatus"
-            );
-            return Err(dl_brain::BrainError::Backend("exit status".to_string()));
-        }
-        if output.stdout.iter().all(u8::is_ascii_whitespace) {
-            tracing::warn!("Brain-CLI lieferte leeres stdout");
-            return Err(dl_brain::BrainError::Backend("empty stdout".to_string()));
-        }
-
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
-            tracing::warn!(%err, "Brain-CLI JSON konnte nicht geparst werden");
-            dl_brain::BrainError::Backend(err.to_string())
-        })?;
-        brain_context_from_value(value)
-    }
-}
-
-async fn run_brain_cli(
-    bin: &Path,
-    frage: &str,
-    timeout_duration: Duration,
-) -> Result<Output, dl_brain::BrainError> {
-    let mut command = Command::new(bin);
-    command.kill_on_drop(true);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    // Kein --db mehr: deadlock-brain liest die zentrale Postgres via DEADLOCK_CENTRAL_DSN
-    command.arg("ask-context").arg("--").arg(frage);
-
-    let mut child = command.spawn().map_err(|err| {
-        tracing::warn!(
-            %err,
-            bin = %bin.display(),
-            "Brain-CLI konnte nicht gestartet werden"
-        );
-        dl_brain::BrainError::Backend(err.to_string())
-    })?;
-
-    let stdout = child.stdout.take().map(read_pipe);
-    let stderr = child.stderr.take().map(read_pipe);
-    let status = match timeout(timeout_duration, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(err)) => {
-            tracing::warn!(%err, bin = %bin.display(), "Brain-CLI wait fehlgeschlagen");
-            return Err(dl_brain::BrainError::Backend(err.to_string()));
-        }
-        Err(_) => {
-            tracing::warn!(
-                bin = %bin.display(),
-                timeout_secs = timeout_duration.as_secs(),
-                "Brain-CLI Timeout"
-            );
-            if let Err(err) = child.start_kill() {
-                tracing::warn!(%err, bin = %bin.display(), "Brain-CLI Kill fehlgeschlagen");
-            }
-            if let Err(err) = child.wait().await {
-                tracing::warn!(%err, bin = %bin.display(), "Brain-CLI Reap nach Timeout fehlgeschlagen");
-            }
-            let _ = collect_pipe(stdout).await;
-            let _ = collect_pipe(stderr).await;
-            return Err(dl_brain::BrainError::Backend("timeout".to_string()));
-        }
-    };
-
-    let stdout = collect_pipe(stdout).await?;
-    let stderr = collect_pipe(stderr).await?;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn read_pipe<R>(mut pipe: R) -> JoinHandle<std::io::Result<Vec<u8>>>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut buffer = Vec::new();
-        pipe.read_to_end(&mut buffer).await?;
-        Ok(buffer)
-    })
-}
-
-async fn collect_pipe(
-    task: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-) -> Result<Vec<u8>, dl_brain::BrainError> {
-    let Some(task) = task else {
-        return Ok(Vec::new());
-    };
-    match task.await {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(err)) => Err(dl_brain::BrainError::Backend(err.to_string())),
-        Err(err) => Err(dl_brain::BrainError::Backend(err.to_string())),
-    }
-}
-
-fn brain_context_from_value(value: Value) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
-    let intent = value
-        .get("intent")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let prompt = value
-        .get("prompt")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if intent.is_empty() {
-        tracing::warn!("Brain-CLI JSON ohne intent");
-        return Err(dl_brain::BrainError::Backend("missing intent".to_string()));
-    }
-    if prompt.trim().is_empty() && intent != "out_of_domain" {
-        tracing::warn!("Brain-CLI JSON ohne prompt");
-        return Err(dl_brain::BrainError::Backend("missing prompt".to_string()));
-    }
-    let sources = match value.get("sources") {
-        Some(Value::Array(values)) => values
-            .iter()
-            .filter_map(brain_source_to_string)
-            .collect::<Vec<_>>(),
-        Some(other) => brain_source_to_string(other).into_iter().collect(),
-        None => Vec::new(),
-    };
-    Ok(dl_brain::BrainContext {
-        intent,
-        prompt,
-        sources,
-    })
-}
-
-fn brain_source_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::String(value) => {
-            let value = value.trim();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            }
-        }
-        other => serde_json::to_string(other).ok(),
-    }
-}
-
-pub struct BrainAiGlue {
-    pub client: Option<Arc<dyn dl_ai::TextGenerator>>,
-}
-
-#[async_trait::async_trait]
-impl dl_brain::AiAnswerer for BrainAiGlue {
-    async fn answer(&self, prompt: &str) -> Result<Option<String>, dl_brain::BrainError> {
-        let Some(client) = &self.client else {
-            tracing::warn!("Brain-Antwort nicht möglich: kein LLM-Anbieter verdrahtet");
-            return Err(dl_brain::BrainError::Backend(
-                "missing llm provider".to_string(),
-            ));
-        };
-        let prompt = brain_ai_prompt(prompt);
-        let Some(text) = client
-            .generate_text(dl_ai::GenerateRequest {
-                prompt,
-                system_prompt: None,
-                model: None,
-                max_output_tokens: Some(BRAIN_MAX_OUTPUT_TOKENS),
-                reasoning_effort: None,
-                temperature: 0.25,
-            })
+impl dl_brain::AiAnswerer for SharedBrainAnswerer {
+    async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+        self.engine
+            .answer(question, dl_answer::Scope::GameOnly)
             .await
-        else {
-            return Err(dl_brain::BrainError::Backend(
-                "missing llm response".to_string(),
-            ));
-        };
-        let cleaned = dl_ai::strip_think(&text);
-        if cleaned.trim().is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(cleaned))
-        }
+            .map(|answer| match answer {
+                dl_answer::Answer::Grounded { text, .. } => dl_brain::BrainOutcome::Answer(text),
+                dl_answer::Answer::NoEvidence => dl_brain::BrainOutcome::NoAnswer,
+                dl_answer::Answer::OutOfDomain => dl_brain::BrainOutcome::OutOfDomain,
+            })
+            .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
     }
 }
 
@@ -354,7 +166,6 @@ pub struct BrainHandler {
     pub adapter: Arc<DiscordAdapter>,
     pub config: Arc<dl_brain::BrainConfig>,
     pub cooldowns: Arc<dl_brain::BrainCooldowns>,
-    pub retriever: Arc<dyn dl_brain::BrainRetriever>,
     pub answerer: Arc<dyn dl_brain::AiAnswerer>,
     pub channel_allowlist: Option<HashSet<u64>>,
 }
@@ -373,7 +184,6 @@ impl BrainHandler {
             user_id,
             self.config.as_ref(),
             self.cooldowns.as_ref(),
-            self.retriever.as_ref(),
             self.answerer.as_ref(),
         )
         .await
@@ -501,25 +311,6 @@ impl InteractionHandler for BrainHandler {
     }
 }
 
-fn brain_ai_prompt(prompt: &str) -> String {
-    format!("{prompt}\n\n{}", brain_answer_style_override(prompt))
-}
-
-fn brain_answer_style_override(prompt: &str) -> &'static str {
-    if prompt_is_build_answer(prompt) {
-        BRAIN_BUILD_OVERRIDE
-    } else {
-        BRAIN_DIRECT_ANSWER_OVERRIDE
-    }
-}
-
-fn prompt_is_build_answer(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-    lower.contains("erkannte absicht: build_recommendation")
-        || lower.contains("build_context_json:")
-        || lower.contains("berechneten build")
-}
-
 fn brain_public_message_body(message: &str) -> Map<String, Value> {
     let mut body = Map::new();
     body.insert("content".into(), json!(message));
@@ -602,13 +393,23 @@ fn truncate_brain_description(description: &str) -> String {
 }
 
 fn truncate_brain_chars(value: &str, max_chars: usize, suffix: &str) -> String {
-    if value.chars().count() <= max_chars {
+    if value.encode_utf16().count() <= max_chars {
         return value.to_string();
     }
 
-    let suffix_len = suffix.chars().count();
-    let take_chars = max_chars.saturating_sub(suffix_len);
-    let mut truncated = value.chars().take(take_chars).collect::<String>();
+    let suffix_len = suffix.encode_utf16().count();
+    let mut remaining = max_chars.saturating_sub(suffix_len);
+    let mut truncated: String = value
+        .chars()
+        .take_while(|ch| {
+            let units = ch.len_utf16();
+            if units > remaining {
+                return false;
+            }
+            remaining -= units;
+            true
+        })
+        .collect();
     truncated.push_str(suffix);
     truncated
 }
@@ -3563,7 +3364,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
-    use dl_brain::BrainRetriever as _;
+    use dl_answer::Retriever as _;
 
     #[test]
     fn np_lane_in_chill_wird_als_new_player_gelabelt() {
@@ -3640,36 +3441,19 @@ mod tests {
         }
     }
 
-    struct CountingBrainRetriever {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl dl_brain::BrainRetriever for CountingBrainRetriever {
-        async fn ask_context(
-            &self,
-            _frage: &str,
-        ) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(dl_brain::BrainContext {
-                intent: "answer".to_string(),
-                prompt: "prompt".to_string(),
-                sources: Vec::new(),
-            })
-        }
-    }
-
     struct CountingBrainAnswerer {
         calls: Arc<AtomicUsize>,
+        retrieval_calls: Arc<AtomicUsize>,
     }
-
     #[async_trait::async_trait]
     impl dl_brain::AiAnswerer for CountingBrainAnswerer {
-        async fn answer(&self, _prompt: &str) -> Result<Option<String>, dl_brain::BrainError> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(Some("Antwort".to_string()))
+        async fn answer(
+            &self,
+            _question: &str,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
         }
     }
 
@@ -3685,11 +3469,9 @@ mod tests {
                 cooldown_secs: 20,
             }),
             cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-            retriever: Arc::new(CountingBrainRetriever {
-                calls: retriever_calls,
-            }),
             answerer: Arc::new(CountingBrainAnswerer {
                 calls: answerer_calls,
+                retrieval_calls: retriever_calls,
             }),
             channel_allowlist,
         }
@@ -3747,33 +3529,6 @@ mod tests {
             cleaned,
             "# Seven\n\n\n## Items\nText\n**Timing**\n#### Kein Heading"
         );
-    }
-
-    #[test]
-    fn brain_ai_prompt_nutzt_direktstil_fuer_normale_fragen() {
-        let prompt = "FRAGE: Ab wie viel Spirit macht Scourge gleich viel Schaden?\nERKANNTE ABSICHT: mechanic\nFAKTEN (JSON, vertrauenssortiert): {}";
-
-        let styled = brain_ai_prompt(prompt);
-
-        assert!(styled.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
-        assert!(!styled.contains(BRAIN_BUILD_OVERRIDE));
-        assert!(styled.contains("Zahlen aus der Nutzerfrage als Annahme"));
-        assert!(styled.contains("Keine Meta-Abschnitte"));
-    }
-
-    #[test]
-    fn brain_ai_prompt_nutzt_buildstil_nur_fuer_buildfragen() {
-        let ask_prompt = "FRAGE: Seven build\nERKANNTE ABSICHT: build_recommendation";
-        let engine_prompt =
-            "Erkläre den folgenden, bereits berechneten Build verständlich auf Deutsch.\n\nBUILD_CONTEXT_JSON:{}";
-
-        let styled_ask = brain_ai_prompt(ask_prompt);
-        let styled_engine = brain_ai_prompt(engine_prompt);
-
-        assert!(styled_ask.contains(BRAIN_BUILD_OVERRIDE));
-        assert!(styled_engine.contains(BRAIN_BUILD_OVERRIDE));
-        assert!(!styled_ask.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
-        assert!(!styled_engine.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
     }
 
     #[tokio::test]
@@ -3879,6 +3634,19 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
+        let bounded = "🧠".repeat(1900);
+        let payload = brain_answer_embed_body(&"🧠".repeat(300), &bounded).expect("embed");
+        let embed = &payload["embeds"][0];
+        assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
+        assert!(
+            embed["title"]
+                .as_str()
+                .expect("title")
+                .encode_utf16()
+                .count()
+                <= 256
+        );
+        assert!(bounded.encode_utf16().count() <= 4096);
         let body = brain_answer_embed_body(
             "Wie spiel ich Seven?",
             "### Build\n\n✅ **Seven** startet stabil.",
@@ -3941,6 +3709,9 @@ mod tests {
             "🧠 ".chars().count() + BRAIN_EMBED_TITLE_QUESTION_LIMIT
         );
         assert!(title.ends_with('…'));
+        let emoji_title = brain_embed_title(&"🧠".repeat(300));
+        assert!(emoji_title.encode_utf16().count() <= 256);
+        assert!(emoji_title.ends_with('…'));
 
         let description =
             truncate_brain_description(&"ä".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT + 1));
@@ -3997,9 +3768,9 @@ mod tests {
         make_executable(&script)?;
 
         let retriever = BrainRetrieverGlue { bin: script };
-        let context = retriever.ask_context("- Spirit Lifesteal?").await?;
+        let context = retriever.retrieve("- Spirit Lifesteal?").await?;
 
-        assert_eq!(context.prompt, "ok");
+        assert!(context.evidence.is_empty());
         let argv = fs::read_to_string(argv_log)?;
         let lines = argv.lines().collect::<Vec<_>>();
         assert_eq!(lines, vec!["3", "ask-context", "--", "- Spirit Lifesteal?"]);
@@ -4024,7 +3795,7 @@ mod tests {
 
         let retriever = BrainRetrieverGlue { bin: script };
         let timed_out =
-            tokio::time::timeout(Duration::from_millis(200), retriever.ask_context("frage")).await;
+            tokio::time::timeout(Duration::from_millis(200), retriever.retrieve("frage")).await;
         assert!(timed_out.is_err());
 
         let started = Instant::now();
@@ -4147,6 +3918,10 @@ mod tests {
 
     #[test]
     fn faq_message_body_deaktiviert_mentions() {
+        let bounded = "🧠".repeat(900);
+        let payload = faq_message_body(&bounded, None);
+        assert_eq!(payload["content"].as_str(), Some(bounded.as_str()));
+        assert!(bounded.encode_utf16().count() <= 2000);
         // Rohe Nutzerfrage, Modelltext und Shadow-Ausgabe laufen alle durch diesen einen
         // Sendepfad: er muss standardmäßig Rollen, @everyone und User-Pings unterbinden.
         let body = faq_message_body("@everyone <@123> <@&456>", None);

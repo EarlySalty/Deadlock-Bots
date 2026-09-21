@@ -1226,7 +1226,7 @@ fn apply_deadlock(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, category_
 }
 
 fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
+    dl_core::runtime_config::lookup(name).is_some_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"

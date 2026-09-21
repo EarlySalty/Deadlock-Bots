@@ -1,6 +1,16 @@
+mod dense;
+mod eval;
+mod faq;
+mod hybrid;
+mod retrieval;
+mod server_config;
+#[cfg(test)]
+mod test_database;
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +47,8 @@ const MODEL_TIMEOUT: Duration = Duration::from_secs(7);
 const MAX_SELECTED_CANDIDATES: usize = 4;
 const MAX_ANSWER_UTF16: usize = 1800;
 
+static NEXT_KNOWLEDGE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 const STOPWORDS: &[&str] = &[
     "aber", "als", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis", "da", "das", "dass",
     "dein", "dem", "den", "der", "des", "die", "dir", "doch", "du", "ein", "eine", "einem",
@@ -48,6 +60,8 @@ const STOPWORDS: &[&str] = &[
 
 #[derive(Clone)]
 struct AppState {
+    reload_gate: Arc<tokio::sync::Mutex<()>>,
+    hybrid: Option<Arc<hybrid::Runtime>>,
     docs_path: PathBuf,
     knowledge: Arc<RwLock<KnowledgeBase>>,
     generator: Option<Arc<dyn TextGenerator>>,
@@ -555,6 +569,8 @@ struct Chunk {
     section: String,
     path: String,
     tags: Vec<String>,
+    stand: String,
+    quelle: String,
     text: String,
     passages: Vec<Passage>,
 }
@@ -603,6 +619,11 @@ struct Candidate {
 struct KnowledgeBase {
     chunks: Vec<Chunk>,
     index: Bm25Index,
+    generation: u64,
+    /// Digest of the exact public HTML bytes parsed into this snapshot.
+    corpus_digest: String,
+    faq: Vec<faq::Entry>,
+    faq_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -638,6 +659,8 @@ struct Source {
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
+    generation: String,
+    faq_generation: Option<String>,
     chunks: usize,
     html_sources: usize,
     non_html_sources: usize,
@@ -673,12 +696,30 @@ struct PromptCandidate<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if eval::run()? {
+        return Ok(());
+    }
+    if dense::cli::run().await? || hybrid::cli::run().await? {
+        return Ok(());
+    }
     dl_core::observability::init_tracing("info");
 
-    let docs_path = resolve_production_docs_path(
-        std::env::args_os().nth(1).map(PathBuf::from),
-        std::env::var_os("DL_DOCS_PATH").map(PathBuf::from),
-    )?;
+    let server_config =
+        server_config::ServerConfig::from_args(&std::env::args_os().skip(1).collect::<Vec<_>>())?;
+    let retrieval_only = server_config
+        .as_ref()
+        .is_some_and(|config| config.retrieval_only);
+    let bind = server_config
+        .as_ref()
+        .map(|config| config.bind.to_string())
+        .unwrap_or_else(|| BIND_ADDR.to_string());
+    // Config cannot select a different corpus. Shadow mode reads no provider
+    // settings or credentials; the approved snapshot and loader stay identical.
+    let docs_path = if server_config.is_some() {
+        PathBuf::from(DEFAULT_DOCS_PATH)
+    } else {
+        resolve_production_docs_path(None, std::env::var_os("DL_DOCS_PATH").map(PathBuf::from))?
+    };
     let knowledge = load_production_corpus(&docs_path)
         .with_context(|| format!("Korpus laden: {}", docs_path.display()))?;
     tracing::info!(
@@ -686,23 +727,44 @@ async fn main() -> Result<()> {
         "dl-knowledge Korpus geladen"
     );
 
-    let generator: Option<Arc<dyn TextGenerator>> =
+    let generator: Option<Arc<dyn TextGenerator>> = if retrieval_only {
+        None
+    } else {
         FireworksClient::from_env(|key| std::env::var(key).ok())
-            .map(|client| client as Arc<dyn TextGenerator>);
-    if generator.is_none() {
+            .map(|client| client as Arc<dyn TextGenerator>)
+    };
+    if generator.is_none() && !retrieval_only {
         tracing::warn!("Fireworks-Client nicht initialisiert; /ask antwortet fail-closed");
     }
 
+    // Reserve the port before preparing or activating a shared index. A failed
+    // duplicate start must not change the generation serving the live process.
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("dl-knowledge binden: {bind}"))?;
+    let hybrid = if let Some(settings) = server_config
+        .as_ref()
+        .and_then(|config| config.hybrid.as_ref())
+    {
+        Some(hybrid::Runtime::from_config(settings).await?)
+    } else if retrieval_only {
+        None
+    } else {
+        hybrid::Runtime::from_env().await?
+    };
+    if let Some(runtime) = &hybrid {
+        let prepared = runtime.prepare(&knowledge).await?;
+        runtime.activate(prepared).await?;
+    }
     let state = AppState {
+        reload_gate: Default::default(),
+        hybrid,
         docs_path,
         knowledge: Arc::new(RwLock::new(knowledge)),
         generator,
     };
-    let listener = tokio::net::TcpListener::bind(BIND_ADDR)
-        .await
-        .with_context(|| format!("dl-knowledge binden: {BIND_ADDR}"))?;
-    tracing::info!(addr = BIND_ADDR, "dl-knowledge gebunden");
-    axum::serve(listener, router(state))
+    tracing::info!(addr = %bind, retrieval_only, "dl-knowledge gebunden");
+    axum::serve(listener, router_with_mode(state, retrieval_only))
         .await
         .context("dl-knowledge Server")?;
     Ok(())
@@ -720,18 +782,45 @@ fn resolve_production_docs_path(
     Ok(PathBuf::from(DEFAULT_DOCS_PATH))
 }
 
+#[cfg(test)]
 fn router(state: AppState) -> Router {
+    router_with_mode(state, false)
+}
+
+fn router_with_mode(state: AppState, retrieval_only: bool) -> Router {
+    let ask_route = if retrieval_only {
+        post(ask_disabled)
+    } else {
+        post(ask)
+    };
     Router::new()
         .route("/healthz", get(health))
         .route("/internal/reload", post(reload))
-        .route("/public/v1/ask", post(ask))
+        .route("/public/v1/ask", ask_route)
+        .route(
+            "/public/v1/retrieve",
+            post(retrieval::retrieve).layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+        )
         .with_state(state)
+}
+
+async fn ask_disabled() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "retrieval_only",
+            "message": "Antwortgenerierung ist für diesen Dienst deaktiviert.",
+        })),
+    )
+        .into_response()
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let knowledge = state.knowledge.read().await;
     let stats = knowledge.source_stats();
     Json(HealthResponse {
+        generation: knowledge.corpus_digest.clone(),
+        faq_generation: knowledge.faq_generation.clone(),
         chunks: knowledge.chunks.len(),
         html_sources: stats.html_sources,
         non_html_sources: stats.non_html_sources,
@@ -740,12 +829,41 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn reload(State(state): State<AppState>) -> Response {
-    match load_production_corpus(&state.docs_path) {
-        Ok(knowledge) => {
-            let chunks = knowledge.chunks.len();
-            *state.knowledge.write().await = knowledge;
-            (StatusCode::OK, Json(json!({ "chunks": chunks }))).into_response()
+    let Ok(reload_guard) = state.reload_gate.clone().try_lock_owned() else {
+        return (StatusCode::CONFLICT, Json(json!({"error":"reload_busy"}))).into_response();
+    };
+    // The task owns the swap: disconnecting the HTTP caller must not leave a
+    // newly activated dense generation paired with the previous BM25 snapshot.
+    let result = tokio::spawn(async move {
+        let _reload_guard = reload_guard;
+        let path = state.docs_path.clone();
+        let knowledge = tokio::task::spawn_blocking(move || load_production_corpus(&path))
+            .await
+            .context("Korpus-Ladeworker verbinden")??;
+        let changed = state.knowledge.read().await.corpus_digest != knowledge.corpus_digest;
+        let prepared = if changed {
+            if let Some(runtime) = &state.hybrid {
+                Some(runtime.prepare(&knowledge).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut live = state.knowledge.write().await;
+        if let Some(prepared) = prepared {
+            if let Some(runtime) = &state.hybrid {
+                runtime.activate(prepared).await?;
+            }
         }
+        *live = knowledge;
+        Ok::<_, anyhow::Error>(live.chunks.len())
+    })
+    .await
+    .context("Korpuswechsel verbinden")
+    .and_then(|result| result);
+    match result {
+        Ok(chunks) => (StatusCode::OK, Json(json!({ "chunks": chunks }))).into_response(),
         Err(err) => {
             tracing::warn!(%err, "dl-knowledge Reload fehlgeschlagen");
             (
@@ -758,7 +876,25 @@ async fn reload(State(state): State<AppState>) -> Response {
 }
 
 async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> Json<AskResponse> {
-    let ranked = {
+    let ranked = if let Some(hybrid) = &state.hybrid {
+        match hybrid
+            .retrieve(&request.question, state.knowledge.clone())
+            .await
+        {
+            Ok(ranked) => ranked,
+            Err(_) => {
+                log_decision(
+                    "error",
+                    "none",
+                    None,
+                    "hybrid_failed",
+                    (0, 0, 0),
+                    Some("retrieval_unavailable"),
+                );
+                return Json(unanswerable());
+            }
+        }
+    } else {
         let knowledge = state.knowledge.read().await;
         knowledge.search(&request.question, 6)
     };
@@ -1118,17 +1254,33 @@ fn load_corpus(root: &Path) -> Result<KnowledgeBase> {
     files.sort();
 
     let mut chunks = Vec::new();
+    let mut manifest = Vec::new();
+    let mut hashes = HashMap::new();
     for path in files {
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("Korpusdatei lesen: {}", path.display()))?;
         if html_mode {
+            let relative = path
+                .strip_prefix(root)?
+                .to_str()
+                .context("Korpuspfad ist nicht UTF-8")?;
+            manifest.extend_from_slice(relative.as_bytes());
+            manifest.push(0);
+            manifest.extend_from_slice(dense::sha256(raw.as_bytes()).as_bytes());
+            manifest.push(b'\n');
+            hashes.insert(relative.to_string(), dense::sha256(raw.as_bytes()));
             chunks.extend(parse_html_file(root, &path, &raw)?);
         } else {
             chunks.extend(parse_markdown_file(root, &path, &raw));
         }
     }
     validate_passage_lengths(&chunks)?;
-    Ok(KnowledgeBase::from_chunks(chunks))
+    let mut knowledge = KnowledgeBase::from_chunks(chunks);
+    knowledge.corpus_digest = dense::sha256(&manifest);
+    if html_mode {
+        (knowledge.faq, knowledge.faq_generation) = faq::load(root, &knowledge.chunks, &hashes)?;
+    }
+    Ok(knowledge)
 }
 
 fn validate_passage_lengths(chunks: &[Chunk]) -> Result<()> {
@@ -1226,8 +1378,8 @@ fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
     ensure!(!title.is_empty(), "HTML-Titel ist leer");
 
     let tags_raw = required_meta(&document, &meta_selector, "tags")?;
-    let _stand = required_meta(&document, &meta_selector, "stand")?;
-    let _quelle = required_meta(&document, &meta_selector, "quelle")?;
+    let stand = required_meta(&document, &meta_selector, "stand")?;
+    let quelle = required_meta(&document, &meta_selector, "quelle")?;
     let tags = tags_raw
         .split(',')
         .map(str::trim)
@@ -1291,6 +1443,8 @@ fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
         section: h1,
         path: rel_path.clone(),
         tags: tags.clone(),
+        stand: stand.clone(),
+        quelle: quelle.clone(),
         text: intro_text,
         passages: intro_passages,
     }];
@@ -1357,6 +1511,8 @@ fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
             section: section_name,
             path: rel_path.clone(),
             tags: tags.clone(),
+            stand: stand.clone(),
+            quelle: quelle.clone(),
             text,
             passages,
         });
@@ -1641,6 +1797,8 @@ fn push_chunk(
         section: section.to_string(),
         path: path.to_string(),
         tags: tags.to_vec(),
+        stand: String::new(),
+        quelle: String::new(),
         text: text.clone(),
         passages: vec![Passage {
             heading: None,
@@ -1759,7 +1917,15 @@ fn relative_path(root: &Path, path: &Path) -> String {
 impl KnowledgeBase {
     fn from_chunks(chunks: Vec<Chunk>) -> Self {
         let index = Bm25Index::new(&chunks);
-        Self { chunks, index }
+        let generation = NEXT_KNOWLEDGE_GENERATION.fetch_add(1, AtomicOrdering::Relaxed);
+        Self {
+            chunks,
+            index,
+            generation,
+            corpus_digest: String::new(),
+            faq: Vec::new(),
+            faq_generation: None,
+        }
     }
 
     fn search(&self, query: &str, limit: usize) -> Vec<(Chunk, f64)> {
@@ -1985,6 +2151,8 @@ mod tests {
         context_terms: Vec<String>,
         answer_terms: Vec<String>,
         forbidden_terms: Vec<String>,
+        #[serde(default, rename = "herkunft")]
+        _herkunft: Option<String>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2126,8 +2294,8 @@ mod tests {
             }
         }
         ensure!(
-            cases.len() == GOLDEN_CASE_COUNT,
-            "Golden-Suite hat {} statt exakt {GOLDEN_CASE_COUNT} Faellen",
+            cases.len() >= GOLDEN_CASE_COUNT,
+            "Golden-Suite hat {} statt mindestens {GOLDEN_CASE_COUNT} Fällen",
             cases.len()
         );
         Ok(cases)
@@ -2196,6 +2364,7 @@ mod tests {
                 .map(|term| (*term).to_string())
                 .collect(),
             forbidden_terms: vec![],
+            _herkunft: None,
         };
 
         let five_candidates = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
@@ -2252,13 +2421,17 @@ mod tests {
     }
 
     #[test]
-    fn golden_suite_verlangt_exakt_224_faelle() -> Result<()> {
+    fn golden_suite_verlangt_mindestens_224_faelle() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let (golden_dir, docs_path) = write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT)?;
         let cases = load_golden_cases(&golden_dir, &docs_path)?;
         assert_eq!(cases.len(), GOLDEN_CASE_COUNT);
 
         write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT + 1)?;
+        let cases = load_golden_cases(&golden_dir, &docs_path)?;
+        assert_eq!(cases.len(), GOLDEN_CASE_COUNT + 1);
+
+        write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT - 1)?;
         assert!(load_golden_cases(&golden_dir, &docs_path).is_err());
         Ok(())
     }
@@ -2541,6 +2714,16 @@ mod tests {
         assert!(!wrapper.contains("DL_DOCS_PATH"));
     }
 
+    #[test]
+    fn service_wrapper_entfernt_veralteten_fireworks_modellalias() {
+        let wrapper = include_str!("../../../../scripts/run_dl_knowledge_service.sh");
+        let stale_model = "accounts/fireworks/models/deepseek-v4-flash";
+
+        assert!(wrapper.contains(stale_model));
+        assert!(wrapper.contains("unset FIREWORK_MODEL"));
+        assert!(wrapper.contains("unset FIREWORKS_MODEL"));
+    }
+
     const HTML_FIXTURE: &str = r#"<!doctype html>
 <html lang="de"><head>
 <meta charset="utf-8"><title>Steam-Bot</title>
@@ -2649,6 +2832,8 @@ mod tests {
             section: section.to_string(),
             path: path.to_string(),
             tags: Vec::new(),
+            stand: String::new(),
+            quelle: String::new(),
             text: text.to_string(),
             passages: vec![Passage {
                 heading: None,
@@ -2806,6 +2991,8 @@ mod tests {
     ) -> (Router, Arc<RwLock<KnowledgeBase>>) {
         let knowledge = Arc::new(RwLock::new(KnowledgeBase::from_chunks(chunks)));
         let state = AppState {
+            reload_gate: Default::default(),
+            hybrid: None,
             docs_path: PathBuf::from("/does/not/matter"),
             knowledge: knowledge.clone(),
             generator,
@@ -2819,7 +3006,7 @@ mod tests {
     /// Level-Cache das `decision`-Log ein und der Capture bleibt leer (`count == 0`). Eine
     /// tokio-`Mutex` (kein extra Crate, `sync`-Feature ist an) hält das Rennen aus dem Cache
     /// heraus; sie darf über `await` gehalten werden, ohne `clippy::await_holding_lock`.
-    static ASK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(super) static ASK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Ungesperrter Request-Kern — Basis für gesperrte wie ungesperrte Aufrufer.
     async fn post_json(app: Router, path: &str, body: Value) -> Result<(u16, Value)> {
@@ -2848,6 +3035,14 @@ mod tests {
         generator: Option<Arc<dyn TextGenerator>>,
         question: &str,
     ) -> Result<String> {
+        Ok(ask_with_logs_timed(chunks, generator, question).await?.0)
+    }
+
+    async fn ask_with_logs_timed(
+        chunks: Vec<Chunk>,
+        generator: Option<Arc<dyn TextGenerator>>,
+        question: &str,
+    ) -> Result<(String, Duration)> {
         // Lock VOR set_default bis nach dem Request: schützt den thread-lokalen Subscriber vor
         // parallelen /ask-Tests, die sonst den globalen Interest-/Level-Cache der decision-
         // Callsite einfrieren. Danach der ungesperrte Kern (post_json), nie post_ask (Self-Deadlock).
@@ -2861,10 +3056,12 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
         let (app, _) = test_app(chunks, generator);
+        let started = std::time::Instant::now();
         let (status, _) = post_json(app, "/public/v1/ask", json!({"question": question})).await?;
+        let elapsed = started.elapsed();
         drop(guard);
         assert_eq!(status, 200);
-        Ok(log_capture.text())
+        Ok((log_capture.text(), elapsed))
     }
 
     fn assert_decision(
@@ -3213,6 +3410,8 @@ mod tests {
         let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
+            reload_gate: Default::default(),
+            hybrid: None,
             docs_path: public,
             knowledge: knowledge.clone(),
             generator: None,
@@ -3232,6 +3431,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reload_abbruch_beendet_den_snapshotwechsel_nicht() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        std::fs::create_dir(&public)?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+        let initial = load_corpus(&public)?;
+        let before = initial.corpus_digest.clone();
+        let state = AppState {
+            reload_gate: Default::default(),
+            hybrid: None,
+            docs_path: public.clone(),
+            knowledge: Arc::new(RwLock::new(initial)),
+            generator: None,
+        };
+        std::fs::write(public.join("new.html"), HTML_FIXTURE)?;
+        let expected = load_corpus(&public)?.corpus_digest;
+        assert_ne!(before, expected);
+        let hold_publication = state.knowledge.write().await;
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move { reload(State(caller_state)).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.reload_gate.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            reload(State(state.clone())).await.status(),
+            StatusCode::CONFLICT
+        );
+        caller.abort();
+        assert!(caller.await.is_err());
+        drop(hold_publication);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.knowledge.read().await.corpus_digest == expected
+                    && state.reload_gate.try_lock().is_ok()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(state.reload_gate.try_lock().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reload_lehnt_internal_root_mit_gueltigem_html_ab() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let public = temp.path().join("public");
@@ -3243,6 +3494,8 @@ mod tests {
         let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
+            reload_gate: Default::default(),
+            hybrid: None,
             docs_path: internal,
             knowledge: knowledge.clone(),
             generator: None,
@@ -4200,8 +4453,7 @@ Frag im Support.
         let generator = Arc::new(SlowGenerator {
             calls: AtomicUsize::new(0),
         });
-        let started = std::time::Instant::now();
-        let logs = ask_with_logs(
+        let (logs, elapsed) = ask_with_logs_timed(
             vec![test_chunk(
                 "CANDIDATE_TITLE_MUST_NOT_LEAK",
                 "Steam",
@@ -4212,7 +4464,6 @@ Frag im Support.
             "Wie Steam verknüpfen? QUESTION_MUST_NOT_LEAK",
         )
         .await?;
-        let elapsed = started.elapsed();
 
         assert!(elapsed >= MODEL_TIMEOUT, "Timeout kam zu früh: {elapsed:?}");
         assert!(

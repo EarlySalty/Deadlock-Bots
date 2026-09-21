@@ -8,6 +8,7 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+dl-core.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 hex.workspace = true

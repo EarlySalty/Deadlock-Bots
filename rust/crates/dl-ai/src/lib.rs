@@ -40,6 +40,7 @@ pub const DEFAULT_MODEL: &str = "MiniMax-M3";
 /// Freigegeben ist genau dieses Modell, teurere Varianten (Pro) nie ohne
 /// ausdrueckliche Freigabe des Owners.
 pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
+const LEGACY_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
@@ -442,9 +443,18 @@ impl FireworksClient {
         let base_url = get("FIREWORK_BASE_URL")
             .or_else(|| get("FIREWORKS_BASE_URL"))
             .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.to_string());
-        let model = get("FIREWORK_MODEL")
-            .or_else(|| get("FIREWORKS_MODEL"))
-            .unwrap_or_else(|| DEFAULT_FIREWORKS_MODEL.to_string());
+        let model = match get("FIREWORK_MODEL").or_else(|| get("FIREWORKS_MODEL")) {
+            Some(model) if model == LEGACY_FIREWORKS_MODEL => {
+                tracing::warn!(
+                    legacy_model = %model,
+                    replacement = DEFAULT_FIREWORKS_MODEL,
+                    "Veralteter Fireworks Modellalias ersetzt"
+                );
+                DEFAULT_FIREWORKS_MODEL.to_string()
+            }
+            Some(model) => model,
+            None => DEFAULT_FIREWORKS_MODEL.to_string(),
+        };
         tracing::info!(%base_url, %model, "Fireworks-Text-Client initialisiert");
         Some(Self::new(base_url, api_key, model))
     }
@@ -1358,6 +1368,18 @@ mod tests {
 
         assert_eq!(client.model, DEFAULT_FIREWORKS_MODEL);
         assert_eq!(client.base_url, DEFAULT_FIREWORKS_BASE_URL);
+    }
+
+    #[test]
+    fn fireworks_from_env_ersetzt_veralteten_modellalias() {
+        let client = FireworksClient::from_env(|key| match key {
+            "FIREWORK_API_KEY" => Some("fw-key".to_string()),
+            "FIREWORK_MODEL" => Some(LEGACY_FIREWORKS_MODEL.to_string()),
+            _ => None,
+        })
+        .expect("fireworks client");
+
+        assert_eq!(client.model, DEFAULT_FIREWORKS_MODEL);
     }
 
     #[tokio::test]

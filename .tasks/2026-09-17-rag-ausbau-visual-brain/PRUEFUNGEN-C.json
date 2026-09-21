@@ -1,0 +1,71 @@
+{
+  "baseline": "508419ee",
+  "rust_unique_passed": 174,
+  "new_rust_tests": [
+    "hybrid::tests::aktualitaet_und_quellenprioritaet_werden_rangsignal",
+    "hybrid::tests::asynchronous::dense_fehlender_index_und_fremdes_modell_sind_fehler",
+    "hybrid::tests::asynchronous::dense_filter_und_korpusabgleich_greifen_vor_limit",
+    "hybrid::tests::asynchronous::dense_gefaelschter_text_wird_nie_gerendert",
+    "hybrid::tests::asynchronous::http::hybrid_bewahrt_antwortvertrag_rendering_und_grounding",
+    "hybrid::tests::asynchronous::http::hybrid_filter_darf_nicht_auf_ungefiltertes_bm25_zurueckfallen",
+    "hybrid::tests::asynchronous::http::hybrid_rerankerfehler_bleibt_fail_closed",
+    "hybrid::tests::asynchronous::worker_client_abbruch_startet_keine_zweite_inferenz",
+    "hybrid::tests::asynchronous::worker_fehler_wird_nicht_als_ergebnis_ausgegeben",
+    "hybrid::tests::asynchronous::worker_timeout_haelt_kapazitaet_bis_inferenz_beendet",
+    "hybrid::tests::bm25_filtert_vor_top_k",
+    "hybrid::tests::datum_prueft_kalender_und_utf8",
+    "hybrid::tests::fehlendes_rerankmodell_ist_fehler_ohne_download",
+    "hybrid::tests::hybrid_default_aus_ignoriert_optionen",
+    "hybrid::tests::konfiguration_lehnt_tippfehler_und_unbegrenzte_last_ab",
+    "hybrid::tests::messbereiche_verweigern_luecken_ausserhalb_der_golden_suite",
+    "hybrid::tests::messung_trennt_quellentreffer_von_lexikalisch_zulaessigem_beleg",
+    "hybrid::tests::metadaten_filter_sind_optional_aber_strikt",
+    "hybrid::tests::nullgewicht_entfernt_einen_retrievalzweig",
+    "hybrid::tests::reranker_lehnt_nan_und_falsche_anzahl_ab",
+    "hybrid::tests::reranker_sortiert_ohne_neue_kandidaten_zu_erfinden",
+    "hybrid::tests::rrf_dedupliziert_und_sortiert_deterministisch",
+    "hybrid::tests::rrf_gewichtet_raenge_statt_rohscores"
+  ],
+  "python_merge_tests_passed": 4,
+  "checks": {
+    "tests-final": {
+      "exit_code": 0,
+      "passed": 149
+    },
+    "db-ignored": {
+      "exit_code": 0,
+      "passed": 24
+    },
+    "test-range": {
+      "exit_code": 0,
+      "passed": 1
+    },
+    "test-default-final": {
+      "exit_code": 0,
+      "passed": 1
+    },
+    "clippy-code-final": {
+      "exit_code": 0,
+      "passed": 0
+    },
+    "clippy-all-targets-final": {
+      "exit_code": 101,
+      "passed": 0
+    },
+    "release-final": {
+      "exit_code": 0,
+      "passed": 0
+    },
+    "bench-part1": {
+      "exit_code": 0,
+      "passed": 0
+    },
+    "bench-part2": {
+      "exit_code": 0,
+      "passed": 0
+    }
+  },
+  "all_targets_limit": "12 unwrap_used-Stellen in unverändertem src/dense/tests.rs aus B",
+  "binary_bytes": 45009048,
+  "binary_sha256": "6127e4eb18ec03561d62c7fa99e2814f387b0d709df0bb69faef9c2684dadae1"
+}

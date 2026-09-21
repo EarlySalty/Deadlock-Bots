@@ -131,6 +131,20 @@ fn knowledge_question_from_history(history: &[(String, String)], question: &str)
     if !question.is_empty() && questions.last().map(String::as_str) != Some(question) {
         questions.push(question.to_string());
     }
+    let current = questions.pop();
+    let mut length = current.as_ref().map_or(0, |text| text.chars().count());
+    questions.reverse();
+    questions.retain(|prior| {
+        let added = prior.chars().count() + 1;
+        if length + added > 4000 {
+            false
+        } else {
+            length += added;
+            true
+        }
+    });
+    questions.reverse();
+    questions.extend(current);
     questions.join("\n")
 }
 
@@ -801,11 +815,57 @@ pub struct FaqChat {
     pub knowledge_url: String,
     shadow_channel_id: Option<u64>,
     ticket_generator: Option<Arc<dyn TextGenerator>>,
+    answers: Option<Arc<dl_answer::AnswerEngine>>,
     ticket_claims: Arc<dyn TicketClaimStore>,
     chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl FaqChat {
+    /// Produktiver FAQ-Eingang teilt exakt dieselbe Instanz wie Concierge und Brain.
+    pub fn with_answers(
+        pool: PgPool,
+        port: Arc<dyn FaqPort>,
+        answers: Arc<dl_answer::AnswerEngine>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            ticket_claims: Arc::new(KvTicketClaimStore { pool: pool.clone() }),
+            store: FaqStore { pool },
+            port,
+            knowledge_url: knowledge_url_from_env(),
+            shadow_channel_id: Some(LOG_CHANNEL_ID),
+            ticket_generator: None,
+            answers: Some(answers),
+            chat_actions: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn lookup(&self, question: &str) -> KnowledgeLookup {
+        self.lookup_with_context(question, question).await
+    }
+
+    async fn lookup_with_context(&self, question: &str, context: &str) -> KnowledgeLookup {
+        let Some(engine) = &self.answers else {
+            return ask_knowledge_at(&self.knowledge_url, context).await;
+        };
+        match engine
+            .answer_with_context(question, context, dl_answer::Scope::CommunityAndGame)
+            .await
+        {
+            Ok(dl_answer::Answer::Grounded { text, .. }) => {
+                KnowledgeLookup::Answer(KnowledgeAnswer {
+                    answerable: true,
+                    answer: Some(text),
+                    sources: Vec::new(),
+                })
+            }
+            Ok(dl_answer::Answer::NoEvidence | dl_answer::Answer::OutOfDomain) => {
+                KnowledgeLookup::Unanswerable
+            }
+            Err(dl_answer::AnswerError::Timeout) => KnowledgeLookup::Timeout,
+            Err(_) => KnowledgeLookup::Transport,
+        }
+    }
+
     pub fn new(pool: PgPool, port: Arc<dyn FaqPort>) -> Arc<Self> {
         Self::new_with_config(pool, port, knowledge_url_from_env(), Some(LOG_CHANNEL_ID))
     }
@@ -865,6 +925,7 @@ impl FaqChat {
             knowledge_url,
             shadow_channel_id,
             ticket_generator,
+            answers: None,
             ticket_claims,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
@@ -968,9 +1029,19 @@ impl FaqChat {
         let _ = kv::delete(&self.store.pool, PANEL_KV_NS, LEGACY_KEY).await;
     }
 
+    fn visible_answer(&self, lookup: KnowledgeLookup) -> String {
+        if self.answers.is_some() {
+            match lookup {
+                KnowledgeLookup::Timeout => return "Das Nachschlagen dauert gerade zu lange. Versuch es bitte gleich noch einmal.".into(),
+                KnowledgeLookup::Transport | KnowledgeLookup::InvalidResponse => return "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into(),
+                _ => {}
+            }
+        }
+        answer_text(lookup).unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
+    }
+
     async fn generate_stateless_answer(&self, question: &str) -> String {
-        answer_text(ask_knowledge_at(&self.knowledge_url, question).await)
-            .unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
+        self.visible_answer(self.lookup(question).await)
     }
 
     async fn answer_statefully(
@@ -1032,8 +1103,10 @@ impl FaqChat {
         .fetch_all(&mut *tx)
         .await?;
         let knowledge_question = knowledge_question_from_history(&history, question);
-        let answer = answer_text(ask_knowledge_at(&self.knowledge_url, &knowledge_question).await)
-            .unwrap_or_else(|| FAQ_NO_ANSWER.to_string());
+        let answer = self.visible_answer(
+            self.lookup_with_context(question, &knowledge_question)
+                .await,
+        );
         let inserted = sqlx::query(
             "INSERT INTO bot.faq_chat_messages(session_id, role, content)
              VALUES($1, 'assistant', $2)",
@@ -1124,7 +1197,7 @@ impl FaqChat {
     }
 
     async fn ticket_auto_answer(&self, problem: &str, _author_id: u64) -> TicketAutoOutcome {
-        ticket_auto_outcome_from_knowledge(ask_knowledge_at(&self.knowledge_url, problem).await)
+        ticket_auto_outcome_from_knowledge(self.lookup(problem).await)
     }
 
     async fn ticket_candidate(
@@ -1132,6 +1205,12 @@ impl FaqChat {
         problem: &str,
         outcome: &TicketAutoOutcome,
     ) -> (&'static str, String) {
+        if self.answers.is_some() {
+            return match &outcome.answer {
+                Some(answer) => ("generated", answer.clone()),
+                None => ("unavailable", TICKET_CANDIDATE_UNAVAILABLE.to_string()),
+            };
+        }
         let Some(generator) = &self.ticket_generator else {
             return ("unavailable", TICKET_CANDIDATE_UNAVAILABLE.to_string());
         };
@@ -2096,6 +2175,184 @@ mod tests {
             .expect("lazy pg pool")
     }
 
+    #[cfg(feature = "testing")]
+    struct FaqEvidenceProvider;
+
+    #[cfg(feature = "testing")]
+    #[async_trait::async_trait]
+    impl dl_ai::ChatProvider for FaqEvidenceProvider {
+        async fn chat(
+            &self,
+            messages: &[dl_ai::ChatMessage],
+            params: dl_ai::ChatParams,
+        ) -> Result<dl_ai::ChatResponse, dl_ai::ChatProviderError> {
+            assert_eq!(params.reasoning_effort.as_deref(), Some("none"));
+            assert_eq!(
+                params.model.as_deref(),
+                Some(dl_ai::DEFAULT_FIREWORKS_MODEL)
+            );
+            let payload: serde_json::Value =
+                serde_json::from_str(&messages.last().expect("user evidence").content)
+                    .expect("evidence JSON");
+            let first = &payload["evidence"][0];
+            assert!(first["text"].is_string());
+            Ok(dl_ai::ChatResponse::text(
+                serde_json::json!({
+                    "answerable": true, "answer": first["text"], "source_ids": [first["id"]],
+                })
+                .to_string(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    fn shared_faq(
+        pool: PgPool,
+        port: Arc<dyn FaqPort>,
+        url: String,
+        shadow: Option<u64>,
+    ) -> Arc<FaqChat> {
+        let engine = Arc::new(dl_answer::AnswerEngine::new(
+            Some(Arc::new(FaqEvidenceProvider)),
+            Arc::new(crate::knowledge_client::CommunityRetriever {
+                base_url: url,
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            Duration::from_secs(20),
+        ));
+        let mut faq = FaqChat::with_answers(pool, port, engine);
+        Arc::get_mut(&mut faq)
+            .expect("fresh fixture")
+            .shadow_channel_id = shadow;
+        faq
+    }
+
+    async fn evidence_server(
+        status: u16,
+        body: &'static str,
+        delay: Duration,
+    ) -> (String, tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let capture = called.clone();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_http_request_body(&mut stream).await;
+            capture.store(true, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (format!("http://{addr}"), handle, called)
+    }
+
+    #[tokio::test]
+    async fn shared_faq_verwendet_retrieve_und_genau_eine_finale_generierung() {
+        let (url, server, called) = evidence_server(200,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Paten","path":"paten.html"},"text":"Ein Pate hilft beim Einstieg.","observed_at":null}],"truncated":false}"#,
+            Duration::ZERO,
+        ).await;
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"answerable":true,"answer":"Ein Pate hilft beim Einstieg.","source_ids":["C1"]}"#,
+        );
+        let engine = Arc::new(dl_answer::AnswerEngine::new(
+            Some(provider.clone()),
+            Arc::new(crate::knowledge_client::CommunityRetriever {
+                base_url: url,
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            Duration::from_secs(20),
+        ));
+        let faq = FaqChat::with_answers(lazy_pool(), ticket_port(), engine);
+        let newer = format!("Neu {}", "ö".repeat(2400));
+        let history = vec![
+            ("user".into(), format!("Alt {}", "ä".repeat(2400))),
+            (
+                "assistant".into(),
+                "Diese alte Botantwort gehört nicht in den Kontext".into(),
+            ),
+            ("user".into(), newer.clone()),
+            ("user".into(), "Letzte Rückfrage".into()),
+        ];
+        let context = knowledge_question_from_history(&history, "Was ist ein Pate?");
+        assert_eq!(
+            context,
+            format!("{newer}\nLetzte Rückfrage\nWas ist ein Pate?")
+        );
+        assert!(context.chars().count() <= 4000);
+        let lookup = faq.lookup_with_context("Was ist ein Pate?", &context).await;
+        server.await.unwrap();
+        assert!(called.load(Ordering::SeqCst));
+        let KnowledgeLookup::Answer(answer) = lookup else {
+            panic!("belegte Antwort erwartet")
+        };
+        assert_eq!(
+            answer.answer.as_deref(),
+            Some("Ein Pate hilft beim Einstieg.")
+        );
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(requests[0].1.max_tokens, None);
+        let payload: serde_json::Value = serde_json::from_str(&requests[0].0[1].content).unwrap();
+        assert_eq!(payload["evidence"][0]["id"], "C1");
+        assert_eq!(payload["question"], "Was ist ein Pate?");
+        assert_eq!(payload["conversation_context"], context);
+        let outcome = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Answer(answer));
+        let (_, candidate) = faq.ticket_candidate("Was ist ein Pate?", &outcome).await;
+        assert_eq!(candidate, "Ein Pate hilft beim Einstieg.");
+        assert_eq!(
+            provider.requests().len(),
+            1,
+            "Shadow-Kandidat löst keinen zweiten Aufruf aus"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_faq_leere_oder_ungueltige_belege_starten_keine_generierung() {
+        for (body, invalid) in [
+            (
+                r#"{"status":"no_evidence","evidence":[],"truncated":false}"#,
+                false,
+            ),
+            (
+                r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Privat","path":"internal/privat.html"},"text":"Darf nicht zum Modell","observed_at":null}],"truncated":false}"#,
+                true,
+            ),
+        ] {
+            let (url, server, _) = evidence_server(200, body, Duration::ZERO).await;
+            let provider = dl_ai::MockChatProvider::new(Vec::new());
+            let engine = Arc::new(dl_answer::AnswerEngine::new(
+                Some(provider.clone()),
+                Arc::new(crate::knowledge_client::CommunityRetriever {
+                    base_url: url,
+                    timeout: KNOWLEDGE_TIMEOUT,
+                }),
+                None,
+                Duration::from_secs(20),
+            ));
+            let faq = FaqChat::with_answers(lazy_pool(), ticket_port(), engine);
+            let lookup = faq.lookup("Frage").await;
+            server.await.unwrap();
+            assert!(if invalid {
+                matches!(lookup, KnowledgeLookup::Transport)
+            } else {
+                matches!(lookup, KnowledgeLookup::Unanswerable)
+            });
+            let visible = faq.visible_answer(lookup);
+            if invalid {
+                assert!(visible.contains("nicht zuverlässig an mein Wissen"));
+                assert_ne!(visible, FAQ_NO_ANSWER);
+            } else {
+                assert_eq!(visible, FAQ_NO_ANSWER);
+            }
+            assert!(provider.requests().is_empty());
+        }
+    }
+
     #[derive(Default)]
     struct MemoryTicketClaimStore {
         claimed: tokio::sync::Mutex<HashSet<u64>>,
@@ -2288,7 +2545,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "testing")]
     async fn read_http_request_body(stream: &mut tokio::net::TcpStream) -> String {
         let mut request = Vec::new();
         let header_end = loop {
@@ -2301,6 +2557,10 @@ mod tests {
             request.extend_from_slice(&chunk[..read]);
         };
         let headers = std::str::from_utf8(&request[..header_end]).expect("utf8 request headers");
+        assert_eq!(
+            headers.lines().next(),
+            Some("POST /public/v1/retrieve HTTP/1.1")
+        );
         let content_length = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
@@ -2364,6 +2624,10 @@ mod tests {
 
     #[test]
     fn shadow_nachricht_zeigt_sichere_entscheidung() {
+        let bounded = "🧠".repeat(900);
+        let payload = shadow_ticket_message(u64::MAX, "uncertain", &bounded);
+        assert!(payload.encode_utf16().count() <= 2000);
+        assert!(payload.ends_with(&bounded));
         let message = shadow_ticket_message(10, "no", "Antwort");
         assert!(message.starts_with("🧪 **FAQ-Shadow**\n"));
         assert!(message.contains("Urteil: no"));
@@ -3482,14 +3746,13 @@ mod tests {
     async fn normaler_faq_chat_spiegelt_keine_rohfrage_in_den_log_kanal() {
         let db = db_with_kv().await;
         let port = panel_port();
-        let (url, handle, _) = knowledge_server(
+        let (url, handle, _) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Antwort","observed_at":null}],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq =
-            FaqChat::new_with_config(db.pool().clone(), port.clone(), url, Some(LOG_CHANNEL_ID));
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, Some(LOG_CHANNEL_ID));
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3514,13 +3777,13 @@ mod tests {
         let db = db_with_kv().await;
         let port = panel_port();
         port.faq_private_channels.lock().unwrap().clear();
-        let (url, server, called) = knowledge_server(
+        let (url, server, called) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"darf nicht kommen","sources":[]}"#,
+            r#"{"status":"ready","evidence":[],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3539,13 +3802,13 @@ mod tests {
     async fn bestehender_faq_chat_antwortet_nach_optout_stateless_ohne_writes() {
         let db = db_with_kv().await;
         let port = panel_port();
-        let (url, handle, _) = knowledge_server(
+        let (url, handle, _) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless Antwort","observed_at":null}],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3584,11 +3847,11 @@ mod tests {
         let db = db_with_kv().await;
         let port = panel_port();
         let (url, started, release, request_bodies, server) = gated_two_response_knowledge_server(
-            r#"{"answerable":true,"answer":"Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
-            r#"{"answerable":true,"answer":"ungenutzt","sources":[]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Antwort","observed_at":null}],"truncated":false}"#,
+            r#"{"status":"ready","evidence":[],"truncated":false}"#,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3636,11 +3899,11 @@ mod tests {
         let db = db_with_kv().await;
         let port = panel_port();
         let (url, started, release, request_bodies, server) = gated_two_response_knowledge_server(
-            r#"{"answerable":true,"answer":"Verlaufsantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
-            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Verlaufsantwort","observed_at":null}],"truncated":false}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless Antwort","observed_at":null}],"truncated":false}"#,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3720,11 +3983,11 @@ mod tests {
         let db = db_with_kv().await;
         let port = faq_category_port();
         let (url, started, release, request_bodies, server) = gated_two_response_knowledge_server(
-            r#"{"answerable":true,"answer":"Verlaufsantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
-            r#"{"answerable":true,"answer":"Stateless nach Erasure","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Verlaufsantwort","observed_at":null}],"truncated":false}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless nach Erasure","observed_at":null}],"truncated":false}"#,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3812,13 +4075,13 @@ mod tests {
     async fn faq_antwort_bleibt_bei_commit_unsicherheit_sichtbar_und_warnt() {
         let db = db_with_kv().await;
         let port = panel_port();
-        let (url, server, _) = knowledge_server(
+        let (url, server, _) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"Sachantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Sachantwort","observed_at":null}],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3860,13 +4123,13 @@ mod tests {
     async fn geloeschter_faq_chat_kanal_antwortet_stateless_und_bleibt_db_leer() {
         let db = db_with_kv().await;
         let port = faq_category_port();
-        let (url, handle, _) = knowledge_server(
+        let (url, handle, _) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"Antwort nach Löschung","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Antwort nach Löschung","observed_at":null}],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3907,13 +4170,13 @@ mod tests {
         let db = db_with_kv().await;
         let port = faq_category_port();
         port.faq_private_channels.lock().unwrap().clear();
-        let (url, server, called) = knowledge_server(
+        let (url, server, called) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"darf nicht kommen","sources":[]}"#,
+            r#"{"status":"ready","evidence":[],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
 
         assert!(!faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
 
@@ -3953,13 +4216,13 @@ mod tests {
     async fn geschlossener_faq_chat_startet_keine_stateless_antwort() {
         let db = db_with_kv().await;
         let port = faq_category_port();
-        let (url, handle, called) = knowledge_server(
+        let (url, handle, called) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"darf nicht kommen","sources":[]}"#,
+            r#"{"status":"ready","evidence":[],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -3980,13 +4243,13 @@ mod tests {
         let db = db_with_kv().await;
         let pool = db.pool().clone();
         let port = faq_category_port();
-        let (url, knowledge_handle, called) = knowledge_server(
+        let (url, knowledge_handle, called) = evidence_server(
             200,
-            r#"{"answerable":true,"answer":"zu spaet","sources":[]}"#,
+            r#"{"status":"ready","evidence":[],"truncated":false}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(pool.clone(), port.clone(), url, None);
+        let faq = shared_faq(pool.clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -4021,11 +4284,11 @@ mod tests {
         let db = db_with_kv().await;
         let port = faq_category_port();
         let (url, started, release, _request_bodies, server) = gated_two_response_knowledge_server(
-            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
-            r#"{"answerable":true,"answer":"ungenutzt","sources":[]}"#,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Test","path":"public/test.html"},"text":"Stateless Antwort","observed_at":null}],"truncated":false}"#,
+            r#"{"status":"ready","evidence":[],"truncated":false}"#,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = shared_faq(db.pool().clone(), port.clone(), url, None);
         assert!(faq
             .store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)

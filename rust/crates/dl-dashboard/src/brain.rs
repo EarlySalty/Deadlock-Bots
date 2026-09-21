@@ -30,9 +30,9 @@ use crate::web::{err_text, ok_json, DashboardApp};
 const DEFAULT_WIKI_ROOT: &str = "/home/naniadm/Documents/Deadlock-2nd-Brain";
 
 fn wiki_root() -> PathBuf {
-    std::env::var("DL_BRAIN_WIKI_ROOT")
+    dl_core::runtime_config::lookup("DL_BRAIN_WIKI_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_WIKI_ROOT))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_WIKI_ROOT))
 }
 
 /// Ein Lauf-Protokoll aus `brain.feeder_runs`.
