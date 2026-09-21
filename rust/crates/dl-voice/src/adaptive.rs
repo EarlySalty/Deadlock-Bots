@@ -614,6 +614,7 @@ pub fn spawn(
                     channel_adaptive.sort_chill_lanes(guild_id).await;
                     channel_adaptive.sort_comp_ranked_lanes(guild_id).await;
                 }
+                Ok(dl_discord::ChannelEvent::VoiceChannelStatusUpdated { .. }) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

@@ -1729,6 +1729,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             }),
         );
         dl_voice::status::spawn(status_worker.clone());
+        dl_voice::status::spawn_routing(status_worker.clone(), &dispatcher);
         let status_commands = dl_voice::status::StatusCommands::new(status_worker.clone());
         dl_voice::status::spawn_command(status_commands, &dispatcher, adapter.clone());
         // Slash-Commands syncen: Python-Default ist on + guild-scope.
