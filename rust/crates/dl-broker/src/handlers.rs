@@ -1756,6 +1756,22 @@ pub async fn add_reaction(
     .await
 }
 
+/// Coaching-Notifications sofort anstoßen (`POST .../coaching/
+/// notifications-nudge`). Token wie alle Aktionen; Body (leer oder
+/// `{"reason": …}`) bleibt ungelesen, der Nudge ist inhärent idempotent.
+pub async fn coaching_notifications_nudge(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    state.coaching_wake.notify_one();
+    respond(200, json!({ "ok": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2010,6 +2026,40 @@ mod tests {
         assert_eq!(data["result"]["lobbies"][0]["channel_id"], "42");
         assert!(data["result"]["captured_at"].as_u64().unwrap() > 0);
         assert!(!String::from_utf8(bytes.to_vec()).unwrap().contains("user_id"));
+    }
+
+    #[tokio::test]
+    async fn coaching_nudge_requires_token_and_notifies_wake() {
+        let state = test_state().unwrap();
+        let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let missing =
+            coaching_notifications_nudge(State(state.clone()), peer, HeaderMap::new()).await;
+        assert_eq!(missing.status(), 401);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Internal-Token", "wrong".parse().unwrap());
+        let rejected = coaching_notifications_nudge(State(state.clone()), peer, headers).await;
+        assert_eq!(rejected.status(), 401);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                state.coaching_wake.notified()
+            )
+            .await
+            .is_err()
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        let response = coaching_notifications_nudge(State(state.clone()), peer, headers).await;
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 10000).await.unwrap();
+        let data: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data, json!({ "ok": true }));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(1000),
+            state.coaching_wake.notified(),
+        )
+        .await
+        .expect("nudge notifies the coaching loop");
     }
 
     fn test_state() -> Result<SharedBroker, String> {

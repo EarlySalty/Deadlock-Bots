@@ -5,10 +5,10 @@
 //! - **Rollen-Sync** (alle 10 min): Mitglieder mit der Coach-Rolle →
 //!   `POST /coaching/platform/coaches/sync` — mit dem Roster-Wipe-Schutz
 //!   des Originals (leere Liste wird NIE gesendet).
-//! - **Notification-Poller** (alle 60 s): fällige Plattform-Notifications
-//!   abholen (`/notifications/due`), zustellen/spiegeln und bestätigen
-//!   (`/notifications/ack`). Termin-DMs bleiben wortgleich; deaktivierte DMs
-//!   werden geackt statt endlos wiederholt.
+//! - **Notification-Poller** (alle 60 s oder sofort per Nudge): fällige
+//!   Plattform-Notifications abholen (`/notifications/due`), zustellen/spiegeln
+//!   und bestätigen (`/notifications/ack`). Termin-DMs bleiben wortgleich;
+//!   deaktivierte DMs werden geackt statt endlos wiederholt.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -456,6 +456,7 @@ pub fn role_event_touches_coach_role(event: &dl_discord::RoleEvent) -> bool {
 pub fn spawn(
     sync: Arc<CoachingSync>,
     dispatcher: &dl_discord::Dispatcher,
+    coaching_wake: Arc<tokio::sync::Notify>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let role_sync = sync.clone();
     let role_task = tokio::spawn(async move {
@@ -502,7 +503,10 @@ pub fn spawn(
     let notification_task = tokio::spawn(async move {
         loop {
             sync.process_notifications().await;
-            tokio::time::sleep(NOTIFICATION_INTERVAL).await;
+            tokio::select! {
+                _ = tokio::time::sleep(NOTIFICATION_INTERVAL) => {}
+                _ = coaching_wake.notified() => {}
+            }
         }
     });
     vec![role_task, role_event_task, notification_task]
@@ -527,6 +531,7 @@ mod tests {
         acked: Mutex<Vec<Value>>,
         acked_request_ids: Mutex<Vec<String>>,
         synced_coaches: Mutex<Vec<Vec<Value>>>,
+        due_calls: Mutex<usize>,
     }
 
     #[async_trait::async_trait]
@@ -537,6 +542,7 @@ mod tests {
         }
 
         async fn due_notifications(&self) -> Vec<Value> {
+            *self.due_calls.lock().await += 1;
             std::mem::take(&mut *self.due.lock().await)
         }
 
@@ -748,6 +754,44 @@ mod tests {
 
         assert!(client.acked.lock().await.is_empty());
         assert!(client.acked_request_ids.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nudge_weckt_notification_loop_sofort() {
+        let client = Arc::new(TestPlatformClient::default());
+        let sync = Arc::new(CoachingSync {
+            client: client.clone(),
+            port: Arc::new(TestCoachingPort::default()),
+            request_sink: None,
+        });
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let dispatcher = dl_discord::Dispatcher::new();
+        spawn(sync, &dispatcher, wake.clone());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while *client.due_calls.lock().await == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("erster Notification-Lauf");
+
+        client.due.lock().await.push(json!({
+            "type": "created",
+            "discord_user_id": 42,
+            "coach_display": "Nani",
+            "scheduled_at": "2026-06-10T17:00:00Z",
+        }));
+        wake.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while client.acked.lock().await.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Nudge beendet den 60-s-Sleep sofort");
+        assert_eq!(client.acked.lock().await.len(), 1);
     }
 
     #[test]

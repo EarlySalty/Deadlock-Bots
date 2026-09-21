@@ -67,6 +67,7 @@ pub struct BrokerState {
     pub channel_allowlist: Allowlist,
     pub guild_allowlist: Allowlist,
     pub role_allowlist: Allowlist,
+    pub coaching_wake: Arc<tokio::sync::Notify>,
 }
 
 pub type SharedBroker = Arc<BrokerState>;
@@ -110,6 +111,7 @@ impl BrokerState {
             channel_info,
             token,
             store: IdempotencyStore::new(IdempotencyConfig::from_env(&lookup)),
+            coaching_wake: Arc::new(tokio::sync::Notify::new()),
             channel_allowlist: Allowlist::from_env(
                 &lookup,
                 &[
@@ -240,6 +242,10 @@ pub fn router(state: SharedBroker) -> Router {
         .route(
             "/internal/master/v1/discord/add-reaction",
             post(handlers::add_reaction),
+        )
+        .route(
+            "/internal/master/v1/coaching/notifications-nudge",
+            post(handlers::coaching_notifications_nudge),
         )
         .with_state(state)
 }
