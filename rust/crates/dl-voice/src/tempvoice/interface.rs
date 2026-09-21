@@ -2486,6 +2486,7 @@ mod tests {
             .expect("test_pool");
         let engine = TempVoiceEngine::new(
             TempVoiceConfig {
+                empty_lane_grace_seconds: 300,
                 guild_id_hint: 1,
                 staging_channels: HashSet::new(),
                 fixed_lane_ids: HashSet::new(),
@@ -2827,6 +2828,7 @@ mod tests {
             .expect("test_pool");
         let engine = TempVoiceEngine::new(
             TempVoiceConfig {
+                empty_lane_grace_seconds: 300,
                 guild_id_hint: 1,
                 staging_channels: HashSet::new(),
                 fixed_lane_ids: HashSet::new(),
@@ -2856,6 +2858,7 @@ mod tests {
             .expect("test_pool");
         let engine = TempVoiceEngine::new(
             TempVoiceConfig {
+                empty_lane_grace_seconds: 300,
                 guild_id_hint: 1,
                 staging_channels: HashSet::from([4242]),
                 fixed_lane_ids: HashSet::new(),
@@ -3329,6 +3332,7 @@ mod tests {
             .expect("test_pool");
         let engine = TempVoiceEngine::new(
             TempVoiceConfig {
+                empty_lane_grace_seconds: 300,
                 guild_id_hint: 1,
                 staging_channels: HashSet::new(),
                 fixed_lane_ids: HashSet::new(),

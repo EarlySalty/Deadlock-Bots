@@ -53,6 +53,8 @@ pub struct BotConfig {
     #[serde(default)]
     pub concierge: ConciergeConfig,
     #[serde(default)]
+    pub tempvoice: TempVoiceCleanupConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
 }
 
@@ -127,6 +129,18 @@ impl Default for ConciergeConfig {
         Self {
             timeout_seconds: 100,
         }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TempVoiceCleanupConfig {
+    pub empty_lane_grace_seconds: u64,
+}
+
+impl Default for TempVoiceCleanupConfig {
+    fn default() -> Self {
+        Self { empty_lane_grace_seconds: 300 }
     }
 }
 
@@ -334,6 +348,9 @@ impl BotConfig {
                 "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
             ));
         }
+        if !(1..=86_400).contains(&self.tempvoice.empty_lane_grace_seconds) {
+            return Err(invalid("tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen"));
+        }
         let fireworks = &self.llm.fireworks;
         if fireworks
             .model
@@ -441,6 +458,15 @@ mod tests {
     #[test]
     fn schema_version_is_required() {
         rejected("");
+    }
+
+    #[test]
+    fn tempvoice_reconcile_grace_default_und_toml_override() {
+        assert_eq!(BotConfig::parse("schema_version = 1").expect("default").tempvoice.empty_lane_grace_seconds, 300);
+        assert_eq!(BotConfig::parse("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = 120").expect("override").tempvoice.empty_lane_grace_seconds, 120);
+        for invalid in [0, 86401] {
+            rejected(&format!("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = {invalid}"));
+        }
     }
 
     #[test]

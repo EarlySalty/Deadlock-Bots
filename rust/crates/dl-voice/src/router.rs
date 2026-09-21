@@ -2672,6 +2672,7 @@ mod tests {
     fn test_engine(pool: sqlx::PgPool) -> Arc<TempVoiceEngine> {
         TempVoiceEngine::new(
             crate::tempvoice::TempVoiceConfig {
+                empty_lane_grace_seconds: 300,
                 guild_id_hint: 1,
                 staging_channels: HashSet::new(),
                 fixed_lane_ids: HashSet::new(),

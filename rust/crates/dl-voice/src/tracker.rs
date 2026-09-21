@@ -13,6 +13,9 @@
 //! Bewusste 4a-Lücke (kommt mit 4b, vor dem Voice-Cutover): das
 //! Feedback-DM-System nach der ersten Session sowie die Statistik-Commands.
 
+
+mod reconcile;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,6 +119,10 @@ pub struct VoiceMemberState {
 /// in Tests gemockt.
 #[async_trait::async_trait]
 pub trait VoiceSnapshot: Send + Sync {
+    async fn guild_voice_snapshot(&self, _guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+        None
+    }
+
     async fn channel_states(
         &self,
         guild_id: u64,
@@ -593,13 +600,9 @@ impl VoiceTracker {
         }
     }
 
-    /// Keep-Alive-Tick (2min-Loop): laufende Sessions als lebendig markieren.
+    /// Keep-Alive-Tick: echte Anwesenheit bestätigen, Geister konservativ schließen.
     pub async fn touch_sessions(&self) {
-        let now = Utc::now().naive_utc();
-        let mut state = self.state.lock().await;
-        for session in state.sessions.values_mut() {
-            session.last_update = now;
-        }
+        self.reconcile_keepalive().await;
     }
 
     async fn was_first_session(&self, user_id: u64) -> VoiceDbResult<bool> {
@@ -798,6 +801,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl VoiceSnapshot for MockSnapshot {
+        async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+            Some(dl_discord::voice_cache::GuildVoiceSnapshot {
+                guild_id, observed_at: Utc::now(),
+                channels: self.names.lock().expect("lock").keys().map(|&channel| (channel, None)).collect(),
+                members: self.states.lock().expect("lock").iter().filter(|((guild, _), _)| *guild == guild_id)
+                    .flat_map(|((_, channel), members)| members.iter().map(move |member| (member.user_id, *channel))).collect(),
+            })
+        }
+
         async fn channel_states(
             &self,
             guild_id: u64,
@@ -839,6 +851,70 @@ mod tests {
         });
         let tracker = VoiceTracker::new(db.pool().clone(), snapshot.clone());
         (db, tracker, snapshot)
+    }
+
+    #[tokio::test]
+    async fn reconcile_keepalive_closes_ghost_at_last_observation() {
+        let (_db, tracker, snapshot) = setup().await;
+        snapshot.names.lock().expect("lock").insert(10, "Lane".to_string());
+        snapshot.states.lock().expect("lock").insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
+        tracker.handle_event(VoiceEvent::Join { guild_id: 1, user_id: 100, channel_id: 10 }).await;
+        let last = Utc::now().naive_utc() - chrono::Duration::minutes(10);
+        {
+            let mut state = tracker.state.lock().await;
+            for session in state.sessions.values_mut() {
+                session.start_time = last - chrono::Duration::minutes(10);
+                session.last_update = last;
+            }
+        }
+        snapshot.states.lock().expect("lock").clear();
+        tracker.touch_sessions().await;
+        assert_eq!(tracker.active_sessions().await, 0);
+        let rows: Vec<(i64, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT duration_seconds, ended_at FROM activity.voice_session_log ORDER BY user_id",
+        ).fetch_all(&tracker.pool).await.expect("history");
+        assert_eq!(rows.len(), 2);
+        for (seconds, ended_at) in &rows {
+            assert_eq!(*seconds, 600);
+            assert_eq!(ended_at.timestamp_micros(), last.and_utc().timestamp_micros());
+        }
+        tracker.touch_sessions().await;
+        let after: Vec<(i64, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT duration_seconds, ended_at FROM activity.voice_session_log ORDER BY user_id",
+        ).fetch_all(&tracker.pool).await.expect("unchanged history");
+        assert_eq!(rows, after);
+    }
+
+    #[tokio::test]
+    async fn reconcile_db_fehler_behaelt_session_und_rollt_punkte_zurueck() {
+        let (_db, tracker, snapshot) = setup().await;
+        snapshot.states.lock().expect("lock").insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
+        tracker.update_channel(1, 10).await;
+        {
+            let mut state = tracker.state.lock().await;
+            for session in state.sessions.values_mut() {
+                session.start_time -= chrono::Duration::minutes(20);
+                session.last_update -= chrono::Duration::minutes(10);
+            }
+        }
+        let snapshot = dl_discord::voice_cache::GuildVoiceSnapshot {
+            guild_id: 1, observed_at: Utc::now(), channels: HashMap::new(), members: HashMap::new(),
+        };
+        // Ausschließlich die Wegwerf-Testdatenbank: History-Insert gezielt ablehnen.
+        sqlx::query("ALTER TABLE activity.voice_session_log ADD CONSTRAINT test_reconcile_failure CHECK (FALSE)")
+            .execute(&tracker.pool).await.expect("inject failure");
+        assert!(tracker.reconcile_snapshot(&snapshot).await.is_err());
+        assert_eq!(tracker.active_sessions().await, 2);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM voice.voice_stats")
+            .fetch_one(&tracker.pool).await.expect("rolled back");
+        assert_eq!(count, 0);
+        sqlx::query("ALTER TABLE activity.voice_session_log DROP CONSTRAINT test_reconcile_failure")
+            .execute(&tracker.pool).await.expect("remove failure");
+        assert_eq!(tracker.reconcile_snapshot(&snapshot).await.expect("retry"), 2);
+        assert_eq!(tracker.reconcile_snapshot(&snapshot).await.expect("idempotent"), 0);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM activity.voice_session_log")
+            .fetch_one(&tracker.pool).await.expect("history");
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]

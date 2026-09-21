@@ -4,6 +4,9 @@
 //! nur wer/wo/wann/Laenge/Anhang/Reply. Rohereignisse werden nach fester Frist
 //! in anonyme Tagesaggregate verdichtet und geloescht.
 
+mod voice_reconcile;
+pub use voice_reconcile::reconcile_voice_open_sessions;
+
 use std::collections::HashSet;
 use std::time::Duration as StdDuration;
 
@@ -1220,6 +1223,9 @@ pub async fn record_voice_metadata(
                 &mut tx, user_id, guild_id, channel_id, "update", now, None, None, None,
             )
             .await?;
+            sqlx::query("UPDATE activity.voice_open_sessions SET updated_at = $4 WHERE user_id = $1 AND guild_id = $2 AND channel_id = $3 AND updated_at < $4")
+                .bind(user_id).bind(guild_id).bind(channel_id).bind(now)
+                .execute(&mut *tx).await?;
         }
     }
 

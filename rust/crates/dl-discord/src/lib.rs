@@ -18,6 +18,7 @@ pub mod dispatcher;
 pub mod gateway;
 pub mod interactions;
 pub mod invite_tracker;
+pub mod voice_cache;
 
 pub use adapter::DiscordAdapter;
 pub use dispatcher::{
