@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::Duration;
 
 use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
-use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
+use dl_discord::{BridgeInteraction, BridgeReply, CommandSpec, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{
     ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, PermissionOverwriteType,
@@ -30,20 +30,20 @@ const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
-const BRAIN_USAGE: &str = "🧠 Frag mich was zu Deadlock! Z. B. `!brain wie spiel ich Vindicta?` oder `!brain ist Lash grad stark?`";
-const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig — eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
+const BRAIN_USAGE: &str = "🧠 Nutze `/brain frage:<deine Frage>`. Im Testkanal darfst du auch Fragen außerhalb von Deadlock stellen.";
+const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig, eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
 const BRAIN_TOO_LONG: &str =
-    "Das ist ja ein halber Roman 😅 — pack deine Frage in unter {max} Zeichen.";
+    "Das ist ja ein halber Roman 😅. Pack deine Frage in unter {max} Zeichen.";
 #[allow(dead_code)]
 const BRAIN_WORKING: &str = "🧠 Moment, ich wühl kurz im Brain…";
 const BRAIN_THINKING_FRAMES: [&str; 3] = ["💭 .", "💭 . .", "💭 . . ."];
 const BRAIN_THINKING_INTERVAL: Duration = Duration::from_millis(1200);
 const BRAIN_THINKING_MAX_TICKS: usize = 40;
-const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad — probier's in ein paar Sekunden nochmal.";
+const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad. Probier's in ein paar Sekunden nochmal.";
 const BRAIN_NO_ANSWER: &str =
-    "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter — Held, Item oder Fähigkeit.";
+    "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter nach Held, Item oder Fähigkeit.";
 const BRAIN_OUT_OF_DOMAIN: &str =
-    "🧠 Klingt nicht nach Deadlock — dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
+    "🧠 Klingt nicht nach Deadlock. Dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
 const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain";
 const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
@@ -145,11 +145,21 @@ pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
 pub struct SharedBrainAnswerer {
     pub engine: Arc<dl_answer::AnswerEngine>,
+    pub open_test_mode: bool,
 }
 
 #[async_trait::async_trait]
 impl dl_brain::AiAnswerer for SharedBrainAnswerer {
     async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+        if self.open_test_mode {
+            return self
+                .engine
+                .answer_open_test(question)
+                .await
+                .map(dl_brain::BrainOutcome::Answer)
+                .map_err(|error| dl_brain::BrainError::Backend(error.to_string()));
+        }
+
         self.engine
             .answer(question, dl_answer::Scope::GameOnly)
             .await
@@ -301,13 +311,41 @@ impl BrainHandler {
 impl InteractionHandler for BrainHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         if !self.channel_allowed(interaction.channel_id) {
-            return BridgeReply::default();
+            return BridgeReply::ephemeral_text(
+                "Der Brain-Test ist in diesem Kanal nicht freigeschaltet.",
+            );
         }
-        let question = parse_brain_question(&interaction.content)
-            .unwrap_or_else(|| interaction.content.trim().to_string());
-        self.handle_brain_question(interaction.channel_id, interaction.user_id, &question)
+        let question = interaction
+            .options
+            .get("frage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| parse_brain_question(&interaction.content))
+            .unwrap_or_default();
+        let outcome = self
+            .outcome_for_question(&question, interaction.user_id)
             .await;
-        BridgeReply::default()
+        brain_bridge_reply_from_body(self.public_body_for_outcome(&question, outcome))
+    }
+}
+
+fn brain_bridge_reply_from_body(mut body: Map<String, Value>) -> BridgeReply {
+    let content = body
+        .remove("content")
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|value| !value.is_empty());
+    let embeds = body
+        .remove("embeds")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let allowed_mentions = body.remove("allowed_mentions");
+    BridgeReply {
+        content,
+        embeds,
+        allowed_mentions,
+        ..BridgeReply::default()
     }
 }
 
@@ -455,6 +493,23 @@ fn parse_brain_question(content: &str) -> Option<String> {
         }
     }
     Some(rest.trim().to_string())
+}
+
+pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
+    CommandSpec {
+        definition: json!({
+            "name": "brain",
+            "description": "Deadlock Brain im schreibgeschützten Testmodus fragen",
+            "dm_permission": false,
+            "options": [{
+                "type": 3,
+                "name": "frage",
+                "description": "Was möchtest du wissen?",
+                "required": true,
+                "max_length": max_question_len.min(4000),
+            }],
+        }),
+    }
 }
 
 pub fn parse_brain_channel_allowlist(raw: &str) -> Option<HashSet<u64>> {
@@ -3528,6 +3583,48 @@ mod tests {
         assert_eq!(
             cleaned,
             "# Seven\n\n\n## Items\nText\n**Timing**\n#### Kein Heading"
+        );
+    }
+
+    #[test]
+    fn brain_slash_command_hat_frage_option_und_limit() {
+        let spec = brain_command_spec(300);
+        assert_eq!(spec.definition["name"], json!("brain"));
+        assert_eq!(spec.definition["options"][0]["name"], json!("frage"));
+        assert_eq!(spec.definition["options"][0]["required"], json!(true));
+        assert_eq!(spec.definition["options"][0]["max_length"], json!(300));
+    }
+
+    #[tokio::test]
+    async fn brain_slash_command_antwortet_ohne_separates_discord_io() {
+        let retriever_calls = Arc::new(AtomicUsize::new(0));
+        let answerer_calls = Arc::new(AtomicUsize::new(0));
+        let handler = test_brain_handler(
+            Some(HashSet::from([1])),
+            retriever_calls.clone(),
+            answerer_calls.clone(),
+        );
+        let mut options = HashMap::new();
+        options.insert("frage".to_string(), json!("Was ist Abrams?"));
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "brain".to_string(),
+                options,
+                guild_id: 1,
+                channel_id: 1,
+                user_id: 3,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(answerer_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(retriever_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(reply.embeds.len(), 1);
+        assert_eq!(reply.embeds[0]["description"], json!("Antwort"));
+        assert_eq!(
+            reply.allowed_mentions,
+            Some(json!({ "parse": [], "replied_user": false }))
         );
     }
 
