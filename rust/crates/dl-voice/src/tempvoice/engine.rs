@@ -2273,6 +2273,7 @@ pub fn spawn(engine: Arc<TempVoiceEngine>, dispatcher: &Dispatcher) -> tokio::ta
                         .await;
                 }
                 Ok(ChannelEvent::VoiceChannelUpdated { .. }) => {}
+                Ok(ChannelEvent::VoiceChannelStatusUpdated { .. }) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

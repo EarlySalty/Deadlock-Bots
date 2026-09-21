@@ -1917,6 +1917,37 @@ impl crate::status::StatusPort for StatusGlue {
         None
     }
 
+    async fn channel_status(&self, channel_id: u64) -> Option<String> {
+        for guild_id in self.adapter.cache().guilds() {
+            let Some(guild) = self.adapter.cache().guild(guild_id) else {
+                continue;
+            };
+            if let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) {
+                return channel.status.clone();
+            }
+        }
+        None
+    }
+
+    async fn move_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": channel_id.to_string() }),
+                Some("Voice status routing"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
     async fn resolved_base_name(
         &self,
         guild_id: u64,

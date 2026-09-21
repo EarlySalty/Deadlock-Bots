@@ -34,6 +34,47 @@ pub const TARGET_CATEGORY_IDS: [u64; 3] = [
 ];
 /// Permanenter Chill-Voice — Status wird hier aktiv entfernt.
 pub const EXCLUDED_CHANNEL_IDS: [u64; 1] = [1493690350580138114];
+pub const OFF_TOPIC_CHANNEL_ID: u64 = crate::adaptive::DUO_ANCHOR_CHANNEL_ID;
+pub const VOICE_STATUS_ROUTER_ANCHOR: &str = "voice_status_router_v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceStatusRoute {
+    Deadlock,
+    OffTopic,
+    Unknown,
+}
+
+pub fn contains_deadlock_lobby_code(status: &str) -> bool {
+    status
+        .split(|c: char| !c.is_ascii_digit())
+        .any(|part| part.len() == 5)
+}
+
+fn status_words(status: &str) -> Vec<String> {
+    status
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+pub fn classify_voice_channel_status(status: Option<&str>) -> VoiceStatusRoute {
+    let Some(status) = status.map(str::trim).filter(|status| !status.is_empty()) else {
+        return VoiceStatusRoute::Unknown;
+    };
+    let words = status_words(status);
+    let war_dogs = words.iter().any(|word| word == "wardogs")
+        || words
+            .windows(2)
+            .any(|pair| pair[0] == "war" && pair[1] == "dogs");
+    if war_dogs {
+        return VoiceStatusRoute::OffTopic;
+    }
+    if words.iter().any(|word| word == "deadlock") || contains_deadlock_lobby_code(status) {
+        return VoiceStatusRoute::Deadlock;
+    }
+    VoiceStatusRoute::Unknown
+}
 
 pub fn match_minute_display_offset() -> i64 {
     // NOTE(tempvoice-blocking-rework): config parity for this offset is deferred;
@@ -674,6 +715,9 @@ pub trait StatusPort: Send + Sync {
     /// Alle Voice-Kanäle in den Ziel-Kategorien: (guild, channel, name, non-bot-member-ids).
     async fn monitored_channels(&self) -> Vec<(u64, u64, String, Vec<u64>)>;
     async fn channel_info(&self, channel_id: u64) -> Option<(u64, String, Vec<u64>)>;
+    async fn channel_status(&self, channel_id: u64) -> Option<String>;
+    async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
+        -> Result<(), String>;
     async fn resolved_base_name(
         &self,
         _guild_id: u64,
@@ -702,6 +746,83 @@ impl VoiceStatusWorker {
         })
     }
 
+    async fn move_members_to_off_topic(
+        &self,
+        guild_id: u64,
+        source_channel_id: u64,
+        members: &[u64],
+    ) {
+        if source_channel_id == OFF_TOPIC_CHANNEL_ID {
+            return;
+        }
+        for user_id in members {
+            match self
+                .port
+                .move_member(guild_id, *user_id, OFF_TOPIC_CHANNEL_ID)
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    anchor = VOICE_STATUS_ROUTER_ANCHOR,
+                    guild_id,
+                    source_channel_id,
+                    target_channel_id = OFF_TOPIC_CHANNEL_ID,
+                    user_id,
+                    "VoiceStatusRouting moved member to off topic"
+                ),
+                Err(err) => tracing::warn!(
+                    %err,
+                    guild_id,
+                    source_channel_id,
+                    target_channel_id = OFF_TOPIC_CHANNEL_ID,
+                    user_id,
+                    "VoiceStatusRouting could not move member"
+                ),
+            }
+        }
+    }
+
+    async fn monitored_members(&self, guild_id: u64, channel_id: u64) -> Option<Vec<u64>> {
+        self.port
+            .monitored_channels()
+            .await
+            .into_iter()
+            .find(|(candidate_guild, candidate_channel, _, _)| {
+                *candidate_guild == guild_id && *candidate_channel == channel_id
+            })
+            .map(|(_, _, _, members)| members)
+    }
+
+    pub async fn route_status_update(&self, guild_id: u64, channel_id: u64, status: Option<&str>) {
+        if channel_id == OFF_TOPIC_CHANNEL_ID
+            || classify_voice_channel_status(status) != VoiceStatusRoute::OffTopic
+        {
+            return;
+        }
+        let Some(members) = self.monitored_members(guild_id, channel_id).await else {
+            return;
+        };
+        self.move_members_to_off_topic(guild_id, channel_id, &members)
+            .await;
+    }
+
+    pub async fn route_voice_member(&self, guild_id: u64, user_id: u64, channel_id: u64) {
+        if channel_id == OFF_TOPIC_CHANNEL_ID {
+            return;
+        }
+        let Some(members) = self.monitored_members(guild_id, channel_id).await else {
+            return;
+        };
+        if !members.contains(&user_id) {
+            return;
+        }
+        let status = self.port.channel_status(channel_id).await;
+        if classify_voice_channel_status(status.as_deref()) != VoiceStatusRoute::OffTopic {
+            return;
+        }
+        self.move_members_to_off_topic(guild_id, channel_id, &[user_id])
+            .await;
+    }
+
     pub async fn tick(self: &Arc<Self>) {
         // Status von ausgenommenen Kanälen aktiv räumen
         for channel_id in EXCLUDED_CHANNEL_IDS {
@@ -715,6 +836,19 @@ impl VoiceStatusWorker {
         }
 
         let channels = self.port.monitored_channels().await;
+        let mut deadlock_channels = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let status = self.port.channel_status(channel.1).await;
+            if channel.1 != OFF_TOPIC_CHANNEL_ID
+                && classify_voice_channel_status(status.as_deref()) == VoiceStatusRoute::OffTopic
+            {
+                self.move_members_to_off_topic(channel.0, channel.1, &channel.3)
+                    .await;
+                continue;
+            }
+            deadlock_channels.push(channel);
+        }
+        let channels = deadlock_channels;
         if channels.is_empty() {
             return;
         }
@@ -959,6 +1093,61 @@ pub fn spawn(worker: Arc<VoiceStatusWorker>) -> tokio::task::JoinHandle<()> {
     })
 }
 
+pub fn spawn_routing(
+    worker: Arc<VoiceStatusWorker>,
+    dispatcher: &Dispatcher,
+) -> tokio::task::JoinHandle<()> {
+    let mut channel_events = dispatcher.subscribe_channels();
+    let mut voice_events = dispatcher.subscribe_voice();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                event = channel_events.recv() => match event {
+                    Ok(dl_discord::ChannelEvent::VoiceChannelStatusUpdated {
+                        guild_id,
+                        channel_id,
+                        status,
+                        ..
+                    }) => {
+                        worker
+                            .route_status_update(guild_id, channel_id, status.as_deref())
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "VoiceStatusRouting channel events lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                event = voice_events.recv() => match event {
+                    Ok(dl_discord::VoiceEvent::Join {
+                        guild_id,
+                        user_id,
+                        channel_id,
+                    }) => {
+                        worker.route_voice_member(guild_id, user_id, channel_id).await;
+                    }
+                    Ok(dl_discord::VoiceEvent::Move {
+                        guild_id,
+                        user_id,
+                        to_channel_id,
+                        ..
+                    }) => {
+                        worker
+                            .route_voice_member(guild_id, user_id, to_channel_id)
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "VoiceStatusRouting voice events lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+            }
+        }
+    })
+}
+
 pub struct StatusCommands {
     worker: Arc<VoiceStatusWorker>,
 }
@@ -1080,16 +1269,40 @@ mod tests {
     #[derive(Default)]
     struct MockStatusPort {
         renamed: StdMutex<Vec<(u64, String)>>,
+        monitored: StdMutex<Vec<(u64, u64, String, Vec<u64>)>>,
+        statuses: StdMutex<HashMap<u64, String>>,
+        moved: StdMutex<Vec<(u64, u64, u64)>>,
     }
 
     #[async_trait::async_trait]
     impl StatusPort for MockStatusPort {
         async fn monitored_channels(&self) -> Vec<(u64, u64, String, Vec<u64>)> {
-            Vec::new()
+            self.monitored.lock().expect("lock").clone()
         }
 
         async fn channel_info(&self, _channel_id: u64) -> Option<(u64, String, Vec<u64>)> {
             None
+        }
+
+        async fn channel_status(&self, channel_id: u64) -> Option<String> {
+            self.statuses
+                .lock()
+                .expect("lock")
+                .get(&channel_id)
+                .cloned()
+        }
+
+        async fn move_member(
+            &self,
+            guild_id: u64,
+            user_id: u64,
+            channel_id: u64,
+        ) -> Result<(), String> {
+            self.moved
+                .lock()
+                .expect("lock")
+                .push((guild_id, user_id, channel_id));
+            Ok(())
         }
 
         async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
@@ -1105,6 +1318,127 @@ mod tests {
         PgPoolOptions::new()
             .connect_lazy("postgres://voice-status-test.invalid/deadlock")
             .expect("lazy pg pool")
+    }
+
+    #[test]
+    fn voice_status_routing_erkennt_war_dogs_und_deadlock_codes() {
+        assert_eq!(
+            classify_voice_channel_status(Some("War Dogs")),
+            VoiceStatusRoute::OffTopic
+        );
+        assert_eq!(
+            classify_voice_channel_status(Some("heute WAR-DOGS zocken")),
+            VoiceStatusRoute::OffTopic
+        );
+        assert_eq!(
+            classify_voice_channel_status(Some("Lobby 12345 EU")),
+            VoiceStatusRoute::Deadlock
+        );
+        assert_eq!(
+            classify_voice_channel_status(Some("Deadlock Ranked")),
+            VoiceStatusRoute::Deadlock
+        );
+        assert_eq!(
+            classify_voice_channel_status(Some("Lobby 123456")),
+            VoiceStatusRoute::Unknown
+        );
+        assert_eq!(
+            classify_voice_channel_status(Some("War Dogs 12345")),
+            VoiceStatusRoute::OffTopic
+        );
+    }
+
+    #[tokio::test]
+    async fn war_dogs_status_verschiebt_mitglieder_in_off_topic() {
+        let port = Arc::new(MockStatusPort::default());
+        port.monitored.lock().expect("lock").push((
+            1289721245281292288,
+            1555000000000000001,
+            "Chill Lane".to_string(),
+            vec![11, 22],
+        ));
+        let worker = VoiceStatusWorker::new(lazy_pool(), port.clone());
+
+        worker
+            .route_status_update(1289721245281292288, 1555000000000000001, Some("War Dogs"))
+            .await;
+
+        assert_eq!(
+            *port.moved.lock().expect("lock"),
+            vec![
+                (1289721245281292288, 11, OFF_TOPIC_CHANNEL_ID),
+                (1289721245281292288, 22, OFF_TOPIC_CHANNEL_ID),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn war_dogs_status_verschiebt_neu_beigetretenes_mitglied() {
+        let port = Arc::new(MockStatusPort::default());
+        port.monitored.lock().expect("lock").push((
+            1289721245281292288,
+            1555000000000000001,
+            "Chill Lane".to_string(),
+            vec![11, 22],
+        ));
+        port.statuses
+            .lock()
+            .expect("lock")
+            .insert(1555000000000000001, "War Dogs".to_string());
+        let worker = VoiceStatusWorker::new(lazy_pool(), port.clone());
+
+        worker
+            .route_voice_member(1289721245281292288, 22, 1555000000000000001)
+            .await;
+
+        assert_eq!(
+            *port.moved.lock().expect("lock"),
+            vec![(1289721245281292288, 22, OFF_TOPIC_CHANNEL_ID)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fuenfstelliger_lobby_code_bleibt_in_deadlock_lane() {
+        let port = Arc::new(MockStatusPort::default());
+        port.monitored.lock().expect("lock").push((
+            1289721245281292288,
+            1555000000000000001,
+            "Chill Lane".to_string(),
+            vec![11],
+        ));
+        port.statuses
+            .lock()
+            .expect("lock")
+            .insert(1555000000000000001, "Lobby 54321".to_string());
+        let worker = VoiceStatusWorker::new(lazy_pool(), port.clone());
+
+        worker
+            .route_voice_member(1289721245281292288, 11, 1555000000000000001)
+            .await;
+
+        assert!(port.moved.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn unbekannter_status_loest_keinen_move_aus() {
+        let port = Arc::new(MockStatusPort::default());
+        port.monitored.lock().expect("lock").push((
+            1289721245281292288,
+            1555000000000000001,
+            "Chill Lane".to_string(),
+            vec![11],
+        ));
+        port.statuses
+            .lock()
+            .expect("lock")
+            .insert(1555000000000000001, "Abends entspannt".to_string());
+        let worker = VoiceStatusWorker::new(lazy_pool(), port.clone());
+
+        worker
+            .route_voice_member(1289721245281292288, 11, 1555000000000000001)
+            .await;
+
+        assert!(port.moved.lock().expect("lock").is_empty());
     }
 
     #[allow(clippy::too_many_arguments)]

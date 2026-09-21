@@ -83,7 +83,10 @@ impl DiscordAdapter {
     }
 
     /// Vollständig geladener und verbundener Guild-Cache, sonst unbekannt.
-    pub fn voice_cache_snapshot(&self, guild_id: u64) -> Option<crate::voice_cache::GuildVoiceSnapshot> {
+    pub fn voice_cache_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Option<crate::voice_cache::GuildVoiceSnapshot> {
         self.voice_cache_health.snapshot(self.cache(), guild_id)
     }
 
@@ -1004,7 +1007,11 @@ impl DiscordPort for DiscordAdapter {
         Ok(members)
     }
 
-    async fn community_lobbies(&self, guild_id: u64, user_id: u64) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
+    async fn community_lobbies(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<Vec<dl_broker::port::CommunityLobby>, PortError> {
         crate::community::directory(self, guild_id, user_id)
     }
 

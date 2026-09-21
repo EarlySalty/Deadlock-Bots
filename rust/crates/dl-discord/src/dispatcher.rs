@@ -50,6 +50,12 @@ pub enum ChannelEvent {
         guild_id: u64,
         channel_id: u64,
     },
+    VoiceChannelStatusUpdated {
+        guild_id: u64,
+        channel_id: u64,
+        old_status: Option<String>,
+        status: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
