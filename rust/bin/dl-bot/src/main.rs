@@ -1005,23 +1005,29 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
             None
         } else {
-            let raw_allowlist = operating_value("BRAIN_CHANNEL_ALLOWLIST");
-            let channel_allowlist = brain_channel_allowlist_from_value(raw_allowlist.as_deref());
-            if channel_allowlist.is_none() {
+            let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
+            let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
+            let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
+            let channel_allowlist = if open_test_mode {
+                None
+            } else {
+                brain_channel_allowlist_from_value(
+                    operating_value("BRAIN_CHANNEL_ALLOWLIST").as_deref(),
+                )
+            };
+            if !open_test_mode && channel_allowlist.is_none() {
                 tracing::warn!(
-                    "Brain-Command deaktiviert: BRAIN_CHANNEL_ALLOWLIST fehlt, ist leer oder enthaelt eine ungueltige/0-Channel-ID (deny-all)"
+                    "Brain-Command deaktiviert: BRAIN_CHANNEL_ALLOWLIST fehlt, ist leer oder enthält eine ungültige oder 0 Channel-ID"
                 );
-            }
-            channel_allowlist.map(|channel_allowlist| {
-                let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
-                let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
-                let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
+                None
+            } else {
                 tracing::info!(
                     bin = %brain_bin_path.display(),
                     cooldown_secs,
                     max_question_len,
                     open_test_mode,
-                    channel_allowlist = channel_allowlist.len(),
+                    all_guild_channels = open_test_mode,
+                    channel_allowlist = channel_allowlist.as_ref().map_or(0, HashSet::len),
                     "Brain-Command registriert"
                 );
                 let config = Arc::new(dl_brain::BrainConfig {
@@ -1033,14 +1039,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         engine: shared_answers.clone(),
                         open_test_mode,
                     });
-                Arc::new(modglue::BrainHandler {
+                Some(Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
                     config,
                     cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
                     answerer,
-                    channel_allowlist: Some(channel_allowlist),
-                })
-            })
+                    channel_allowlist,
+                    all_guild_channels: open_test_mode,
+                }))
+            }
         }
     };
     if let Some(handler) = &brain_handler {

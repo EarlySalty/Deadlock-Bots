@@ -178,14 +178,17 @@ pub struct BrainHandler {
     pub cooldowns: Arc<dl_brain::BrainCooldowns>,
     pub answerer: Arc<dyn dl_brain::AiAnswerer>,
     pub channel_allowlist: Option<HashSet<u64>>,
+    pub all_guild_channels: bool,
 }
 
 impl BrainHandler {
     fn channel_allowed(&self, channel_id: u64) -> bool {
-        self.channel_allowlist
-            .as_ref()
-            .map(|allowlist| allowlist.contains(&channel_id))
-            .unwrap_or(false)
+        self.all_guild_channels
+            || self
+                .channel_allowlist
+                .as_ref()
+                .map(|allowlist| allowlist.contains(&channel_id))
+                .unwrap_or(false)
     }
 
     async fn outcome_for_question(&self, question: &str, user_id: u64) -> dl_brain::BrainOutcome {
@@ -310,6 +313,9 @@ impl BrainHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for BrainHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if interaction.guild_id == 0 {
+            return BridgeReply::ephemeral_text("Der Brain-Test ist nur auf dem Server verfügbar.");
+        }
         if !self.channel_allowed(interaction.channel_id) {
             return BridgeReply::ephemeral_text(
                 "Der Brain-Test ist in diesem Kanal nicht freigeschaltet.",
@@ -3529,6 +3535,7 @@ mod tests {
                 retrieval_calls: retriever_calls,
             }),
             channel_allowlist,
+            all_guild_channels: false,
         }
     }
 
@@ -3626,6 +3633,47 @@ mod tests {
             reply.allowed_mentions,
             Some(json!({ "parse": [], "replied_user": false }))
         );
+    }
+
+    #[tokio::test]
+    async fn offener_brain_testmodus_erlaubt_alle_serverkanaele_aber_keine_dms() {
+        let retriever_calls = Arc::new(AtomicUsize::new(0));
+        let answerer_calls = Arc::new(AtomicUsize::new(0));
+        let mut handler = test_brain_handler(None, retriever_calls.clone(), answerer_calls.clone());
+        handler.all_guild_channels = true;
+        assert!(handler.channel_allowed(1));
+        assert!(handler.channel_allowed(999_999));
+
+        let mut options = HashMap::new();
+        options.insert("frage".to_string(), json!("Hallo Brain"));
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "brain".to_string(),
+                options: options.clone(),
+                guild_id: 1,
+                channel_id: 999_999,
+                user_id: 3,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(reply.embeds[0]["description"], json!("Antwort"));
+        assert_eq!(answerer_calls.load(Ordering::Relaxed), 1);
+
+        let dm = handler
+            .handle(BridgeInteraction {
+                command: "brain".to_string(),
+                options,
+                guild_id: 0,
+                channel_id: 42,
+                user_id: 4,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            dm.content.as_deref(),
+            Some("Der Brain-Test ist nur auf dem Server verfügbar.")
+        );
+        assert_eq!(answerer_calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
