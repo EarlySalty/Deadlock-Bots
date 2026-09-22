@@ -3148,6 +3148,23 @@ impl crate::pairing::PairingPort for PairingGlue {
         self.engine.lane_mode(channel_id).await.map(str::to_string)
     }
 
+    async fn member_major_rank_index(&self, guild_id: u64, user_id: u64) -> Option<usize> {
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
+        let member = guild.members.get(&UserId::new(user_id))?;
+        let roles = member
+            .roles
+            .iter()
+            .filter_map(|role_id| {
+                guild
+                    .roles
+                    .get(role_id)
+                    .map(|role| (role_id.get(), role.name.clone()))
+            })
+            .collect::<Vec<_>>();
+        let (_, rank, _) = crate::rank::user_rank_from_roles(&roles);
+        usize::try_from(rank).ok().filter(|rank| *rank > 0)
+    }
+
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
         crate::pairing::set_never_ask_db(&self.pool, user_id).await
     }

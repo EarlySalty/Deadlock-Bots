@@ -59,6 +59,8 @@ pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const MOVED_REPLY: &str = "Ihr seid zusammen in einer Lane. Viel Spaß euch beiden.";
 pub const TOO_FULL_REPLY: &str =
     "Inzwischen seid ihr zusammen zu viele für eine Lane. Beim nächsten Mal klappt es.";
+pub const RANK_MISMATCH_REPLY: &str =
+    "Eure Ränge liegen inzwischen zu weit auseinander. Ich verschiebe euch deshalb nicht.";
 pub const MOVE_PARTIAL_REPLY: &str =
     "Fast alle sind drüben, bei einem hat es nicht geklappt. Der kann einfach selbst rüberspringen.";
 pub const MOVE_FAILED_REPLY: &str =
@@ -96,6 +98,8 @@ pub struct LaneSeat {
     pub channel_id: u64,
     pub mode: String,
     pub members: Vec<u64>,
+    /// Hauptrang ohne Subrang. Nur für Ranked relevant.
+    pub major_rank: Option<usize>,
     pub since: DateTime<Utc>,
 }
 
@@ -111,6 +115,10 @@ fn pairing_capacity(mode: &str) -> usize {
         "street_brawl" => STREET_BRAWL_PAIRING_CAP,
         _ => MAX_LANE_MEMBERS,
     }
+}
+
+fn rank_gap_allows(first: Option<usize>, second: Option<usize>) -> bool {
+    matches!((first, second), (Some(first), Some(second)) if first.abs_diff(second) <= 1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +159,8 @@ pub trait PairingPort: Send + Sync {
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     /// Aktueller Router-Modus der Lane, falls sie noch existiert.
     async fn lane_mode(&self, guild_id: u64, channel_id: u64) -> Option<String>;
+    /// Aktueller Hauptrang aus den Discord-Rollen, ohne frei wählbare Lane-Präferenz.
+    async fn member_major_rank_index(&self, guild_id: u64, user_id: u64) -> Option<usize>;
     /// Aktuelle Mitglieder eines Kanals (ohne Bots).
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64>;
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
@@ -175,7 +185,7 @@ impl LanePairing {
     /// Ein Durchlauf: Einzelsitzer fortschreiben, dann höchstens ein Paar fragen.
     pub async fn tick_at(&self, guild_id: u64, now: DateTime<Utc>) {
         let lanes = self.port.lane_views(guild_id).await;
-        let seats = self.update_watched(&lanes, now).await;
+        let seats = self.update_watched(guild_id, &lanes, now).await;
         let Some((first, second)) = pick_pair(&seats, now) else {
             return;
         };
@@ -228,7 +238,12 @@ impl LanePairing {
     }
 
     /// Beobachtungsstand je Lane fortschreiben und die Kandidaten liefern.
-    async fn update_watched(&self, lanes: &[LaneView], now: DateTime<Utc>) -> Vec<LaneSeat> {
+    async fn update_watched(
+        &self,
+        guild_id: u64,
+        lanes: &[LaneView],
+        now: DateTime<Utc>,
+    ) -> Vec<LaneSeat> {
         let mut watched = self.watched.lock().await;
         let mut seats = Vec::new();
         let mut seen = Vec::new();
@@ -275,10 +290,21 @@ impl LanePairing {
                 channel_id: lane.channel_id,
                 mode: lane.mode.clone(),
                 members,
+                major_rank: None,
                 since,
             });
         }
         watched.retain(|channel_id, _| seen.contains(channel_id));
+        drop(watched);
+
+        for seat in &mut seats {
+            if seat.mode == "ranked" && seat.size() == 1 {
+                seat.major_rank = self
+                    .port
+                    .member_major_rank_index(guild_id, seat.speaker_id)
+                    .await;
+            }
+        }
         seats
     }
 
@@ -360,16 +386,28 @@ impl LanePairing {
             return BridgeReply::ephemeral_text(GONE_REPLY);
         }
         let own_group = self.port.channel_members(guild_id, own_lane).await;
-        let capacity = self
-            .port
-            .lane_mode(guild_id, other_lane)
-            .await
+        let mode = self.port.lane_mode(guild_id, other_lane).await;
+        let capacity = mode
             .as_deref()
             .map(pairing_capacity)
             .unwrap_or(MAX_LANE_MEMBERS);
         if own_group.len() + other_group.len() > capacity {
             self.port.log_decision(user_id, "verworfen", "zu_voll");
             return BridgeReply::ephemeral_text(TOO_FULL_REPLY);
+        }
+        if mode.as_deref() == Some("ranked") {
+            let own_rank = match own_group.first().copied() {
+                Some(member) => self.port.member_major_rank_index(guild_id, member).await,
+                None => None,
+            };
+            let other_rank = match other_group.first().copied() {
+                Some(member) => self.port.member_major_rank_index(guild_id, member).await,
+                None => None,
+            };
+            if !rank_gap_allows(own_rank, other_rank) {
+                self.port.log_decision(user_id, "verworfen", "rank_abstand");
+                return BridgeReply::ephemeral_text(RANK_MISMATCH_REPLY);
+            }
         }
 
         // Wer Ja sagt, geht rüber. Seine Lane zieht mit, denn gefragt wurde ihr
@@ -415,9 +453,12 @@ pub fn pick_pair(seats: &[LaneSeat], now: DateTime<Utc>) -> Option<(LaneSeat, La
     ripe.sort_by_key(|seat| (seat.since, seat.channel_id));
     for (index, first) in ripe.iter().enumerate() {
         for second in ripe.iter().skip(index + 1) {
+            let ranked_compatible =
+                first.mode != "ranked" || rank_gap_allows(first.major_rank, second.major_rank);
             if first.mode == second.mode
                 && first.channel_id != second.channel_id
                 && first.size() + second.size() <= pairing_capacity(&first.mode)
+                && ranked_compatible
             {
                 return Some(((*first).clone(), (*second).clone()));
             }
@@ -794,8 +835,20 @@ mod tests {
             channel_id,
             mode: mode.to_string(),
             members: members.to_vec(),
+            major_rank: None,
             since,
         }
+    }
+
+    fn ranked_seat(
+        user_id: u64,
+        channel_id: u64,
+        major_rank: usize,
+        since: DateTime<Utc>,
+    ) -> LaneSeat {
+        let mut seat = seat(user_id, channel_id, "ranked", since);
+        seat.major_rank = Some(major_rank);
+        seat
     }
 
     fn now() -> DateTime<Utc> {
@@ -843,12 +896,35 @@ mod tests {
         );
 
         let zwei_solos = vec![
-            seat(1, 10, "ranked", now - Duration::minutes(9)),
-            seat(2, 11, "ranked", now - Duration::minutes(8)),
+            ranked_seat(1, 10, 8, now - Duration::minutes(9)),
+            ranked_seat(2, 11, 9, now - Duration::minutes(8)),
         ];
         assert!(
             pick_pair(&zwei_solos, now).is_some(),
             "zwei Ranked-Solos dürfen weiterhin zu einem Duo gepaart werden"
+        );
+    }
+
+    #[test]
+    fn ranked_pairing_erlaubt_hoechstens_einen_hauptrang_abstand() {
+        let now = now();
+        let phantom = ranked_seat(1, 10, 9, now - Duration::minutes(9));
+        let oracle = ranked_seat(2, 11, 8, now - Duration::minutes(8));
+        assert!(
+            pick_pair(&[phantom.clone(), oracle], now).is_some(),
+            "Phantom und Oracle liegen einen Hauptrang auseinander"
+        );
+
+        let emissary = ranked_seat(3, 12, 6, now - Duration::minutes(8));
+        assert!(
+            pick_pair(&[phantom.clone(), emissary], now).is_none(),
+            "Phantom und Emissary dürfen nicht gepaart werden"
+        );
+
+        let unbekannt = seat(4, 13, "ranked", now - Duration::minutes(8));
+        assert!(
+            pick_pair(&[phantom, unbekannt], now).is_none(),
+            "ohne bekannten Discord-Rang darf Ranked nicht automatisch gepaart werden"
         );
     }
 
@@ -881,6 +957,47 @@ mod tests {
         assert!(
             port.state.lock().expect("lock").dms.is_empty(),
             "ein bereits vollständiges Ranked-Duo darf keine Pairing-DM auslösen"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_fragt_phantom_und_emissary_nicht() {
+        let port = TestPort::new(TestState {
+            lanes: vec![lane(100, "ranked", &[10]), lane(200, "ranked", &[20])],
+            ranks: HashMap::from([(10, 9), (20, 6)]),
+            decision: AskDecision::Ask,
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+        let start = now();
+
+        pairing.tick_at(1, start).await;
+        pairing.tick_at(1, start + Duration::minutes(5)).await;
+
+        assert!(
+            port.state.lock().expect("lock").dms.is_empty(),
+            "Phantom und Emissary dürfen keine Ranked-Pairing-DM bekommen"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_fragt_phantom_und_oracle() {
+        let port = TestPort::new(TestState {
+            lanes: vec![lane(100, "ranked", &[10]), lane(200, "ranked", &[20])],
+            ranks: HashMap::from([(10, 9), (20, 8)]),
+            decision: AskDecision::Ask,
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+        let start = now();
+
+        pairing.tick_at(1, start).await;
+        pairing.tick_at(1, start + Duration::minutes(5)).await;
+
+        assert_eq!(
+            port.state.lock().expect("lock").dms.len(),
+            2,
+            "Phantom und Oracle dürfen als benachbarte Hauptränge gefragt werden"
         );
     }
 
@@ -978,6 +1095,7 @@ mod tests {
         dms: Vec<(u64, Value)>,
         moves: Vec<(u64, u64)>,
         voice: HashMap<u64, u64>,
+        ranks: HashMap<u64, usize>,
         never: Vec<u64>,
         softened: Vec<(u64, u64)>,
         decision: AskDecision,
@@ -1003,6 +1121,7 @@ mod tests {
                 dms: Vec::new(),
                 moves: Vec::new(),
                 voice: HashMap::new(),
+                ranks: HashMap::new(),
                 never: Vec::new(),
                 softened: Vec::new(),
                 decision: AskDecision::Ask,
@@ -1074,6 +1193,15 @@ mod tests {
                 .iter()
                 .find(|lane| lane.channel_id == channel_id)
                 .map(|lane| lane.mode.clone())
+        }
+
+        async fn member_major_rank_index(&self, _guild_id: u64, user_id: u64) -> Option<usize> {
+            self.state
+                .lock()
+                .expect("lock")
+                .ranks
+                .get(&user_id)
+                .copied()
         }
 
         async fn move_member(
@@ -1301,6 +1429,25 @@ mod tests {
             state.moves,
             vec![(20, 100), (21, 100)],
             "die ganze Lane des Zusagenden zieht mit"
+        );
+    }
+
+    #[tokio::test]
+    async fn veraltete_ranked_dm_prueft_den_rang_beim_klick_erneut() {
+        let port = TestPort::new(TestState {
+            lanes: vec![lane(100, "ranked", &[10]), lane(200, "ranked", &[20])],
+            voice: HashMap::from([(10, 100), (20, 200)]),
+            ranks: HashMap::from([(10, 9), (20, 6)]),
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+
+        let reply = pairing.handle_yes(10, 1, 100, 200, 20).await;
+
+        assert_eq!(reply.content.as_deref(), Some(RANK_MISMATCH_REPLY));
+        assert!(
+            port.state.lock().expect("lock").moves.is_empty(),
+            "eine alte Ranked-Einladung darf einen inzwischen zu großen Rangabstand nicht umgehen"
         );
     }
 
