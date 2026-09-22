@@ -19,6 +19,7 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
         });
     }
     let mut result = Retrieved::default();
+    add_query_semantics(value, &mut result);
     if let Some(build) = build_context(value) {
         push(
             &mut result,
@@ -80,6 +81,30 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
         }
     }
     Ok(result)
+}
+
+fn add_query_semantics(value: &Value, result: &mut Retrieved) {
+    let intent = value
+        .get("intent")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let answer_target = value
+        .pointer("/retrieval_meta/answer_target")
+        .and_then(Value::as_str);
+    let Some(answer_target) = answer_target else {
+        return;
+    };
+    push(
+        result,
+        Source::GameData {
+            title: "Erkannte Fragebedeutung".into(),
+        },
+        serde_json::json!({
+            "intent": intent,
+            "semantic_target": answer_target,
+        })
+        .to_string(),
+    );
 }
 
 fn add_ground_fields(value: &Value, keys: &[&str], result: &mut Retrieved) {
@@ -249,6 +274,24 @@ fn prune(value: &Value) -> Option<Value> {
                             | "DescKey"
                             | "Ability"
                             | "Hero"
+                            | "semantic_target"
+                            | "question_kind"
+                            | "hero_roster"
+                            | "hero_roster_schema"
+                            | "MaxHealth"
+                            | "MaxMoveSpeed"
+                            | "SprintSpeed"
+                            | "Stamina"
+                            | "LevelScaling"
+                            | "DPS"
+                            | "SustainedDPS"
+                            | "BulletDamage"
+                            | "TechPower"
+                            | "RoundsPerSecond"
+                            | "BulletsPerShot"
+                            | "ClipSize"
+                            | "FalloffStartRange"
+                            | "FalloffEndRange"
                             | "Health"
                             | "Damage"
                             | "AbilityCooldown"
@@ -262,8 +305,8 @@ fn prune(value: &Value) -> Option<Value> {
                 })
                 .filter_map(|(key, value)| {
                     let projected = if key == "BoundAbilities" {
-                        value.as_object().map(|slots| {
-                            Value::Array(
+                        if let Some(slots) = value.as_object() {
+                            Some(Value::Array(
                                 slots
                                     .iter()
                                     .filter(|(slot, _)| slot.parse::<u8>().is_ok())
@@ -275,8 +318,10 @@ fn prune(value: &Value) -> Option<Value> {
                                         })
                                     })
                                     .collect(),
-                            )
-                        })
+                            ))
+                        } else {
+                            prune(value)
+                        }
                     } else {
                         prune(value)
                     };
@@ -722,6 +767,35 @@ mod tests {
             "source_snapshot_not_live_confirmation"
         );
         assert_eq!(payload["facts"]["Name"], "Beispiel");
+    }
+
+    #[test]
+    fn hero_archetype_context_behaelt_semantik_und_roster_signale() {
+        let content = "````json\n{\"semantic_target\":\"hero\",\"question_kind\":\"hero_archetype\",\"hero_roster_schema\":[\"name\",\"type\",\"base_health\",\"move_speed\",\"sprint_speed\",\"stamina\",\"dps_growth\",\"health_growth\",\"spirit_growth\",\"abilities\"],\"hero_roster\":[[\"Beacon\",\"Brawler\",700,6.5,1.5,3,1.2,40,1.1,[\"Fast Start\"]]]}\n````";
+        let result = from_context(&json!({
+            "intent": "hero_archetype",
+            "retrieval_meta": {"answer_target": "hero"},
+            "ground_truth": {
+                "game_knowledge": {
+                    "available": true,
+                    "matches": [{"title": "Deadlock Heldenroster und Mechaniksignale", "content": content}]
+                }
+            }
+        }))
+        .expect("gültige Archetypenfixture");
+
+        assert_eq!(result.evidence.len(), 2);
+        assert!(result.evidence[0].text.contains("hero_archetype"));
+        assert!(result.evidence[0]
+            .text
+            .contains("\"semantic_target\":\"hero\""));
+        let roster: Value = serde_json::from_str(&result.evidence[1].text).expect("Rosterbeleg");
+        assert_eq!(roster["facts"]["semantic_target"], "hero");
+        assert_eq!(roster["facts"]["question_kind"], "hero_archetype");
+        assert_eq!(roster["facts"]["hero_roster_schema"][0], "name");
+        assert_eq!(roster["facts"]["hero_roster"][0][0], "Beacon");
+        assert_eq!(roster["facts"]["hero_roster"][0][6], 1.2);
+        assert_eq!(roster["facts"]["hero_roster"][0][9][0], "Fast Start");
     }
 
     #[test]
