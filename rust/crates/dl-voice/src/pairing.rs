@@ -37,6 +37,9 @@ pub const TICK_INTERVAL: StdDuration = StdDuration::from_secs(20);
 /// Größte Gruppe, die noch einen Vorschlag bekommt (darüber ist die Lane voll
 /// genug). Zusammen dürfen beide Seiten [`MAX_LANE_MEMBERS`] nicht sprengen.
 pub const MAX_GROUP_SIZE: usize = 4;
+/// Ranked erlaubt aktuell höchstens ein Duo. Street Brawl bleibt bei vier.
+pub const RANKED_PAIRING_CAP: usize = 2;
+pub const STREET_BRAWL_PAIRING_CAP: usize = 4;
 /// Nach „Später vielleicht" darf der Bot so bald wieder fragen.
 pub const LATER_RETRY: Duration = Duration::minutes(45);
 
@@ -102,6 +105,14 @@ impl LaneSeat {
     }
 }
 
+fn pairing_capacity(mode: &str) -> usize {
+    match mode {
+        "ranked" => RANKED_PAIRING_CAP,
+        "street_brawl" => STREET_BRAWL_PAIRING_CAP,
+        _ => MAX_LANE_MEMBERS,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskDecision {
     Ask,
@@ -138,6 +149,8 @@ pub trait PairingPort: Send + Sync {
     /// Sperren so weit kürzen, dass bald wieder gefragt werden darf.
     async fn soften_cooldown(&self, user_id: u64, other_user: u64) -> Result<(), String>;
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
+    /// Aktueller Router-Modus der Lane, falls sie noch existiert.
+    async fn lane_mode(&self, guild_id: u64, channel_id: u64) -> Option<String>;
     /// Aktuelle Mitglieder eines Kanals (ohne Bots).
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64>;
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
@@ -220,7 +233,18 @@ impl LanePairing {
         let mut seats = Vec::new();
         let mut seen = Vec::new();
         for lane in lanes {
+            let capacity = pairing_capacity(&lane.mode);
             if lane.members.is_empty() || lane.members.len() > MAX_GROUP_SIZE {
+                continue;
+            }
+            if lane.members.len() >= capacity {
+                tracing::debug!(
+                    channel_id = lane.channel_id,
+                    mode = %lane.mode,
+                    members = lane.members.len(),
+                    capacity,
+                    "Lane Pairing: Moduslimit erreicht"
+                );
                 continue;
             }
             seen.push(lane.channel_id);
@@ -336,7 +360,14 @@ impl LanePairing {
             return BridgeReply::ephemeral_text(GONE_REPLY);
         }
         let own_group = self.port.channel_members(guild_id, own_lane).await;
-        if own_group.len() + other_group.len() > MAX_LANE_MEMBERS {
+        let capacity = self
+            .port
+            .lane_mode(guild_id, other_lane)
+            .await
+            .as_deref()
+            .map(pairing_capacity)
+            .unwrap_or(MAX_LANE_MEMBERS);
+        if own_group.len() + other_group.len() > capacity {
             self.port.log_decision(user_id, "verworfen", "zu_voll");
             return BridgeReply::ephemeral_text(TOO_FULL_REPLY);
         }
@@ -379,13 +410,14 @@ pub fn pick_pair(seats: &[LaneSeat], now: DateTime<Utc>) -> Option<(LaneSeat, La
         .iter()
         .filter(|seat| now - seat.since >= MIN_ALONE)
         .filter(|seat| seat.size() <= MAX_GROUP_SIZE)
+        .filter(|seat| seat.size() < pairing_capacity(&seat.mode))
         .collect();
     ripe.sort_by_key(|seat| (seat.since, seat.channel_id));
     for (index, first) in ripe.iter().enumerate() {
         for second in ripe.iter().skip(index + 1) {
             if first.mode == second.mode
                 && first.channel_id != second.channel_id
-                && first.size() + second.size() <= MAX_LANE_MEMBERS
+                && first.size() + second.size() <= pairing_capacity(&first.mode)
             {
                 return Some(((*first).clone(), (*second).clone()));
             }
@@ -799,6 +831,60 @@ mod tests {
     }
 
     #[test]
+    fn ranked_pairing_respektiert_das_duo_limit() {
+        let now = now();
+        let volles_duo = vec![
+            group(&[1, 2], 10, "ranked", now - Duration::minutes(9)),
+            seat(3, 11, "ranked", now - Duration::minutes(8)),
+        ];
+        assert!(
+            pick_pair(&volles_duo, now).is_none(),
+            "ein volles Ranked-Duo darf keinen Pairing-Vorschlag bekommen"
+        );
+
+        let zwei_solos = vec![
+            seat(1, 10, "ranked", now - Duration::minutes(9)),
+            seat(2, 11, "ranked", now - Duration::minutes(8)),
+        ];
+        assert!(
+            pick_pair(&zwei_solos, now).is_some(),
+            "zwei Ranked-Solos dürfen weiterhin zu einem Duo gepaart werden"
+        );
+    }
+
+    #[test]
+    fn street_brawl_pairing_respektiert_das_viererlimit() {
+        let now = now();
+        let seats = vec![
+            group(&[1, 2, 3], 10, "street_brawl", now - Duration::minutes(9)),
+            group(&[4, 5], 11, "street_brawl", now - Duration::minutes(8)),
+        ];
+        assert!(
+            pick_pair(&seats, now).is_none(),
+            "Street Brawl darf durch Pairing nicht über vier Spieler wachsen"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_fragt_volles_ranked_duo_nicht() {
+        let port = TestPort::new(TestState {
+            lanes: vec![lane(100, "ranked", &[10, 11]), lane(200, "ranked", &[20])],
+            decision: AskDecision::Ask,
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+        let start = now();
+
+        pairing.tick_at(1, start).await;
+        pairing.tick_at(1, start + Duration::minutes(5)).await;
+
+        assert!(
+            port.state.lock().expect("lock").dms.is_empty(),
+            "ein bereits vollständiges Ranked-Duo darf keine Pairing-DM auslösen"
+        );
+    }
+
+    #[test]
     fn pick_pair_paart_niemanden_mit_sich_selbst() {
         let now = now();
         let seats = vec![seat(1, 10, "casual", now - Duration::minutes(9))];
@@ -978,6 +1064,16 @@ mod tests {
                 .voice
                 .get(&user_id)
                 .copied()
+        }
+
+        async fn lane_mode(&self, _guild_id: u64, channel_id: u64) -> Option<String> {
+            self.state
+                .lock()
+                .expect("lock")
+                .lanes
+                .iter()
+                .find(|lane| lane.channel_id == channel_id)
+                .map(|lane| lane.mode.clone())
         }
 
         async fn move_member(
@@ -1205,6 +1301,24 @@ mod tests {
             state.moves,
             vec![(20, 100), (21, 100)],
             "die ganze Lane des Zusagenden zieht mit"
+        );
+    }
+
+    #[tokio::test]
+    async fn veraltete_ranked_dm_kann_keinen_dritten_spieler_ins_duo_ziehen() {
+        let port = TestPort::new(TestState {
+            lanes: vec![lane(100, "ranked", &[10]), lane(200, "ranked", &[20, 21])],
+            voice: HashMap::from([(10, 100), (20, 200), (21, 200)]),
+            ..TestState::default()
+        });
+        let pairing = LanePairing::new(port.clone());
+
+        let reply = pairing.handle_yes(10, 1, 100, 200, 20).await;
+
+        assert_eq!(reply.content.as_deref(), Some(TOO_FULL_REPLY));
+        assert!(
+            port.state.lock().expect("lock").moves.is_empty(),
+            "eine alte Ranked-Einladung darf das Duo-Limit nicht umgehen"
         );
     }
 

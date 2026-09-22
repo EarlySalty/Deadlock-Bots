@@ -3144,6 +3144,10 @@ impl crate::pairing::PairingPort for PairingGlue {
         send_dm_body(&self.adapter, user_id, body).await.map(|_| ())
     }
 
+    async fn lane_mode(&self, _guild_id: u64, channel_id: u64) -> Option<String> {
+        self.engine.lane_mode(channel_id).await.map(str::to_string)
+    }
+
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
         crate::pairing::set_never_ask_db(&self.pool, user_id).await
     }
