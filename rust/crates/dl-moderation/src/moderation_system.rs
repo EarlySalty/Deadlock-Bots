@@ -262,19 +262,31 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             return;
         }
 
-        let content_input = if (self.config.scan_channel_ids.contains(&event.channel_id)
-            || behavior_signal.is_some())
-            && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
+        let content_input = if self.config.scan_channel_ids.contains(&event.channel_id)
+            || behavior_signal.is_some()
         {
-            Some(ModerationInput::new(
-                event.content.clone(),
-                event.image_attachment_urls.clone(),
-            ))
+            let input = moderation_input_for_event(event, behavior_signal.as_ref());
+            if input.content.trim().is_empty() && input.image_urls.is_empty() {
+                None
+            } else {
+                Some(input)
+            }
         } else {
             None
         };
         let content_evaluation = if let Some(input) = content_input.as_ref() {
-            Some(self.pipeline.evaluate_with_analysis(input).await)
+            if let Some(signal) = behavior_signal
+                .as_ref()
+                .filter(|signal| signal.trigger_type == BehaviorTriggerType::AccountTakeover)
+            {
+                Some(
+                    self.pipeline
+                        .evaluate_behavior_trigger(input, signal.trigger_label())
+                        .await,
+                )
+            } else {
+                Some(self.pipeline.evaluate_with_analysis(input).await)
+            }
         } else {
             None
         };
@@ -816,19 +828,10 @@ fn non_action_verdict(
 }
 
 fn decision_details(
-    source: &str,
+    _source: &str,
     content_evaluation: Option<&ContentModerationEvaluation>,
     behavior_signal: Option<&BehaviorSignal>,
 ) -> (String, f64, String) {
-    if source == "behavior" {
-        if let Some(signal) = behavior_signal {
-            return (
-                signal.trigger_label().to_string(),
-                1.0,
-                signal.reason_code.clone(),
-            );
-        }
-    }
     if let Some(evaluation) = content_evaluation {
         if let Some(verdict) = evaluation.verdict.as_ref() {
             return (
@@ -902,6 +905,28 @@ fn auto_delete_targets(
         targets.push((event.channel_id, event.message_id));
     }
     targets
+}
+
+fn moderation_input_for_event(
+    event: &dl_discord::MessageEvent,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> ModerationInput {
+    let mut image_urls = Vec::new();
+    if let Some(signal) = behavior_signal {
+        for message in &signal.messages {
+            for url in &message.image_urls {
+                if !image_urls.contains(url) {
+                    image_urls.push(url.clone());
+                }
+            }
+        }
+    }
+    for url in &event.image_attachment_urls {
+        if !image_urls.contains(url) {
+            image_urls.push(url.clone());
+        }
+    }
+    ModerationInput::new(event.content.clone(), image_urls)
 }
 
 fn evidence_image_urls(
@@ -1019,7 +1044,9 @@ pub fn spawn(
 mod tests {
     use super::*;
     use crate::action_policy::ActionPolicyConfig;
-    use crate::behavior_detector::BehaviorDetectorPort;
+    use crate::behavior_detector::{
+        BehaviorActionHint, BehaviorDetectorPort, BehaviorEvidence, BehaviorSeverity, RecentMessage,
+    };
     use crate::content_analyzer::test_support::LogCapture;
     use crate::content_analyzer::{ContentAnalyzer, ContentAnalyzerConfig};
     use crate::content_verifier::ContentVerifier;
@@ -1506,6 +1533,61 @@ mod tests {
     }
 
     #[test]
+    fn behavior_moderation_input_collects_images_from_the_trigger_wave() {
+        let event = image_event(200, 11, 1001, 1_000, Some(900));
+        let signal = BehaviorSignal {
+            trigger_type: BehaviorTriggerType::AccountTakeover,
+            severity: BehaviorSeverity::Critical,
+            action_hint: BehaviorActionHint::Timeout,
+            reason_code: "behavior:account_takeover".to_string(),
+            account_is_new: false,
+            evidence: BehaviorEvidence {
+                window_seconds: 30,
+                channel_ids: vec![10, 11],
+                message_ids: vec![1000, 1001],
+                message_count: 2,
+                attachment_count: 2,
+                image_count: 2,
+                keyword_hit: false,
+                account_age_hours: 100,
+                join_age_hours: Some(50),
+                invite_code: None,
+                image_urls: vec!["https://img/1001.png".to_string()],
+            },
+            messages: vec![
+                RecentMessage {
+                    channel_id: 10,
+                    message_id: 1000,
+                    created_at: 999,
+                    content: String::new(),
+                    attachment_count: 1,
+                    image_count: 1,
+                    image_urls: vec!["https://img/1000.png".to_string()],
+                },
+                RecentMessage {
+                    channel_id: 11,
+                    message_id: 1001,
+                    created_at: 1_000,
+                    content: String::new(),
+                    attachment_count: 1,
+                    image_count: 1,
+                    image_urls: vec!["https://img/1001.png".to_string()],
+                },
+            ],
+        };
+
+        let input = moderation_input_for_event(&event, Some(&signal));
+
+        assert_eq!(
+            input.image_urls,
+            vec![
+                "https://img/1000.png".to_string(),
+                "https://img/1001.png".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn default_config_uses_single_moderation_channel() {
         let config = ModerationSystemConfig::default();
 
@@ -1824,8 +1906,8 @@ mod tests {
     async fn takeover_heuristic_with_benign_image_is_ignored_by_ai() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_image_moderator(
-            &[r#"{"category":"other","confidence":0.9,"reason":"Normaler Social-Media-Post"}"#],
-            &[r#"{"confirmed":false,"category":"other","confidence":0.94,"reason":"Kein schädlicher Inhalt"}"#],
+            &[r#"{"category":"game_related_ok","confidence":0.99,"reason":"Normaler Gaming-Screenshot"}"#],
+            &[r#"{"confirmed":false,"category":"other","confidence":0.99,"reason":"Kein schädlicher Inhalt"}"#],
             Some(detector),
             vec![999],
             true,
@@ -1848,7 +1930,7 @@ mod tests {
         assert_eq!(draft.action, "ignored");
         assert_eq!(draft.category, "other");
         assert_eq!(draft.reason, "Kein schädlicher Inhalt");
-        assert_eq!(draft.confidence, 0.94);
+        assert_eq!(draft.confidence, 0.99);
         assert_eq!(draft.source, "content+behavior");
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);

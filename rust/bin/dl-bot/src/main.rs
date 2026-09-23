@@ -935,6 +935,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         openai_client_with_model_from_env("MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
     let moderation_verify_text_client =
         chat_text_generator(dl_ai::LlmUseCase::ModerationVerify, false);
+    tracing::info!(
+        image_analyze_model = moderation_image_analyze_client
+            .as_ref()
+            .map(|(_, model)| model.as_str())
+            .unwrap_or("nicht_verfügbar"),
+        image_verify_model = moderation_verify_vision_client
+            .as_ref()
+            .map(|(_, model)| model.as_str())
+            .unwrap_or("nicht_verfügbar"),
+        "Moderation Bildprüfung konfiguriert"
+    );
     let our_guild_id = env("OUR_GUILD_ID")
         .or_else(|| env("MAIN_GUILD_ID"))
         .and_then(|v| v.parse::<u64>().ok())

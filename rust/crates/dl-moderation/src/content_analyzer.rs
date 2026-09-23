@@ -341,6 +341,27 @@ impl ContentModerationPipeline {
             }),
         }
     }
+
+    pub(crate) async fn evaluate_behavior_trigger(
+        &self,
+        input: &ModerationInput,
+        behavior_trigger: &str,
+    ) -> ContentModerationEvaluation {
+        let modal_analysis = self.analyzer.analyze_modal(input).await;
+        let analysis = modal_analysis.analysis;
+        let verification = self
+            .verifier
+            .verify_behavior_trigger(input, &analysis, behavior_trigger)
+            .await;
+        ContentModerationEvaluation {
+            analysis: analysis.clone(),
+            verdict: Some(ModerationVerdict {
+                analysis,
+                verification,
+                trigger: input.trigger_preview(),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +390,7 @@ mod tests {
     struct RecordingVision {
         responses: Mutex<Vec<String>>,
         models: Mutex<Vec<Option<String>>>,
+        image_counts: Mutex<Vec<usize>>,
     }
 
     #[async_trait::async_trait]
@@ -377,6 +399,10 @@ mod tests {
             &self,
             request: dl_ai::GenerateMultimodalRequest,
         ) -> Option<String> {
+            self.image_counts
+                .lock()
+                .await
+                .push(request.image_urls.len());
             self.models.lock().await.push(request.model);
             self.responses.lock().await.pop()
         }
@@ -616,6 +642,67 @@ mod tests {
         assert_eq!(verdict.verification.category.as_label(), "scam");
         assert_eq!(verifier_text.models.lock().await.len(), 1);
         assert_eq!(verifier_vision.models.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn behavior_trigger_always_runs_image_verifier_even_after_harmless_analysis() {
+        let text = Arc::new(RecordingText::default());
+        let vision = Arc::new(RecordingVision::default());
+        vision.responses.lock().await.push(
+            r#"{"category":"game_related_ok","confidence":0.99,"reason":"Normaler Ranked-Screenshot"}"#
+                .to_string(),
+        );
+        let verifier_text = Arc::new(RecordingText::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":false,"category":"other","confidence":0.99,"reason":"Kein Scam sichtbar"}"#
+                .to_string(),
+        );
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                text,
+                Some(vision.clone()),
+                ContentAnalyzerConfig {
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                    image_model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            ContentVerifier::new(
+                verifier_text.clone(),
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            0.5,
+        );
+
+        let result = pipeline
+            .evaluate_behavior_trigger(
+                &ModerationInput::new(
+                    "",
+                    vec![
+                        "https://example.test/ranked-1.png".to_string(),
+                        "https://example.test/ranked-2.png".to_string(),
+                    ],
+                ),
+                "account_takeover",
+            )
+            .await;
+
+        let verdict = result
+            .verdict
+            .expect("behavior trigger needs verifier verdict");
+        assert_eq!(verdict.analysis.category.as_label(), "game_related_ok");
+        assert!(!verdict.verification.confirmed);
+        assert_eq!(verdict.verification.category.as_label(), "other");
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[2]);
+        assert_eq!(
+            verifier_vision.models.lock().await.as_slice(),
+            &[Some("gpt-5.4-nano".to_string())]
+        );
+        assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[2]);
+        assert!(verifier_text.models.lock().await.is_empty());
     }
 
     #[tokio::test]
