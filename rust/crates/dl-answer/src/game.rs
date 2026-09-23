@@ -2,6 +2,8 @@
 use crate::{AnswerError, Evidence, Retrieved, Source};
 use serde_json::Value;
 
+const GAME_CONTEXT_MAX_UNITS: usize = 20_000;
+
 /// Liest nur explizite Ground-Truth und verifizierte Creator-Aussagen.
 pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
     if value.get("intent").and_then(Value::as_str).is_none() {
@@ -19,6 +21,7 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
         });
     }
     let mut result = Retrieved::default();
+    add_query_semantics(value, &mut result);
     if let Some(build) = build_context(value) {
         push(
             &mut result,
@@ -29,6 +32,7 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
         );
     }
     add_ground_fields(value, &["item"], &mut result);
+    add_ground_fields(value, &["hero_power_curve"], &mut result);
     add_game_wiki(value, &mut result);
     add_ground_fields(value, &["stats"], &mut result);
     let history_requested = value["intent"] == "patch_changes"
@@ -82,6 +86,30 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
     Ok(result)
 }
 
+fn add_query_semantics(value: &Value, result: &mut Retrieved) {
+    let intent = value
+        .get("intent")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let answer_target = value
+        .pointer("/retrieval_meta/answer_target")
+        .and_then(Value::as_str);
+    let Some(answer_target) = answer_target else {
+        return;
+    };
+    push(
+        result,
+        Source::GameData {
+            title: "Erkannte Fragebedeutung".into(),
+        },
+        serde_json::json!({
+            "intent": intent,
+            "semantic_target": answer_target,
+        })
+        .to_string(),
+    );
+}
+
 fn add_ground_fields(value: &Value, keys: &[&str], result: &mut Retrieved) {
     if let Some(ground) = value.get("ground_truth").and_then(Value::as_object) {
         for key in keys {
@@ -116,7 +144,8 @@ fn push_dated(result: &mut Retrieved, source: Source, text: String, observed_at:
         .iter()
         .map(|item| item.text.encode_utf16().count())
         .sum();
-    if text.encode_utf16().count() + current > 12_000 || result.evidence.len() >= 12 {
+    if text.encode_utf16().count() + current > GAME_CONTEXT_MAX_UNITS || result.evidence.len() >= 12
+    {
         result.truncated = true;
         return;
     }
@@ -249,6 +278,42 @@ fn prune(value: &Value) -> Option<Value> {
                             | "DescKey"
                             | "Ability"
                             | "Hero"
+                            | "semantic_target"
+                            | "question_kind"
+                            | "hero_roster"
+                            | "hero_roster_schema"
+                            | "method"
+                            | "window_days"
+                            | "window_start"
+                            | "window_end"
+                            | "global_matches"
+                            | "duration_cutoffs_s"
+                            | "short_game_max_s"
+                            | "long_game_min_s"
+                            | "minimum_bucket_matches"
+                            | "signal_threshold_pp"
+                            | "hero_curve_schema"
+                            | "hero_curves"
+                            | "interpretation"
+                            | "early_skewed"
+                            | "late_skewed"
+                            | "flat"
+                            | "insufficient_sample"
+                            | "caution"
+                            | "MaxHealth"
+                            | "MaxMoveSpeed"
+                            | "SprintSpeed"
+                            | "Stamina"
+                            | "LevelScaling"
+                            | "DPS"
+                            | "SustainedDPS"
+                            | "BulletDamage"
+                            | "TechPower"
+                            | "RoundsPerSecond"
+                            | "BulletsPerShot"
+                            | "ClipSize"
+                            | "FalloffStartRange"
+                            | "FalloffEndRange"
                             | "Health"
                             | "Damage"
                             | "AbilityCooldown"
@@ -262,8 +327,8 @@ fn prune(value: &Value) -> Option<Value> {
                 })
                 .filter_map(|(key, value)| {
                     let projected = if key == "BoundAbilities" {
-                        value.as_object().map(|slots| {
-                            Value::Array(
+                        if let Some(slots) = value.as_object() {
+                            Some(Value::Array(
                                 slots
                                     .iter()
                                     .filter(|(slot, _)| slot.parse::<u8>().is_ok())
@@ -275,8 +340,10 @@ fn prune(value: &Value) -> Option<Value> {
                                         })
                                     })
                                     .collect(),
-                            )
-                        })
+                            ))
+                        } else {
+                            prune(value)
+                        }
                     } else {
                         prune(value)
                     };
@@ -722,6 +789,87 @@ mod tests {
             "source_snapshot_not_live_confirmation"
         );
         assert_eq!(payload["facts"]["Name"], "Beispiel");
+    }
+
+    #[test]
+    fn hero_power_curve_bleibt_vor_roster_als_beleg_erhalten() {
+        let curve = json!({
+            "available": true,
+            "method": "recent_duration_tertiles",
+            "window_days": 30,
+            "window_start": "2026-08-23T00:00:00+00:00",
+            "window_end": "2026-09-22T00:00:00+00:00",
+            "global_matches": 2000,
+            "duration_cutoffs_s": {
+                "short_game_max_s": 1500,
+                "long_game_min_s": 2100
+            },
+            "minimum_bucket_matches": 50,
+            "signal_threshold_pp": 3.0,
+            "hero_curve_schema": [
+                "name","hero_id","total_matches","short_matches","short_win_rate_percent",
+                "mid_matches","mid_win_rate_percent","long_matches","long_win_rate_percent",
+                "short_minus_long_pp","curve_label"
+            ],
+            "hero_curves": [
+                ["Beacon", 1, 180, 60, 55.0, 60, 50.0, 60, 47.0, 8.0, "early_skewed"]
+            ],
+            "interpretation": {
+                "early_skewed": "short stronger",
+                "late_skewed": "long stronger",
+                "flat": "close",
+                "insufficient_sample": "thin",
+                "caution": "observed signal"
+            }
+        });
+        let roster = "````json\n{\"semantic_target\":\"hero\",\"question_kind\":\"hero_archetype\",\"hero_roster_schema\":[\"name\"],\"hero_roster\":[[\"Beacon\"]]}\n````";
+        let result = from_context(&json!({
+            "intent": "hero_archetype",
+            "retrieval_meta": {"answer_target": "hero"},
+            "ground_truth": {
+                "hero_power_curve": curve,
+                "game_knowledge": {
+                    "available": true,
+                    "matches": [{"title": "Deadlock Heldenroster und Mechaniksignale", "content": roster}]
+                }
+            }
+        }))
+        .expect("gültige Archetypenfixture");
+
+        assert_eq!(result.evidence.len(), 3);
+        assert!(result.evidence[1].text.contains("early_skewed"));
+        assert!(result.evidence[1].text.contains("short_minus_long_pp"));
+        assert!(result.evidence[2].text.contains("Beacon"));
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn hero_archetype_context_behaelt_semantik_und_roster_signale() {
+        let content = "````json\n{\"semantic_target\":\"hero\",\"question_kind\":\"hero_archetype\",\"hero_roster_schema\":[\"name\",\"type\",\"base_health\",\"move_speed\",\"sprint_speed\",\"stamina\",\"dps_growth\",\"health_growth\",\"spirit_growth\",\"abilities\"],\"hero_roster\":[[\"Beacon\",\"Brawler\",700,6.5,1.5,3,1.2,40,1.1,[\"Fast Start\"]]]}\n````";
+        let result = from_context(&json!({
+            "intent": "hero_archetype",
+            "retrieval_meta": {"answer_target": "hero"},
+            "ground_truth": {
+                "game_knowledge": {
+                    "available": true,
+                    "matches": [{"title": "Deadlock Heldenroster und Mechaniksignale", "content": content}]
+                }
+            }
+        }))
+        .expect("gültige Archetypenfixture");
+
+        assert_eq!(result.evidence.len(), 2);
+        assert!(result.evidence[0].text.contains("hero_archetype"));
+        assert!(result.evidence[0]
+            .text
+            .contains("\"semantic_target\":\"hero\""));
+        let roster: Value = serde_json::from_str(&result.evidence[1].text).expect("Rosterbeleg");
+        assert_eq!(roster["facts"]["semantic_target"], "hero");
+        assert_eq!(roster["facts"]["question_kind"], "hero_archetype");
+        assert_eq!(roster["facts"]["hero_roster_schema"][0], "name");
+        assert_eq!(roster["facts"]["hero_roster"][0][0], "Beacon");
+        assert_eq!(roster["facts"]["hero_roster"][0][6], 1.2);
+        assert_eq!(roster["facts"]["hero_roster"][0][9][0], "Fast Start");
     }
 
     #[test]
