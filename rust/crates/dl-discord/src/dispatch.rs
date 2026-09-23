@@ -29,6 +29,18 @@ const EPHEMERAL_FLAG: u64 = 64;
 const DEFER_THRESHOLD: Duration = Duration::from_secs(2);
 const DEFER_HTTP_TIMEOUT: Duration = Duration::from_secs(1);
 
+fn aimod_needs_immediate_defer(custom_id: &str) -> bool {
+    [
+        "aimod:accept:",
+        "aimod:ban:",
+        "aimod:denysubmit:",
+        "aimod:untimeout:",
+        "aimod:unban:",
+    ]
+    .iter()
+    .any(|prefix| custom_id.starts_with(prefix))
+}
+
 async fn await_handler_with_bounded_defer<Handler, Defer, Reply, Error>(
     handler: Handler,
     defer: Defer,
@@ -123,6 +135,7 @@ async fn dispatch_command(
         &cmd.token,
         cmd.channel_id.get(),
         false, // Slash: kein UPDATE_MESSAGE
+        false,
     )
     .await;
 }
@@ -148,6 +161,7 @@ async fn dispatch_component(
         }
         _ => Vec::new(),
     };
+    let defer_immediately = aimod_needs_immediate_defer(&custom_id);
     let bridge = BridgeInteraction {
         custom_id,
         values,
@@ -205,6 +219,7 @@ async fn dispatch_component(
         &component.token,
         component.channel_id.get(),
         true, // Komponente: update_message erlaubt (in-place editieren)
+        defer_immediately,
     )
     .await;
 }
@@ -219,6 +234,7 @@ async fn dispatch_modal(
         tracing::debug!(%custom_id, "Kein Handler für Modal");
         return;
     };
+    let defer_immediately = aimod_needs_immediate_defer(&custom_id);
     // Eingabefelder: custom_id → Wert
     let mut options = std::collections::HashMap::new();
     for row in &modal.data.components {
@@ -288,6 +304,7 @@ async fn dispatch_modal(
         &modal.token,
         modal.channel_id.get(),
         false, // Modal-Submit: kein UPDATE_MESSAGE
+        defer_immediately,
     )
     .await;
 }
@@ -443,42 +460,69 @@ async fn respond(
     token: &str,
     channel_id: u64,
     allow_update: bool,
+    defer_immediately: bool,
 ) {
     let http = adapter.http.clone();
     tokio::pin!(handler_future);
 
-    let reply = match tokio::time::timeout(DEFER_THRESHOLD, &mut handler_future).await {
-        Ok(reply) => {
-            send_initial(
-                adapter,
-                &http,
-                reply,
-                interaction_id,
-                token,
-                channel_id,
-                allow_update,
-            )
-            .await;
-            return;
+    let reply = if defer_immediately {
+        // Moderationsaktionen koennen Discord-HTTP und DB-Schreibvorgaenge ausloesen.
+        // Deshalb zuerst bestaetigen und erst danach den Handler starten. So konkurriert
+        // der Interaction-ACK nicht mit der eigentlichen Moderationsaktion um Zeit.
+        let defer = json!({ "type": CB_DEFER, "data": { "flags": EPHEMERAL_FLAG } });
+        let defer_result = tokio::time::timeout(
+            DEFER_HTTP_TIMEOUT,
+            http.create_interaction_response(interaction_id.into(), token, &defer, Vec::new()),
+        )
+        .await;
+        match defer_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!(%err, "Sofort-Defer fehlgeschlagen"),
+            Err(_) => tracing::warn!(
+                timeout_ms = DEFER_HTTP_TIMEOUT.as_millis(),
+                "Sofort-Defer-HTTP hat Zeitlimit ueberschritten"
+            ),
         }
-        Err(_) => {
-            // Defer (ephemeral) — Token bleibt 15 Minuten gültig
-            let defer = json!({ "type": CB_DEFER, "data": { "flags": EPHEMERAL_FLAG } });
-            let (reply, defer_result) = await_handler_with_bounded_defer(
-                &mut handler_future,
-                http.create_interaction_response(interaction_id.into(), token, &defer, Vec::new()),
-                DEFER_HTTP_TIMEOUT,
-            )
-            .await;
-            match defer_result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!(%err, "Defer fehlgeschlagen"),
-                Err(_) => tracing::warn!(
-                    timeout_ms = DEFER_HTTP_TIMEOUT.as_millis(),
-                    "Defer-HTTP hat Zeitlimit ueberschritten"
-                ),
+        handler_future.await
+    } else {
+        match tokio::time::timeout(DEFER_THRESHOLD, &mut handler_future).await {
+            Ok(reply) => {
+                send_initial(
+                    adapter,
+                    &http,
+                    reply,
+                    interaction_id,
+                    token,
+                    channel_id,
+                    allow_update,
+                )
+                .await;
+                return;
             }
-            reply
+            Err(_) => {
+                // Defer (ephemeral) — Token bleibt 15 Minuten gültig
+                let defer = json!({ "type": CB_DEFER, "data": { "flags": EPHEMERAL_FLAG } });
+                let (reply, defer_result) = await_handler_with_bounded_defer(
+                    &mut handler_future,
+                    http.create_interaction_response(
+                        interaction_id.into(),
+                        token,
+                        &defer,
+                        Vec::new(),
+                    ),
+                    DEFER_HTTP_TIMEOUT,
+                )
+                .await;
+                match defer_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => tracing::warn!(%err, "Defer fehlgeschlagen"),
+                    Err(_) => tracing::warn!(
+                        timeout_ms = DEFER_HTTP_TIMEOUT.as_millis(),
+                        "Defer-HTTP hat Zeitlimit ueberschritten"
+                    ),
+                }
+                reply
+            }
         }
     };
 
@@ -767,6 +811,21 @@ mod tests {
             "Global Name"
         );
         assert_eq!(display_name_from_parts(None, None, "username"), "username");
+    }
+
+    #[test]
+    fn langsame_aimod_aktionen_deferen_vor_dem_handler() {
+        for custom_id in [
+            "aimod:accept:case-1",
+            "aimod:ban:case-1",
+            "aimod:denysubmit:case-1",
+            "aimod:untimeout:case-1",
+            "aimod:unban:case-1",
+        ] {
+            assert!(aimod_needs_immediate_defer(custom_id), "{custom_id}");
+        }
+        assert!(!aimod_needs_immediate_defer("aimod:deny:case-1"));
+        assert!(!aimod_needs_immediate_defer("other:accept:case-1"));
     }
 
     #[test]
