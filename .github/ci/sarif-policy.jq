@@ -1,9 +1,10 @@
 # Missing/invalid structure, unsuccessful invocations and warning/error findings fail.
 def no_scanner_errors:
-  all(.invocations[]?;
-    .executionSuccessful != false and
-    all(.toolExecutionNotifications[]?; .level != "error") and
-    all(.toolConfigurationNotifications[]?; .level != "error"));
+  (.invocations | type == "array" and length > 0) and
+  all(.invocations[];
+    .executionSuccessful == true and
+    all(.toolExecutionNotifications[]?; .level != "error" and .level != "warning") and
+    all(.toolConfigurationNotifications[]?; .level != "error" and .level != "warning"));
 def security_severity($run; $result):
   [
     $result.properties."security-severity",

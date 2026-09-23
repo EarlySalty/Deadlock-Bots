@@ -43,6 +43,10 @@ jobs:
           rustc +1.88.0 --edition=2021 -D warnings .github/ci/required_gate.rs -o .ci/required-gate
           bash .github/ci/gate-counterchecks.sh
           bash .github/ci/sarif-counterchecks.sh
+          bash .github/ci/test-runner-counterchecks.sh
+          bash .github/ci/database-counterchecks.sh
+          rustc +1.88.0 --edition=2021 -D warnings --test .github/ci/test_inventory.rs -o .ci/test-inventory-tests
+          .ci/test-inventory-tests
           if [ -n "$(git ls-files -- .ci rust/target)" ]; then
             echo '::error::Generated scanner probes/build outputs must not be tracked'
             exit 1

@@ -50,6 +50,9 @@ CodeQL besitzt zusätzlich einen eigenen `always()`-Abschluss für Detektion und
 Matrix. Fehlende SARIF-Dateien, ungültiges JSON, fehlende Ergebnisarrays,
 Scannerfehler und Warning/Error-Findings blockieren. HIGH/CRITICAL-
 Security-Severity wird auch aus den SARIF-Regelmetadaten ausgewertet.
+Mindestens eine ausdrücklich erfolgreiche Scanner-Ausführung muss enthalten
+sein; fehlende Invocations, fehlende Erfolgsflags und Scanner-Warnungen sind
+keine erfolgreiche Abnahme.
 Die einzige tolerierte Operation ist das separate Archivieren fertiger
 CodeQL-Berichte; Analyse und Befundauswertung sind niemals `continue-on-error`.
 
@@ -83,7 +86,7 @@ KV-Roundtrip-Tests ohne DSN wurde entfernt. Der tatsächliche FFmpeg-Transcoder-
 Test läuft mit; FFmpeg wird im CI-Runner bereitgestellt. Schema- und Scrim-
 Feature-Verträge sowie die bestehenden Knowledge-Hybrid-Tests sind Pflicht.
 
-### Sieben ausdrücklich nicht als bestanden gewertete externe Abnahmen
+### Elf ausdrücklich nicht als bestanden gewertete externe Abnahmen
 
 Diese einzelnen Tests sind keine geheimnisfreie, hermetische PR-Abnahme und
 werden beim Include-Ignored-Lauf namentlich ausgeschlossen, nicht ganze Crates:
@@ -97,6 +100,26 @@ werden beim Include-Ignored-Lauf namentlich ausgeschlossen, nicht ganze Crates:
 | tournament_snapshot_loads_and_verifies_real_data | reale alte Turnier-Datenbank |
 | website_source_snapshot_loads_and_round_trips_real_data | reale alte Website-Datenbank |
 | final_reconciliation_dry_run_real_copies_is_read_only | reale Quellen und freigegebener p4-final-Snapshot |
+| known_source_snapshots_preserve_original_hashes_and_mtimes | reale alte Deadlock-, Website- und Turnier-Datenbanken; `etl_engine.rs` |
+| barrier_full_real_run_reconciles_idempotently_and_preserves_schema | reale Quellen für vollständige ETL-Abnahme; `etl_barrier.rs` |
+| barrier_converter_matrix_covers_all_real_mapped_pairs | Schema-Matrix aus realen Quellsnapshots; `etl_barrier.rs` |
+| real_text_timestamptz_unix_seconds_text_fallback_is_limited_to_known_columns | Werteprüfung realer Quellsnapshots; `etl_barrier.rs` |
+
+Die vier zusätzlichen ETL-Fälle waren im ersten PR-Stand nicht abgegrenzt.
+Die Liste liegt jetzt in `.github/ci/external-rust-tests.txt`. Vor dem
+Workspace-Test prüft `test_inventory.rs` die tatsächliche Cargo-Testliste:
+Jede Ausnahme muss genau einen bestehenden Test treffen, auch bei libtests
+Substring-Semantik für `--skip`. Fehlende, umbenannte oder kollidierende Namen
+blockieren. Der Include-Ignored-Lauf verwendet einen Testthread, da ältere
+ETL-Verträge dieselbe Wegwerf-Datenbank verwenden und Tabellen leeren.
+
+`run-cargo-tests.sh` erhält Fehler- und Abbruchcodes des Testprozesses.
+Ein erfolgreicher Cargo-Aufruf ohne tatsächlich bestandene Tests wird abgelehnt.
+Acht negative Gegenproben decken unter anderem leere Filter, nur ignorierte
+Tests, fehlende Ausführung und Abbruch ab. Sechs DB-Gegenproben prüfen fehlendes
+Docker und fehlende beziehungsweise unzulässige Test-DSNs, ohne einen Docker-
+Daemon oder eine Datenbank anzusprechen. Vier Inventar-Unit-Tests sichern die
+enge Ausnahmeauswahl ab.
 
 Keine dieser Voraussetzungen wird durch produktive Secrets, veränderliche
 Checkouts fremder privater Repositories oder einen erfolgreichen Leer-Test
@@ -144,7 +167,7 @@ Semgrep und Trivy müssen jeweils saubere Eingaben akzeptieren, echte Testbefund
 mit Exit 1 melden und bei ungültiger Scanner-Konfiguration fehlschlagen. Trivy
 prüft zusätzlich eine HIGH-Dockerfile-Gegenprobe. Hinzu kommen vier Rust-Gate-
 Tests, 63 negative Gate-Prozessprüfungen, zwei CodeQL-Detektor-Tests sowie eine
-positive und 15 negative SARIF-Proben. Getrackte `.ci`-/Rust-Build-Artefakte werden
+positive und 20 negative SARIF-Proben. Getrackte `.ci`-/Rust-Build-Artefakte werden
 im Actions-Job abgelehnt.
 
 CodeQL erkennt ausschließlich vorhandene getrackte Dateien für Rust, Python,
