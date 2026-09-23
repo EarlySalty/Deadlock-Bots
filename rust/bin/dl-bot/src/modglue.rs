@@ -30,7 +30,7 @@ const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
-const BRAIN_USAGE: &str = "🧠 Nutze `/brain frage:<deine Frage>`. Im Testkanal darfst du auch Fragen außerhalb von Deadlock stellen.";
+const BRAIN_USAGE: &str = "🧠 Nutze `/brain frage:<deine Frage>`. Build-Fragen erzeugen einen markierten Review-Build für die In-Game-Prüfung.";
 const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig, eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
 const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅. Pack deine Frage in unter {max} Zeichen.";
@@ -49,6 +49,105 @@ const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
 const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
 const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
+const BRAIN_REVIEW_BUILD_WAIT_SECS: u64 = 30;
+const BRAIN_REVIEW_BUILD_TIMEOUT: Duration = Duration::from_secs(40);
+
+#[derive(Debug, Clone, Default)]
+pub struct BrainEmojiIndex {
+    entries: Vec<(String, String)>,
+}
+
+impl BrainEmojiIndex {
+    pub fn load(catalog_path: &std::path::Path, emoji_map_path: &std::path::Path) -> Self {
+        let Ok(catalog_raw) = std::fs::read_to_string(catalog_path) else {
+            return Self::default();
+        };
+        let Ok(map_raw) = std::fs::read_to_string(emoji_map_path) else {
+            return Self::default();
+        };
+        let Ok(catalog) = serde_json::from_str::<Value>(&catalog_raw) else {
+            return Self::default();
+        };
+        let Ok(emoji_map) = serde_json::from_str::<HashMap<String, String>>(&map_raw) else {
+            return Self::default();
+        };
+        let mut entries = Vec::new();
+        for section in ["heroes", "items", "abilities"] {
+            for entry in catalog
+                .get(section)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(name) = entry.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(emoji_name) = entry.get("emoji_name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(emoji_id) = emoji_map.get(emoji_name) else {
+                    continue;
+                };
+                entries.push((
+                    name.to_string(),
+                    format!("<:{emoji_name}:{emoji_id}>")
+                ));
+            }
+        }
+        entries.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+        Self { entries }
+    }
+
+    fn markup_for(&self, name: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, markup)| markup.as_str())
+    }
+
+    fn decorate_name(&self, name: &str) -> String {
+        self.markup_for(name)
+            .map(|markup| format!("{markup} {name}"))
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    fn annotate_inline(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (name, markup) in &self.entries {
+            if name.chars().count() < 6 && !name.contains(' ') {
+                continue;
+            }
+            let decorated = format!("{markup} {name}");
+            if result.contains(&decorated) {
+                continue;
+            }
+            result = result.replace(name, &decorated);
+        }
+        result
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BrainReviewBuildItem {
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BrainReviewBuildSituation {
+    label: String,
+    items: Vec<BrainReviewBuildItem>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BrainReviewBuildReceipt {
+    status: String,
+    task_id: i64,
+    hero_build_id: Option<i64>,
+    version: Option<i64>,
+    hero_name: String,
+    core: Vec<BrainReviewBuildItem>,
+    situations: Vec<BrainReviewBuildSituation>,
+}
 
 pub struct LfgFreetextGlue {
     pub adapter: Arc<DiscordAdapter>,
@@ -143,14 +242,107 @@ pub struct ModGlue {
 
 pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
+fn looks_like_build_request(question: &str) -> bool {
+    let lower = question.to_lowercase();
+    ["build", "baue", "bau mir", "kaufreihenfolge"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+async fn run_brain_review_build(
+    bin: &std::path::Path,
+    question: &str,
+) -> Result<BrainReviewBuildReceipt, dl_brain::BrainError> {
+    let future = tokio::process::Command::new(bin)
+        .kill_on_drop(true)
+        .arg("review-build")
+        .arg("--wait-seconds")
+        .arg(BRAIN_REVIEW_BUILD_WAIT_SECS.to_string())
+        .arg("--")
+        .arg(question)
+        .output();
+    let output = timeout(BRAIN_REVIEW_BUILD_TIMEOUT, future)
+        .await
+        .map_err(|_| dl_brain::BrainError::Backend("Review-Build Timeout".into()))?
+        .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))?;
+    if !output.status.success() {
+        return Err(dl_brain::BrainError::Backend(format!(
+            "Review-Build Prozess fehlgeschlagen: {:?}",
+            output.status.code()
+        )));
+    }
+    if output.stdout.len() > 512 * 1024 {
+        return Err(dl_brain::BrainError::Backend(
+            "Review-Build Ausgabe ist zu groß".into(),
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
+}
+
+fn format_review_build_receipt(
+    receipt: &BrainReviewBuildReceipt,
+    emoji_index: &BrainEmojiIndex,
+) -> String {
+    let published = receipt
+        .hero_build_id
+        .map(|id| format!("✅ Im Spiel veröffentlicht · Build-ID `{id}`"))
+        .unwrap_or_else(|| format!("⏳ Veröffentlichung läuft · Task `{}`", receipt.task_id));
+    let core = receipt
+        .core
+        .iter()
+        .take(12)
+        .map(|item| emoji_index.decorate_name(&item.name))
+        .collect::<Vec<_>>()
+        .join(" → ");
+    let situations = receipt
+        .situations
+        .iter()
+        .take(4)
+        .map(|block| {
+            let items = block
+                .items
+                .iter()
+                .take(5)
+                .map(|item| emoji_index.decorate_name(&item.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("**{}:** {}", block.label, items)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let version = receipt
+        .version
+        .map(|version| format!(" · v{version}"))
+        .unwrap_or_default();
+    format!(
+        "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
+        emoji_index.decorate_name(&receipt.hero_name), situations
+    )
+}
+
 pub struct SharedBrainAnswerer {
     pub engine: Arc<dl_answer::AnswerEngine>,
     pub open_test_mode: bool,
+    pub brain_bin: std::path::PathBuf,
+    pub emoji_index: Arc<BrainEmojiIndex>,
 }
 
 #[async_trait::async_trait]
 impl dl_brain::AiAnswerer for SharedBrainAnswerer {
     async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+        if self.open_test_mode && looks_like_build_request(question) {
+            let receipt = run_brain_review_build(&self.brain_bin, question).await?;
+            if matches!(receipt.status.as_str(), "FAILED" | "CANCELLED") {
+                return Err(dl_brain::BrainError::Backend(
+                    "Review-Build konnte nicht veröffentlicht werden".into(),
+                ));
+            }
+            return Ok(dl_brain::BrainOutcome::Answer(format_review_build_receipt(
+                &receipt,
+                self.emoji_index.as_ref(),
+            )));
+        }
         if self.open_test_mode {
             return self
                 .engine
@@ -179,6 +371,7 @@ pub struct BrainHandler {
     pub answerer: Arc<dyn dl_brain::AiAnswerer>,
     pub channel_allowlist: Option<HashSet<u64>>,
     pub all_guild_channels: bool,
+    pub emoji_index: Arc<BrainEmojiIndex>,
 }
 
 impl BrainHandler {
@@ -216,7 +409,7 @@ impl BrainHandler {
                 &BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string()),
             )],
             dl_brain::BrainOutcome::Answer(answer) => {
-                match brain_answer_embed_body(question, &answer) {
+                match brain_answer_embed_body(question, &answer, self.emoji_index.as_ref()) {
                     Some(body) => vec![body],
                     None => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
                 }
@@ -365,8 +558,13 @@ fn brain_public_message_body(message: &str) -> Map<String, Value> {
     body
 }
 
-fn brain_answer_embed_body(question: &str, raw_answer: &str) -> Option<Map<String, Value>> {
-    let description = truncate_brain_description(&clean_brain_markdown(raw_answer));
+fn brain_answer_embed_body(
+    question: &str,
+    raw_answer: &str,
+    emoji_index: &BrainEmojiIndex,
+) -> Option<Map<String, Value>> {
+    let cleaned = clean_brain_markdown(raw_answer);
+    let description = truncate_brain_description(&emoji_index.annotate_inline(&cleaned));
     if description.trim().is_empty() {
         return None;
     }
@@ -505,7 +703,7 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
     CommandSpec {
         definition: json!({
             "name": "brain",
-            "description": "Deadlock Brain im schreibgeschützten Testmodus fragen",
+            "description": "Deadlock Brain fragen und Review-Builds fürs Spiel erzeugen",
             "dm_permission": false,
             "options": [{
                 "type": 3,
@@ -3536,6 +3734,7 @@ mod tests {
             }),
             channel_allowlist,
             all_guild_channels: false,
+            emoji_index: Arc::new(BrainEmojiIndex::default()),
         }
     }
 
@@ -3778,9 +3977,55 @@ mod tests {
     }
 
     #[test]
+    fn brain_emoji_index_dekoriert_build_entitaeten_wie_patchnotes() {
+        let index = BrainEmojiIndex {
+            entries: vec![
+                ("Extended Magazine".into(), "<:dli_extended_magazine:5>".into()),
+                ("Warden".into(), "<:dlh_warden:7>".into()),
+            ],
+        };
+        assert_eq!(
+            index.decorate_name("Warden"),
+            "<:dlh_warden:7> Warden"
+        );
+        assert_eq!(
+            index.annotate_inline("Warden kauft Extended Magazine."),
+            "<:dlh_warden:7> Warden kauft <:dli_extended_magazine:5> Extended Magazine."
+        );
+    }
+
+    #[test]
+    fn review_build_receipt_bleibt_knapp_und_zeigt_build_id() {
+        let receipt = BrainReviewBuildReceipt {
+            status: "DONE".into(),
+            task_id: 42,
+            hero_build_id: Some(818625),
+            version: Some(1),
+            hero_name: "Warden".into(),
+            core: vec![BrainReviewBuildItem { name: "Extended Magazine".into() }],
+            situations: vec![BrainReviewBuildSituation {
+                label: "Optional".into(),
+                items: vec![BrainReviewBuildItem { name: "Healing Tempo".into() }],
+            }],
+        };
+        let index = BrainEmojiIndex {
+            entries: vec![("Warden".into(), "<:dlh_warden:7>".into())],
+        };
+        let text = format_review_build_receipt(&receipt, &index);
+        assert!(text.contains("Build-ID `818625`"));
+        assert!(text.contains("**Kern:** Extended Magazine"));
+        assert!(text.contains("**Optional:** Healing Tempo"));
+    }
+
+    #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
         let bounded = "🧠".repeat(1900);
-        let payload = brain_answer_embed_body(&"🧠".repeat(300), &bounded).expect("embed");
+        let payload = brain_answer_embed_body(
+            &"🧠".repeat(300),
+            &bounded,
+            &BrainEmojiIndex::default(),
+        )
+        .expect("embed");
         let embed = &payload["embeds"][0];
         assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
         assert!(
@@ -3795,6 +4040,7 @@ mod tests {
         let body = brain_answer_embed_body(
             "Wie spiel ich Seven?",
             "### Build\n\n✅ **Seven** startet stabil.",
+            &BrainEmojiIndex::default(),
         )
         .unwrap_or_else(|| panic!("answer should create embed body"));
 
@@ -3823,8 +4069,12 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
-        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c")
-            .unwrap_or_else(|| panic!("answer should create embed body"));
+        let body = brain_answer_embed_body(
+            "Items?",
+            "- a\n- b\n- c",
+            &BrainEmojiIndex::default(),
+        )
+        .unwrap_or_else(|| panic!("answer should create embed body"));
         let description = body
             .get("embeds")
             .and_then(Value::as_array)
