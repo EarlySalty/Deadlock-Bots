@@ -275,10 +275,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             None
         };
         let content_evaluation = if let Some(input) = content_input.as_ref() {
-            if let Some(signal) = behavior_signal
-                .as_ref()
-                .filter(|signal| signal.trigger_type == BehaviorTriggerType::AccountTakeover)
-            {
+            if let Some(signal) = behavior_signal.as_ref() {
                 Some(
                     self.pipeline
                         .evaluate_behavior_trigger(input, signal.trigger_label())
@@ -913,6 +910,15 @@ fn moderation_input_for_event(
 ) -> ModerationInput {
     let mut image_urls = Vec::new();
     if let Some(signal) = behavior_signal {
+        // Der Vision-Client begrenzt Bilder pro Request. Deshalb zuerst je
+        // Wellennachricht ein Bild aufnehmen, danach die restlichen Anhänge.
+        for message in &signal.messages {
+            if let Some(url) = message.image_urls.first() {
+                if !image_urls.contains(url) {
+                    image_urls.push(url.clone());
+                }
+            }
+        }
         for message in &signal.messages {
             for url in &message.image_urls {
                 if !image_urls.contains(url) {
@@ -1560,18 +1566,25 @@ mod tests {
                     message_id: 1000,
                     created_at: 999,
                     content: String::new(),
-                    attachment_count: 1,
-                    image_count: 1,
-                    image_urls: vec!["https://img/1000.png".to_string()],
+                    attachment_count: 3,
+                    image_count: 3,
+                    image_urls: vec![
+                        "https://img/1000-a.png".to_string(),
+                        "https://img/1000-b.png".to_string(),
+                        "https://img/1000-c.png".to_string(),
+                    ],
                 },
                 RecentMessage {
                     channel_id: 11,
                     message_id: 1001,
                     created_at: 1_000,
                     content: String::new(),
-                    attachment_count: 1,
-                    image_count: 1,
-                    image_urls: vec!["https://img/1001.png".to_string()],
+                    attachment_count: 2,
+                    image_count: 2,
+                    image_urls: vec![
+                        "https://img/1001.png".to_string(),
+                        "https://img/1001-b.png".to_string(),
+                    ],
                 },
             ],
         };
@@ -1581,8 +1594,20 @@ mod tests {
         assert_eq!(
             input.image_urls,
             vec![
-                "https://img/1000.png".to_string(),
+                "https://img/1000-a.png".to_string(),
                 "https://img/1001.png".to_string(),
+                "https://img/1000-b.png".to_string(),
+                "https://img/1000-c.png".to_string(),
+                "https://img/1001-b.png".to_string(),
+            ]
+        );
+        assert_eq!(
+            &input.image_urls[..4],
+            &[
+                "https://img/1000-a.png".to_string(),
+                "https://img/1001.png".to_string(),
+                "https://img/1000-b.png".to_string(),
+                "https://img/1000-c.png".to_string(),
             ]
         );
     }
