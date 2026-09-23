@@ -660,7 +660,10 @@ impl CacheSnapshot {
 
 #[async_trait::async_trait]
 impl VoiceSnapshot for CacheSnapshot {
-    async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+    async fn guild_voice_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         self.adapter.voice_cache_snapshot(guild_id)
     }
 
@@ -783,7 +786,10 @@ impl crate::scrim_record::ScrimRecordPort for CacheSnapshot {
 
 #[async_trait::async_trait]
 impl LanePort for CacheSnapshot {
-    async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+    async fn guild_voice_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         self.adapter.voice_cache_snapshot(guild_id)
     }
 
@@ -892,10 +898,21 @@ impl LanePort for CacheSnapshot {
     }
 
     async fn delete_channel(&self, channel_id: u64, reason: &str) -> Result<(), String> {
-        match self.adapter.http.delete_channel(ChannelId::new(channel_id), Some(reason)).await {
+        match self
+            .adapter
+            .http
+            .delete_channel(ChannelId::new(channel_id), Some(reason))
+            .await
+        {
             Ok(_) => Ok(()),
             // Nach erfolgreichem Discord-Delete kann ein DB-/LFG-Retry folgen.
-            Err(serenity::Error::Http(err)) if err.status_code().is_some_and(|status| status.as_u16() == 404) => Ok(()),
+            Err(serenity::Error::Http(err))
+                if err
+                    .status_code()
+                    .is_some_and(|status| status.as_u16() == 404) =>
+            {
+                Ok(())
+            }
             Err(err) => Err(err.to_string()),
         }
     }

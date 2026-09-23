@@ -12,14 +12,16 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use dl_ai::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, LlmProviderConfig, LlmUseCase};
+use dl_ai::{
+    ChatMessage, ChatParams, ChatProvider, ChatProviderError, LlmProviderConfig, LlmUseCase,
+};
 use dl_brain_community::{anonymize_for_privacy, Decision, LedgerEntry};
 use dl_verbinder::{
-    agreement_je_kategorie, chunk_message, ledger_entry_fuer_kritik, ledger_entry_fuer_match_fehler,
-    ledger_entry_fuer_match_urteil, parse_kritik_antwort, parse_match_antwort, render_prompt,
-    render_staff_post, render_tages_summary, render_wochenbericht, resolve_outcomes,
-    text_verstoesse, waechter_filter, Akte, Caps, Kandidat, Kategorie, WochenberichtInput,
-    SOURCE_KRITIK, SOURCE_MATCH,
+    agreement_je_kategorie, chunk_message, ledger_entry_fuer_kritik,
+    ledger_entry_fuer_match_fehler, ledger_entry_fuer_match_urteil, parse_kritik_antwort,
+    parse_match_antwort, render_prompt, render_staff_post, render_tages_summary,
+    render_wochenbericht, resolve_outcomes, text_verstoesse, waechter_filter, Akte, Caps, Kandidat,
+    Kategorie, WochenberichtInput, SOURCE_KRITIK, SOURCE_MATCH,
 };
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -36,7 +38,10 @@ const LLM_TIMEOUT: Duration = Duration::from_secs(45);
 const DISCORD_CONTENT_LIMIT: usize = 1900;
 
 #[derive(Debug, Parser)]
-#[command(name = "dl-verbinder", about = "Verbinder-Agent R1, fester Shadow-Modus")]
+#[command(
+    name = "dl-verbinder",
+    about = "Verbinder-Agent R1, fester Shadow-Modus"
+)]
 struct Args {
     #[command(subcommand)]
     befehl: Option<Befehl>,
@@ -108,8 +113,14 @@ fn caps_from_env() -> Caps {
             default.max_llm_per_run as i64,
         )
         .max(0) as usize,
-        max_llm_per_day: env_i64("DL_VERBINDER_MAX_LLM_CALLS_PER_DAY", default.max_llm_per_day),
-        pair_cooldown_days: env_i64("DL_VERBINDER_PAIR_COOLDOWN_DAYS", default.pair_cooldown_days),
+        max_llm_per_day: env_i64(
+            "DL_VERBINDER_MAX_LLM_CALLS_PER_DAY",
+            default.max_llm_per_day,
+        ),
+        pair_cooldown_days: env_i64(
+            "DL_VERBINDER_PAIR_COOLDOWN_DAYS",
+            default.pair_cooldown_days,
+        ),
     }
 }
 
@@ -189,7 +200,8 @@ async fn run(taeglich: bool) -> Result<()> {
     // Schritt 2: Wächter (Kosten, Zirkel, Opt-out) vor jedem Modellaufruf.
     let recent_pairs = lade_recent_pairs(&pool, caps.pair_cooldown_days).await?;
     let llm_calls_today = zaehle_llm_calls_heute(&pool).await?;
-    let (zu_bewerten, mut entries) = waechter_filter(kandidaten, &recent_pairs, llm_calls_today, &caps);
+    let (zu_bewerten, mut entries) =
+        waechter_filter(kandidaten, &recent_pairs, llm_calls_today, &caps);
     entries.extend(lade_fehler);
 
     // Schritt 3: LLM-Bewertung (Ersteller) plus Kritiker auf jedes yes.
@@ -269,9 +281,7 @@ async fn run(taeglich: bool) -> Result<()> {
                                 Ok(kritik) => {
                                     let same_model = match (&benutztes_modell, &kritik_modell) {
                                         (Some(a), Some(b)) => a == b,
-                                        _ => {
-                                            ersteller.model_override == kritiker.model_override
-                                        }
+                                        _ => ersteller.model_override == kritiker.model_override,
                                     };
                                     let decision = if kritik.ok {
                                         Decision::Yes
@@ -355,15 +365,25 @@ async fn run(taeglich: bool) -> Result<()> {
             objekt.insert("ledger_id".into(), json!(id));
         }
     }
-    if let Some(post) = render_staff_post(&akte.nonce, kandidaten_gesamt, &entries_mit_id, &kritik_refs)
-    {
+    if let Some(post) = render_staff_post(
+        &akte.nonce,
+        kandidaten_gesamt,
+        &entries_mit_id,
+        &kritik_refs,
+    ) {
         poste_staff(&post).await;
     }
 
     if taeglich {
         let zaehler = zaehle_klassen_heute(&pool).await?;
         let llm_heute = zaehle_llm_calls_heute(&pool).await?;
-        poste_staff(&render_tages_summary(&akte.nonce, &zaehler, llm_heute, &caps)).await;
+        poste_staff(&render_tages_summary(
+            &akte.nonce,
+            &zaehler,
+            llm_heute,
+            &caps,
+        ))
+        .await;
     }
 
     tracing::info!(
@@ -403,7 +423,11 @@ const OPT_OUT_A_UND_B: &str = "(
 )";
 
 /// T1: zwei Menschen gleichzeitig allein in verschiedenen Kanälen.
-async fn lade_t1(pool: &PgPool, guild_id: i64, router_vc: i64) -> Result<Vec<Kandidat>, sqlx::Error> {
+async fn lade_t1(
+    pool: &PgPool,
+    guild_id: i64,
+    router_vc: i64,
+) -> Result<Vec<Kandidat>, sqlx::Error> {
     let sql = format!(
         "WITH counts AS (
             SELECT channel_id, count(*) AS n
@@ -433,7 +457,11 @@ async fn lade_t1(pool: &PgPool, guild_id: i64, router_vc: i64) -> Result<Vec<Kan
          ORDER BY a.joined_at
          LIMIT 30"
     );
-    let rows = sqlx::query(&sql).bind(guild_id).bind(router_vc).fetch_all(pool).await?;
+    let rows = sqlx::query(&sql)
+        .bind(guild_id)
+        .bind(router_vc)
+        .fetch_all(pool)
+        .await?;
     Ok(rows
         .into_iter()
         .map(|row| Kandidat {
@@ -691,7 +719,10 @@ async fn persist_entries(
         }
         insert_mit_privacy_recheck(&mut transaction, &kritik).await?;
     }
-    transaction.commit().await.context("Transaktion committen")?;
+    transaction
+        .commit()
+        .await
+        .context("Transaktion committen")?;
     Ok(ids)
 }
 
@@ -824,7 +855,8 @@ async fn auswertung() -> Result<()> {
             Some("yes") => "Kritiker ok".to_string(),
             Some("no") => format!(
                 "Kritiker beanstandet: {}",
-                row.get::<Option<String>, _>("kritik_begruendung").unwrap_or_default()
+                row.get::<Option<String>, _>("kritik_begruendung")
+                    .unwrap_or_default()
             ),
             Some(andere) => format!("Kritiker {andere}"),
             None => "ohne Kritik".to_string(),
@@ -837,7 +869,8 @@ async fn auswertung() -> Result<()> {
         format!(
             "{}. [{}] über {}: „{}“ | {} | Realität: {}",
             index + 1,
-            row.get::<Option<String>, _>("kategorie").unwrap_or_default(),
+            row.get::<Option<String>, _>("kategorie")
+                .unwrap_or_default(),
             row.get::<Option<String>, _>("kanal").unwrap_or_default(),
             row.get::<Option<String>, _>("text").unwrap_or_default(),
             kritik,
@@ -882,7 +915,10 @@ async fn poste_staff(text: &str) {
             return;
         }
     };
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             tracing::error!(%error, "HTTP-Client, Bericht auf stdout");
@@ -899,7 +935,9 @@ async fn poste_staff(text: &str) {
     let mut fehlgeschlagen = 0_usize;
     for (nummer, teil) in teile.iter().enumerate() {
         let antwort = client
-            .post(format!("https://discord.com/api/v10/channels/{kanal}/messages"))
+            .post(format!(
+                "https://discord.com/api/v10/channels/{kanal}/messages"
+            ))
             .header("Authorization", format!("Bot {token}"))
             .header("User-Agent", "dl-verbinder/0.1")
             .json(&json!({

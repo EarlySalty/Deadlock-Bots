@@ -1057,10 +1057,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                             .to_string()
                     }),
                 );
-                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
-                    &emoji_catalog,
-                    &emoji_map,
-                ));
+                let emoji_index =
+                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
