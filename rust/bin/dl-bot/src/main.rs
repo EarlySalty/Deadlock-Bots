@@ -1034,10 +1034,28 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     max_question_len,
                     cooldown_secs,
                 });
+                let emoji_catalog = std::path::PathBuf::from(
+                    operating_value("BRAIN_EMOJI_CATALOG").unwrap_or_else(|| {
+                        "/home/naniadm/Documents/Deadlock--Patchnotes-Bot/data/deadlock_catalog.json"
+                            .to_string()
+                    }),
+                );
+                let emoji_map = std::path::PathBuf::from(
+                    operating_value("BRAIN_EMOJI_MAP").unwrap_or_else(|| {
+                        "/home/naniadm/Documents/Deadlock--Patchnotes-Bot/data/emoji_map.json"
+                            .to_string()
+                    }),
+                );
+                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
+                    &emoji_catalog,
+                    &emoji_map,
+                ));
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
                         open_test_mode,
+                        brain_bin: brain_bin_path.clone(),
+                        emoji_index: emoji_index.clone(),
                     });
                 Some(Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
@@ -1046,6 +1064,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     answerer,
                     channel_allowlist,
                     all_guild_channels: open_test_mode,
+                    emoji_index,
                 }))
             }
         }
