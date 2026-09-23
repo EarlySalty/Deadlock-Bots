@@ -12,7 +12,7 @@ async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dl-ai.workspace = true
-dl-brain-community = { path = "../dl-brain-community" }
+dl-brain-community = { version = "0.1.0", path = "../dl-brain-community" }
 dl-central-db.workspace = true
 reqwest.workspace = true
 serde.workspace = true

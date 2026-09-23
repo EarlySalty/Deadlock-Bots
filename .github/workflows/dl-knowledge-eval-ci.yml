@@ -1,40 +1,16 @@
 name: dl-knowledge eval CI
 
+# Hermetic eval/parser/unit tests run in the required workspace suite.
+# The old mutable private Deadlock-Docs/main checkout is not a PR prerequisite.
+# External corpus/live API acceptance is documented separately in SECURITY-CI.md.
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - main
-      - feat/dl-knowledge-eval
-  pull_request:
-    branches:
-      - main
+    branches: [feat/dl-knowledge-eval]
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Checkout Golden corpus
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: EarlySalty/Deadlock-Docs
-          ref: main
-          path: Deadlock-Docs
-      - name: Rust 1.88
-        run: |
-          rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
-          rustup default 1.88.0
-      - name: Format own eval file
-        run: rustfmt --edition 2021 --check bin/dl-knowledge/src/eval.rs
-      - name: Test dl-knowledge
-        run: cargo test --package dl-knowledge
-      - name: Clippy dl-knowledge
-        run: cargo clippy --package dl-knowledge --no-deps -- -D warnings
-      - name: BM25 baseline
-        run: cargo run --package dl-knowledge -- eval bm25 ../Deadlock-Docs/evals ../Deadlock-Docs/public /tmp/bm25.json /tmp/bm25.md
+    uses: ./.github/workflows/discord-config-ci.yml # zizmor: ignore[self-repository] -- Same-commit workflow; actionlint 1.7.12 does not parse dollar-slash syntax.

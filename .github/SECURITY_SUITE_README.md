@@ -1,5 +1,9 @@
 # 🔒 GitHub Security & Quality Analysis Suite
 
+> Historischer Entwurf, kein Nachweis aktiver Prüfungen. Die Behauptungen über
+> „50+ Tools“ und Python-Dashboard-Workflows stimmen nicht mit dem Rust-Bestand
+> vom 23. September 2026 überein. Verbindliche aktuelle Policy: [SECURITY-CI.md](SECURITY-CI.md).
+
 Diese umfassende Security-Suite bietet die **maximalste und tiefste Analyse** für dein Repository mit über **50+ verschiedenen Security-Tools** und Analysemethoden.
 
 ## 📋 Übersicht

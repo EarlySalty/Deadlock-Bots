@@ -1,29 +1,10 @@
-name: "Maximum Security & Quality Analysis"
+name: Actual repository security and quality
 
-# Alle Query-Suites
+# Bundled suites from the SHA-pinned CodeQL Action/CLI, not floating query packs.
+# Language detection includes tracked Python, Rust, JavaScript and Actions.
 queries:
   - uses: security-extended
   - uses: security-and-quality
-
-# Query-Packs für alle Sprachen
-packs:
-  javascript-typescript:
-    - codeql/javascript-queries
-  go:
-    - codeql/go-queries
-  java-kotlin:
-    - codeql/java-queries
-  csharp:
-    - codeql/csharp-queries
-  ruby:
-    - codeql/ruby-queries
-  rust:
-    - codeql/rust-queries
-  c-cpp:
-    - codeql/cpp-queries
-  swift:
-    - codeql/swift-queries
-
-# Generated bundle output of vendored third-party GitHub action.
-# Scan the action sources, not compiled output noise.
-paths-ignore: []
+paths-ignore:
+  - .ci/**
+  - rust/target/**

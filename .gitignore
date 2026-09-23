@@ -122,3 +122,6 @@ deadlock-bot-rust.pid
 !/scripts/maintenance/
 /scripts/maintenance/*
 !/scripts/maintenance/repair_discord_system_messages_20260908.sql
+
+# Isolated CI tools, reports, probes and build artifacts (never production data).
+/.ci/

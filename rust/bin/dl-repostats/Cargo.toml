@@ -2,6 +2,7 @@
 name = "dl-repostats"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "Sammelt Git-Aktivität (Commits/Churn/Datei-Änderungen) über die eigenen Repos in Tagesbuckets und schreibt sie als kompaktes JSON-Artefakt fürs Admin-Dashboard."
 
 [dependencies]

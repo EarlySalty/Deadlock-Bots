@@ -1,62 +1,48 @@
-name: Discord config CI
+name: Discord config and workspace CI
+
 on:
+  workflow_call:
+  workflow_dispatch:
   push:
     branches: [feat/discord-global-toml-20260920, feat/discord-toml-rollout-20260920]
-  pull_request:
-    branches: [main]
-    paths:
-      - rust/crates/dl-core/**
-      - rust/crates/dl-dashboard/**
-      - rust/crates/dl-bridges/**
-      - rust/crates/dl-broker/**
-      - rust/crates/dl-webcore/**
-      - rust/crates/dl-server-as-code/**
-      - service/static/dashboard.html
-      - service/static/operating-config.js
-      - rust/bin/dl-bot/**
-      - rust/bin/dl-web/**
-      - rust/Cargo.toml
-      - rust/Cargo.lock
-      - config/bot.toml
-      - .github/workflows/discord-config-ci.yml
+
 permissions:
   contents: read
+
 jobs:
   config:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Rust workspace and existing config contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      SQLX_OFFLINE: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/target
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust
-        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
-      - name: Test file configuration and process startup
-        working-directory: rust
-        run: cargo +1.88.0 test -j 2 -p dl-core
-      - name: Test authenticated editor and Steam proxy
-        working-directory: rust
+      - name: Install pinned Rust toolchain and native test dependencies
         run: |
-          cargo +1.88.0 test -j 2 -p dl-bridges --lib steam_operating
-          cargo +1.88.0 test -j 2 -p dl-dashboard --lib visual_brain_route_tests
-          cargo +1.88.0 test -j 2 -p dl-dashboard --lib broker_evidence_requires_authenticated_fresh_envelope_and_pid
-          cargo +1.88.0 test -j 2 -p dl-bridges --lib typed_toml_host_reaches_actual_twitch_constructor
-          cargo +1.88.0 test -j 2 -p dl-bot --bin dl-bot typed_operating_snapshot_reaches_community_moderation_and_ai_constructors
-          cargo +1.88.0 test -j 2 -p dl-bot --bin dl-bot dl_bot_baut_keine_llm_clients_mehr_selbst
-      - name: Check dashboard script
-        run: node --check service/static/operating-config.js
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libssl-dev libopus-dev protobuf-compiler postgresql-client ffmpeg
+      - name: Compile all workspace targets with checked-in SQLx cache
+        working-directory: rust
+        run: cargo +1.88.0 build --locked --workspace --all-targets --all-features -j 2
+      - name: Clippy denies warnings across all workspace targets
+        working-directory: rust
+        run: cargo +1.88.0 clippy --locked --workspace --all-targets --all-features -j 2 -- -D warnings
       - name: Check existing runtime consumers
         working-directory: rust
-        run: cargo +1.88.0 check -j 2 -p dl-bot -p dl-web
+        run: cargo +1.88.0 check --locked -j 2 -p dl-bot -p dl-web
+      - name: Check dashboard script
+        run: node --check service/static/operating-config.js
       - name: Validate repository TOML
-        run: cargo +1.88.0 run -j 2 --manifest-path rust/Cargo.toml -p dl-core --bin dl-config-check -- --config config/bot.toml
-      - name: Lint configuration
-        working-directory: rust
-        run: cargo +1.88.0 clippy -j 2 -p dl-core --all-targets -- -D warnings
-      - name: Check formatting
-        run: |
-          rustfmt +1.88.0 --edition 2021 --check \
-            rust/crates/dl-core/src/config.rs \
-            rust/crates/dl-core/src/bot_config.rs \
-            rust/crates/dl-core/src/bin/dl-config-check.rs \
-            rust/crates/dl-core/tests/config_startup.rs
+        run: cargo +1.88.0 run --locked -j 2 --manifest-path rust/Cargo.toml -p dl-core --bin dl-config-check -- --config config/bot.toml
+      - name: Test config, workspace, DB and hybrid contracts in a disposable database
+        run: bash rust/scripts/central_test_db.sh bash ../.github/ci/rust-tests.sh

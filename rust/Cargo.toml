@@ -47,7 +47,7 @@ repository = "https://github.com/NaniDerEchte2/Deadlock-Bots"
 # Eine gepinnte Version pro Dependency — einzige Quelle der Wahrheit für den
 # gesamten Workspace. Crates übernehmen via `<dep>.workspace = true`.
 [workspace.dependencies]
-dl-answer = { path = "crates/dl-answer" }
+dl-answer = { version = "0.1.0", path = "crates/dl-answer" }
 # Async-Runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "fs"] }
 # Fehler-Typen (Domänen) / Fehler-Kontext (Binaries)
@@ -97,25 +97,25 @@ url = "2"
 tempfile = "3"
 
 # Interne Crates
-dl-core = { path = "crates/dl-core" }
-dl-webcore = { path = "crates/dl-webcore" }
-dl-stats = { path = "crates/dl-stats" }
-dl-tierlist = { path = "crates/dl-tierlist" }
-dl-broker = { path = "crates/dl-broker" }
-dl-changelog = { path = "crates/dl-changelog" }
-dl-discord = { path = "crates/dl-discord" }
-dl-bridges = { path = "crates/dl-bridges" }
-dl-voice = { path = "crates/dl-voice" }
-dl-activity = { path = "crates/dl-activity" }
-dl-ai = { path = "crates/dl-ai" }
-dl-brain = { path = "crates/dl-brain" }
-dl-moderation = { path = "crates/dl-moderation" }
-dl-squads = { path = "crates/dl-squads" }
-dl-community = { path = "crates/dl-community" }
-dl-dashboard = { path = "crates/dl-dashboard" }
-dl-central-db = { path = "crates/dl-central-db" }
-dl-central-etl = { path = "crates/dl-central-etl" }
-dl-server-as-code = { path = "crates/dl-server-as-code" }
+dl-core = { version = "0.1.0", path = "crates/dl-core" }
+dl-webcore = { version = "0.1.0", path = "crates/dl-webcore" }
+dl-stats = { version = "0.1.0", path = "crates/dl-stats" }
+dl-tierlist = { version = "0.1.0", path = "crates/dl-tierlist" }
+dl-broker = { version = "0.1.0", path = "crates/dl-broker" }
+dl-changelog = { version = "0.1.0", path = "crates/dl-changelog" }
+dl-discord = { version = "0.1.0", path = "crates/dl-discord" }
+dl-bridges = { version = "0.1.0", path = "crates/dl-bridges" }
+dl-voice = { version = "0.1.0", path = "crates/dl-voice" }
+dl-activity = { version = "0.1.0", path = "crates/dl-activity" }
+dl-ai = { version = "0.1.0", path = "crates/dl-ai" }
+dl-brain = { version = "0.1.0", path = "crates/dl-brain" }
+dl-moderation = { version = "0.1.0", path = "crates/dl-moderation" }
+dl-squads = { version = "0.1.0", path = "crates/dl-squads" }
+dl-community = { version = "0.1.0", path = "crates/dl-community" }
+dl-dashboard = { version = "0.1.0", path = "crates/dl-dashboard" }
+dl-central-db = { version = "0.1.0", path = "crates/dl-central-db" }
+dl-central-etl = { version = "0.1.0", path = "crates/dl-central-etl" }
+dl-server-as-code = { version = "0.1.0", path = "crates/dl-server-as-code" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

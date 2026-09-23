@@ -2,6 +2,7 @@
 name = "dl-twitch-invite-sync"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [features]
 testing = ["dl-central-db/testing"]

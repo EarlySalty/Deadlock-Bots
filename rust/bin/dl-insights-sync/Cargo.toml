@@ -2,6 +2,7 @@
 name = "dl-insights-sync"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "Wöchentlicher Discord-Insights-CSV-Sync ins Dashboard."
 
 [dependencies]
