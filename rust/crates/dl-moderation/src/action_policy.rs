@@ -84,9 +84,15 @@ impl ActionPolicy {
         content: Option<&ModerationVerdict>,
         behavior: Option<&BehaviorSignal>,
     ) -> PolicyDecisionOutcome {
-        let content_decision = content
-            .map(|verdict| self.decide_content(verdict))
-            .unwrap_or(PolicyDecision::Ignore);
+        let takeover_context = behavior
+            .is_some_and(|signal| signal.trigger_type == BehaviorTriggerType::AccountTakeover);
+        let content_decision = if takeover_context {
+            PolicyDecision::Ignore
+        } else {
+            content
+                .map(|verdict| self.decide_content(verdict))
+                .unwrap_or(PolicyDecision::Ignore)
+        };
         let behavior_decision = behavior
             .map(|signal| self.decide_behavior(signal, content))
             .unwrap_or(PolicyDecision::Ignore);
@@ -138,13 +144,19 @@ impl ActionPolicy {
         };
 
         if signal.trigger_type == BehaviorTriggerType::AccountTakeover {
+            let matching_high_damage = verdict.analysis.category.is_high_damage()
+                && verdict.verification.category.is_high_damage()
+                && verdict.analysis.category == verdict.verification.category;
             if !verdict.verification.confirmed
-                || !verdict.verification.category.is_high_damage()
+                || !matching_high_damage
+                || verdict.analysis.confidence < self.config.proposal_verified_confidence
                 || verdict.verification.confidence < self.config.proposal_verified_confidence
             {
                 return PolicyDecision::Ignore;
             }
-            if verdict.verification.confidence < self.config.auto_execute_verified_confidence {
+            if verdict.analysis.confidence < self.config.auto_execute_verified_confidence
+                || verdict.verification.confidence < self.config.auto_execute_verified_confidence
+            {
                 return PolicyDecision::Proposal {
                     timeout_minutes: self.config.behavior_proposal_timeout_minutes,
                 };
@@ -430,6 +442,15 @@ mod tests {
         let benign = verdict(ModerationCategory::Other, 0.95);
         assert_eq!(
             policy.decide_combined(Some(&benign), Some(&new_takeover)),
+            PolicyDecision::Ignore
+        );
+
+        let mut analyzer_cleared = verdict(ModerationCategory::Scam, 0.99);
+        analyzer_cleared.analysis.category = ModerationCategory::GameRelatedOk;
+        analyzer_cleared.analysis.confidence = 0.99;
+        analyzer_cleared.analysis.reason = "Normaler Gaming-Screenshot".to_string();
+        assert_eq!(
+            policy.decide_combined(Some(&analyzer_cleared), Some(&new_takeover)),
             PolicyDecision::Ignore
         );
 
