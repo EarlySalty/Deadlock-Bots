@@ -491,7 +491,8 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                         banned
                     }
                 };
-                let final_action = match (action, deleted && action_ok) {
+                let enforcement_ok = deleted && action_ok;
+                let final_action = match (action, enforcement_ok) {
                     (ModerationAction::DeleteOnly, true) => "auto_delete",
                     (ModerationAction::Timeout, true) => "auto_timeout",
                     (ModerationAction::Ban, true) => "auto_ban",
@@ -501,11 +502,11 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 };
                 self.store.update_case_action(&case_id, final_action).await;
                 // Cleanup-Fenster erst JETZT armieren: Case ist persistiert, enforce ist
-                // aktiv und die Sanktion/Delete-Runde ist gelaufen. Nur so werden noch in
+                // aktiv und die Sanktion/Delete-Runde war erfolgreich. Nur so werden noch in
                 // der Queue liegende Wellennachrichten desselben Kontos ohne zweiten Case
                 // geloescht, ohne dass Shadow-Modus oder ein gescheiterter Case spurlos
                 // loeschen.
-                if is_takeover {
+                if is_takeover && enforcement_ok {
                     if let Some(detector) = &self.behavior_detector {
                         detector.arm_takeover_cleanup(event.author_id).await;
                     }
@@ -689,7 +690,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         if matches!(case.action.as_str(), "timeout_reversed" | "denied") {
             return ReviewOutcome::AlreadyHandled;
         }
-        let _ok = self
+        let ok = self
             .port
             .untimeout_member(
                 case.guild_id,
@@ -697,6 +698,23 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 "Timeout durch Moderator aufgehoben",
             )
             .await;
+        if !ok {
+            tracing::warn!(
+                case_id,
+                guild_id = case.guild_id,
+                user_id = case.user_id,
+                mod_id,
+                "Moderation: Timeout-Aufhebung fehlgeschlagen"
+            );
+            return ReviewOutcome::Done(
+                "Timeout konnte nicht aufgehoben werden. Bitte erneut versuchen.".to_string(),
+            );
+        }
+        if let Some(detector) = &self.behavior_detector {
+            detector
+                .clear_user_after_moderator_reversal(case.user_id)
+                .await;
+        }
         self.store
             .resolve_case(case_id, "timeout_reversed", mod_id)
             .await;
@@ -710,7 +728,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         if matches!(case.action.as_str(), "unbanned" | "denied") {
             return ReviewOutcome::AlreadyHandled;
         }
-        let _ok = self
+        let ok = self
             .port
             .unban_member(
                 case.guild_id,
@@ -718,6 +736,23 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 "Bann durch Moderator aufgehoben",
             )
             .await;
+        if !ok {
+            tracing::warn!(
+                case_id,
+                guild_id = case.guild_id,
+                user_id = case.user_id,
+                mod_id,
+                "Moderation: Entbannen fehlgeschlagen"
+            );
+            return ReviewOutcome::Done(
+                "Entbannen ist fehlgeschlagen. Bitte erneut versuchen.".to_string(),
+            );
+        }
+        if let Some(detector) = &self.behavior_detector {
+            detector
+                .clear_user_after_moderator_reversal(case.user_id)
+                .await;
+        }
         self.store.resolve_case(case_id, "unbanned", mod_id).await;
         ReviewOutcome::Done("Entbannt.".to_string())
     }
@@ -990,7 +1025,7 @@ mod tests {
     use crate::content_verifier::ContentVerifier;
     use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     #[derive(Default)]
@@ -1028,6 +1063,9 @@ mod tests {
         bans: AtomicUsize,
         untimeouts: AtomicUsize,
         unbans: AtomicUsize,
+        fail_timeouts: AtomicBool,
+        fail_untimeouts: AtomicBool,
+        fail_unbans: AtomicBool,
         posts: AtomicUsize,
         delete_targets: Mutex<Vec<(u64, u64)>>,
         notice_payloads: Mutex<Vec<(u64, u64, String)>>,
@@ -1084,7 +1122,7 @@ mod tests {
         ) -> bool {
             self.timeouts.fetch_add(1, Ordering::Relaxed);
             self.timeout_minutes.lock().await.push(minutes);
-            true
+            !self.fail_timeouts.load(Ordering::Relaxed)
         }
 
         async fn ban_member(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
@@ -1094,12 +1132,12 @@ mod tests {
 
         async fn untimeout_member(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
             self.untimeouts.fetch_add(1, Ordering::Relaxed);
-            true
+            !self.fail_untimeouts.load(Ordering::Relaxed)
         }
 
         async fn unban_member(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
             self.unbans.fetch_add(1, Ordering::Relaxed);
-            true
+            !self.fail_unbans.load(Ordering::Relaxed)
         }
 
         async fn post_moderation_case(
@@ -1999,6 +2037,164 @@ mod tests {
             port.delete_targets.lock().await.as_slice(),
             &[(10, 1000), (11, 1001), (12, 1002), (13, 1003)]
         );
+    }
+
+    #[tokio::test]
+    async fn failed_timeout_does_not_arm_takeover_cleanup() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector.clone()),
+            vec![999],
+            true,
+        )
+        .await;
+        port.fail_timeouts.store(true, Ordering::Relaxed);
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&image_event(540, 10, 1400, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(540, 11, 1401, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 1);
+        assert!(!detector.cleanup_armed(540).await);
+        let record = moderator.store.fetch_case("case-1401").await.expect("case");
+        assert_eq!(record.action, "auto_timeout_failed");
+    }
+
+    #[tokio::test]
+    async fn reversing_timeout_clears_takeover_cleanup_state() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector.clone()),
+            vec![999],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&image_event(550, 10, 1500, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(550, 11, 1501, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 1);
+        assert!(detector.cleanup_armed(550).await);
+
+        let outcome = moderator.untimeout_case("case-1501", 999).await;
+        assert_eq!(
+            outcome,
+            ReviewOutcome::Done("Timeout aufgehoben.".to_string())
+        );
+        assert_eq!(port.untimeouts.load(Ordering::Relaxed), 1);
+        assert!(!detector.cleanup_armed(550).await);
+
+        moderator
+            .handle_message(&image_event(550, 12, 1502, created_at, joined_at))
+            .await;
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_timeout_reversal_keeps_case_and_cleanup_retryable() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector.clone()),
+            vec![999],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&image_event(560, 10, 1600, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(560, 11, 1601, created_at, joined_at))
+            .await;
+        assert!(detector.cleanup_armed(560).await);
+
+        port.fail_untimeouts.store(true, Ordering::Relaxed);
+        let failed = moderator.untimeout_case("case-1601", 999).await;
+        assert_eq!(
+            failed,
+            ReviewOutcome::Done(
+                "Timeout konnte nicht aufgehoben werden. Bitte erneut versuchen.".to_string()
+            )
+        );
+        assert!(detector.cleanup_armed(560).await);
+        let record = moderator.store.fetch_case("case-1601").await.expect("case");
+        assert_eq!(record.action, "auto_timeout");
+
+        port.fail_untimeouts.store(false, Ordering::Relaxed);
+        let retried = moderator.untimeout_case("case-1601", 999).await;
+        assert_eq!(
+            retried,
+            ReviewOutcome::Done("Timeout aufgehoben.".to_string())
+        );
+        assert!(!detector.cleanup_armed(560).await);
+        let record = moderator.store.fetch_case("case-1601").await.expect("case");
+        assert_eq!(record.action, "timeout_reversed");
+    }
+
+    #[tokio::test]
+    async fn failed_unban_keeps_case_and_cleanup_retryable() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector.clone()),
+            vec![999],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+
+        moderator
+            .handle_message(&image_event(570, 10, 1700, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(570, 11, 1701, created_at, joined_at))
+            .await;
+        assert_eq!(port.bans.load(Ordering::Relaxed), 1);
+        assert!(detector.cleanup_armed(570).await);
+
+        port.fail_unbans.store(true, Ordering::Relaxed);
+        let failed = moderator.unban_case("case-1701", 999).await;
+        assert_eq!(
+            failed,
+            ReviewOutcome::Done(
+                "Entbannen ist fehlgeschlagen. Bitte erneut versuchen.".to_string()
+            )
+        );
+        assert!(detector.cleanup_armed(570).await);
+        let record = moderator.store.fetch_case("case-1701").await.expect("case");
+        assert_eq!(record.action, "auto_ban");
+
+        port.fail_unbans.store(false, Ordering::Relaxed);
+        let retried = moderator.unban_case("case-1701", 999).await;
+        assert_eq!(retried, ReviewOutcome::Done("Entbannt.".to_string()));
+        assert!(!detector.cleanup_armed(570).await);
+        let record = moderator.store.fetch_case("case-1701").await.expect("case");
+        assert_eq!(record.action, "unbanned");
     }
 
     #[tokio::test]

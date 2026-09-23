@@ -371,6 +371,14 @@ impl BehaviorDetector {
         *entry
     }
 
+    pub async fn clear_user_after_moderator_reversal(&self, user_id: u64) {
+        self.history.lock().await.remove(&user_id);
+        self.active.lock().await.remove(&user_id);
+        self.suppressed_until.lock().await.remove(&user_id);
+        self.cleanup_until.lock().await.remove(&user_id);
+        self.cleanup_deleted.lock().await.remove(&user_id);
+    }
+
     #[cfg(test)]
     pub async fn cleanup_armed(&self, user_id: u64) -> bool {
         let now = chrono::Utc::now().timestamp();
