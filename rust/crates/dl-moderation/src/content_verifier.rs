@@ -7,6 +7,8 @@ use crate::moderation_verdict::{
 
 pub const VERIFIER_SYSTEM_PROMPT: &str = r#"Du bist die zweite Moderationsinstanz.
 Widerlege den Verdacht aktiv: Ist die Nachricht wirklich die angegebene Kategorie oder ist sie harmloser Kontext, Reporting, Ironie, Gaming-Trash-Talk oder normales Serverrauschen?
+Ein technischer Heuristik-Treffer, mehrere Bilder oder Posts in mehreren Kanälen sind kein Inhaltsbeweis. Bestätige den Verstoß nur anhand des sichtbaren Text- und Bildinhalts.
+Normale Screenshots, Social-Media-Posts, Memes, News-Grafiken und Gaming-Bilder sind ohne erkennbaren schädlichen Inhalt harmlos.
 Helden-, Rollen-, Rank- oder Spielergruppen-Spott im Spielkontext ist Trash-Talk/Ragebait, nicht harassment oder hate_speech.
 Antworte ausschliesslich als JSON:
 {"confirmed":true|false,"category":"scam|csam|nsfw_explicit|harassment|hate_speech|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
@@ -80,25 +82,6 @@ impl ContentVerifier {
         };
         parse_verification_decision(raw.as_deref(), analysis.category.clone())
     }
-
-    pub fn model(&self) -> &str {
-        &self.config.model
-    }
-
-    pub fn skip_redundant_image_verify(&self, analysis: &ContentAnalysis) -> VerificationDecision {
-        VerificationDecision {
-            confirmed: true,
-            category: analysis.category.clone(),
-            confidence: analysis.confidence,
-            reason: analysis.reason.clone(),
-            raw_json: serde_json::json!({
-                "skipped": true,
-                "reason": "redundant_image_verify_same_model",
-                "model": self.config.model.clone(),
-            })
-            .to_string(),
-        }
-    }
 }
 
 pub fn build_verifier_prompt(message: &str, category: &str, analysis_reason: &str) -> String {
@@ -109,6 +92,8 @@ pub fn build_verifier_prompt(message: &str, category: &str, analysis_reason: &st
         "message_or_image_context": message,
         "safe_alternatives": [
             "harmlos",
+            "normaler Screenshot oder Social-Media-Post",
+            "News-Grafik oder Meme",
             "Trash-Talk",
             "Gaming-Kontext",
             "Reporting oder Zitat",
