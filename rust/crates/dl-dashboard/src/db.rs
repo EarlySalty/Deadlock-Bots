@@ -28,22 +28,30 @@ pub enum DashboardDbError {
 
 pub type DashboardDbResult<T> = Result<T, DashboardDbError>;
 
-/// Lokale Integrationstests nutzen Peer-Auth, keine Secrets oder ENV-Konfiguration.
+/// Integrationstests verwenden dieselbe explizite Wegwerf-DSN wie der CI-Wrapper.
 #[cfg(all(test, feature = "testing"))]
 pub async fn test_pool() -> Result<dl_central_db::TestDb, dl_central_db::CentralDbError> {
-    #[derive(serde::Deserialize)]
-    struct TestConfig {
-        socket: String,
-        user: String,
-        database: String,
-    }
-    let config: TestConfig = serde_json::from_str(include_str!("../tests/postgres.json"))
-        .map_err(|err| dl_central_db::CentralDbError::TestHarness(err.to_string()))?;
-    let options = sqlx::postgres::PgConnectOptions::new()
-        .host(&config.socket)
-        .username(&config.user)
-        .database(&config.database);
-    dl_central_db::testing::test_pool_with_options(options).await
+    dl_central_db::test_pool().await
+}
+
+#[cfg(all(test, feature = "testing"))]
+#[tokio::test]
+async fn test_pool_uses_disposable_tcp_database() {
+    let expected = std::env::var("CENTRAL_TEST_DSN")
+        .expect("run dashboard integration tests through central_test_db.sh")
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .expect("valid disposable PostgreSQL DSN");
+    let db = test_pool()
+        .await
+        .expect("create isolated dashboard database");
+    let actual = db.pool().connect_options();
+    assert_eq!(actual.get_host(), "127.0.0.1");
+    assert_eq!(actual.get_host(), expected.get_host());
+    assert_eq!(actual.get_port(), expected.get_port());
+    assert!(actual
+        .get_database()
+        .unwrap_or_default()
+        .starts_with("dlcentral_test_"));
 }
 
 pub fn unix_to_utc(value: i64) -> DashboardDbResult<DateTime<Utc>> {

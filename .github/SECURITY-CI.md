@@ -79,6 +79,15 @@ Twitch-/Bot-Constructor-Verträge, Laufzeit-Consumer-Check, TOML-Validierung und
 - Readiness auf Host und im Container, Erweiterungsprüfung und echter Migrator
   müssen erfolgreich sein, bevor irgendein Test starten darf.
 
+Dashboard-Tests verwenden nun ebenfalls den zentralen Wegwerf-Testhelfer statt
+fest eingebauter Peer-Authentifizierung am Host-Socket. Die dadurch verwaiste
+`tests/postgres.json` wurde entfernt. Beim Knowledge-Testhelfer hat eine gesetzte
+`CENTRAL_TEST_DSN` Vorrang vor einer lokalen Peer-Konfiguration. Zwei echte
+DB-Regressionstests prüfen Loopback-Host, Port und den neu erzeugten Datenbanknamen;
+eine absichtlich ungültige lokale Knowledge-Konfiguration darf den Wrapper nicht
+aushebeln. Fehlende oder ungültige Wrapper-DSNs werden nicht durch einen lokalen
+Host-Login ersetzt.
+
 `rust-tests.sh` akzeptiert ausschließlich die DSN des Wrappers. Workspace-Tests
 laufen auch mit `--include-ignored`, damit die zahlreichen DB-Tests nicht als
 unbeachtete Ignorierungen verschwinden. Das bisherige stille Überspringen des
@@ -238,7 +247,12 @@ Erst nach grünem PR-Lauf, nachgewiesenen negativen Gegenproben und bestätigtem
 Zugriff auf die Schutzkonfiguration darf `Required PR Gate` mit Quelle GitHub
 Actions als verpflichtender Check für main eingetragen werden. Vorhandene
 Required Checks/Reviews bleiben bis zur bewiesenen Ersatzabsicherung erhalten.
-Änderungen an Workflow und Gate müssen dem vorhandenen CODEOWNERS-Review
-unterliegen. Es wird keine neue LLM-/Copilot-Pflicht eingeführt. Ohne diese
+Die GitHub-Codeowners-Fehlerprüfung meldete zwei ungültige Einträge für den
+früheren Account. `EarlySalty` wurde als Repository-Administrator bestätigt und
+ersetzt diese Einträge. Die Eigentümerzuordnung benennt Workflows, Gate-Helfer,
+Scannerregeln und Ausnahmekonfigurationen ausdrücklich. Sie ersetzt weder einen
+aktivierten Required-Check noch eine serverseitige Review-Pflicht. Änderungen
+an Workflow und Gate benötigen nach Schutzaktivierung ein Eigentümerreview.
+Es wird keine neue LLM-/Copilot-Pflicht eingeführt. Ohne diese
 Schutzaktivierung darf ein grüner oder roter Check nicht als bereits
 nachgewiesene serverseitige Merge-Sperre bezeichnet werden.

@@ -796,7 +796,17 @@ mod tests {
             0,
         )
         .await;
-        seed_user(pool, 5, guild_id, now() - Duration::days(1), false, None, 2).await;
+        // Monthly budget requires a real ping inside 30 days, outside the 14-day cooldown.
+        seed_user(
+            pool,
+            5,
+            guild_id,
+            now() - Duration::days(1),
+            false,
+            Some(now() - Duration::days(20)),
+            2,
+        )
+        .await;
         seed_user(pool, 6, guild_id, now() - Duration::days(1), false, None, 0).await;
         sqlx::query(
             "INSERT INTO bot.action_outbox(
