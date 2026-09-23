@@ -961,21 +961,22 @@ mod tests {
 
     #[test]
     fn leere_charts_sind_nicht_bereit() {
-        let snap = insights_ready_from_value(&json!({"charts": 2, "points": 0, "csv": 3})).unwrap();
+        let snap = insights_ready_from_value(&json!({"charts": 2, "points": 0, "csv": 3}))
+            .expect("valid chart snapshot fixture");
         assert!(!snap.has_data());
     }
 
     #[test]
     fn punkte_ohne_csv_knopf_sind_nicht_bereit() {
-        let snap =
-            insights_ready_from_value(&json!({"charts": 1, "points": 12, "csv": 0})).unwrap();
+        let snap = insights_ready_from_value(&json!({"charts": 1, "points": 12, "csv": 0}))
+            .expect("valid chart snapshot fixture");
         assert!(!snap.has_data());
     }
 
     #[test]
     fn punkte_und_csv_sind_bereit() {
-        let snap =
-            insights_ready_from_value(&json!({"charts": 3, "points": 40, "csv": 4})).unwrap();
+        let snap = insights_ready_from_value(&json!({"charts": 3, "points": 40, "csv": 4}))
+            .expect("valid chart snapshot fixture");
         assert!(snap.has_data());
         assert_eq!(snap.points, 40);
         assert_eq!(snap.csv, 4);

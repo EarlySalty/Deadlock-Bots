@@ -1660,8 +1660,7 @@ impl ServerSyncService {
         output.stored_message_ids = discovered_message_ids.to_vec();
         output.repost_required = false;
         output.warnings.push(format!(
-            "Rang-Guide: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {:?}",
-            discovered_message_ids
+            "Rang-Guide: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered_message_ids:?}"
         ));
         for (message_index, message_id) in discovered_message_ids.iter().copied().enumerate() {
             if let Some(message) = output.messages.get_mut(message_index) {
@@ -2842,8 +2841,7 @@ fn adopt_regelwerk_message_ids(
     output.stored_message_ids = discovered_message_ids.to_vec();
     output.repost_required = false;
     output.warnings.push(format!(
-        "Regelwerk: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {:?}",
-        discovered_message_ids
+        "Regelwerk: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered_message_ids:?}"
     ));
     for (message_index, message_id) in discovered_message_ids.iter().copied().enumerate() {
         if let Some(message) = output.messages.get_mut(message_index) {
@@ -2864,8 +2862,7 @@ fn adopt_support_message_ids(
     output.stored_message_ids = discovered_message_ids.to_vec();
     output.repost_required = false;
     output.warnings.push(format!(
-        "Support: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {:?}",
-        discovered_message_ids
+        "Support: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered_message_ids:?}"
     ));
     for (message_index, message_id) in discovered_message_ids.iter().copied().enumerate() {
         if let Some(message) = output.messages.get_mut(message_index) {
@@ -2886,8 +2883,7 @@ fn adopt_faq_message_ids(
     output.stored_message_ids = discovered_message_ids.to_vec();
     output.repost_required = false;
     output.warnings.push(format!(
-        "FAQ: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {:?}",
-        discovered_message_ids
+        "FAQ: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered_message_ids:?}"
     ));
     for (message_index, message_id) in discovered_message_ids.iter().copied().enumerate() {
         if let Some(message) = output.messages.get_mut(message_index) {

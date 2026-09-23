@@ -31,12 +31,10 @@ const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
 /// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
 /// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
 /// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.
-const STEAM_INVITE_WORST_CASE_SECS: u64 = 45 * 2;
-
 // Der Vertrag gilt zur Compile-Zeit: wer das Bridge-Timeout senkt oder das
 // Steam-Budget hebt, bekommt keinen roten Test, sondern gar kein Binary.
 const _: () = assert!(
-    INVITE_FORWARD_TIMEOUT_SECS > STEAM_INVITE_WORST_CASE_SECS,
+    INVITE_FORWARD_TIMEOUT_SECS > 45 * 2,
     "Bridge-Timeout für /invite liegt unter dem Steam-Worst-Case: die Bridge \
      bricht ab, während der Invite-Task bei Steam noch läuft"
 );

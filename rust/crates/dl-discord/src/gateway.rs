@@ -682,7 +682,7 @@ impl EventHandler for Handler {
                     guild_id,
                     user_id,
                     channel_id,
-                    was_muted: old.as_ref().map(&muted).unwrap_or(false),
+                    was_muted: old.as_ref().map(muted).unwrap_or(false),
                     is_muted: muted(&new),
                 }
             }

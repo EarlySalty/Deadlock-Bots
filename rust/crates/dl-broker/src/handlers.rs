@@ -1758,6 +1758,80 @@ pub async fn add_reaction(
     .await
 }
 
+/// Authenticated, aggregate-only, member-scoped community directory.
+pub async fn community_lobbies(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let Ok(payload) = json_object(&body) else {
+        return bad_request(&rid, "invalid JSON payload");
+    };
+    let guild_id = match payload::positive_int(&payload, "guild_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    let user_id = match payload::positive_int(&payload, "user_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    if guild_id != 1289721245281292288 {
+        return bad_request(&rid, "unsupported community");
+    }
+    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) {
+        return resp;
+    }
+    if !state.port.is_ready().await {
+        return respond(
+            503,
+            error_body(&rid, None, "unavailable", "Discord gateway unavailable"),
+        );
+    }
+    match state.port.community_lobbies(guild_id, user_id).await {
+        Ok(mut lobbies) => {
+            lobbies.retain(|lobby| {
+                lobby.channel_id.parse::<u64>().is_ok_and(|id| {
+                    allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()
+                })
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            respond(
+                200,
+                success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})),
+            )
+        }
+        Err(PortError::MemberNotFound) => respond(
+            403,
+            error_body(
+                &rid,
+                None,
+                "member_required",
+                "Discord membership could not be confirmed",
+            ),
+        ),
+        Err(err) => {
+            tracing::warn!(%err, "Community lobby directory unavailable");
+            respond(
+                503,
+                error_body(
+                    &rid,
+                    None,
+                    "unavailable",
+                    "Discord lobby directory unavailable",
+                ),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2004,36 +2078,61 @@ mod tests {
 
     #[tokio::test]
     async fn community_directory_requires_token_and_confirmed_membership() {
-        let state = test_state().unwrap();
-        let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let state = test_state().expect("valid broker test fixture");
+        let peer = ConnectInfo(
+            "127.0.0.1:12345"
+                .parse::<SocketAddr>()
+                .expect("valid broker test fixture"),
+        );
         let body = axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","user_id":"99"}"#);
         let missing =
             community_lobbies(State(state.clone()), peer, HeaderMap::new(), body.clone()).await;
         assert_eq!(missing.status(), 401);
         let mut headers = HeaderMap::new();
-        headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        headers.insert(
+            "X-Internal-Token",
+            "secret".parse().expect("valid broker test fixture"),
+        );
         let response = community_lobbies(State(state), peer, headers, body).await;
         assert_eq!(response.status(), 403);
     }
 
     #[tokio::test]
     async fn community_directory_respects_channel_allowlist_and_omits_member_identities() {
-        let (state, _) = reaction_test_state("42").unwrap();
-        let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let (state, _) = reaction_test_state("42").expect("valid broker test fixture");
+        let peer = ConnectInfo(
+            "127.0.0.1:12345"
+                .parse::<SocketAddr>()
+                .expect("valid broker test fixture"),
+        );
         let mut headers = HeaderMap::new();
-        headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        headers.insert(
+            "X-Internal-Token",
+            "secret".parse().expect("valid broker test fixture"),
+        );
         let body = axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","user_id":"123"}"#);
         let response = community_lobbies(State(state), peer, headers, body).await;
         assert_eq!(response.status(), 200);
         let bytes = axum::body::to_bytes(response.into_body(), 10000)
             .await
-            .unwrap();
-        let data: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(data["result"]["lobbies"].as_array().unwrap().len(), 1);
+            .expect("valid broker test fixture");
+        let data: Value = serde_json::from_slice(&bytes).expect("valid broker test fixture");
+        assert_eq!(
+            data["result"]["lobbies"]
+                .as_array()
+                .expect("valid broker test fixture")
+                .len(),
+            1
+        );
         assert_eq!(data["result"]["lobbies"][0]["channel_id"], "42");
-        assert!(data["result"]["captured_at"].as_u64().unwrap() > 0);
+        assert!(
+            data["result"]["captured_at"]
+                .as_u64()
+                .expect("valid broker test fixture")
+                > 0
+        );
         assert!(!String::from_utf8(bytes.to_vec())
-            .unwrap()
+            .expect("valid broker test fixture")
             .contains("user_id"));
     }
 
@@ -2583,79 +2682,5 @@ mod tests {
         assert_eq!(status, 502);
         assert!(!body.to_string().contains(SENTINEL));
         Ok(())
-    }
-}
-
-/// Authenticated, aggregate-only, member-scoped community directory.
-pub async fn community_lobbies(
-    State(state): State<SharedBroker>,
-    peer: Peer,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    let rid = request_id(&headers);
-    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
-        return resp;
-    }
-    let Ok(payload) = json_object(&body) else {
-        return bad_request(&rid, "invalid JSON payload");
-    };
-    let guild_id = match payload::positive_int(&payload, "guild_id") {
-        Ok(v) => v,
-        Err(msg) => return bad_request(&rid, &msg),
-    };
-    let user_id = match payload::positive_int(&payload, "user_id") {
-        Ok(v) => v,
-        Err(msg) => return bad_request(&rid, &msg),
-    };
-    if guild_id != 1289721245281292288 {
-        return bad_request(&rid, "unsupported community");
-    }
-    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) {
-        return resp;
-    }
-    if !state.port.is_ready().await {
-        return respond(
-            503,
-            error_body(&rid, None, "unavailable", "Discord gateway unavailable"),
-        );
-    }
-    match state.port.community_lobbies(guild_id, user_id).await {
-        Ok(mut lobbies) => {
-            lobbies.retain(|lobby| {
-                lobby.channel_id.parse::<u64>().is_ok_and(|id| {
-                    allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()
-                })
-            });
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            respond(
-                200,
-                success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})),
-            )
-        }
-        Err(PortError::MemberNotFound) => respond(
-            403,
-            error_body(
-                &rid,
-                None,
-                "member_required",
-                "Discord membership could not be confirmed",
-            ),
-        ),
-        Err(err) => {
-            tracing::warn!(%err, "Community lobby directory unavailable");
-            respond(
-                503,
-                error_body(
-                    &rid,
-                    None,
-                    "unavailable",
-                    "Discord lobby directory unavailable",
-                ),
-            )
-        }
     }
 }

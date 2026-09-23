@@ -4577,10 +4577,7 @@ fn lobby_code_success_log_message(
     target_count: usize,
     _source_line: u32,
 ) -> String {
-    format!(
-        "Scrim-Lobbycode gepostet (Match {match_id}, Ziele: {target_count}, Code: {}).",
-        code
-    )
+    format!("Scrim-Lobbycode gepostet (Match {match_id}, Ziele: {target_count}, Code: {code}).")
 }
 
 fn start_success_log_message(match_id: i64, code: &str, _source_line: u32) -> String {

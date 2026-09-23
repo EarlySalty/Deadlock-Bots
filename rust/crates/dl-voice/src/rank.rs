@@ -1462,7 +1462,7 @@ mod tests {
     #[test]
     fn rrang_texte_sind_final() {
         assert_ne!(RRANG_INFO_BALANCING_RULE, "Platzhalter");
-        assert!(!RRANG_INFO_BALANCING_RULE.is_empty());
+        assert_eq!(RRANG_INFO_BALANCING_RULE, "Balancing-Regel");
     }
 
     #[test]
