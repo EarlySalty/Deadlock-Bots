@@ -133,7 +133,22 @@ impl ActionPolicy {
         signal: &BehaviorSignal,
         content: Option<&ModerationVerdict>,
     ) -> PolicyDecision {
+        let Some(verdict) = content else {
+            return PolicyDecision::Ignore;
+        };
+
         if signal.trigger_type == BehaviorTriggerType::AccountTakeover {
+            if !verdict.verification.confirmed
+                || !verdict.verification.category.is_high_damage()
+                || verdict.verification.confidence < self.config.proposal_verified_confidence
+            {
+                return PolicyDecision::Ignore;
+            }
+            if verdict.verification.confidence < self.config.auto_execute_verified_confidence {
+                return PolicyDecision::Proposal {
+                    timeout_minutes: self.config.behavior_proposal_timeout_minutes,
+                };
+            }
             let action = match signal.action_hint {
                 BehaviorActionHint::Ban => ModerationAction::Ban,
                 BehaviorActionHint::Timeout | BehaviorActionHint::Proposal => {
@@ -146,9 +161,6 @@ impl ActionPolicy {
             };
         }
 
-        let Some(verdict) = content else {
-            return PolicyDecision::Ignore;
-        };
         if !verdict.verification.confirmed
             || verdict.verification.confidence < self.config.proposal_verified_confidence
         {
@@ -397,32 +409,40 @@ mod tests {
     }
 
     #[test]
-    fn account_takeover_maps_to_auto_execute_via_unified_policy() {
+    fn account_takeover_requires_ai_confirmed_high_damage_content() {
         let policy = ActionPolicy::new(ActionPolicyConfig::default());
+        let new_takeover = behavior_signal(
+            BehaviorTriggerType::AccountTakeover,
+            BehaviorActionHint::Ban,
+            true,
+        );
+        let established_takeover = behavior_signal(
+            BehaviorTriggerType::AccountTakeover,
+            BehaviorActionHint::Timeout,
+            false,
+        );
 
         assert_eq!(
-            policy.decide_combined(
-                None,
-                Some(&behavior_signal(
-                    BehaviorTriggerType::AccountTakeover,
-                    BehaviorActionHint::Ban,
-                    true,
-                )),
-            ),
+            policy.decide_combined(None, Some(&new_takeover)),
+            PolicyDecision::Ignore
+        );
+
+        let benign = verdict(ModerationCategory::Other, 0.95);
+        assert_eq!(
+            policy.decide_combined(Some(&benign), Some(&new_takeover)),
+            PolicyDecision::Ignore
+        );
+
+        let scam = verdict(ModerationCategory::Scam, 0.90);
+        assert_eq!(
+            policy.decide_combined(Some(&scam), Some(&new_takeover)),
             PolicyDecision::AutoExecute {
                 action: ModerationAction::Ban,
                 timeout_minutes: 1440,
             }
         );
         assert_eq!(
-            policy.decide_combined(
-                None,
-                Some(&behavior_signal(
-                    BehaviorTriggerType::AccountTakeover,
-                    BehaviorActionHint::Timeout,
-                    false,
-                )),
-            ),
+            policy.decide_combined(Some(&scam), Some(&established_takeover)),
             PolicyDecision::AutoExecute {
                 action: ModerationAction::Timeout,
                 timeout_minutes: 1440,

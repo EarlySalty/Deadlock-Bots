@@ -308,18 +308,9 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         };
 
         let verdict = match source {
-            Some(PolicyDecisionSource::Behavior) => {
-                let is_takeover = behavior_signal
-                    .as_ref()
-                    .map(|signal| signal.trigger_type == BehaviorTriggerType::AccountTakeover)
-                    .unwrap_or(false);
-                if is_takeover {
-                    behavior_signal.as_ref().map(behavior_verdict)
-                } else {
-                    content_verdict.cloned()
-                }
+            Some(PolicyDecisionSource::Behavior) | Some(PolicyDecisionSource::Content) => {
+                content_verdict.cloned()
             }
-            Some(PolicyDecisionSource::Content) => content_verdict.cloned(),
             None => content_verdict
                 .cloned()
                 .or_else(|| behavior_signal.as_ref().map(behavior_verdict)),
@@ -1015,6 +1006,21 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct StaticVision {
+        responses: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl dl_ai::VisionGenerator for StaticVision {
+        async fn generate_multimodal(
+            &self,
+            _request: dl_ai::GenerateMultimodalRequest,
+        ) -> Option<String> {
+            self.responses.lock().await.pop()
+        }
+    }
+
+    #[derive(Default)]
     struct CountingPort {
         deletes: AtomicUsize,
         notices: AtomicUsize,
@@ -1297,6 +1303,62 @@ mod tests {
                     },
                 ),
                 ContentVerifier::new(verifier_text, None, Default::default()),
+                0.5,
+            ),
+            behavior_detector,
+            ActionPolicy::new(ActionPolicyConfig::default()),
+            port.clone(),
+            ModerationSystemConfig {
+                scan_channel_ids,
+                moderation_channel_id: 99,
+                enforce,
+            },
+        );
+        (moderator, port)
+    }
+
+    async fn memory_image_moderator(
+        analysis_responses: &[&str],
+        verification_responses: &[&str],
+        behavior_detector: Option<Arc<BehaviorDetector>>,
+        scan_channel_ids: Vec<u64>,
+        enforce: bool,
+    ) -> (Arc<ModerationSystem<MemoryStore>>, Arc<CountingPort>) {
+        let analyzer_text = Arc::new(StaticText::default());
+        let analyzer_vision = Arc::new(StaticVision::default());
+        {
+            let mut responses = analyzer_vision.responses.lock().await;
+            for response in analysis_responses {
+                responses.push((*response).to_string());
+            }
+        }
+        let verifier_text = Arc::new(StaticText::default());
+        let verifier_vision = Arc::new(StaticVision::default());
+        {
+            let mut responses = verifier_vision.responses.lock().await;
+            for response in verification_responses {
+                responses.push((*response).to_string());
+            }
+        }
+        let port = Arc::new(CountingPort::default());
+        let moderator = ModerationSystem::new_with_store(
+            MemoryStore::default(),
+            ContentModerationPipeline::new(
+                ContentAnalyzer::new(
+                    analyzer_text,
+                    Some(analyzer_vision),
+                    ContentAnalyzerConfig {
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                        image_model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
+                ContentVerifier::new(
+                    verifier_text,
+                    Some(verifier_vision),
+                    crate::content_verifier::ContentVerifierConfig {
+                        model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
                 0.5,
             ),
             behavior_detector,
@@ -1665,35 +1727,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn takeover_signal_creates_one_case_embed_and_deletes_all_signal_messages() {
-        let analyzer_text = Arc::new(StaticText::default());
-        let verifier_text = Arc::new(StaticText::default());
-        let port = Arc::new(CountingPort::default());
-        let store = MemoryStore::default();
+    async fn takeover_signal_needs_real_ai_confirmation_before_auto_action() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
-        let moderator = ModerationSystem::new_with_store(
-            store,
-            ContentModerationPipeline::new(
-                ContentAnalyzer::new(
-                    analyzer_text,
-                    None,
-                    ContentAnalyzerConfig {
-                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
-                        image_model: "gpt-5.4-nano".to_string(),
-                    },
-                ),
-                ContentVerifier::new(verifier_text, None, Default::default()),
-                0.5,
-            ),
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
             Some(detector),
-            ActionPolicy::new(ActionPolicyConfig::default()),
-            port.clone(),
-            ModerationSystemConfig {
-                scan_channel_ids: vec![10, 11],
-                moderation_channel_id: 99,
-                enforce: true,
-            },
-        );
+            vec![999],
+            true,
+        )
+        .await;
         let now = chrono::Utc::now().timestamp();
         let created_at = now - 10 * 3600;
         let joined_at = Some(now - 3600);
@@ -1706,8 +1749,10 @@ mod tests {
             .await;
 
         let drafts = moderator.store.drafts.lock().await;
-        assert_eq!(drafts.len(), 2);
-        assert_eq!(drafts[0].action, "ignored");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].category, "scam");
+        assert_eq!(drafts[0].confidence, 0.93);
+        assert_eq!(drafts[0].source, "content+behavior");
         assert_eq!(moderator.store.review_messages.lock().await.len(), 1);
         assert_eq!(port.posts.load(Ordering::Relaxed), 1);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
@@ -1715,8 +1760,6 @@ mod tests {
             port.delete_targets.lock().await.as_slice(),
             &[(10, 1000), (11, 1001)]
         );
-        // REQ3: als Beweis wird genau EINE Nachricht gespiegelt (die ausloesende
-        // Event-Nachricht 1001), kein Mix ueber beide Wellennachrichten.
         assert_eq!(
             port.mirrored_urls.lock().await.as_slice(),
             &["https://img/1001.png".to_string()]
@@ -1724,49 +1767,56 @@ mod tests {
         assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[1]);
         assert_eq!(port.bans.load(Ordering::Relaxed), 1);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
-        drop(drafts);
-        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
-        assert_eq!(draft.source, "behavior");
-        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
-        assert!(draft.ai_raw_json.contains("account_takeover"));
+        assert_eq!(drafts[0].trigger_type.as_deref(), Some("account_takeover"));
+        assert!(drafts[0].ai_raw_json.contains("account_takeover"));
+        let embed = port
+            .posted_embeds
+            .lock()
+            .await
+            .last()
+            .cloned()
+            .expect("embed");
+        let serialized = embed.to_string();
+        assert!(serialized.contains("91%"));
+        assert!(serialized.contains("93%"));
+        assert!(!serialized.contains("Analyse 100%"));
     }
 
     #[tokio::test]
-    async fn behavior_trigger_wins_persisted_and_embedded_verdict_when_it_decides_action() {
+    async fn takeover_heuristic_with_benign_image_is_ignored_by_ai() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
-        let (moderator, port) = memory_moderator(
-            &[
-                r#"{"category":"other","confidence":0.9,"reason":"content-other"}"#,
-                r#"{"category":"other","confidence":0.9,"reason":"content-other"}"#,
-            ],
-            &[
-                r#"{"confirmed":false,"category":"other","confidence":0.9,"reason":"content-unconfirmed"}"#,
-                r#"{"confirmed":false,"category":"other","confidence":0.9,"reason":"content-unconfirmed"}"#,
-            ],
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"other","confidence":0.9,"reason":"Normaler Social-Media-Post"}"#],
+            &[r#"{"confirmed":false,"category":"other","confidence":0.94,"reason":"Kein schädlicher Inhalt"}"#],
             Some(detector),
-            vec![10, 11],
-            false,
+            vec![999],
+            true,
         )
         .await;
         let now = chrono::Utc::now().timestamp();
         let created_at = now - 10 * 3600;
         let joined_at = Some(now - 3600);
-        let mut first = image_event(300, 10, 1100, created_at, joined_at);
-        first.content = "ambiguous report".to_string();
-        let mut second = image_event(300, 11, 1101, created_at, joined_at);
-        second.content = "ambiguous report".to_string();
 
-        moderator.handle_message(&first).await;
-        moderator.handle_message(&second).await;
+        moderator
+            .handle_message(&image_event(300, 10, 1100, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(300, 11, 1101, created_at, joined_at))
+            .await;
 
-        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
-        assert_eq!(draft.category, "account_takeover");
-        assert_eq!(draft.reason, "behavior:account_takeover");
-        let embed = port.posted_embeds.lock().await.pop().expect("embed");
-        let serialized = embed.to_string();
-        assert!(serialized.contains("account_takeover"));
-        assert!(serialized.contains("behavior:account_takeover"));
-        assert!(!serialized.contains("content-unconfirmed"));
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        let draft = drafts.last().expect("draft");
+        assert_eq!(draft.action, "ignored");
+        assert_eq!(draft.category, "other");
+        assert_eq!(draft.reason, "Kein schädlicher Inhalt");
+        assert_eq!(draft.confidence, 0.94);
+        assert_eq!(draft.source, "content+behavior");
+        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -1854,38 +1904,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn behavior_takeover_fires_outside_scan_channels() {
-        // Kontoübernahme kann in JEDEM Kanal posten. Die Verhaltens-Erkennung muss
-        // serverweit greifen, auch wenn der Kanal nicht in scan_channel_ids steht.
-        let analyzer_text = Arc::new(StaticText::default());
-        let verifier_text = Arc::new(StaticText::default());
-        let port = Arc::new(CountingPort::default());
-        let store = MemoryStore::default();
+    async fn behavior_takeover_fires_outside_scan_channels_after_ai_confirmation() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
-        let moderator = ModerationSystem::new_with_store(
-            store,
-            ContentModerationPipeline::new(
-                ContentAnalyzer::new(
-                    analyzer_text,
-                    None,
-                    ContentAnalyzerConfig {
-                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
-                        image_model: "gpt-5.4-nano".to_string(),
-                    },
-                ),
-                ContentVerifier::new(verifier_text, None, Default::default()),
-                0.5,
-            ),
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
             Some(detector),
-            ActionPolicy::new(ActionPolicyConfig::default()),
-            port.clone(),
-            ModerationSystemConfig {
-                // Nachrichten laufen in Kanal 10/11 — bewusst NICHT in scan_channel_ids.
-                scan_channel_ids: vec![777],
-                moderation_channel_id: 99,
-                enforce: true,
-            },
-        );
+            vec![777],
+            true,
+        )
+        .await;
         let now = chrono::Utc::now().timestamp();
         let created_at = now - 10 * 3600;
         let joined_at = Some(now - 3600);
@@ -1901,7 +1929,8 @@ mod tests {
         assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
         assert_eq!(port.posts.load(Ordering::Relaxed), 1);
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
-        assert_eq!(draft.source, "behavior");
+        assert_eq!(draft.source, "content+behavior");
+        assert_eq!(draft.category, "scam");
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
     }
 
@@ -1937,7 +1966,14 @@ mod tests {
         // genau EIN Case und genau EIN Timeout. Vor dem Fix bricht detect() fuer die
         // unterdrueckten Nachrichten 3/4 mit None ab, es werden nur zwei geloescht.
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
-        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector),
+            vec![999],
+            true,
+        )
+        .await;
         let now = chrono::Utc::now().timestamp();
         // Etabliertes Konto -> Takeover-Aktion ist Timeout, nicht Ban.
         let created_at = now - 100_000 * 3600;
@@ -1972,7 +2008,14 @@ mod tests {
         // Vier-Bild-Mix aus beiden Nachrichten. Vor dem Fix flacht build_evidence beide
         // Nachrichten zusammen und mischt.
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
-        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![999], true).await;
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector),
+            vec![999],
+            true,
+        )
+        .await;
         let now = chrono::Utc::now().timestamp();
         let created_at = now - 100_000 * 3600;
         let joined_at = Some(now - 3_000 * 3600);
@@ -2003,8 +2046,14 @@ mod tests {
         // Folgenachrichten spurlos verschwinden koennten und die Shadow-Auswertung
         // schlechter wird als der bisherige Suppression-Pfad.
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
-        let (moderator, port) =
-            memory_moderator(&[], &[], Some(detector.clone()), vec![999], false).await;
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#],
+            Some(detector.clone()),
+            vec![999],
+            false,
+        )
+        .await;
         let now = chrono::Utc::now().timestamp();
         let created_at = now - 100_000 * 3600;
         let joined_at = Some(now - 3_000 * 3600);
@@ -2031,20 +2080,35 @@ mod tests {
         // Restwelle geloescht wird.
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let analyzer_text = Arc::new(StaticText::default());
+        let analyzer_vision = Arc::new(StaticVision::default());
+        analyzer_vision.responses.lock().await.push(
+            r#"{"category":"scam","confidence":0.91,"reason":"Phishing im Bild"}"#.to_string(),
+        );
         let verifier_text = Arc::new(StaticText::default());
+        let verifier_vision = Arc::new(StaticVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":true,"category":"scam","confidence":0.93,"reason":"Phishing bestätigt"}"#
+                .to_string(),
+        );
         let port = Arc::new(CountingPort::default());
         let moderator = ModerationSystem::new_with_store(
             FailingInsertStore::default(),
             ContentModerationPipeline::new(
                 ContentAnalyzer::new(
                     analyzer_text,
-                    None,
+                    Some(analyzer_vision),
                     ContentAnalyzerConfig {
                         text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                         image_model: "gpt-5.4-nano".to_string(),
                     },
                 ),
-                ContentVerifier::new(verifier_text, None, Default::default()),
+                ContentVerifier::new(
+                    verifier_text,
+                    Some(verifier_vision),
+                    crate::content_verifier::ContentVerifierConfig {
+                        model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
                 0.5,
             ),
             Some(detector.clone()),

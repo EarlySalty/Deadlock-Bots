@@ -53,6 +53,7 @@ pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Anal
 Analysiere Text und Bilder knapp und konservativ.
 Gib eine Kategorie, Confidence und eine kurze Begruendung auf Deutsch zurueck.
 Flagge nur echte Risiken; normaler Gaming-Trash-Talk und harmlose Meldungen sollen game_related_ok oder ragebait_ok sein.
+Ein normales Bild, ein Screenshot, ein Social-Media-Post, ein Meme, eine News-Grafik oder ein Gaming-Bild ist für sich kein Scam oder Account-Takeover.
 Helden-, Rollen-, Rank- oder Spielergruppen-Spott im Spielkontext ist Trash-Talk/Ragebait, nicht harassment oder hate_speech.
 Antworte ausschliesslich als JSON:
 {"category":"scam|csam|nsfw_explicit|harassment|hate_speech|ragebait_ok|game_related_ok|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
@@ -212,10 +213,6 @@ impl ContentAnalyzer {
                 modality: AnalysisModality::Text,
             })
     }
-
-    fn image_model(&self) -> &str {
-        &self.config.image_model
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,14 +327,11 @@ impl ContentModerationPipeline {
                 verdict: None,
             };
         }
-        let verification =
-            if input.is_image_only() && self.analyzer.image_model() == self.verifier.model() {
-                self.verifier.skip_redundant_image_verify(&analysis)
-            } else if matches!(modal_analysis.modality, AnalysisModality::Text) {
-                self.verifier.verify(&input.text_only(), &analysis).await
-            } else {
-                self.verifier.verify(input, &analysis).await
-            };
+        let verification = if matches!(modal_analysis.modality, AnalysisModality::Text) {
+            self.verifier.verify(&input.text_only(), &analysis).await
+        } else {
+            self.verifier.verify(input, &analysis).await
+        };
         ContentModerationEvaluation {
             analysis: analysis.clone(),
             verdict: Some(ModerationVerdict {
@@ -353,7 +347,7 @@ impl ContentModerationPipeline {
 mod tests {
     use super::*;
     use crate::content_analyzer::test_support::LogCapture;
-    use crate::content_verifier::ContentVerifier;
+    use crate::content_verifier::{ContentVerifier, ContentVerifierConfig};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -625,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_skips_redundant_nano_verify_for_pure_image_flags() {
+    async fn pipeline_runs_real_verifier_for_pure_image_flags_on_same_model() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
         vision
@@ -635,6 +629,10 @@ mod tests {
             .push(r#"{"category":"scam","confidence":0.9,"reason":"Bildscam"}"#.to_string());
         let verifier_text = Arc::new(RecordingText::default());
         let verifier_vision = Arc::new(RecordingVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":false,"category":"other","confidence":0.96,"reason":"Harmloser Screenshot"}"#
+                .to_string(),
+        );
         let pipeline = ContentModerationPipeline::new(
             ContentAnalyzer::new(
                 text,
@@ -647,7 +645,9 @@ mod tests {
             ContentVerifier::new(
                 verifier_text.clone(),
                 Some(verifier_vision.clone()),
-                Default::default(),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
             ),
             0.5,
         );
@@ -662,9 +662,13 @@ mod tests {
         let Some(verdict) = result else {
             panic!("expected pure image flag verdict");
         };
-        assert!(verdict.verification.confirmed);
-        assert_eq!(verdict.verification.category.as_label(), "scam");
+        assert_eq!(verdict.analysis.category.as_label(), "scam");
+        assert!(!verdict.verification.confirmed);
+        assert_eq!(verdict.verification.category.as_label(), "other");
         assert_eq!(verifier_text.models.lock().await.len(), 0);
-        assert_eq!(verifier_vision.models.lock().await.len(), 0);
+        assert_eq!(
+            verifier_vision.models.lock().await.as_slice(),
+            &[Some("gpt-5.4-nano".to_string())]
+        );
     }
 }
