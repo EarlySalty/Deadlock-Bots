@@ -32,7 +32,15 @@ pub fn from_context(value: &Value) -> Result<Retrieved, AnswerError> {
         );
     }
     add_ground_fields(value, &["item"], &mut result);
-    add_ground_fields(value, &["hero_power_curve"], &mut result);
+    let has_tempo_profile = value
+        .pointer("/ground_truth/hero_tempo_profile/available")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if has_tempo_profile {
+        add_ground_fields(value, &["hero_tempo_profile"], &mut result);
+    } else {
+        add_ground_fields(value, &["hero_power_curve"], &mut result);
+    }
     add_game_wiki(value, &mut result);
     add_ground_fields(value, &["stats"], &mut result);
     let history_requested = value["intent"] == "patch_changes"
@@ -105,6 +113,7 @@ fn add_query_semantics(value: &Value, result: &mut Retrieved) {
         serde_json::json!({
             "intent": intent,
             "semantic_target": answer_target,
+            "archetype_concept": value.pointer("/retrieval_meta/archetype_concept").and_then(Value::as_str),
         })
         .to_string(),
     );
@@ -279,7 +288,34 @@ fn prune(value: &Value) -> Option<Value> {
                             | "Ability"
                             | "Hero"
                             | "semantic_target"
+                            | "archetype_concept"
                             | "question_kind"
+                            | "definition"
+                            | "classification_rule"
+                            | "clear"
+                            | "supported"
+                            | "curve_only"
+                            | "candidate_schema"
+                            | "excluded_curve_only_count"
+                            | "mechanics_unavailable_count"
+                            | "candidates"
+                            | "answer_rule"
+                            | "classification"
+                            | "short_minus_long_pp"
+                            | "short_matches"
+                            | "long_matches"
+                            | "short_win_rate_percent"
+                            | "mid_win_rate_percent"
+                            | "long_win_rate_percent"
+                            | "mechanics_available"
+                            | "mechanics_signal_kind"
+                            | "mobility_abilities"
+                            | "control_abilities"
+                            | "damage_abilities"
+                            | "non_ultimate_pressure_abilities"
+                            | "repeatable_pressure_abilities"
+                            | "mechanics_support"
+                            | "supporting_signal_families"
                             | "hero_roster"
                             | "hero_roster_schema"
                             | "method"
@@ -792,7 +828,43 @@ mod tests {
     }
 
     #[test]
-    fn hero_power_curve_bleibt_vor_roster_als_beleg_erhalten() {
+    fn tempo_profil_ersetzt_rohe_power_curve_und_bleibt_vor_roster() {
+        let tempo_profile = json!({
+            "available": true,
+            "archetype_concept": "tempo",
+            "definition": "Tempo braucht Druck plus Umsetzungswerkzeuge.",
+            "classification_rule": {
+                "clear": "mehrere Signalfamilien",
+                "supported": "ausreichende Signale",
+                "curve_only": "nicht ausreichend"
+            },
+            "candidate_schema": {
+                "classification": ["clear", "supported", "curve_only"],
+                "supporting_signal_families": ["early_power_curve", "mobility", "control", "repeatable_pressure"]
+            },
+            "candidates": [
+                {
+                    "name": "Beacon",
+                    "classification": "clear",
+                    "short_minus_long_pp": 8.0,
+                    "short_matches": 60,
+                    "long_matches": 60,
+                    "short_win_rate_percent": 55.0,
+                    "mid_win_rate_percent": 50.0,
+                    "long_win_rate_percent": 47.0,
+                    "mechanics_available": true,
+                    "mechanics_signal_kind": "derived_from_ability_descriptions_and_cooldowns",
+                    "mobility_abilities": 1,
+                    "control_abilities": 1,
+                    "damage_abilities": 2,
+                    "non_ultimate_pressure_abilities": 2,
+                    "repeatable_pressure_abilities": 2,
+                    "mechanics_support": "strong",
+                    "supporting_signal_families": ["early_power_curve", "mobility", "control", "repeatable_pressure"]
+                }
+            ],
+            "answer_rule": "curve_only nicht als typische Tempo-Helden nennen"
+        });
         let curve = json!({
             "available": true,
             "method": "recent_duration_tertiles",
@@ -825,8 +897,9 @@ mod tests {
         let roster = "````json\n{\"semantic_target\":\"hero\",\"question_kind\":\"hero_archetype\",\"hero_roster_schema\":[\"name\"],\"hero_roster\":[[\"Beacon\"]]}\n````";
         let result = from_context(&json!({
             "intent": "hero_archetype",
-            "retrieval_meta": {"answer_target": "hero"},
+            "retrieval_meta": {"answer_target": "hero", "archetype_concept": "tempo"},
             "ground_truth": {
+                "hero_tempo_profile": tempo_profile,
                 "hero_power_curve": curve,
                 "game_knowledge": {
                     "available": true,
@@ -837,10 +910,38 @@ mod tests {
         .expect("gültige Archetypenfixture");
 
         assert_eq!(result.evidence.len(), 3);
-        assert!(result.evidence[1].text.contains("early_skewed"));
+        assert!(result.evidence[0]
+            .text
+            .contains("\"archetype_concept\":\"tempo\""));
+        assert!(result.evidence[1]
+            .text
+            .contains("\"classification\":\"clear\""));
+        assert!(result.evidence[1].text.contains("repeatable_pressure"));
         assert!(result.evidence[1].text.contains("short_minus_long_pp"));
+        assert!(!result.evidence[1].text.contains("early_skewed"));
         assert!(result.evidence[2].text.contains("Beacon"));
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn scaling_archetyp_behaelt_power_curve_wenn_tempo_profil_fehlt() {
+        let curve = json!({
+            "available": true,
+            "archetype_concept": "scaling",
+            "method": "recent_duration_tertiles",
+            "hero_curve_schema": ["name", "curve_label"],
+            "hero_curves": [["Beacon", "late_skewed"]]
+        });
+        let result = from_context(&json!({
+            "intent": "hero_archetype",
+            "retrieval_meta": {"answer_target": "hero", "archetype_concept": "scaling"},
+            "ground_truth": {"hero_power_curve": curve}
+        }))
+        .expect("gültige Scaling-Fixture");
+
+        assert_eq!(result.evidence.len(), 2);
+        assert!(result.evidence[0].text.contains("\"archetype_concept\":\"scaling\""));
+        assert!(result.evidence[1].text.contains("late_skewed"));
     }
 
     #[test]
