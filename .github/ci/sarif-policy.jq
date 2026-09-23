@@ -1,10 +1,14 @@
 # Missing/invalid structure, unsuccessful invocations and warning/error findings fail.
+def benign_notifications($key):
+  (has($key) | not) or
+  (.[$key] | type == "array" and
+    all(.[]; type == "object" and (.level == "note" or .level == "none")));
 def no_scanner_errors:
   (.invocations | type == "array" and length > 0) and
   all(.invocations[];
     .executionSuccessful == true and
-    all(.toolExecutionNotifications[]?; .level != "error" and .level != "warning") and
-    all(.toolConfigurationNotifications[]?; .level != "error" and .level != "warning"));
+    benign_notifications("toolExecutionNotifications") and
+    benign_notifications("toolConfigurationNotifications"));
 def security_severity($run; $result):
   [
     $result.properties."security-severity",

@@ -8,6 +8,8 @@ mkdir "$PROBE/results"
 printf '%s\n' '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL","rules":[]}},"results":[],"invocations":[{"executionSuccessful":true}]}]}' > "$PROBE/clean.json"
 cp "$PROBE/clean.json" "$PROBE/results/result.sarif"
 bash "$ROOT/.github/ci/check-sarif.sh" "$PROBE/results"
+jq '.runs[0].invocations[0].toolExecutionNotifications = [{"level":"note"}] | .runs[0].invocations[0].toolConfigurationNotifications = [{"level":"none"}]' "$PROBE/clean.json" > "$PROBE/results/result.sarif"
+bash "$ROOT/.github/ci/check-sarif.sh" "$PROBE/results"
 negative() {
   if bash "$ROOT/.github/ci/check-sarif.sh" "$PROBE/results" >/dev/null 2>&1; then
     echo "SARIF policy accepted invalid case: $1" >&2
@@ -26,6 +28,11 @@ cases=(
   '.runs[0].invocations[0].toolExecutionNotifications = [{"level":"warning"}]'
   '.runs[0].invocations[0].toolExecutionNotifications = [{"level":"error"}]'
   '.runs[0].invocations[0].toolConfigurationNotifications = [{"level":"error"}]'
+  '.runs[0].invocations[0].toolExecutionNotifications = [{}]'
+  '.runs[0].invocations[0].toolConfigurationNotifications = [{}]'
+  '.runs[0].invocations[0].toolExecutionNotifications = [{"level":"unexpected"}]'
+  '.runs[0].invocations[0].toolExecutionNotifications = "broken"'
+  '.runs[0].invocations[0].toolConfigurationNotifications = null'
   '.runs[0].results = [{"level":"warning","ruleId":"probe"}]'
   '.runs[0].results = [{"level":"error","ruleId":"probe"}]'
   '.runs[0].results = [{"level":"unknown","ruleId":"probe"}]'
@@ -43,4 +50,4 @@ rm "$PROBE/results/result.sarif"
 negative 'empty results directory'
 rmdir "$PROBE/results"
 negative 'missing results directory'
-printf 'SARIF counterchecks: 1 clean + %s negative cases passed\n' "$((${#cases[@]} + 3))"
+printf 'SARIF counterchecks: 2 clean + %s negative cases passed\n' "$((${#cases[@]} + 3))"

@@ -52,7 +52,9 @@ Scannerfehler und Warning/Error-Findings blockieren. HIGH/CRITICAL-
 Security-Severity wird auch aus den SARIF-Regelmetadaten ausgewertet.
 Mindestens eine ausdrücklich erfolgreiche Scanner-Ausführung muss enthalten
 sein; fehlende Invocations, fehlende Erfolgsflags und Scanner-Warnungen sind
-keine erfolgreiche Abnahme.
+keine erfolgreiche Abnahme. Vorhandene Scanner-Meldungen müssen Arrays mit
+explizitem `note` oder `none` sein. Fehlende oder unbekannte Meldungslevel sowie
+strukturell ungültige Meldungen blockieren ebenfalls.
 Die einzige tolerierte Operation ist das separate Archivieren fertiger
 CodeQL-Berichte; Analyse und Befundauswertung sind niemals `continue-on-error`.
 
@@ -175,8 +177,8 @@ führen kein unsicheres Programm aus und löschen die Fixtures wieder. Gitleaks,
 Semgrep und Trivy müssen jeweils saubere Eingaben akzeptieren, echte Testbefunde
 mit Exit 1 melden und bei ungültiger Scanner-Konfiguration fehlschlagen. Trivy
 prüft zusätzlich eine HIGH-Dockerfile-Gegenprobe. Hinzu kommen vier Rust-Gate-
-Tests, 63 negative Gate-Prozessprüfungen, zwei CodeQL-Detektor-Tests sowie eine
-positive und 20 negative SARIF-Proben. Getrackte `.ci`-/Rust-Build-Artefakte werden
+Tests, 63 negative Gate-Prozessprüfungen, zwei CodeQL-Detektor-Tests sowie zwei
+positive und 25 negative SARIF-Proben. Getrackte `.ci`-/Rust-Build-Artefakte werden
 im Actions-Job abgelehnt.
 
 CodeQL erkennt ausschließlich vorhandene getrackte Dateien für Rust, Python,
