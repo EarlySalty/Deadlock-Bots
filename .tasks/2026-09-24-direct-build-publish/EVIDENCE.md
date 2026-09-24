@@ -25,4 +25,15 @@ Der Brain-CLI-Branch `feat/direct-build-publish-20260924` muss vor dem Discord-V
 
 Der aktuelle PR-first-Testbetrieb untersagt Merge, main-Push, Auto-Merge, Produktions-Uploads, Neustart und Cleanup vor Auslieferung.
 
+## Fortsetzung am 24. September 2026
+
+Die im eigenen Feature-Worktree vorliegende Ergänzung zur Erkennung von Verneinungen und Erklärungsfragen wurde mit Rustfmt formatiert und erneut geprüft. Der Sperrpfad berücksichtigt weitere gebeugte Formen von „kein“ sowie ausdrückliche Bitten um Beschreibung, Bewertung oder Erklärung. Er ersetzt keine Benutzerfrage durch eine Veröffentlichungsanweisung.
+
+Erneut bestanden: 9 Tests aus `dl-brain --lib`, 15 gefilterte Brain-Tests aus `dl-bot`, 1 Mock-CLI-Test und 1 Test der Veröffentlichungsbestätigung. Insgesamt 26 Tests, 0 Fehler, 0 ignoriert. Der vollständige Bot wurde für diese Tests neu kompiliert; keine Produktionsverbindung oder Veröffentlichung.
+
+GitHub PR #451 ist offen. Die drei zuvor blockierten PR-Runs 35948523256, 35948523480 und 35948523406 wurden jeweils als Versuch 2 erneut angefordert. GitHub hat die Jobs wegen eines Abrechnungs-/Ausgabenlimit-Problems erneut nicht gestartet. Betroffene Check-IDs: 107514068677, 107514071091 und 107514074126. Das ist weiterhin keine GitHub-Testabnahme. Abrechnung und Ausgabenlimit wurden nicht verändert.
+
+Ein zusätzlicher unabhängiger Review wurde über T3 angefordert. Beide Startversuche endeten ohne Modellurteil wegen abgelaufener Claude-Anmeldung. Der Rollenresolver meldete außerdem Kontingentsperren für GLM, Grok und Astra. Kein Review-Gate wurde ersetzt oder übergangen.
+
 MERGEPROTOKOLL[MS-1]: kein Merge: PR-first-Testbetrieb
+LIVEBEWEIS[DV-1]: nicht ausgeführt: PR-first-Testbetrieb
