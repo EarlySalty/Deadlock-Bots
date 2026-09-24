@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   test:
+    name: Knowledge hybrid
     runs-on: ubuntu-latest
     defaults:
       run:
