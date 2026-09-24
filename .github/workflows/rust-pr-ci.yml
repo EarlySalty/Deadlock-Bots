@@ -36,4 +36,4 @@ jobs:
         with:
           workspaces: rust
       - name: Full repository Rust gate
-        run: rust/scripts/check.sh
+        run: rust/scripts/central_ci.sh
