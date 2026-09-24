@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   test:
+    name: Knowledge eval
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -33,7 +34,7 @@ jobs:
       - name: Format own eval file
         run: rustfmt --edition 2021 --check bin/dl-knowledge/src/eval.rs
       - name: Test dl-knowledge
-        run: cargo test --package dl-knowledge
+        run: bash scripts/central_test_db.sh cargo test --package dl-knowledge -- --test-threads=2
       - name: Clippy dl-knowledge
         run: cargo clippy --package dl-knowledge --no-deps -- -D warnings
       - name: BM25 baseline
