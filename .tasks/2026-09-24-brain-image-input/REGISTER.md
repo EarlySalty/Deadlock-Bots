@@ -17,6 +17,6 @@ Der delegierte Bauweg ist nicht verfügbar. Die ausdrücklich beauftragte Übern
 | Paket | Thread-ID | Modell | Status | Letzte Meldung |
 |---|---|---|---|---|
 | R1 | 2f3e9855-e681-4e2e-b48a-1e1bdd386b0f | astra | kein Urteil wegen Kontingentlimit, gesettelt, nicht wieder aufnehmen | Codex-Kontingent erschöpft; kein BLOCK ergangen |
-| R1 Ersatz | cc670e0a-f1c3-42af-8aa1-633bf3302a92 | glm-5.3-flash laut review_1 | laufend | vollständiger Diff und Verdrahtung werden read-only geprüft |
+| R1 Ersatz | cc670e0a-f1c3-42af-8aa1-633bf3302a92 | glm-5.3-flash laut review_1 | fertig, gesettelt | finale Delta-Abnahme ALLOW inklusive Inhaltsprotokoll-Schutz und Round6; REVIEW-EXTERN.md liegt vor |
 
 Die Hauptsession wertet PR-CI aus. Kein Merge, Deploy, Dienstneustart oder Worktree-Cleanup im aktiven Testbetrieb. Die Einträge zu ausgefallenen Threads erteilen keine Übersteuerung eines Hooks.
