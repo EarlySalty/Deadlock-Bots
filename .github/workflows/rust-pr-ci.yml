@@ -3,9 +3,6 @@ name: "Rust PR CI"
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust-pr-ci.yml"
   workflow_dispatch:
 
 permissions:
