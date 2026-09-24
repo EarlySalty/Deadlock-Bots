@@ -37,6 +37,60 @@ jobs:
             const repo = context.repo.repo;
             const requested = Number.parseInt(process.env.INPUT_PR_NUMBER || "", 10);
 
+            const requiredChecksByRepo = {
+              "Deadlock-Twitch-Bot": [
+                "Semantic review",
+                "Scope-Abgleich (keine toten Projekte)",
+                "Frontend PR Gate (website)",
+                "Frontend PR Gate (admin_dashboard)",
+                "Frontend PR Gate (dashboard_v2)",
+                "Uplink Auth, Broker und Dashboard-Anschluss",
+                "offline-build",
+                "schema-gate",
+              ],
+              "Deadlock-Bots": [
+                "Semantic review",
+                "Workspace check and tests",
+                "Knowledge eval",
+                "Knowledge hybrid",
+              ],
+              "Deadlock-Steam-Bot": [
+                "Semantic review",
+                "clippy + test",
+              ],
+              "uplink": [
+                "Semantic review",
+                "check",
+              ],
+              "Deadlock-Brain": [
+                "Semantic review",
+                "Migration composition",
+                "Rust compile",
+                "Python syntax",
+              ],
+              "Deadlock--Patchnotes-Bot": [
+                "Semantic review",
+                "Python tests",
+                "Changed Python and dependency security",
+              ],
+              "Deadlock-Turniere": [
+                "Semantic review",
+                "Frontend CI",
+                "Rust workspace and isolated PostgreSQL",
+                "Secret Detection",
+                "JavaScript Dependency Audit",
+                "Semgrep SAST",
+                "CodeQL Analysis (javascript-typescript)",
+                "Trivy Filesystem Scan",
+              ],
+            };
+
+            const requiredChecks = requiredChecksByRepo[repo];
+            if (!requiredChecks) {
+              core.setFailed(`No required-check policy exists for repository ${repo}.`);
+              return;
+            }
+
             let pulls;
             if (Number.isInteger(requested) && requested > 0) {
               pulls = [(await github.rest.pulls.get({ owner, repo, pull_number: requested })).data];
@@ -60,18 +114,18 @@ jobs:
                 core.notice(`PR #${pull_number}: base is not main or the PR is a draft.`);
                 continue;
               }
-
               if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
                 core.notice(`PR #${pull_number}: automatic merge is limited to same-repository branches.`);
                 continue;
               }
 
+              const evaluatedSha = pr.head.sha;
               const comparison = await github.request(
                 "GET /repos/{owner}/{repo}/compare/{basehead}",
                 {
                   owner,
                   repo,
-                  basehead: `${pr.base.sha}...${pr.head.sha}`,
+                  basehead: `${pr.base.sha}...${evaluatedSha}`,
                 },
               );
 
@@ -81,7 +135,7 @@ jobs:
                     owner,
                     repo,
                     pull_number,
-                    expected_head_sha: pr.head.sha,
+                    expected_head_sha: evaluatedSha,
                   });
                   core.notice(`PR #${pull_number}: base moved. Branch update requested, all gates must run again.`);
                 } catch (error) {
@@ -90,23 +144,30 @@ jobs:
                 continue;
               }
 
-              if (pr.mergeable === false || pr.mergeable_state === "dirty") {
-                core.notice(`PR #${pull_number}: merge conflict or non-mergeable state.`);
+              if (pr.mergeable !== true || pr.mergeable_state === "dirty") {
+                core.notice(`PR #${pull_number}: mergeability is not clean yet.`);
                 continue;
               }
 
               const checkResponse = await github.rest.checks.listForRef({
                 owner,
                 repo,
-                ref: pr.head.sha,
+                ref: evaluatedSha,
                 filter: "latest",
                 per_page: 100,
               });
               const checkRuns = checkResponse.data.check_runs || [];
+              const byName = new Map(checkRuns.map((check) => [check.name, check]));
 
-              const semantic = checkRuns.find((check) => check.name === "Semantic review");
-              if (!semantic || semantic.status !== "completed" || semantic.conclusion !== "success") {
-                core.notice(`PR #${pull_number}: waiting for successful semantic review on current head ${pr.head.sha}.`);
+              const missingRequired = requiredChecks.filter((name) => !byName.has(name));
+              const incompleteRequired = requiredChecks.filter((name) => {
+                const check = byName.get(name);
+                return check && (check.status !== "completed" || check.conclusion !== "success");
+              });
+              if (missingRequired.length || incompleteRequired.length) {
+                core.notice(
+                  `PR #${pull_number}: required checks not ready. missing=${missingRequired.join(",") || "none"} incomplete=${incompleteRequired.join(",") || "none"}.`,
+                );
                 continue;
               }
 
@@ -120,7 +181,7 @@ jobs:
               const combinedStatus = await github.rest.repos.getCombinedStatusForRef({
                 owner,
                 repo,
-                ref: pr.head.sha,
+                ref: evaluatedSha,
                 per_page: 100,
               });
               const statuses = combinedStatus.data.statuses || [];
@@ -128,10 +189,6 @@ jobs:
                 (status) => !acceptedStatusStates.has(status.state),
               );
 
-              if (checkRuns.length === 0 && statuses.length === 0) {
-                core.notice(`PR #${pull_number}: no CI result exists for the current head SHA.`);
-                continue;
-              }
               if (pendingChecks.length || failedChecks.length || failedStatuses.length) {
                 core.notice(
                   `PR #${pull_number}: gates not fully green. pending=${pendingChecks.length}, failed_checks=${failedChecks.length}, failed_statuses=${failedStatuses.length}.`,
@@ -140,8 +197,12 @@ jobs:
               }
 
               pr = (await github.rest.pulls.get({ owner, repo, pull_number })).data;
-              if (pr.head.sha !== listed.head.sha && Number.isInteger(requested)) {
-                core.notice(`PR #${pull_number}: head changed during reconciliation. Next run re-evaluates it.`);
+              if (pr.head.sha !== evaluatedSha) {
+                core.notice(`PR #${pull_number}: head changed after gate evaluation. Re-evaluation required.`);
+                continue;
+              }
+              if (pr.base.sha !== listed.base.sha && listed.base?.sha) {
+                core.notice(`PR #${pull_number}: base changed during reconciliation. Re-evaluation required.`);
                 continue;
               }
 
@@ -151,10 +212,10 @@ jobs:
                   repo,
                   pull_number,
                   merge_method: "squash",
-                  sha: pr.head.sha,
+                  sha: evaluatedSha,
                 });
                 if (merged.data.merged) {
-                  core.notice(`PR #${pull_number}: merged after fresh base, semantic review, and green CI.`);
+                  core.notice(`PR #${pull_number}: merged after fresh base, semantic review, and required CI.`);
                 } else {
                   core.warning(`PR #${pull_number}: GitHub did not merge: ${merged.data.message || "unknown reason"}`);
                 }
