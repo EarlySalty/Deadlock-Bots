@@ -140,7 +140,12 @@ jobs:
                 per_page: 100,
               });
               const checkRuns = checkResponse.data.check_runs || [];
-              const byName = new Map(checkRuns.map((check) => [check.name, check]));
+              const trustedCheckRuns = checkRuns.filter(
+                (check) =>
+                  check.head_sha === evaluatedSha &&
+                  check.app?.slug === "github-actions",
+              );
+              const byName = new Map(trustedCheckRuns.map((check) => [check.name, check]));
 
               const statusResponse = await github.rest.repos.getCombinedStatusForRef({
                 owner,
@@ -160,16 +165,10 @@ jobs:
                 }
               }
 
-              const missingRequired = requiredChecks.filter(
-                (name) => !byName.has(name) && !latestStatusByContext.has(name),
-              );
+              const missingRequired = requiredChecks.filter((name) => !byName.has(name));
               const incompleteRequired = requiredChecks.filter((name) => {
                 const check = byName.get(name);
-                const status = latestStatusByContext.get(name);
-                const checkNotGreen =
-                  check && (check.status !== "completed" || check.conclusion !== "success");
-                const statusNotGreen = status && status.state !== "success";
-                return Boolean(checkNotGreen || statusNotGreen);
+                return check && (check.status !== "completed" || check.conclusion !== "success");
               });
               if (missingRequired.length || incompleteRequired.length) {
                 core.notice(
