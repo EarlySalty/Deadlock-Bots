@@ -37,57 +37,12 @@ jobs:
             const repo = context.repo.repo;
             const requested = Number.parseInt(process.env.INPUT_PR_NUMBER || "", 10);
 
-            const requiredChecksByRepo = {
-              "Deadlock-Twitch-Bot": [
-                "Semantic review",
-                "Scope-Abgleich (keine toten Projekte)",
-                "Frontend PR Gate (website)",
-                "Frontend PR Gate (admin_dashboard)",
-                "Frontend PR Gate (dashboard_v2)",
-                "Rust SQLx required",
-              ],
-              "Deadlock-Bots": [
-                "Semantic review",
-                "Workspace check and tests",
-                "Knowledge eval",
-                "Knowledge hybrid",
-              ],
-              "Deadlock-Steam-Bot": [
-                "Semantic review",
-                "clippy + test",
-              ],
-              "uplink": [
-                "Semantic review",
-                "check",
-              ],
-              "Deadlock-Brain": [
-                "Semantic review",
-                "Migration composition",
-                "Rust compile",
-                "Python syntax",
-              ],
-              "Deadlock--Patchnotes-Bot": [
-                "Semantic review",
-                "Python tests",
-                "Changed Python and dependency security",
-              ],
-              "Deadlock-Turniere": [
-                "Semantic review",
-                "Frontend CI",
-                "Rust workspace and isolated PostgreSQL",
-                "Secret Detection",
-                "JavaScript Dependency Audit",
-                "Semgrep SAST",
-                "CodeQL Analysis (javascript-typescript)",
-                "Trivy Filesystem Scan",
-              ],
-            };
-
-            const requiredChecks = requiredChecksByRepo[repo];
-            if (!requiredChecks) {
-              core.setFailed(`No required-check policy exists for repository ${repo}.`);
-              return;
-            }
+            const requiredChecks = [
+              "Semantic review",
+              "Workspace check and tests",
+              "Knowledge eval",
+              "Knowledge hybrid",
+            ];
 
             let pulls;
             if (Number.isInteger(requested) && requested > 0) {
