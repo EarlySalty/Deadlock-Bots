@@ -76,6 +76,11 @@ async fn wait_for_cache_ready(
 /// Discord-Seite der Engine (Cache-Reads + REST-Aktionen).
 #[async_trait::async_trait]
 pub trait LanePort: Send + Sync {
+    /// Frische Streamer-Rolle und spielunabhängiger Live-Status. Unbekannt bedeutet nein.
+    async fn member_is_live_streamer(&self, _guild_id: u64, _user_id: u64) -> bool {
+        false
+    }
+
     /// Kein vollständiger Cache bedeutet unbekannt, nicht leer.
     async fn guild_voice_snapshot(&self, _guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         None

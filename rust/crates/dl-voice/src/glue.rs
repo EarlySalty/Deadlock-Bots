@@ -620,6 +620,7 @@ fn count_scrim_record_humans(
 }
 
 pub struct CacheSnapshot {
+    pub live_streamer_access: Option<crate::tempvoice::live_streamer::LiveStreamerAccess>,
     pub adapter: Arc<DiscordAdapter>,
     pub voice_pair_store: Arc<VoicePairGuardStore>,
     pub voice_pair_operations: Arc<VoicePairOperationLock>,
@@ -783,6 +784,13 @@ impl crate::scrim_record::ScrimRecordPort for CacheSnapshot {
 
 #[async_trait::async_trait]
 impl LanePort for CacheSnapshot {
+    async fn member_is_live_streamer(&self, guild_id: u64, user_id: u64) -> bool {
+        match &self.live_streamer_access {
+            Some(access) => access.allows(&self.adapter, guild_id, user_id).await,
+            None => false,
+        }
+    }
+
     async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         self.adapter.voice_cache_snapshot(guild_id)
     }
@@ -3300,6 +3308,7 @@ mod tests {
             .connect_lazy("postgres://localhost/test")
             .expect("lazy pool");
         CacheSnapshot {
+            live_streamer_access: None,
             adapter,
             voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
             voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
@@ -3479,6 +3488,7 @@ mod tests {
             .connect_lazy("postgres://localhost/test")
             .expect("lazy pool");
         let snapshot = CacheSnapshot {
+            live_streamer_access: None,
             adapter,
             voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
             voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
@@ -3785,6 +3795,7 @@ mod tests {
             .connect_lazy("postgres://localhost/test")
             .expect("lazy pool");
         let snapshot = CacheSnapshot {
+            live_streamer_access: None,
             adapter,
             voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
             voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
