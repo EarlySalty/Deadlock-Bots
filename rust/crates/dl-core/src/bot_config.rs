@@ -140,7 +140,9 @@ pub struct TempVoiceCleanupConfig {
 
 impl Default for TempVoiceCleanupConfig {
     fn default() -> Self {
-        Self { empty_lane_grace_seconds: 300 }
+        Self {
+            empty_lane_grace_seconds: 300,
+        }
     }
 }
 
@@ -349,7 +351,9 @@ impl BotConfig {
             ));
         }
         if !(1..=86_400).contains(&self.tempvoice.empty_lane_grace_seconds) {
-            return Err(invalid("tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen"));
+            return Err(invalid(
+                "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen",
+            ));
         }
         let fireworks = &self.llm.fireworks;
         if fireworks
@@ -462,10 +466,24 @@ mod tests {
 
     #[test]
     fn tempvoice_reconcile_grace_default_und_toml_override() {
-        assert_eq!(BotConfig::parse("schema_version = 1").expect("default").tempvoice.empty_lane_grace_seconds, 300);
-        assert_eq!(BotConfig::parse("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = 120").expect("override").tempvoice.empty_lane_grace_seconds, 120);
+        assert_eq!(
+            BotConfig::parse("schema_version = 1")
+                .expect("default")
+                .tempvoice
+                .empty_lane_grace_seconds,
+            300
+        );
+        assert_eq!(
+            BotConfig::parse("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = 120")
+                .expect("override")
+                .tempvoice
+                .empty_lane_grace_seconds,
+            120
+        );
         for invalid in [0, 86401] {
-            rejected(&format!("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = {invalid}"));
+            rejected(&format!(
+                "schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = {invalid}"
+            ));
         }
     }
 
