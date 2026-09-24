@@ -1,12 +1,32 @@
-title = "Deadlock custom gitleaks config"
+title = "Deadlock blocking secret policy"
 
 [extend]
 useDefault = true
 
-[allowlist]
-paths = [
-  "cogs/twitch/analytics/dashboard_v2/dist/.*"
-]
+[[allowlists]]
+description = "Generated CI/build outputs only; tracked artifacts are forbidden by the CI policy check"
+paths = ['''(^|/)\.ci/''', '''(^|/)rust/target/''', '''(^|/)\.git/''']
+
+[[allowlists]]
+description = "Two exact synthetic values in secret-redaction unit tests; SECURITY-CI.md"
+condition = "AND"
+paths = ['''^rust/crates/dl-ai/src/transparency\.rs$''']
+regexTarget = "secret"
+regexes = ['''^sk-liveGEHEIM1234567890$''', '''^sk-abcdefghijklmnop1234$''']
+
+[[allowlists]]
+description = "Two adjacent public crate names mistaken for an API key in Cargo.lock; SECURITY-CI.md"
+condition = "AND"
+paths = ['''^rust/Cargo\.lock$''']
+regexTarget = "match"
+regexes = ['''^libcrux-secrets",\s+"libcrux-sha3"$''']
+
+[[allowlists]]
+description = "Numeric Discord user IDs, not credentials, in this historical reconciliation report"
+condition = "AND"
+paths = ['''^rust/docs/_work/sp1/reconciliation/2026-07-02-final-apply-report\.json$''']
+regexTarget = "match"
+regexes = ['''^discord_id=[0-9]{17,20}"$''']
 
 [[rules]]
 id = "deadlock-discord-bot-token"
@@ -14,23 +34,14 @@ description = "Potential Discord bot token assignment"
 regex = '''(?i)(discord|bot).{0,24}(token|secret|key).{0,8}[:=]\s*["']?(mfa\.[A-Za-z0-9_-]{20,}|[MN][A-Za-z0-9]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27})'''
 tags = ["discord", "token", "deadlock-custom"]
 
-[[rules.allowlists]]
-regexes = ['''(?i)(example|sample|dummy|test|fake|placeholder|changeme)''']
-
 [[rules]]
 id = "deadlock-twitch-oauth-token"
 description = "Potential Twitch OAuth token assignment"
 regex = '''(?i)(twitch|irc).{0,20}(oauth|token|password).{0,8}[:=]\s*["']?oauth:[a-z0-9]{20,}'''
 tags = ["twitch", "oauth", "deadlock-custom"]
 
-[[rules.allowlists]]
-regexes = ['''(?i)(example|sample|dummy|test|fake|placeholder|changeme)''']
-
 [[rules]]
 id = "deadlock-steam-token"
 description = "Potential Steam refresh or machine auth token assignment"
 regex = '''(?i)(steam).{0,24}(refresh[_-]?token|machine[_-]?auth[_-]?token).{0,8}[:=]\s*["']?[A-Za-z0-9._-]{20,}'''
 tags = ["steam", "token", "deadlock-custom"]
-
-[[rules.allowlists]]
-regexes = ['''(?i)(example|sample|dummy|test|fake|placeholder|changeme)''']

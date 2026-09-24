@@ -1,152 +1,91 @@
-name: "CodeQL Advanced (auto-detect)"
+name: CodeQL Advanced
 
 on:
+  workflow_call:
   schedule:
     - cron: '44 10 * * 1'
   workflow_dispatch:
-
-concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   detect:
-    name: Detect languages
-    runs-on: ubuntu-latest
+    name: Detect tracked languages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
-      found: ${{ steps.detect.outputs.found }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-      - name: Detect present languages
+          persist-credentials: false
+      - name: Compile and test actual-language detection
+        run: |
+          mkdir -p .ci
+          rustup toolchain install 1.88.0 --profile minimal
+          rustc +1.88.0 --edition=2021 -D warnings --test .github/ci/codeql_languages.rs -o .ci/codeql-language-tests
+          .ci/codeql-language-tests
+          rustc +1.88.0 --edition=2021 -D warnings .github/ci/codeql_languages.rs -o .ci/codeql-languages
+      - name: Detect actual Python, Rust, JavaScript and Actions
         id: detect
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-
-            const root = process.env.GITHUB_WORKSPACE || '.';
-            const exts = new Set();
-
-            function walk(dir) {
-              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                const p = path.join(dir, entry.name);
-                if (entry.isDirectory()) {
-                  // Skip common bulky dirs
-                  if (['.git','node_modules','.venv','venv','dist','build','__pycache__'].includes(entry.name)) continue;
-                  walk(p);
-                } else {
-                  const m = entry.name.match(/(\.[^.]+)$/);
-                  if (m) exts.add(m[1].toLowerCase());
-                }
-              }
-            }
-            walk(root);
-
-            const has = (arr) => arr.some(e => exts.has(e));
-
-            // Map file extensions -> CodeQL language + sensible build-mode
-            const langs = [];
-
-            if (has(['.js','.ts','.tsx'])) langs.push({ language: 'javascript-typescript',  build: 'none' });
-            if (has(['.go']))              langs.push({ language: 'go',                     build: 'autobuild' });
-            if (has(['.java','.kt','.kts'])) langs.push({ language: 'java-kotlin',          build: 'autobuild' });
-            if (has(['.cs']))              langs.push({ language: 'csharp',                 build: 'autobuild' });
-            if (has(['.rb']))              langs.push({ language: 'ruby',                   build: 'none' });
-            if (has(['.rs']))              langs.push({ language: 'rust',                   build: 'autobuild' });
-            // Optional/Best-effort:
-            if (has(['.c','.cc','.cpp','.cxx','.h','.hpp'])) langs.push({ language: 'c-cpp', build: 'autobuild' });
-            if (has(['.swift']))           langs.push({ language: 'swift',                  build: 'autobuild' });
-
-            // GitHub Actions (workflows) — nur wenn wirklich QL-Packs dafür erwünscht
-            if (fs.existsSync(path.join(root, '.github', 'workflows'))) {
-              const hasYaml = fs.readdirSync(path.join(root, '.github', 'workflows'))
-                                .some(n => n.endsWith('.yml') || n.endsWith('.yaml'));
-              if (hasYaml) langs.push({ language: 'actions', build: 'none' });
-            }
-
-            const found = langs.length > 0;
-            const matrix = JSON.stringify({ include: langs });
-
-            core.setOutput('found', String(found));
-            core.setOutput('matrix', matrix);
-            core.info(`Detected languages: ${found ? langs.map(l => l.language).join(', ') : '(none)'}`);
+        run: .ci/codeql-languages >> "$GITHUB_OUTPUT"
 
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: detect
-    if: needs.detect.outputs.found == 'true'
-    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
-    permissions:
-      security-events: write
-      contents: read
-      packages: read
-      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      SQLX_OFFLINE: 'true'
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
-
     steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-      # Runtimes nur da, wo es hilft – schadet nicht, macht Autobuild stabiler
-      - name: Setup Node.js
-        if: matrix.language == 'javascript-typescript' || matrix.language == 'actions'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '20'
-
-      - name: Setup Go
-        if: matrix.language == 'go'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.22'
-
-      - name: Setup Java
-        if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-
-      - name: Setup .NET
-        if: matrix.language == 'csharp'
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
-        with:
-          dotnet-version: '8.0.x'
-
+          persist-credentials: false
+      - name: Rust extractor prerequisites
+        if: matrix.language == 'rust'
+        run: rustup toolchain install 1.88.0 --profile minimal
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+          SQLX_OFFLINE: 'true'
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build }}
-          tools: linked
           config-file: ./.github/codeql/codeql-config.yml
-
-      # Für compiled langs übernimmt CodeQL bei 'autobuild' den Versuch automatisch.
-      # Fehlschläge müssen den Workflow blockieren.
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+      - name: Perform analysis without requiring reporting permissions
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
-          category: "/language:${{ matrix.language }}"
-          upload: true
-
-      - name: Archive SARIF
-        if: always()
+          category: /language:${{ matrix.language }}
+          output: ${{ runner.temp }}/codeql-results
+          upload: never
+          upload-database: false
+      - name: Block findings, scanner errors and missing SARIF
+        run: bash .github/ci/check-sarif.sh "$RUNNER_TEMP/codeql-results"
+      - name: Archive reports independently of scanner enforcement
+        if: ${{ always() }}
+        continue-on-error: true # Only reporting. Analysis and SARIF gate above remain blocking.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codeql-sarif-${{ matrix.language }}
-          path: /home/runner/work/**/results/**/*.sarif
-          if-no-files-found: ignore
-          retention-days: 30
+          path: ${{ runner.temp }}/codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 7
+
+  complete:
+    name: CodeQL complete
+    if: ${{ always() }}
+    needs: [detect, analyze]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on detection or matrix failure
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+        run: test "$DETECT_RESULT" = success && test "$ANALYZE_RESULT" = success

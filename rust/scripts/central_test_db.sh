@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Wegwerfbarer Timescale-Testcontainer fuer zentrale DB-Integrationstests.
-# Nutzt ein Throwaway-Passwort und hat keinen Bezug zur echten zentralen DB.
+# Wegwerfbare Postgres/TimescaleDB mit pgvector; keine produktiven DSNs oder Volumes.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -9,7 +8,8 @@ if [ "$#" -eq 0 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="timescale/timescaledb:2.17.2-pg16"
+# Geprüft am 2026-09-23: enthält timescaledb, pgcrypto und vector.
+IMAGE="timescale/timescaledb@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a"
 NAME="dl-central-test-postgres-$$"
 DB="deadlock_test"
 USER="deadlock"
@@ -18,7 +18,6 @@ PASS="testpw"
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
-
 finish() {
   local status="${1:-$?}"
   trap - EXIT INT TERM
@@ -29,7 +28,7 @@ trap 'finish "$?"' EXIT
 trap 'finish 130' INT
 trap 'finish 143' TERM
 
-docker run --rm -d \
+docker run --rm -d --cpus 2 --memory 2g \
   --name "$NAME" \
   -e POSTGRES_DB="$DB" \
   -e POSTGRES_USER="$USER" \
@@ -39,22 +38,23 @@ docker run --rm -d \
 
 PORT="$(docker port "$NAME" 5432/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
 if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
-  echo "ungueltiger Host-Port fuer $NAME: ${PORT:-<leer>}" >&2
+  echo "Ungültiger Host-Port für $NAME: ${PORT:-<leer>}" >&2
   exit 1
 fi
 
 CENTRAL_TEST_DSN="postgres://${USER}:${PASS}@127.0.0.1:${PORT}/${DB}"
 export CENTRAL_TEST_DSN
+# Alle bekannten Fallbacks überschreiben, niemals eine geerbte Produktiv-DSN verwenden.
 export DEADLOCK_CENTRAL_DSN="$CENTRAL_TEST_DSN"
+export DATABASE_URL="$CENTRAL_TEST_DSN"
 export TURNIER_TEST_DB_CONFIRM="throwaway-only"
 export SQLX_OFFLINE=true
 
 if ! command -v pg_isready >/dev/null 2>&1; then
-  echo "pg_isready nicht gefunden; Host-DSN-Readiness kann nicht geprueft werden" >&2
+  echo "pg_isready fehlt; kein erfolgreicher Test ohne geprüfte Datenbank" >&2
   exit 1
 fi
 
-echo -n "warte auf zentrale Test-Postgres"
 ready=0
 for _ in $(seq 1 90); do
   count="$(docker logs "$NAME" 2>&1 | grep -c 'database system is ready to accept connections' || true)"
@@ -62,33 +62,22 @@ for _ in $(seq 1 90); do
     && docker exec "$NAME" pg_isready -U "$USER" -d "$DB" >/dev/null 2>&1 \
     && pg_isready -h 127.0.0.1 -p "$PORT" -U "$USER" -d "$DB" >/dev/null 2>&1; then
     ready=1
-    echo " ok"
     break
   fi
-  echo -n "."
   sleep 1
 done
-
 if [ "$ready" -ne 1 ]; then
-  echo " TIMEOUT" >&2
+  echo "Testdatenbank nicht bereit" >&2
   docker logs "$NAME" 2>&1 | tail -50 >&2
   exit 1
 fi
 
-for _ in $(seq 1 15); do
-  if docker logs "$NAME" 2>&1 | grep -q 'TimescaleDB background worker launcher connected'; then
-    break
-  fi
-  sleep 1
-done
+# Echte Erweiterungen laden: ein bloß offener TCP-Port reicht nicht.
+docker exec "$NAME" psql -X -U "$USER" -d "$DB" -v ON_ERROR_STOP=1 \
+  -c 'CREATE EXTENSION IF NOT EXISTS timescaledb; CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE EXTENSION IF NOT EXISTS vector;' \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('timescaledb', 'pgcrypto', 'vector') ORDER BY extname;"
 
 echo "CENTRAL_TEST_DSN=postgres://${USER}:***@127.0.0.1:${PORT}/${DB}"
-
 cd "$ROOT"
-SQLX_OFFLINE=true DEADLOCK_CENTRAL_DSN="$CENTRAL_TEST_DSN" cargo run -p dl-central-migrate
-
-set +e
+cargo run --locked -j 2 -p dl-central-migrate
 "$@"
-status=$?
-set -e
-finish "$status"

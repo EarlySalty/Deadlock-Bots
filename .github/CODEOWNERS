@@ -1,5 +1,10 @@
-# Default ownership for all files in this repository.
-* @NaniDerEchte2
+# Repository owner verified through GitHub's collaborator permission endpoint.
+* @EarlySalty
 
-# Protect CI/security changes with explicit owner review.
-.github/workflows/* @NaniDerEchte2
+# Explicit ownership for CI enforcement, scanners and exception policies.
+/.github/ @EarlySalty
+/.gitleaks.toml @EarlySalty
+/.semgrep/ @EarlySalty
+/.semgrepignore @EarlySalty
+/rust/deny.toml @EarlySalty
+/rust/scripts/central_test_db.sh @EarlySalty

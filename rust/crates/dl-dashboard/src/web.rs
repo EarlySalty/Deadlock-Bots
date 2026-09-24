@@ -2231,7 +2231,7 @@ mod visual_brain_route_tests {
 
     #[tokio::test]
     async fn wissenskarte_prueft_jede_route_vor_dem_dateizugriff() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("dashboard test operation succeeds");
         let mut cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("test-id".into()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("test-secret".into()),
@@ -2240,7 +2240,7 @@ mod visual_brain_route_tests {
         cfg.data_dir = dir.path().join("data");
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost/unused_test_database")
-            .unwrap();
+            .expect("dashboard test operation succeeds");
         let sessions = SessionStore::new(3600);
         let mut cookies = Vec::new();
         for access_level in [AccessLevel::TurnierOnly, AccessLevel::Full] {
@@ -2257,7 +2257,7 @@ mod visual_brain_route_tests {
                         now_unix_f64(),
                     )
                     .await
-                    .unwrap(),
+                    .expect("dashboard test operation succeeds"),
             );
         }
         let app = DashboardApp {
@@ -2308,9 +2308,13 @@ mod visual_brain_route_tests {
                 }
                 let response = routes
                     .clone()
-                    .oneshot(request.body(Body::empty()).unwrap())
+                    .oneshot(
+                        request
+                            .body(Body::empty())
+                            .expect("dashboard test operation succeeds"),
+                    )
                     .await
-                    .unwrap();
+                    .expect("dashboard test operation succeeds");
                 assert_eq!(response.status().as_u16(), expected, "{path}");
                 assert_eq!(
                     response.headers()[header::CACHE_CONTROL],

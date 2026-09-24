@@ -767,18 +767,27 @@ mod tests {
                 {"source":"neighbor", "target":"unrelated", "relation":"calls"}
             ]
         }))
-        .unwrap();
-        let graph = reduce_graph(raw, SystemTime::UNIX_EPOCH).unwrap();
+        .expect("visual-brain test operation succeeds");
+        let graph = reduce_graph(raw, SystemTime::UNIX_EPOCH)
+            .expect("visual-brain test operation succeeds");
         assert_eq!(graph.nodes.len(), 4);
         assert_eq!(graph.links.len(), 2);
         assert_eq!(graph.unlinked_documents, 1);
-        let document = graph.nodes.iter().find(|node| node.id == "doc").unwrap();
-        let code = graph.nodes.iter().find(|node| node.id == "code").unwrap();
+        let document = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "doc")
+            .expect("visual-brain test operation succeeds");
+        let code = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "code")
+            .expect("visual-brain test operation succeeds");
         assert_eq!(document.layer, "knowledge");
         assert_eq!(document.visibility, "internal");
         assert_eq!(code.layer, "evidence");
         assert_eq!(code.visibility, "internal");
-        let encoded = serde_json::to_string(&graph).unwrap();
+        let encoded = serde_json::to_string(&graph).expect("visual-brain test operation succeeds");
         assert!(!encoded.contains("file://"));
         assert!(!encoded.contains("unrelated"));
     }
@@ -826,8 +835,10 @@ mod tests {
             nodes.push(serde_json::json!({"id":format!("code-{index}")}));
             links.push(serde_json::json!({"source":"doc", "target":format!("code-{index}"), "relation":"documents"}));
         }
-        let raw = serde_json::from_value(serde_json::json!({"nodes":nodes,"links":links})).unwrap();
-        let graph = reduce_graph(raw, SystemTime::UNIX_EPOCH).unwrap();
+        let raw = serde_json::from_value(serde_json::json!({"nodes":nodes,"links":links}))
+            .expect("visual-brain test operation succeeds");
+        let graph = reduce_graph(raw, SystemTime::UNIX_EPOCH)
+            .expect("visual-brain test operation succeeds");
         assert_eq!(graph.nodes.len(), MAX_NODES);
         assert_eq!(graph.omitted_nodes, 101);
         assert_eq!(graph.unlinked_documents, 0);
@@ -836,7 +847,7 @@ mod tests {
                 .nodes
                 .iter()
                 .find(|node| node.id == "doc")
-                .unwrap()
+                .expect("visual-brain test operation succeeds")
                 .evidence_links,
             1600
         );
@@ -844,22 +855,28 @@ mod tests {
 
     #[tokio::test]
     async fn cache_wird_beim_neuen_dateistand_erneuert() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("visual-brain test operation succeeds");
         let path = dir.path().join("graph.json");
         std::fs::write(
             &path,
             r#"{"nodes":[{"id":"a","metadata":{"kind":"corpus"}}],"links":[]}"#,
         )
-        .unwrap();
-        let first = cached_graph(path.clone()).await.unwrap();
-        let same = cached_graph(path.clone()).await.unwrap();
+        .expect("visual-brain test operation succeeds");
+        let first = cached_graph(path.clone())
+            .await
+            .expect("visual-brain test operation succeeds");
+        let same = cached_graph(path.clone())
+            .await
+            .expect("visual-brain test operation succeeds");
         assert_eq!(first.as_ptr(), same.as_ptr());
         std::fs::write(
             &path,
             r#"{"nodes":[{"id":"neuer-stand","metadata":{"kind":"corpus"}}],"links":[]}"#,
         )
-        .unwrap();
-        let updated = cached_graph(path).await.unwrap();
+        .expect("visual-brain test operation succeeds");
+        let updated = cached_graph(path)
+            .await
+            .expect("visual-brain test operation succeeds");
         assert_ne!(first, updated);
         assert!(String::from_utf8_lossy(&updated).contains("neuer-stand"));
     }

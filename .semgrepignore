@@ -1,0 +1,4 @@
+# Intentionally no source/test exclusions. Override Semgrep's built-in test ignores.
+# CI passes --no-git-ignore so tracked files such as export_infisical_env.py are
+# scanned despite legacy .gitignore patterns. Generated .ci, .git and rust/target
+# are excluded explicitly by the command in required-pr-gate.yml.

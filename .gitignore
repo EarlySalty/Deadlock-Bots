@@ -115,10 +115,10 @@ docs/superpowers/
 # Laufzeit-PID des Rust-Discord-Bots
 deadlock-bot-rust.pid
 
-# Secretfreie Peer-Konfiguration für die Dashboard-Integrationstests
-!rust/crates/dl-dashboard/tests/postgres.json
-
 # Reviewbares einmaliges Reparaturskript, keine Laufzeitdaten.
 !/scripts/maintenance/
 /scripts/maintenance/*
 !/scripts/maintenance/repair_discord_system_messages_20260908.sql
+
+# Isolated CI tools, reports, probes and build artifacts (never production data).
+/.ci/

@@ -1,0 +1,195 @@
+name: Deterministic PR CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: required-pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  actions:
+    name: Actions policy and gate counterchecks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned workflow scanners
+        run: bash .github/ci/install-tools.sh actionlint zizmor
+      - name: Validate all workflows
+        run: |
+          .ci/bin/actionlint -color
+          .ci/bin/zizmor --offline --no-progress --min-severity low --min-confidence low .github/workflows
+      - name: Compile and test fail-closed gate
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustc +1.88.0 --edition=2021 -D warnings --test .github/ci/required_gate.rs -o .ci/gate-tests
+          .ci/gate-tests
+          rustc +1.88.0 --edition=2021 -D warnings .github/ci/required_gate.rs -o .ci/required-gate
+          bash .github/ci/gate-counterchecks.sh
+          bash .github/ci/sarif-counterchecks.sh
+          bash .github/ci/test-runner-counterchecks.sh
+          bash .github/ci/database-counterchecks.sh
+          bash .github/ci/scanner-counterchecks.sh trivy-inventory
+          rustc +1.88.0 --edition=2021 -D warnings --test .github/ci/test_inventory.rs -o .ci/test-inventory-tests
+          .ci/test-inventory-tests
+          if [ -n "$(git ls-files -- .ci rust/target)" ]; then
+            echo '::error::Generated scanner probes/build outputs must not be tracked'
+            exit 1
+          fi
+
+  format:
+    name: Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+      - name: Check full workspace and CI helpers
+        run: |
+          cargo +1.88.0 fmt --manifest-path rust/Cargo.toml --all -- --check
+          rustfmt +1.88.0 --edition 2021 --check .github/ci/*.rs
+
+  rust:
+    name: Rust build and isolated integration tests
+    uses: ./.github/workflows/discord-config-ci.yml # zizmor: ignore[self-repository] -- Same-commit workflow; actionlint 1.7.12 does not parse dollar-slash syntax.
+
+  python:
+    name: Existing Python tests and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Python test tools
+        run: |
+          python3 -m venv .ci/python
+          .ci/python/bin/python -m pip install --require-hashes -r .github/ci/python-requirements.txt
+      - name: Lint real tracked Python and run both existing suites
+        run: |
+          git ls-files -z -- '*.py' | xargs -0 -r .ci/python/bin/ruff check --select E4,E7,E9,F
+          .ci/python/bin/python -m pytest -q tests/test_infisical_exporter_contract.py
+          .ci/python/bin/python .tasks/2026-09-17-rag-ausbau-visual-brain/test_auswertung_c.py
+
+  secrets:
+    name: Secret scanners and counterchecks
+    uses: ./.github/workflows/secret-scanning.yml # zizmor: ignore[self-repository] -- Same-commit workflow; actionlint 1.7.12 does not parse dollar-slash syntax.
+
+  dependencies:
+    name: Cargo audit and deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Cargo security tools
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 install --locked --version 0.22.2 --root .ci/audit cargo-audit
+          cargo +1.88.0 install --locked --version 0.20.2 --root .ci/deny cargo-deny
+      - name: Audit locked dependency graph
+        working-directory: rust
+        run: ../.ci/audit/bin/cargo-audit audit --deny warnings
+      - name: Deny unapproved dependencies and sources
+        working-directory: rust
+        run: ../.ci/deny/bin/cargo-deny --locked --all-features check
+
+  semgrep:
+    name: Native Rust, Python and JavaScript SAST
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Semgrep
+        run: |
+          python3 -m venv .ci/semgrep
+          .ci/semgrep/bin/python -m pip install --require-hashes -r .github/ci/semgrep-requirements.txt
+      - name: Prove native Rust rules execute with the production severity filter
+        run: |
+          export PATH="$PWD/.ci/semgrep/bin:$PATH"
+          bash .github/ci/scanner-counterchecks.sh semgrep
+      - name: Scan repository with reviewed local rules
+        run: >-
+          .ci/semgrep/bin/semgrep scan --config .semgrep/rules
+          --severity ERROR --severity WARNING --error --strict
+          --metrics off --disable-version-check --no-git-ignore --jobs 2 --timeout 30
+          --exclude .ci --exclude .git --exclude rust/target .
+
+  trivy:
+    name: Trivy HIGH and CRITICAL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Trivy
+        run: bash .github/ci/install-tools.sh trivy
+      - name: Prove findings and scanner errors block
+        run: |
+          export PATH="$PWD/.ci/bin:$PATH"
+          bash .github/ci/scanner-counterchecks.sh trivy
+      - name: Scan dependencies and require complete scanner coverage
+        run: |
+          status=0
+          rm -f .ci/trivy-security.json
+          .ci/bin/trivy fs --scanners vuln,misconfig --severity HIGH,CRITICAL \
+            --file-patterns 'pip:(^|/)(python|semgrep)-requirements\.txt$' \
+            --exit-code 1 --skip-dirs .ci --skip-dirs .git --skip-dirs rust/target \
+            --list-all-pkgs --format json --output .ci/trivy-security.json . || status=$?
+          jq -e -s -f .github/ci/trivy-inventory.jq .ci/trivy-security.json >/dev/null
+          jq -r '.Results[] | .Target as $target | (.Vulnerabilities[]? | [$target, .Severity, .VulnerabilityID, .PkgName] | @tsv), (.Misconfigurations[]? | [$target, .Severity, .ID] | @tsv)' .ci/trivy-security.json
+          printf 'Trivy scan inventory verified; scanner exit code: %s\n' "$status"
+          exit "$status"
+
+  codeql:
+    name: CodeQL deep analysis
+    uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository] -- Same-commit workflow; actionlint 1.7.12 does not parse dollar-slash syntax.
+
+  required:
+    name: Required PR Gate
+    if: ${{ always() }}
+    needs: [actions, format, rust, python, secrets, dependencies, semgrep, trivy, codeql]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require every mandatory job to succeed
+        env:
+          CI_RESULT_actions: ${{ needs.actions.result }}
+          CI_RESULT_format: ${{ needs.format.result }}
+          CI_RESULT_rust: ${{ needs.rust.result }}
+          CI_RESULT_python: ${{ needs.python.result }}
+          CI_RESULT_secrets: ${{ needs.secrets.result }}
+          CI_RESULT_dependencies: ${{ needs.dependencies.result }}
+          CI_RESULT_semgrep: ${{ needs.semgrep.result }}
+          CI_RESULT_trivy: ${{ needs.trivy.result }}
+          CI_RESULT_codeql: ${{ needs.codeql.result }}
+        run: |
+          mkdir -p .ci
+          rustup toolchain install 1.88.0 --profile minimal
+          rustc +1.88.0 --edition=2021 -D warnings .github/ci/required_gate.rs -o .ci/required-gate
+          .ci/required-gate

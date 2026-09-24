@@ -1421,10 +1421,12 @@ mod tests {
         let query = InsightQuery {
             interval: Interval::Weekly,
             guild_id: Some(7001),
-            from: NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
-            to: NaiveDate::from_ymd_opt(2026, 9, 7).unwrap(),
+            from: NaiveDate::from_ymd_opt(2026, 8, 24)
+                .expect("valid calendar date in test fixture"),
+            to: NaiveDate::from_ymd_opt(2026, 9, 7).expect("valid calendar date in test fixture"),
         };
-        let today = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let today =
+            NaiveDate::from_ymd_opt(2026, 9, 8).expect("valid calendar date in test fixture");
         let activation = participation_cohorts(db.pool(), &query, false, today).await?;
         assert_eq!(
             activation[0]["new_members"], 3,
@@ -1442,8 +1444,9 @@ mod tests {
             "Online und Verify sind keine Communityteilnahme"
         );
         let partial = InsightQuery {
-            from: NaiveDate::from_ymd_opt(2026, 8, 26).unwrap(),
-            to: NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
+            from: NaiveDate::from_ymd_opt(2026, 8, 26)
+                .expect("valid calendar date in test fixture"),
+            to: NaiveDate::from_ymd_opt(2026, 9, 3).expect("valid calendar date in test fixture"),
             ..query
         };
         assert!(participation_cohorts(db.pool(), &partial, true, today)
@@ -1453,8 +1456,8 @@ mod tests {
             .await?
             .is_empty());
         let old = InsightQuery {
-            from: NaiveDate::from_ymd_opt(2026, 2, 2).unwrap(),
-            to: NaiveDate::from_ymd_opt(2026, 2, 9).unwrap(),
+            from: NaiveDate::from_ymd_opt(2026, 2, 2).expect("valid calendar date in test fixture"),
+            to: NaiveDate::from_ymd_opt(2026, 2, 9).expect("valid calendar date in test fixture"),
             ..query
         };
         for following_week in [false, true] {

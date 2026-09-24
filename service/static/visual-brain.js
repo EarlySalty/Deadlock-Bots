@@ -74,10 +74,10 @@
         }
         const pairs = new Map();
         for (const docs of evidence.values()) {
-            const unique = [...new Set(docs)].sort();
-            for (let left = 0; left < unique.length; left++) {
-                for (let right = left + 1; right < unique.length; right++) {
-                    const key = unique[left] + '\u0000' + unique[right];
+            const uniqueDocs = [...new Set(docs)].sort();
+            for (let left = 0; left < uniqueDocs.length; left++) {
+                for (let right = left + 1; right < uniqueDocs.length; right++) {
+                    const key = uniqueDocs[left] + '\u0000' + uniqueDocs[right];
                     pairs.set(key, (pairs.get(key) || 0) + 1);
                     if (pairs.size >= limit) break;
                 }

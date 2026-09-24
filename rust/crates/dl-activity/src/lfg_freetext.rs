@@ -584,7 +584,8 @@ impl FreetextLfg {
                     end = ?request.start_window.as_ref().map(|window| window.end),
                     "LFG-Freitext-Entscheidung"
                 );
-                self.match_and_enqueue(event, guild_id, request).await;
+                self.match_and_enqueue(event, guild_id, request, Utc::now)
+                    .await;
             }
         }
     }
@@ -594,6 +595,7 @@ impl FreetextLfg {
         event: &dl_discord::MessageEvent,
         guild_id: u64,
         request: LfgRequest,
+        clock: impl FnOnce() -> DateTime<Utc>,
     ) {
         let (Ok(guild_id), Ok(requester_id)) =
             (i64::try_from(guild_id), i64::try_from(event.author_id))
@@ -620,7 +622,7 @@ impl FreetextLfg {
         };
         let invite_limit = (usize::from(request.needed_players) * 2).min(MAX_INVITES_PER_REQUEST);
         let mut invites_written = 0;
-        for decision in match_candidates(&request, candidates, Utc::now()) {
+        for decision in match_candidates(&request, candidates, clock()) {
             match decision.outcome {
                 MatchOutcome::Skipped(reason) => tracing::info!(
                     decision = "skipped",
@@ -1093,7 +1095,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO activity.user_activity_patterns(\
                 user_id, typical_hours, typical_days, last_active_at, last_pinged_at, ping_count_30d\
-             ) SELECT user_id, '[20,21]'::jsonb, '[0]'::jsonb, $2, NULL, 0 \
+             ) SELECT user_id, '[18,19]'::jsonb, '[0]'::jsonb, $2, NULL, 0 \
              FROM generate_series(1, $1) AS users(user_id)",
         )
         .bind(count)
@@ -1153,7 +1155,7 @@ mod tests {
         );
 
         handler(pool.clone())
-            .match_and_enqueue(&message_event(), 99, request())
+            .match_and_enqueue(&message_event(), 99, request(), now)
             .await;
 
         let invite_exists: bool = sqlx::query_scalar(
@@ -1178,7 +1180,7 @@ mod tests {
         request.needed_players = 1;
 
         handler(pool.clone())
-            .match_and_enqueue(&message_event(), 99, request)
+            .match_and_enqueue(&message_event(), 99, request, now)
             .await;
 
         let invited: Vec<i64> = sqlx::query_scalar(
@@ -1204,7 +1206,7 @@ mod tests {
         request.needed_players = 5;
 
         handler(pool.clone())
-            .match_and_enqueue(&message_event(), 99, request)
+            .match_and_enqueue(&message_event(), 99, request, now)
             .await;
 
         let invited: Vec<i64> = sqlx::query_scalar(
@@ -1234,7 +1236,7 @@ mod tests {
             .expect("existing invite"));
 
         handler(pool.clone())
-            .match_and_enqueue(&message_event(), 99, request)
+            .match_and_enqueue(&message_event(), 99, request, now)
             .await;
 
         let invited: Vec<i64> = sqlx::query_scalar(

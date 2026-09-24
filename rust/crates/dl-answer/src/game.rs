@@ -940,7 +940,9 @@ mod tests {
         .expect("gültige Scaling-Fixture");
 
         assert_eq!(result.evidence.len(), 2);
-        assert!(result.evidence[0].text.contains("\"archetype_concept\":\"scaling\""));
+        assert!(result.evidence[0]
+            .text
+            .contains("\"archetype_concept\":\"scaling\""));
         assert!(result.evidence[1].text.contains("late_skewed"));
     }
 

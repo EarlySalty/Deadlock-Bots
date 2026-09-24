@@ -5,14 +5,8 @@ use dl_central_db::{kv, testing::test_pool};
 #[tokio::test]
 #[ignore = "requires a central Postgres DSN; run with --include-ignored"]
 async fn kv_round_trips_and_deletes_values() {
-    if std::env::var("CENTRAL_TEST_DSN").is_err()
-        && std::env::var("DATABASE_URL").is_err()
-        && std::env::var("DEADLOCK_CENTRAL_DSN").is_err()
-    {
-        eprintln!("skipping: CENTRAL_TEST_DSN, DATABASE_URL or DEADLOCK_CENTRAL_DSN is required");
-        return;
-    }
-
+    // test_pool rejects missing DSNs and production database names. Never report
+    // an unexecuted integration test as a successful test.
     let db = test_pool().await.expect("create migrated test pool");
     let pool = db.pool();
     let ns = "voice";

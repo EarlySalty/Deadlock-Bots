@@ -32,25 +32,25 @@ const TEAM_VOICE_CHANNELS: &[TeamChannelConfig] = &[
         voice_channel_id: 1_521_167_264_533_970_954,
         team_role_id: 1_521_163_175_318_388_847,
         text_channel_id: 1_521_164_348_976_922_795,
-            archive_folder: "Team 1",
+        archive_folder: "Team 1",
     },
     TeamChannelConfig {
         voice_channel_id: 1_521_167_309_828_526_183,
         team_role_id: 1_521_163_233_245_794_465,
         text_channel_id: 1_521_164_426_424_750_171,
-            archive_folder: "Team 2",
+        archive_folder: "Team 2",
     },
     TeamChannelConfig {
         voice_channel_id: 1_521_167_476_711_358_505,
         team_role_id: 1_521_163_300_480_483_498,
         text_channel_id: 1_521_164_444_787_540_110,
-            archive_folder: "Team 3",
+        archive_folder: "Team 3",
     },
     TeamChannelConfig {
         voice_channel_id: 1_521_939_025_982_652_416,
         team_role_id: 1_521_163_334_211_338_391,
         text_channel_id: 1_521_164_466_169_970_728,
-            archive_folder: "Team 4",
+        archive_folder: "Team 4",
     },
 ];
 
@@ -185,25 +185,25 @@ mod tests {
             voice_channel_id: 1_521_167_264_533_970_954,
             team_role_id: 1_521_163_175_318_388_847,
             text_channel_id: 1_521_164_348_976_922_795,
-                    archive_folder: "Team 1",
+            archive_folder: "Team 1",
         },
         TeamChannelConfig {
             voice_channel_id: 1_521_167_309_828_526_183,
             team_role_id: 1_521_163_233_245_794_465,
             text_channel_id: 1_521_164_426_424_750_171,
-                    archive_folder: "Team 2",
+            archive_folder: "Team 2",
         },
         TeamChannelConfig {
             voice_channel_id: 1_521_167_476_711_358_505,
             team_role_id: 1_521_163_300_480_483_498,
             text_channel_id: 1_521_164_444_787_540_110,
-                    archive_folder: "Team 3",
+            archive_folder: "Team 3",
         },
         TeamChannelConfig {
             voice_channel_id: 1_521_939_025_982_652_416,
             team_role_id: 1_521_163_334_211_338_391,
             text_channel_id: 1_521_164_466_169_970_728,
-                    archive_folder: "Team 4",
+            archive_folder: "Team 4",
         },
     ];
 
@@ -305,7 +305,9 @@ mod tests {
 
     #[test]
     fn duration_cap_does_not_trigger_after_five_hours_fifty_nine_minutes() {
-        assert!(!duration_cap_reached(Duration::from_secs(5 * 3600 + 59 * 60)));
+        assert!(!duration_cap_reached(Duration::from_secs(
+            5 * 3600 + 59 * 60
+        )));
     }
 
     #[test]

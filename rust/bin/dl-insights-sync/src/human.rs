@@ -79,7 +79,7 @@ mod tests {
     fn mausweg_ist_kein_sprung() {
         let pts = path((10.0, 10.0), (400.0, 260.0));
         assert!(pts.len() >= 7);
-        let last = *pts.last().unwrap();
+        let last = *pts.last().expect("mouse path contains points");
         assert!((last.0 - 400.0).abs() < 12.0);
         assert!((last.1 - 260.0).abs() < 12.0);
         let mut prev = (10.0, 10.0);

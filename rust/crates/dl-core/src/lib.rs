@@ -8,7 +8,7 @@ pub mod bot_config;
 pub mod config;
 pub mod observability;
 pub mod operating_config;
-pub mod runtime_config;
 pub mod pyfloat;
+pub mod runtime_config;
 
 pub use config::{Config, ConfigError, Ports};

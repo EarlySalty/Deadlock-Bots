@@ -77,7 +77,10 @@ async fn wait_for_cache_ready(
 #[async_trait::async_trait]
 pub trait LanePort: Send + Sync {
     /// Kein vollständiger Cache bedeutet unbekannt, nicht leer.
-    async fn guild_voice_snapshot(&self, _guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+    async fn guild_voice_snapshot(
+        &self,
+        _guild_id: u64,
+    ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         None
     }
 
@@ -2242,7 +2245,8 @@ pub fn spawn(engine: Arc<TempVoiceEngine>, dispatcher: &Dispatcher) -> tokio::ta
         wait_for_cache_ready(&mut gateway_events, purge_engine.config.guild_id_hint).await;
         purge_rehydrated.notified().await;
         purge_engine.purge_empty_lanes().await;
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(RECONCILE_INTERVAL_SECONDS));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(RECONCILE_INTERVAL_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -2356,15 +2360,31 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LanePort for MockPort {
-        async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
-            if self.cache_unavailable.load(Ordering::Relaxed) { return None; }
+        async fn guild_voice_snapshot(
+            &self,
+            guild_id: u64,
+        ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+            if self.cache_unavailable.load(Ordering::Relaxed) {
+                return None;
+            }
             let names = self.names.lock().expect("lock");
             let categories = self.categories.lock().expect("lock");
             Some(dl_discord::voice_cache::GuildVoiceSnapshot {
-                guild_id, observed_at: Utc::now(),
-                channels: names.keys().map(|&channel| (channel, categories.get(&channel).copied())).collect(),
-                members: self.members.lock().expect("lock").iter()
-                    .flat_map(|(&channel, members)| members.iter().map(move |&user| (user, channel))).collect(),
+                guild_id,
+                observed_at: Utc::now(),
+                channels: names
+                    .keys()
+                    .map(|&channel| (channel, categories.get(&channel).copied()))
+                    .collect(),
+                members: self
+                    .members
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .flat_map(|(&channel, members)| {
+                        members.iter().map(move |&user| (user, channel))
+                    })
+                    .collect(),
             })
         }
 
@@ -3123,22 +3143,38 @@ mod tests {
     async fn reconcile_delete_failure_retains_lane_for_retry() {
         let (_db, engine, port, _staging) = setup().await;
         let channel_id = 4242;
-        port.names.lock().expect("lock").insert(channel_id, "Lane 1".to_string());
-        engine.store.upsert_lane(LaneRecord {
-            channel_id, guild_id: engine.config.guild_id_hint, owner_id: 100,
-            initial_owner_id: Some(100), base_name: "Lane 1".to_string(),
-            category_id: CASUAL_CATEGORY, source_staging_id: None,
-        }).await.expect("lane");
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(channel_id, "Lane 1".to_string());
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Lane 1".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
         engine.rehydrate().await;
         port.delete_fails.store(true, Ordering::Relaxed);
         engine.cleanup_lane(channel_id, "TempVoice: Test").await;
         assert_eq!(engine.lane_owner(channel_id).await, Some(100));
         assert_eq!(engine.store.all_lanes().await.expect("retry row").len(), 1);
         port.delete_fails.store(false, Ordering::Relaxed);
-        engine.cleanup_lane(channel_id, "TempVoice: Test-Retry").await;
+        engine
+            .cleanup_lane(channel_id, "TempVoice: Test-Retry")
+            .await;
         assert!(engine.lane_owner(channel_id).await.is_none());
         assert!(engine.store.all_lanes().await.expect("removed").is_empty());
-        assert_eq!(*port.deleted.lock().expect("lock"), vec![channel_id, channel_id]);
+        assert_eq!(
+            *port.deleted.lock().expect("lock"),
+            vec![channel_id, channel_id]
+        );
     }
 
     #[tokio::test]
