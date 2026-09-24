@@ -119,6 +119,39 @@ jobs:
                 continue;
               }
 
+              const permissionResponse = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner,
+                repo,
+                username: pr.user.login,
+              });
+              const trustedPermissions = new Set(["admin", "maintain", "write"]);
+              if (!trustedPermissions.has(permissionResponse.data.permission)) {
+                core.notice(
+                  `PR #${pull_number}: author ${pr.user.login} lacks trusted write permission (${permissionResponse.data.permission}).`,
+                );
+                continue;
+              }
+
+              const changedFiles = await github.paginate(github.rest.pulls.listFiles, {
+                owner,
+                repo,
+                pull_number,
+                per_page: 100,
+              });
+              const protectedPolicyPath = (filename) =>
+                filename.startsWith(".github/") ||
+                filename.startsWith("scripts/ci/") ||
+                /^rust\/scripts\/(?:central_ci|central_fresh_schema|central_test_db|check)\.sh$/.test(filename);
+              const protectedChanges = changedFiles
+                .map((file) => file.filename)
+                .filter(protectedPolicyPath);
+              if (protectedChanges.length) {
+                core.notice(
+                  `PR #${pull_number}: trusted manual bootstrap required for CI/release-policy files: ${protectedChanges.join(", ")}`,
+                );
+                continue;
+              }
+
               const evaluatedSha = pr.head.sha;
               const comparison = await github.request(
                 "GET /repos/{owner}/{repo}/compare/{basehead}",
