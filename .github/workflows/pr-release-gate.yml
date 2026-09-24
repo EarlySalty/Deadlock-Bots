@@ -160,6 +160,49 @@ jobs:
                 continue;
               }
 
+              const acceptedAncillaryConclusions = new Set(["success", "neutral", "skipped"]);
+              const blockingCheckRuns = (checkResponse.data.check_runs || []).filter(
+                (check) =>
+                  check.head_sha === evaluatedSha &&
+                  (
+                    check.status !== "completed" ||
+                    !acceptedAncillaryConclusions.has(check.conclusion || "")
+                  ),
+              );
+              if (blockingCheckRuns.length) {
+                core.notice(
+                  `PR #${pull_number}: other check runs are not green: ${blockingCheckRuns.map((check) => `${check.name}=${check.status}/${check.conclusion || "pending"}`).join(", ")}.`,
+                );
+                continue;
+              }
+
+              const statusResponse = await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: evaluatedSha,
+                per_page: 100,
+              });
+              const latestStatusByContext = new Map();
+              for (const status of statusResponse.data.statuses || []) {
+                const previous = latestStatusByContext.get(status.context);
+                if (
+                  !previous ||
+                  new Date(status.created_at || 0).getTime() >
+                    new Date(previous.created_at || 0).getTime()
+                ) {
+                  latestStatusByContext.set(status.context, status);
+                }
+              }
+              const blockingStatuses = [...latestStatusByContext.values()].filter(
+                (status) => status.state !== "success",
+              );
+              if (blockingStatuses.length) {
+                core.notice(
+                  `PR #${pull_number}: commit statuses are not green: ${blockingStatuses.map((status) => `${status.context}=${status.state}`).join(", ")}.`,
+                );
+                continue;
+              }
+
               pr = (await github.rest.pulls.get({ owner, repo, pull_number })).data;
               if (pr.head.sha !== evaluatedSha) {
                 core.notice(`PR #${pull_number}: head changed after gate evaluation. Re-evaluation required.`);
