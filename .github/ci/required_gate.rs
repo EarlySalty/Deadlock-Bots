@@ -94,6 +94,30 @@ mod tests {
     }
 
     #[test]
+    fn trivy_covers_ci_locks_and_requires_scan_evidence() {
+        let workflow = include_str!("../workflows/required-pr-gate.yml");
+        let counterchecks = include_str!("scanner-counterchecks.sh");
+        let pip_pattern = r"--file-patterns 'pip:(^|/)(python|semgrep)-requirements\.txt$'";
+        assert!(workflow.contains(pip_pattern), "CI locks must be scanned");
+        assert!(
+            counterchecks.contains(pip_pattern),
+            "the real scanner countercheck must use the production pattern"
+        );
+        for required in [
+            "--list-all-pkgs",
+            "--output .ci/trivy-security.json",
+            "jq -e -s -f .github/ci/trivy-inventory.jq .ci/trivy-security.json",
+            "exit \"$status\"",
+            "bash .github/ci/scanner-counterchecks.sh trivy-inventory",
+        ] {
+            assert!(
+                workflow.contains(required),
+                "missing Trivy contract: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn workflow_contract_matches_evaluator() {
         let workflow = include_str!("../workflows/required-pr-gate.yml");
         let jobs = workflow.split_once("\njobs:\n").expect("jobs mapping").1;

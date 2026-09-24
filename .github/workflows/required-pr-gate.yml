@@ -45,6 +45,7 @@ jobs:
           bash .github/ci/sarif-counterchecks.sh
           bash .github/ci/test-runner-counterchecks.sh
           bash .github/ci/database-counterchecks.sh
+          bash .github/ci/scanner-counterchecks.sh trivy-inventory
           rustc +1.88.0 --edition=2021 -D warnings --test .github/ci/test_inventory.rs -o .ci/test-inventory-tests
           .ci/test-inventory-tests
           if [ -n "$(git ls-files -- .ci rust/target)" ]; then
@@ -149,10 +150,18 @@ jobs:
         run: |
           export PATH="$PWD/.ci/bin:$PATH"
           bash .github/ci/scanner-counterchecks.sh trivy
-      - name: Scan dependency vulnerabilities and infrastructure
-        run: >-
-          .ci/bin/trivy fs --scanners vuln,misconfig --severity HIGH,CRITICAL
-          --exit-code 1 --skip-dirs .ci --skip-dirs .git --skip-dirs rust/target .
+      - name: Scan dependencies and require complete scanner coverage
+        run: |
+          status=0
+          rm -f .ci/trivy-security.json
+          .ci/bin/trivy fs --scanners vuln,misconfig --severity HIGH,CRITICAL \
+            --file-patterns 'pip:(^|/)(python|semgrep)-requirements\.txt$' \
+            --exit-code 1 --skip-dirs .ci --skip-dirs .git --skip-dirs rust/target \
+            --list-all-pkgs --format json --output .ci/trivy-security.json . || status=$?
+          jq -e -s -f .github/ci/trivy-inventory.jq .ci/trivy-security.json >/dev/null
+          jq -r '.Results[] | .Target as $target | (.Vulnerabilities[]? | [$target, .Severity, .VulnerabilityID, .PkgName] | @tsv), (.Misconfigurations[]? | [$target, .Severity, .ID] | @tsv)' .ci/trivy-security.json
+          printf 'Trivy scan inventory verified; scanner exit code: %s\n' "$status"
+          exit "$status"
 
   codeql:
     name: CodeQL deep analysis

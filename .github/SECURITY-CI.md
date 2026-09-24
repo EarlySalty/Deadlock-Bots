@@ -1,6 +1,6 @@
 # Deterministisches PR-Gate
 
-Stand: 23. September 2026. Gilt für die Konfiguration dieses PRs, noch nicht als
+Stand: 24. September 2026. Gilt für die Konfiguration dieses PRs, noch nicht als
 Nachweis eines aktivierten GitHub-Merge-Schutzes. PR-Testbetrieb: kein Merge,
 kein main-Push, kein Deploy und kein Neustart. Bestehende Schutzregeln bleiben
 unverändert. Messergebnisse und verbleibende Blocker stehen in
@@ -172,13 +172,29 @@ standardmäßigen Test-Ausschlüsse gescannt; dadurch bleibt auch der durch die
 alte `.gitignore` sonst verdeckte Infisical-Exporter sichtbar. Parserfehler und
 Timeouts blockieren durch `--strict`; sie werden nicht wegkonfiguriert.
 
+Trivy erhält ein explizites Pip-Dateimuster für `python-requirements.txt` und
+`semgrep-requirements.txt`. Ohne dieses Muster hatte der tatsächliche Scan die
+beiden CI-Lockfiles nicht erfasst. `--list-all-pkgs` und
+`.github/ci/trivy-inventory.jq` verlangen jetzt Scan-Ergebnisse mit nichtleeren
+Paketinventaren für diese beiden Dateien, `rust/Cargo.lock` und das bestehende
+ESLint-Lockfile. Trivys virtueller Cargo-Wurzelknoten wird anhand seiner
+Graph-Metadaten erkannt, zählt aber nicht als gescanntes Paket. Mindestens ein
+benanntes und versioniertes Paket bleibt pro Lockfile Pflicht. Für
+`.clusterfuzzlite/Dockerfile` sind ausgeführte Konfigurationsprüfungen erforderlich. Fehlende oder doppelte Pflichtbereiche,
+leere Paketinventare, ungültige Ergebnisstrukturen und leere oder mehrteilige
+JSON-Berichte blockieren. Der Exitcode des Scanners bleibt erhalten; ein
+vollständiges Inventar macht einen Befund nicht erfolgreich. Es gibt keine
+zusätzliche Befundausnahme für CI-Abhängigkeiten.
+
 Die Gegenproben erzeugen nur temporäre, nicht kompilierte Dateien in `.ci/`,
 führen kein unsicheres Programm aus und löschen die Fixtures wieder. Gitleaks,
 Semgrep und Trivy müssen jeweils saubere Eingaben akzeptieren, echte Testbefunde
 mit Exit 1 melden und bei ungültiger Scanner-Konfiguration fehlschlagen. Trivy
-prüft zusätzlich eine HIGH-Dockerfile-Gegenprobe. Hinzu kommen vier Rust-Gate-
-Tests, 63 negative Gate-Prozessprüfungen, zwei CodeQL-Detektor-Tests sowie zwei
-positive und 25 negative SARIF-Proben. Getrackte `.ci`-/Rust-Build-Artefakte werden
+prüft zusätzlich eine HIGH-Dockerfile-Gegenprobe und ein nicht installiertes
+verwundbares Paket in einem anders benannten Pip-Lockfile. Zwei saubere und
+35 negative Inventar-Proben sichern die Trivy-Abdeckung ab. Hinzu kommen fünf
+Rust-Gate-Tests, 63 negative Gate-Prozessprüfungen, zwei CodeQL-Detektor-Tests
+sowie zwei positive und 25 negative SARIF-Proben. Getrackte `.ci`-/Rust-Build-Artefakte werden
 im Actions-Job abgelehnt.
 
 CodeQL erkennt ausschließlich vorhandene getrackte Dateien für Rust, Python,
