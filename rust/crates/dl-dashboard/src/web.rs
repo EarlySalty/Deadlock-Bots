@@ -634,10 +634,14 @@ fn html_escape_attr(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-/// Lädt eine SPA-Datei aus `service/static/` (neben der DB: `repo/data/` →
-/// `repo/`). Kein Caching — wie das Original; fehlt die Datei, gibt der
-/// aufrufende Handler 500.
+/// Lädt SPA-Dateien. Das zentrale Admin-Dashboard wird in die Binary eingebettet,
+/// damit Frontend und Backend aus demselben Commit stammen. Andere Dateien bleiben
+/// als Laufzeit-Fallback aus `service/static/` lesbar.
 async fn load_static_html(app: &DashboardApp, name: &str) -> Option<String> {
+    if name == "dashboard.html" {
+        return Some(include_str!("../../../../service/static/dashboard.html").to_string());
+    }
+
     let repo_root = app.repo_root()?;
     tokio::fs::read_to_string(repo_root.join("service/static").join(name))
         .await
