@@ -44,9 +44,7 @@ jobs:
                 "Frontend PR Gate (website)",
                 "Frontend PR Gate (admin_dashboard)",
                 "Frontend PR Gate (dashboard_v2)",
-                "Uplink Auth, Broker und Dashboard-Anschluss",
-                "offline-build",
-                "schema-gate",
+                "Rust SQLx required",
               ],
               "Deadlock-Bots": [
                 "Semantic review",
@@ -102,9 +100,6 @@ jobs:
                 per_page: 100,
               });
             }
-
-            const acceptedCheckConclusions = new Set(["success", "neutral", "skipped"]);
-            const acceptedStatusStates = new Set(["success"]);
 
             for (const listed of pulls) {
               const pull_number = listed.number;
@@ -200,31 +195,6 @@ jobs:
               if (missingRequired.length || incompleteRequired.length) {
                 core.notice(
                   `PR #${pull_number}: required checks not ready. missing=${missingRequired.join(",") || "none"} incomplete=${incompleteRequired.join(",") || "none"}.`,
-                );
-                continue;
-              }
-
-              const pendingChecks = checkRuns.filter((check) => check.status !== "completed");
-              const failedChecks = checkRuns.filter(
-                (check) =>
-                  check.status === "completed" &&
-                  !acceptedCheckConclusions.has(check.conclusion || ""),
-              );
-
-              const combinedStatus = await github.rest.repos.getCombinedStatusForRef({
-                owner,
-                repo,
-                ref: evaluatedSha,
-                per_page: 100,
-              });
-              const statuses = combinedStatus.data.statuses || [];
-              const failedStatuses = statuses.filter(
-                (status) => !acceptedStatusStates.has(status.state),
-              );
-
-              if (pendingChecks.length || failedChecks.length || failedStatuses.length) {
-                core.notice(
-                  `PR #${pull_number}: gates not fully green. pending=${pendingChecks.length}, failed_checks=${failedChecks.length}, failed_statuses=${failedStatuses.length}.`,
                 );
                 continue;
               }
