@@ -187,14 +187,48 @@ jobs:
               const checkRuns = checkResponse.data.check_runs || [];
               const byName = new Map(checkRuns.map((check) => [check.name, check]));
 
-              const missingRequired = requiredChecks.filter((name) => !byName.has(name));
+              const statusResponse = await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: evaluatedSha,
+                per_page: 100,
+              });
+              const latestStatusByContext = new Map();
+              for (const status of statusResponse.data.statuses || []) {
+                const previous = latestStatusByContext.get(status.context);
+                if (
+                  !previous ||
+                  new Date(status.created_at || 0).getTime() >
+                    new Date(previous.created_at || 0).getTime()
+                ) {
+                  latestStatusByContext.set(status.context, status);
+                }
+              }
+
+              const missingRequired = requiredChecks.filter(
+                (name) => !byName.has(name) && !latestStatusByContext.has(name),
+              );
               const incompleteRequired = requiredChecks.filter((name) => {
                 const check = byName.get(name);
-                return check && (check.status !== "completed" || check.conclusion !== "success");
+                const status = latestStatusByContext.get(name);
+                const checkNotGreen =
+                  check && (check.status !== "completed" || check.conclusion !== "success");
+                const statusNotGreen = status && status.state !== "success";
+                return Boolean(checkNotGreen || statusNotGreen);
               });
               if (missingRequired.length || incompleteRequired.length) {
                 core.notice(
                   `PR #${pull_number}: required checks not ready. missing=${missingRequired.join(",") || "none"} incomplete=${incompleteRequired.join(",") || "none"}.`,
+                );
+                continue;
+              }
+
+              const blockingStatuses = [...latestStatusByContext.values()].filter(
+                (status) => status.state !== "success",
+              );
+              if (blockingStatuses.length) {
+                core.notice(
+                  `PR #${pull_number}: commit statuses not green: ${blockingStatuses.map((status) => `${status.context}=${status.state}`).join(", ")}.`,
                 );
                 continue;
               }
