@@ -62,7 +62,7 @@ Antworte ausschließlich als JSON:
 {"category":"scam|csam|nsfw_explicit|harassment|hate_speech|ragebait_ok|game_related_ok|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
 
 pub const ANALYZER_CONSISTENCY_SYSTEM_PROMPT: &str = r#"Du prüfst ausschließlich eine widersprüchliche Moderationsanalyse erneut.
-Die vorherige Antwort hat category=other geliefert, obwohl ihre eigene Begründung mit hoher Sicherheit ein konkretes Scam-/Betrugs-/Phishing-Muster beschrieben hat.
+Die vorherige Antwort hat eine Nicht-Scam-Kategorie geliefert, obwohl ihre eigene Begründung mit hoher Sicherheit ein konkretes Scam-/Betrugs-/Phishing-Muster beschrieben hat.
 Bewerte den sichtbaren Inhalt neu und löse diesen Widerspruch auf. Das Screenshot-Format ist kein Entlastungsgrund: sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind scam, sofern kein sichtbarer Reporting-/Warnkontext sie klar als Bericht oder Warnung einordnet.
 Kategorie und Begründung müssen logisch zusammenpassen.
 Antworte ausschließlich als JSON:
@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn behavior_trigger_rechecks_unconfirmed_scam_verdict() {
+    async fn behavior_trigger_rechecks_wrong_non_scam_verdict() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
         vision.responses.lock().await.push(
@@ -960,7 +960,7 @@ mod tests {
                     .to_string(),
             );
             responses.push(
-                r#"{"confirmed":false,"category":"scam","confidence":0.90,"reason":"Sichtbarer Scam mit Krypto-Casino, Promo-Code und Auszahlungsversprechen."}"#
+                r#"{"confirmed":false,"category":"harassment","confidence":0.90,"reason":"Sichtbarer Scam mit Krypto-Casino, Promo-Code und Auszahlungsversprechen."}"#
                     .to_string(),
             );
         }

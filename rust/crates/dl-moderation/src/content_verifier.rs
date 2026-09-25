@@ -27,7 +27,7 @@ Antworte ausschließlich als JSON:
 {"confirmed":true|false,"category":"scam|csam|nsfw_explicit|harassment|hate_speech|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
 
 pub const CONSISTENCY_SYSTEM_PROMPT: &str = r#"Du prüfst ausschließlich eine widersprüchliche Moderationsentscheidung erneut.
-Die vorherige Antwort hat category=other oder confirmed=false geliefert, obwohl ihre eigene Begründung mit hoher Sicherheit ein konkretes Scam-/Betrugs-/Phishing-Muster beschrieben hat.
+Die vorherige Antwort hat eine nicht passende Kategorie oder confirmed=false geliefert, obwohl ihre eigene Begründung mit hoher Sicherheit ein konkretes Scam-/Betrugs-/Phishing-Muster beschrieben hat.
 Bewerte den sichtbaren Inhalt neu und löse diesen Widerspruch auf. Das Screenshot-Format ist kein Entlastungsgrund: sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind scam, sofern kein sichtbarer Reporting-/Warnkontext sie klar als Bericht oder Warnung einordnet.
 Ein technischer Heuristik-Treffer ist für sich kein Beweis. Entscheidend bleibt immer der sichtbare Inhalt.
 Kategorie, confirmed und Begründung müssen logisch zusammenpassen.

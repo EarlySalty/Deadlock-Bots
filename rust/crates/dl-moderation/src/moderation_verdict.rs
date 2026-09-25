@@ -78,7 +78,7 @@ pub(crate) fn high_confidence_scam_reason_conflict(
     confidence: f64,
     reason: &str,
 ) -> bool {
-    matches!(category, ModerationCategory::Other)
+    !matches!(category, ModerationCategory::Scam)
         && confidence >= 0.80
         && explicit_scam_reason(reason)
 }
@@ -90,8 +90,7 @@ pub(crate) fn high_confidence_scam_verification_conflict(
         return false;
     }
 
-    matches!(verification.category, ModerationCategory::Other)
-        || (!verification.confirmed && matches!(verification.category, ModerationCategory::Scam))
+    !verification.confirmed || !matches!(verification.category, ModerationCategory::Scam)
 }
 
 fn explicit_scam_reason(reason: &str) -> bool {
@@ -277,6 +276,11 @@ mod tests {
             0.99,
             "Kein Phishing sichtbar, normaler Screenshot."
         ));
+        assert!(high_confidence_scam_reason_conflict(
+            &ModerationCategory::Harassment,
+            0.91,
+            "Sichtbarer Scam mit Promo-Code und Auszahlungsversprechen."
+        ));
         assert!(!high_confidence_scam_reason_conflict(
             &ModerationCategory::Scam,
             0.99,
@@ -303,6 +307,15 @@ mod tests {
             raw_json: "{}".to_string(),
         };
         assert!(!high_confidence_scam_verification_conflict(&uncertain));
+
+        let wrong_category = VerificationDecision {
+            confirmed: false,
+            category: ModerationCategory::Harassment,
+            confidence: 0.91,
+            reason: "Sichtbarer Scam mit Promo-Code und Auszahlungsversprechen.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(high_confidence_scam_verification_conflict(&wrong_category));
 
         let confirmed = VerificationDecision {
             confirmed: true,
