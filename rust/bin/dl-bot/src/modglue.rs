@@ -141,13 +141,19 @@ struct BrainReviewBuildSituation {
 #[derive(Debug, serde::Deserialize)]
 struct BrainReviewBuildReceipt {
     status: String,
-    task_id: i64,
+    task_id: Option<i64>,
     hero_build_id: Option<i64>,
     version: Option<i64>,
     hero_name: String,
+    #[serde(default = "default_review_build")]
+    review: bool,
+    #[serde(default)]
+    message: Option<String>,
     core: Vec<BrainReviewBuildItem>,
     situations: Vec<BrainReviewBuildSituation>,
 }
+
+fn default_review_build() -> bool { true }
 
 pub struct LfgFreetextGlue {
     pub adapter: Arc<DiscordAdapter>,
@@ -243,19 +249,21 @@ pub struct ModGlue {
 pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
 fn looks_like_build_request(question: &str) -> bool {
-    let lower = question.to_lowercase();
-    ["build", "baue", "bau mir", "kaufreihenfolge"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    dl_brain::build_request::requests_creation(question)
 }
 
-async fn run_brain_review_build(
+async fn run_brain_requested_build(
     bin: &std::path::Path,
     question: &str,
+    review: bool,
 ) -> Result<BrainReviewBuildReceipt, dl_brain::BrainError> {
     let future = tokio::process::Command::new(bin)
         .kill_on_drop(true)
-        .arg("review-build")
+        .arg(if review {
+            "review-build"
+        } else {
+            "publish-build-query"
+        })
         .arg("--wait-seconds")
         .arg(BRAIN_REVIEW_BUILD_WAIT_SECS.to_string())
         .arg("--")
@@ -284,10 +292,12 @@ fn format_review_build_receipt(
     receipt: &BrainReviewBuildReceipt,
     emoji_index: &BrainEmojiIndex,
 ) -> String {
-    let published = receipt
-        .hero_build_id
+    let published = dl_brain::build_request::confirmed_build_id(&receipt.status, receipt.hero_build_id)
         .map(|id| format!("✅ Im Spiel veröffentlicht · Build-ID `{id}`"))
-        .unwrap_or_else(|| format!("⏳ Veröffentlichung läuft · Task `{}`", receipt.task_id));
+        .unwrap_or_else(|| match (receipt.status.as_str(), receipt.task_id.filter(|id| *id > 0)) {
+            ("PENDING" | "RUNNING", Some(id)) => format!("⏳ Zur Veröffentlichung eingereiht · Auftrag `{id}`. Noch keine Build-ID bestätigt."),
+            _ => "Die Veröffentlichung ist nicht bestätigt.".to_string(),
+        });
     let core = receipt
         .core
         .iter()
@@ -315,9 +325,15 @@ fn format_review_build_receipt(
         .version
         .map(|version| format!(" · v{version}"))
         .unwrap_or_default();
+    let label = if receipt.review {
+        "Review-Build (experimentell)"
+    } else {
+        "Build"
+    };
     format!(
-        "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
-        emoji_index.decorate_name(&receipt.hero_name), situations
+        "**{} {label}**{version}\n{published}\n\n**Kern:** {core}\n{}",
+        emoji_index.decorate_name(&receipt.hero_name),
+        situations
     )
 }
 
@@ -331,11 +347,24 @@ pub struct SharedBrainAnswerer {
 #[async_trait::async_trait]
 impl dl_brain::AiAnswerer for SharedBrainAnswerer {
     async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-        if self.open_test_mode && looks_like_build_request(question) {
-            let receipt = run_brain_review_build(&self.brain_bin, question).await?;
-            if matches!(receipt.status.as_str(), "FAILED" | "CANCELLED") {
+        if looks_like_build_request(question) {
+            let receipt =
+                run_brain_requested_build(&self.brain_bin, question, self.open_test_mode).await?;
+            if receipt.status == "BLOCKED" {
+                return Ok(dl_brain::BrainOutcome::Answer(receipt.message.unwrap_or_else(||
+                    "Die aktuellen Daten reichen nicht für einen geprüften Build. Es wurde nichts veröffentlicht.".into())));
+            }
+            if !matches!(receipt.status.as_str(), "DONE" | "PENDING" | "RUNNING")
+                || receipt.task_id.is_none_or(|id| id <= 0)
+                || (receipt.status == "DONE"
+                    && dl_brain::build_request::confirmed_build_id(
+                        &receipt.status,
+                        receipt.hero_build_id,
+                    )
+                    .is_none())
+            {
                 return Err(dl_brain::BrainError::Backend(
-                    "Review-Build konnte nicht veröffentlicht werden".into(),
+                    "Steam hat die Build-Veröffentlichung nicht bestätigt".into(),
                 ));
             }
             return Ok(dl_brain::BrainOutcome::Answer(format_review_build_receipt(
@@ -3996,9 +4025,11 @@ mod tests {
 
     #[test]
     fn review_build_receipt_bleibt_knapp_und_zeigt_build_id() {
-        let receipt = BrainReviewBuildReceipt {
+        let mut receipt = BrainReviewBuildReceipt {
             status: "DONE".into(),
-            task_id: 42,
+            task_id: Some(42),
+            review: true,
+            message: None,
             hero_build_id: Some(818625),
             version: Some(1),
             hero_name: "Warden".into(),
@@ -4015,6 +4046,38 @@ mod tests {
         assert!(text.contains("Build-ID `818625`"));
         assert!(text.contains("**Kern:** Extended Magazine"));
         assert!(text.contains("**Optional:** Healing Tempo"));
+        assert!(text.contains("experimentell"));
+        for status in ["PENDING", "RUNNING", "FAILED", "CANCELLED", "BLOCKED"] {
+            receipt.status = status.into();
+            let text = format_review_build_receipt(&receipt, &index);
+            assert!(!text.contains("Im Spiel veröffentlicht"), "{status}");
+            assert!(!text.contains("Build-ID `818625`"), "{status}");
+        }
+        receipt.status = "DONE".into();
+        receipt.hero_build_id = Some(0);
+        assert!(!format_review_build_receipt(&receipt, &index).contains("Im Spiel veröffentlicht"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn requested_build_cli_waehlt_guarded_oder_review_ohne_shell_interpolation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("brain-fixture");
+        let args_file = dir.path().join("args");
+        let fixture = r#"{"status":"DONE","task_id":1,"hero_build_id":123,"version":1,"hero_name":"Held","review":false,"core":[],"situations":[]}"#;
+        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}'\n", args_file.display(), fixture)).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (review, command) in [(false,"publish-build-query"),(true,"review-build")] {
+            let result = run_brain_requested_build(&bin, "- Bau mir einen Build", review).await.unwrap();
+            assert_eq!(result.hero_build_id,Some(123));
+            let args = std::fs::read_to_string(&args_file).unwrap();
+            let lines: Vec<_> = args.lines().collect();
+            assert_eq!(lines[0],command);
+            assert_eq!(lines[1],"--wait-seconds");
+            assert_eq!(lines[3],"--");
+            assert_eq!(lines[4],"- Bau mir einen Build");
+        }
     }
 
     #[test]
