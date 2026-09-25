@@ -8,6 +8,7 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+brain-client = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "bdcc6dec3424bd313d36e5f545de2a07df564c7f" }
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true

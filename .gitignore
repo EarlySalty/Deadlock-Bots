@@ -1,3 +1,4 @@
+.consumer-ci-reports/
 .env
 .env.worker
 .env.*
