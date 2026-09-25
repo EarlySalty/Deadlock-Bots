@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::content_verifier::ContentVerifier;
 use crate::moderation_verdict::{
-    parse_content_analysis, ContentAnalysis, ModerationCategory, ModerationVerdict,
+    high_confidence_scam_reason_conflict, parse_content_analysis, ContentAnalysis,
+    ModerationCategory, ModerationVerdict,
 };
 
 #[cfg(test)]
@@ -49,13 +50,22 @@ pub(crate) mod test_support {
     }
 }
 
-pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer fuer einen Gaming-Server.
+pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer für einen Gaming-Server.
 Analysiere Text und Bilder knapp und konservativ.
-Gib eine Kategorie, Confidence und eine kurze Begruendung auf Deutsch zurueck.
+Gib eine Kategorie, Confidence und eine kurze Begründung auf Deutsch zurück.
 Flagge nur echte Risiken; normaler Gaming-Trash-Talk und harmlose Meldungen sollen game_related_ok oder ragebait_ok sein.
 Ein normales Bild, ein Screenshot, ein Social-Media-Post, ein Meme, eine News-Grafik oder ein Gaming-Bild ist für sich kein Scam oder Account-Takeover.
+Wichtig: Das Screenshot-Format macht schädlichen Inhalt nicht harmlos. Sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind als scam zu klassifizieren, wenn die Nachricht sie selbst bewirbt und kein sichtbarer Reporting-/Warnkontext sie klar einordnet.
+Kategorie und Begründung müssen logisch zusammenpassen. Wenn deine Begründung einen tatsächlichen Scam, Betrugsversuch oder Phishing-Inhalt beschreibt, darf category nicht other sein.
 Helden-, Rollen-, Rank- oder Spielergruppen-Spott im Spielkontext ist Trash-Talk/Ragebait, nicht harassment oder hate_speech.
-Antworte ausschliesslich als JSON:
+Antworte ausschließlich als JSON:
+{"category":"scam|csam|nsfw_explicit|harassment|hate_speech|ragebait_ok|game_related_ok|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
+
+pub const ANALYZER_CONSISTENCY_SYSTEM_PROMPT: &str = r#"Du prüfst ausschließlich eine widersprüchliche Moderationsanalyse erneut.
+Die vorherige Antwort hat category=other geliefert, obwohl ihre eigene Begründung mit hoher Sicherheit ein konkretes Scam-/Betrugs-/Phishing-Muster beschrieben hat.
+Bewerte den sichtbaren Inhalt neu und löse diesen Widerspruch auf. Das Screenshot-Format ist kein Entlastungsgrund: sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind scam, sofern kein sichtbarer Reporting-/Warnkontext sie klar als Bericht oder Warnung einordnet.
+Kategorie und Begründung müssen logisch zusammenpassen.
+Antworte ausschließlich als JSON:
 {"category":"scam|csam|nsfw_explicit|harassment|hate_speech|ragebait_ok|game_related_ok|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +223,59 @@ impl ContentAnalyzer {
                 modality: AnalysisModality::Text,
             })
     }
+
+    async fn reanalyze_consistency(
+        &self,
+        input: &ModerationInput,
+        modality: AnalysisModality,
+        trigger_context: &str,
+        previous: &ContentAnalysis,
+    ) -> ContentAnalysis {
+        let prompt = analyzer_consistency_prompt(
+            &input.prompt_text(),
+            trigger_context,
+            previous,
+            input.image_urls.len(),
+        );
+        let raw = if matches!(modality, AnalysisModality::Image) {
+            if let Some(vision) = &self.vision {
+                vision
+                    .generate_multimodal(dl_ai::GenerateMultimodalRequest {
+                        prompt,
+                        image_urls: input.image_urls.clone(),
+                        system_prompt: Some(ANALYZER_CONSISTENCY_SYSTEM_PROMPT.to_string()),
+                        model: Some(self.config.image_model.clone()),
+                        max_output_tokens: Some(300),
+                        temperature: 0.0,
+                    })
+                    .await
+            } else {
+                None
+            }
+        } else {
+            self.text
+                .generate_text(dl_ai::GenerateRequest {
+                    prompt,
+                    system_prompt: Some(ANALYZER_CONSISTENCY_SYSTEM_PROMPT.to_string()),
+                    model: Some(self.config.text_model.clone()),
+                    max_output_tokens: Some(300),
+                    reasoning_effort: None,
+                    temperature: 0.0,
+                })
+                .await
+        };
+
+        if raw.is_none() {
+            let (modality, model) = if matches!(modality, AnalysisModality::Text) {
+                ("text_consistency", &self.config.text_model)
+            } else {
+                ("image_consistency", &self.config.image_model)
+            };
+            log_provider_failure(input, modality, model);
+        }
+
+        parse_content_analysis(raw.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +315,27 @@ fn analyzer_prompt(modality: &str, message: &str, image_count: usize) -> String 
         "modality": modality,
         "message": message,
         "image_count": image_count,
+    })
+    .to_string()
+}
+
+fn analyzer_consistency_prompt(
+    message: &str,
+    behavior_trigger: &str,
+    previous: &ContentAnalysis,
+    image_count: usize,
+) -> String {
+    serde_json::json!({
+        "task": "Löse den Widerspruch in deiner vorherigen Analyse auf und klassifiziere den sichtbaren Inhalt erneut.",
+        "behavior_trigger": behavior_trigger,
+        "previous_analysis": {
+            "category": previous.category.as_label(),
+            "confidence": previous.confidence,
+            "reason": previous.reason,
+        },
+        "message_or_image_context": message,
+        "image_count": image_count,
+        "instruction": "Wenn die Begründung einen tatsächlichen Scam/Betrug/Phishing-Inhalt beschreibt, muss category dazu passen. Reporting oder Warnkontext darf weiterhin other sein.",
     })
     .to_string()
 }
@@ -320,14 +404,33 @@ impl ContentModerationPipeline {
         input: &ModerationInput,
     ) -> ContentModerationEvaluation {
         let modal_analysis = self.analyzer.analyze_modal(input).await;
-        let analysis = modal_analysis.analysis;
+        let modality = modal_analysis.modality;
+        let mut analysis = modal_analysis.analysis;
+        if high_confidence_scam_reason_conflict(
+            &analysis.category,
+            analysis.confidence,
+            &analysis.reason,
+        ) {
+            tracing::warn!(
+                category = analysis.category.as_label(),
+                confidence = analysis.confidence,
+                "Moderation: widersprüchliche Scam-Analyse, Konsistenzprüfung wird wiederholt"
+            );
+            let retry = self
+                .analyzer
+                .reanalyze_consistency(input, modality, "content_scan", &analysis)
+                .await;
+            if retry.reason != "parse_error" {
+                analysis = retry;
+            }
+        }
         if analysis.confidence < self.analyze_flag_threshold || analysis.category.is_harmless() {
             return ContentModerationEvaluation {
                 analysis,
                 verdict: None,
             };
         }
-        let verification = if matches!(modal_analysis.modality, AnalysisModality::Text) {
+        let verification = if matches!(modality, AnalysisModality::Text) {
             self.verifier.verify(&input.text_only(), &analysis).await
         } else {
             self.verifier.verify(input, &analysis).await
@@ -348,7 +451,28 @@ impl ContentModerationPipeline {
         behavior_trigger: &str,
     ) -> ContentModerationEvaluation {
         let modal_analysis = self.analyzer.analyze_modal(input).await;
-        let analysis = modal_analysis.analysis;
+        let modality = modal_analysis.modality;
+        let mut analysis = modal_analysis.analysis;
+        if high_confidence_scam_reason_conflict(
+            &analysis.category,
+            analysis.confidence,
+            &analysis.reason,
+        ) {
+            tracing::warn!(
+                behavior_trigger,
+                category = analysis.category.as_label(),
+                confidence = analysis.confidence,
+                "Moderation: widersprüchliche Scam-Analyse, Konsistenzprüfung wird wiederholt"
+            );
+            let retry = self
+                .analyzer
+                .reanalyze_consistency(input, modality, behavior_trigger, &analysis)
+                .await;
+            if retry.reason != "parse_error" {
+                analysis = retry;
+            }
+        }
+
         let verification = self
             .verifier
             .verify_behavior_trigger(input, &analysis, behavior_trigger)
@@ -645,6 +769,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn content_scan_rechecks_self_contradictory_scam_verifier() {
+        let text = Arc::new(RecordingText::default());
+        let vision = Arc::new(RecordingVision::default());
+        vision.responses.lock().await.push(
+            r#"{"category":"scam","confidence":0.92,"reason":"Krypto-Casino, Promo-Code und Auszahlung"}"#
+                .to_string(),
+        );
+        let verifier_text = Arc::new(RecordingText::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        {
+            let mut responses = verifier_vision.responses.lock().await;
+            responses.push(
+                r#"{"confirmed":true,"category":"scam","confidence":0.95,"reason":"Sichtbarer Scam ohne Reporting-Kontext"}"#
+                    .to_string(),
+            );
+            responses.push(
+                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Screenshot zeigt Krypto-Casino, Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."}"#
+                    .to_string(),
+            );
+        }
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                text,
+                Some(vision),
+                ContentAnalyzerConfig {
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                    image_model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            ContentVerifier::new(
+                verifier_text,
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            0.5,
+        );
+
+        let result = pipeline
+            .evaluate(&ModerationInput::new(
+                "",
+                vec!["https://example.test/scam.png".to_string()],
+            ))
+            .await
+            .expect("contradictory verifier must be rechecked");
+
+        assert_eq!(result.analysis.category.as_label(), "scam");
+        assert!(result.verification.confirmed);
+        assert_eq!(result.verification.category.as_label(), "scam");
+        assert_eq!(
+            verifier_vision.image_counts.lock().await.as_slice(),
+            &[1, 1]
+        );
+    }
+
+    #[tokio::test]
     async fn behavior_trigger_always_runs_image_verifier_even_after_harmless_analysis() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
@@ -702,6 +883,128 @@ mod tests {
             &[Some("gpt-5.4-nano".to_string())]
         );
         assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[2]);
+        assert!(verifier_text.models.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn behavior_trigger_rechecks_self_contradictory_scam_analysis() {
+        let text = Arc::new(RecordingText::default());
+        let vision = Arc::new(RecordingVision::default());
+        {
+            let mut responses = vision.responses.lock().await;
+            responses.push(
+                r#"{"category":"scam","confidence":0.94,"reason":"Sichtbarer Krypto-Bonus- und Auszahlungs-Scam"}"#
+                    .to_string(),
+            );
+            responses.push(
+                r#"{"category":"other","confidence":0.90,"reason":"Screenshot zeigt Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."}"#
+                    .to_string(),
+            );
+        }
+        let verifier_text = Arc::new(RecordingText::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":true,"category":"scam","confidence":0.95,"reason":"Scam bestätigt"}"#
+                .to_string(),
+        );
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                text,
+                Some(vision.clone()),
+                ContentAnalyzerConfig {
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                    image_model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            ContentVerifier::new(
+                verifier_text,
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            0.5,
+        );
+
+        let result = pipeline
+            .evaluate_behavior_trigger(
+                &ModerationInput::new("", vec!["https://example.test/scam.png".to_string()]),
+                "account_takeover",
+            )
+            .await;
+
+        let verdict = result.verdict.expect("behavior verifier verdict");
+        assert_eq!(verdict.analysis.category.as_label(), "scam");
+        assert!(verdict.verification.confirmed);
+        assert_eq!(verdict.verification.category.as_label(), "scam");
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[1, 1]);
+        assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[1]);
+    }
+
+    #[tokio::test]
+    async fn behavior_trigger_rechecks_self_contradictory_scam_verdict() {
+        let text = Arc::new(RecordingText::default());
+        let vision = Arc::new(RecordingVision::default());
+        vision.responses.lock().await.push(
+            r#"{"category":"scam","confidence":0.92,"reason":"Krypto-Bonus und Auszahlung als Scam-Muster"}"#
+                .to_string(),
+        );
+        let verifier_text = Arc::new(RecordingText::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        {
+            let mut responses = verifier_vision.responses.lock().await;
+            // RecordingVision liefert per pop(): zuerst die widersprüchliche Antwort,
+            // danach die fokussierte Konsistenzprüfung.
+            responses.push(
+                r#"{"confirmed":true,"category":"scam","confidence":0.94,"reason":"Sichtbarer Krypto-Bonus- und Auszahlungs-Scam ohne Reporting-Kontext"}"#
+                    .to_string(),
+            );
+            responses.push(
+                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Screenshot zeigt Krypto-Casino, Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."}"#
+                    .to_string(),
+            );
+        }
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                text,
+                Some(vision.clone()),
+                ContentAnalyzerConfig {
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                    image_model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            ContentVerifier::new(
+                verifier_text.clone(),
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            0.5,
+        );
+
+        let result = pipeline
+            .evaluate_behavior_trigger(
+                &ModerationInput::new(
+                    "",
+                    vec![
+                        "https://example.test/scam-1.png".to_string(),
+                        "https://example.test/scam-2.png".to_string(),
+                    ],
+                ),
+                "account_takeover",
+            )
+            .await;
+
+        let verdict = result.verdict.expect("behavior verifier verdict");
+        assert_eq!(verdict.analysis.category.as_label(), "scam");
+        assert!(verdict.verification.confirmed);
+        assert_eq!(verdict.verification.category.as_label(), "scam");
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[2]);
+        assert_eq!(
+            verifier_vision.image_counts.lock().await.as_slice(),
+            &[2, 2]
+        );
         assert!(verifier_text.models.lock().await.is_empty());
     }
 

@@ -2080,6 +2080,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn takeover_scam_with_self_contradictory_verifier_is_rechecked_and_enforced() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.92,"reason":"Krypto-Bonus, Promo-Code und Auszahlung als Scam-Muster"}"#],
+            &[
+                r#"{"confirmed":true,"category":"scam","confidence":0.94,"reason":"Sichtbarer Krypto-Bonus- und Auszahlungs-Scam ohne Reporting-Kontext"}"#,
+                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Screenshot zeigt Krypto-Casino, Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."}"#,
+            ],
+            Some(detector),
+            vec![777],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+
+        moderator
+            .handle_message(&image_event(201, 10, 1100, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(201, 11, 1101, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.bans.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.action, "auto_execute");
+        assert_eq!(draft.category, "scam");
+        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
+        let record = moderator.store.fetch_case("case-1101").await.expect("case");
+        assert_eq!(record.action, "auto_ban");
+    }
+
+    #[tokio::test]
     async fn content_scan_stays_limited_to_scan_channels() {
         // Ohne Verhaltens-Detektor bleibt nur der Content-Pfad — der darf außerhalb
         // der scan_channel_ids NICHT feuern (LLM-Scan bleibt gezielt).
