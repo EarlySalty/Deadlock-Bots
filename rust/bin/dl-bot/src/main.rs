@@ -685,6 +685,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let voice_pair_operations =
         Arc::new(dl_voice::voice_pair_guard::VoicePairOperationLock::new(()));
     let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
+        live_streamer_access: twitch_client.as_ref().map(|client| {
+            dl_voice::tempvoice::live_streamer::LiveStreamerAccess::new(
+                client.clone(),
+                dl_bridges::matcher::MatcherConfig::from_env(operating_value).role_id,
+            )
+        }),
         adapter: adapter.clone(),
         voice_pair_store: voice_pair_store.clone(),
         voice_pair_operations: voice_pair_operations.clone(),

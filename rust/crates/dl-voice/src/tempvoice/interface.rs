@@ -21,7 +21,11 @@ use super::engine::{TempVoiceEngine, VERIFIED_ROLE_ID};
 use super::store::{DefaultPresetRecord, InterfaceRecord, PresetRecord};
 
 const NOT_IN_LANE: &str = "Du musst dafür in einem Sprachkanal sein.";
-const NOT_OWNER: &str = "Nur der Lane-Owner kann das.";
+const NOT_OWNER: &str =
+    "Dafür musst du Lane-Owner sein oder mit der Streamer-Rolle live in diesem Call sitzen.";
+const PROTECTED_OWNER: &str = "Den Lane-Owner kannst du weder kicken noch bannen.";
+const TARGET_NOT_IN_LANE: &str = "Dieses Mitglied ist nicht mehr in deinem Call.";
+const MODERATION_PREFIX: &str = "tv_moderation:";
 pub const MIN_RANK_VERIFY_REQUIRED: &str =
     "Du kannst den Mindest-Rang nur setzen, wenn du verifiziert bist.";
 pub const MIN_RANK_BLOCKED_REPLY: &str =
@@ -41,8 +45,7 @@ Standard ist dein Rang **±1,5 Ränge**. Unten kannst du Mindestrang und Toleran
 const TV_RANK_GATE_CONFIRM_LABEL: &str = "✅ Gate aktivieren";
 const TV_RANK_GATE_ON: &str = "🔒 Rang-Gate ist an — nur verifizierte Ränge im gewählten Fenster können jetzt joinen. Wer schon drin ist, bleibt drin. Nochmal drücken schaltet es wieder aus.";
 const TV_RANK_GATE_OFF: &str = "🔓 Rang-Gate ist aus — deine Lane ist wieder für alle offen.";
-const TV_RANK_GATE_ONLY_RANKED: &str =
-    "Das Rang-Gate gibt es nur in Ranked-Lanes, und nur der Owner kann es schalten.";
+const TV_RANK_GATE_ONLY_RANKED: &str = "Das Rang-Gate gibt es nur in Ranked-Lanes.";
 const TV_RANK_GATE_INVALID: &str = "Rang-Gate hat nicht geklappt";
 const TV_RANK_GATE_SELECT_RANK: &str = "Mindestrang wählen";
 const TV_RANK_GATE_SELECT_TOLERANCE: &str = "Toleranz wählen (± Subränge)";
@@ -51,7 +54,7 @@ const TV_GUIDE_TEXT: &str = "## 📖 So funktionieren die Sprachkanäle\n\
 **Alles in einer Kategorie:** Alle Lanes stehen jetzt zusammen — oben Ranked (nach Rang sortiert, klein → groß), darunter Casual, unten Street Brawl. Der Name sagt dir, was drin läuft: *Ranked Phantom 3*, *Chill Lane 2 · Oracle*, *Street Brawl 1*.\n\n\
 **🎯 Mein Rang:** Damit stellst du im Panel ein, mit welchem Rang deine Lanes benannt werden. Bei Ranked ist dein Rang zusätzlich die Vorgabe fürs Rang-Gate.\n\n\
 **Ranked ist offen:** Zum Erstellen und Joinen von Ranked-Lanes brauchst du keine Verifizierung mehr.\n\n\
-**🔓 Rang-Gate (nur Ranked, nur Owner):** Ein Klick zeigt dir die Erklärung mit zwei Auswahlfeldern — Mindestrang und Toleranz, Standard: dein Rang ±1,5 Ränge. Nach dem Bestätigen können nur noch verifizierte Ränge im Fenster joinen, alle anderen sehen ein 🔒. Niemand wird gekickt. Nochmal klicken schaltet das Gate wieder aus.";
+**🔓 Rang-Gate (nur Ranked):** Ein Klick zeigt dir die Erklärung mit zwei Auswahlfeldern — Mindestrang und Toleranz, Standard: dein Rang ±1,5 Ränge. Nach dem Bestätigen können nur noch verifizierte Ränge im Fenster joinen, alle anderen sehen ein 🔒. Niemand wird gekickt. Nochmal klicken schaltet das Gate wieder aus.";
 const TV_GUIDE_BUTTON_LABEL: &str = "📖 Anleitung";
 const TV_ANNOUNCEMENT_TEXT: &str = "## 🔊 Voice-Umbau: Alle Lanes in einer Kategorie\n\
 Wir haben die Sprachkanäle umgebaut, damit Ranked nicht mehr abschreckt und ihr schneller zusammenfindet:\n\
@@ -366,7 +369,8 @@ fn global_panel_embed() -> Value {
         "description": concat!(
             "So funktionieren Sprachkanäle:\n",
             "• Betritt einen **(+) Sprachkanal**, dein eigener Sprachkanal wird automatisch erstellt.\n",
-            "• Passe deine Lane hier an; die Buttons wirken sofort, wenn du Owner bist.\n\n",
+            "• Als Owner steuerst du deine Lane über diese Buttons.\n",
+            "• **Live-Streamer:** Mit Streamer-Rolle hast du während deines Streams dieselben Panel-Rechte im aktuellen Call, bei jedem Spiel. Den Owner kannst du weder kicken noch bannen.\n\n",
             "Was ihr hier machen könnt:\n",
             "• **Kick:** Jemand AFK oder stört? Entferne die Person, wenn Reden nicht reicht.\n",
             "• **Ban:** Sperre jemanden dauerhaft aus deinem Kanal, solange du Owner bist.\n",
@@ -391,7 +395,8 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
         "title": format!("🎙️ Sprachkanal – {lane_name}"),
         "description": format!(
             concat!(
-                "**Owner:** {}\n\n",
+                "**Owner:** {}\n",
+                "**Live-Streamer:** Mit Streamer-Rolle kannst du diesen Call während deines Streams ebenfalls verwalten. Der Owner bleibt vor Kick und Ban geschützt.\n\n",
                 "**Steuerung** *(nur wenn du in dieser Lane bist)*\n",
                 "🇩🇪 / 🌍 – Sprachfilter: nur DE oder alle EU\n",
                 "👑 – Owner übernehmen (wenn der Owner die Lane verlassen hat)\n",
@@ -399,7 +404,7 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
                 "🦵 Kick · 🚫 Ban · ✅ Unban – Mitglieder verwalten\n",
                 "👥 Duo / Trio · 🔄 Reset – Lane-Größe schnell anpassen\n",
                 "👻 Lurker – stumm beitreten ohne Limit-Slot zu belegen\n\n",
-                "**🔓 Rang-Gate** *(nur Ranked, nur Owner)*\n",
+                "**🔓 Rang-Gate** *(nur Ranked)*\n",
                 "Macht die Lane exklusiv für verifizierte Ränge in einem Fenster\n",
                 "(Standard: dein Rang ±1,5). Wer drin ist, bleibt drin —\n",
                 "wirkt nur auf neue Joins. Nochmal drücken = wieder offen."
@@ -670,6 +675,32 @@ fn looks_missing_message(err: &str) -> bool {
         || err.contains("404")
 }
 
+/// Bindet mehrstufige Moderationsaktionen an den ursprünglichen Call und Owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModerationContext {
+    lane: u64,
+    owner: u64,
+}
+
+impl ModerationContext {
+    fn custom_id(self, action: &str) -> String {
+        format!("{MODERATION_PREFIX}{}:{}:{action}", self.lane, self.owner)
+    }
+
+    fn parse(custom_id: &str) -> Option<(Self, &str)> {
+        let mut parts = custom_id.strip_prefix(MODERATION_PREFIX)?.split(':');
+        let lane = parts.next()?.parse::<u64>().ok().filter(|id| *id > 0)?;
+        let owner = parts.next()?.parse::<u64>().ok()?;
+        let action = parts.next()?;
+        if parts.next().is_some()
+            || !matches!(action, "tv_kick_sel" | "tv_ban_sel" | "tv_unban_sel")
+        {
+            return None;
+        }
+        Some((Self { lane, owner }, action))
+    }
+}
+
 struct PanelHandler {
     engine: Arc<TempVoiceEngine>,
     lfg: Option<Arc<crate::lfg_panel::LfgPanelInterface>>,
@@ -760,12 +791,83 @@ impl PanelHandler {
         let Some(lane) = self.lane_of(interaction).await else {
             return Err(BridgeReply::ephemeral_text(NOT_IN_LANE));
         };
-        if self.engine.lane_owner(lane).await != Some(interaction.user_id)
-            && !interaction.author_can_manage_channels
-        {
+        if !self.can_manage_lane(interaction, lane).await {
             return Err(BridgeReply::ephemeral_text(NOT_OWNER));
         }
         Ok(lane)
+    }
+
+    async fn can_manage_lane(&self, interaction: &BridgeInteraction, lane: u64) -> bool {
+        let owner = self.engine.lane_owner(lane).await;
+        if owner == Some(interaction.user_id) || interaction.author_can_manage_channels {
+            return true;
+        }
+        // Keine Rechte in fremden Guilds, festen Kanälen oder unbekannten Lanes.
+        if owner.is_none() || interaction.guild_id != self.engine.config.guild_id_hint {
+            return false;
+        }
+        self.engine
+            .port
+            .member_is_live_streamer(interaction.guild_id, interaction.user_id)
+            .await
+            && self.lane_of(interaction).await == Some(lane)
+            && self.engine.lane_owner(lane).await == owner
+    }
+
+    async fn moderation_context(&self, lane: u64) -> ModerationContext {
+        ModerationContext {
+            lane,
+            owner: self.engine.lane_owner(lane).await.unwrap_or(0),
+        }
+    }
+
+    async fn check_moderation_context(
+        &self,
+        lane: u64,
+        expected: Option<ModerationContext>,
+    ) -> Result<(), BridgeReply> {
+        if let Some(expected) = expected {
+            if self.moderation_context(lane).await != expected {
+                return Err(BridgeReply::ephemeral_text(
+                    "Der Call oder sein Owner hat sich geändert. Öffne die Aktion bitte neu.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn ban_action_lane(
+        &self,
+        interaction: &BridgeInteraction,
+        expected: Option<ModerationContext>,
+    ) -> Result<Option<u64>, BridgeReply> {
+        if expected.is_some() {
+            let lane = self.owned_lane_of(interaction).await?;
+            self.check_moderation_context(lane, expected).await?;
+            return Ok(Some(lane));
+        }
+        // Alte/ungebundene Selects behalten ihre bisherige Owner-/Mod-Semantik.
+        // Ein persönlicher Bann wird nicht durch einen späteren Streamstart
+        // unbemerkt zum Bann auf der Liste eines fremden Owners.
+        let Some(lane) = self.lane_of(interaction).await else {
+            return Ok(None);
+        };
+        Ok(
+            (self.engine.lane_owner(lane).await == Some(interaction.user_id)
+                || interaction.author_can_manage_channels)
+                .then_some(lane),
+        )
+    }
+
+    async fn target_is_protected_owner(
+        &self,
+        interaction: &BridgeInteraction,
+        lane: u64,
+        target: u64,
+    ) -> bool {
+        self.engine.lane_owner(lane).await == Some(target)
+            && target != interaction.user_id
+            && !interaction.author_can_manage_channels
     }
 
     async fn lane_owner_id(&self, lane: u64, actor_id: u64) -> u64 {
@@ -830,18 +932,13 @@ impl PanelHandler {
         }
     }
 
-    /// Lane-Kontext für Ban/Unban: Nur wenn der Klickende die Lane besitzt
-    /// (oder Mod-Rechte hat), zählt die Banliste des Lane-Owners und wird
-    /// sofort im Kanal durchgesetzt. Sonst — auch ganz ohne Voice — läuft
-    /// der Ban rein über die persönliche Liste des Klickenden.
+    /// Owner, Moderatoren und aktuell live streamende Gäste verwenden die
+    /// vorhandene Owner-Banliste. Ohne Berechtigung bleibt die persönliche Liste.
     async fn ban_context_lane(&self, interaction: &BridgeInteraction) -> Option<u64> {
         let lane = self.lane_of(interaction).await?;
-        let is_owner = self.engine.lane_owner(lane).await == Some(interaction.user_id);
-        if is_owner || interaction.author_can_manage_channels {
-            Some(lane)
-        } else {
-            None
-        }
+        self.can_manage_lane(interaction, lane)
+            .await
+            .then_some(lane)
     }
 
     /// Select mit den anderen Membern der Lane (für Kick/Ban).
@@ -859,7 +956,11 @@ impl PanelHandler {
             .await;
         let mut options = Vec::new();
         for user_id in members {
-            if user_id == interaction.user_id {
+            if user_id == interaction.user_id
+                || self
+                    .target_is_protected_owner(interaction, lane, user_id)
+                    .await
+            {
                 continue;
             }
             let label = self
@@ -1082,7 +1183,16 @@ fn prefs_mode_label(mode: &str) -> &'static str {
 
 #[async_trait::async_trait]
 impl InteractionHandler for PanelHandler {
-    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+    async fn handle(&self, mut interaction: BridgeInteraction) -> BridgeReply {
+        let expected_moderation = if interaction.custom_id.starts_with(MODERATION_PREFIX) {
+            let Some((context, action)) = ModerationContext::parse(&interaction.custom_id) else {
+                return BridgeReply::ephemeral_text("Ungültige Moderationsaktion.");
+            };
+            interaction.custom_id = action.to_string();
+            Some(context)
+        } else {
+            None
+        };
         let engine = &self.engine;
         match interaction.custom_id.as_str() {
             "tv_guide" => tv_guide_reply(),
@@ -1393,7 +1503,7 @@ impl InteractionHandler for PanelHandler {
                     .switch_lane_mode(
                         interaction.guild_id,
                         lane,
-                        interaction.user_id,
+                        self.lane_owner_id(lane, interaction.user_id).await,
                         &default.mode,
                     )
                     .await
@@ -1524,22 +1634,59 @@ impl InteractionHandler for PanelHandler {
                     Ok(lane) => lane,
                     Err(reply) => return reply,
                 };
-                self.member_select(&interaction, lane, "tv_kick_sel", "Wen kicken?")
+                let custom_id = self.moderation_context(lane).await.custom_id("tv_kick_sel");
+                self.member_select(&interaction, lane, &custom_id, "Wen kicken?")
                     .await
             }
             "tv_kick_sel" => {
-                if let Err(reply) = self.owned_lane_of(&interaction).await {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                if let Err(reply) = self
+                    .check_moderation_context(lane, expected_moderation)
+                    .await
+                {
                     return reply;
                 }
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
-                match engine
-                    .port
-                    .disconnect_member(interaction.guild_id, target, "TempVoice: Owner-Kick")
+                if self
+                    .target_is_protected_owner(&interaction, lane, target)
                     .await
                 {
-                    Ok(()) => BridgeReply::ephemeral_text(format!("<@{target}> gekickt.")),
+                    return BridgeReply::ephemeral_text(PROTECTED_OWNER);
+                }
+                if target == interaction.user_id {
+                    return BridgeReply::ephemeral_text("Dich selbst kicken geht nicht.");
+                }
+                if engine
+                    .port
+                    .member_voice_channel(interaction.guild_id, target)
+                    .await
+                    != Some(lane)
+                {
+                    return BridgeReply::ephemeral_text(TARGET_NOT_IN_LANE);
+                }
+                match engine
+                    .port
+                    .disconnect_member(
+                        interaction.guild_id,
+                        target,
+                        &format!("TempVoice: Panel-Kick durch {}", interaction.user_id),
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            actor_id = interaction.user_id,
+                            target_id = target,
+                            channel_id = lane,
+                            "TempVoice: Panel-Kick"
+                        );
+                        BridgeReply::ephemeral_text(format!("<@{target}> gekickt."))
+                    }
                     Err(err) => BridgeReply::ephemeral_text(format!("Kick fehlgeschlagen: {err}")),
                 }
             }
@@ -1548,13 +1695,18 @@ impl InteractionHandler for PanelHandler {
                 // beim Join jeder seiner künftigen Lanes durchgesetzt. Der
                 // User-Select (Typ 5) ist serverweit durchsuchbar — der Störer
                 // muss nicht (mehr) in der Lane sitzen.
+                let lane = self.ban_context_lane(&interaction).await;
+                let custom_id = match lane {
+                    Some(lane) => self.moderation_context(lane).await.custom_id("tv_ban_sel"),
+                    None => "tv_ban_sel".to_string(),
+                };
                 BridgeReply {
-                    content: Some(
-                        "Wen bannen? Name eintippen und auswählen — gilt für alle deine Lanes."
-                            .to_string(),
-                    ),
+                    content: Some(match lane {
+                        Some(_) => "Wen bannen? Der Bann gilt für die Lanes dieses Owners, bis er aufgehoben wird.".to_string(),
+                        None => "Wen bannen? Der Bann gilt für alle deine Lanes, bis du ihn aufhebst.".to_string(),
+                    }),
                     components: Some(json!([{ "type": 1, "components": [{
-                        "type": 5, "custom_id": "tv_ban_sel",
+                        "type": 5, "custom_id": custom_id,
                         "placeholder": "Mitglied suchen…",
                         "min_values": 1, "max_values": 1,
                     }]}])),
@@ -1569,26 +1721,66 @@ impl InteractionHandler for PanelHandler {
                 if target == interaction.user_id {
                     return BridgeReply::ephemeral_text("Dich selbst bannen geht nicht.");
                 }
-                let owned_lane = self.ban_context_lane(&interaction).await;
+                let owned_lane = match self
+                    .ban_action_lane(&interaction, expected_moderation)
+                    .await
+                {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                if let Some(lane) = owned_lane {
+                    if self
+                        .target_is_protected_owner(&interaction, lane, target)
+                        .await
+                    {
+                        return BridgeReply::ephemeral_text(PROTECTED_OWNER);
+                    }
+                }
                 let owner_id = match owned_lane {
                     Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
                     None => interaction.user_id,
                 };
-                let _ = engine.add_owner_ban(owner_id, target, owned_lane).await;
-                if owned_lane.is_some() {
-                    let _ = engine
-                        .port
-                        .disconnect_member(interaction.guild_id, target, "TempVoice: Owner-Bann")
-                        .await;
+                if let Err(err) = engine.add_owner_ban(owner_id, target, owned_lane).await {
+                    return BridgeReply::ephemeral_text(format!("Bann fehlgeschlagen: {err}"));
                 }
-                BridgeReply::ephemeral_text(format!(
-                    "<@{target}> gebannt — gilt für alle deine Lanes, bis du den Bann aufhebst."
-                ))
+                if let Some(lane) = owned_lane {
+                    // Die serverweite Suche darf niemanden aus einem anderen Call trennen.
+                    if engine
+                        .port
+                        .member_voice_channel(interaction.guild_id, target)
+                        .await
+                        == Some(lane)
+                    {
+                        if let Err(err) = engine
+                            .port
+                            .disconnect_member(
+                                interaction.guild_id,
+                                target,
+                                &format!("TempVoice: Panel-Bann durch {}", interaction.user_id),
+                            )
+                            .await
+                        {
+                            return BridgeReply::ephemeral_text(format!(
+                                "Bann gesetzt, aber Trennen fehlgeschlagen: {err}"
+                            ));
+                        }
+                    }
+                }
+                tracing::info!(actor_id = interaction.user_id, owner_id, target_id = target, channel_id = ?owned_lane, "TempVoice: Panel-Bann");
+                BridgeReply::ephemeral_text(format!("<@{target}> gebannt. Der Bann gilt für alle Lanes von <@{owner_id}>, bis er aufgehoben wird."))
             }
             "tv_unban" => {
-                let owner_id = match self.ban_context_lane(&interaction).await {
+                let lane = self.ban_context_lane(&interaction).await;
+                let owner_id = match lane {
                     Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
                     None => interaction.user_id,
+                };
+                let custom_id = match lane {
+                    Some(lane) => self
+                        .moderation_context(lane)
+                        .await
+                        .custom_id("tv_unban_sel"),
+                    None => "tv_unban_sel".to_string(),
                 };
                 let bans = engine.store.list_bans(owner_id).await.unwrap_or_default();
                 if bans.is_empty() {
@@ -1607,7 +1799,7 @@ impl InteractionHandler for PanelHandler {
                 BridgeReply {
                     content: Some("Wen entbannen?".to_string()),
                     components: Some(json!([{ "type": 1, "components": [{
-                        "type": 3, "custom_id": "tv_unban_sel", "options": options,
+                        "type": 3, "custom_id": custom_id, "options": options,
                         "min_values": 1, "max_values": 1,
                     }]}])),
                     ephemeral: true,
@@ -1618,12 +1810,21 @@ impl InteractionHandler for PanelHandler {
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
-                let owned_lane = self.ban_context_lane(&interaction).await;
+                let owned_lane = match self
+                    .ban_action_lane(&interaction, expected_moderation)
+                    .await
+                {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
                 let owner_id = match owned_lane {
                     Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
                     None => interaction.user_id,
                 };
-                let _ = engine.remove_owner_ban(owner_id, target, owned_lane).await;
+                if let Err(err) = engine.remove_owner_ban(owner_id, target, owned_lane).await {
+                    return BridgeReply::ephemeral_text(format!("Entbannen fehlgeschlagen: {err}"));
+                }
+                tracing::info!(actor_id = interaction.user_id, owner_id, target_id = target, channel_id = ?owned_lane, "TempVoice: Panel-Unban");
                 BridgeReply::ephemeral_text(format!("<@{target}> entbannt."))
             }
 
@@ -1957,7 +2158,12 @@ impl InteractionHandler for PanelHandler {
                 };
                 match self
                     .engine
-                    .switch_lane_mode(interaction.guild_id, lane, interaction.user_id, &mode)
+                    .switch_lane_mode(
+                        interaction.guild_id,
+                        lane,
+                        self.lane_owner_id(lane, interaction.user_id).await,
+                        &mode,
+                    )
                     .await
                 {
                     None => {
@@ -2234,6 +2440,7 @@ pub fn register(
     ] {
         router.on_custom_id(custom_id, handler.clone());
     }
+    router.on_prefix(MODERATION_PREFIX, handler.clone());
     if lfg_active {
         router.on_custom_id(crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID, handler);
     }
@@ -2330,6 +2537,7 @@ pub fn spawn_command(
 
 #[cfg(test)]
 mod tests {
+    include!("live_streamer_tests.rs");
     use super::*;
     use crate::tempvoice::store::LaneRecord;
     use crate::tempvoice::{TempVoiceConfig, TempVoiceEngine, TempVoiceStore};
@@ -2496,7 +2704,7 @@ mod tests {
                 staging_rules: HashMap::new(),
             },
             TempVoiceStore::new(db.pool().clone()),
-            Arc::new(ForeignLanePort),
+            Arc::new(ForeignLanePort::default()),
         );
         let handler = PanelHandler {
             engine,
@@ -2560,7 +2768,7 @@ mod tests {
         let description = embed["description"].as_str().expect("description");
         assert!(description.contains("**Owner:** <@42>"));
         assert!(description.contains("👻 Lurker – stumm beitreten ohne Limit-Slot zu belegen"));
-        assert!(description.contains("**🔓 Rang-Gate** *(nur Ranked, nur Owner)*"));
+        assert!(description.contains("**🔓 Rang-Gate** *(nur Ranked)*"));
     }
 
     #[test]
@@ -2609,10 +2817,19 @@ mod tests {
         assert_eq!(find_existing_tempvoice_global_panel(&messages), Some(13));
     }
 
-    struct ForeignLanePort;
+    #[derive(Default)]
+    struct ForeignLanePort {
+        live_streamer: std::sync::atomic::AtomicBool,
+        voice_channels: std::sync::Mutex<HashMap<u64, Option<u64>>>,
+        actions: std::sync::Mutex<Vec<String>>,
+    }
 
     #[async_trait::async_trait]
     impl crate::tempvoice::LanePort for ForeignLanePort {
+        async fn member_is_live_streamer(&self, _guild_id: u64, _user_id: u64) -> bool {
+            self.live_streamer.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         async fn create_voice_channel(
             &self,
             _guild_id: u64,
@@ -2716,9 +2933,13 @@ mod tests {
         async fn disconnect_member(
             &self,
             _guild_id: u64,
-            _user_id: u64,
+            user_id: u64,
             _reason: &str,
         ) -> Result<(), String> {
+            self.actions
+                .lock()
+                .expect("test mutex")
+                .push(format!("kick:{user_id}"));
             Ok(())
         }
 
@@ -2777,8 +2998,13 @@ mod tests {
             Ok(())
         }
 
-        async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
-            Some(4242)
+        async fn member_voice_channel(&self, _guild_id: u64, user_id: u64) -> Option<u64> {
+            self.voice_channels
+                .lock()
+                .expect("valid test fixture")
+                .get(&user_id)
+                .copied()
+                .unwrap_or(Some(4242))
         }
 
         async fn member_role_names(&self, _guild_id: u64, _user_id: u64) -> Vec<String> {
@@ -2789,8 +3015,13 @@ mod tests {
             Vec::new()
         }
 
-        async fn channel_members(&self, _guild_id: u64, _channel_id: u64) -> Vec<u64> {
-            Vec::new()
+        async fn channel_members(&self, _guild_id: u64, channel_id: u64) -> Vec<u64> {
+            self.voice_channels
+                .lock()
+                .expect("valid test fixture")
+                .iter()
+                .filter_map(|(user, channel)| (*channel == Some(channel_id)).then_some(*user))
+                .collect()
         }
 
         async fn channel_name(&self, _guild_id: u64, _channel_id: u64) -> Option<String> {
@@ -2838,7 +3069,7 @@ mod tests {
                 staging_rules: HashMap::new(),
             },
             TempVoiceStore::new(db.pool().clone()),
-            Arc::new(ForeignLanePort),
+            Arc::new(ForeignLanePort::default()),
         );
         let handler = PanelHandler {
             engine,
@@ -2868,7 +3099,7 @@ mod tests {
                 staging_rules: HashMap::new(),
             },
             TempVoiceStore::new(db.pool().clone()),
-            Arc::new(ForeignLanePort),
+            Arc::new(ForeignLanePort::default()),
         );
         let handler = PanelHandler {
             engine,
@@ -3342,7 +3573,7 @@ mod tests {
                 staging_rules: HashMap::new(),
             },
             TempVoiceStore::new(db.pool().clone()),
-            Arc::new(ForeignLanePort),
+            Arc::new(ForeignLanePort::default()),
         );
         engine
             .store
