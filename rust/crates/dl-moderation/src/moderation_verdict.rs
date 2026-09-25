@@ -78,10 +78,23 @@ pub(crate) fn high_confidence_scam_reason_conflict(
     confidence: f64,
     reason: &str,
 ) -> bool {
-    if !matches!(category, ModerationCategory::Other) || confidence < 0.80 {
+    matches!(category, ModerationCategory::Other)
+        && confidence >= 0.80
+        && explicit_scam_reason(reason)
+}
+
+pub(crate) fn high_confidence_scam_verification_conflict(
+    verification: &VerificationDecision,
+) -> bool {
+    if verification.confidence < 0.80 || !explicit_scam_reason(&verification.reason) {
         return false;
     }
 
+    matches!(verification.category, ModerationCategory::Other)
+        || (!verification.confirmed && matches!(verification.category, ModerationCategory::Scam))
+}
+
+fn explicit_scam_reason(reason: &str) -> bool {
     let reason = reason.to_ascii_lowercase();
     let explicit_scam = [
         "scam-muster",
@@ -96,6 +109,9 @@ pub(crate) fn high_confidence_scam_reason_conflict(
         "crypto-scam",
         "klarer scam",
         "eindeutiger scam",
+        "sichtbarer scam",
+        "scam bestätigt",
+        "scam bestaetigt",
     ]
     .iter()
     .any(|needle| reason.contains(needle));
@@ -266,6 +282,36 @@ mod tests {
             0.99,
             "Eindeutiger Scam."
         ));
+    }
+
+    #[test]
+    fn detects_unconfirmed_scam_verification_contradiction() {
+        let contradictory = VerificationDecision {
+            confirmed: false,
+            category: ModerationCategory::Scam,
+            confidence: 0.91,
+            reason: "Sichtbarer Scam mit Promo-Code und Auszahlungsversprechen.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(high_confidence_scam_verification_conflict(&contradictory));
+
+        let uncertain = VerificationDecision {
+            confirmed: false,
+            category: ModerationCategory::Scam,
+            confidence: 0.91,
+            reason: "Möglicher Scam, aber nicht eindeutig belegt.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(!high_confidence_scam_verification_conflict(&uncertain));
+
+        let confirmed = VerificationDecision {
+            confirmed: true,
+            category: ModerationCategory::Scam,
+            confidence: 0.91,
+            reason: "Sichtbarer Scam.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(!high_confidence_scam_verification_conflict(&confirmed));
     }
 
     #[test]

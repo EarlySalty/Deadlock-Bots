@@ -2080,13 +2080,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn takeover_scam_with_self_contradictory_verifier_is_rechecked_and_enforced() {
+    async fn takeover_scam_with_unconfirmed_scam_verifier_is_rechecked_and_enforced() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_image_moderator(
             &[r#"{"category":"scam","confidence":0.92,"reason":"Krypto-Bonus, Promo-Code und Auszahlung als Scam-Muster"}"#],
             &[
                 r#"{"confirmed":true,"category":"scam","confidence":0.94,"reason":"Sichtbarer Krypto-Bonus- und Auszahlungs-Scam ohne Reporting-Kontext"}"#,
-                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Screenshot zeigt Krypto-Casino, Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."}"#,
+                r#"{"confirmed":false,"category":"scam","confidence":0.90,"reason":"Sichtbarer Scam mit Krypto-Casino, Promo-Code und Auszahlungsversprechen."}"#,
             ],
             Some(detector),
             vec![777],

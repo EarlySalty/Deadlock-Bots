@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn behavior_trigger_rechecks_self_contradictory_scam_verdict() {
+    async fn behavior_trigger_rechecks_unconfirmed_scam_verdict() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
         vision.responses.lock().await.push(
@@ -960,7 +960,7 @@ mod tests {
                     .to_string(),
             );
             responses.push(
-                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Screenshot zeigt Krypto-Casino, Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."}"#
+                r#"{"confirmed":false,"category":"scam","confidence":0.90,"reason":"Sichtbarer Scam mit Krypto-Casino, Promo-Code und Auszahlungsversprechen."}"#
                     .to_string(),
             );
         }

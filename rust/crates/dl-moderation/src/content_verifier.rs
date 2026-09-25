@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::content_analyzer::ModerationInput;
 use crate::moderation_verdict::{
-    high_confidence_scam_reason_conflict, parse_verification_decision, ContentAnalysis,
+    high_confidence_scam_verification_conflict, parse_verification_decision, ContentAnalysis,
     VerificationDecision,
 };
 
@@ -79,11 +79,7 @@ impl ContentVerifier {
         let raw = self.request(input, prompt, VERIFIER_SYSTEM_PROMPT).await;
         let verification = parse_verification_decision(raw.as_deref(), analysis.category.clone());
 
-        if !high_confidence_scam_reason_conflict(
-            &verification.category,
-            verification.confidence,
-            &verification.reason,
-        ) {
+        if !high_confidence_scam_verification_conflict(&verification) {
             return verification;
         }
 
@@ -128,11 +124,7 @@ impl ContentVerifier {
             .await;
         let verification = parse_verification_decision(raw.as_deref(), analysis.category.clone());
 
-        if !high_confidence_scam_reason_conflict(
-            &verification.category,
-            verification.confidence,
-            &verification.reason,
-        ) {
+        if !high_confidence_scam_verification_conflict(&verification) {
             return verification;
         }
 
