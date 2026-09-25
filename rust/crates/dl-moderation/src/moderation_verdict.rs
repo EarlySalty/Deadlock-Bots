@@ -73,6 +73,77 @@ pub struct ModerationVerdict {
     pub trigger: String,
 }
 
+pub(crate) fn high_confidence_scam_reason_conflict(
+    category: &ModerationCategory,
+    confidence: f64,
+    reason: &str,
+) -> bool {
+    !matches!(category, ModerationCategory::Scam)
+        && confidence >= 0.80
+        && explicit_scam_reason(reason)
+}
+
+pub(crate) fn high_confidence_scam_verification_conflict(
+    verification: &VerificationDecision,
+) -> bool {
+    if verification.confidence < 0.80 || !explicit_scam_reason(&verification.reason) {
+        return false;
+    }
+
+    !verification.confirmed || !matches!(verification.category, ModerationCategory::Scam)
+}
+
+fn explicit_scam_reason(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    let explicit_scam = [
+        "scam-muster",
+        "scammuster",
+        "scam-merkmal",
+        "scammerkmal",
+        "betrugsmuster",
+        "betrugs-muster",
+        "betrugsversuch",
+        "phishing",
+        "krypto-scam",
+        "crypto-scam",
+        "klarer scam",
+        "eindeutiger scam",
+        "sichtbarer scam",
+        "scam bestätigt",
+        "scam bestaetigt",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle));
+
+    if !explicit_scam {
+        return false;
+    }
+
+    let uncertainty_or_safe_context = [
+        "kein scam",
+        "kein betrug",
+        "kein phishing",
+        "nicht eindeutig",
+        "nicht belegt",
+        "nicht klar",
+        "möglich",
+        "moeglich",
+        "könnte",
+        "koennte",
+        "verdacht",
+        "unklar",
+        "wirkt wie",
+        "reporting",
+        "warnung",
+        "warnt",
+        "zitat",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle));
+
+    !uncertainty_or_safe_context
+}
+
 fn raw_envelope(raw_text: Option<&str>, parsed: Option<Value>) -> String {
     let mut envelope = serde_json::Map::new();
     envelope.insert("response_text".to_string(), serde_json::json!(raw_text));
@@ -182,6 +253,79 @@ pub fn parse_verification_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_live_scam_reason_category_contradiction_without_flagging_uncertainty() {
+        assert!(high_confidence_scam_reason_conflict(
+            &ModerationCategory::Other,
+            0.90,
+            "Screenshot zeigt Krypto-Casino, Promo-Code und Auszahlung, typisches Betrugs-/Scam-Muster."
+        ));
+        assert!(high_confidence_scam_reason_conflict(
+            &ModerationCategory::Other,
+            0.84,
+            "Sichtbarer Werbetext verspricht $100K+ within a week und verlangt Telegram-Kontakt; typische unseriöse Anzeige mit Scam-Merkmalen."
+        ));
+        assert!(!high_confidence_scam_reason_conflict(
+            &ModerationCategory::Other,
+            0.62,
+            "Wirkt wie möglicher Scam, aber der Betrugscharakter ist nicht eindeutig belegt."
+        ));
+        assert!(!high_confidence_scam_reason_conflict(
+            &ModerationCategory::Other,
+            0.99,
+            "Kein Phishing sichtbar, normaler Screenshot."
+        ));
+        assert!(high_confidence_scam_reason_conflict(
+            &ModerationCategory::Harassment,
+            0.91,
+            "Sichtbarer Scam mit Promo-Code und Auszahlungsversprechen."
+        ));
+        assert!(!high_confidence_scam_reason_conflict(
+            &ModerationCategory::Scam,
+            0.99,
+            "Eindeutiger Scam."
+        ));
+    }
+
+    #[test]
+    fn detects_unconfirmed_scam_verification_contradiction() {
+        let contradictory = VerificationDecision {
+            confirmed: false,
+            category: ModerationCategory::Scam,
+            confidence: 0.91,
+            reason: "Sichtbarer Scam mit Promo-Code und Auszahlungsversprechen.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(high_confidence_scam_verification_conflict(&contradictory));
+
+        let uncertain = VerificationDecision {
+            confirmed: false,
+            category: ModerationCategory::Scam,
+            confidence: 0.91,
+            reason: "Möglicher Scam, aber nicht eindeutig belegt.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(!high_confidence_scam_verification_conflict(&uncertain));
+
+        let wrong_category = VerificationDecision {
+            confirmed: false,
+            category: ModerationCategory::Harassment,
+            confidence: 0.91,
+            reason: "Sichtbarer Scam mit Promo-Code und Auszahlungsversprechen.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(high_confidence_scam_verification_conflict(&wrong_category));
+
+        let confirmed = VerificationDecision {
+            confirmed: true,
+            category: ModerationCategory::Scam,
+            confidence: 0.91,
+            reason: "Sichtbarer Scam.".to_string(),
+            raw_json: "{}".to_string(),
+        };
+        assert!(!high_confidence_scam_verification_conflict(&confirmed));
+    }
 
     #[test]
     fn parses_analyzer_json_and_clamps_confidence() {

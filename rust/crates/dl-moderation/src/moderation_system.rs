@@ -290,9 +290,28 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         let content_verdict = content_evaluation
             .as_ref()
             .and_then(|evaluation| evaluation.verdict.as_ref());
-        let outcome = self
+        let mut outcome = self
             .policy
             .decide_combined_outcome(content_verdict, behavior_signal.as_ref());
+        if content_evaluation
+            .as_ref()
+            .is_some_and(|evaluation| evaluation.unresolved_consistency)
+        {
+            let timeout_minutes = if behavior_signal.is_some() {
+                self.policy.config().behavior_proposal_timeout_minutes
+            } else {
+                self.policy.config().timeout_minutes
+            };
+            outcome.source = Some(PolicyDecisionSource::Content);
+            outcome.decision = PolicyDecision::Proposal { timeout_minutes };
+            tracing::warn!(
+                guild_id,
+                channel_id = event.channel_id,
+                message_id = event.message_id,
+                user_id = event.author_id,
+                "Moderation: ungelöster KI-Konsistenzkonflikt wird nur zur manuellen Prüfung vorgeschlagen"
+            );
+        }
         let source = outcome.source;
         let decision = outcome.decision;
         if content_evaluation.is_some() || behavior_signal.is_some() {
@@ -2076,6 +2095,77 @@ mod tests {
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
         assert_eq!(draft.source, "content+behavior");
         assert_eq!(draft.category, "scam");
+        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
+    }
+
+    #[tokio::test]
+    async fn takeover_scam_with_unconfirmed_scam_verifier_is_rechecked_and_enforced() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.92,"reason":"Krypto-Bonus, Promo-Code und Auszahlung als Scam-Muster"}"#],
+            &[
+                r#"{"confirmed":true,"category":"scam","confidence":0.94,"reason":"Sichtbarer Krypto-Bonus- und Auszahlungs-Scam ohne Reporting-Kontext"}"#,
+                r#"{"confirmed":false,"category":"scam","confidence":0.90,"reason":"Sichtbarer Scam mit Krypto-Casino, Promo-Code und Auszahlungsversprechen."}"#,
+            ],
+            Some(detector),
+            vec![777],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+
+        moderator
+            .handle_message(&image_event(201, 10, 1100, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(201, 11, 1101, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.bans.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.action, "auto_execute");
+        assert_eq!(draft.category, "scam");
+        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
+        let record = moderator.store.fetch_case("case-1101").await.expect("case");
+        assert_eq!(record.action, "auto_ban");
+    }
+
+    #[tokio::test]
+    async fn takeover_repeated_scam_verifier_contradiction_routes_to_manual_review() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"scam","confidence":0.92,"reason":"Sichtbarer Krypto-Scam"}"#],
+            &[
+                r#"{"confirmed":false,"category":"harassment","confidence":0.91,"reason":"Sichtbarer Scam mit Promo-Code"}"#,
+                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Typisches Betrugs-/Scam-Muster mit Promo-Code"}"#,
+            ],
+            Some(detector),
+            vec![777],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+
+        moderator
+            .handle_message(&image_event(202, 10, 1200, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(202, 11, 1201, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.action, "proposed");
+        assert_eq!(draft.timeout_minutes, Some(60));
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
     }
 
