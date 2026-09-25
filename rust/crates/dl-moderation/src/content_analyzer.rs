@@ -294,6 +294,7 @@ struct ModalAnalysis {
 pub(crate) struct ContentModerationEvaluation {
     pub analysis: ContentAnalysis,
     pub verdict: Option<ModerationVerdict>,
+    pub unresolved_consistency: bool,
 }
 
 fn log_provider_failure(input: &ModerationInput, modality: &str, model: &str) {
@@ -406,11 +407,14 @@ impl ContentModerationPipeline {
         let modal_analysis = self.analyzer.analyze_modal(input).await;
         let modality = modal_analysis.modality;
         let mut analysis = modal_analysis.analysis;
-        if high_confidence_scam_reason_conflict(
+        let force_verification = high_confidence_scam_reason_conflict(
             &analysis.category,
             analysis.confidence,
             &analysis.reason,
-        ) {
+        );
+        let mut unresolved_consistency = false;
+
+        if force_verification {
             tracing::warn!(
                 category = analysis.category.as_label(),
                 confidence = analysis.confidence,
@@ -420,28 +424,50 @@ impl ContentModerationPipeline {
                 .analyzer
                 .reanalyze_consistency(input, modality, "content_scan", &analysis)
                 .await;
+            let retry_resolved = retry.reason != "parse_error"
+                && !high_confidence_scam_reason_conflict(
+                    &retry.category,
+                    retry.confidence,
+                    &retry.reason,
+                );
             if retry.reason != "parse_error" {
                 analysis = retry;
             }
+            if !retry_resolved {
+                unresolved_consistency = true;
+                tracing::warn!(
+                    category = analysis.category.as_label(),
+                    confidence = analysis.confidence,
+                    "Moderation: Scam-Analyse-Widerspruch blieb nach Konsistenzprüfung offen"
+                );
+            }
         }
-        if analysis.confidence < self.analyze_flag_threshold || analysis.category.is_harmless() {
+
+        if !force_verification
+            && (analysis.confidence < self.analyze_flag_threshold
+                || analysis.category.is_harmless())
+        {
             return ContentModerationEvaluation {
                 analysis,
                 verdict: None,
+                unresolved_consistency: false,
             };
         }
+
         let verification = if matches!(modality, AnalysisModality::Text) {
             self.verifier.verify(&input.text_only(), &analysis).await
         } else {
             self.verifier.verify(input, &analysis).await
         };
+        unresolved_consistency |= verification.unresolved_consistency;
         ContentModerationEvaluation {
             analysis: analysis.clone(),
             verdict: Some(ModerationVerdict {
                 analysis,
-                verification,
+                verification: verification.decision,
                 trigger: input.trigger_preview(),
             }),
+            unresolved_consistency,
         }
     }
 
@@ -453,6 +479,7 @@ impl ContentModerationPipeline {
         let modal_analysis = self.analyzer.analyze_modal(input).await;
         let modality = modal_analysis.modality;
         let mut analysis = modal_analysis.analysis;
+        let mut unresolved_consistency = false;
         if high_confidence_scam_reason_conflict(
             &analysis.category,
             analysis.confidence,
@@ -468,8 +495,23 @@ impl ContentModerationPipeline {
                 .analyzer
                 .reanalyze_consistency(input, modality, behavior_trigger, &analysis)
                 .await;
+            let retry_resolved = retry.reason != "parse_error"
+                && !high_confidence_scam_reason_conflict(
+                    &retry.category,
+                    retry.confidence,
+                    &retry.reason,
+                );
             if retry.reason != "parse_error" {
                 analysis = retry;
+            }
+            if !retry_resolved {
+                unresolved_consistency = true;
+                tracing::warn!(
+                    behavior_trigger,
+                    category = analysis.category.as_label(),
+                    confidence = analysis.confidence,
+                    "Moderation: Scam-Analyse-Widerspruch blieb nach Konsistenzprüfung offen"
+                );
             }
         }
 
@@ -477,13 +519,15 @@ impl ContentModerationPipeline {
             .verifier
             .verify_behavior_trigger(input, &analysis, behavior_trigger)
             .await;
+        unresolved_consistency |= verification.unresolved_consistency;
         ContentModerationEvaluation {
             analysis: analysis.clone(),
             verdict: Some(ModerationVerdict {
                 analysis,
-                verification,
+                verification: verification.decision,
                 trigger: input.trigger_preview(),
             }),
+            unresolved_consistency,
         }
     }
 }
@@ -819,6 +863,120 @@ mod tests {
         assert_eq!(result.analysis.category.as_label(), "scam");
         assert!(result.verification.confirmed);
         assert_eq!(result.verification.category.as_label(), "scam");
+        assert_eq!(
+            verifier_vision.image_counts.lock().await.as_slice(),
+            &[1, 1]
+        );
+    }
+
+    #[tokio::test]
+    async fn contradictory_analysis_retry_to_harmless_still_runs_verifier() {
+        let text = Arc::new(RecordingText::default());
+        let vision = Arc::new(RecordingVision::default());
+        {
+            let mut responses = vision.responses.lock().await;
+            // pop(): initial contradiction first, then the harmless consistency retry.
+            responses.push(
+                r#"{"category":"game_related_ok","confidence":0.99,"reason":"Reporting-Screenshot ohne Werbung"}"#
+                    .to_string(),
+            );
+            responses.push(
+                r#"{"category":"other","confidence":0.90,"reason":"Typisches Betrugs-/Scam-Muster mit Promo-Code"}"#
+                    .to_string(),
+            );
+        }
+        let verifier_text = Arc::new(RecordingText::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":false,"category":"other","confidence":0.99,"reason":"Reporting-Kontext ist sichtbar, kein Scam"}"#
+                .to_string(),
+        );
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                text,
+                Some(vision.clone()),
+                ContentAnalyzerConfig {
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                    image_model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            ContentVerifier::new(
+                verifier_text,
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            0.5,
+        );
+
+        let result = pipeline
+            .evaluate_with_analysis(&ModerationInput::new(
+                "",
+                vec!["https://example.test/reporting.png".to_string()],
+            ))
+            .await;
+
+        assert_eq!(result.analysis.category.as_label(), "game_related_ok");
+        assert!(
+            result.verdict.is_some(),
+            "initial conflict must force verifier"
+        );
+        assert!(!result.unresolved_consistency);
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[1, 1]);
+        assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[1]);
+    }
+
+    #[tokio::test]
+    async fn repeated_verifier_contradiction_is_marked_unresolved() {
+        let text = Arc::new(RecordingText::default());
+        let vision = Arc::new(RecordingVision::default());
+        vision.responses.lock().await.push(
+            r#"{"category":"scam","confidence":0.92,"reason":"Sichtbarer Krypto-Scam"}"#
+                .to_string(),
+        );
+        let verifier_text = Arc::new(RecordingText::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        {
+            let mut responses = verifier_vision.responses.lock().await;
+            // pop(): initial contradiction first, then another still-contradictory retry.
+            responses.push(
+                r#"{"confirmed":false,"category":"harassment","confidence":0.91,"reason":"Sichtbarer Scam mit Promo-Code"}"#
+                    .to_string(),
+            );
+            responses.push(
+                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Typisches Betrugs-/Scam-Muster mit Promo-Code"}"#
+                    .to_string(),
+            );
+        }
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                text,
+                Some(vision),
+                ContentAnalyzerConfig {
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                    image_model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            ContentVerifier::new(
+                verifier_text,
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+            0.5,
+        );
+
+        let result = pipeline
+            .evaluate_with_analysis(&ModerationInput::new(
+                "",
+                vec!["https://example.test/scam.png".to_string()],
+            ))
+            .await;
+
+        assert!(result.verdict.is_some());
+        assert!(result.unresolved_consistency);
         assert_eq!(
             verifier_vision.image_counts.lock().await.as_slice(),
             &[1, 1]

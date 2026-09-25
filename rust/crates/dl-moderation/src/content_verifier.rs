@@ -47,6 +47,12 @@ impl Default for ContentVerifierConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VerificationEvaluation {
+    pub decision: VerificationDecision,
+    pub unresolved_consistency: bool,
+}
+
 pub struct ContentVerifier {
     text: Arc<dyn dl_ai::TextGenerator>,
     vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
@@ -66,11 +72,11 @@ impl ContentVerifier {
         }
     }
 
-    pub async fn verify(
+    pub(crate) async fn verify(
         &self,
         input: &ModerationInput,
         analysis: &ContentAnalysis,
-    ) -> VerificationDecision {
+    ) -> VerificationEvaluation {
         let prompt = build_verifier_prompt(
             &input.prompt_text(),
             analysis.category.as_label(),
@@ -79,39 +85,16 @@ impl ContentVerifier {
         let raw = self.request(input, prompt, VERIFIER_SYSTEM_PROMPT).await;
         let verification = parse_verification_decision(raw.as_deref(), analysis.category.clone());
 
-        if !high_confidence_scam_verification_conflict(&verification) {
-            return verification;
-        }
-
-        tracing::warn!(
-            category = verification.category.as_label(),
-            confidence = verification.confidence,
-            "Moderation: widersprüchliches Scam-Verifier-Urteil, Konsistenzprüfung wird wiederholt"
-        );
-        let retry_prompt = build_behavior_consistency_prompt(
-            &input.prompt_text(),
-            "content_scan",
-            analysis,
-            &verification,
-        );
-        let retry_raw = self
-            .request(input, retry_prompt, CONSISTENCY_SYSTEM_PROMPT)
-            .await;
-        let retry = parse_verification_decision(retry_raw.as_deref(), analysis.category.clone());
-
-        if retry.reason == "parse_error" {
-            verification
-        } else {
-            retry
-        }
+        self.resolve_consistency(input, analysis, "content_scan", verification)
+            .await
     }
 
-    pub async fn verify_behavior_trigger(
+    pub(crate) async fn verify_behavior_trigger(
         &self,
         input: &ModerationInput,
         analysis: &ContentAnalysis,
         behavior_trigger: &str,
-    ) -> VerificationDecision {
+    ) -> VerificationEvaluation {
         let prompt = build_behavior_verifier_prompt(
             &input.prompt_text(),
             behavior_trigger,
@@ -124,19 +107,33 @@ impl ContentVerifier {
             .await;
         let verification = parse_verification_decision(raw.as_deref(), analysis.category.clone());
 
+        self.resolve_consistency(input, analysis, behavior_trigger, verification)
+            .await
+    }
+
+    async fn resolve_consistency(
+        &self,
+        input: &ModerationInput,
+        analysis: &ContentAnalysis,
+        trigger_context: &str,
+        verification: VerificationDecision,
+    ) -> VerificationEvaluation {
         if !high_confidence_scam_verification_conflict(&verification) {
-            return verification;
+            return VerificationEvaluation {
+                decision: verification,
+                unresolved_consistency: false,
+            };
         }
 
         tracing::warn!(
-            behavior_trigger,
+            trigger_context,
             category = verification.category.as_label(),
             confidence = verification.confidence,
             "Moderation: widersprüchliches Scam-Verifier-Urteil, Konsistenzprüfung wird wiederholt"
         );
         let retry_prompt = build_behavior_consistency_prompt(
             &input.prompt_text(),
-            behavior_trigger,
+            trigger_context,
             analysis,
             &verification,
         );
@@ -144,11 +141,29 @@ impl ContentVerifier {
             .request(input, retry_prompt, CONSISTENCY_SYSTEM_PROMPT)
             .await;
         let retry = parse_verification_decision(retry_raw.as_deref(), analysis.category.clone());
+        let retry_resolved =
+            retry.reason != "parse_error" && !high_confidence_scam_verification_conflict(&retry);
 
-        if retry.reason == "parse_error" {
-            verification
+        if retry_resolved {
+            VerificationEvaluation {
+                decision: retry,
+                unresolved_consistency: false,
+            }
         } else {
-            retry
+            tracing::warn!(
+                trigger_context,
+                retry_category = retry.category.as_label(),
+                retry_confidence = retry.confidence,
+                "Moderation: Scam-Verifier-Widerspruch blieb nach Konsistenzprüfung offen"
+            );
+            VerificationEvaluation {
+                decision: if retry.reason == "parse_error" {
+                    verification
+                } else {
+                    retry
+                },
+                unresolved_consistency: true,
+            }
         }
     }
 
