@@ -1057,13 +1057,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                             .to_string()
                     }),
                 );
-                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
-                    &emoji_catalog,
-                    &emoji_map,
-                ));
+                let emoji_index =
+                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
+                let brain_vision = moderation_image_analyze_client
+                    .as_ref()
+                    .map(|(client, _)| -> Arc<dyn dl_ai::VisionGenerator> { client.clone() });
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
+                        vision: brain_vision,
                         open_test_mode,
                         brain_bin: brain_bin_path.clone(),
                         emoji_index: emoji_index.clone(),

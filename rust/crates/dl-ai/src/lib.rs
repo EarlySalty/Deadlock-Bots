@@ -201,6 +201,8 @@ impl MiniMaxClient {
     }
 }
 
+pub mod discord_image;
+
 pub struct OpenAiClient {
     http: reqwest::Client,
     base_url: String,

@@ -17,6 +17,7 @@ pub enum BrainOutcome {
     OutOfDomain,
     NoAnswer,
     BackendError,
+    ImageError(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,16 +32,39 @@ pub type BrainCooldowns = Mutex<HashMap<u64, Instant>>;
 pub enum BrainError {
     #[error("brain backend failed: {0}")]
     Backend(String),
+    #[error("{0}")]
+    Image(&'static str),
 }
 
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
-    /// Führt Retrieval und genau eine gemeinsame Generierung aus.
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
+
+    async fn answer_with_images(
+        &self,
+        question: &str,
+        image_urls: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
+        if !image_urls.is_empty() {
+            return Err(BrainError::Image("Die Bildanalyse ist gerade nicht verfügbar. Deine Frage wurde nicht ohne das Bild beantwortet."));
+        }
+        self.answer(question).await
+    }
 }
 
 pub async fn handle_brain_query(
     question: &str,
+    user_id: u64,
+    cfg: &BrainConfig,
+    cooldowns: &BrainCooldowns,
+    answerer: &dyn AiAnswerer,
+) -> BrainOutcome {
+    handle_brain_query_with_images(question, &[], user_id, cfg, cooldowns, answerer).await
+}
+
+pub async fn handle_brain_query_with_images(
+    question: &str,
+    image_urls: &[String],
     user_id: u64,
     cfg: &BrainConfig,
     cooldowns: &BrainCooldowns,
@@ -70,14 +94,18 @@ pub async fn handle_brain_query(
         }
     }
 
-    let outcome = match answerer.answer(question).await {
+    let outcome = match answerer.answer_with_images(question, image_urls).await {
         Ok(outcome) => outcome,
+        Err(BrainError::Image(message)) => return BrainOutcome::ImageError(message),
         Err(error) => {
             tracing::warn!(%error, "Gemeinsame Brain-Antwort fehlgeschlagen");
             return BrainOutcome::BackendError;
         }
     };
-    if !matches!(outcome, BrainOutcome::BackendError) {
+    if !matches!(
+        outcome,
+        BrainOutcome::BackendError | BrainOutcome::ImageError(_)
+    ) {
         register_cooldown(user_id, cfg, cooldowns).await;
     }
     outcome
@@ -185,6 +213,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_images_are_not_ignored_and_do_not_consume_cooldown() {
+        let config = BrainConfig {
+            max_question_len: 20,
+            cooldown_secs: 20,
+        };
+        let cooldowns = BrainCooldowns::default();
+        let answerer = CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        let images = vec!["https://cdn.discordapp.com/attachments/1/2/a.png".to_owned()];
+        assert!(matches!(
+            handle_brain_query_with_images("Frage", &images, 1, &config, &cooldowns, &answerer)
+                .await,
+            BrainOutcome::ImageError(_)
+        ));
+        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
+        assert!(cooldowns.lock().await.is_empty());
+        assert_eq!(
+            handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
+            BrainOutcome::Answer("Frage".into())
+        );
+        assert!(matches!(
+            handle_brain_query_with_images("Frage", &images, 1, &config, &cooldowns, &answerer)
+                .await,
+            BrainOutcome::Cooldown { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn gemeinsame_antwort_erhaelt_frage_und_beachtet_grenzen_und_cooldown() {
         let config = BrainConfig {
             max_question_len: 20,
@@ -221,6 +279,53 @@ mod tests {
             BrainOutcome::Answer(_)
         ));
         assert_eq!(answerer.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn bild_urls_werden_an_den_answerer_durchgereicht() {
+        struct ImageAnswerer {
+            images: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AiAnswerer for ImageAnswerer {
+            async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
+                Ok(BrainOutcome::Answer(question.to_string()))
+            }
+
+            async fn answer_with_images(
+                &self,
+                question: &str,
+                image_urls: &[String],
+            ) -> Result<BrainOutcome, BrainError> {
+                self.images.store(image_urls.len(), Ordering::SeqCst);
+                self.answer(question).await
+            }
+        }
+
+        let config = BrainConfig {
+            max_question_len: 20,
+            cooldown_secs: 0,
+        };
+        let cooldowns = BrainCooldowns::default();
+        let answerer = ImageAnswerer {
+            images: AtomicUsize::new(0),
+        };
+        let image_urls = vec!["https://cdn.discordapp.com/a.png".to_string()];
+
+        assert_eq!(
+            handle_brain_query_with_images(
+                "Frage",
+                &image_urls,
+                1,
+                &config,
+                &cooldowns,
+                &answerer,
+            )
+            .await,
+            BrainOutcome::Answer("Frage".into())
+        );
+        assert_eq!(answerer.images.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
