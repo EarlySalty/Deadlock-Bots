@@ -469,8 +469,12 @@ impl LlmProviderConfig {
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Arc<dyn ChatProvider>, ChatProviderInitError> {
         let provider = self.provider_for(use_case, &lookup)?;
+        let overrides = crate::configured_chat::Overrides::from_lookup(use_case, provider, &lookup);
         let lookup = model_key_lookup(use_case, lookup);
-        let retry = retry_for_use_case(use_case);
+        let mut retry = retry_for_use_case(use_case);
+        if let Some(timeout) = overrides.request_timeout {
+            retry.request_timeout = timeout;
+        }
         let built = match provider {
             LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup, retry)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
@@ -486,7 +490,10 @@ impl LlmProviderConfig {
         // Transparenz-Log haengt: damit ist jeder der vierzehn
         // Anwendungsfaelle erfasst, ohne dass eine Aufrufstelle etwas tun
         // muss. Ohne registrierte Senke reicht der Wrapper unveraendert durch.
-        Ok(crate::transparency::wrap_with_transparency(built, use_case))
+        Ok(crate::transparency::wrap_with_transparency(
+            overrides.wrap(built),
+            use_case,
+        ))
     }
 
     /// Startinventar: baut jeden Anwendungsfall einmal probeweise auf.
