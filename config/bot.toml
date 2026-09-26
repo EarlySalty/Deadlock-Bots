@@ -16,6 +16,11 @@ master_broker_port = 8770
 tierlist_public_port = 8771
 changelog_port = 8899
 
+[runtime.start]
+# Der MCP-Connector bindet fest an 127.0.0.1. Authentisierung nutzt einen
+# bestehenden TWITCH_INTERNAL_API_TOKEN aus Infisical; hier stehen nur Betriebswerte.
+mcp_port = 8890
+
 [storage]
 # Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.
 # Relative Pfade beziehen sich auf das WorkingDirectory des Dienstes.

@@ -1386,14 +1386,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
-    // MCP-Connector :8890 — loopback-only Streamable-HTTP-Endpunkt für Claude.
-    // Läuft mit der Bot-Identität (DISCORD_TOKEN aus dem Prozess-Env, via
-    // Infisical/systemd-creds) — kein eigener Secrets-Weg nötig.
+    // MCP-Connector :8890 — TOML-Betriebswerte, bestehender Infisical-Token,
+    // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
+    let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
     let mcp_state = Arc::new(
-        mcp::McpState::from_env(discord_token.clone(), operating_value)
+        mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?,
     );
-    let mcp_addr = mcp::McpState::bind_addr(operating_value);
+    let mcp_addr = mcp::McpState::bind_addr(&operating.runtime.start);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
         .await
         .with_context(|| format!("MCP-Connector-Port binden: {mcp_addr}"))?;

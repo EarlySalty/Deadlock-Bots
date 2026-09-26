@@ -643,7 +643,6 @@ pub fn secret_value(key: &str) -> Option<String> {
         | "INTERNAL_API_TOKEN"
         | "TURNIER_INTERNAL_API_TOKEN"
         | "SERVERSYNC_INTERNAL_TOKEN"
-        | "MCP_CONNECTOR_TOKEN"
         | "COACHING_BOT_TOKEN"
         | "DISCORD_OAUTH_CLIENT_SECRET"
         | "PUBLIC_STATS_SESSION_SECRET"
