@@ -8,25 +8,23 @@
 //! Muster wie Broker/Changelog/Server-Sync: eigener axum-Router, loopback-only,
 //! vom selben tokio::select! in main.rs getragen.
 //!
-//! Env (alle optional):
-//!   MCP_CONNECTOR_HOST    default 127.0.0.1 (nicht öffentlich binden!)
-//!   MCP_CONNECTOR_PORT    default 8890
-//!   MCP_CONNECTOR_TOKEN   wenn gesetzt: Authorization: Bearer <t> ODER ?token=<t>
-//!   MCP_DEFAULT_GUILD_ID  default: einzige Guild des Bots
-//!   MCP_EXPORT_DIR        default data/mcp_exports (relativ zum WorkingDirectory)
+//! Betriebswerte kommen aus der zentralen TOML, der interne Token aus dem
+//! bestehenden Infisical-Bootstrap. Der Listener bindet ausschließlich Loopback.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use chrono::{DateTime, Utc};
+use dl_core::runtime_config::StartOptions;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const DISCORD_API: &str = "https://discord.com/api/v10";
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -38,38 +36,39 @@ const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"]
 pub struct McpState {
     http: reqwest::Client,
     bot_token: String,
-    auth_token: Option<String>,
+    auth_token: String,
     default_guild: Option<String>,
     export_dir: PathBuf,
 }
 
 impl McpState {
-    pub fn from_env<F>(bot_token: String, lookup: F) -> Result<Self>
-    where
-        F: Fn(&str) -> Option<String>,
-    {
+    pub fn from_config(
+        bot_token: String,
+        auth_token: Option<String>,
+        config: &StartOptions,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .context("MCP: reqwest-Client")?;
+        let auth_token = auth_token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .context("MCP: interner Auth-Token aus Infisical fehlt")?;
         Ok(Self {
             http,
             bot_token,
-            auth_token: lookup("MCP_CONNECTOR_TOKEN").filter(|s| !s.trim().is_empty()),
-            default_guild: lookup("MCP_DEFAULT_GUILD_ID").filter(|s| !s.trim().is_empty()),
-            export_dir: lookup("MCP_EXPORT_DIR")
-                .map(PathBuf::from)
+            auth_token,
+            default_guild: config.mcp_guild_id.map(|id| id.to_string()),
+            export_dir: config
+                .mcp_export_dir
+                .clone()
                 .unwrap_or_else(|| PathBuf::from("data/mcp_exports")),
         })
     }
 
-    pub fn bind_addr<F>(lookup: F) -> String
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        let host = lookup("MCP_CONNECTOR_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
-        let port = lookup("MCP_CONNECTOR_PORT").unwrap_or_else(|| "8890".to_string());
-        format!("{host}:{port}")
+    pub fn bind_addr(config: &StartOptions) -> String {
+        format!("127.0.0.1:{}", config.mcp_port.unwrap_or(8890))
     }
 }
 
@@ -91,35 +90,29 @@ fn json_response(status: StatusCode, body: Value) -> Response {
         .into_response()
 }
 
-fn auth_ok(st: &McpState, headers: &HeaderMap, query: &HashMap<String, String>) -> bool {
-    let Some(expected) = &st.auth_token else {
-        return true;
-    };
-    if let Some(v) = headers
+fn auth_ok(st: &McpState, headers: &HeaderMap) -> bool {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-    {
-        if let Some(tok) = v.strip_prefix("Bearer ") {
-            if constant_time_eq(tok.trim(), expected) {
-                return true;
-            }
-        }
-    }
-    query
-        .get("token")
-        .map(|t| constant_time_eq(t, expected))
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| constant_time_eq(token.trim(), &st.auth_token))
         .unwrap_or(false)
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    let left = Sha256::digest(a.as_bytes());
+    let right = Sha256::digest(b.as_bytes());
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (left, right)| acc | (left ^ right))
+        == 0
 }
 
-async fn mcp_get() -> Response {
+async fn mcp_get(State(st): State<Arc<McpState>>, headers: HeaderMap) -> Response {
+    if !auth_ok(&st, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+    }
     // Kein server-initiierter SSE-Stream nötig — Streamable HTTP erlaubt 405.
     json_response(
         StatusCode::METHOD_NOT_ALLOWED,
@@ -127,13 +120,8 @@ async fn mcp_get() -> Response {
     )
 }
 
-async fn mcp_post(
-    State(st): State<Arc<McpState>>,
-    Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
-    if !auth_ok(&st, &headers, &query) {
+async fn mcp_post(State(st): State<Arc<McpState>>, headers: HeaderMap, body: String) -> Response {
+    if !auth_ok(&st, &headers) {
         return json_response(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
     }
     let parsed: Value = match serde_json::from_str(&body) {
@@ -1142,4 +1130,103 @@ async fn tool_api_call(st: &McpState, args: &Value) -> Result<Value> {
     } else {
         res
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    fn state(token: Option<&str>) -> Result<McpState> {
+        McpState::from_config(
+            "bot-token".into(),
+            token.map(str::to_owned),
+            &StartOptions::default(),
+        )
+    }
+
+    #[test]
+    fn fehlender_oder_leerer_token_sperrt_den_mcp_start() {
+        assert!(state(None).is_err());
+        assert!(state(Some("  ")).is_err());
+    }
+
+    #[test]
+    fn typed_toml_options_steuern_nur_port_guild_und_exportpfad() {
+        let config = StartOptions {
+            mcp_host: Some("0.0.0.0".parse().expect("gültige Test-IP")),
+            mcp_port: Some(8891),
+            mcp_guild_id: Some(12345),
+            mcp_export_dir: Some(PathBuf::from("data/test-exports")),
+            ..Default::default()
+        };
+        let state = McpState::from_config("bot-token".into(), Some(" expected ".into()), &config)
+            .expect("gültiger Test-State");
+        assert_eq!(state.auth_token, "expected");
+        assert_eq!(state.default_guild.as_deref(), Some("12345"));
+        assert_eq!(state.export_dir, PathBuf::from("data/test-exports"));
+        assert_eq!(McpState::bind_addr(&config), "127.0.0.1:8891");
+    }
+
+    #[test]
+    fn nur_bearer_header_mit_richtigem_token_wird_akzeptiert() {
+        let state = state(Some("expected")).expect("gültiger Test-State");
+        let mut headers = HeaderMap::new();
+        assert!(!auth_ok(&state, &headers));
+        for value in [
+            "Basic expected",
+            "Bearer wrong",
+            "Bearer much-longer-than-expected",
+        ] {
+            headers.insert(
+                header::AUTHORIZATION,
+                value.parse().expect("gültiger Header"),
+            );
+            assert!(!auth_ok(&state, &headers));
+        }
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer expected".parse().expect("gültiger Header"),
+        );
+        assert!(auth_ok(&state, &headers));
+    }
+
+    #[tokio::test]
+    async fn query_token_wird_verworfen_und_auth_laeuft_vor_json_parse() {
+        let app = router(Arc::new(
+            state(Some("expected")).expect("gültiger Test-State"),
+        ));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/mcp?token=expected")
+                    .body(Body::empty())
+                    .expect("gültige Test-Request"),
+            )
+            .await
+            .expect("gültige Test-Response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp?token=expected")
+                    .body(Body::from("kein json"))
+                    .expect("gültige Test-Request"),
+            )
+            .await
+            .expect("gültige Test-Response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::AUTHORIZATION, "Bearer expected")
+                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                    .expect("gültige Test-Request"),
+            )
+            .await
+            .expect("gültige Test-Response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
