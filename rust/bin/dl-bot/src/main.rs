@@ -20,10 +20,11 @@ mod turnierglue;
 mod vanity;
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     num::NonZeroU64,
     os::unix::fs::PermissionsExt,
     sync::{atomic::AtomicBool, Arc},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -100,6 +101,69 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
     env(name)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrainConsumerMode {
+    Legacy,
+    Shadow,
+    Typed,
+}
+
+fn brain_consumer_mode_from_value(raw: Option<&str>) -> anyhow::Result<BrainConsumerMode> {
+    let Some(raw) = raw else {
+        return Ok(BrainConsumerMode::Legacy);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "legacy" => Ok(BrainConsumerMode::Legacy),
+        "typed" => Ok(BrainConsumerMode::Typed),
+        "shadow" => Ok(BrainConsumerMode::Shadow),
+        _ => anyhow::bail!(
+            "BRAIN_CLIENT_MODE ungültig; erlaubt sind ausschließlich legacy, typed oder shadow"
+        ),
+    }
+}
+
+fn brain_consumer_mode() -> anyhow::Result<BrainConsumerMode> {
+    brain_consumer_mode_from_value(operating_value("BRAIN_CLIENT_MODE").as_deref())
+}
+
+fn validate_brain_open_test_mode(
+    consumer_mode: BrainConsumerMode,
+    open_test_mode: bool,
+) -> anyhow::Result<()> {
+    if consumer_mode == BrainConsumerMode::Typed && open_test_mode {
+        anyhow::bail!(
+            "BRAIN_OPEN_TEST_MODE ist mit BRAIN_CLIENT_MODE=typed nicht kompatibel: der bestehende Review-Build-Testpfad darf nicht still umgangen werden"
+        );
+    }
+    Ok(())
+}
+
+fn brain_api_timeout() -> Duration {
+    Duration::from_millis(env_u64_default("BRAIN_API_TIMEOUT_MS", 8_000).max(1))
+}
+
+fn brain_api_answerer() -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
+    let endpoint = env("BRAIN_API_ENDPOINT").context("BRAIN_API_ENDPOINT fehlt")?;
+    let token = env("BRAIN_API_TOKEN").context("BRAIN_API_TOKEN fehlt")?;
+    let scopes: BTreeSet<String> = env("BRAIN_API_SCOPES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if scopes.is_empty() {
+        anyhow::bail!("BRAIN_API_SCOPES fehlt oder ist leer");
+    }
+    let timeout = brain_api_timeout();
+    // BrainApiAnswerer adds a random per-instance namespace before its local sequence.
+    let namespace = format!("dl-bot-{}", std::process::id());
+    let answerer =
+        dl_brain::brain_api::BrainApiAnswerer::new(&endpoint, &token, timeout, namespace, scopes)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(Arc::new(answerer))
 }
 
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
@@ -1001,24 +1065,33 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
-    // Brain-RAG: Slash-Command plus bestehender Textcommand über MessageEvent-Subscriber.
+    // Brain command: legacy remains the default until an operator explicitly selects
+    // typed or report-only shadow mode. The typed adapter never falls back to local RAG.
     let brain_handler = {
+        let consumer_mode = brain_consumer_mode()?;
         let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
         let brain_bin_path = std::path::PathBuf::from(&brain_bin);
-        let enabled = env_bool_default("BRAIN_CMD_ENABLED", brain_bin_path.is_file());
+        let typed_configured =
+            env("BRAIN_API_ENDPOINT").is_some() && env("BRAIN_API_TOKEN").is_some();
+        let enabled_default = match consumer_mode {
+            BrainConsumerMode::Typed => typed_configured,
+            BrainConsumerMode::Legacy | BrainConsumerMode::Shadow => brain_bin_path.is_file(),
+        };
+        let enabled = env_bool_default("BRAIN_CMD_ENABLED", enabled_default);
         if !enabled {
             tracing::info!("Brain-Command deaktiviert (BRAIN_CMD_ENABLED)");
             None
-        } else if !brain_bin_path.is_file() {
+        } else if consumer_mode != BrainConsumerMode::Typed && !brain_bin_path.is_file() {
             tracing::warn!(
                 bin = %brain_bin_path.display(),
-                "Brain-Command nicht registriert: BRAIN_BIN existiert nicht"
+                "Brain-Command nicht registriert: Legacy-/Shadow-Pfad benötigt BRAIN_BIN"
             );
             None
         } else {
             let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
             let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
             let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
+            validate_brain_open_test_mode(consumer_mode, open_test_mode)?;
             let channel_allowlist = if open_test_mode {
                 None
             } else {
@@ -1033,7 +1106,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 None
             } else {
                 tracing::info!(
-                    bin = %brain_bin_path.display(),
+                    mode = ?consumer_mode,
                     cooldown_secs,
                     max_question_len,
                     open_test_mode,
@@ -1057,17 +1130,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                             .to_string()
                     }),
                 );
-                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
-                    &emoji_catalog,
-                    &emoji_map,
-                ));
-                let answerer: Arc<dyn dl_brain::AiAnswerer> =
+                let emoji_index =
+                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
+                let legacy: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
                         open_test_mode,
                         brain_bin: brain_bin_path.clone(),
                         emoji_index: emoji_index.clone(),
                     });
+                let answerer: Arc<dyn dl_brain::AiAnswerer> = match consumer_mode {
+                    BrainConsumerMode::Legacy => legacy,
+                    BrainConsumerMode::Typed => brain_api_answerer()?,
+                    BrainConsumerMode::Shadow => Arc::new(modglue::ReportOnlyShadowBrainAnswerer {
+                        visible: legacy,
+                        probe: brain_api_answerer()?,
+                        probe_timeout: brain_api_timeout(),
+                    }),
+                };
                 Some(Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
                     config,
@@ -2043,10 +2123,12 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     use super::{
-        brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
-        lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
-        matcher_provider_choice, model_from_lookup, moderation_enforce_from_lookup,
-        validate_voice_worker_token, warn_if_lagebild_token_empty, MatcherProviderChoice,
+        brain_channel_allowlist_from_value, brain_consumer_mode_from_value,
+        chat_text_generator_with, legacy_lfg_responder_enabled, lfg_cutover_active,
+        lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value, matcher_provider_choice,
+        model_from_lookup, moderation_enforce_from_lookup, validate_brain_open_test_mode,
+        validate_voice_worker_token, warn_if_lagebild_token_empty, BrainConsumerMode,
+        MatcherProviderChoice,
     };
     use std::{
         collections::HashMap,
@@ -2324,6 +2406,40 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
 
         let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
+
+    #[test]
+    fn brain_client_mode_faellt_bei_unbekannten_werten_geschlossen_aus() {
+        assert_eq!(
+            brain_consumer_mode_from_value(None)
+                .expect("unset keeps the documented legacy default"),
+            BrainConsumerMode::Legacy
+        );
+        for (raw, expected) in [
+            ("legacy", BrainConsumerMode::Legacy),
+            ("typed", BrainConsumerMode::Typed),
+            ("shadow", BrainConsumerMode::Shadow),
+            (" TYPED ", BrainConsumerMode::Typed),
+        ] {
+            assert_eq!(
+                brain_consumer_mode_from_value(Some(raw)).expect("explicit mode must be accepted"),
+                expected
+            );
+        }
+        for raw in ["", "auto", "legac", "typed-shadow"] {
+            assert!(
+                brain_consumer_mode_from_value(Some(raw)).is_err(),
+                "{raw:?} must fail closed instead of selecting legacy"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_mode_lehnt_legacy_open_test_review_build_semantik_ab() {
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Typed, true).is_err());
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Typed, false).is_ok());
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Legacy, true).is_ok());
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Shadow, true).is_ok());
     }
 
     #[test]
