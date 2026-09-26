@@ -28,7 +28,7 @@ impl BrainApiAnswerer {
         game_scopes: BTreeSet<String>,
     ) -> Result<Self, BrainError> {
         if namespace.is_empty()
-            || namespace.len() > 128
+            || namespace.len() > 64
             || !namespace
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
@@ -36,6 +36,10 @@ impl BrainApiAnswerer {
         {
             return Err(backend_error());
         }
+        // A PID is not an instance identity: containers can share it and restarts reuse it.
+        // Give every adapter construction its own 128-bit namespace before the local counter.
+        let instance_nonce = rand::random::<u128>();
+        let namespace = format!("{namespace}-{instance_nonce:032x}");
         let client =
             AsyncBrainClient::new_local(endpoint, token, timeout).map_err(|_| backend_error())?;
         let candidate = Self {
@@ -313,6 +317,31 @@ mod tests {
             .join()
             .expect("offline fixture operation must succeed");
     }
+    #[test]
+    fn independent_instances_never_share_request_or_conversation_ids() {
+        let first = BrainApiAnswerer::new(
+            "http://127.0.0.1:1",
+            "fixture-token",
+            Duration::from_secs(1),
+            "same-container-pid".into(),
+            BTreeSet::from(["fixture.game".into()]),
+        )
+        .expect("offline construction must succeed");
+        let second = BrainApiAnswerer::new(
+            "http://127.0.0.1:1",
+            "fixture-token",
+            Duration::from_secs(1),
+            "same-container-pid".into(),
+            BTreeSet::from(["fixture.game".into()]),
+        )
+        .expect("offline construction must succeed");
+
+        let first_query = first.query("Abrams").expect("query must be valid");
+        let second_query = second.query("Abrams").expect("query must be valid");
+        assert_ne!(first_query.request_id, second_query.request_id);
+        assert_ne!(first_query.conversation_id, second_query.conversation_id);
+    }
+
     #[test]
     fn configuration_is_explicit_local_and_scope_bound() {
         assert!(BrainApiAnswerer::new(

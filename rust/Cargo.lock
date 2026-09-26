@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "brain-client"
 version = "0.1.0"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=54dcae30a172f5cccdb9f53b6bd6ed746f9315ec#54dcae30a172f5cccdb9f53b6bd6ed746f9315ec"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=3b86d3cbe5ea39a67b8b1fbd8a3d48ab935982ef#3b86d3cbe5ea39a67b8b1fbd8a3d48ab935982ef"
 dependencies = [
  "brain-contracts",
  "reqwest",
@@ -431,7 +431,7 @@ dependencies = [
 [[package]]
 name = "brain-contracts"
 version = "0.1.0"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=54dcae30a172f5cccdb9f53b6bd6ed746f9315ec#54dcae30a172f5cccdb9f53b6bd6ed746f9315ec"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=3b86d3cbe5ea39a67b8b1fbd8a3d48ab935982ef#3b86d3cbe5ea39a67b8b1fbd8a3d48ab935982ef"
 dependencies = [
  "serde",
  "serde_json",
@@ -1374,6 +1374,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "brain-client",
+ "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
@@ -3112,7 +3113,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4956,7 +4957,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4994,7 +4995,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6604,7 +6605,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -7737,7 +7738,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

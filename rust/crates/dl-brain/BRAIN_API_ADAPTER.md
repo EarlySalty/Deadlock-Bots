@@ -2,7 +2,7 @@
 
 Stand: 2026-09-26. C9 verdrahtet den vorhandenen `BrainApiAnswerer` in die echte `brain`-Command-Composition. Der bestehende Pfad bleibt Default und wird nicht produktiv abgeschaltet.
 
-Der Adapter verwendet ausschließlich den kanonischen `AsyncBrainClient` aus Deadlock-Brain, gepinnt auf `54dcae30a172f5cccdb9f53b6bd6ed746f9315ec`. Im neuen Adapter existiert kein direkter Modell- oder RAG-Fallback.
+Der Adapter verwendet ausschließlich den kanonischen `AsyncBrainClient` aus Deadlock-Brain, gepinnt auf `3b86d3cbe5ea39a67b8b1fbd8a3d48ab935982ef`. Im neuen Adapter existiert kein direkter Modell- oder RAG-Fallback.
 
 ## Runtime-Modi
 

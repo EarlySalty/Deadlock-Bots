@@ -110,16 +110,26 @@ enum BrainConsumerMode {
     Typed,
 }
 
-fn brain_consumer_mode() -> BrainConsumerMode {
-    match env("BRAIN_CLIENT_MODE")
-        .unwrap_or_else(|| "legacy".into())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "typed" => BrainConsumerMode::Typed,
-        "shadow" => BrainConsumerMode::Shadow,
-        _ => BrainConsumerMode::Legacy,
+fn brain_consumer_mode_from_value(raw: Option<&str>) -> anyhow::Result<BrainConsumerMode> {
+    let Some(raw) = raw else {
+        return Ok(BrainConsumerMode::Legacy);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "legacy" => Ok(BrainConsumerMode::Legacy),
+        "typed" => Ok(BrainConsumerMode::Typed),
+        "shadow" => Ok(BrainConsumerMode::Shadow),
+        _ => anyhow::bail!(
+            "BRAIN_CLIENT_MODE ungültig; erlaubt sind ausschließlich legacy, typed oder shadow"
+        ),
     }
+}
+
+fn brain_consumer_mode() -> anyhow::Result<BrainConsumerMode> {
+    brain_consumer_mode_from_value(operating_value("BRAIN_CLIENT_MODE").as_deref())
+}
+
+fn brain_api_timeout() -> Duration {
+    Duration::from_millis(env_u64_default("BRAIN_API_TIMEOUT_MS", 8_000).max(1))
 }
 
 fn brain_api_answerer() -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
@@ -135,7 +145,8 @@ fn brain_api_answerer() -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
     if scopes.is_empty() {
         anyhow::bail!("BRAIN_API_SCOPES fehlt oder ist leer");
     }
-    let timeout = Duration::from_millis(env_u64_default("BRAIN_API_TIMEOUT_MS", 8_000).max(1));
+    let timeout = brain_api_timeout();
+    // BrainApiAnswerer adds a random per-instance namespace before its local sequence.
     let namespace = format!("dl-bot-{}", std::process::id());
     let answerer =
         dl_brain::brain_api::BrainApiAnswerer::new(&endpoint, &token, timeout, namespace, scopes)
@@ -1045,7 +1056,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Brain command: legacy remains the default until an operator explicitly selects
     // typed or report-only shadow mode. The typed adapter never falls back to local RAG.
     let brain_handler = {
-        let consumer_mode = brain_consumer_mode();
+        let consumer_mode = brain_consumer_mode()?;
         let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
         let brain_bin_path = std::path::PathBuf::from(&brain_bin);
         let typed_configured =
@@ -1121,6 +1132,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     BrainConsumerMode::Shadow => Arc::new(modglue::ReportOnlyShadowBrainAnswerer {
                         visible: legacy,
                         probe: brain_api_answerer()?,
+                        probe_timeout: brain_api_timeout(),
                     }),
                 };
                 Some(Arc::new(modglue::BrainHandler {
@@ -2098,10 +2110,11 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     use super::{
-        brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
-        lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
-        matcher_provider_choice, model_from_lookup, moderation_enforce_from_lookup,
-        validate_voice_worker_token, warn_if_lagebild_token_empty, MatcherProviderChoice,
+        brain_channel_allowlist_from_value, brain_consumer_mode_from_value,
+        chat_text_generator_with, legacy_lfg_responder_enabled, lfg_cutover_active,
+        lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value, matcher_provider_choice,
+        model_from_lookup, moderation_enforce_from_lookup, validate_voice_worker_token,
+        warn_if_lagebild_token_empty, BrainConsumerMode, MatcherProviderChoice,
     };
     use std::{
         collections::HashMap,
@@ -2379,6 +2392,32 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
 
         let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
+
+    #[test]
+    fn brain_client_mode_faellt_bei_unbekannten_werten_geschlossen_aus() {
+        assert_eq!(
+            brain_consumer_mode_from_value(None)
+                .expect("unset keeps the documented legacy default"),
+            BrainConsumerMode::Legacy
+        );
+        for (raw, expected) in [
+            ("legacy", BrainConsumerMode::Legacy),
+            ("typed", BrainConsumerMode::Typed),
+            ("shadow", BrainConsumerMode::Shadow),
+            (" TYPED ", BrainConsumerMode::Typed),
+        ] {
+            assert_eq!(
+                brain_consumer_mode_from_value(Some(raw)).expect("explicit mode must be accepted"),
+                expected
+            );
+        }
+        for raw in ["", "auto", "legac", "typed-shadow"] {
+            assert!(
+                brain_consumer_mode_from_value(Some(raw)).is_err(),
+                "{raw:?} must fail closed instead of selecting legacy"
+            );
+        }
     }
 
     #[test]

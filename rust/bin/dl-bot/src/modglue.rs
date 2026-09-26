@@ -91,7 +91,7 @@ impl BrainEmojiIndex {
                 entries.push((name.to_string(), format!("<:{emoji_name}:{emoji_id}>")));
             }
         }
-        entries.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
         Self { entries }
     }
 
@@ -365,29 +365,37 @@ impl dl_brain::AiAnswerer for SharedBrainAnswerer {
 pub struct ReportOnlyShadowBrainAnswerer {
     pub visible: Arc<dyn dl_brain::AiAnswerer>,
     pub probe: Arc<dyn dl_brain::AiAnswerer>,
+    pub probe_timeout: Duration,
 }
 
 #[async_trait::async_trait]
 impl dl_brain::AiAnswerer for ReportOnlyShadowBrainAnswerer {
     async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-        let probe = self.probe.answer(question).await;
-        match &probe {
-            Ok(dl_brain::BrainOutcome::Answer(_)) => {
-                tracing::info!("Brain typed shadow: answer");
+        let probe = Arc::clone(&self.probe);
+        let probe_question = question.to_owned();
+        let probe_timeout = self.probe_timeout;
+        tokio::spawn(async move {
+            match timeout(probe_timeout, probe.answer(&probe_question)).await {
+                Ok(Ok(dl_brain::BrainOutcome::Answer(_))) => {
+                    tracing::info!("Brain typed shadow: answer");
+                }
+                Ok(Ok(dl_brain::BrainOutcome::NoAnswer)) => {
+                    tracing::info!("Brain typed shadow: no_answer");
+                }
+                Ok(Ok(dl_brain::BrainOutcome::OutOfDomain)) => {
+                    tracing::info!("Brain typed shadow: out_of_domain");
+                }
+                Ok(Ok(_)) => {
+                    tracing::info!("Brain typed shadow: other");
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Brain typed shadow: backend_error");
+                }
+                Err(_) => {
+                    tracing::warn!("Brain typed shadow: timeout");
+                }
             }
-            Ok(dl_brain::BrainOutcome::NoAnswer) => {
-                tracing::info!("Brain typed shadow: no_answer");
-            }
-            Ok(dl_brain::BrainOutcome::OutOfDomain) => {
-                tracing::info!("Brain typed shadow: out_of_domain");
-            }
-            Ok(_) => {
-                tracing::info!("Brain typed shadow: other");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "Brain typed shadow: backend_error");
-            }
-        }
+        });
         self.visible.answer(question).await
     }
 }
@@ -3647,11 +3655,13 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
 mod tests {
     use super::*;
     use std::fs;
+    use std::future::pending;
     use std::path::Path;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::time::Instant;
 
     use dl_answer::Retriever as _;
+    use dl_brain::AiAnswerer as _;
 
     #[test]
     fn np_lane_in_chill_wird_als_new_player_gelabelt() {
@@ -3742,6 +3752,77 @@ mod tests {
             self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
             Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
         }
+    }
+
+    struct ImmediateBrainAnswerer;
+
+    #[async_trait::async_trait]
+    impl dl_brain::AiAnswerer for ImmediateBrainAnswerer {
+        async fn answer(
+            &self,
+            _question: &str,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            Ok(dl_brain::BrainOutcome::Answer("legacy-visible".into()))
+        }
+    }
+
+    struct CancellationFlag(Arc<AtomicBool>);
+
+    impl Drop for CancellationFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    struct BlockingBrainProbe {
+        started: Arc<AtomicBool>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl dl_brain::AiAnswerer for BlockingBrainProbe {
+        async fn answer(
+            &self,
+            _question: &str,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            self.started.store(true, Ordering::Release);
+            let _cancelled = CancellationFlag(Arc::clone(&self.cancelled));
+            pending::<()>().await;
+            unreachable!("blocking probe only exits by cancellation");
+        }
+    }
+
+    #[tokio::test]
+    async fn shadow_typed_probe_does_not_delay_visible_legacy_answer() {
+        let started = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let shadow = ReportOnlyShadowBrainAnswerer {
+            visible: Arc::new(ImmediateBrainAnswerer),
+            probe: Arc::new(BlockingBrainProbe {
+                started: Arc::clone(&started),
+                cancelled: Arc::clone(&cancelled),
+            }),
+            probe_timeout: Duration::from_millis(20),
+        };
+
+        let outcome = timeout(Duration::from_millis(100), shadow.answer("Abrams"))
+            .await
+            .expect("report-only probe must never hold up the visible legacy path")
+            .expect("legacy answer must remain unaffected by probe failure");
+        assert_eq!(
+            outcome,
+            dl_brain::BrainOutcome::Answer("legacy-visible".into())
+        );
+
+        timeout(Duration::from_millis(250), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("probe must be independently bounded and cancelled");
+        assert!(started.load(Ordering::Acquire));
     }
 
     fn test_brain_handler(
