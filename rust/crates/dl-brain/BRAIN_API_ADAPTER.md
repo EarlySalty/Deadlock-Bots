@@ -27,7 +27,7 @@ Die bestehende Einmal-Conversation pro Anfrage bleibt erhalten, weil der Command
 
 ## Sicherheit und Prüfung
 
-Das vorhandene PR-/Release-Gate wurde durch C9 nicht gelockert. Der vorherige Completion-Branch war nur Ausgangsmaterial; die dortige Änderung an `.github/workflows/pr-release-gate.yml` wurde bewusst nicht übernommen. Auto-Merge bleibt außerhalb des Brain-Adapters und report-only/sicher.
+Der unabhängige Semantic-Review-Gate fand im vorhandenen direkten Mergepfad eine Base-SHA-TOCTOU-Race. C9 entfernt deshalb den mutierenden `updateBranch`-/`pulls.merge`-Pfad vollständig: das PR-Release-Gate besitzt nur Leserechte und meldet grüne Gates report-only; Branch-Update und Merge bleiben manuell.
 
 Die C9-Unit-/Fixture-Tests starten keinen Bot und senden keine Discord-Nachricht. Die vollständigen `dl-bot`-DB-Integrationstests benötigen weiterhin `CENTRAL_TEST_DSN` und sind als separater lokaler Test dokumentiert.
 

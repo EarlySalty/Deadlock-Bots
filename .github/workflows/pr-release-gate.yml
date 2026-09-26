@@ -13,8 +13,8 @@ on:
         type: string
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
   checks: read
   statuses: read
 
@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   reconcile:
-    name: "Auto merge after gates"
+    name: "PR Gate Bericht (report-only)"
     runs-on: ubuntu-latest
     steps:
       - name: Reconcile eligible pull requests
@@ -65,7 +65,7 @@ jobs:
                 continue;
               }
               if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
-                core.notice(`PR #${pull_number}: automatic merge is limited to same-repository branches.`);
+                core.notice(`PR #${pull_number}: trusted gate evaluation is limited to same-repository branches.`);
                 continue;
               }
 
@@ -113,17 +113,9 @@ jobs:
               );
 
               if ((comparison.data.behind_by || 0) > 0) {
-                try {
-                  await github.rest.pulls.updateBranch({
-                    owner,
-                    repo,
-                    pull_number,
-                    expected_head_sha: evaluatedSha,
-                  });
-                  core.notice(`PR #${pull_number}: base moved. Branch update requested, all gates must run again.`);
-                } catch (error) {
-                  core.warning(`PR #${pull_number}: branch update failed: ${String(error?.message || error)}`);
-                }
+                core.notice(
+                  `PR #${pull_number}: base moved (behind by ${comparison.data.behind_by}). Branch update and renewed gates are required manually.`,
+                );
                 continue;
               }
 
@@ -213,20 +205,7 @@ jobs:
                 continue;
               }
 
-              try {
-                const merged = await github.rest.pulls.merge({
-                  owner,
-                  repo,
-                  pull_number,
-                  merge_method: "squash",
-                  sha: evaluatedSha,
-                });
-                if (merged.data.merged) {
-                  core.notice(`PR #${pull_number}: merged after fresh base, semantic review, and required CI.`);
-                } else {
-                  core.warning(`PR #${pull_number}: GitHub did not merge: ${merged.data.message || "unknown reason"}`);
-                }
-              } catch (error) {
-                core.warning(`PR #${pull_number}: merge rejected by GitHub: ${String(error?.message || error)}`);
-              }
+              core.notice(
+                `PR #${pull_number}: all trusted gates are green for ${evaluatedSha}. Merge remains manual after independent approval.`,
+              );
             }
