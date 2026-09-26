@@ -2007,6 +2007,7 @@ schema_version=1
 guild_id="1234"
 [runtime.community]
 concierge_enabled=true
+concierge_proactive=true
 concierge_test_users=[55,66]
 concierge_free_voice=false
 survey_pulse=true
@@ -2026,6 +2027,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         let lookup = |key: &str| config.runtime_value(key);
         let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
         assert!(concierge.enabled);
+        assert!(concierge.proactive);
         assert!(!concierge.free_voice);
         assert_eq!(concierge.main_guild_id, 1234);
         assert_eq!(concierge.test_user_allowlist.len(), 2);
