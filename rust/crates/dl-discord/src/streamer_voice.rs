@@ -144,48 +144,57 @@ async fn fresh_channel(
         .ok_or(PortError::ChannelNotFound)
 }
 
-fn rollback_allowed(
-    channel_id: u64,
-    current_channel_id: u64,
-    current_limit: u32,
-    target: u32,
-) -> bool {
-    current_channel_id == channel_id && current_limit == target
-}
-
-/// A failed response must not leave a usable public invite behind. If the
-/// capacity edit may have happened, restore only the exact limit we set; a
-/// later owner change takes precedence. Discord has no atomic invite/edit API.
-async fn discard_invite(adapter: &DiscordAdapter, code: &str, rollback: Option<(u64, u32, u32)>) {
+/// A failed response must not leave a usable public invite behind. Never
+/// restore a channel limit here: Discord has no conditional edit, so a
+/// read-then-write rollback could overwrite a concurrent owner change.
+async fn discard_invite(adapter: &DiscordAdapter, code: &str) {
     if !code.is_empty() {
         if let Err(error) = adapter.http.delete_invite(code, Some(REASON)).await {
             tracing::error!(%error, "Streamer-Voice-Invite konnte nicht zurückgenommen werden");
         }
     }
-    if let Some((channel_id, previous, target)) = rollback {
-        match fresh_channel(adapter, channel_id).await {
-            Ok(current)
-                if rollback_allowed(
-                    channel_id,
-                    current.id.get(),
-                    current.user_limit.unwrap_or(0),
-                    target,
-                ) =>
-            {
-                if let Err(error) = adapter
-                    .http
-                    .edit_channel(current.id, &json!({"user_limit": previous}), Some(REASON))
-                    .await
-                {
-                    tracing::error!(%error, channel_id, previous, target, "Streamer-Voice-Kanallimit konnte nicht zurückgenommen werden");
-                }
-            }
-            Ok(_) => {} // A later channel change must not be overwritten.
-            Err(error) => {
-                tracing::error!(%error, channel_id, previous, target, "Streamer-Voice-Kanallimit konnte nicht zur Rücknahme gelesen werden");
-            }
-        }
+}
+
+pub(crate) async fn invite_still_valid(
+    adapter: &DiscordAdapter,
+    guild_id: u64,
+    streamer_id: u64,
+    channel_id: u64,
+    invite_url: &str,
+) -> Result<bool, PortError> {
+    let _guard = adapter.streamer_voice_lock.lock().await;
+    if guild_id != GUILD || !adapter.community_gateway.is_ready() {
+        return Err(PortError::GuildUnavailable);
     }
+    let channel = fresh_channel(adapter, channel_id).await?;
+    let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
+        return Ok(false);
+    };
+    let limit = channel.user_limit.unwrap_or(0);
+    if limit != 0 && state.members >= limit as usize {
+        return Ok(false);
+    }
+    let Some(code) = invite_url.strip_prefix("https://discord.gg/") else {
+        return Ok(false);
+    };
+    if code.is_empty()
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Ok(false);
+    }
+    let invite = adapter
+        .http
+        .get_invite(code, false, false, None)
+        .await
+        .map_err(|_| PortError::GuildUnavailable)?;
+    Ok(invite.code == code
+        && invite.channel.id == channel.id
+        && invite
+            .guild
+            .as_ref()
+            .is_some_and(|guild| guild.id.get() == guild_id))
 }
 
 pub(crate) async fn invite(
@@ -219,7 +228,6 @@ pub(crate) async fn invite(
         .create_invite(channel.id, &invite_options(), Some(REASON))
         .await
         .map_err(|_| PortError::GuildUnavailable)?;
-    let mut rollback = None;
     let result = async {
         if invite.channel.id != channel.id
             || invite
@@ -246,26 +254,23 @@ pub(crate) async fn invite(
             return Ok(None);
         };
         let slot_added = target != limit;
-        let channel = if slot_added {
+        if slot_added {
             if !state.can_manage {
                 return Ok(None);
             }
-            rollback = Some((expected_channel_id, limit, target));
-            adapter
+            // This is the final mutating step. The REST response confirms the
+            // target; a later read/rollback cannot be atomic with an owner edit.
+            let edited = adapter
                 .http
                 .edit_channel(channel.id, &json!({"user_limit": target}), Some(REASON))
                 .await
-                .map_err(|_| PortError::GuildUnavailable)?
-        } else {
-            channel
-        };
-        // A moved streamer or a rejected/non-applied limit is not success.
-        let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
-            return Ok(None);
-        };
-        let actual_limit = channel.user_limit.unwrap_or(0);
-        if actual_limit != target || (actual_limit > 0 && state.members >= actual_limit as usize) {
-            return Ok(None);
+                .map_err(|error| {
+                    tracing::error!(%error, channel_id = expected_channel_id, "Streamer-Voice-Kanallimit konnte nicht gesetzt werden");
+                    PortError::GuildUnavailable
+                })?;
+            if edited.id != channel.id || edited.user_limit.unwrap_or(0) != target {
+                return Err(PortError::GuildUnavailable);
+            }
         }
         tracing::info!(
             guild_id,
@@ -282,7 +287,7 @@ pub(crate) async fn invite(
     }
     .await;
     if !matches!(result, Ok(Some(_))) {
-        discard_invite(adapter, &invite.code, rollback).await;
+        discard_invite(adapter, &invite.code).await;
     }
     result
 }
@@ -297,13 +302,6 @@ mod tests {
             invite_options(),
             json!({"max_age": 600, "max_uses": 1, "unique": true})
         );
-    }
-
-    #[test]
-    fn rollback_only_reverts_our_unchanged_limit() {
-        assert!(rollback_allowed(42, 42, 9, 9));
-        assert!(!rollback_allowed(42, 42, 10, 9));
-        assert!(!rollback_allowed(42, 43, 9, 9));
     }
 
     #[test]

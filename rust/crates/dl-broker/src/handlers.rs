@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -650,6 +651,97 @@ pub async fn send_message(
         },
     )
     .await
+}
+
+async fn validate_voice_replay(
+    state: &SharedBroker,
+    rid: &str,
+    idem: &str,
+    guild_id: u64,
+    streamer_id: u64,
+    response: Response,
+) -> Response {
+    if !response.status().is_success() {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, 16_384).await else {
+        return respond(
+            503,
+            error_body(
+                rid,
+                Some(idem),
+                "unavailable",
+                "Discord voice invitation unavailable",
+            ),
+        );
+    };
+    let Ok(data) = serde_json::from_slice::<Value>(&bytes) else {
+        return respond(
+            503,
+            error_body(
+                rid,
+                Some(idem),
+                "unavailable",
+                "Discord voice invitation unavailable",
+            ),
+        );
+    };
+    if data.get("cached") != Some(&Value::Bool(true)) || data["result"]["available"] != true {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    let channel_id = data["result"]["channel_id"]
+        .as_str()
+        .and_then(|id| id.parse::<u64>().ok());
+    let invite_url = data["result"]["invite_url"].as_str();
+    let (Some(channel_id), Some(invite_url)) = (channel_id, invite_url) else {
+        return respond(
+            503,
+            error_body(
+                rid,
+                Some(idem),
+                "unavailable",
+                "Discord voice invitation unavailable",
+            ),
+        );
+    };
+    if !state.guild_allowlist.permits(guild_id) || !state.channel_allowlist.permits(channel_id) {
+        return respond(
+            200,
+            success_body(rid, Some(idem), json!({"available": false})),
+        );
+    }
+    if !state.port.is_ready().await {
+        return respond(
+            503,
+            error_body(
+                rid,
+                Some(idem),
+                "unavailable",
+                "Discord gateway unavailable",
+            ),
+        );
+    }
+    match state
+        .port
+        .streamer_voice_invite_valid(guild_id, streamer_id, channel_id, invite_url)
+        .await
+    {
+        Ok(true) => Response::from_parts(parts, Body::from(bytes)),
+        Ok(false) => respond(
+            200,
+            success_body(rid, Some(idem), json!({"available": false})),
+        ),
+        Err(_) => respond(
+            503,
+            error_body(
+                rid,
+                Some(idem),
+                "unavailable",
+                "Discord voice invitation unavailable",
+            ),
+        ),
+    }
 }
 
 pub async fn create_channel(
@@ -1544,7 +1636,7 @@ pub async fn streamer_voice_invite(
     operation.insert("guild_id".into(), json!(guild_id));
     operation.insert("streamer_id".into(), json!(streamer_id));
     let hash = payload_hash(&operation);
-    run_idempotent(
+    let response = run_idempotent(
         &state,
         &rid,
         "discord.streamer_voice_invite",
@@ -1552,16 +1644,32 @@ pub async fn streamer_voice_invite(
         &hash,
         || async {
             if guild_id != 1289721245281292288 {
-                return (400, error_body(&rid, Some(&idem), "bad_request", "unsupported community"));
+                return (
+                    400,
+                    error_body(&rid, Some(&idem), "bad_request", "unsupported community"),
+                );
             }
             if !state.guild_allowlist.permits(guild_id) {
                 return (
                     403,
-                    error_body(&rid, Some(&idem), "forbidden", &format!("guild_id {guild_id} is not permitted")),
+                    error_body(
+                        &rid,
+                        Some(&idem),
+                        "forbidden",
+                        &format!("guild_id {guild_id} is not permitted"),
+                    ),
                 );
             }
             if !state.port.is_ready().await {
-                return (503, error_body(&rid, Some(&idem), "unavailable", "Discord gateway unavailable"));
+                return (
+                    503,
+                    error_body(
+                        &rid,
+                        Some(&idem),
+                        "unavailable",
+                        "Discord gateway unavailable",
+                    ),
+                );
             }
             let channel_id = match state.port.community_lobbies(guild_id, streamer_id).await {
                 Ok(lobbies) => lobbies
@@ -1570,16 +1678,32 @@ pub async fn streamer_voice_invite(
                     .and_then(|lobby| lobby.channel_id.parse::<u64>().ok()),
                 Err(PortError::MemberNotFound) => None,
                 Err(_) => {
-                    return (503, error_body(&rid, Some(&idem), "unavailable", "Discord voice unavailable"));
+                    return (
+                        503,
+                        error_body(
+                            &rid,
+                            Some(&idem),
+                            "unavailable",
+                            "Discord voice unavailable",
+                        ),
+                    );
                 }
             };
             let Some(channel_id) = channel_id else {
-                return (200, success_body(&rid, Some(&idem), json!({"available": false})));
+                return (
+                    200,
+                    success_body(&rid, Some(&idem), json!({"available": false})),
+                );
             };
             if !state.channel_allowlist.permits(channel_id) {
                 return (
                     403,
-                    error_body(&rid, Some(&idem), "forbidden", &format!("channel_id {channel_id} is not permitted")),
+                    error_body(
+                        &rid,
+                        Some(&idem),
+                        "forbidden",
+                        &format!("channel_id {channel_id} is not permitted"),
+                    ),
                 );
             }
             match state
@@ -1616,7 +1740,8 @@ pub async fn streamer_voice_invite(
             }
         },
     )
-    .await
+    .await;
+    validate_voice_replay(&state, &rid, &idem, guild_id, streamer_id, response).await
 }
 
 pub async fn create_invite(
@@ -1875,10 +2000,24 @@ mod tests {
         delete_message_result: Result<(), PortError>,
         voice_invite_calls: Mutex<Vec<(u64, u64, u64)>>,
         voice_channel: Mutex<Option<u64>>,
+        voice_invite_public: Mutex<bool>,
     }
 
     #[async_trait::async_trait]
     impl DiscordPort for UnusedDiscordPort {
+        async fn streamer_voice_invite_valid(
+            &self,
+            _guild: u64,
+            streamer: u64,
+            channel: u64,
+            invite_url: &str,
+        ) -> Result<bool, PortError> {
+            Ok(streamer == 7
+                && *self.voice_channel.lock().expect("voice channel") == Some(channel)
+                && *self.voice_invite_public.lock().expect("voice public")
+                && invite_url == "https://discord.gg/voiceTest")
+        }
+
         async fn streamer_voice_invite(
             &self,
             guild: u64,
@@ -2125,9 +2264,11 @@ mod tests {
         let state = test_state().unwrap();
         let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
         let body = axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","user_id":"99"}"#);
-        let missing = community_lobbies(State(state.clone()), peer, HeaderMap::new(), body.clone()).await;
+        let missing =
+            community_lobbies(State(state.clone()), peer, HeaderMap::new(), body.clone()).await;
         assert_eq!(missing.status(), 401);
-        let mut headers = HeaderMap::new(); headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Internal-Token", "secret".parse().unwrap());
         let response = community_lobbies(State(state), peer, headers, body).await;
         assert_eq!(response.status(), 403);
     }
@@ -2136,16 +2277,21 @@ mod tests {
     async fn community_directory_respects_channel_allowlist_and_omits_member_identities() {
         let (state, _) = reaction_test_state("42").unwrap();
         let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
-        let mut headers = HeaderMap::new(); headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Internal-Token", "secret".parse().unwrap());
         let body = axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","user_id":"123"}"#);
         let response = community_lobbies(State(state), peer, headers, body).await;
         assert_eq!(response.status(), 200);
-        let bytes = axum::body::to_bytes(response.into_body(), 10000).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 10000)
+            .await
+            .unwrap();
         let data: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(data["result"]["lobbies"].as_array().unwrap().len(), 1);
         assert_eq!(data["result"]["lobbies"][0]["channel_id"], "42");
         assert!(data["result"]["captured_at"].as_u64().unwrap() > 0);
-        assert!(!String::from_utf8(bytes.to_vec()).unwrap().contains("user_id"));
+        assert!(!String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .contains("user_id"));
     }
 
     #[tokio::test]
@@ -2240,50 +2386,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_invite_retry_after_channel_move_replays_original_result() {
+    async fn voice_invite_retry_after_channel_move_hides_stale_invite() {
         let (state, port) = reaction_test_state("42,43").expect("state");
         let peer = peer("127.0.0.1:12345").expect("peer");
-        let body = axum::body::Bytes::from(
-            r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#,
-        );
+        let body =
+            axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
         let first = streamer_voice_invite(
-            State(state.clone()), peer, action_headers("voice-move").expect("headers"), body.clone(),
-        ).await;
+            State(state.clone()),
+            peer,
+            action_headers("voice-move").expect("headers"),
+            body.clone(),
+        )
+        .await;
         assert_eq!(first.status(), 200);
         *port.voice_channel.lock().expect("channel") = Some(43);
         let retry = streamer_voice_invite(
-            State(state), peer, action_headers("voice-move").expect("headers"), body,
-        ).await;
+            State(state),
+            peer,
+            action_headers("voice-move").expect("headers"),
+            body,
+        )
+        .await;
         assert_eq!(retry.status(), 200);
-        let bytes = axum::body::to_bytes(retry.into_body(), 10000).await.expect("body");
+        let bytes = axum::body::to_bytes(retry.into_body(), 10000)
+            .await
+            .expect("body");
         let data: Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(data["result"]["channel_id"], "42");
-        assert_eq!(data["cached"], true);
-        assert_eq!(*port.voice_invite_calls.lock().expect("calls"), vec![(1289721245281292288, 7, 42)]);
+        assert_eq!(data["result"], json!({"available": false}));
+        assert_eq!(
+            *port.voice_invite_calls.lock().expect("calls"),
+            vec![(1289721245281292288, 7, 42)]
+        );
     }
 
     #[tokio::test]
     async fn voice_invite_retry_replays_absent_result_without_mutation() {
         let (state, port) = reaction_test_state("42").expect("state");
         let peer = peer("127.0.0.1:12345").expect("peer");
-        let body = axum::body::Bytes::from(
-            r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#,
-        );
+        let body =
+            axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
         *port.voice_channel.lock().expect("channel") = None;
         let first = streamer_voice_invite(
-            State(state.clone()), peer, action_headers("voice-absent-retry").expect("headers"), body.clone(),
-        ).await;
+            State(state.clone()),
+            peer,
+            action_headers("voice-absent-retry").expect("headers"),
+            body.clone(),
+        )
+        .await;
         assert_eq!(first.status(), 200);
         *port.voice_channel.lock().expect("channel") = Some(42);
         let retry = streamer_voice_invite(
-            State(state), peer, action_headers("voice-absent-retry").expect("headers"), body,
-        ).await;
+            State(state),
+            peer,
+            action_headers("voice-absent-retry").expect("headers"),
+            body,
+        )
+        .await;
         assert_eq!(retry.status(), 200);
-        let bytes = axum::body::to_bytes(retry.into_body(), 10000).await.expect("body");
+        let bytes = axum::body::to_bytes(retry.into_body(), 10000)
+            .await
+            .expect("body");
         let data: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(data["result"], json!({"available": false}));
         assert_eq!(data["cached"], true);
         assert!(port.voice_invite_calls.lock().expect("calls").is_empty());
+    }
+
+    #[tokio::test]
+    async fn voice_invite_retry_after_room_lock_hides_stale_invite() {
+        let (state, port) = reaction_test_state("42").expect("state");
+        let peer = peer("127.0.0.1:12345").expect("peer");
+        let body =
+            axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
+        let first = streamer_voice_invite(
+            State(state.clone()),
+            peer,
+            action_headers("voice-locked").expect("headers"),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(first.status(), 200);
+        *port.voice_invite_public.lock().expect("public") = false;
+        let retry = streamer_voice_invite(
+            State(state),
+            peer,
+            action_headers("voice-locked").expect("headers"),
+            body,
+        )
+        .await;
+        assert_eq!(retry.status(), 200);
+        let bytes = axum::body::to_bytes(retry.into_body(), 10000)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(data["result"], json!({"available": false}));
+        assert_eq!(
+            *port.voice_invite_calls.lock().expect("calls"),
+            vec![(1289721245281292288, 7, 42)]
+        );
     }
 
     fn test_state() -> Result<SharedBroker, String> {
@@ -2300,6 +2500,7 @@ mod tests {
                 delete_message_calls: Mutex::new(Vec::new()),
                 voice_invite_calls: Mutex::new(Vec::new()),
                 voice_channel: Mutex::new(Some(42)),
+                voice_invite_public: Mutex::new(true),
                 delete_message_result: Err(PortError::Discord("unused".to_string())),
             }),
             Arc::new(MockChannelInfoPort),
@@ -2317,6 +2518,7 @@ mod tests {
             delete_message_calls: Mutex::new(Vec::new()),
             voice_invite_calls: Mutex::new(Vec::new()),
             voice_channel: Mutex::new(Some(42)),
+            voice_invite_public: Mutex::new(true),
             delete_message_result: Err(PortError::Discord("unused".to_string())),
         });
         let allowed_channel_ids = allowed_channel_ids.to_string();
@@ -2340,6 +2542,7 @@ mod tests {
             delete_message_calls: Mutex::new(Vec::new()),
             voice_invite_calls: Mutex::new(Vec::new()),
             voice_channel: Mutex::new(Some(42)),
+            voice_invite_public: Mutex::new(true),
             delete_message_result: result,
         });
         let state = crate::BrokerState::new_with_channel_info(
@@ -2843,30 +3046,74 @@ mod tests {
 
 /// Authenticated, aggregate-only, member-scoped community directory.
 pub async fn community_lobbies(
-    State(state): State<SharedBroker>, peer: Peer, headers: HeaderMap,
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let rid = request_id(&headers);
-    if let Err(resp) = authorize(&state, &peer, &headers, &rid) { return resp; }
-    let Ok(payload) = json_object(&body) else { return bad_request(&rid, "invalid JSON payload"); };
-    let guild_id = match payload::positive_int(&payload, "guild_id") { Ok(v) => v, Err(msg) => return bad_request(&rid, &msg) };
-    let user_id = match payload::positive_int(&payload, "user_id") { Ok(v) => v, Err(msg) => return bad_request(&rid, &msg) };
-    if guild_id != 1289721245281292288 { return bad_request(&rid, "unsupported community"); }
-    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) { return resp; }
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let Ok(payload) = json_object(&body) else {
+        return bad_request(&rid, "invalid JSON payload");
+    };
+    let guild_id = match payload::positive_int(&payload, "guild_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    let user_id = match payload::positive_int(&payload, "user_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    if guild_id != 1289721245281292288 {
+        return bad_request(&rid, "unsupported community");
+    }
+    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) {
+        return resp;
+    }
     if !state.port.is_ready().await {
-        return respond(503, error_body(&rid, None, "unavailable", "Discord gateway unavailable"));
+        return respond(
+            503,
+            error_body(&rid, None, "unavailable", "Discord gateway unavailable"),
+        );
     }
     match state.port.community_lobbies(guild_id, user_id).await {
         Ok(mut lobbies) => {
-            lobbies.retain(|lobby| lobby.channel_id.parse::<u64>().is_ok_and(|id|
-                allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()));
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-            respond(200, success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})))
+            lobbies.retain(|lobby| {
+                lobby.channel_id.parse::<u64>().is_ok_and(|id| {
+                    allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()
+                })
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            respond(
+                200,
+                success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})),
+            )
         }
-        Err(PortError::MemberNotFound) => respond(403, error_body(&rid, None, "member_required", "Discord membership could not be confirmed")),
+        Err(PortError::MemberNotFound) => respond(
+            403,
+            error_body(
+                &rid,
+                None,
+                "member_required",
+                "Discord membership could not be confirmed",
+            ),
+        ),
         Err(err) => {
             tracing::warn!(%err, "Community lobby directory unavailable");
-            respond(503, error_body(&rid, None, "unavailable", "Discord lobby directory unavailable"))
+            respond(
+                503,
+                error_body(
+                    &rid,
+                    None,
+                    "unavailable",
+                    "Discord lobby directory unavailable",
+                ),
+            )
         }
     }
 }

@@ -794,6 +794,23 @@ impl DiscordPort for DiscordAdapter {
         crate::streamer_voice::invite(self, guild_id, streamer_id, expected_channel_id).await
     }
 
+    async fn streamer_voice_invite_valid(
+        &self,
+        guild_id: u64,
+        streamer_id: u64,
+        channel_id: u64,
+        invite_url: &str,
+    ) -> Result<bool, PortError> {
+        crate::streamer_voice::invite_still_valid(
+            self,
+            guild_id,
+            streamer_id,
+            channel_id,
+            invite_url,
+        )
+        .await
+    }
+
     async fn create_invite(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, PortError> {
         let invite = self
             .http
