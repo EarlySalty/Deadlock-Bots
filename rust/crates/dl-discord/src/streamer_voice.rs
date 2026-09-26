@@ -1,5 +1,8 @@
 //! Invites requested by Twitch viewers, restricted to public community voices.
 //! This never changes overwrites or moves/disconnects members.
+use std::future::Future;
+use std::time::Duration;
+
 use dl_broker::port::{PortError, StreamerVoiceInvite};
 use serde_json::json;
 use serenity::all::{
@@ -12,6 +15,36 @@ use crate::community::{eligible, GUILD};
 
 const REASON: &str = "Twitch: Zuschauer möchte beim Streamer mitspielen";
 const INVITE_SECONDS: u64 = 600;
+const EDIT_READBACK_ATTEMPTS: usize = 2;
+const EDIT_READBACK_DELAY: Duration = Duration::from_millis(150);
+
+#[derive(Debug, Clone, Copy)]
+struct EditReadback {
+    channel_id: u64,
+    limit: u32,
+    members: usize,
+    policy_safe: bool,
+}
+
+/// An edit may have reached Discord even if its HTTP acknowledgement was
+/// lost. Read only; never issue an unsafe compensating channel PATCH.
+async fn confirm_uncertain_edit<F, Fut>(channel_id: u64, target: u32, mut read: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<EditReadback, PortError>>,
+{
+    for attempt in 0..EDIT_READBACK_ATTEMPTS {
+        match read().await {
+            Ok(state) if !state.policy_safe || state.channel_id != channel_id => return false,
+            Ok(state) if state.limit == target => return state.members < target as usize,
+            _ => {}
+        }
+        if attempt + 1 < EDIT_READBACK_ATTEMPTS {
+            tokio::time::sleep(EDIT_READBACK_DELAY).await;
+        }
+    }
+    false
+}
 
 fn invite_options() -> serde_json::Value {
     json!({"max_age": INVITE_SECONDS, "max_uses": 1, "unique": true})
@@ -144,6 +177,27 @@ async fn fresh_channel(
         .ok_or(PortError::ChannelNotFound)
 }
 
+async fn read_after_edit_error(
+    adapter: &DiscordAdapter,
+    guild_id: u64,
+    streamer_id: u64,
+    channel_id: u64,
+) -> Result<EditReadback, PortError> {
+    if guild_id != GUILD || !adapter.community_gateway.is_ready() {
+        return Err(PortError::GuildUnavailable);
+    }
+    let channel = fresh_channel(adapter, channel_id).await?;
+    let state = snapshot(adapter, &channel, guild_id, streamer_id)?;
+    Ok(EditReadback {
+        channel_id: channel.id.get(),
+        limit: channel.user_limit.unwrap_or(0),
+        members: state.as_ref().map_or(0, |state| state.members),
+        // The broker's channel allowlist is immutable for this request and
+        // approved this exact channel ID before entering the adapter.
+        policy_safe: state.is_some(),
+    })
+}
+
 /// A failed response must not leave a usable public invite behind. Never
 /// restore a channel limit here: Discord has no conditional edit, so a
 /// read-then-write rollback could overwrite a concurrent owner change.
@@ -260,16 +314,23 @@ pub(crate) async fn invite(
             }
             // This is the final mutating step. The REST response confirms the
             // target; a later read/rollback cannot be atomic with an owner edit.
-            let edited = adapter
+            match adapter
                 .http
                 .edit_channel(channel.id, &json!({"user_limit": target}), Some(REASON))
                 .await
-                .map_err(|error| {
-                    tracing::error!(%error, channel_id = expected_channel_id, "Streamer-Voice-Kanallimit konnte nicht gesetzt werden");
-                    PortError::GuildUnavailable
-                })?;
-            if edited.id != channel.id || edited.user_limit.unwrap_or(0) != target {
-                return Err(PortError::GuildUnavailable);
+            {
+                Ok(edited) if edited.id == channel.id && edited.user_limit.unwrap_or(0) == target => {}
+                Ok(_) => return Err(PortError::GuildUnavailable),
+                Err(error) => {
+                    tracing::warn!(%error, channel_id = expected_channel_id, target, "Streamer-Voice-Edit-ACK unklar; REST-Zustand wird geprüft");
+                    if !confirm_uncertain_edit(expected_channel_id, target, || {
+                        read_after_edit_error(adapter, guild_id, streamer_id, expected_channel_id)
+                    })
+                    .await
+                    {
+                        return Err(PortError::GuildUnavailable);
+                    }
+                }
             }
         }
         tracing::info!(
@@ -295,6 +356,83 @@ pub(crate) async fn invite(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    fn readback(limit: u32, policy_safe: bool) -> Result<EditReadback, PortError> {
+        Ok(EditReadback {
+            channel_id: 42,
+            limit,
+            members: 8,
+            policy_safe,
+        })
+    }
+
+    #[tokio::test]
+    async fn verlorenes_edit_ack_mit_wirksamem_limit_wird_bestaetigt() {
+        let mut reads = VecDeque::from([readback(9, true)]);
+        assert!(
+            confirm_uncertain_edit(42, 9, || {
+                std::future::ready(reads.pop_front().expect("readback"))
+            })
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn noch_nicht_sichtbares_edit_wird_begrenzt_nachgelesen() {
+        let mut reads = VecDeque::from([readback(8, true), readback(9, true)]);
+        assert!(
+            confirm_uncertain_edit(42, 9, || {
+                std::future::ready(reads.pop_front().expect("readback"))
+            })
+            .await
+        );
+        assert!(reads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nicht_wirksames_edit_oder_get_fehler_bleibt_gesperrt() {
+        let mut unchanged = VecDeque::from([readback(8, true), readback(8, true)]);
+        assert!(
+            !confirm_uncertain_edit(42, 9, || {
+                std::future::ready(unchanged.pop_front().expect("readback"))
+            })
+            .await
+        );
+        let mut unavailable = VecDeque::from([
+            Err(PortError::GuildUnavailable),
+            Err(PortError::GuildUnavailable),
+        ]);
+        assert!(
+            !confirm_uncertain_edit(42, 9, || {
+                std::future::ready(unavailable.pop_front().expect("readback"))
+            })
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn nach_rechteentzug_oder_vollem_ziel_keine_bestaetigung() {
+        let mut revoked = VecDeque::from([readback(9, false)]);
+        assert!(
+            !confirm_uncertain_edit(42, 9, || {
+                std::future::ready(revoked.pop_front().expect("readback"))
+            })
+            .await
+        );
+        let mut full = VecDeque::from([Ok(EditReadback {
+            channel_id: 42,
+            limit: 9,
+            members: 9,
+            policy_safe: true,
+        })]);
+        assert!(
+            !confirm_uncertain_edit(42, 9, || {
+                std::future::ready(full.pop_front().expect("readback"))
+            })
+            .await
+        );
+    }
 
     #[test]
     fn public_invite_can_be_used_once() {
