@@ -1,0 +1,7 @@
+# Discord-Producer für den Partner-Voice-Chat
+
+Der alte Branch `feat/streamer-voice-join` basierte auf einer überholten `main` und kollidierte in `dl-discord/src/adapter.rs` mit der neuen Voice-Cache-Prüfung. Dieser Ersatzbranch übernimmt nur den Voice-Producer auf aktuelle `origin/main`. Beide Adapter-Felder bleiben erhalten; die Einladung wird zusätzlich erst bei vollständig geladenem Guild-Voice-Cache erzeugt.
+
+Der Twitch-Verbraucher ist Draft-PR [EarlySalty/Deadlock-Twitch-Bot#990](https://github.com/EarlySalty/Deadlock-Twitch-Bot/pull/990). Der authentifizierte Broker prüft Guild- und Kanal-Allowlist sowie die aktuelle Voice-Präsenz des verknüpften Partner-Streamers. Der Discord-Adapter erlaubt nur öffentliche Community-Spielkanäle und prüft Rechte, Gateway-Zustand und den aktuellen Kanal erneut. Ist der Kanal voll, wird das Limit auf die tatsächliche Belegung plus eins gesetzt; bei freiem Platz bleibt es unverändert. Die Einladung ist kanalspezifisch, zehn Minuten gültig und **einmal nutzbar** (`max_uses: 1`). Idempotente Wiederholungen derselben Anfrage geben dieselbe Antwort zurück, ohne einen zweiten Invite oder weiteren Platz anzulegen.
+
+Abnahmefolge: diesen Producer unabhängig prüfen, CI und Gate abschließen, dann Discord vor PR #990 integrieren und deployen. PR #990 bleibt bis dahin Draft/BLOCK. Es wurde kein produktiver Invite erstellt und kein Sprachkanal verändert.

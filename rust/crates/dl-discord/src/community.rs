@@ -40,7 +40,7 @@ impl GatewayFreshness {
     }
 }
 
-const GUILD: u64 = 1289721245281292288;
+pub(crate) const GUILD: u64 = 1289721245281292288;
 const STREAMER_VC: u64 = 1326984426906714236;
 // Same categories as dl-voice::status::TARGET_CATEGORY_IDS. No dependency on
 // dl-voice here (it already depends on dl-discord).
@@ -56,7 +56,7 @@ const EXCLUDED: [u64; 4] = [
     1357422958544420944,
 ];
 
-fn eligible(channel: u64, parent: Option<u64>, permissions: Permissions) -> bool {
+pub(crate) fn eligible(channel: u64, parent: Option<u64>, permissions: Permissions) -> bool {
     !EXCLUDED.contains(&channel)
         && (channel == STREAMER_VC || parent.is_some_and(|id| CATEGORIES.contains(&id)))
         && permissions.contains(Permissions::VIEW_CHANNEL | Permissions::CONNECT)
