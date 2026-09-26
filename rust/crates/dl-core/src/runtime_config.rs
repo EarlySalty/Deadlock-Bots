@@ -168,6 +168,25 @@ section!(ModerationOptions {
     ai_moderator: bool => "AI_MODERATOR_ENABLE",
 });
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrainClientMode {
+    #[default]
+    Legacy,
+    Typed,
+    Shadow,
+}
+impl LookupValue for BrainClientMode {
+    fn lookup_value(&self) -> String {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Typed => "typed",
+            Self::Shadow => "shadow",
+        }
+        .into()
+    }
+}
+
 section!(AiOptions {
     openai_base_url: String => "OPENAI_BASE_URL",
     openai_model: String => "OPENAI_MODEL" | "AI_OPENAI_MODEL",
@@ -188,7 +207,17 @@ section!(AiOptions {
     brain_channels: Vec<u64> => "BRAIN_CHANNEL_ALLOWLIST",
     brain_cooldown_seconds: u64 => "BRAIN_COOLDOWN_SECS",
     brain_max_question_len: usize => "BRAIN_MAX_QUESTION_LEN",
+    brain_client_mode: BrainClientMode => "BRAIN_CLIENT_MODE",
+    brain_api_endpoint: String => "BRAIN_API_ENDPOINT",
+    brain_api_scopes: Vec<String> => "BRAIN_API_SCOPES",
+    brain_api_timeout_ms: u64 => "BRAIN_API_TIMEOUT_MS",
 });
+
+impl AiOptions {
+    pub fn brain_client_mode(&self) -> BrainClientMode {
+        self.brain_client_mode.unwrap_or_default()
+    }
+}
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -255,6 +284,36 @@ impl RuntimeConfig {
             .ai
             .brain_max_question_len
             .is_some_and(|length| length == 0 || length > 65_536)
+        {
+            return Err(invalid());
+        }
+        if self
+            .ai
+            .brain_api_timeout_ms
+            .is_some_and(|timeout| !(1..=60_000).contains(&timeout))
+        {
+            return Err(invalid());
+        }
+        if let Some(scopes) = &self.ai.brain_api_scopes {
+            if scopes.is_empty()
+                || scopes.len() > 16
+                || scopes.iter().any(|scope| {
+                    scope.is_empty()
+                        || scope.len() > 64
+                        || !scope.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'.' | b'_' | b'-')
+                        })
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        if matches!(
+            self.ai.brain_client_mode(),
+            BrainClientMode::Typed | BrainClientMode::Shadow
+        ) && (self.ai.brain_api_endpoint.is_none() || self.ai.brain_api_scopes.is_none())
         {
             return Err(invalid());
         }
@@ -486,6 +545,7 @@ impl RuntimeConfig {
             (&self.web.callback_url, false),
             (&self.ai.openai_base_url, false),
             (&self.ai.fireworks_base_url, false),
+            (&self.ai.brain_api_endpoint, true),
         ] {
             if let Some(address) = address {
                 validate_url(address, local)?;
@@ -627,6 +687,7 @@ pub fn secret_value(key: &str) -> Option<String> {
         | "TWITCH_INTERNAL_API_TOKEN"
         | "STEAM_INTERNAL_API_TOKEN"
         | "INTERNAL_API_TOKEN"
+        | "BRAIN_API_TOKEN"
         | "TURNIER_INTERNAL_API_TOKEN"
         | "SERVERSYNC_INTERNAL_TOKEN"
         | "MCP_CONNECTOR_TOKEN"
