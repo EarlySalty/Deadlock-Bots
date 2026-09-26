@@ -21,6 +21,21 @@ pub struct SaveRequest {
     pub options: OperatingOptions,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfigWrite {
+    Catalog(dl_core::settings_catalog::ChangeRequest),
+    Legacy(SaveRequest),
+}
+impl ConfigWrite {
+    fn revision(&self) -> &str {
+        match self {
+            Self::Catalog(value) => &value.revision,
+            Self::Legacy(value) => &value.revision,
+        }
+    }
+}
+
 pub fn no_store(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -98,9 +113,30 @@ async fn fetch_bot_fingerprint(url: &str, token: &str) -> Option<(String, u64)> 
 
 #[cfg(test)]
 mod active_tests {
-    use super::fetch_bot_fingerprint;
+    use super::{fetch_bot_fingerprint, ConfigWrite};
     use axum::{http::HeaderMap, routing::get, Json, Router};
     use serde_json::json;
+
+    #[test]
+    fn catalog_request_preserves_ids_and_rejects_mixed_envelopes() {
+        let request = json!({
+            "revision": "a".repeat(64),
+            "changes": {"runtime.community.concierge_pate_channel_id": "1547199955133927465"}
+        });
+        let parsed: ConfigWrite = serde_json::from_value(request.clone()).expect("Katalogauftrag");
+        let ConfigWrite::Catalog(parsed) = parsed else {
+            panic!("Katalogauftrag muss als Katalog erkannt werden");
+        };
+        assert_eq!(
+            parsed.changes["runtime.community.concierge_pate_channel_id"],
+            "1547199955133927465"
+        );
+        for extra in ["options", "patch", "unknown"] {
+            let mut invalid = request.clone();
+            invalid[extra] = json!({});
+            assert!(serde_json::from_value::<ConfigWrite>(invalid).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn broker_evidence_requires_authenticated_fresh_envelope_and_pid() {
@@ -163,6 +199,7 @@ async fn output(saved: SavedConfig, active: &str) -> Response {
             "revision": saved.revision,
             "saved_fingerprint": saved.fingerprint,
             "options": OperatingOptions::from(&saved.config),
+            "catalog": dl_core::admin_settings::catalog(&saved.config),
             "services": [
                 {"name": "Discord-Web", "restart_required": saved.fingerprint != active, "process_id": std::process::id(), "observed_at": crate::now_unix()},
                 {"name": "Discord-Bot", "restart_required": bot.as_ref().map(|(fingerprint, _)| fingerprint != &saved.fingerprint), "process_id": bot.as_ref().map(|(_, pid)| pid), "observed_at": bot.as_ref().map(|_| crate::now_unix())}
@@ -205,10 +242,10 @@ pub async fn save(State(app): State<DashboardApp>, headers: HeaderMap, body: Byt
     if let Err(response) = app.guard_mutate(&headers, true).await {
         return no_store(response);
     }
-    if body.len() > 8192 {
+    if body.len() > 131072 {
         return no_store(StatusCode::PAYLOAD_TOO_LARGE.into_response());
     }
-    let request: SaveRequest = match serde_json::from_slice(&body) {
+    let request: ConfigWrite = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
             return no_store(err_text(
@@ -217,9 +254,9 @@ pub async fn save(State(app): State<DashboardApp>, headers: HeaderMap, body: Byt
             ))
         }
     };
-    if request.revision.len() != 64
+    if request.revision().len() != 64
         || !request
-            .revision
+            .revision()
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
     {
@@ -232,8 +269,11 @@ pub async fn save(State(app): State<DashboardApp>, headers: HeaderMap, body: Byt
         Ok(value) => value,
         Err(response) => return no_store(response),
     };
-    let result = tokio::task::spawn_blocking(move || {
-        store.save_if_revision(&request.revision, &request.options)
+    let result = tokio::task::spawn_blocking(move || match request {
+        ConfigWrite::Legacy(request) => store.save_if_revision(&request.revision, &request.options),
+        ConfigWrite::Catalog(request) => {
+            store.save_changes_if_revision(&request.revision, &request.changes)
+        }
     })
     .await;
     match result {
@@ -241,7 +281,7 @@ pub async fn save(State(app): State<DashboardApp>, headers: HeaderMap, body: Byt
         Ok(Err(error)) => {
             let status = match error {
                 EditError::Conflict => 409,
-                EditError::Invalid(_) => 422,
+                EditError::Invalid(_) | EditError::Catalog(_) => 422,
                 EditError::Busy | EditError::UnsafeLocation => 503,
                 EditError::Io | EditError::Durability => 500,
             };
@@ -254,7 +294,7 @@ pub async fn save(State(app): State<DashboardApp>, headers: HeaderMap, body: Byt
     }
 }
 
-async fn steam_request(save: Option<dl_bridges::steam_operating::SaveRequest>) -> Response {
+async fn steam_request(save: Option<dl_bridges::steam_operating::WriteRequest>) -> Response {
     let config = match dl_core::config::process_bot_config() {
         Ok(value) => value.snapshot(),
         Err(_) => {
@@ -275,7 +315,7 @@ async fn steam_request(save: Option<dl_bridges::steam_operating::SaveRequest>) -
     .map(|value| value.trim().to_owned())
     .find(|value| !value.is_empty());
     let client = dl_bridges::steam::SteamBotClient::new(&config.services.steam_api_url, token);
-    match client.operating_config(save.as_ref()).await {
+    match client.operating_config_write(save.as_ref()).await {
         Ok(value) => no_store(Json(value).into_response()),
         Err(error) => {
             use dl_bridges::steam_operating::Error;
@@ -305,10 +345,10 @@ pub async fn steam_save(
     if let Err(response) = app.guard_mutate(&headers, true).await {
         return no_store(response);
     }
-    if body.len() > 8192 {
+    if body.len() > 131072 {
         return no_store(StatusCode::PAYLOAD_TOO_LARGE.into_response());
     }
-    let request: dl_bridges::steam_operating::SaveRequest = match serde_json::from_slice(&body) {
+    let request: dl_bridges::steam_operating::WriteRequest = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
             return no_store(err_text(
@@ -317,9 +357,9 @@ pub async fn steam_save(
             ))
         }
     };
-    if request.revision.len() != 64
+    if request.revision().len() != 64
         || !request
-            .revision
+            .revision()
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
     {
