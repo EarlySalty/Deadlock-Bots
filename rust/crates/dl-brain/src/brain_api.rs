@@ -135,6 +135,8 @@ mod tests {
         thread,
     };
 
+    const FIXTURE_BEARER: &str = "brain-fixture-bearer";
+
     fn fixture(statuses: Vec<AnswerStatus>) -> (String, thread::JoinHandle<Vec<Query>>) {
         let listener =
             TcpListener::bind("127.0.0.1:0").expect("offline fixture operation must succeed");
@@ -155,37 +157,36 @@ mod tests {
                     .expect("offline fixture operation must succeed");
                 let mut request = Vec::new();
                 let mut buffer = [0; 4096];
-                let body =
-                    loop {
-                        let n = stream
-                            .read(&mut buffer)
+                let body = loop {
+                    let n = stream
+                        .read(&mut buffer)
+                        .expect("offline fixture operation must succeed");
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let expected_auth = format!("authorization: Bearer {FIXTURE_BEARER}");
+                        assert!(headers
+                            .lines()
+                            .any(|line| line.eq_ignore_ascii_case(&expected_auth)));
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|s| {
+                                        s.trim()
+                                            .parse()
+                                            .expect("offline fixture operation must succeed")
+                                    })
+                            })
                             .expect("offline fixture operation must succeed");
-                        assert!(n > 0);
-                        request.extend_from_slice(&buffer[..n]);
-                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let headers = String::from_utf8_lossy(&request[..end]);
-                            assert!(headers
-                                .lines()
-                                .any(|l| l
-                                    .eq_ignore_ascii_case("authorization: Bearer fixture-token")));
-                            let len: usize = headers
-                                .lines()
-                                .find_map(|l| {
-                                    l.to_ascii_lowercase().strip_prefix("content-length:").map(
-                                        |s| {
-                                            s.trim()
-                                                .parse()
-                                                .expect("offline fixture operation must succeed")
-                                        },
-                                    )
-                                })
-                                .expect("offline fixture operation must succeed");
-                            if request.len() >= end + 4 + len {
-                                break request[end + 4..].to_vec();
-                            }
+                        if request.len() >= end + 4 + len {
+                            break request[end + 4..].to_vec();
                         }
-                        assert!(request.len() < 70 * 1024);
-                    };
+                    }
+                    assert!(request.len() < 70 * 1024);
+                };
                 let query: Query =
                     serde_json::from_slice(&body).expect("offline fixture operation must succeed");
                 let response = PublicAnswerResponse {
@@ -218,7 +219,7 @@ mod tests {
     fn adapter(endpoint: &str) -> BrainApiAnswerer {
         BrainApiAnswerer::new(
             endpoint,
-            "fixture-token",
+            FIXTURE_BEARER,
             Duration::from_secs(2),
             "fixture-run".into(),
             BTreeSet::from(["fixture.game".into()]),

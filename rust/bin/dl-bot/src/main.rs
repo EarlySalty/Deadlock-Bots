@@ -128,6 +128,18 @@ fn brain_consumer_mode() -> anyhow::Result<BrainConsumerMode> {
     brain_consumer_mode_from_value(operating_value("BRAIN_CLIENT_MODE").as_deref())
 }
 
+fn validate_brain_open_test_mode(
+    consumer_mode: BrainConsumerMode,
+    open_test_mode: bool,
+) -> anyhow::Result<()> {
+    if consumer_mode == BrainConsumerMode::Typed && open_test_mode {
+        anyhow::bail!(
+            "BRAIN_OPEN_TEST_MODE ist mit BRAIN_CLIENT_MODE=typed nicht kompatibel: der bestehende Review-Build-Testpfad darf nicht still umgangen werden"
+        );
+    }
+    Ok(())
+}
+
 fn brain_api_timeout() -> Duration {
     Duration::from_millis(env_u64_default("BRAIN_API_TIMEOUT_MS", 8_000).max(1))
 }
@@ -1079,6 +1091,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
             let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
             let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
+            validate_brain_open_test_mode(consumer_mode, open_test_mode)?;
             let channel_allowlist = if open_test_mode {
                 None
             } else {
@@ -2113,8 +2126,9 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         brain_channel_allowlist_from_value, brain_consumer_mode_from_value,
         chat_text_generator_with, legacy_lfg_responder_enabled, lfg_cutover_active,
         lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value, matcher_provider_choice,
-        model_from_lookup, moderation_enforce_from_lookup, validate_voice_worker_token,
-        warn_if_lagebild_token_empty, BrainConsumerMode, MatcherProviderChoice,
+        model_from_lookup, moderation_enforce_from_lookup, validate_brain_open_test_mode,
+        validate_voice_worker_token, warn_if_lagebild_token_empty, BrainConsumerMode,
+        MatcherProviderChoice,
     };
     use std::{
         collections::HashMap,
@@ -2418,6 +2432,14 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
                 "{raw:?} must fail closed instead of selecting legacy"
             );
         }
+    }
+
+    #[test]
+    fn typed_mode_lehnt_legacy_open_test_review_build_semantik_ab() {
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Typed, true).is_err());
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Typed, false).is_ok());
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Legacy, true).is_ok());
+        assert!(validate_brain_open_test_mode(BrainConsumerMode::Shadow, true).is_ok());
     }
 
     #[test]
