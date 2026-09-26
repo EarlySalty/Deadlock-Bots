@@ -259,6 +259,40 @@ fn text(value: &Value) -> Result<Value, CatalogError> {
     }
     Ok(value.clone())
 }
+fn number(field: &Field, value: &Value) -> Result<Value, CatalogError> {
+    const MAX_EXACT_JSON_INTEGER: u64 = (1u64 << 53) - 1;
+    let raw = value.as_number().ok_or_else(invalid)?;
+    let parsed = if let Some(integer) = raw.as_i64() {
+        if integer.unsigned_abs() > MAX_EXACT_JSON_INTEGER {
+            return Err(invalid());
+        }
+        integer as f64
+    } else if let Some(integer) = raw.as_u64() {
+        if integer > MAX_EXACT_JSON_INTEGER {
+            return Err(invalid());
+        }
+        integer as f64
+    } else {
+        raw.as_f64().ok_or_else(invalid)?
+    };
+    if !parsed.is_finite()
+        || !field
+            .min
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_none_or(|min| parsed >= min)
+        || !field
+            .max
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_none_or(|max| parsed <= max)
+    {
+        return Err(invalid());
+    }
+    Ok(Value::Number(
+        serde_json::Number::from_f64(parsed).ok_or_else(invalid)?,
+    ))
+}
 pub fn normalize(
     fields: &[Field],
     changes: &BTreeMap<String, Value>,
@@ -283,23 +317,7 @@ pub fn normalize(
             match field.kind {
                 Kind::Boolean if value.is_boolean() => value.clone(),
                 Kind::Integer => integer(field, value)?,
-                Kind::Number
-                    if value.as_f64().is_some_and(|value| {
-                        value.is_finite()
-                            && field
-                                .min
-                                .as_deref()
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .is_none_or(|min| value >= min)
-                            && field
-                                .max
-                                .as_deref()
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .is_none_or(|max| value <= max)
-                    }) =>
-                {
-                    value.clone()
-                }
+                Kind::Number => number(field, value)?,
                 Kind::String => text(value)?,
                 Kind::Choice
                     if value
@@ -340,6 +358,7 @@ fn toml_value(value: &Value) -> Result<toml_edit::Value, CatalogError> {
         Value::Bool(v) => (*v).into(),
         Value::String(v) => v.clone().into(),
         Value::Number(v) if v.is_i64() => v.as_i64().ok_or_else(invalid)?.into(),
+        Value::Number(v) if v.is_u64() => return Err(invalid()),
         Value::Number(v) => v
             .as_f64()
             .filter(|v| v.is_finite())
@@ -486,5 +505,60 @@ mod tests {
             let parsed: Value = toml::from_str(&document.to_string()).expect("TOML");
             assert!(parsed["runtime"]["ai"].get("model").is_none());
         }
+    }
+
+    #[test]
+    fn whole_json_numbers_for_float_fields_roundtrip_as_toml_floats() {
+        let spec = "llm.use_cases.test.temperature\tOption<f64>\tTest\tTemperatur\tedit\tTest\n\
+runtime.bridges.twitch_timeout_seconds\tOption<f64>\tTest\tTimeout\tedit\tTest\n\
+runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTest\n";
+        let fields = fields(spec, &[]);
+        let changes = BTreeMap::from([
+            ("llm.use_cases.test.temperature".into(), json!(1)),
+            ("runtime.bridges.twitch_timeout_seconds".into(), json!(1)),
+            ("runtime.moderation.analyze_flag_threshold".into(), json!(1)),
+        ]);
+        let normalized = normalize(&fields, &changes).expect("Ganzzahlen für f64 gültig");
+        assert!(normalized.values().all(|value| value.as_f64() == Some(1.0)
+            && value.as_number().is_some_and(serde_json::Number::is_f64)));
+        let mut document: toml_edit::DocumentMut = "".parse().expect("leeres TOML");
+        apply(&mut document, &normalized).expect("TOML-Schreibpfad");
+        let parsed: toml::Value =
+            toml::from_str(&document.to_string()).expect("geschriebenes TOML");
+        assert_eq!(
+            parsed["llm"]["use_cases"]["test"]["temperature"].as_float(),
+            Some(1.0)
+        );
+        assert_eq!(
+            parsed["runtime"]["bridges"]["twitch_timeout_seconds"].as_float(),
+            Some(1.0)
+        );
+        assert_eq!(
+            parsed["runtime"]["moderation"]["analyze_flag_threshold"].as_float(),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn number_rejects_imprecise_json_integers_and_u64_toml_overflow() {
+        let fields = fields(
+            "threshold\tf64\tTest\tSchwelle\tedit\tTest\nrole\tu64\tTest\tRolle\tedit\tTest\n",
+            &[],
+        );
+        let change = |path: &str, value| BTreeMap::from([(path.to_owned(), value)]);
+        assert!(normalize(&fields, &change("threshold", json!((1u64 << 53) - 1))).is_ok());
+        assert!(normalize(&fields, &change("threshold", json!(1u64 << 53))).is_err());
+        assert!(normalize(&fields, &change("threshold", json!(u64::MAX))).is_err());
+        assert_eq!(
+            normalize(&fields, &change("role", json!(i64::MAX.to_string()))).expect("i64-Grenze")
+                ["role"],
+            json!(i64::MAX)
+        );
+        assert!(normalize(
+            &fields,
+            &change("role", json!((i64::MAX as u64 + 1).to_string()))
+        )
+        .is_err());
+        assert!(toml_value(&json!(u64::MAX)).is_err());
     }
 }

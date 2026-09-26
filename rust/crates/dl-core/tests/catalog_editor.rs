@@ -76,6 +76,36 @@ fn settings_reach_real_runtime_lookup_and_survive_restart_without_rounding() {
     assert!(text.contains("# Pin"));
 }
 #[test]
+fn whole_numbers_save_and_reload_for_float_settings() {
+    let (_directory, store) = setup();
+    let before = store.read_versioned().expect("Stand");
+    store
+        .save_changes_if_revision(
+            &before.revision,
+            &changes(json!({
+                "llm.use_cases.bot_pate.temperature": 1,
+                "runtime.bridges.twitch_timeout_seconds": 1,
+                "runtime.moderation.analyze_flag_threshold": 1
+            })),
+        )
+        .expect("Ganzzahl-Eingaben für f64 speichern");
+    let text = fs::read_to_string(store.path()).expect("gespeicherte Datei");
+    let parsed: toml::Value = toml::from_str(&text).expect("gültiges TOML");
+    assert_eq!(
+        parsed["llm"]["use_cases"]["bot_pate"]["temperature"].as_float(),
+        Some(1.0)
+    );
+    assert_eq!(
+        parsed["runtime"]["bridges"]["twitch_timeout_seconds"].as_float(),
+        Some(1.0)
+    );
+    assert_eq!(
+        parsed["runtime"]["moderation"]["analyze_flag_threshold"].as_float(),
+        Some(1.0)
+    );
+    BotConfigStore::open(store.path()).expect("gültig nach Neustart");
+}
+#[test]
 fn invalid_protected_or_expensive_pins_do_not_partially_write() {
     let (_directory, store) = setup();
     let before = store.read_versioned().expect("Stand");
