@@ -8,6 +8,21 @@ pub struct SaveRequest {
     pub patch: Patch,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum WriteRequest {
+    Catalog(dl_core::settings_catalog::ChangeRequest),
+    Legacy(SaveRequest),
+}
+impl WriteRequest {
+    pub fn revision(&self) -> &str {
+        match self {
+            Self::Catalog(value) => &value.revision,
+            Self::Legacy(value) => &value.revision,
+        }
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Patch {
@@ -48,6 +63,8 @@ pub struct Saved {
     pub revision: String,
     pub saved_fingerprint: String,
     pub editable: Editable,
+    #[serde(default)]
+    pub catalog: Option<dl_core::settings_catalog::Catalog>,
     pub active: Vec<Active>,
     pub restart_required: Option<bool>,
 }
@@ -105,6 +122,14 @@ pub enum Error {
 
 impl super::steam::SteamBotClient {
     pub async fn operating_config(&self, save: Option<&SaveRequest>) -> Result<Saved, Error> {
+        let request = save.cloned().map(WriteRequest::Legacy);
+        self.operating_config_write(request.as_ref()).await
+    }
+
+    pub async fn operating_config_write(
+        &self,
+        save: Option<&WriteRequest>,
+    ) -> Result<Saved, Error> {
         let token = self
             .token
             .as_deref()
@@ -136,12 +161,28 @@ impl super::steam::SteamBotClient {
         let mut response = response;
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| Error::Upstream)? {
-            if bytes.len() + chunk.len() > 65536 {
+            if bytes.len() + chunk.len() > 1048576 {
                 return Err(Error::Upstream);
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| Error::Upstream)
+        let mut saved: Saved = serde_json::from_slice(&bytes).map_err(|_| Error::Upstream)?;
+        if let Some(catalog) = &mut saved.catalog {
+            if catalog.version != 1 || catalog.fields.len() > 512 {
+                return Err(Error::Upstream);
+            }
+            catalog.values.retain(|path, _| {
+                catalog
+                    .fields
+                    .iter()
+                    .any(|field| &field.path == path && field.writable)
+            });
+            if !catalog.values.is_empty() {
+                dl_core::settings_catalog::normalize(&catalog.fields, &catalog.values)
+                    .map_err(|_| Error::Upstream)?;
+            }
+        }
+        Ok(saved)
     }
 }
 
