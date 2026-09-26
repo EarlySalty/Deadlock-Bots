@@ -144,6 +144,50 @@ async fn fresh_channel(
         .ok_or(PortError::ChannelNotFound)
 }
 
+fn rollback_allowed(
+    channel_id: u64,
+    current_channel_id: u64,
+    current_limit: u32,
+    target: u32,
+) -> bool {
+    current_channel_id == channel_id && current_limit == target
+}
+
+/// A failed response must not leave a usable public invite behind. If the
+/// capacity edit may have happened, restore only the exact limit we set; a
+/// later owner change takes precedence. Discord has no atomic invite/edit API.
+async fn discard_invite(adapter: &DiscordAdapter, code: &str, rollback: Option<(u64, u32, u32)>) {
+    if !code.is_empty() {
+        if let Err(error) = adapter.http.delete_invite(code, Some(REASON)).await {
+            tracing::error!(%error, "Streamer-Voice-Invite konnte nicht zurückgenommen werden");
+        }
+    }
+    if let Some((channel_id, previous, target)) = rollback {
+        match fresh_channel(adapter, channel_id).await {
+            Ok(current)
+                if rollback_allowed(
+                    channel_id,
+                    current.id.get(),
+                    current.user_limit.unwrap_or(0),
+                    target,
+                ) =>
+            {
+                if let Err(error) = adapter
+                    .http
+                    .edit_channel(current.id, &json!({"user_limit": previous}), Some(REASON))
+                    .await
+                {
+                    tracing::error!(%error, channel_id, previous, target, "Streamer-Voice-Kanallimit konnte nicht zurückgenommen werden");
+                }
+            }
+            Ok(_) => {} // A later channel change must not be overwritten.
+            Err(error) => {
+                tracing::error!(%error, channel_id, previous, target, "Streamer-Voice-Kanallimit konnte nicht zur Rücknahme gelesen werden");
+            }
+        }
+    }
+}
+
 pub(crate) async fn invite(
     adapter: &DiscordAdapter,
     guild_id: u64,
@@ -175,63 +219,72 @@ pub(crate) async fn invite(
         .create_invite(channel.id, &invite_options(), Some(REASON))
         .await
         .map_err(|_| PortError::GuildUnavailable)?;
-    if invite.channel.id != channel.id
-        || invite
-            .guild
-            .as_ref()
-            .is_none_or(|guild| guild.id.get() != guild_id)
-        || invite.code.is_empty()
-        || !invite
-            .code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        return Err(PortError::GuildUnavailable);
-    }
+    let mut rollback = None;
+    let result = async {
+        if invite.channel.id != channel.id
+            || invite
+                .guild
+                .as_ref()
+                .is_none_or(|guild| guild.id.get() != guild_id)
+            || invite.code.is_empty()
+            || !invite
+                .code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(PortError::GuildUnavailable);
+        }
 
-    // The owner may have changed the limit or locked the channel while the
-    // invitation was being created. Re-read before writing only user_limit.
-    let channel = fresh_channel(adapter, expected_channel_id).await?;
-    let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
-        return Ok(None);
-    };
-    let limit = channel.user_limit.unwrap_or(0);
-    let Some(target) = target_limit(limit, state.members) else {
-        return Ok(None);
-    };
-    let slot_added = target != limit;
-    let channel = if slot_added {
-        if !state.can_manage {
+        // The owner may have changed the limit or locked the channel while
+        // creating the invite. Re-read before writing only user_limit.
+        let channel = fresh_channel(adapter, expected_channel_id).await?;
+        let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
+            return Ok(None);
+        };
+        let limit = channel.user_limit.unwrap_or(0);
+        let Some(target) = target_limit(limit, state.members) else {
+            return Ok(None);
+        };
+        let slot_added = target != limit;
+        let channel = if slot_added {
+            if !state.can_manage {
+                return Ok(None);
+            }
+            rollback = Some((expected_channel_id, limit, target));
+            adapter
+                .http
+                .edit_channel(channel.id, &json!({"user_limit": target}), Some(REASON))
+                .await
+                .map_err(|_| PortError::GuildUnavailable)?
+        } else {
+            channel
+        };
+        // A moved streamer or a rejected/non-applied limit is not success.
+        let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
+            return Ok(None);
+        };
+        let actual_limit = channel.user_limit.unwrap_or(0);
+        if actual_limit != target || (actual_limit > 0 && state.members >= actual_limit as usize) {
             return Ok(None);
         }
-        adapter
-            .http
-            .edit_channel(channel.id, &json!({"user_limit": target}), Some(REASON))
-            .await
-            .map_err(|_| PortError::GuildUnavailable)?
-    } else {
-        channel
-    };
-    // A moved streamer or a rejected/non-applied limit is not success.
-    let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
-        return Ok(None);
-    };
-    let actual_limit = channel.user_limit.unwrap_or(0);
-    if actual_limit != target || (actual_limit > 0 && state.members >= actual_limit as usize) {
-        return Ok(None);
+        tracing::info!(
+            guild_id,
+            streamer_id,
+            channel_id = expected_channel_id,
+            slot_added,
+            "Streamer-Voice-Invite erstellt"
+        );
+        Ok(Some(StreamerVoiceInvite {
+            invite_url: format!("https://discord.gg/{}", invite.code),
+            channel_id: expected_channel_id.to_string(),
+            slot_added,
+        }))
     }
-    tracing::info!(
-        guild_id,
-        streamer_id,
-        channel_id = expected_channel_id,
-        slot_added,
-        "Streamer-Voice-Invite erstellt"
-    );
-    Ok(Some(StreamerVoiceInvite {
-        invite_url: format!("https://discord.gg/{}", invite.code),
-        channel_id: expected_channel_id.to_string(),
-        slot_added,
-    }))
+    .await;
+    if !matches!(result, Ok(Some(_))) {
+        discard_invite(adapter, &invite.code, rollback).await;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -244,6 +297,13 @@ mod tests {
             invite_options(),
             json!({"max_age": 600, "max_uses": 1, "unique": true})
         );
+    }
+
+    #[test]
+    fn rollback_only_reverts_our_unchanged_limit() {
+        assert!(rollback_allowed(42, 42, 9, 9));
+        assert!(!rollback_allowed(42, 42, 10, 9));
+        assert!(!rollback_allowed(42, 43, 9, 9));
     }
 
     #[test]
