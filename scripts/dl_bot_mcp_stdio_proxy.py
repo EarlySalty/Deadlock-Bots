@@ -9,9 +9,11 @@ import sys
 from pathlib import Path
 from urllib import error, request
 
-ENDPOINT = "http://127.0.0.1:8890/mcp"
+import tomllib
+
 SECRET_NAME = "TWITCH_INTERNAL_API_TOKEN"
 LOADER = Path("/home/nathanael/Documents/Infisical/export_gpt_secret.py")
+CONFIG = Path("/home/nathanael/.config/deadlock-bots/bot.toml")
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
@@ -38,29 +40,58 @@ def load_token(loader: Path = LOADER) -> str:
     return token
 
 
-def rpc_id(payload: bytes) -> object | None:
+def endpoint_from_config(path: Path = CONFIG) -> str:
+    """Liest denselben nichtgeheimen MCP-Port wie der dl-bot aus normaler TOML."""
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        port = raw.get("runtime", {}).get("start", {}).get("mcp_port", 8890)
+    except (OSError, ValueError, AttributeError, TypeError):
+        raise RuntimeError("MCP-Betriebsconfig ist nicht lesbar") from None
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise RuntimeError("MCP-Port in TOML ist ungültig")
+    return f"http://127.0.0.1:{port}/mcp"
+
+
+def rpc_ids(payload: bytes) -> tuple[list[object], bool]:
     try:
         value = json.loads(payload)
     except (ValueError, UnicodeDecodeError):
+        return [], False
+    if isinstance(value, list):
+        return [
+            item["id"]
+            for item in value
+            if isinstance(item, dict) and item.get("id") is not None
+        ], True
+    if isinstance(value, dict) and value.get("id") is not None:
+        return [value["id"]], False
+    return [], False
+
+
+def error_response(payload: bytes) -> bytes | None:
+    ids, batch = rpc_ids(payload)
+    if not ids:
         return None
-    return value.get("id") if isinstance(value, dict) else None
-
-
-def error_response(request_id: object) -> bytes:
-    return json.dumps(
+    errors = [
         {
             "jsonrpc": "2.0",
             "id": request_id,
             "error": {"code": -32000, "message": "Discord-MCP ist nicht erreichbar"},
-        },
+        }
+        for request_id in ids
+    ]
+    return json.dumps(
+        errors if batch else errors[0],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
 
 
-def forward(payload: bytes, token: str, opener: request.OpenerDirector) -> bytes | None:
+def forward(
+    payload: bytes, token: str, opener: request.OpenerDirector, endpoint: str
+) -> bytes | None:
     message = request.Request(
-        ENDPOINT,
+        endpoint,
         data=payload,
         headers={
             "Authorization": f"Bearer {token}",
@@ -70,23 +101,20 @@ def forward(payload: bytes, token: str, opener: request.OpenerDirector) -> bytes
         method="POST",
     )
     try:
-        with opener.open(message, timeout=30) as response:
+        with opener.open(message, timeout=180) as response:
             if response.status == 202:
                 return None
             if response.status != 200:
                 raise RuntimeError("MCP-Status")
             body = response.read(MAX_MESSAGE_BYTES + 1)
     except (error.HTTPError, error.URLError, TimeoutError, OSError, RuntimeError):
-        request_id = rpc_id(payload)
-        return error_response(request_id) if request_id is not None else None
+        return error_response(payload)
     if len(body) > MAX_MESSAGE_BYTES:
-        request_id = rpc_id(payload)
-        return error_response(request_id) if request_id is not None else None
+        return error_response(payload)
     try:
         json.loads(body)
     except (ValueError, UnicodeDecodeError):
-        request_id = rpc_id(payload)
-        return error_response(request_id) if request_id is not None else None
+        return error_response(payload)
     return body
 
 
@@ -101,7 +129,12 @@ def main() -> int:
         if len(line) > MAX_MESSAGE_BYTES or not line.endswith(b"\n"):
             print("MCP-Nachricht ist zu groß oder unvollständig", file=sys.stderr)
             return 1
-        result = forward(line, token, opener)
+        try:
+            endpoint = endpoint_from_config()
+        except RuntimeError:
+            result = error_response(line)
+        else:
+            result = forward(line, token, opener, endpoint)
         if result is not None:
             sys.stdout.buffer.write(result.rstrip(b"\n") + b"\n")
             sys.stdout.buffer.flush()

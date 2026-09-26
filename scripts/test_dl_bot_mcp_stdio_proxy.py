@@ -32,7 +32,7 @@ class FakeOpener:
         self.last_request = None
 
     def open(self, req, timeout):
-        assert timeout == 30
+        assert timeout == 180
         self.last_request = req
         if isinstance(self.response, Exception):
             raise self.response
@@ -53,7 +53,10 @@ def test_proxy_liest_nur_bestehenden_infisical_token(tmp_path):
 def test_proxy_sendet_bearer_nur_an_festen_loopback_endpoint():
     opener = FakeOpener(FakeResponse(200, b'{"jsonrpc":"2.0","id":1,"result":{}}'))
     result = proxy.forward(
-        b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n', "test-token", opener
+        b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n',
+        "test-token",
+        opener,
+        "http://127.0.0.1:8890/mcp",
     )
     assert result == b'{"jsonrpc":"2.0","id":1,"result":{}}'
     assert opener.last_request.full_url == "http://127.0.0.1:8890/mcp"
@@ -73,12 +76,54 @@ def test_redirect_darf_bearer_nicht_an_fremdes_ziel_tragen():
 def test_proxy_verwirft_notification_und_meldet_http_fehler_ohne_token():
     opener = FakeOpener(error.URLError("Netz nicht erreichbar"))
     notification = b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
-    assert proxy.forward(notification, "test-token", opener) is None
+    endpoint = "http://127.0.0.1:8890/mcp"
+    assert proxy.forward(notification, "test-token", opener, endpoint) is None
     result = proxy.forward(
-        b'{"jsonrpc":"2.0","id":7,"method":"ping"}\n', "test-token", opener
+        b'{"jsonrpc":"2.0","id":7,"method":"ping"}\n',
+        "test-token",
+        opener,
+        endpoint,
     )
     assert result is not None and b'"id":7' in result
     assert b"test-token" not in result
+
+
+def test_proxy_folgt_dem_toml_port_und_lehnt_ungueltige_werte_ab(tmp_path):
+    config = tmp_path / "bot.toml"
+    config.write_text("[runtime.start]\nmcp_port = 8891\n", encoding="utf-8")
+    assert proxy.endpoint_from_config(config) == "http://127.0.0.1:8891/mcp"
+    config.write_text("[runtime.start]\nmcp_port = 8892\n", encoding="utf-8")
+    assert proxy.endpoint_from_config(config) == "http://127.0.0.1:8892/mcp"
+    config.write_text("[runtime.start]\nmcp_port = true\n", encoding="utf-8")
+    try:
+        proxy.endpoint_from_config(config)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Bool-Port wurde akzeptiert")
+
+
+def test_batch_fehlermeldung_antwortet_auf_jede_id():
+    payload = (
+        b'[{"jsonrpc":"2.0","id":1,"method":"ping"},'
+        b'{"jsonrpc":"2.0","method":"notifications/initialized"},'
+        b'{"jsonrpc":"2.0","id":2,"method":"tools/list"}]\n'
+    )
+    result = proxy.forward(
+        payload,
+        "test-token",
+        FakeOpener(error.URLError("Netz nicht erreichbar")),
+        "http://127.0.0.1:8890/mcp",
+    )
+    assert result is not None
+    assert proxy.json.loads(result) == [
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32000, "message": "Discord-MCP ist nicht erreichbar"},
+        }
+        for request_id in (1, 2)
+    ]
 
 
 def test_proxy_verwirft_leeren_oder_fehlenden_secretwert(tmp_path):
