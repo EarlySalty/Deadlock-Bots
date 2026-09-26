@@ -8,8 +8,8 @@
 //! Muster wie Broker/Changelog/Server-Sync: eigener axum-Router, loopback-only,
 //! vom selben tokio::select! in main.rs getragen.
 //!
-//! Betriebswerte kommen aus der zentralen TOML, der interne Token aus dem
-//! bestehenden Infisical-Bootstrap. Der Listener bindet ausschließlich Loopback.
+//! Betriebswerte kommen aus der zentralen TOML, der bestehende
+//! TWITCH_INTERNAL_API_TOKEN aus Infisical. Der Listener bindet nur Loopback.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 

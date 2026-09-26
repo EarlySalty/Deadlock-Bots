@@ -1388,8 +1388,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // MCP-Connector :8890 — TOML-Betriebswerte, bestehender Infisical-Token,
     // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
-    let mcp_token = dl_core::runtime_config::secret_value("MCP_CONNECTOR_TOKEN")
-        .or_else(|| dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN"));
+    let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
     let mcp_state = Arc::new(
         mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?,
