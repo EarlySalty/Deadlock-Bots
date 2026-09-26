@@ -64,6 +64,7 @@ impl BrainApiAnswerer {
             request_id: id.clone(),
             conversation_id: id,
             text: question.to_owned(),
+            domain: None,
             requested_scopes: self.scopes.clone(),
             profile: AnswerProfile::Explain,
             patch: None,
@@ -86,8 +87,10 @@ fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
             }
             Ok(BrainOutcome::Answer(response.text))
         }
+        AnswerStatus::BuildRejected => Ok(BrainOutcome::Answer(response.text)),
         AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
         AnswerStatus::UnauthorizedEvidence
+        | AnswerStatus::Unavailable
         | AnswerStatus::ProviderError
         | AnswerStatus::BudgetExceeded => Err(backend_error()),
     }
@@ -187,7 +190,10 @@ mod tests {
                     knowledge_release: "fixture-release".into(),
                     status,
                     text: "Antwort äöü 🧪".into(),
-                    citations: if status == AnswerStatus::Answered {
+                    citations: if matches!(
+                        status,
+                        AnswerStatus::Answered | AnswerStatus::BuildRejected
+                    ) {
                         vec![PublicCitation {
                             citation_id: "opaque".into(),
                             label: "Beleg".into(),
@@ -275,6 +281,24 @@ mod tests {
         assert_ne!(queries[0].conversation_id, queries[1].conversation_id);
         assert_ne!(queries[0].request_id, queries[1].request_id);
     }
+    #[tokio::test]
+    async fn build_rejected_is_visible_but_unavailable_is_backend_failure() {
+        let (endpoint, server) =
+            fixture(vec![AnswerStatus::BuildRejected, AnswerStatus::Unavailable]);
+        let backend = adapter(&endpoint);
+        assert_eq!(
+            backend
+                .answer("illegaler Build")
+                .await
+                .expect("domain rejection is a typed answer"),
+            BrainOutcome::Answer("Antwort äöü 🧪".into())
+        );
+        assert!(backend.answer("Abrams").await.is_err());
+        server
+            .join()
+            .expect("offline fixture operation must succeed");
+    }
+
     #[tokio::test]
     async fn missing_evidence_remains_no_answer() {
         let (endpoint, server) = fixture(vec![AnswerStatus::InsufficientEvidence]);

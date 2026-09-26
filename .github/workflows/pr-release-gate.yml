@@ -1,39 +1,232 @@
-name: PR Release Gate
+name: "PR Release Gate"
+
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       pr_number:
-        description: Optional pull request number to report; never merges or updates branches.
+        description: "Optional pull request number. Empty reconciles all open pull requests."
         required: false
         type: string
+
 permissions:
-  contents: read
-  pull-requests: read
+  contents: write
+  pull-requests: write
   checks: read
   statuses: read
+
+concurrency:
+  group: pr-release-gate-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
-  report:
-    name: Report only - manual release decision
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+  reconcile:
+    name: "Auto merge after gates"
+    runs-on: ubuntu-latest
     steps:
-      # Metadata only; no PR checkout or execution under pull_request_target.
-      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      - name: Reconcile eligible pull requests
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          REQUESTED_PR: ${{ inputs.pr_number || '' }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number || '' }}
         with:
           script: |
-            const requested = Number(process.env.REQUESTED_PR || context.payload.pull_request?.number || 0);
-            if (!Number.isSafeInteger(requested) || requested <= 0) {
-              await core.summary.addRaw('Report only: no PR selected. No merge, branch update, deployment or release approval.').write();
-              return;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const requested = Number.parseInt(process.env.INPUT_PR_NUMBER || "", 10);
+
+            const requiredChecks = [
+              "Semantic review",
+              "Workspace check and tests",
+              "Knowledge eval",
+              "Knowledge hybrid",
+            ];
+
+            let pulls;
+            if (Number.isInteger(requested) && requested > 0) {
+              pulls = [(await github.rest.pulls.get({ owner, repo, pull_number: requested })).data];
+            } else {
+              pulls = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: "open",
+                per_page: 100,
+              });
             }
-            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: requested});
-            const checks = await github.paginate(github.rest.checks.listForRef, {
-              ...context.repo, ref: pr.head.sha, filter: 'latest', per_page: 100,
-            });
-            const trusted = checks.filter(c => c.head_sha === pr.head.sha && c.app?.slug === 'github-actions');
-            const failed = trusted.filter(c => c.status === 'completed' && !['success', 'neutral', 'skipped'].includes(c.conclusion));
-            await core.summary.addRaw(`PR #${requested}, head ${pr.head.sha}, draft=${pr.draft}. Current GitHub Actions checks: ${trusted.length}; unsuccessful: ${failed.length}. Report only; missing or skipped checks are not approval. No merge, branch update or deployment.`).write();
+
+            for (const listed of pulls) {
+              const pull_number = listed.number;
+              let pr = (await github.rest.pulls.get({ owner, repo, pull_number })).data;
+
+              if (pr.base.ref !== "main" || pr.draft) {
+                core.notice(`PR #${pull_number}: base is not main or the PR is a draft.`);
+                continue;
+              }
+              if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
+                core.notice(`PR #${pull_number}: automatic merge is limited to same-repository branches.`);
+                continue;
+              }
+
+              const permissionResponse = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner,
+                repo,
+                username: pr.user.login,
+              });
+              const trustedPermissions = new Set(["admin", "maintain", "write"]);
+              if (!trustedPermissions.has(permissionResponse.data.permission)) {
+                core.notice(
+                  `PR #${pull_number}: author ${pr.user.login} lacks trusted write permission (${permissionResponse.data.permission}).`,
+                );
+                continue;
+              }
+
+              const changedFiles = await github.paginate(github.rest.pulls.listFiles, {
+                owner,
+                repo,
+                pull_number,
+                per_page: 100,
+              });
+              const protectedPolicyPath = (filename) =>
+                filename.startsWith(".github/") ||
+                filename.startsWith("scripts/ci/") ||
+                /^rust\/scripts\/(?:central_ci|central_fresh_schema|central_test_db|check)\.sh$/.test(filename);
+              const protectedChanges = changedFiles
+                .map((file) => file.filename)
+                .filter(protectedPolicyPath);
+              if (protectedChanges.length) {
+                core.notice(
+                  `PR #${pull_number}: trusted manual bootstrap required for CI/release-policy files: ${protectedChanges.join(", ")}`,
+                );
+                continue;
+              }
+
+              const evaluatedSha = pr.head.sha;
+              const comparison = await github.request(
+                "GET /repos/{owner}/{repo}/compare/{basehead}",
+                {
+                  owner,
+                  repo,
+                  basehead: `${pr.base.sha}...${evaluatedSha}`,
+                },
+              );
+
+              if ((comparison.data.behind_by || 0) > 0) {
+                try {
+                  await github.rest.pulls.updateBranch({
+                    owner,
+                    repo,
+                    pull_number,
+                    expected_head_sha: evaluatedSha,
+                  });
+                  core.notice(`PR #${pull_number}: base moved. Branch update requested, all gates must run again.`);
+                } catch (error) {
+                  core.warning(`PR #${pull_number}: branch update failed: ${String(error?.message || error)}`);
+                }
+                continue;
+              }
+
+              if (pr.mergeable !== true || pr.mergeable_state === "dirty") {
+                core.notice(`PR #${pull_number}: mergeability is not clean yet.`);
+                continue;
+              }
+
+              const checkResponse = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: evaluatedSha,
+                filter: "latest",
+                per_page: 100,
+              });
+              const trustedActionChecks = (checkResponse.data.check_runs || []).filter(
+                (check) =>
+                  check.head_sha === evaluatedSha &&
+                  check.app?.slug === "github-actions",
+              );
+              const byName = new Map(
+                trustedActionChecks.map((check) => [check.name, check]),
+              );
+
+              const missingRequired = requiredChecks.filter((name) => !byName.has(name));
+              const incompleteRequired = requiredChecks.filter((name) => {
+                const check = byName.get(name);
+                return check && (check.status !== "completed" || check.conclusion !== "success");
+              });
+              if (missingRequired.length || incompleteRequired.length) {
+                core.notice(
+                  `PR #${pull_number}: trusted required Actions checks not ready. missing=${missingRequired.join(",") || "none"} incomplete=${incompleteRequired.join(",") || "none"}.`,
+                );
+                continue;
+              }
+
+              const acceptedAncillaryConclusions = new Set(["success", "neutral", "skipped"]);
+              const blockingCheckRuns = (checkResponse.data.check_runs || []).filter(
+                (check) =>
+                  check.head_sha === evaluatedSha &&
+                  (
+                    check.status !== "completed" ||
+                    !acceptedAncillaryConclusions.has(check.conclusion || "")
+                  ),
+              );
+              if (blockingCheckRuns.length) {
+                core.notice(
+                  `PR #${pull_number}: other check runs are not green: ${blockingCheckRuns.map((check) => `${check.name}=${check.status}/${check.conclusion || "pending"}`).join(", ")}.`,
+                );
+                continue;
+              }
+
+              const statusResponse = await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: evaluatedSha,
+                per_page: 100,
+              });
+              const latestStatusByContext = new Map();
+              for (const status of statusResponse.data.statuses || []) {
+                const previous = latestStatusByContext.get(status.context);
+                if (
+                  !previous ||
+                  new Date(status.created_at || 0).getTime() >
+                    new Date(previous.created_at || 0).getTime()
+                ) {
+                  latestStatusByContext.set(status.context, status);
+                }
+              }
+              const blockingStatuses = [...latestStatusByContext.values()].filter(
+                (status) => status.state !== "success",
+              );
+              if (blockingStatuses.length) {
+                core.notice(
+                  `PR #${pull_number}: commit statuses are not green: ${blockingStatuses.map((status) => `${status.context}=${status.state}`).join(", ")}.`,
+                );
+                continue;
+              }
+
+              pr = (await github.rest.pulls.get({ owner, repo, pull_number })).data;
+              if (pr.head.sha !== evaluatedSha) {
+                core.notice(`PR #${pull_number}: head changed after gate evaluation. Re-evaluation required.`);
+                continue;
+              }
+              if (pr.base.sha !== listed.base.sha && listed.base?.sha) {
+                core.notice(`PR #${pull_number}: base changed during reconciliation. Re-evaluation required.`);
+                continue;
+              }
+
+              try {
+                const merged = await github.rest.pulls.merge({
+                  owner,
+                  repo,
+                  pull_number,
+                  merge_method: "squash",
+                  sha: evaluatedSha,
+                });
+                if (merged.data.merged) {
+                  core.notice(`PR #${pull_number}: merged after fresh base, semantic review, and required CI.`);
+                } else {
+                  core.warning(`PR #${pull_number}: GitHub did not merge: ${merged.data.message || "unknown reason"}`);
+                }
+              } catch (error) {
+                core.warning(`PR #${pull_number}: merge rejected by GitHub: ${String(error?.message || error)}`);
+              }
+            }

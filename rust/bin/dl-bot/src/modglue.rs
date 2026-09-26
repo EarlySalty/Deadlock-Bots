@@ -88,10 +88,7 @@ impl BrainEmojiIndex {
                 let Some(emoji_id) = emoji_map.get(emoji_name) else {
                     continue;
                 };
-                entries.push((
-                    name.to_string(),
-                    format!("<:{emoji_name}:{emoji_id}>")
-                ));
+                entries.push((name.to_string(), format!("<:{emoji_name}:{emoji_id}>")));
             }
         }
         entries.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
@@ -317,7 +314,8 @@ fn format_review_build_receipt(
         .unwrap_or_default();
     format!(
         "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
-        emoji_index.decorate_name(&receipt.hero_name), situations
+        emoji_index.decorate_name(&receipt.hero_name),
+        situations
     )
 }
 
@@ -361,6 +359,36 @@ impl dl_brain::AiAnswerer for SharedBrainAnswerer {
                 dl_answer::Answer::OutOfDomain => dl_brain::BrainOutcome::OutOfDomain,
             })
             .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
+    }
+}
+
+pub struct ReportOnlyShadowBrainAnswerer {
+    pub visible: Arc<dyn dl_brain::AiAnswerer>,
+    pub probe: Arc<dyn dl_brain::AiAnswerer>,
+}
+
+#[async_trait::async_trait]
+impl dl_brain::AiAnswerer for ReportOnlyShadowBrainAnswerer {
+    async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+        let probe = self.probe.answer(question).await;
+        match &probe {
+            Ok(dl_brain::BrainOutcome::Answer(_)) => {
+                tracing::info!("Brain typed shadow: answer");
+            }
+            Ok(dl_brain::BrainOutcome::NoAnswer) => {
+                tracing::info!("Brain typed shadow: no_answer");
+            }
+            Ok(dl_brain::BrainOutcome::OutOfDomain) => {
+                tracing::info!("Brain typed shadow: out_of_domain");
+            }
+            Ok(_) => {
+                tracing::info!("Brain typed shadow: other");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Brain typed shadow: backend_error");
+            }
+        }
+        self.visible.answer(question).await
     }
 }
 
@@ -3980,14 +4008,14 @@ mod tests {
     fn brain_emoji_index_dekoriert_build_entitaeten_wie_patchnotes() {
         let index = BrainEmojiIndex {
             entries: vec![
-                ("Extended Magazine".into(), "<:dli_extended_magazine:5>".into()),
+                (
+                    "Extended Magazine".into(),
+                    "<:dli_extended_magazine:5>".into(),
+                ),
                 ("Warden".into(), "<:dlh_warden:7>".into()),
             ],
         };
-        assert_eq!(
-            index.decorate_name("Warden"),
-            "<:dlh_warden:7> Warden"
-        );
+        assert_eq!(index.decorate_name("Warden"), "<:dlh_warden:7> Warden");
         assert_eq!(
             index.annotate_inline("Warden kauft Extended Magazine."),
             "<:dlh_warden:7> Warden kauft <:dli_extended_magazine:5> Extended Magazine."
@@ -4002,10 +4030,14 @@ mod tests {
             hero_build_id: Some(818625),
             version: Some(1),
             hero_name: "Warden".into(),
-            core: vec![BrainReviewBuildItem { name: "Extended Magazine".into() }],
+            core: vec![BrainReviewBuildItem {
+                name: "Extended Magazine".into(),
+            }],
             situations: vec![BrainReviewBuildSituation {
                 label: "Optional".into(),
-                items: vec![BrainReviewBuildItem { name: "Healing Tempo".into() }],
+                items: vec![BrainReviewBuildItem {
+                    name: "Healing Tempo".into(),
+                }],
             }],
         };
         let index = BrainEmojiIndex {
@@ -4020,12 +4052,9 @@ mod tests {
     #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
         let bounded = "🧠".repeat(1900);
-        let payload = brain_answer_embed_body(
-            &"🧠".repeat(300),
-            &bounded,
-            &BrainEmojiIndex::default(),
-        )
-        .expect("embed");
+        let payload =
+            brain_answer_embed_body(&"🧠".repeat(300), &bounded, &BrainEmojiIndex::default())
+                .expect("embed");
         let embed = &payload["embeds"][0];
         assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
         assert!(
@@ -4069,12 +4098,8 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
-        let body = brain_answer_embed_body(
-            "Items?",
-            "- a\n- b\n- c",
-            &BrainEmojiIndex::default(),
-        )
-        .unwrap_or_else(|| panic!("answer should create embed body"));
+        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c", &BrainEmojiIndex::default())
+            .unwrap_or_else(|| panic!("answer should create embed body"));
         let description = body
             .get("embeds")
             .and_then(Value::as_array)

@@ -20,10 +20,11 @@ mod turnierglue;
 mod vanity;
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     num::NonZeroU64,
     os::unix::fs::PermissionsExt,
     sync::{atomic::AtomicBool, Arc},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -100,6 +101,46 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
     env(name)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrainConsumerMode {
+    Legacy,
+    Shadow,
+    Typed,
+}
+
+fn brain_consumer_mode() -> BrainConsumerMode {
+    match env("BRAIN_CLIENT_MODE")
+        .unwrap_or_else(|| "legacy".into())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "typed" => BrainConsumerMode::Typed,
+        "shadow" => BrainConsumerMode::Shadow,
+        _ => BrainConsumerMode::Legacy,
+    }
+}
+
+fn brain_api_answerer() -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
+    let endpoint = env("BRAIN_API_ENDPOINT").context("BRAIN_API_ENDPOINT fehlt")?;
+    let token = env("BRAIN_API_TOKEN").context("BRAIN_API_TOKEN fehlt")?;
+    let scopes: BTreeSet<String> = env("BRAIN_API_SCOPES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if scopes.is_empty() {
+        anyhow::bail!("BRAIN_API_SCOPES fehlt oder ist leer");
+    }
+    let timeout = Duration::from_millis(env_u64_default("BRAIN_API_TIMEOUT_MS", 8_000).max(1));
+    let namespace = format!("dl-bot-{}", std::process::id());
+    let answerer =
+        dl_brain::brain_api::BrainApiAnswerer::new(&endpoint, &token, timeout, namespace, scopes)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(Arc::new(answerer))
 }
 
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
@@ -1001,18 +1042,26 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
-    // Brain-RAG: Slash-Command plus bestehender Textcommand über MessageEvent-Subscriber.
+    // Brain command: legacy remains the default until an operator explicitly selects
+    // typed or report-only shadow mode. The typed adapter never falls back to local RAG.
     let brain_handler = {
+        let consumer_mode = brain_consumer_mode();
         let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
         let brain_bin_path = std::path::PathBuf::from(&brain_bin);
-        let enabled = env_bool_default("BRAIN_CMD_ENABLED", brain_bin_path.is_file());
+        let typed_configured =
+            env("BRAIN_API_ENDPOINT").is_some() && env("BRAIN_API_TOKEN").is_some();
+        let enabled_default = match consumer_mode {
+            BrainConsumerMode::Typed => typed_configured,
+            BrainConsumerMode::Legacy | BrainConsumerMode::Shadow => brain_bin_path.is_file(),
+        };
+        let enabled = env_bool_default("BRAIN_CMD_ENABLED", enabled_default);
         if !enabled {
             tracing::info!("Brain-Command deaktiviert (BRAIN_CMD_ENABLED)");
             None
-        } else if !brain_bin_path.is_file() {
+        } else if consumer_mode != BrainConsumerMode::Typed && !brain_bin_path.is_file() {
             tracing::warn!(
                 bin = %brain_bin_path.display(),
-                "Brain-Command nicht registriert: BRAIN_BIN existiert nicht"
+                "Brain-Command nicht registriert: Legacy-/Shadow-Pfad benötigt BRAIN_BIN"
             );
             None
         } else {
@@ -1033,7 +1082,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 None
             } else {
                 tracing::info!(
-                    bin = %brain_bin_path.display(),
+                    mode = ?consumer_mode,
                     cooldown_secs,
                     max_question_len,
                     open_test_mode,
@@ -1057,17 +1106,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                             .to_string()
                     }),
                 );
-                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
-                    &emoji_catalog,
-                    &emoji_map,
-                ));
-                let answerer: Arc<dyn dl_brain::AiAnswerer> =
+                let emoji_index =
+                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
+                let legacy: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
                         open_test_mode,
                         brain_bin: brain_bin_path.clone(),
                         emoji_index: emoji_index.clone(),
                     });
+                let answerer: Arc<dyn dl_brain::AiAnswerer> = match consumer_mode {
+                    BrainConsumerMode::Legacy => legacy,
+                    BrainConsumerMode::Typed => brain_api_answerer()?,
+                    BrainConsumerMode::Shadow => Arc::new(modglue::ReportOnlyShadowBrainAnswerer {
+                        visible: legacy,
+                        probe: brain_api_answerer()?,
+                    }),
+                };
                 Some(Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
                     config,
