@@ -816,7 +816,7 @@ impl DiscordPort for DiscordAdapter {
             .http
             .create_invite(
                 ChannelId::new(channel_id),
-                &json!({ "max_age": 0, "max_uses": 0, "unique": true }),
+                &json!({ "max_age": 0, "max_uses": 0, "temporary": false, "unique": true }),
                 Some(reason),
             )
             .await

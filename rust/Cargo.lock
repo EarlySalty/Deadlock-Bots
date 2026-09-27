@@ -588,6 +588,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1394,6 +1395,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "dl-core",
  "hex",
  "rand 0.8.6",
@@ -1743,6 +1745,7 @@ dependencies = [
  "chrono",
  "dl-activity",
  "dl-central-db",
+ "dl-core",
  "reqwest",
  "serde",
  "serde_json",

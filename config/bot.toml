@@ -4,6 +4,7 @@
 # Zugangsdaten bleiben in Infisical und gehören nicht in diese Datei.
 # Änderungen der angebundenen Startwerte werden beim Prozessneustart wirksam.
 schema_version = 1
+twitch_invites = { personal_links_per_channel = 10, guild_invite_reserve = 50, evaluation_interval_seconds = 300, excluded_voice_channel_ids = [], sync_dry_run = false }
 
 [discord]
 # guild_id vor dem produktiven Cutover inventarisieren.

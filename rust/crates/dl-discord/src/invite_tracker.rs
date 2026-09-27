@@ -1,24 +1,18 @@
 //! Invite-Snapshot-Cache für die Beitrittsquellen-Erkennung.
 //!
-//! Hält pro Gilde die zuletzt bekannten Invite-Nutzungszähler. Bei einem Join
-//! wird der aktuelle Stand geholt und gegen den Cache differenziert: Der Code
-//! mit dem grössten positiven Delta ist der genutzte Invite (Port der
-//! Snapshot-/Diff-Logik aus `cogs/user_activity_analyzer.py`
-//! `_collect_join_invite_snapshot` / `_classify_join_source`).
-//!
 //! Die produzierten Metadaten sind ROH (`join_source_bucket` = personal /
 //! bot_invite / public / unknown); die Twitch-/Website-Verfeinerung macht der
 //! Writer über `dl_activity::join_source::classify`. Vanity-Nutzungszähler
 //! werden NICHT getrackt (serenity liefert keinen) — Vanity-Joins fallen in die
 //! Discovery-Heuristik (Bucket `public`), was den Bucket-Count nicht verändert.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serenity::all::{GuildId, Http, InviteCreateEvent, Member};
 use sqlx::PgPool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct InviteSnap {
@@ -34,6 +28,7 @@ struct InviteSnap {
 /// Pro-Gilde-Cache der Invite-Stände (`code → Snapshot`).
 pub struct InviteTracker {
     by_guild: Mutex<HashMap<u64, HashMap<String, InviteSnap>>>,
+    join_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
     pool: PgPool,
 }
 
@@ -62,20 +57,36 @@ fn classify_snapshots(
         return "unknown".to_string();
     };
 
-    let mut best: Option<(String, u64)> = None;
-    for (code, snap) in after_map {
-        let before_uses = before_map.get(code).map(|s| s.uses).unwrap_or(0);
-        if snap.uses > before_uses {
-            let delta = snap.uses - before_uses;
-            let take = match &best {
-                None => true,
-                Some((bc, bd)) => delta > *bd || (delta == *bd && code < bc),
-            };
-            if take {
-                best = Some((code.clone(), delta));
-            }
+    let increases: Vec<_> = after_map
+        .iter()
+        .filter_map(|(code, snap)| {
+            let before = before_map.get(code).map_or(0, |value| value.uses);
+            (snap.uses > before).then(|| (code.clone(), snap.uses - before))
+        })
+        .collect();
+    if increases.len() > 1 || increases.first().is_some_and(|(_, delta)| *delta != 1) {
+        for key in [
+            "invite_code",
+            "invite_url",
+            "inviter_id",
+            "inviter_name",
+            "inviter_bot",
+            "invite_channel_id",
+            "invite_channel_name",
+        ] {
+            meta.remove(key);
         }
+        meta.insert("join_source_bucket".into(), Value::from("unknown"));
+        meta.insert("join_source_kind".into(), Value::from("unknown"));
+        meta.insert("join_source_label".into(), Value::from("Unbekannt"));
+        meta.insert("join_source_confidence".into(), Value::from("low"));
+        meta.insert(
+            "join_source_reason".into(),
+            Value::from("ambiguous_invite_delta"),
+        );
+        return "unknown".to_string();
     }
+    let best = increases.into_iter().next();
 
     if let Some((code, _)) = best {
         let snap = &after_map[&code];
@@ -130,8 +141,21 @@ impl InviteTracker {
     pub fn new(pool: PgPool) -> Self {
         Self {
             by_guild: Mutex::new(HashMap::new()),
+            join_locks: Mutex::new(HashMap::new()),
             pool,
         }
+    }
+
+    async fn lock_guild(&self, guild_id: u64) -> OwnedMutexGuard<()> {
+        let lock = {
+            self.join_locks
+                .lock()
+                .await
+                .entry(guild_id)
+                .or_default()
+                .clone()
+        };
+        lock.lock_owned().await
     }
 
     async fn fetch(http: &Http, guild_id: u64) -> Option<HashMap<String, InviteSnap>> {
@@ -226,6 +250,7 @@ impl InviteTracker {
 
     /// Primt den Cache einer Gilde (API-Fetch). Beim Start für alle Gilden.
     pub async fn prime(&self, http: &Http, guild_id: u64) {
+        let _guard = self.lock_guild(guild_id).await;
         let has_cache = self.by_guild.lock().await.contains_key(&guild_id);
         if !has_cache && self.restore_from_db(guild_id).await {
             return;
@@ -241,6 +266,7 @@ impl InviteTracker {
         let Some(guild_id) = ev.guild_id else {
             return;
         };
+        let _guard = self.lock_guild(guild_id.get()).await;
         let snap = InviteSnap {
             uses: 0,
             url: format!("https://discord.gg/{}", ev.code),
@@ -258,7 +284,7 @@ impl InviteTracker {
         let snapshot = {
             let mut guard = self.by_guild.lock().await;
             let entry = guard.entry(guild_id).or_default();
-            entry.insert(ev.code.to_string(), snap);
+            entry.entry(ev.code.to_string()).or_insert(snap);
             entry.clone()
         };
         self.save_snapshot_to_db(guild_id, &snapshot).await;
@@ -266,6 +292,20 @@ impl InviteTracker {
 
     /// Entfernt einen gelöschten Invite aus dem Cache.
     pub async fn on_invite_delete(&self, guild_id: u64, code: &str) {
+        let _guard = self.lock_guild(guild_id).await;
+        if let Ok(guild_db_id) = i64::try_from(guild_id) {
+            if let Err(error) = sqlx::query(
+                "UPDATE bot.twitch_personal_invites SET revoked_at = clock_timestamp()
+                 WHERE guild_id = $1 AND invite_code = $2 AND revoked_at IS NULL",
+            )
+            .bind(guild_db_id)
+            .bind(code)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::warn!(%error, "Widerruf eines persönlichen Twitch-Invites nicht gespeichert");
+            }
+        }
         let snapshot = {
             let mut guard = self.by_guild.lock().await;
             let Some(g) = guard.get_mut(&guild_id) else {
@@ -282,6 +322,7 @@ impl InviteTracker {
     /// zurückgeben.
     pub async fn on_join(&self, http: &Http, member: &Member) -> Value {
         let guild_id = member.guild_id.get();
+        let _guard = self.lock_guild(guild_id).await;
         let mut meta = Map::new();
         meta.insert(
             "avatar_url".into(),
@@ -292,6 +333,10 @@ impl InviteTracker {
                 .unwrap_or(Value::Null),
         );
         meta.insert("is_pending".into(), Value::from(member.pending));
+        meta.insert(
+            "discord_joined_at".into(),
+            serde_json::json!(member.joined_at.as_ref().map(ToString::to_string)),
+        );
         meta.insert("join_source_bucket".into(), Value::from("unknown"));
         meta.insert("join_source_kind".into(), Value::from("unknown"));
         meta.insert("join_source_label".into(), Value::from("Unbekannt"));
@@ -328,6 +373,7 @@ impl InviteTracker {
 
 #[cfg(test)]
 mod tests {
+    include!("invite_tracker_attribution_tests.rs");
     use super::*;
 
     #[cfg(feature = "testing")]
