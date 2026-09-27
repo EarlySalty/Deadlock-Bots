@@ -1648,6 +1648,7 @@ impl InteractionHandler for PanelHandler {
                     .await
             }
             "tv_kick_sel" => {
+                let _moderation = engine.moderation_operations.lock().await;
                 let lane = match self.owned_lane_of(&interaction).await {
                     Ok(lane) => lane,
                     Err(reply) => return reply,
@@ -1718,6 +1719,7 @@ impl InteractionHandler for PanelHandler {
                 }
             }
             "tv_ban_sel" => {
+                let _moderation = engine.moderation_operations.lock().await;
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
@@ -1804,6 +1806,7 @@ impl InteractionHandler for PanelHandler {
                 }
             }
             "tv_unban_sel" => {
+                let _moderation = engine.moderation_operations.lock().await;
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
@@ -1996,13 +1999,25 @@ impl InteractionHandler for PanelHandler {
                 else {
                     return BridgeReply::ephemeral_text("Preset nicht gefunden.");
                 };
-                let _ = engine
+                if let Err(err) = engine
                     .set_lane_template(interaction.guild_id, lane, &base, limit)
-                    .await;
-                if !engine.is_min_rank_blocked(lane).await {
-                    let _ = engine
+                    .await
+                {
+                    return BridgeReply::ephemeral_text(format!(
+                        "Preset teilweise angewendet: Vorlage konnte nicht gesetzt werden: {err}"
+                    ));
+                }
+                if engine.config.minrank_categories.contains(&category_id)
+                    && !engine.is_min_rank_blocked(lane).await
+                {
+                    if let Err(err) = engine
                         .set_min_rank(interaction.guild_id, lane, &min_rank)
-                        .await;
+                        .await
+                    {
+                        return BridgeReply::ephemeral_text(format!(
+                            "Preset teilweise angewendet: Mindest-Rang konnte nicht gesetzt werden: {err}"
+                        ));
+                    }
                 }
                 let result = if self.engine.lane_owner(lane).await == Some(interaction.user_id) {
                     engine.set_region(lane, interaction.user_id, &region).await

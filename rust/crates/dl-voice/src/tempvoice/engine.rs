@@ -361,6 +361,8 @@ pub struct TempVoiceEngine {
     lfg: tokio::sync::RwLock<Option<Weak<crate::lfg_panel::LfgPanelInterface>>>,
     voice_tracker: tokio::sync::RwLock<Option<Weak<crate::tracker::VoiceTracker>>>,
     voice_pair_operations: Arc<VoicePairOperationLock>,
+    /// Serialisiert Panel-Moderation mit Owner-Wechseln derselben Engine.
+    pub(super) moderation_operations: tokio::sync::Mutex<()>,
     state: tokio::sync::Mutex<EngineState>,
 }
 
@@ -393,6 +395,7 @@ impl TempVoiceEngine {
             lfg: tokio::sync::RwLock::new(None),
             voice_tracker: tokio::sync::RwLock::new(None),
             voice_pair_operations,
+            moderation_operations: tokio::sync::Mutex::new(()),
             state: tokio::sync::Mutex::new(EngineState::default()),
         })
     }
@@ -786,6 +789,7 @@ impl TempVoiceEngine {
         if !self.is_managed_lane(guild_id, channel_id).await {
             return;
         }
+        let _moderation = self.moderation_operations.lock().await;
         let members = self.port.channel_members(guild_id, channel_id).await;
 
         let was_owner = {
@@ -1265,6 +1269,7 @@ impl TempVoiceEngine {
 
     /// Owner-Wechsel (Claim/Transfer): State + DB + Bann-Swap.
     pub async fn claim_owner(self: &Arc<Self>, guild_id: u64, channel_id: u64, new_owner: u64) {
+        let _moderation = self.moderation_operations.lock().await;
         let previous = {
             let mut state = self.state.lock().await;
             let Some(lane) = state.lanes.get_mut(&channel_id) else {
