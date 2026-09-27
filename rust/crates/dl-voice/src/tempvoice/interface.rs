@@ -1484,19 +1484,26 @@ impl InteractionHandler for PanelHandler {
                     Ok(lane) => lane,
                     Err(reply) => return reply,
                 };
-                let Some(default) = self
+                let default = match self
                     .engine
                     .store
                     .get_default_preset(interaction.user_id)
                     .await
-                    .ok()
-                    .flatten()
-                else {
-                    return Self::prefs_reply(
-                        Self::prefs_text(None, interaction.guild_id == 0),
-                        Self::prefs_components(false, false, interaction.guild_id == 0),
-                        interaction.guild_id == 0,
-                    );
+                {
+                    Ok(Some(default)) => default,
+                    Ok(None) => {
+                        return Self::prefs_reply(
+                            Self::prefs_text(None, interaction.guild_id == 0),
+                            Self::prefs_components(false, false, interaction.guild_id == 0),
+                            interaction.guild_id == 0,
+                        )
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, user_id = interaction.user_id, "TempVoice: Standard-Preset konnte nicht geladen werden");
+                        return BridgeReply::ephemeral_text(
+                            "Deine Voreinstellung konnte gerade nicht geladen werden.",
+                        );
+                    }
                 };
                 if let Some(err) = self
                     .engine
@@ -1533,10 +1540,15 @@ impl InteractionHandler for PanelHandler {
                     };
                 }
                 if default.min_rank != "unknown" {
-                    let _ = self
+                    if let Err(err) = self
                         .engine
                         .set_min_rank(interaction.guild_id, lane, &default.min_rank)
-                        .await;
+                        .await
+                    {
+                        return BridgeReply::ephemeral_text(format!(
+                            "Voreinstellung teilweise angewendet: Mindest-Rang konnte nicht gesetzt werden: {err}"
+                        ));
+                    }
                 }
                 self.prefs_open_reply(&interaction).await
             }
@@ -1955,11 +1967,19 @@ impl InteractionHandler for PanelHandler {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
                 let preset_owner_id = interaction.user_id;
-                let presets = engine
+                let presets = match engine
                     .store
                     .list_presets(preset_owner_id, category_id)
                     .await
-                    .unwrap_or_default();
+                {
+                    Ok(presets) => presets,
+                    Err(err) => {
+                        tracing::warn!(%err, user_id = preset_owner_id, category_id, "TempVoice: Preset-Liste konnte nicht geladen werden");
+                        return BridgeReply::ephemeral_text(
+                            "Deine Presets konnten gerade nicht geladen werden.",
+                        );
+                    }
+                };
                 if presets.is_empty() {
                     return BridgeReply::ephemeral_text("Keine Presets in dieser Kategorie.");
                 }
@@ -1990,14 +2010,19 @@ impl InteractionHandler for PanelHandler {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
                 let preset_owner_id = interaction.user_id;
-                let Some((base, limit, min_rank, region)) = engine
+                let (base, limit, min_rank, region) = match engine
                     .store
                     .get_preset(preset_owner_id, category_id, name)
                     .await
-                    .ok()
-                    .flatten()
-                else {
-                    return BridgeReply::ephemeral_text("Preset nicht gefunden.");
+                {
+                    Ok(Some(preset)) => preset,
+                    Ok(None) => return BridgeReply::ephemeral_text("Preset nicht gefunden."),
+                    Err(err) => {
+                        tracing::warn!(%err, user_id = preset_owner_id, category_id, "TempVoice: Preset konnte nicht geladen werden");
+                        return BridgeReply::ephemeral_text(
+                            "Das Preset konnte gerade nicht geladen werden.",
+                        );
+                    }
                 };
                 if let Err(err) = engine
                     .set_lane_template(interaction.guild_id, lane, &base, limit)
