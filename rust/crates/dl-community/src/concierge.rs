@@ -1904,6 +1904,7 @@ struct PateRequestRow {
     created_at: DateTime<Utc>,
     escalated_2h_at: Option<DateTime<Utc>>,
     escalated_24h_at: Option<DateTime<Utc>>,
+    dm_pending: bool,
 }
 
 fn pate_request_row_from(row: &sqlx::postgres::PgRow) -> CommunityDbResult<PateRequestRow> {
@@ -1922,6 +1923,7 @@ fn pate_request_row_from(row: &sqlx::postgres::PgRow) -> CommunityDbResult<PateR
         created_at: row.try_get("created_at")?,
         escalated_2h_at: row.try_get("escalated_2h_at")?,
         escalated_24h_at: row.try_get("escalated_24h_at")?,
+        dm_pending: row.try_get("dm_pending")?,
     })
 }
 
@@ -2846,12 +2848,12 @@ impl ConciergeStore {
         let twenty_four_hours = now - Duration::hours(24);
         let rows = sqlx::query(
             "SELECT id, status, user_id, channel_id, message_id, created_at,
-                    escalated_2h_at, escalated_24h_at
+                    escalated_2h_at, escalated_24h_at, dm_pending
                FROM bot.concierge_pate_requests
               WHERE (status = 'open' AND (
                      (escalated_2h_at IS NULL AND created_at <= $1)
                   OR (escalated_24h_at IS NULL AND created_at <= $2)
-                )) OR (status = 'closed_unbesetzt' AND escalated_24h_at IS NULL)
+                )) OR (status = 'closed_unbesetzt' AND (escalated_24h_at IS NULL OR dm_pending))
               ORDER BY created_at ASC",
         )
         .bind(two_hours)
@@ -2887,6 +2889,7 @@ impl ConciergeStore {
                     "UPDATE bot.concierge_pate_requests
                         SET status = 'closed_unbesetzt',
                             closed_at = $2,
+                            dm_pending = TRUE,
                             updated_at = $2
                       WHERE id = $1 AND status = 'open' AND escalated_24h_at IS NULL
                       RETURNING user_id",
@@ -2923,6 +2926,19 @@ impl ConciergeStore {
             "UPDATE bot.concierge_pate_requests
                 SET escalated_24h_at = $2, updated_at = $2
               WHERE id = $1 AND status = 'closed_unbesetzt' AND escalated_24h_at IS NULL",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_pate_24h_dm_done(&self, id: i64, now: DateTime<Utc>) -> CommunityDbResult<()> {
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET dm_pending = FALSE, updated_at = $2
+              WHERE id = $1 AND status = 'closed_unbesetzt' AND dm_pending",
         )
         .bind(id)
         .bind(now)
@@ -5344,8 +5360,11 @@ impl Concierge {
         };
         for row in due {
             let age = now - row.created_at;
-            if row.status == "closed_unbesetzt" && row.escalated_24h_at.is_none() {
-                if self.update_closed_pate_card(&row).await {
+            if row.status == "closed_unbesetzt" {
+                if row.dm_pending && self.escalate_pate_unbesetzt(&row).await {
+                    self.mark_closed_pate_dm(&row, now).await;
+                }
+                if row.escalated_24h_at.is_none() && self.update_closed_pate_card(&row).await {
                     self.mark_closed_pate_card(&row, now).await;
                 }
             } else if row.escalated_24h_at.is_none() && age >= Duration::hours(24) {
@@ -5355,7 +5374,9 @@ impl Concierge {
                     .await
                 {
                     Ok(true) => {
-                        self.escalate_pate_unbesetzt(&row).await;
+                        if self.escalate_pate_unbesetzt(&row).await {
+                            self.mark_closed_pate_dm(&row, now).await;
+                        }
                         if self.update_closed_pate_card(&row).await {
                             self.mark_closed_pate_card(&row, now).await;
                         }
@@ -5382,6 +5403,12 @@ impl Concierge {
     async fn mark_closed_pate_card(&self, row: &PateRequestRow, now: DateTime<Utc>) {
         if let Err(err) = self.store.mark_pate_24h_card_completed(row.id, now).await {
             tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Kartenupdate konnte nicht bestätigt werden");
+        }
+    }
+
+    async fn mark_closed_pate_dm(&self, row: &PateRequestRow, now: DateTime<Utc>) {
+        if let Err(err) = self.store.mark_pate_24h_dm_done(row.id, now).await {
+            tracing::warn!(%err, request_id = row.id, "Concierge: 24h-DM konnte nicht bestätigt werden");
         }
     }
 
@@ -5413,7 +5440,7 @@ impl Concierge {
         true
     }
 
-    async fn escalate_pate_unbesetzt(&self, row: &PateRequestRow) {
+    async fn escalate_pate_unbesetzt(&self, row: &PateRequestRow) -> bool {
         let opted_out = match u64_to_i64(row.user_id, "concierge_pate_requests.user_id") {
             Ok(db_user_id) => crate::privacy::is_opted_out(self.store.pool(), db_user_id).await,
             Err(err) => {
@@ -5440,6 +5467,7 @@ impl Concierge {
                 }
                 Ok(ConciergeDmDelivery::Failed(err)) => {
                     tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-DM fehlgeschlagen");
+                    return false;
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -5448,9 +5476,11 @@ impl Concierge {
                         request_id = row.id,
                         "Concierge: 24h-DM hat Zeitlimit ueberschritten"
                     );
+                    return false;
                 }
             }
         }
+        true
     }
 
     async fn update_closed_pate_card(&self, row: &PateRequestRow) -> bool {
@@ -15612,6 +15642,46 @@ mod tests {
         .await
         .expect("Anfrage");
         assert!(marker.is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_24h_dm_transportfehler_wird_nach_neustart_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 556, now - Duration::hours(25)).await;
+
+        *port.dm_fails.lock().unwrap() = true;
+        concierge.run_pate_escalations(now).await;
+        let pending: bool = sqlx::query_scalar(
+            "SELECT dm_pending FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(pending);
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42]);
+
+        *port.dm_fails.lock().unwrap() = false;
+        let restarted = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        restarted.run_pate_escalations(now).await;
+        let pending: bool = sqlx::query_scalar(
+            "SELECT dm_pending FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(!pending);
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42, 42]);
+        assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42, 42]);
     }
 
     #[cfg(feature = "testing")]

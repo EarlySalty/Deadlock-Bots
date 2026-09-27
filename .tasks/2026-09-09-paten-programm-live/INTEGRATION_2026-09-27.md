@@ -10,7 +10,8 @@ Der Bot-Release allein belegt noch keine automatische Begrüßung.
 
 Nach unabhängigem Review zuerst die additiven Migrationen
 `2026090918_concierge_pate_requests.sql` und
-`2026090919_team_applications_pate_kind.sql` mit dem zentralen Migrator anwenden.
+`2026090919_team_applications_pate_kind.sql` sowie die additive
+`2026090920_concierge_pate_dm_retry.sql` mit dem zentralen Migrator anwenden.
 Erst danach den Bot aus dem geprüften Main bauen. Für eine kontrollierte Probe
 in der tatsächlichen Betriebs-TOML unter `[runtime.community]`
 `concierge_enabled = true`, `concierge_proactive = true` und eine ausdrücklich
@@ -29,11 +30,14 @@ ausgelöst.
 
 Die 2-Stunden-Karte gilt erst nach erfolgreicher Discord-Bearbeitung als
 eskaliert. Nach einem fehlgeschlagenen Karten-Update versucht der Scheduler es
-erneut. Bei der 24-Stunden-Stufe wird die Anfrage einmal geschlossen und die
-DM höchstens einmal versucht. Das Karten-Update bleibt bis zum Erfolg offen,
-auch nach Bot-Neustart; die geschlossene Karte enthält keinen Übernehmen-Knopf.
+erneut. Bei der 24-Stunden-Stufe wird die Anfrage einmal geschlossen. Eine
+gesperrte DM oder ein Opt-out beendet den DM-Versuch; ein Transportfehler
+bleibt zum erneuten Versuch offen. Das Karten-Update bleibt ebenfalls bis zum
+Erfolg offen, auch nach Bot-Neustart; die geschlossene Karte enthält keinen
+Übernehmen-Knopf. Bei einem Transport-Timeout ist die Zustellung technisch
+unsicher: Ein erneuter Versuch kann im Grenzfall eine zweite DM erzeugen.
 
-Validierung dieses Portstands: beide Migrationen auf einer Wegwerf-DB
+Validierung dieses Portstands: alle drei Migrationen auf einer Wegwerf-DB
 erfolgreich; `dl-community --features testing` 473 grün, zwei bekannte
 Baseline-Fehler in Coaching-ACK-Timing und Reaction-Roles-Teardown; der
 gezielte `dl-bot`-Test für TOML → `concierge_proactive` ist grün.
