@@ -12,6 +12,8 @@ Mehrstufige Kick-/Ban-/Unban-Menüs sind an die ursprüngliche Lane und deren Ow
 
 Der Owner wird im Kick-Menü ausgeblendet und auf der Serverseite vor Kick und Ban geschützt. Unveränderte echte Moderatorrechte sind davon getrennt. Kick und das sofortige Trennen beim Ban sind auf Mitglieder im selben Call beschränkt. Die vorhandene serverweite Mitgliedersuche beim Ban bleibt für bereits gegangene Störer erhalten, trennt aber niemanden aus einem anderen Call.
 
+Vor jedem Panel-Disconnect liest der Bot den Ziel-Voice-State frisch über Discord REST und bricht ab, wenn das Ziel inzwischen in einem anderen Call sitzt. Discord bietet für das anschließende Trennen keine bedingte Mutation: Ein Wechsel zwischen dieser REST-Abfrage und dem Move-Aufruf bleibt technisch möglich. Die Prüfung verhindert Cache-bedingte Fehltrennungen, garantiert aber keine atomare Kanalbindung.
+
 ## Persistenz und Umfang der Sperren
 Wie bei bisherigen Owner-Aktionen wird die bestehende Owner-Banliste verwendet. Ein Streamer-Ban ist daher keine nur bis zum Stream-Ende gültige Sperre: Er gilt für die Lanes dieses Owners, bis er aufgehoben wird. Das Panel und die Bestätigung benennen diesen Umfang. Ungebundene persönliche Alt-Menüs dürfen nicht durch einen späteren Streamstart stillschweigend auf eine fremde Owner-Liste wechseln. Keine neue Datenbanktabelle oder Migration.
 

@@ -1070,6 +1070,25 @@ impl LanePort for CacheSnapshot {
             .map_err(|e| e.to_string())
     }
 
+    async fn channel_region(&self, channel_id: u64) -> Result<String, String> {
+        let channel = self
+            .adapter
+            .http
+            .get_channel(ChannelId::new(channel_id))
+            .await
+            .map_err(|err| err.to_string())?
+            .guild()
+            .ok_or_else(|| "Lane ist kein Guild-Channel".to_string())?;
+        let de = channel.permission_overwrites.iter().any(|overwrite| {
+            overwrite.kind
+                == PermissionOverwriteType::Role(RoleId::new(
+                    crate::tempvoice::engine::ENGLISH_ONLY_ROLE_ID,
+                ))
+                && overwrite.deny.contains(Permissions::CONNECT)
+        });
+        Ok(if de { "DE" } else { "EU" }.to_string())
+    }
+
     async fn apply_role_connect_batch(
         &self,
         guild_id: u64,
@@ -1189,6 +1208,38 @@ impl LanePort for CacheSnapshot {
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    async fn disconnect_member_from_lane(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        expected_lane: u64,
+        reason: &str,
+    ) -> Result<bool, String> {
+        // Der Gateway-Cache kann dem REST-Move hinterherhinken. Vor dem
+        // Trennen den aktuellen Voice-State direkt bei Discord lesen.
+        let state = match self
+            .adapter
+            .http
+            .get_user_voice_state(GuildId::new(guild_id), UserId::new(user_id))
+            .await
+        {
+            Ok(state) => state,
+            // Der User kann die Voice-Lane vor dem REST-Check verlassen haben.
+            // Das ist beim Ban erlaubt und braucht keinen Disconnect.
+            Err(serenity::Error::Http(err))
+                if err.status_code().is_some_and(|status| status.as_u16() == 404) =>
+            {
+                return Ok(false);
+            }
+            Err(err) => return Err(err.to_string()),
+        };
+        if state.channel_id.map(|channel| channel.get()) != Some(expected_lane) {
+            return Ok(false);
+        }
+        self.disconnect_member(guild_id, user_id, reason).await?;
+        Ok(true)
     }
 
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {

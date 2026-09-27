@@ -373,7 +373,7 @@ fn global_panel_embed() -> Value {
             "• **Live-Streamer:** Mit Streamer-Rolle hast du während deines Streams dieselben Panel-Rechte im aktuellen Call, bei jedem Spiel. Den Owner kannst du weder kicken noch bannen.\n\n",
             "Was ihr hier machen könnt:\n",
             "• **Kick:** Jemand AFK oder stört? Entferne die Person, wenn Reden nicht reicht.\n",
-            "• **Ban:** Sperre jemanden dauerhaft aus deinem Kanal, solange du Owner bist.\n",
+            "• **Ban:** Mit Lane-Rechten landet die Person auf der Banliste des Owners. Sie kann seinen Lanes nicht mehr beitreten, bis der Bann aufgehoben wird — auch nach deinem Stream. Ohne Lane-Rechte bearbeitest du deine eigene Banliste.\n",
             "• **Unban:** Hebe die Sperre wieder auf.\n",
             "• **Duo/Trio Call:** Stelle 2er/3er-Runden ein; andere können (fast) nicht beitreten.\n",
             "• **Normale Lane:** Setzt die Berechtigungen wieder auf offen.\n",
@@ -401,7 +401,7 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
                 "🇩🇪 / 🌍 – Sprachfilter: nur DE oder alle EU\n",
                 "👑 – Owner übernehmen (wenn der Owner die Lane verlassen hat)\n",
                 "🔢 – Spielerlimit setzen (0 = kein Limit)\n",
-                "🦵 Kick · 🚫 Ban · ✅ Unban – Mitglieder verwalten\n",
+                "🦵 Kick · 🚫 Ban · ✅ Unban – Bann sperrt künftige Beitritte in die Lanes dieses Owners\n",
                 "👥 Duo / Trio · 🔄 Reset – Lane-Größe schnell anpassen\n",
                 "👻 Lurker – stumm beitreten ohne Limit-Slot zu belegen\n\n",
                 "**🔓 Rang-Gate** *(nur Ranked)*\n",
@@ -1551,8 +1551,17 @@ impl InteractionHandler for PanelHandler {
                 } else {
                     "EU"
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
-                engine.set_region(lane, owner_id, region).await;
+                let result = if self.engine.lane_owner(lane).await == Some(interaction.user_id) {
+                    engine.set_region(lane, interaction.user_id, region).await
+                } else {
+                    engine
+                        .apply_region_to_lane(lane, region)
+                        .await
+                        .map_err(|err| format!("Sprachfilter konnte nicht gesetzt werden: {err}"))
+                };
+                if let Err(err) = result {
+                    return BridgeReply::ephemeral_text(err);
+                }
                 BridgeReply::ephemeral_text(if region == "DE" {
                     "Region gesetzt: **DE** — English-Only-Accounts können nicht mehr verbinden."
                 } else {
@@ -1661,24 +1670,17 @@ impl InteractionHandler for PanelHandler {
                 if target == interaction.user_id {
                     return BridgeReply::ephemeral_text("Dich selbst kicken geht nicht.");
                 }
-                if engine
-                    .port
-                    .member_voice_channel(interaction.guild_id, target)
-                    .await
-                    != Some(lane)
-                {
-                    return BridgeReply::ephemeral_text(TARGET_NOT_IN_LANE);
-                }
                 match engine
                     .port
-                    .disconnect_member(
+                    .disconnect_member_from_lane(
                         interaction.guild_id,
                         target,
+                        lane,
                         &format!("TempVoice: Panel-Kick durch {}", interaction.user_id),
                     )
                     .await
                 {
-                    Ok(()) => {
+                    Ok(true) => {
                         tracing::info!(
                             actor_id = interaction.user_id,
                             target_id = target,
@@ -1687,6 +1689,7 @@ impl InteractionHandler for PanelHandler {
                         );
                         BridgeReply::ephemeral_text(format!("<@{target}> gekickt."))
                     }
+                    Ok(false) => BridgeReply::ephemeral_text(TARGET_NOT_IN_LANE),
                     Err(err) => BridgeReply::ephemeral_text(format!("Kick fehlgeschlagen: {err}")),
                 }
             }
@@ -1702,8 +1705,8 @@ impl InteractionHandler for PanelHandler {
                 };
                 BridgeReply {
                     content: Some(match lane {
-                        Some(_) => "Wen bannen? Der Bann gilt für die Lanes dieses Owners, bis er aufgehoben wird.".to_string(),
-                        None => "Wen bannen? Der Bann gilt für alle deine Lanes, bis du ihn aufhebst.".to_string(),
+                        Some(_) => "Wen bannen? Die Person kann den Lanes dieses Owners nicht mehr beitreten, bis der Bann aufgehoben wird.".to_string(),
+                        None => "Wen bannen? Die Person landet auf deiner eigenen Banliste und kann deinen Lanes nicht mehr beitreten, bis du den Bann aufhebst.".to_string(),
                     }),
                     components: Some(json!([{ "type": 1, "components": [{
                         "type": 5, "custom_id": custom_id,
@@ -1745,29 +1748,23 @@ impl InteractionHandler for PanelHandler {
                 }
                 if let Some(lane) = owned_lane {
                     // Die serverweite Suche darf niemanden aus einem anderen Call trennen.
-                    if engine
+                    if let Err(err) = engine
                         .port
-                        .member_voice_channel(interaction.guild_id, target)
+                        .disconnect_member_from_lane(
+                            interaction.guild_id,
+                            target,
+                            lane,
+                            &format!("TempVoice: Panel-Bann durch {}", interaction.user_id),
+                        )
                         .await
-                        == Some(lane)
                     {
-                        if let Err(err) = engine
-                            .port
-                            .disconnect_member(
-                                interaction.guild_id,
-                                target,
-                                &format!("TempVoice: Panel-Bann durch {}", interaction.user_id),
-                            )
-                            .await
-                        {
-                            return BridgeReply::ephemeral_text(format!(
-                                "Bann gesetzt, aber Trennen fehlgeschlagen: {err}"
-                            ));
-                        }
+                        return BridgeReply::ephemeral_text(format!(
+                            "Bann gesetzt, aber Trennen fehlgeschlagen: {err}"
+                        ));
                     }
                 }
                 tracing::info!(actor_id = interaction.user_id, owner_id, target_id = target, channel_id = ?owned_lane, "TempVoice: Panel-Bann");
-                BridgeReply::ephemeral_text(format!("<@{target}> gebannt. Der Bann gilt für alle Lanes von <@{owner_id}>, bis er aufgehoben wird."))
+                BridgeReply::ephemeral_text(format!("<@{target}> gebannt. Die Person kann den Lanes von <@{owner_id}> nicht mehr beitreten, bis der Bann aufgehoben wird."))
             }
             "tv_unban" => {
                 let lane = self.ban_context_lane(&interaction).await;
@@ -1784,7 +1781,7 @@ impl InteractionHandler for PanelHandler {
                 };
                 let bans = engine.store.list_bans(owner_id).await.unwrap_or_default();
                 if bans.is_empty() {
-                    return BridgeReply::ephemeral_text("Du hast niemanden gebannt.");
+                    return BridgeReply::ephemeral_text("Auf dieser Bannliste steht niemand.");
                 }
                 let mut options = Vec::new();
                 for user_id in bans.iter().take(25) {
@@ -1908,7 +1905,7 @@ impl InteractionHandler for PanelHandler {
                 let Some((base_name, _, min_rank)) = engine.lane_preset_snapshot(lane).await else {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let preset_owner_id = interaction.user_id;
                 let limit = match engine
                     .port
                     .channel_user_limit(interaction.guild_id, lane)
@@ -1917,15 +1914,18 @@ impl InteractionHandler for PanelHandler {
                     Some(limit) => limit,
                     None => engine.default_limit_for_lane(lane).await,
                 };
-                let region = engine
-                    .store
-                    .region_pref(owner_id)
-                    .await
-                    .unwrap_or_else(|_| "EU".to_string());
+                let region = match engine.port.channel_region(lane).await {
+                    Ok(region) => region,
+                    Err(err) => {
+                        return BridgeReply::ephemeral_text(format!(
+                            "Sprachfilter nicht lesbar, Preset nicht gespeichert: {err}"
+                        ));
+                    }
+                };
                 let result = engine
                     .store
                     .save_preset(PresetRecord {
-                        user_id: owner_id,
+                        user_id: preset_owner_id,
                         category_id,
                         name: name.clone(),
                         base_name,
@@ -1951,10 +1951,10 @@ impl InteractionHandler for PanelHandler {
                 let Some((_, category_id)) = engine.lane_snapshot(lane).await else {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let preset_owner_id = interaction.user_id;
                 let presets = engine
                     .store
-                    .list_presets(owner_id, category_id)
+                    .list_presets(preset_owner_id, category_id)
                     .await
                     .unwrap_or_default();
                 if presets.is_empty() {
@@ -1986,10 +1986,10 @@ impl InteractionHandler for PanelHandler {
                 let Some((_, category_id)) = engine.lane_snapshot(lane).await else {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let preset_owner_id = interaction.user_id;
                 let Some((base, limit, min_rank, region)) = engine
                     .store
-                    .get_preset(owner_id, category_id, name)
+                    .get_preset(preset_owner_id, category_id, name)
                     .await
                     .ok()
                     .flatten()
@@ -2004,7 +2004,19 @@ impl InteractionHandler for PanelHandler {
                         .set_min_rank(interaction.guild_id, lane, &min_rank)
                         .await;
                 }
-                engine.set_region(lane, owner_id, &region).await;
+                let result = if self.engine.lane_owner(lane).await == Some(interaction.user_id) {
+                    engine.set_region(lane, interaction.user_id, &region).await
+                } else {
+                    engine
+                        .apply_region_to_lane(lane, &region)
+                        .await
+                        .map_err(|err| format!("Sprachfilter konnte nicht gesetzt werden: {err}"))
+                };
+                if let Err(err) = result {
+                    return BridgeReply::ephemeral_text(format!(
+                        "Preset teilweise angewendet: {err}"
+                    ));
+                }
                 BridgeReply::ephemeral_text(format!(
                     "Preset **{name}** angewendet (Limit {limit}, Region {region})."
                 ))
@@ -2821,6 +2833,9 @@ mod tests {
     struct ForeignLanePort {
         live_streamer: std::sync::atomic::AtomicBool,
         voice_channels: std::sync::Mutex<HashMap<u64, Option<u64>>>,
+        fresh_voice_channels: std::sync::Mutex<HashMap<u64, Option<u64>>>,
+        channel_regions: std::sync::Mutex<HashMap<u64, String>>,
+        region_update_fails: std::sync::atomic::AtomicBool,
         actions: std::sync::Mutex<Vec<String>>,
     }
 
@@ -2893,11 +2908,30 @@ mod tests {
 
         async fn set_role_connect(
             &self,
-            _channel_id: u64,
-            _role_id: u64,
-            _connect: Option<bool>,
+            channel_id: u64,
+            role_id: u64,
+            connect: Option<bool>,
         ) -> Result<(), String> {
+            if self.region_update_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Discord verweigert den Sprachfilter".to_string());
+            }
+            if role_id == crate::tempvoice::engine::ENGLISH_ONLY_ROLE_ID {
+                self.channel_regions
+                    .lock()
+                    .expect("test mutex")
+                    .insert(channel_id, if connect == Some(false) { "DE" } else { "EU" }.to_string());
+            }
             Ok(())
+        }
+
+        async fn channel_region(&self, channel_id: u64) -> Result<String, String> {
+            Ok(self
+                .channel_regions
+                .lock()
+                .expect("test mutex")
+                .get(&channel_id)
+                .cloned()
+                .unwrap_or_else(|| "EU".to_string()))
         }
 
         async fn apply_role_connect_batch(
@@ -2941,6 +2975,30 @@ mod tests {
                 .expect("test mutex")
                 .push(format!("kick:{user_id}"));
             Ok(())
+        }
+
+        async fn disconnect_member_from_lane(
+            &self,
+            guild_id: u64,
+            user_id: u64,
+            expected_lane: u64,
+            reason: &str,
+        ) -> Result<bool, String> {
+            let fresh = self
+                .fresh_voice_channels
+                .lock()
+                .expect("test mutex")
+                .get(&user_id)
+                .copied();
+            let channel = match fresh {
+                Some(channel) => channel,
+                None => self.member_voice_channel(guild_id, user_id).await,
+            };
+            if channel != Some(expected_lane) {
+                return Ok(false);
+            }
+            self.disconnect_member(guild_id, user_id, reason).await?;
+            Ok(true)
         }
 
         async fn member_display_name(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
