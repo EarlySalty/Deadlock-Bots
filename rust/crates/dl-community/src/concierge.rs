@@ -5478,14 +5478,15 @@ impl Concierge {
                     }
                 }
             } else if row.escalated_2h_at.is_none() && age >= Duration::hours(2) {
-                if self.escalate_pate_owner_ping(&row).await {
-                    if let Err(err) = self
-                        .store
-                        .claim_pate_escalation_stage(row.id, PateEscalationStage::TwoHours, now)
-                        .await
-                    {
-                        tracing::warn!(%err, request_id = row.id, "Concierge: 2h-Eskalationsstufe konnte nicht bestätigt werden");
-                    }
+                if !self.escalate_pate_owner_ping(&row).await {
+                    continue;
+                }
+                if let Err(err) = self
+                    .store
+                    .claim_pate_escalation_stage(row.id, PateEscalationStage::TwoHours, now)
+                    .await
+                {
+                    tracing::warn!(%err, request_id = row.id, "Concierge: 2h-Eskalationsstufe konnte nicht bestätigt werden");
                 }
             }
         }
