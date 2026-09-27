@@ -48,10 +48,17 @@ async fn source_ids_are_not_reused_after_activity_history_cleanup() {
     let db = database().await;
     let pool = db.pool();
     join(pool, 50, 120, at("2026-01-01T12:00:00Z"), "ViewerCode").await;
-    sqlx::query("DELETE FROM activity.member_events").execute(pool).await.expect("raw history cleanup");
+    sqlx::query("DELETE FROM activity.member_events")
+        .execute(pool)
+        .await
+        .expect("raw history cleanup");
     let mut tx = pool.begin().await.expect("source allocation");
-    crate::db::lock_member_events(&mut tx).await.expect("source lock");
-    let next = crate::db::next_member_event_id_in_tx(&mut tx).await.expect("retained source watermark");
+    crate::db::lock_member_events(&mut tx)
+        .await
+        .expect("source lock");
+    let next = crate::db::next_member_event_id_in_tx(&mut tx)
+        .await
+        .expect("retained source watermark");
     assert_eq!(next, 51);
     tx.rollback().await.expect("fixture rollback");
 }
