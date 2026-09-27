@@ -2449,6 +2449,52 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         self.adapter.send_raw_public(channel_id, &body).await
     }
 
+    async fn find_channel_message_by_nonce(
+        &self,
+        channel_id: u64,
+        after_message_id: u64,
+        nonce: &str,
+    ) -> Result<Option<u64>, String> {
+        let bot_id = self
+            .adapter
+            .http
+            .get_current_user()
+            .await
+            .map_err(|err| err.to_string())?
+            .id;
+        let mut before = None;
+        for _ in 0..10 {
+            let mut request = GetMessages::new().limit(100);
+            if let Some(message_id) = before {
+                request = request.before(MessageId::new(message_id));
+            }
+            let messages = ChannelId::new(channel_id)
+                .messages(&self.adapter.http, request)
+                .await
+                .map_err(|err| err.to_string())?;
+            if messages.is_empty() {
+                return Ok(None);
+            }
+            for message in &messages {
+                if message.id.get() > after_message_id
+                    && message.author.id == bot_id
+                    && matches!(&message.nonce, Some(serenity::all::Nonce::String(value)) if value == nonce)
+                {
+                    return Ok(Some(message.id.get()));
+                }
+            }
+            let oldest = messages.iter().map(|message| message.id.get()).min();
+            if oldest.is_some_and(|id| id <= after_message_id) {
+                return Ok(None);
+            }
+            before = oldest;
+            if messages.len() < 100 {
+                return Ok(None);
+            }
+        }
+        Err("Discord-Verlauf für den Owner-Hinweis ist zu lang für einen sicheren Abgleich".into())
+    }
+
     async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(content));
