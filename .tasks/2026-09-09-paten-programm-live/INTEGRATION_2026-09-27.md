@@ -36,8 +36,11 @@ Owner-Ping; der Rückgabewert der neuen Nachricht wird gespeichert. Die Antwort
 nutzt eine stabile Discord-Nonce gegen unmittelbare Duplikate. Das weicht von
 der ursprünglichen Formulierung „in derselben Nachricht“ technisch begründet
 ab, bleibt aber an genau dieser Anfrage verknüpft. Vor einem erneuten Senden
-sucht der Bot die Nonce im Discord-Verlauf seit der Anfragekarte. Kann er den
-Verlauf nicht vollständig prüfen, sendet er keinen zweiten Ping ins Blaue.
+sucht der Bot die Nonce oder die eigene Antwort auf genau diese Karte im
+Discord-Verlauf seit der Anfragekarte. Der Abgleich hat ein Zeitlimit statt
+einer festen Nachrichtenobergrenze. Kann er den Verlauf nicht vollständig
+prüfen, sendet er keinen zweiten Ping ins Blaue und versucht den Abgleich beim
+nächsten Lauf erneut.
 Bei der 24-Stunden-Stufe
 wird die Anfrage einmal geschlossen. Eine
 gesperrte DM oder ein Opt-out beendet den DM-Versuch; ein Transportfehler

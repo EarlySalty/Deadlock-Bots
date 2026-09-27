@@ -5467,10 +5467,13 @@ impl Concierge {
         }
         if row.owner_alert_message_id.is_none() {
             let nonce = format!("pate2h-{}", row.id);
-            let existing = match self
-                .port
-                .find_channel_message_by_nonce(row.channel_id, row.message_id, &nonce)
-                .await
+            let existing = match tokio::time::timeout(
+                CONCIERGE_DISCORD_IO_TIMEOUT,
+                self.port
+                    .find_channel_message_by_nonce(row.channel_id, row.message_id, &nonce),
+            )
+            .await
+            .unwrap_or_else(|_| Err("Zeitlimit überschritten".to_string()))
             {
                 Ok(existing) => existing,
                 Err(err) => {
