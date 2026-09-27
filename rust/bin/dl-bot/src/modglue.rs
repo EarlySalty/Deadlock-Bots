@@ -2463,7 +2463,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             .map_err(|err| err.to_string())?
             .id;
         let mut before = None;
-        for _ in 0..10 {
+        loop {
             let mut request = GetMessages::new().limit(100);
             if let Some(message_id) = before {
                 request = request.before(MessageId::new(message_id));
@@ -2476,9 +2476,17 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
                 return Ok(None);
             }
             for message in &messages {
+                let matching_reply = message
+                    .message_reference
+                    .as_ref()
+                    .and_then(|reference| reference.message_id)
+                    == Some(MessageId::new(after_message_id))
+                    && serde_json::to_string(&message.components)
+                        .is_ok_and(|body| body.contains("diese Patenanfrage wartet seit zwei Stunden"));
                 if message.id.get() > after_message_id
                     && message.author.id == bot_id
-                    && matches!(&message.nonce, Some(serenity::all::Nonce::String(value)) if value == nonce)
+                    && (matches!(&message.nonce, Some(serenity::all::Nonce::String(value)) if value == nonce)
+                        || matching_reply)
                 {
                     return Ok(Some(message.id.get()));
                 }
@@ -2487,12 +2495,14 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             if oldest.is_some_and(|id| id <= after_message_id) {
                 return Ok(None);
             }
+            if before == oldest {
+                return Err("Discord-Verlauf für den Owner-Hinweis bewegt sich nicht weiter".into());
+            }
             before = oldest;
             if messages.len() < 100 {
                 return Ok(None);
             }
         }
-        Err("Discord-Verlauf für den Owner-Hinweis ist zu lang für einen sicheren Abgleich".into())
     }
 
     async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
