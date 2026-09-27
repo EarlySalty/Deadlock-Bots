@@ -48,6 +48,8 @@ bleibt zum erneuten Versuch offen. Das Karten-Update bleibt ebenfalls bis zum
 Erfolg offen, auch nach Bot-Neustart; die geschlossene Karte enthält keinen
 Übernehmen-Knopf. Bei einem Transport-Timeout ist die Zustellung technisch
 unsicher: Ein erneuter Versuch kann im Grenzfall eine zweite DM erzeugen.
+Eine stabile Discord-Nonce mit `enforce_nonce` vermeidet unmittelbare
+Doppelzustellungen innerhalb des von Discord angebotenen kurzen Fensters.
 
 Validierung dieses Portstands: alle drei Migrationen auf einer Wegwerf-DB
 erfolgreich; `dl-community --features testing` 473 grün, zwei bekannte
