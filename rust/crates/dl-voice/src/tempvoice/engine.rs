@@ -76,6 +76,11 @@ async fn wait_for_cache_ready(
 /// Discord-Seite der Engine (Cache-Reads + REST-Aktionen).
 #[async_trait::async_trait]
 pub trait LanePort: Send + Sync {
+    /// Frische Streamer-Rolle und spielunabhängiger Live-Status. Unbekannt bedeutet nein.
+    async fn member_is_live_streamer(&self, _guild_id: u64, _user_id: u64) -> bool {
+        false
+    }
+
     /// Kein vollständiger Cache bedeutet unbekannt, nicht leer.
     async fn guild_voice_snapshot(&self, _guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         None
@@ -127,6 +132,10 @@ pub trait LanePort: Send + Sync {
         role_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String>;
+    /// Liest den wirksamen DE/EU-Sprachfilter der Lane für ein gespeichertes Preset.
+    async fn channel_region(&self, _channel_id: u64) -> Result<String, String> {
+        Err("Sprachfilter der Lane nicht lesbar".to_string())
+    }
     /// Rollen-Connect gesammelt per Channel-Batch: allowed => connect allow,
     /// cleared => Rollen-Overwrite entfernen. Keine Deny-Syncs für Rang-Rollen.
     async fn apply_role_connect_batch(
@@ -152,6 +161,21 @@ pub trait LanePort: Send + Sync {
         user_id: u64,
         reason: &str,
     ) -> Result<(), String>;
+    /// Prüft die aktuelle Voice-Lane unmittelbar am ausführenden Port erneut.
+    /// Discord bietet für das anschließende Move-REST keine bedingte Mutation.
+    async fn disconnect_member_from_lane(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        expected_lane: u64,
+        reason: &str,
+    ) -> Result<bool, String> {
+        if self.member_voice_channel(guild_id, user_id).await != Some(expected_lane) {
+            return Ok(false);
+        }
+        self.disconnect_member(guild_id, user_id, reason).await?;
+        Ok(true)
+    }
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
     async fn add_role(
         &self,
@@ -337,6 +361,8 @@ pub struct TempVoiceEngine {
     lfg: tokio::sync::RwLock<Option<Weak<crate::lfg_panel::LfgPanelInterface>>>,
     voice_tracker: tokio::sync::RwLock<Option<Weak<crate::tracker::VoiceTracker>>>,
     voice_pair_operations: Arc<VoicePairOperationLock>,
+    /// Serialisiert Panel-Moderation mit Owner-Wechseln derselben Engine.
+    pub(super) moderation_operations: tokio::sync::Mutex<()>,
     state: tokio::sync::Mutex<EngineState>,
 }
 
@@ -369,6 +395,7 @@ impl TempVoiceEngine {
             lfg: tokio::sync::RwLock::new(None),
             voice_tracker: tokio::sync::RwLock::new(None),
             voice_pair_operations,
+            moderation_operations: tokio::sync::Mutex::new(()),
             state: tokio::sync::Mutex::new(EngineState::default()),
         })
     }
@@ -762,6 +789,7 @@ impl TempVoiceEngine {
         if !self.is_managed_lane(guild_id, channel_id).await {
             return;
         }
+        let _moderation = self.moderation_operations.lock().await;
         let members = self.port.channel_members(guild_id, channel_id).await;
 
         let was_owner = {
@@ -1241,6 +1269,7 @@ impl TempVoiceEngine {
 
     /// Owner-Wechsel (Claim/Transfer): State + DB + Bann-Swap.
     pub async fn claim_owner(self: &Arc<Self>, guild_id: u64, channel_id: u64, new_owner: u64) {
+        let _moderation = self.moderation_operations.lock().await;
         let previous = {
             let mut state = self.state.lock().await;
             let Some(lane) = state.lanes.get_mut(&channel_id) else {
@@ -1284,13 +1313,25 @@ impl TempVoiceEngine {
     }
 
     /// Region DE = English-Only-Rolle deny; EU = Overwrite weg. Persistiert Pref.
-    pub async fn set_region(&self, channel_id: u64, owner_id: u64, region: &str) {
-        let _ = self.store.set_region_pref(owner_id, region).await;
+    pub async fn set_region(&self, channel_id: u64, owner_id: u64, region: &str) -> Result<(), String> {
+        self.apply_region_to_lane(channel_id, region)
+            .await
+            .map_err(|err| format!("Sprachfilter konnte nicht gesetzt werden: {err}"))?;
+        self.store
+            .set_region_pref(owner_id, region)
+            .await
+            .map_err(|_| {
+                "Sprachfilter im Call gesetzt, aber deine Voreinstellung konnte nicht gespeichert werden."
+                    .to_string()
+            })
+    }
+
+    /// Temporäre Mitverwalter ändern nur den aktuellen Call, nicht die Owner-Pref.
+    pub async fn apply_region_to_lane(&self, channel_id: u64, region: &str) -> Result<(), String> {
         let connect = if region == "DE" { Some(false) } else { None };
-        let _ = self
-            .port
+        self.port
             .set_role_connect(channel_id, ENGLISH_ONLY_ROLE_ID, connect)
-            .await;
+            .await
     }
 
     /// (base_name, category_id) der Lane — fürs Interface.

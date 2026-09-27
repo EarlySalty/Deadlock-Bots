@@ -94,7 +94,7 @@ impl BrainEmojiIndex {
                 ));
             }
         }
-        entries.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
         Self { entries }
     }
 
