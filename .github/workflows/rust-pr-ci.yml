@@ -32,5 +32,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: rust
+      - name: Qualified Discord invite regressions
+        run: rust/scripts/central_test_db.sh cargo test -p dl-activity -p dl-broker -p dl-bot -p dl-core -p dl-discord --features dl-activity/testing invite -- --test-threads=2
       - name: Full repository Rust gate
         run: rust/scripts/central_ci.sh
