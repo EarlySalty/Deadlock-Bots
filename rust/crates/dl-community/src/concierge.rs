@@ -2876,6 +2876,40 @@ impl ConciergeStore {
         rows.iter().map(pate_request_row_from).collect()
     }
 
+    async fn pate_request_by_id(&self, id: i64) -> CommunityDbResult<Option<PateRequestRow>> {
+        let row = sqlx::query(
+            "SELECT id, status, user_id, channel_id, message_id, created_at,
+                    escalated_2h_at, escalated_24h_at, dm_pending, owner_alert_message_id
+               FROM bot.concierge_pate_requests WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(pate_request_row_from).transpose()
+    }
+
+    async fn pate_request_has_newer_resolution(
+        &self,
+        id: i64,
+        user_id: u64,
+    ) -> CommunityDbResult<bool> {
+        let user_id = u64_to_i64(user_id, "concierge_pate_requests.user_id")?;
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM bot.concierge_patenschaften
+                 WHERE user_id = $2 AND released_at IS NULL
+              ) OR EXISTS(
+                SELECT 1 FROM bot.concierge_pate_requests
+                 WHERE user_id = $2 AND id > $1 AND status IN ('open', 'claimed')
+              )",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     async fn claim_pate_escalation_stage(
         &self,
         id: i64,
@@ -5391,11 +5425,35 @@ impl Concierge {
                 return;
             }
         };
-        for row in due {
+        for due_row in due {
+            let action = self.user_action_lock(due_row.user_id);
+            let _guard = action.lock().await;
+            let row = match self.store.pate_request_by_id(due_row.id).await {
+                Ok(Some(row)) if row.status != "claimed" => row,
+                Ok(_) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = due_row.id, "Concierge: Patenanfrage vor Eskalation nicht prüfbar");
+                    continue;
+                }
+            };
             let age = now - row.created_at;
             if row.status == "closed_unbesetzt" {
-                if row.dm_pending && self.escalate_pate_unbesetzt(&row).await {
-                    self.mark_closed_pate_dm(&row, now).await;
+                if row.dm_pending {
+                    match self
+                        .store
+                        .pate_request_has_newer_resolution(row.id, row.user_id)
+                        .await
+                    {
+                        Ok(true) => self.mark_closed_pate_dm(&row, now).await,
+                        Ok(false) => {
+                            if self.escalate_pate_unbesetzt(&row).await {
+                                self.mark_closed_pate_dm(&row, now).await;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, request_id = row.id, "Concierge: neuer Patenstatus vor DM nicht prüfbar");
+                        }
+                    }
                 }
                 if row.escalated_24h_at.is_none() && self.update_closed_pate_card(&row).await {
                     self.mark_closed_pate_card(&row, now).await;
@@ -6591,6 +6649,8 @@ impl Concierge {
         let Ok(user_id) = raw_user_id.parse::<u64>() else {
             return BridgeReply::default();
         };
+        let action = self.user_action_lock(user_id);
+        let _guard = action.lock().await;
         let pate_id = interaction.user_id;
         let guild_id = interaction.guild_id;
         let request_message_id = interaction
@@ -7715,6 +7775,9 @@ impl InteractionHandler for ConciergeHandler {
         {
             return BridgeReply::default();
         }
+        if interaction.custom_id.starts_with("concierge:pate:claim:") {
+            return self.concierge.claim_pate(interaction).await;
+        }
         let action = self.concierge.user_action_lock(interaction.user_id);
         let _guard = action.lock().await;
         let now = Utc::now();
@@ -7975,9 +8038,6 @@ impl InteractionHandler for ConciergeHandler {
                     .await
             }
             "concierge:pate:no" => text_reply(PATE_NO_TEXT),
-            id if id.starts_with("concierge:pate:claim:") => {
-                self.concierge.claim_pate(interaction).await
-            }
             _ => BridgeReply::default(),
         }
     }
@@ -15868,6 +15928,41 @@ mod tests {
 
         restarted.run_pate_escalations(now).await;
         assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42, 42]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_alte_24h_dm_entfaellt_bei_neuer_anfrage() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 556, now - Duration::hours(25)).await;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET status = 'closed_unbesetzt', dm_pending = TRUE,
+                    escalated_24h_at = $1, closed_at = $1
+              WHERE user_id = 42",
+        )
+        .bind(now - Duration::minutes(5))
+        .execute(&pool)
+        .await
+        .expect("alte Anfrage schließen");
+        seed_open_pate_request(&pool, 42, 557, now).await;
+
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        concierge.run_pate_escalations(now).await;
+
+        assert!(port.dm_attempts.lock().unwrap().is_empty());
+        let pending: bool = sqlx::query_scalar(
+            "SELECT dm_pending FROM bot.concierge_pate_requests WHERE message_id = 556",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("alte Anfrage");
+        assert!(!pending);
     }
 
     #[cfg(feature = "testing")]
