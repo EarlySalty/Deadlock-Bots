@@ -30,7 +30,16 @@ ausgelöst.
 
 Die 2-Stunden-Karte gilt erst nach erfolgreicher Discord-Bearbeitung als
 eskaliert. Nach einem fehlgeschlagenen Karten-Update versucht der Scheduler es
-erneut. Bei der 24-Stunden-Stufe wird die Anfrage einmal geschlossen. Eine
+erneut. Ein Edit mit neuer Mention löst bei Discord keinen verlässlichen Ping
+aus. Darum postet der Bot zusätzlich eine Antwort auf die Karte mit dem
+Owner-Ping; der Rückgabewert der neuen Nachricht wird gespeichert. Die Antwort
+nutzt eine stabile Discord-Nonce gegen unmittelbare Duplikate. Das weicht von
+der ursprünglichen Formulierung „in derselben Nachricht“ technisch begründet
+ab, bleibt aber an genau dieser Anfrage verknüpft. Vor einem erneuten Senden
+sucht der Bot die Nonce im Discord-Verlauf seit der Anfragekarte. Kann er den
+Verlauf nicht vollständig prüfen, sendet er keinen zweiten Ping ins Blaue.
+Bei der 24-Stunden-Stufe
+wird die Anfrage einmal geschlossen. Eine
 gesperrte DM oder ein Opt-out beendet den DM-Versuch; ein Transportfehler
 bleibt zum erneuten Versuch offen. Das Karten-Update bleibt ebenfalls bis zum
 Erfolg offen, auch nach Bot-Neustart; die geschlossene Karte enthält keinen

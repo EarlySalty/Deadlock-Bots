@@ -152,7 +152,9 @@ pub const PATE_CLAIM_ERROR_TEXT: &str = "Die sichere Prüfung und Anlage ist tec
 pub const PATE_REQUEST_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und der interne Hinweis konnte möglicherweise nicht vollständig zurückgenommen werden. Eine Patenschaft ist nicht zuverlässig gestartet; bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
 pub const PATE_CLAIM_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und bereits angelegte Discord-Schritte konnten möglicherweise nicht vollständig zurückgenommen werden. Bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
 pub const FRESHLING_T0_PATE_TEXT: &str = "Und weil du hier ganz neu bist: Ich kann dir direkt einen Paten an die Seite stellen. Das ist ein Mensch aus der Community, der dir alles zeigt und mit dir die ersten Runden dreht. Kein Programm, kein fester Termin, einfach jemand, der dir den Anfang leicht macht. Magst du?";
-pub const PATE_ESCALATION_2H_TEXT: &str = "Seit zwei Stunden wartet <@{user_id}> noch auf einen Paten. <@662995601738170389>, magst du kurz schauen, ob jemand Zeit hat?";
+pub const PATE_ESCALATION_2H_TEXT: &str =
+    "Seit zwei Stunden wartet diese Anfrage noch auf einen Paten.";
+pub const PATE_ESCALATION_2H_ALERT_TEXT: &str = "<@662995601738170389>, diese Patenanfrage wartet seit zwei Stunden. Magst du schauen, ob jemand Zeit hat?";
 pub const PATE_ESCALATION_24H_CARD_TEXT: &str = "Diese Anfrage haben wir nach 24 Stunden ohne Übernahme geschlossen. Für weitere Hilfe stehen die Community-Kanäle offen.";
 pub const PATE_UNBESETZT_DM_TEXT: &str = "Hey, ich will ehrlich zu dir sein: gerade hat sich noch kein Pate für dich frei gemacht. Das liegt nicht an dir, manchmal ist einfach viel los. Damit du trotzdem sofort weiterkommst, hier die drei Ecken, wo dir direkt geholfen wird. In <#1426220702054355077> stellst du deine Fragen an die ganze Community, in <#1522769149208821881> findest du Mitspieler für eine Runde, und wenn du besser werden willst, melden sich in <#1494373349944459355> unsere Coaches bei dir. Und wenn du magst, schreib mir einfach nochmal, ich bleib dran.";
 pub const PATE_REQUEST_CLOSED_TEXT: &str = "Diese Patenanfrage wurde nach 24 Stunden ohne Übernahme geschlossen. Der Bot hat versucht, die Person zu erreichen. Hier ist gerade nichts mehr zu tun.";
@@ -1611,6 +1613,12 @@ pub trait ConciergePort: Send + Sync {
         channel_id: u64,
         body: Map<String, Value>,
     ) -> Result<u64, String>;
+    async fn find_channel_message_by_nonce(
+        &self,
+        channel_id: u64,
+        after_message_id: u64,
+        nonce: &str,
+    ) -> Result<Option<u64>, String>;
     async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String>;
     async fn delete_channel(&self, channel_id: u64) -> Result<(), String>;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
@@ -1905,6 +1913,7 @@ struct PateRequestRow {
     escalated_2h_at: Option<DateTime<Utc>>,
     escalated_24h_at: Option<DateTime<Utc>>,
     dm_pending: bool,
+    owner_alert_message_id: Option<u64>,
 }
 
 fn pate_request_row_from(row: &sqlx::postgres::PgRow) -> CommunityDbResult<PateRequestRow> {
@@ -1924,6 +1933,10 @@ fn pate_request_row_from(row: &sqlx::postgres::PgRow) -> CommunityDbResult<PateR
         escalated_2h_at: row.try_get("escalated_2h_at")?,
         escalated_24h_at: row.try_get("escalated_24h_at")?,
         dm_pending: row.try_get("dm_pending")?,
+        owner_alert_message_id: row
+            .try_get::<Option<i64>, _>("owner_alert_message_id")?
+            .map(|value| pg_i64_to_u64(value, "concierge_pate_requests.owner_alert_message_id"))
+            .transpose()?,
     })
 }
 
@@ -2848,7 +2861,7 @@ impl ConciergeStore {
         let twenty_four_hours = now - Duration::hours(24);
         let rows = sqlx::query(
             "SELECT id, status, user_id, channel_id, message_id, created_at,
-                    escalated_2h_at, escalated_24h_at, dm_pending
+                    escalated_2h_at, escalated_24h_at, dm_pending, owner_alert_message_id
                FROM bot.concierge_pate_requests
               WHERE (status = 'open' AND (
                      (escalated_2h_at IS NULL AND created_at <= $1)
@@ -2941,6 +2954,26 @@ impl ConciergeStore {
               WHERE id = $1 AND status = 'closed_unbesetzt' AND dm_pending",
         )
         .bind(id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_pate_owner_alert(
+        &self,
+        id: i64,
+        message_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let message_id = u64_to_i64(message_id, "concierge_pate_requests.owner_alert_message_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET owner_alert_message_id = $2, updated_at = $3
+              WHERE id = $1 AND status = 'open' AND owner_alert_message_id IS NULL",
+        )
+        .bind(id)
+        .bind(message_id)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -5413,18 +5446,13 @@ impl Concierge {
     }
 
     async fn escalate_pate_owner_ping(&self, row: &PateRequestRow) -> bool {
-        let content = PATE_ESCALATION_2H_TEXT.replace("{user_id}", &row.user_id.to_string());
-        let mut body = v2_body(
-            &content,
+        let body = v2_body(
+            PATE_ESCALATION_2H_TEXT,
             vec![button(
                 PATE_CLAIM_BUTTON_LABEL,
                 1,
                 &format!("concierge:pate:claim:{}", row.user_id),
             )],
-        );
-        body.insert(
-            "allowed_mentions".into(),
-            json!({ "parse": [], "users": [CONCIERGE_OWNER_ID.to_string()] }),
         );
         if let Err(err) = tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
@@ -5436,6 +5464,56 @@ impl Concierge {
         {
             tracing::warn!(%err, user_id = row.user_id, stufe = "2h", request_id = row.id, "Concierge: 2h-Kartenupdate fehlgeschlagen");
             return false;
+        }
+        if row.owner_alert_message_id.is_none() {
+            let nonce = format!("pate2h-{}", row.id);
+            let existing = match self
+                .port
+                .find_channel_message_by_nonce(row.channel_id, row.message_id, &nonce)
+                .await
+            {
+                Ok(existing) => existing,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis konnte nicht abgeglichen werden");
+                    return false;
+                }
+            };
+            let mut alert = v2_body(PATE_ESCALATION_2H_ALERT_TEXT, Vec::new());
+            alert.insert(
+                "allowed_mentions".into(),
+                json!({ "parse": [], "users": [CONCIERGE_OWNER_ID.to_string()], "replied_user": false }),
+            );
+            alert.insert(
+                "message_reference".into(),
+                json!({ "channel_id": row.channel_id.to_string(), "message_id": row.message_id.to_string(), "fail_if_not_exists": true }),
+            );
+            alert.insert("nonce".into(), json!(nonce));
+            alert.insert("enforce_nonce".into(), json!(true));
+            let message_id = if let Some(message_id) = existing {
+                message_id
+            } else {
+                match tokio::time::timeout(
+                    CONCIERGE_DISCORD_IO_TIMEOUT,
+                    self.port.send_channel_v2(row.channel_id, alert),
+                )
+                .await
+                .unwrap_or_else(|_| Err("Zeitlimit überschritten".to_string()))
+                {
+                    Ok(message_id) => message_id,
+                    Err(err) => {
+                        tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis fehlgeschlagen oder unsicher");
+                        return false;
+                    }
+                }
+            };
+            if let Err(err) = self
+                .store
+                .record_pate_owner_alert(row.id, message_id, Utc::now())
+                .await
+            {
+                tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis konnte nicht gespeichert werden");
+                return false;
+            }
         }
         true
     }
@@ -8465,6 +8543,21 @@ mod tests {
             let mut sent = self.sent_channel_v2.lock().unwrap();
             sent.push(body);
             Ok(sent.len() as u64)
+        }
+
+        async fn find_channel_message_by_nonce(
+            &self,
+            _channel_id: u64,
+            _after_message_id: u64,
+            nonce: &str,
+        ) -> Result<Option<u64>, String> {
+            Ok(self
+                .sent_channel_v2
+                .lock()
+                .unwrap()
+                .iter()
+                .position(|body| body.get("nonce").and_then(Value::as_str) == Some(nonce))
+                .map(|position| position as u64 + 1))
         }
 
         async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
@@ -15519,9 +15612,17 @@ mod tests {
         {
             let edits = port.edited_channels.lock().unwrap();
             assert_eq!(edits.len(), 1);
-            let raw = serde_json::to_string(&edits[0].2).expect("edit json");
-            assert!(raw.contains("662995601738170389"), "{raw}");
         }
+        let alerts = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(alerts.len(), 1);
+        let alert = &alerts[0];
+        assert_eq!(alert["message_reference"]["message_id"], "555");
+        assert_eq!(
+            alert["allowed_mentions"]["users"][0],
+            CONCIERGE_OWNER_ID.to_string()
+        );
+        assert_eq!(alert["enforce_nonce"], true);
+        drop(alerts);
         let escalated: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
         )
@@ -15532,6 +15633,78 @@ mod tests {
 
         concierge.run_pate_escalations(now).await;
         assert_eq!(port.edited_channels.lock().unwrap().len(), 1);
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_2h_owner_hinweis_wird_nach_sendefehler_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 555, now - Duration::minutes(125)).await;
+
+        port.channel_send_failures_remaining
+            .store(1, Ordering::SeqCst);
+        concierge.run_pate_escalations(now).await;
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_none());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
+
+        let restarted = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_some());
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_2h_unsicherer_send_wird_ueber_nonce_ohne_doppelpost_abgeglichen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 555, now - Duration::minutes(125)).await;
+        let request_id: i64 =
+            sqlx::query_scalar("SELECT id FROM bot.concierge_pate_requests WHERE user_id = 42")
+                .fetch_one(&pool)
+                .await
+                .expect("Anfrage");
+        let mut bereits_gesendet = v2_body(PATE_ESCALATION_2H_ALERT_TEXT, Vec::new());
+        bereits_gesendet.insert("nonce".into(), json!(format!("pate2h-{request_id}")));
+        port.sent_channel_v2.lock().unwrap().push(bereits_gesendet);
+
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        concierge.run_pate_escalations(now).await;
+
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        let stored: Option<i64> = sqlx::query_scalar(
+            "SELECT owner_alert_message_id FROM bot.concierge_pate_requests WHERE id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert_eq!(stored, Some(1));
     }
 
     #[cfg(feature = "testing")]
