@@ -5530,10 +5530,12 @@ impl Concierge {
             }
         };
         if !opted_out {
+            let mut body = v2_body(PATE_UNBESETZT_DM_TEXT, Vec::new());
+            body.insert("nonce".into(), json!(format!("pate24h-{}", row.id)));
+            body.insert("enforce_nonce".into(), json!(true));
             match tokio::time::timeout(
                 CONCIERGE_DISCORD_IO_TIMEOUT,
-                self.port
-                    .send_dm_v2(row.user_id, v2_body(PATE_UNBESETZT_DM_TEXT, Vec::new())),
+                self.port.send_dm_v2(row.user_id, body),
             )
             .await
             {
@@ -15760,6 +15762,14 @@ mod tests {
         concierge.run_pate_escalations(now).await;
 
         assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+        {
+            let dm_bodies = port.sent_dm_v2_bodies.lock().unwrap();
+            let dm_body = &dm_bodies[0].1;
+            assert_eq!(dm_body["enforce_nonce"], true);
+            assert!(dm_body["nonce"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("pate24h-")));
+        }
         {
             let edits = port.edited_channels.lock().unwrap();
             assert_eq!(edits.len(), 1);
