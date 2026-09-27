@@ -17,6 +17,7 @@ mod scrim_adapter;
 mod scrimglue;
 mod serversync;
 mod turnierglue;
+mod twitch_invites;
 mod vanity;
 
 use std::{
@@ -1063,10 +1064,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                             .to_string()
                     }),
                 );
-                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
-                    &emoji_catalog,
-                    &emoji_map,
-                ));
+                let emoji_index =
+                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
@@ -1320,6 +1319,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
         .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
         .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
+    let twitch_invites = twitch_invites::TwitchInvites::new(
+        central_pool.clone(),
+        adapter.clone(),
+        &dl_core::config::process_bot_config()?.snapshot(),
+    );
+    twitch_invites.reset_voice_clock().await?;
     let broker = dl_broker::BrokerState::new_with_channel_info(
         adapter.clone(),
         Arc::new(BrokerChannelInfoGlue {
@@ -1340,7 +1345,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     warn_if_lagebild_token_empty(&lagebild_token);
     let broker_server = axum::serve(
         broker_listener,
-        dl_broker::router(broker)
+        dl_broker::router(broker.clone())
+            .merge(dl_broker::twitch_invites::router(
+                broker,
+                twitch_invites.clone(),
+            ))
             .merge(turnierglue::publisher_router(
                 turnier_proposals,
                 broker_token,
@@ -1479,6 +1488,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(central_pool.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
+        voice_tracker
+            .set_activity_observer(twitch_invites.clone())
+            .await;
         tempvoice.set_voice_tracker(&voice_tracker).await;
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
@@ -1653,6 +1665,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
+        let _qualified_invites = twitch_invites.clone().spawn();
         dl_activity::analyzer::spawn_member_events(central_pool.clone(), &dispatcher);
         // Der Task wartet intern auf READY + Cache-Guilds und retryt leere
         // Member-Snapshots, statt nach einem fixen Startup-Fenster aufzugeben.

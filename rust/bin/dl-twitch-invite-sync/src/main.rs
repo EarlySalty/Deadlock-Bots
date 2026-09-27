@@ -24,12 +24,6 @@
 //! Per systemd-Timer periodisch lauffähig: neue Streamer landen in der Tabelle,
 //! ihre Alt-Joins werden beim nächsten Lauf nachgezogen.
 //!
-//! Env:
-//! - `TWITCH_INTERNAL_API_TOKEN` (Pflicht) — Auth gegen die interne Twitch-API.
-//! - `TWITCH_BOT_API_BASE` (Default `http://127.0.0.1:8776`).
-//! - `DEADLOCK_CENTRAL_DSN` (Pflicht, via `dl_central_db::dsn_from_env`).
-//! - `DRY_RUN=1` — Tabelle wird befüllt (additiv), aber der Reclassify schreibt
-//!   nicht, sondern meldet nur, was er ändern würde.
 
 use std::collections::HashMap;
 
@@ -54,6 +48,10 @@ const WEBSITE_SLUGS: [&str; 6] = [
 #[derive(Debug, Deserialize)]
 struct InviteEntry {
     streamer_login: String,
+    #[serde(default)]
+    twitch_user_id: Option<String>,
+    #[serde(default)]
+    channel_id: Option<i64>,
     guild_id: i64,
     invite_code: String,
     invite_url: String,
@@ -100,26 +98,19 @@ async fn sync_invites_and_reclassify(
             let invite_url = entry.invite_url.trim().to_string();
             let created_at = parse_optional_timestamp(entry.created_at.as_deref())?;
             let last_sent_at = parse_optional_timestamp(entry.last_sent_at.as_deref())?;
-            sqlx::query!(
-                r#"
-                INSERT INTO bot.twitch_streamer_invites(
-                    streamer_login, guild_id, invite_code, invite_url, created_at, last_sent_at
-                )
-                VALUES($1, $2, $3, $4, $5, $6)
-                ON CONFLICT(streamer_login) DO UPDATE SET
-                    guild_id = EXCLUDED.guild_id,
-                    invite_code = EXCLUDED.invite_code,
-                    invite_url = EXCLUDED.invite_url,
-                    created_at = EXCLUDED.created_at,
-                    last_sent_at = EXCLUDED.last_sent_at
-                "#,
-                login,
-                entry.guild_id,
-                invite_code,
-                invite_url,
-                created_at,
-                last_sent_at,
+            sqlx::query(
+                "INSERT INTO bot.twitch_streamer_invites
+                     (streamer_login, guild_id, invite_code, invite_url, created_at, last_sent_at, twitch_user_id, channel_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (streamer_login) DO UPDATE SET
+                     guild_id = EXCLUDED.guild_id, invite_code = EXCLUDED.invite_code,
+                     invite_url = EXCLUDED.invite_url, created_at = EXCLUDED.created_at,
+                     last_sent_at = EXCLUDED.last_sent_at,
+                     twitch_user_id = COALESCE(EXCLUDED.twitch_user_id, bot.twitch_streamer_invites.twitch_user_id),
+                     channel_id = COALESCE(EXCLUDED.channel_id, bot.twitch_streamer_invites.channel_id)",
             )
+            .bind(login).bind(entry.guild_id).bind(invite_code).bind(invite_url)
+            .bind(created_at).bind(last_sent_at).bind(&entry.twitch_user_id).bind(entry.channel_id)
             .execute(&mut *populate_tx)
             .await?;
         }
@@ -148,6 +139,16 @@ async fn sync_invites_and_reclassify(
         if !login.is_empty() && !code.is_empty() {
             twitch_lookup.entry(code).or_insert(login);
         }
+    }
+
+    let personal: Vec<(String, String)> =
+        sqlx::query_as("SELECT streamer_login, invite_code FROM bot.twitch_personal_invites")
+            .fetch_all(pool)
+            .await?;
+    for (login, code) in personal {
+        twitch_lookup
+            .entry(code.to_ascii_lowercase())
+            .or_insert(login);
     }
 
     let website_rows = sqlx::query!(
@@ -266,14 +267,33 @@ async fn sync_invites_and_reclassify(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let base = std::env::var("TWITCH_BOT_API_BASE")
-        .unwrap_or_else(|_| "http://127.0.0.1:8776".to_string());
-    let token = std::env::var("TWITCH_INTERNAL_API_TOKEN")
-        .map_err(|_| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt"))?;
-    let dry_run = matches!(
-        std::env::var("DRY_RUN").ok().as_deref(),
-        Some("1") | Some("true")
-    );
+    let config = dl_core::config::process_bot_config()?.snapshot();
+    let base = config
+        .runtime
+        .bridges
+        .twitch_api_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8776".to_string());
+    let token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN")
+        .ok_or_else(|| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt im Infisical-Bootstrap"))?;
+    let dry_run = config.twitch_invites.sync_dry_run;
+    let parsed = reqwest::Url::parse(&base)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.host_str().is_some_and(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        })
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        anyhow::bail!(
+            "Twitch-Sync benötigt eine numerische Loopback-Adresse ohne Zugangsdaten oder Pfad"
+        );
+    }
     let central_dsn = dl_central_db::dsn_from_env()?;
     let pool = dl_central_db::connect_pool(&central_dsn).await?;
 
@@ -282,6 +302,8 @@ async fn main() -> anyhow::Result<()> {
         base.trim_end_matches('/')
     );
     let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
     let entries: Vec<InviteEntry> = client
@@ -320,6 +342,8 @@ mod tests {
     fn invite(login: &str, code: &str) -> InviteEntry {
         InviteEntry {
             streamer_login: login.to_string(),
+            twitch_user_id: Some("123".to_string()),
+            channel_id: Some(2),
             guild_id: 1,
             invite_code: code.to_string(),
             invite_url: format!("https://discord.gg/{code}"),

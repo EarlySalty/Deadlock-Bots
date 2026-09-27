@@ -1983,7 +1983,7 @@ pub async fn add_reaction(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -2486,7 +2486,7 @@ mod tests {
         );
     }
 
-    fn test_state() -> Result<SharedBroker, String> {
+    pub(crate) fn test_state() -> Result<SharedBroker, String> {
         test_state_with_reactions(Err(PortError::Discord("unused".to_string())))
     }
 

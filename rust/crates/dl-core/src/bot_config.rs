@@ -55,6 +55,8 @@ pub struct BotConfig {
     #[serde(default)]
     pub tempvoice: TempVoiceCleanupConfig,
     #[serde(default)]
+    pub twitch_invites: TwitchInvitesConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
 }
 
@@ -239,6 +241,28 @@ fn flash_version(model: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor.parse::<u32>().ok()?, release))
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TwitchInvitesConfig {
+    pub personal_links_per_channel: u16,
+    pub guild_invite_reserve: u16,
+    pub evaluation_interval_seconds: u64,
+    pub excluded_voice_channel_ids: Vec<u64>,
+    pub sync_dry_run: bool,
+}
+
+impl Default for TwitchInvitesConfig {
+    fn default() -> Self {
+        Self {
+            personal_links_per_channel: 0,
+            guild_invite_reserve: 50,
+            evaluation_interval_seconds: 300,
+            excluded_voice_channel_ids: Vec::new(),
+            sync_dry_run: false,
+        }
+    }
+}
+
 impl BotConfig {
     pub fn parse(text: &str) -> Result<Self, BotConfigError> {
         if text.len() as u64 > MAX_CONFIG_BYTES {
@@ -288,6 +312,19 @@ impl BotConfig {
     pub fn validate(&self) -> Result<(), BotConfigError> {
         self.runtime.validate()?;
         let invalid = BotConfigError::Validation;
+        if self.twitch_invites.personal_links_per_channel > 1000
+            || self.twitch_invites.guild_invite_reserve > 1000
+            || !(1..=86400).contains(&self.twitch_invites.evaluation_interval_seconds)
+            || self
+                .twitch_invites
+                .excluded_voice_channel_ids
+                .iter()
+                .any(|id| *id == 0 || i64::try_from(*id).is_err())
+        {
+            return Err(invalid(
+                "twitch_invites enthält ungültige Grenzen oder Kanal-IDs",
+            ));
+        }
         let steam = url::Url::parse(&self.services.steam_api_url)
             .map_err(|_| invalid("services.steam_api_url ist ungültig"))?;
         if !matches!(steam.scheme(), "http" | "https")

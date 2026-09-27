@@ -13,6 +13,8 @@ pub mod lfg;
 pub mod lfg_freetext;
 pub mod outbox;
 pub mod player_finder;
+pub mod qualified_invite_voice;
+pub mod qualified_invites;
 pub mod stats_cmd;
 pub mod survey_pulse;
 pub mod text_stats;

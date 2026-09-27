@@ -380,6 +380,14 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
         }
     }
 
+    let personal: Vec<(String, String)> =
+        sqlx::query_as("SELECT streamer_login, invite_code FROM bot.twitch_personal_invites")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    for (login, code) in personal {
+        twitch.entry(code.to_ascii_lowercase()).or_insert(login);
+    }
     let mut website = HashMap::new();
     let website_rows = sqlx::query!(
         r#"
@@ -608,6 +616,7 @@ async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> Activit
     .fetch_optional(&mut *tx)
     .await?;
     if opted_out.is_some() {
+        crate::qualified_invites::remember_prior_member(&mut tx, guild_id, user_id).await?;
         tx.commit().await?;
         return Ok(false);
     }
@@ -634,6 +643,16 @@ async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> Activit
     }
 
     let id = next_member_event_id_in_tx(&mut tx).await?;
+    crate::qualified_invites::remember_member_event(
+        &mut tx,
+        id,
+        guild_id,
+        user_id,
+        &event.event_type,
+        event.occurred_at,
+        metadata_json.as_deref(),
+    )
+    .await?;
     sqlx::query!(
         r#"
         INSERT INTO activity.member_events(
@@ -824,6 +843,17 @@ pub fn spawn_message_activity(
                         continue;
                     };
                     let (user_id, channel_id) = (event.author_id, event.channel_id);
+                    if let Err(error) = crate::qualified_invites::record_message(
+                        &pool,
+                        event.message_id,
+                        guild_id,
+                        event.author_id,
+                        event.message_created_at,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "Nachrichtennachweis für Einladungen nicht gespeichert");
+                    }
                     let result =
                         record_message_activity(&pool, user_id, guild_id, channel_id).await;
                     if let Err(err) = result {

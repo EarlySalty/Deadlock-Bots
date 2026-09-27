@@ -1,4 +1,9 @@
 # Pfad	Rust-Typ	Bereich	Beschriftung	Schreibrecht	Hinweis
+twitch_invites.personal_links_per_channel	u16	Einladungen & Partner	Persönliche Links je Twitch-Kanal	edit	0 verhindert neue persönliche Links. Vorhandene Links bleiben gültig. Wirksam nach Neustart.
+twitch_invites.guild_invite_reserve	u16	Einladungen & Partner	Freigehaltene Discord-Einladungen	edit	Reserve innerhalb der Discord-Grenze von 1.000 Einladungen. Wirksam nach Neustart.
+twitch_invites.evaluation_interval_seconds	u64	Einladungen & Partner	Prüfintervall für qualifizierte Einladungen (Sekunden)	edit	Zulässig sind 1 bis 86.400 Sekunden. Wirksam nach Neustart.
+twitch_invites.excluded_voice_channel_ids	Vec<u64>	Einladungen & Partner	Zusätzlich ausgeschlossene Voice-Kanäle	edit	AFK und bestehende Staging-Kanäle sind bereits ausgeschlossen. Wirksam nach Neustart.
+twitch_invites.sync_dry_run	bool	Einladungen & Partner	Invite-Sync ohne Änderung alter Join-Klassifikationen	edit	Der bestehende Dry-Run aktualisiert die Streamer-Zuordnung, aber keine alten Join-Klassifikationen. Wirksam beim nächsten Sync.
 discord.guild_id	Option<String>	Discord · Allgemein	Discord-Server-ID	edit	Wirksam nach Neustart des betroffenen Dienstes.
 services.steam_api_url	String	Infrastruktur	Interne Steam-API	protected	Geschützte Infrastruktur: Änderung über die Betriebsdatei bzw. Infisical, nicht über den Browser. Der Wert wird nicht ausgeliefert.
 services.dashboard_port	u16	Infrastruktur	Dashboard-Port	protected	Geschützte Infrastruktur: Änderung über die Betriebsdatei bzw. Infisical, nicht über den Browser. Der Wert wird nicht ausgeliefert.
