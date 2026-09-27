@@ -216,7 +216,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         bot_description:
             "unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub.",
     },
-    paten_intro: "Ein Pate ist jemand aus der Community, der dir den Einstieg leicht macht. Er zeigt dir den Server, beantwortet deine Fragen und dreht mit dir die ersten Runden. Waehlst du beim Start die Option, dass dich jemand an die Hand nimmt, bekommst du direkt einen Paten angeboten. Du kannst mir aber auch jederzeit per DM schreiben \"ich haette gern einen Paten\", dann kuemmere ich mich darum.",
+    paten_intro: "Ein Pate ist jemand aus der Community, der dir den Einstieg leicht macht. Er zeigt dir den Server, beantwortet deine Fragen und dreht mit dir die ersten Runden. Wenn der Concierge aktiv ist, kannst du ihn beim Start oder per DM nach einem Paten fragen.",
     socials_intro: "Die Community gibt es auch außerhalb von Discord:",
     quickstart_intro: "Die drei wichtigsten Klicks für den Start:",
     buttons: WelcomeButtonLabels {
