@@ -27,6 +27,12 @@ keine Zustellung der 24-Stunden-DM: Opt-out oder gesperrte Discord-DMs können
 sie verhindern. Hier werden keine Community-DMs oder -Posts für den Test
 ausgelöst.
 
+Die 2-Stunden-Karte gilt erst nach erfolgreicher Discord-Bearbeitung als
+eskaliert. Nach einem fehlgeschlagenen Karten-Update versucht der Scheduler es
+erneut. Bei der 24-Stunden-Stufe wird die Anfrage einmal geschlossen und die
+DM höchstens einmal versucht. Das Karten-Update bleibt bis zum Erfolg offen,
+auch nach Bot-Neustart; die geschlossene Karte enthält keinen Übernehmen-Knopf.
+
 Validierung dieses Portstands: beide Migrationen auf einer Wegwerf-DB
 erfolgreich; `dl-community --features testing` 473 grün, zwei bekannte
 Baseline-Fehler in Coaching-ACK-Timing und Reaction-Roles-Teardown; der
