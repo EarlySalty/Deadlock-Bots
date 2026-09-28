@@ -100,6 +100,46 @@ async fn rolling_caps_are_atomic_under_competing_callers() {
             .expect("rolling window"),
         Reservation::Granted { .. }
     ));
+    let pending_id: i64 = sqlx::query_scalar(
+        "INSERT INTO steam.web_api_reservations (caller, caller_class, reserved_at)
+         VALUES ('retry', 'standard', clock_timestamp() - interval '72 hours') RETURNING id",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("seed unreported attempt");
+    let completed_id: i64 = sqlx::query_scalar(
+        "INSERT INTO steam.web_api_reservations
+            (caller, caller_class, reserved_at, response_at, http_status)
+         VALUES ('brain', 'standard', clock_timestamp() - interval '72 hours',
+                 clock_timestamp() - interval '72 hours', 200) RETURNING id",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("seed completed attempt");
+    sqlx::query("UPDATE steam.web_api_budget SET last_pruned_at = NULL WHERE id = true")
+        .execute(db.pool())
+        .await
+        .expect("make pruning due");
+    reserve(db.pool(), "brain", CallerClass::Standard)
+        .await
+        .expect("trigger prune");
+    let pending_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM steam.web_api_reservations WHERE id = $1)")
+            .bind(pending_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("pending attempt exists");
+    let completed_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM steam.web_api_reservations WHERE id = $1)")
+            .bind(completed_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("completed attempt pruned");
+    assert!(pending_exists);
+    assert!(!completed_exists);
+    assert!(observe(db.pool(), pending_id, Some(429), Some("90"))
+        .await
+        .is_ok());
 }
 
 #[tokio::test]
@@ -130,8 +170,13 @@ async fn cooldown_and_response_survive_new_client_and_count_failed_attempts() {
         observe(db.pool(), id, Some(200), None).await,
         Err(LedgerError::ConflictingReport)
     ));
+    let alternate_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(db.pool().connect_options().as_ref().clone())
+        .await
+        .expect("independent client pool");
     assert!(matches!(
-        reserve(db.pool(), "brain", CallerClass::Standard)
+        reserve(&alternate_pool, "brain", CallerClass::Standard)
             .await
             .expect("restart-safe cooldown"),
         Reservation::Denied {
@@ -172,4 +217,24 @@ async fn cooldown_and_response_survive_new_client_and_count_failed_attempts() {
     .await
     .expect("count failures");
     assert_eq!(failed_attempts, 2);
+    let Reservation::Granted { id: third_id, .. } =
+        reserve(&alternate_pool, "patchnotes", CallerClass::OptionalPatch)
+            .await
+            .expect("third reservation")
+    else {
+        panic!("third reservation must be granted");
+    };
+    let header = "x".repeat(129);
+    let fallback = observe(&alternate_pool, third_id, Some(429), Some(&header))
+        .await
+        .expect("overlong header uses fallback");
+    assert_eq!(
+        fallback.cooldown_until,
+        Some(fallback.response_at + Duration::seconds(30))
+    );
+    let repeated = observe(&alternate_pool, third_id, Some(429), Some(&header))
+        .await
+        .expect("overlong header is idempotent");
+    assert!(repeated.duplicate);
+    alternate_pool.close().await;
 }

@@ -171,7 +171,7 @@ pub async fn reserve(
             "DELETE FROM steam.web_api_reservations
               WHERE id IN (
                   SELECT id FROM steam.web_api_reservations
-                   WHERE reserved_at <= $1
+                   WHERE reserved_at <= $1 AND response_at IS NOT NULL
                    ORDER BY reserved_at LIMIT 500
               )",
         )
@@ -196,10 +196,11 @@ pub async fn observe(
 ) -> Result<Observation, LedgerError> {
     if reservation_id <= 0
         || http_status.is_some_and(|status| !(100..=599).contains(&status))
-        || retry_after.is_some_and(|header| header.len() > 128 || http_status != Some(429))
+        || (retry_after.is_some() && http_status != Some(429))
     {
         return Err(LedgerError::InvalidObservation);
     }
+    let retry_after = retry_after.filter(|header| header.len() <= 128);
 
     let mut tx = pool.begin().await?;
     let (now, previous_cooldown, previous_streak): (DateTime<Utc>, Option<DateTime<Utc>>, i32) =
