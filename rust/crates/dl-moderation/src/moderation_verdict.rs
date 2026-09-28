@@ -93,41 +93,89 @@ pub(crate) fn high_confidence_scam_verification_conflict(
     !verification.confirmed || !matches!(verification.category, ModerationCategory::Scam)
 }
 
+const EXPLICIT_SCAM: &[&str] = &[
+    "scam-muster",
+    "scammuster",
+    "scam-merkmal",
+    "scammerkmal",
+    "betrugsmuster",
+    "betrugs-muster",
+    "betrugsversuch",
+    "phishing",
+    "krypto-scam",
+    "crypto-scam",
+    "klarer scam",
+    "eindeutiger scam",
+    "sichtbarer scam",
+    "scam bestätigt",
+    "scam bestaetigt",
+];
+
+const CONTRAST_CONJUNCTIONS: &[&str] = &[
+    " aber ",
+    " doch ",
+    " stattdessen ",
+    " jedoch ",
+    " hingegen ",
+    " sondern ",
+    " allerdings ",
+];
+
 fn explicit_scam_reason(reason: &str) -> bool {
     let reason = reason.to_lowercase();
-    let explicit_scam = [
-        "scam-muster",
-        "scammuster",
-        "scam-merkmal",
-        "scammerkmal",
-        "betrugsmuster",
-        "betrugs-muster",
-        "betrugsversuch",
-        "phishing",
-        "krypto-scam",
-        "crypto-scam",
-        "klarer scam",
-        "eindeutiger scam",
-        "sichtbarer scam",
-        "scam bestätigt",
-        "scam bestaetigt",
-    ];
 
     reason
         .split([';', '.', '!', '?', '\n'])
-        .flat_map(|part| part.split(" aber "))
-        .flat_map(|part| part.split(" doch "))
-        .flat_map(|part| part.split(" stattdessen "))
-        .flat_map(|part| part.split(" jedoch "))
-        .flat_map(|part| part.split(" hingegen "))
-        .flat_map(|part| part.split(" sondern "))
-        .flat_map(|part| part.split(" allerdings "))
+        .flat_map(split_assertion_scopes)
         .any(|part| {
-            explicit_scam.iter().any(|needle| {
+            EXPLICIT_SCAM.iter().any(|needle| {
                 part.match_indices(needle)
-                    .any(|(index, _)| scam_mention_is_asserted(part, index, needle.len()))
+                    .any(|(index, _)| scam_mention_is_asserted(&part, index, needle.len()))
             })
         })
+}
+
+fn split_assertion_scopes(part: &str) -> Vec<String> {
+    let mut scopes = Vec::new();
+    let mut current = String::new();
+    let mut remaining = part;
+    while !remaining.is_empty() {
+        let next_conjunction = CONTRAST_CONJUNCTIONS
+            .iter()
+            .filter_map(|conjunction| {
+                remaining
+                    .find(conjunction)
+                    .map(|index| (index, *conjunction))
+            })
+            .min_by_key(|(index, _)| *index);
+        let Some((index, conjunction)) = next_conjunction else {
+            current.push_str(remaining);
+            break;
+        };
+
+        current.push_str(&remaining[..index]);
+        let continuation = &remaining[index + conjunction.len()..];
+        let next_boundary = CONTRAST_CONJUNCTIONS
+            .iter()
+            .filter_map(|candidate| continuation.find(candidate))
+            .min()
+            .unwrap_or(continuation.len());
+        let next_clause = &continuation[..next_boundary];
+        if !current.is_empty()
+            && EXPLICIT_SCAM
+                .iter()
+                .any(|needle| next_clause.contains(needle))
+        {
+            scopes.push(std::mem::take(&mut current));
+        } else {
+            current.push_str(conjunction);
+        }
+        remaining = continuation;
+    }
+    if !current.is_empty() {
+        scopes.push(current);
+    }
+    scopes
 }
 
 fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
@@ -247,7 +295,7 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
             && !lead.contains(&"ohne")
             && !lead.contains(&"und")
             && !lead.contains(&"oder")
-            && (position == 0 || lead.iter().any(|word| matches!(*word, "als" | "im" | "in")))
+            && (position == 0 || lead.contains(&"als"))
     }) {
         return false;
     }
@@ -440,6 +488,8 @@ mod tests {
             "Phishing-Schutz ist hier die einzige Aussage.",
             "Phishing lässt sich nicht nachweisen.",
             "Keine auf dem Poster oder in den Bildunterschriften erkennbaren Hinweise auf Phishing.",
+            "Phishing ist aber nicht sichtbar.",
+            "Scam-Muster ist jedoch nicht belegt.",
         ];
         for reason in reasons {
             assert!(
@@ -475,7 +525,9 @@ mod tests {
             "Kein Phishing, stattdessen sichtbarer Scam mit Auszahlungsversprechen.",
             "Nicht im ersten Bild, sichtbarer Scam im zweiten.",
             "Kein Phishing und Krypto-Scam.",
+            "Phishing ist aber nicht sichtbar, jedoch ein sichtbarer Scam.",
             "Sichtbarer Scam im Bild und Warnung an Moderatoren.",
+            "Sichtbarer Scam im Bild, Warnung an Moderatoren.",
             "Kein Zweifel: sichtbarer Scam.",
             "Sichtbarer Scam und Phishing ist unbestätigt.",
         ] {
@@ -483,6 +535,50 @@ mod tests {
                 high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.90, reason),
                 "{reason}"
             );
+        }
+    }
+
+    #[test]
+    fn contrast_conjunctions_preserve_negation_and_positive_reframing() {
+        for conjunction in [
+            " aber ",
+            " doch ",
+            " stattdessen ",
+            " jedoch ",
+            " hingegen ",
+            " sondern ",
+            " allerdings ",
+        ] {
+            let negated = format!("Phishing{conjunction}nicht sichtbar.");
+            assert!(!high_confidence_scam_reason_conflict(
+                &ModerationCategory::Other,
+                0.92,
+                &negated
+            ));
+            let verification = VerificationDecision {
+                confirmed: false,
+                category: ModerationCategory::Other,
+                confidence: 0.92,
+                reason: negated.clone(),
+                raw_json: "{}".to_string(),
+            };
+            assert!(!high_confidence_scam_verification_conflict(&verification));
+
+            let asserted =
+                format!("Kein Phishing,{conjunction}sichtbarer Scam mit Auszahlungsversprechen.");
+            assert!(high_confidence_scam_reason_conflict(
+                &ModerationCategory::Other,
+                0.92,
+                &asserted
+            ));
+            let verification = VerificationDecision {
+                confirmed: false,
+                category: ModerationCategory::Other,
+                confidence: 0.92,
+                reason: asserted,
+                raw_json: "{}".to_string(),
+            };
+            assert!(high_confidence_scam_verification_conflict(&verification));
         }
     }
 
