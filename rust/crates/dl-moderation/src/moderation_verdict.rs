@@ -198,10 +198,24 @@ fn text_before_word(text: &str, word_position: usize) -> &str {
 }
 
 fn direct_warn_report_context(prefix: &str) -> bool {
-    let clause_prefix = prefix
-        .rsplit([';', '.', '!', '?', ',', '\n'])
-        .next()
-        .unwrap_or(prefix);
+    let punctuation_boundary = prefix
+        .char_indices()
+        .filter_map(|(index, character)| {
+            matches!(character, ';' | '.' | '!' | '?' | ',' | ':' | '\n')
+                .then_some(index + character.len_utf8())
+        })
+        .max()
+        .unwrap_or(0);
+    let conjunction_boundary = CONTRAST_CONJUNCTIONS
+        .iter()
+        .filter_map(|conjunction| {
+            prefix
+                .rfind(conjunction)
+                .map(|index| index + conjunction.len())
+        })
+        .max()
+        .unwrap_or(0);
+    let clause_prefix = &prefix[punctuation_boundary.max(conjunction_boundary)..];
     let words = clause_prefix
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -579,6 +593,31 @@ mod tests {
 
     #[test]
     fn asserted_scam_survives_unrelated_negation_and_warning_context() {
+        for reason in [
+            "Sichtbarer Scam in der Anzeige: Warnung an Moderatoren.",
+            "Sichtbarer Scam in der Gruppe: Warnung an Moderatoren.",
+        ] {
+            assert!(
+                high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.90, reason),
+                "{reason}"
+            );
+        }
+        for separator in [";", ".", "!", "?", "\n", ",", ":"] {
+            let reason =
+                format!("Sichtbarer Scam in der Anzeige{separator} Warnung an Moderatoren.");
+            assert!(
+                high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.90, &reason),
+                "{reason}"
+            );
+        }
+        for conjunction in CONTRAST_CONJUNCTIONS {
+            let reason =
+                format!("Sichtbarer Scam in einer Anzeige{conjunction}Warnung an Moderatoren.");
+            assert!(
+                high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.90, &reason),
+                "{reason}"
+            );
+        }
         for reason in [
             "Kein Phishing, aber ein sichtbarer Scam mit Auszahlungsversprechen.",
             "Keine Scam-Merkmale im ersten Bild; im zweiten ein klarer Scam.",
