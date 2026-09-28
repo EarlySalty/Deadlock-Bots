@@ -313,6 +313,23 @@ impl DiscordAdapter {
         self.send_raw(channel_id, body).await
     }
 
+    pub async fn send_components_with_files(
+        &self,
+        channel_id: u64,
+        body: &Map<String, Value>,
+        files: Vec<(String, Vec<u8>)>,
+    ) -> Result<u64, serenity::Error> {
+        let attachments = files
+            .into_iter()
+            .map(|(name, bytes)| CreateAttachment::bytes(bytes, name))
+            .collect();
+        let message = self
+            .http
+            .send_message(ChannelId::new(channel_id), attachments, body)
+            .await?;
+        Ok(message.id.get())
+    }
+
     /// Sendet eine lokale Datei als Attachment und liefert die Discord-Message-ID.
     pub async fn send_attachment_public(
         &self,

@@ -1296,6 +1296,7 @@ dependencies = [
  "dl-community",
  "dl-core",
  "dl-dashboard",
+ "dl-devfeed-mirror",
  "dl-discord",
  "dl-moderation",
  "dl-server-as-code",
@@ -1549,6 +1550,23 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dl-devfeed-mirror"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "dl-community",
+ "dl-discord",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

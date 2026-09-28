@@ -490,6 +490,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
         dl_server_as_code::DEFAULT_GUILD_ID,
     );
+    let _devfeed_mirror = dl_devfeed_mirror::spawn(adapter.clone(), central_pool.clone());
     // KI-Transparenz-Log: jede Modellantwort wird im Transparenz-Kanal mitlesbar.
     // Die Senke wird bei jedem chat()-Aufruf neu aufgeloest, deshalb ist es
     // ungefaehrlich, sie hier vor dem Bau der Provider zu registrieren.

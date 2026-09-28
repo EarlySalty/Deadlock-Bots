@@ -27,6 +27,7 @@ dl-brain.workspace = true
 dl-moderation.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
+dl-devfeed-mirror.workspace = true
 dl-discord.workspace = true
 dl-server-as-code.workspace = true
 dl-squads.workspace = true
