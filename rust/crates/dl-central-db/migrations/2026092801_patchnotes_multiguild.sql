@@ -106,8 +106,13 @@ BEGIN
 
     IF configured_approval_mode = 'manual'
        AND NEW.status IN ('sending', 'sent')
-       AND (NEW.approved_by_user_id IS NULL OR NEW.approved_at IS NULL) THEN
+       AND NEW.approved_at IS NULL THEN
         RAISE EXCEPTION 'manual patchnotes dispatch requires approval before sending'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.status = 'sending' AND NEW.recovery_outcome IS NOT NULL THEN
+        RAISE EXCEPTION 'new patchnotes send attempt cannot reuse a prior recovery result'
             USING ERRCODE = '23514';
     END IF;
 
@@ -120,10 +125,17 @@ BEGIN
         IF OLD.send_channel_id IS NOT NULL
            AND NEW.send_channel_id IS DISTINCT FROM OLD.send_channel_id
            AND (cardinality(OLD.sent_message_ids) > 0
-                OR OLD.status IN ('sending', 'delivery_unknown')
-                OR OLD.recovery_outcome IS DISTINCT FROM 'not_delivered'
-                OR OLD.recovery_checked_at IS NULL) THEN
+                OR OLD.status IN ('sending', 'delivery_unknown', 'sent')
+                OR OLD.attempts > 0 AND (
+                    OLD.recovery_outcome IS DISTINCT FROM 'not_delivered'
+                    OR OLD.recovery_checked_at IS NULL
+                )) THEN
             RAISE EXCEPTION 'patchnotes dispatch channel cannot change before delivery is reconciled'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF OLD.status = 'delivery_unknown' AND NEW.status = 'sending' THEN
+            RAISE EXCEPTION 'unknown patchnotes delivery must be reconciled before another send attempt'
                 USING ERRCODE = '23514';
         END IF;
 
@@ -176,7 +188,7 @@ BEGIN
               FROM patchnotes.guild_dispatch
              WHERE guild_id = NEW.guild_id
                AND status = 'sending'
-               AND (approved_by_user_id IS NULL OR approved_at IS NULL)
+               AND approved_at IS NULL
        ) THEN
         RAISE EXCEPTION 'manual approval mode conflicts with an unapproved active dispatch'
             USING ERRCODE = '23514';

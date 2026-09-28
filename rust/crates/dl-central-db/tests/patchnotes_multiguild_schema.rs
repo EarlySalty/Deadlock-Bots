@@ -49,6 +49,8 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
         "REFERENCES patchnotes.changelog_posts (id)",
         "manual patchnotes dispatch requires approval before sending",
         "unknown delivery must be reconciled before marking sent",
+        "unknown patchnotes delivery must be reconciled before another send attempt",
+        "new patchnotes send attempt cannot reuse a prior recovery result",
     ] {
         assert!(sql.contains(expected), "Dispatch-Vertrag fehlt: {expected}");
     }
@@ -145,7 +147,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         "INSERT INTO patchnotes.guild_dispatch
              (guild_id, patch_id, revision_hash, status, send_channel_id, sent_message_ids)
          VALUES ($1, $3, $4, 'sent', 9928004, ARRAY[9928005]::BIGINT[]),
-                ($2, $3, $4, 'pending', NULL, ARRAY[]::BIGINT[])",
+                ($2, $3, $4, 'pending', 9928009, ARRAY[]::BIGINT[])",
     )
     .bind(guild_one)
     .bind(guild_two)
@@ -173,9 +175,23 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
                 vec![9_928_005],
                 Some(9_928_004)
             ),
-            (guild_two, "pending".to_string(), Vec::new(), None),
+            (
+                guild_two,
+                "pending".to_string(),
+                Vec::new(),
+                Some(9_928_009)
+            ),
         ]
     );
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET send_channel_id = 9928013
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_two)
+    .bind(patch_id)
+    .bind(&hash_one)
+    .execute(db.pool())
+    .await?;
 
     sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
@@ -351,6 +367,19 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    let direct_unknown_retry = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("unknown delivery cannot start another attempt before reconciliation");
+    assert_eq!(error_code(&direct_unknown_retry), Some("23514".to_string()));
+
     let blind_retry = sqlx::query(
         "UPDATE patchnotes.guild_dispatch SET status = 'retry'
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
@@ -366,6 +395,30 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
+    let stale_recovery_reuse = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("new send attempt cannot reuse a prior recovery result");
+    assert_eq!(error_code(&stale_recovery_reuse), Some("23514".to_string()));
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', recovery_outcome = NULL, recovery_checked_at = NULL,
+                send_attempt_id = '00000000-0000-0000-0000-000000000005'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(guild_one)
@@ -423,6 +476,36 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         recovered,
         ("sent".to_string(), Some(9_928_014), vec![9_928_015])
     );
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET send_lease_expires_at = now() - interval '1 second'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'delivery_unknown', send_lease_expires_at = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_settings SET approval_mode = 'manual' WHERE guild_id = $1",
     )

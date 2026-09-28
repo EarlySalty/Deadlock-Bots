@@ -5049,7 +5049,7 @@ mod tests {
             .execute(pool)
             .await
             .expect("core user");
-        sqlx::query("INSERT INTO patchnotes.guild_settings(guild_id, updated_by_user_id) VALUES (9984201, 42)")
+        sqlx::query("INSERT INTO patchnotes.guild_settings(guild_id, updated_by_user_id, approval_mode) VALUES (9984201, 42, 'manual')")
             .execute(pool)
             .await
             .expect("guild settings");
@@ -5059,13 +5059,24 @@ mod tests {
             .expect("patch post");
         sqlx::query(
             "INSERT INTO patchnotes.guild_dispatch(
-                 guild_id, patch_id, revision_hash, approved_by_user_id, approved_at
-             ) VALUES (9984201, 9984202, $1, 42, now())",
+                 guild_id, patch_id, revision_hash, status, send_channel_id,
+                 send_attempt_id, send_started_at, send_lease_expires_at,
+                 sent_message_ids, approved_by_user_id, approved_at
+             ) VALUES
+                 (9984201, 9984202, $1, 'pending', NULL, NULL, NULL, NULL,
+                  ARRAY[]::BIGINT[], 42, now()),
+                 (9984201, 9984202, $2, 'sending', 9984203,
+                  '00000000-0000-0000-0000-000000000042'::UUID, now(), now() + interval '1 minute',
+                  ARRAY[]::BIGINT[], 42, now()),
+                 (9984201, 9984202, $3, 'sent', 9984203, NULL, NULL, NULL,
+                  ARRAY[9984204]::BIGINT[], 42, now())",
         )
         .bind("a".repeat(64))
+        .bind("b".repeat(64))
+        .bind("c".repeat(64))
         .execute(pool)
         .await
-        .expect("dispatch approval");
+        .expect("dispatch approvals");
 
         let export = export_user_data(pool, 42, 1_000)
             .await
@@ -5074,8 +5085,11 @@ mod tests {
         let dispatch = &export["tables"]["guild_dispatch.approved_by_user_id"];
         assert_eq!(settings.as_array().expect("settings rows").len(), 1);
         assert_eq!(settings[0]["updated_by_user_id"], 42);
-        assert_eq!(dispatch.as_array().expect("dispatch rows").len(), 1);
-        assert_eq!(dispatch[0]["approved_by_user_id"], 42);
+        let dispatch_rows = dispatch.as_array().expect("dispatch rows");
+        assert_eq!(dispatch_rows.len(), 3);
+        assert!(dispatch_rows
+            .iter()
+            .all(|row| row["approved_by_user_id"] == 42));
 
         let summary = delete_user_data(pool, 42, "test".into(), 2_000)
             .await
@@ -5086,18 +5100,22 @@ mod tests {
         );
         assert_eq!(
             summary.counts.get("guild_dispatch.approved_by_user_id"),
-            Some(&1)
+            Some(&3)
         );
-        let remaining: (Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT s.updated_by_user_id, d.approved_by_user_id
+        let remaining: (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT s.updated_by_user_id,
+                    COUNT(*) FILTER (WHERE d.approved_by_user_id IS NOT NULL)::BIGINT,
+                    COUNT(*) FILTER (WHERE d.status = 'sending')::BIGINT,
+                    COUNT(*) FILTER (WHERE d.status = 'sent')::BIGINT
                FROM patchnotes.guild_settings s
                JOIN patchnotes.guild_dispatch d USING (guild_id)
-              WHERE s.guild_id = 9984201",
+              WHERE s.guild_id = 9984201
+              GROUP BY s.updated_by_user_id",
         )
         .fetch_one(pool)
         .await
         .expect("redacted actor ids");
-        assert_eq!(remaining, (None, None));
+        assert_eq!(remaining, (None, Some(0), Some(1), Some(1)));
     }
 
     #[tokio::test]
