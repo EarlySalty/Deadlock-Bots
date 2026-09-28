@@ -178,6 +178,68 @@ fn split_assertion_scopes(part: &str) -> Vec<String> {
     scopes
 }
 
+fn text_before_word(text: &str, word_position: usize) -> &str {
+    let mut words_seen = 0;
+    let mut in_word = false;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() {
+            if !in_word {
+                if words_seen == word_position {
+                    return &text[..index];
+                }
+                words_seen += 1;
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+        }
+    }
+    text
+}
+
+fn direct_warn_report_context(prefix: &str) -> bool {
+    let clause_prefix = prefix
+        .rsplit([';', '.', '!', '?', ',', '\n'])
+        .next()
+        .unwrap_or(prefix);
+    let words = clause_prefix
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let Some(preposition) = words.iter().rposition(|word| matches!(*word, "in" | "im")) else {
+        return false;
+    };
+
+    words[preposition + 1..].iter().all(|word| {
+        matches!(
+            *word,
+            "ein"
+                | "eine"
+                | "einer"
+                | "einem"
+                | "einen"
+                | "eines"
+                | "der"
+                | "die"
+                | "das"
+                | "dem"
+                | "den"
+                | "dieser"
+                | "diese"
+                | "dieses"
+                | "diesem"
+                | "diesen"
+                | "jeder"
+                | "jede"
+                | "jedes"
+                | "jedem"
+                | "jeden"
+        ) || ["e", "en", "er", "es", "em"]
+            .iter()
+            .any(|ending| word.ends_with(ending))
+    })
+}
+
 fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
     let prefix = &part[..index];
     let suffix = part[index + length..].trim_start_matches('-');
@@ -295,7 +357,9 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
             && !lead.contains(&"ohne")
             && !lead.contains(&"und")
             && !lead.contains(&"oder")
-            && (position == 0 || lead.contains(&"als"))
+            && (position == 0
+                || lead.contains(&"als")
+                || direct_warn_report_context(text_before_word(&part[index + length..], position)))
     }) {
         return false;
     }
@@ -480,6 +544,9 @@ mod tests {
             "Warnung vor sichtbarem Phishing, keine Werbung.",
             "Der Screenshot zitiert einen sichtbaren Scam als Warnung.",
             "Eine Phishing-Warnung im Bericht.",
+            "Phishing in einer Warnung vor Betrugsmaschen.",
+            "Phishing im Bericht über Betrugsmaschen.",
+            "Phishing in der offiziellen Warnung vor Betrugsmaschen.",
             "Kein Scam und Phishing sichtbar.",
             "Keine Anzeichen für Phishing, Scam oder Betrugsversuch.",
             "Phishing ist weder sichtbar noch plausibel.",
