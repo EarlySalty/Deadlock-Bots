@@ -16,6 +16,7 @@ mod onboardglue;
 mod scrim_adapter;
 mod scrimglue;
 mod serversync;
+mod steam_web_api_ledger;
 mod turnierglue;
 mod vanity;
 
@@ -1388,7 +1389,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tracing::info!(addr = %serversync_addr, "Server-Sync-API gebunden");
     let serversync_server = axum::serve(
         serversync_listener,
-        serversync::router(serversync_service.clone(), serversync_token)
+        serversync::router(serversync_service.clone(), serversync_token.clone())
+            .merge(steam_web_api_ledger::router(
+                central_pool.clone(),
+                serversync_token,
+            ))
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 

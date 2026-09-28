@@ -7697,7 +7697,7 @@ fn authorize(
     Ok(())
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let left = Sha256::digest(a.as_bytes());
     let right = Sha256::digest(b.as_bytes());
     left.iter()

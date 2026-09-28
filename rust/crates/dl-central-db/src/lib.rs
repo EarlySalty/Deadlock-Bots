@@ -4,6 +4,7 @@ mod locks;
 pub mod pool;
 mod proactive_dm;
 pub mod scrim_runtime;
+pub mod steam_web_api_ledger;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
