@@ -250,20 +250,21 @@ async fn budget_time_is_read_after_waiting_for_the_row_lock() {
         .await
         .expect("independent probe connection");
 
+    sqlx::query(
+        "UPDATE steam.web_api_budget
+            SET cooldown_until = clock_timestamp() + interval '1 second'
+          WHERE id = true",
+    )
+    .execute(db.pool())
+    .await
+    .expect("set short cooldown before locking");
+
     let mut blocker = db.pool().begin().await.expect("budget blocker");
     let _: bool =
         sqlx::query_scalar("SELECT id FROM steam.web_api_budget WHERE id = true FOR UPDATE")
             .fetch_one(&mut *blocker)
             .await
             .expect("lock budget row");
-    sqlx::query(
-        "UPDATE steam.web_api_budget
-            SET cooldown_until = clock_timestamp() + interval '1 second'
-          WHERE id = true",
-    )
-    .execute(&mut *blocker)
-    .await
-    .expect("set short cooldown");
 
     let reserve_pool = probe_pool.clone();
     let reserve_task =
@@ -275,14 +276,39 @@ async fn budget_time_is_read_after_waiting_for_the_row_lock() {
         .execute(&mut *blocker)
         .await
         .expect("hold lock past cooldown");
+    let released_at: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("read lock release time");
     blocker.commit().await.expect("release budget row");
-    assert!(matches!(
-        reserve_task
+    let reservation = reserve_task
+        .await
+        .expect("reservation task")
+        .expect("reserve");
+    let Reservation::Granted {
+        id: reserved_id,
+        reserved_at,
+    } = reservation
+    else {
+        if let Reservation::Denied { retry_at, .. } = reservation {
+            assert!(
+                retry_at >= released_at,
+                "cooldown denial returned stale retry_at {retry_at} before lock release {released_at}"
+            );
+        }
+        panic!("expired cooldown should grant a reservation");
+    };
+    assert!(
+        reserved_at >= released_at,
+        "reservation timestamp {reserved_at} predates lock release {released_at}"
+    );
+    let persisted_reserved_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT reserved_at FROM steam.web_api_reservations WHERE id = $1")
+            .bind(reserved_id)
+            .fetch_one(db.pool())
             .await
-            .expect("reservation task")
-            .expect("reserve"),
-        Reservation::Granted { .. }
-    ));
+            .expect("persisted reservation slot");
+    assert!(persisted_reserved_at >= released_at);
 
     let Reservation::Granted { id, .. } = reserve(db.pool(), "clock_probe", CallerClass::Standard)
         .await
