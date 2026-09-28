@@ -126,7 +126,7 @@ BEGIN
            AND NEW.send_channel_id IS DISTINCT FROM OLD.send_channel_id
            AND (cardinality(OLD.sent_message_ids) > 0
                 OR OLD.status IN ('sending', 'delivery_unknown', 'sent')
-                OR OLD.attempts > 0 AND (
+                OR OLD.send_attempt_id IS NOT NULL AND (
                     OLD.recovery_outcome IS DISTINCT FROM 'not_delivered'
                     OR OLD.recovery_checked_at IS NULL
                 )) THEN

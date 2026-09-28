@@ -402,6 +402,38 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET recovery_outcome = 'partial'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
+    let partial_delivery_channel_change = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET send_channel_id = 9928016
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("partial delivery must keep its original channel for recovery");
+    assert_eq!(
+        error_code(&partial_delivery_channel_change),
+        Some("23514".to_string())
+    );
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET recovery_outcome = 'not_delivered'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
     let stale_recovery_reuse = sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', send_lease_expires_at = now() + interval '1 minute'
