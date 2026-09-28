@@ -116,27 +116,20 @@ async fn rolling_caps_are_atomic_under_competing_callers() {
     .fetch_one(db.pool())
     .await
     .expect("seed completed attempt");
-    sqlx::query("UPDATE steam.web_api_budget SET last_pruned_at = NULL WHERE id = true")
-        .execute(db.pool())
-        .await
-        .expect("make pruning due");
     reserve(db.pool(), "brain", CallerClass::Standard)
         .await
-        .expect("trigger prune");
+        .expect("new reservation after old attempts");
     let pending_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM steam.web_api_reservations WHERE id = $1)")
             .bind(pending_id)
             .fetch_one(db.pool())
             .await
             .expect("pending attempt exists");
-    let completed_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM steam.web_api_reservations WHERE id = $1)")
-            .bind(completed_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("completed attempt pruned");
     assert!(pending_exists);
-    assert!(!completed_exists);
+    let completed = observe(db.pool(), completed_id, Some(200), None)
+        .await
+        .expect("retry old completed observation");
+    assert!(completed.duplicate);
     assert!(observe(db.pool(), pending_id, Some(429), Some("90"))
         .await
         .is_ok());

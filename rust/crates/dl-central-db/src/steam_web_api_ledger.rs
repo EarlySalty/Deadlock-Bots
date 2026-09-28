@@ -100,12 +100,8 @@ pub async fn reserve(
     }
 
     let mut tx = pool.begin().await?;
-    let (now, cooldown_until, last_pruned_at): (
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-    ) = sqlx::query_as(
-        "SELECT clock_timestamp(), cooldown_until, last_pruned_at
+    let (now, cooldown_until): (DateTime<Utc>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT clock_timestamp(), cooldown_until
            FROM steam.web_api_budget
           WHERE id = true
           FOR UPDATE",
@@ -165,24 +161,6 @@ pub async fn reserve(
     .bind(now)
     .fetch_one(&mut *tx)
     .await?;
-
-    if last_pruned_at.is_none_or(|last| last + Duration::seconds(30) <= now) {
-        sqlx::query(
-            "DELETE FROM steam.web_api_reservations
-              WHERE id IN (
-                  SELECT id FROM steam.web_api_reservations
-                   WHERE reserved_at <= $1 AND response_at IS NOT NULL
-                   ORDER BY reserved_at LIMIT 500
-              )",
-        )
-        .bind(now - Duration::hours(48))
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("UPDATE steam.web_api_budget SET last_pruned_at = $1 WHERE id = true")
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-    }
 
     tx.commit().await?;
     Ok(Reservation::Granted { id, reserved_at })
