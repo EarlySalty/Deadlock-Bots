@@ -100,14 +100,17 @@ pub async fn reserve(
     }
 
     let mut tx = pool.begin().await?;
-    let (now, cooldown_until): (DateTime<Utc>, Option<DateTime<Utc>>) = sqlx::query_as(
-        "SELECT clock_timestamp(), cooldown_until
+    let cooldown_until: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT cooldown_until
            FROM steam.web_api_budget
           WHERE id = true
           FOR UPDATE",
     )
     .fetch_one(&mut *tx)
     .await?;
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
 
     if let Some(retry_at) = cooldown_until.filter(|deadline| *deadline > now) {
         tx.commit().await?;
@@ -181,13 +184,15 @@ pub async fn observe(
     let retry_after = retry_after.filter(|header| header.len() <= 128);
 
     let mut tx = pool.begin().await?;
-    let (now, previous_cooldown, previous_streak): (DateTime<Utc>, Option<DateTime<Utc>>, i32) =
-        sqlx::query_as(
-            "SELECT clock_timestamp(), cooldown_until, consecutive_429
+    let (previous_cooldown, previous_streak): (Option<DateTime<Utc>>, i32) = sqlx::query_as(
+        "SELECT cooldown_until, consecutive_429
            FROM steam.web_api_budget
           WHERE id = true
           FOR UPDATE",
-        )
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *tx)
         .await?;
     let previous: Option<StoredReservation> = sqlx::query_as(

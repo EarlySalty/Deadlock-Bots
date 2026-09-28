@@ -3,6 +3,7 @@ use dl_central_db::steam_web_api_ledger::{
     observe, reserve, CallerClass, DenialReason, LedgerError, Reservation,
 };
 use dl_central_db::test_pool;
+use sqlx::PgPool;
 
 #[tokio::test]
 #[ignore = "requires central_test_db.sh"]
@@ -230,4 +231,112 @@ async fn cooldown_and_response_survive_new_client_and_count_failed_attempts() {
         .expect("overlong header is idempotent");
     assert!(repeated.duplicate);
     alternate_pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires central_test_db.sh"]
+async fn budget_time_is_read_after_waiting_for_the_row_lock() {
+    let db = test_pool().await.expect("isolated migrated database");
+    let application_name = format!("ledger_clock_probe_{}", std::process::id());
+    let probe_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            db.pool()
+                .connect_options()
+                .as_ref()
+                .clone()
+                .application_name(&application_name),
+        )
+        .await
+        .expect("independent probe connection");
+
+    let mut blocker = db.pool().begin().await.expect("budget blocker");
+    let _: bool =
+        sqlx::query_scalar("SELECT id FROM steam.web_api_budget WHERE id = true FOR UPDATE")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("lock budget row");
+    sqlx::query(
+        "UPDATE steam.web_api_budget
+            SET cooldown_until = clock_timestamp() + interval '1 second'
+          WHERE id = true",
+    )
+    .execute(&mut *blocker)
+    .await
+    .expect("set short cooldown");
+
+    let reserve_pool = probe_pool.clone();
+    let reserve_task =
+        tokio::spawn(
+            async move { reserve(&reserve_pool, "clock_probe", CallerClass::Standard).await },
+        );
+    wait_until_probe_is_blocked(db.pool(), &application_name).await;
+    sqlx::query("SELECT pg_sleep(1.1)")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold lock past cooldown");
+    blocker.commit().await.expect("release budget row");
+    assert!(matches!(
+        reserve_task
+            .await
+            .expect("reservation task")
+            .expect("reserve"),
+        Reservation::Granted { .. }
+    ));
+
+    let Reservation::Granted { id, .. } = reserve(db.pool(), "clock_probe", CallerClass::Standard)
+        .await
+        .expect("observation reservation")
+    else {
+        panic!("expired cooldown should allow reservation");
+    };
+    let mut blocker = db.pool().begin().await.expect("observation blocker");
+    let _: bool =
+        sqlx::query_scalar("SELECT id FROM steam.web_api_budget WHERE id = true FOR UPDATE")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("lock budget row for observation");
+
+    let observe_pool = probe_pool.clone();
+    let observe_task =
+        tokio::spawn(async move { observe(&observe_pool, id, Some(200), None).await });
+    wait_until_probe_is_blocked(db.pool(), &application_name).await;
+    sqlx::query("SELECT pg_sleep(1.1)")
+        .execute(&mut *blocker)
+        .await
+        .expect("hold observation lock");
+    let released_at: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("read lock release time");
+    blocker.commit().await.expect("release observation row");
+    let observation = observe_task
+        .await
+        .expect("observation task")
+        .expect("observe");
+    assert!(observation.response_at >= released_at);
+
+    probe_pool.close().await;
+}
+
+async fn wait_until_probe_is_blocked(pool: &PgPool, application_name: &str) {
+    for _ in 0..1_000 {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM pg_stat_activity
+                 WHERE application_name = $1
+                   AND wait_event_type = 'Lock'
+            )",
+        )
+        .bind(application_name)
+        .fetch_one(pool)
+        .await
+        .expect("inspect probe lock state");
+        if blocked {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("probe did not wait for the budget row lock");
 }
