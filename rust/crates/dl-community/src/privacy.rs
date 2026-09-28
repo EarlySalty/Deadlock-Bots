@@ -1104,6 +1104,20 @@ const NULLABLE_USER_COLUMNS: &[TableSpec] = &[
         "reviewer_user_id",
         ColumnType::I64,
     ),
+    TableSpec::new(
+        "guild_settings",
+        "updated_by_user_id",
+        "patchnotes.guild_settings",
+        "updated_by_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "guild_dispatch",
+        "approved_by_user_id",
+        "patchnotes.guild_dispatch",
+        "approved_by_user_id",
+        ColumnType::I64,
+    ),
 ];
 
 const STEAM_SIDE_TABLES: &[TableSpec] = &[
@@ -5025,6 +5039,65 @@ mod tests {
         .await
         .expect("remaining event log");
         assert_eq!(remaining, ["foreign"]);
+    }
+
+    #[tokio::test]
+    async fn patchnotes_guild_actor_ids_werden_exportiert_und_beim_loeschen_genullt() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42)")
+            .execute(pool)
+            .await
+            .expect("core user");
+        sqlx::query("INSERT INTO patchnotes.guild_settings(guild_id, updated_by_user_id) VALUES (9984201, 42)")
+            .execute(pool)
+            .await
+            .expect("guild settings");
+        sqlx::query("INSERT INTO patchnotes.changelog_posts(id, title, url) VALUES (9984202, 'privacy patch', 'https://example.invalid/privacy-patch')")
+            .execute(pool)
+            .await
+            .expect("patch post");
+        sqlx::query(
+            "INSERT INTO patchnotes.guild_dispatch(
+                 guild_id, patch_id, revision_hash, approved_by_user_id, approved_at
+             ) VALUES (9984201, 9984202, $1, 42, now())",
+        )
+        .bind("a".repeat(64))
+        .execute(pool)
+        .await
+        .expect("dispatch approval");
+
+        let export = export_user_data(pool, 42, 1_000)
+            .await
+            .expect("privacy export");
+        let settings = &export["tables"]["guild_settings.updated_by_user_id"];
+        let dispatch = &export["tables"]["guild_dispatch.approved_by_user_id"];
+        assert_eq!(settings.as_array().expect("settings rows").len(), 1);
+        assert_eq!(settings[0]["updated_by_user_id"], 42);
+        assert_eq!(dispatch.as_array().expect("dispatch rows").len(), 1);
+        assert_eq!(dispatch[0]["approved_by_user_id"], 42);
+
+        let summary = delete_user_data(pool, 42, "test".into(), 2_000)
+            .await
+            .expect("privacy delete");
+        assert_eq!(
+            summary.counts.get("guild_settings.updated_by_user_id"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.counts.get("guild_dispatch.approved_by_user_id"),
+            Some(&1)
+        );
+        let remaining: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT s.updated_by_user_id, d.approved_by_user_id
+               FROM patchnotes.guild_settings s
+               JOIN patchnotes.guild_dispatch d USING (guild_id)
+              WHERE s.guild_id = 9984201",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("redacted actor ids");
+        assert_eq!(remaining, (None, None));
     }
 
     #[tokio::test]
