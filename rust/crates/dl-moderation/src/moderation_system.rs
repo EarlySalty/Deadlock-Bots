@@ -257,8 +257,15 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 None,
                 behavior_signal.as_ref(),
             );
-            self.persist_execute_and_post(guild_id, event, verdict, behavior_signal, decision)
-                .await;
+            self.persist_execute_and_post(
+                guild_id,
+                event,
+                verdict,
+                behavior_signal,
+                decision,
+                false,
+            )
+            .await;
             return;
         }
 
@@ -369,8 +376,18 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             .await;
             return;
         };
-        self.persist_execute_and_post(guild_id, event, verdict, behavior_signal, decision)
-            .await;
+        let unresolved_consistency = content_evaluation
+            .as_ref()
+            .is_some_and(|evaluation| evaluation.unresolved_consistency);
+        self.persist_execute_and_post(
+            guild_id,
+            event,
+            verdict,
+            behavior_signal,
+            decision,
+            unresolved_consistency,
+        )
+        .await;
     }
 
     async fn persist_non_action_decision(
@@ -411,6 +428,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         verdict: ModerationVerdict,
         behavior_signal: Option<BehaviorSignal>,
         decision: PolicyDecision,
+        unresolved_consistency: bool,
     ) {
         let action = match decision {
             PolicyDecision::AutoExecute { .. } => "auto_execute",
@@ -556,6 +574,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             verdict,
             behavior_signal,
             policy_decision: decision.clone(),
+            unresolved_consistency,
             executed_actions,
             mirrored_image_count: evidence_file_count,
         });
@@ -1818,6 +1837,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benign_voting_image_has_no_review_case_or_sanction() {
+        let (moderator, port) = memory_image_moderator(
+            &[r#"{"category":"other","confidence":0.86,"reason":"Nur ein harmloses Voting-/Event-Poster mit Pizzen („Who’s next?“, „You have 0 votes“, „Vote for your favorite pizza“); kein sichtbarer Scam-/Phishing-, Gewinn- oder Auszahlungsversprechen."}"#],
+            &[r#"{"confirmed":false,"category":"other","confidence":0.92,"reason":"Kein sichtbarer Scam-/Phishing-Inhalt, nur eine Abstimmung."}"#],
+            None,
+            vec![42],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+
+        moderator
+            .handle_message(&image_event(
+                200,
+                42,
+                100,
+                now - 90 * 24 * 3600,
+                Some(now - 30 * 24 * 3600),
+            ))
+            .await;
+
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].action, "ignored");
+        assert!(moderator.store.review_messages.lock().await.is_empty());
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn benign_burst_rate_does_not_create_review_case() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_moderator(
@@ -1887,7 +1938,7 @@ mod tests {
         assert!(!serialized.contains("100%"));
         assert!(serialized.contains("Nachrichten"));
         assert!(serialized.contains("Kanäle"));
-        assert!(serialized.contains("scam"));
+        assert!(serialized.contains("Betrugsversuch"));
     }
 
     #[tokio::test]
@@ -2167,6 +2218,9 @@ mod tests {
         assert_eq!(draft.action, "proposed");
         assert_eq!(draft.timeout_minutes, Some(60));
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
+        let embed = port.posted_embeds.lock().await.pop().expect("review embed");
+        assert!(embed.to_string().contains("Grund für manuelle Prüfung"));
+        assert!(embed.to_string().contains("Keine automatische Sanktion"));
     }
 
     #[tokio::test]

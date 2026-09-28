@@ -94,7 +94,7 @@ pub(crate) fn high_confidence_scam_verification_conflict(
 }
 
 fn explicit_scam_reason(reason: &str) -> bool {
-    let reason = reason.to_ascii_lowercase();
+    let reason = reason.to_lowercase();
     let explicit_scam = [
         "scam-muster",
         "scammuster",
@@ -111,37 +111,170 @@ fn explicit_scam_reason(reason: &str) -> bool {
         "sichtbarer scam",
         "scam bestätigt",
         "scam bestaetigt",
-    ]
-    .iter()
-    .any(|needle| reason.contains(needle));
+    ];
 
-    if !explicit_scam {
+    reason
+        .split([';', '.', '!', '?', '\n'])
+        .flat_map(|part| part.split(" aber "))
+        .flat_map(|part| part.split(" doch "))
+        .flat_map(|part| part.split(" stattdessen "))
+        .flat_map(|part| part.split(" jedoch "))
+        .flat_map(|part| part.split(" hingegen "))
+        .flat_map(|part| part.split(" sondern "))
+        .flat_map(|part| part.split(" allerdings "))
+        .any(|part| {
+            explicit_scam.iter().any(|needle| {
+                part.match_indices(needle)
+                    .any(|(index, _)| scam_mention_is_asserted(part, index, needle.len()))
+            })
+        })
+}
+
+fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
+    let prefix = &part[..index];
+    let suffix = part[index + length..].trim_start_matches('-');
+    if prefix.ends_with("anti-")
+        || prefix.ends_with("gegen-")
+        || ["schutz", "hinweis", "warnung", "prävention", "praevention"]
+            .iter()
+            .any(|safe_suffix| suffix.starts_with(safe_suffix))
+    {
+        return false;
+    }
+    let before = prefix
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let context = before.as_slice();
+    if context.iter().enumerate().any(|(position, word)| {
+        if (*word == "nicht"
+            && context.get(position + 1).is_some_and(|next| {
+                matches!(*next, "harmlos" | "im" | "in" | "auf" | "am" | "bei")
+            }))
+            || (matches!(*word, "kein" | "keine" | "keinen")
+                && context.get(position + 1) == Some(&"zweifel"))
+        {
+            return false;
+        }
+        let trailing = &context[position + 1..];
+        let assertion = [
+            "sichtbarer scam",
+            "klarer scam",
+            "eindeutiger scam",
+            "krypto-scam",
+            "crypto-scam",
+        ]
+        .iter()
+        .any(|assertion| part[index..].starts_with(assertion));
+        if assertion
+            && (trailing
+                .iter()
+                .rev()
+                .take(2)
+                .any(|word| matches!(*word, "und" | "oder"))
+                || prefix
+                    .rsplit_once(',')
+                    .is_some_and(|(_, tail)| tail.trim().is_empty()))
+        {
+            return false;
+        }
+        if let Some(previous_mention) = trailing
+            .iter()
+            .rposition(|word| matches!(*word, "scam" | "phishing" | "betrug" | "betrugsversuch"))
+        {
+            if !trailing[previous_mention + 1..]
+                .iter()
+                .all(|word| matches!(*word, "und" | "oder" | "sowie"))
+            {
+                return false;
+            }
+        }
+        matches!(
+            *word,
+            "kein"
+                | "keine"
+                | "keinen"
+                | "keinem"
+                | "keiner"
+                | "keines"
+                | "nicht"
+                | "ohne"
+                | "weder"
+                | "fehlt"
+                | "fehlend"
+                | "unklar"
+                | "verdacht"
+                | "möglich"
+                | "moeglich"
+                | "möglicher"
+                | "moeglicher"
+                | "könnte"
+                | "koennte"
+                | "wirkt"
+                | "vermutlich"
+                | "reporting"
+                | "bericht"
+                | "berichtet"
+                | "warnung"
+                | "warnt"
+                | "warnen"
+                | "zitat"
+                | "zitiert"
+                | "zitierte"
+        )
+    }) {
         return false;
     }
 
-    let uncertainty_or_safe_context = [
-        "kein scam",
-        "kein betrug",
-        "kein phishing",
-        "nicht eindeutig",
-        "nicht belegt",
-        "nicht klar",
-        "möglich",
-        "moeglich",
-        "könnte",
-        "koennte",
-        "verdacht",
-        "unklar",
-        "wirkt wie",
-        "reporting",
-        "warnung",
-        "warnt",
-        "zitat",
-    ]
-    .iter()
-    .any(|needle| reason.contains(needle));
-
-    !uncertainty_or_safe_context
+    let after = part[index + length..]
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    if after.iter().enumerate().any(|(position, word)| {
+        matches!(
+            *word,
+            "unbelegt" | "unbestätigt" | "unbestaetigt" | "zitiert" | "zitierte"
+        ) && !after[..position].iter().any(|prior| {
+            matches!(
+                *prior,
+                "und" | "oder" | "scam" | "phishing" | "betrugsversuch"
+            )
+        })
+    }) || after.iter().enumerate().any(|(position, word)| {
+        let lead = &after[..position];
+        matches!(*word, "warnung" | "bericht" | "reporting" | "zitat")
+            && !lead.contains(&"ohne")
+            && !lead.contains(&"und")
+            && !lead.contains(&"oder")
+            && (position == 0 || lead.iter().any(|word| matches!(*word, "als" | "im" | "in")))
+    }) {
+        return false;
+    }
+    !after.iter().take(3).enumerate().any(|(position, word)| {
+        if *word == "weder" {
+            return true;
+        }
+        *word == "nicht"
+            && after[position + 1..].iter().take(3).any(|word| {
+                matches!(
+                    *word,
+                    "eindeutig"
+                        | "belegt"
+                        | "klar"
+                        | "sichtbar"
+                        | "bestätigt"
+                        | "bestaetigt"
+                        | "nachweisbar"
+                        | "erkennbar"
+                        | "vorhanden"
+                        | "sehen"
+                        | "erkennen"
+                        | "festgestellt"
+                        | "nachweisen"
+                )
+            })
+    })
 }
 
 fn raw_envelope(raw_text: Option<&str>, parsed: Option<Value>) -> String {
@@ -286,6 +419,71 @@ mod tests {
             0.99,
             "Eindeutiger Scam."
         ));
+    }
+
+    #[test]
+    fn negated_scam_mentions_do_not_create_conflicts() {
+        let reasons = [
+            "Nur ein harmloses Voting-/Event-Poster mit Pizzen („Who’s next?“, „You have 0 votes“, „Vote for your favorite pizza“); kein sichtbarer Scam-/Phishing-, Gewinn- oder Auszahlungsversprechen.",
+            "Keine konkreten Scam-Merkmale im Screenshot.",
+            "Ohne Anzeichen für einen Betrugsversuch oder Phishing.",
+            "Phishing ist nicht sichtbar.",
+            "Ein Scam-Muster ist nicht belegt.",
+            "Warnung vor sichtbarem Phishing, keine Werbung.",
+            "Der Screenshot zitiert einen sichtbaren Scam als Warnung.",
+            "Eine Phishing-Warnung im Bericht.",
+            "Kein Scam und Phishing sichtbar.",
+            "Keine Anzeichen für Phishing, Scam oder Betrugsversuch.",
+            "Phishing ist weder sichtbar noch plausibel.",
+            "Phishing ist nicht zu sehen.",
+            "Anti-Phishing-Hinweis ohne Werbelink.",
+            "Phishing-Schutz ist hier die einzige Aussage.",
+            "Phishing lässt sich nicht nachweisen.",
+            "Keine auf dem Poster oder in den Bildunterschriften erkennbaren Hinweise auf Phishing.",
+        ];
+        for reason in reasons {
+            assert!(
+                !high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.92, reason),
+                "{reason}"
+            );
+            let verification = VerificationDecision {
+                confirmed: false,
+                category: ModerationCategory::Other,
+                confidence: 0.92,
+                reason: reason.to_string(),
+                raw_json: "{}".to_string(),
+            };
+            assert!(
+                !high_confidence_scam_verification_conflict(&verification),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn asserted_scam_survives_unrelated_negation_and_warning_context() {
+        for reason in [
+            "Kein Phishing, aber ein sichtbarer Scam mit Auszahlungsversprechen.",
+            "Keine Scam-Merkmale im ersten Bild; im zweiten ein klarer Scam.",
+            "Eine Warnung vor Phishing; danach bewirbt der Post einen Krypto-Scam.",
+            "Das ist nicht harmlos: sichtbarer Scam mit Promo-Code.",
+            "Sichtbarer Scam ohne Reporting-Kontext.",
+            "Ohne Phishing ist dies ein sichtbarer Scam.",
+            "Kein Spam und sichtbarer Scam.",
+            "Sichtbarer Scam und Warnung an Moderatoren.",
+            "Kein Phishing, doch sichtbarer Scam mit Promo-Code.",
+            "Kein Phishing, stattdessen sichtbarer Scam mit Auszahlungsversprechen.",
+            "Nicht im ersten Bild, sichtbarer Scam im zweiten.",
+            "Kein Phishing und Krypto-Scam.",
+            "Sichtbarer Scam im Bild und Warnung an Moderatoren.",
+            "Kein Zweifel: sichtbarer Scam.",
+            "Sichtbarer Scam und Phishing ist unbestätigt.",
+        ] {
+            assert!(
+                high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.90, reason),
+                "{reason}"
+            );
+        }
     }
 
     #[test]

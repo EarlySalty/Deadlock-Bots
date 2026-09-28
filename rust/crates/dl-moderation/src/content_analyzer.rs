@@ -732,6 +732,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benign_voting_image_does_not_trigger_consistency_retry() {
+        let vision = Arc::new(RecordingVision::default());
+        vision.responses.lock().await.push(
+            r#"{"category":"other","confidence":0.86,"reason":"Nur ein harmloses Voting-/Event-Poster mit Pizzen („Who’s next?“, „You have 0 votes“, „Vote for your favorite pizza“); kein sichtbarer Scam-/Phishing-, Gewinn- oder Auszahlungsversprechen."}"#.to_string(),
+        );
+        let verifier_vision = Arc::new(RecordingVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":false,"category":"other","confidence":0.92,"reason":"Kein sichtbarer Scam-/Phishing-Inhalt, nur eine Abstimmung."}"#.to_string(),
+        );
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                Arc::new(RecordingText::default()),
+                Some(vision.clone()),
+                ContentAnalyzerConfig::default(),
+            ),
+            ContentVerifier::new(
+                Arc::new(RecordingText::default()),
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig::default(),
+            ),
+            0.5,
+        );
+
+        let evaluation = pipeline
+            .evaluate_with_analysis(&ModerationInput::new(
+                "",
+                vec!["https://example.test/voting.png".to_string()],
+            ))
+            .await;
+
+        assert_eq!(evaluation.analysis.category, ModerationCategory::Other);
+        assert_eq!(evaluation.analysis.confidence, 0.86);
+        let verdict = evaluation.verdict.expect("verified benign verdict");
+        assert!(!verdict.verification.confirmed);
+        assert_eq!(verdict.verification.category, ModerationCategory::Other);
+        assert_eq!(verdict.verification.confidence, 0.92);
+        assert!(!evaluation.unresolved_consistency);
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[1]);
+        assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[1]);
+    }
+
+    #[tokio::test]
+    async fn suspicious_other_analysis_still_reaches_verifier() {
+        let vision = Arc::new(RecordingVision::default());
+        vision.responses.lock().await.push(
+            r#"{"category":"other","confidence":0.90,"reason":"Verspricht Gewinne gegen Vorauszahlung und verlangt Zugangsdaten."}"#.to_string(),
+        );
+        let verifier_vision = Arc::new(RecordingVision::default());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":true,"category":"scam","confidence":0.92,"reason":"Sichtbarer Scam mit Auszahlungsversprechen."}"#.to_string(),
+        );
+        let pipeline = ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                Arc::new(RecordingText::default()),
+                Some(vision.clone()),
+                ContentAnalyzerConfig::default(),
+            ),
+            ContentVerifier::new(
+                Arc::new(RecordingText::default()),
+                Some(verifier_vision.clone()),
+                ContentVerifierConfig::default(),
+            ),
+            0.5,
+        );
+
+        let evaluation = pipeline
+            .evaluate_with_analysis(&ModerationInput::new(
+                "",
+                vec!["https://example.test/offer.png".to_string()],
+            ))
+            .await;
+
+        let verdict = evaluation.verdict.expect("verifier must assess other");
+        assert!(verdict.verification.confirmed);
+        assert_eq!(verdict.verification.category, ModerationCategory::Scam);
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[1]);
+        assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[1]);
+    }
+
+    #[tokio::test]
     async fn pipeline_calls_verifier_for_flagged_analysis() {
         let text = Arc::new(RecordingText::default());
         text.responses

@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::action_policy::{ModerationAction, PolicyDecision};
-use crate::behavior_detector::BehaviorSignal;
-use crate::moderation_verdict::ModerationVerdict;
+use crate::behavior_detector::{BehaviorSignal, BehaviorTriggerType};
+use crate::moderation_verdict::{ModerationCategory, ModerationVerdict};
 
 const DISCORD_FIELD_LIMIT: usize = 1024;
 
@@ -16,6 +16,7 @@ pub struct CompactCaseEmbedInput {
     pub verdict: ModerationVerdict,
     pub behavior_signal: Option<BehaviorSignal>,
     pub policy_decision: PolicyDecision,
+    pub unresolved_consistency: bool,
     pub executed_actions: Vec<String>,
     pub mirrored_image_count: usize,
 }
@@ -38,13 +39,15 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
             "inline": true,
         }),
         json!({
-            "name": "Sicherheit",
+            "name": "Urteilssicherheit",
             "value": format!(
-                "Analyse {:.0}% · Verifikation {:.0}%",
+                "Analyse: {} ({:.0}%)\nPrüfung: {} ({:.0}%)\nDie Werte zeigen die Sicherheit des jeweiligen Urteils, nicht die Scam-Wahrscheinlichkeit.",
+                category_label(&input.verdict.analysis.category),
                 input.verdict.analysis.confidence * 100.0,
+                verification_label(&input.verdict),
                 input.verdict.verification.confidence * 100.0
             ),
-            "inline": true,
+            "inline": false,
         }),
         json!({
             "name": "Begründung",
@@ -57,6 +60,13 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
             "inline": false,
         }),
     ];
+    if input.unresolved_consistency {
+        fields.push(json!({
+            "name": "Grund für manuelle Prüfung",
+            "value": "Analyse und Prüfung widersprechen sich auch nach erneuter Prüfung. Keine automatische Sanktion.",
+            "inline": false,
+        }));
+    }
     if let Some(signal) = &input.behavior_signal {
         fields.push(json!({
             "name": "Verhaltensmuster",
@@ -187,10 +197,45 @@ fn effective_category_label(
         if verdict.trigger == signal.trigger_label()
             && verdict.verification.reason == signal.reason_code
         {
-            return signal.trigger_label().to_string();
+            let label = match signal.trigger_type {
+                BehaviorTriggerType::AccountTakeover => "Mögliche Kontoübernahme",
+                BehaviorTriggerType::BurstRate => "Viele Nachrichten in kurzer Zeit",
+                BehaviorTriggerType::YoungAccountBurst => "Viele Nachrichten von neuem Konto",
+                BehaviorTriggerType::ImageMultichannel => "Bilder in mehreren Kanälen",
+                BehaviorTriggerType::ForeignInvite => "Fremde Einladung",
+                BehaviorTriggerType::Keyword => "Auffälliges Stichwort",
+            };
+            return format!("Verhaltensmuster: {label}");
         }
     }
-    verdict.verification.category.as_label().to_string()
+    let label = category_label(&verdict.verification.category);
+    if verdict.verification.confirmed {
+        label.to_string()
+    } else {
+        format!("{label} (nicht bestätigt)")
+    }
+}
+
+fn category_label(category: &ModerationCategory) -> &'static str {
+    match category {
+        ModerationCategory::Scam => "Betrugsversuch",
+        ModerationCategory::Csam => "Sexualisierte Inhalte mit Minderjährigen",
+        ModerationCategory::NsfwExplicit => "Expliziter sexueller Inhalt",
+        ModerationCategory::Harassment => "Belästigung",
+        ModerationCategory::HateSpeech => "Hassrede",
+        ModerationCategory::RagebaitOk => "Provokation ohne Regelverstoß",
+        ModerationCategory::GameRelatedOk => "Spielbezogen, unauffällig",
+        ModerationCategory::Other => "Sonstiges",
+    }
+}
+
+fn verification_label(verdict: &ModerationVerdict) -> String {
+    let label = category_label(&verdict.verification.category);
+    if verdict.verification.confirmed {
+        format!("Bestätigt: {label}")
+    } else {
+        format!("Nicht bestätigt: {label}")
+    }
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -241,6 +286,7 @@ mod tests {
                 action: ModerationAction::Timeout,
                 timeout_minutes: 1440,
             },
+            unresolved_consistency: false,
             executed_actions: vec!["delete:ok".to_string(), "timeout:ok".to_string()],
             mirrored_image_count: 0,
         });
@@ -265,6 +311,52 @@ mod tests {
 
         assert!(serialized.contains("aimod:accept:case-123"));
         assert!(serialized.contains("Übernehmen"));
+    }
+
+    #[test]
+    fn unconfirmed_verdict_and_unresolved_conflict_are_explicit() {
+        let verdict = ModerationVerdict {
+            analysis: ContentAnalysis {
+                category: ModerationCategory::Other,
+                confidence: 0.86,
+                reason: "Analysegrund".to_string(),
+                raw_json: "{}".to_string(),
+            },
+            verification: VerificationDecision {
+                confirmed: false,
+                category: ModerationCategory::Scam,
+                confidence: 0.92,
+                reason: "Prüfgrund".to_string(),
+                raw_json: "{}".to_string(),
+            },
+            trigger: "Bild".to_string(),
+        };
+        let embed = build_compact_case_embed(&CompactCaseEmbedInput {
+            guild_id: 1,
+            channel_id: 2,
+            message_id: 3,
+            user_id: 4,
+            user_tag: "Anna".to_string(),
+            verdict,
+            behavior_signal: None,
+            policy_decision: PolicyDecision::Proposal {
+                timeout_minutes: 60,
+            },
+            unresolved_consistency: true,
+            executed_actions: Vec::new(),
+            mirrored_image_count: 0,
+        });
+        let fields = embed["fields"].as_array().expect("fields");
+        assert_eq!(fields[2]["value"], "Betrugsversuch (nicht bestätigt)");
+        let certainty = fields[3]["value"].as_str().expect("certainty");
+        assert!(certainty.contains("Analyse: Sonstiges (86%)"));
+        assert!(certainty.contains("Prüfung: Nicht bestätigt: Betrugsversuch (92%)"));
+        assert!(certainty.contains("nicht die Scam-Wahrscheinlichkeit"));
+        assert_eq!(fields[6]["name"], "Grund für manuelle Prüfung");
+        assert!(fields[6]["value"]
+            .as_str()
+            .expect("review reason")
+            .contains("widersprechen"));
     }
 
     #[test]
@@ -319,6 +411,7 @@ mod tests {
                 action: ModerationAction::Ban,
                 timeout_minutes: 1440,
             },
+            unresolved_consistency: false,
             executed_actions: Vec::new(),
             mirrored_image_count: 1,
         });
