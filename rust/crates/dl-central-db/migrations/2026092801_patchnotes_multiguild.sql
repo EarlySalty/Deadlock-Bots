@@ -179,6 +179,18 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
 
+        IF NEW.status = 'sent'
+           AND OLD.status = 'sending'
+           AND NEW.recovery_outcome IS NOT NULL THEN
+            RAISE EXCEPTION 'live patchnotes send cannot carry a recovery outcome'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.recovery_outcome = 'partial' AND NEW.status <> 'failed' THEN
+            RAISE EXCEPTION 'partial patchnotes delivery must be recorded as terminal failure'
+                USING ERRCODE = '23514';
+        END IF;
+
         IF OLD.approved_at IS NULL THEN
             IF OLD.approved_by_user_id IS NOT NULL THEN
                 RAISE EXCEPTION 'patchnotes approval identity requires an approval transition'
@@ -186,13 +198,16 @@ BEGIN
             END IF;
 
             IF OLD.status = 'awaiting_approval' AND NEW.status = 'pending' THEN
-                IF configured_approval_mode <> 'manual'
-                   OR NEW.approved_by_user_id IS NULL
-                   OR NEW.approved_at IS NOT NULL THEN
-                    RAISE EXCEPTION 'patchnotes approval must be an explicit manual approval transition'
+                IF configured_approval_mode = 'manual' THEN
+                    IF NEW.approved_by_user_id IS NULL OR NEW.approved_at IS NOT NULL THEN
+                        RAISE EXCEPTION 'patchnotes approval must be an explicit manual approval transition'
+                            USING ERRCODE = '23514';
+                    END IF;
+                    NEW.approved_at := clock_timestamp();
+                ELSIF NEW.approved_by_user_id IS NOT NULL OR NEW.approved_at IS NOT NULL THEN
+                    RAISE EXCEPTION 'automatic patchnotes release cannot carry manual approval evidence'
                         USING ERRCODE = '23514';
                 END IF;
-                NEW.approved_at := clock_timestamp();
             ELSIF NEW.approved_by_user_id IS NOT NULL OR NEW.approved_at IS NOT NULL THEN
                 RAISE EXCEPTION 'patchnotes approval evidence requires an awaiting-approval transition'
                     USING ERRCODE = '23514';

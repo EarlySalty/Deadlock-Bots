@@ -454,6 +454,44 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .execute(db.pool())
     .await?;
 
+    let automatic_release_hash = "7".repeat(64);
+    sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
+         VALUES ($1, $2, $3, 'awaiting_approval')",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind(&automatic_release_hash)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET approval_mode = 'automatic' WHERE guild_id = $1",
+    )
+    .bind(manual_guild)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET status = 'pending'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind(&automatic_release_hash)
+    .execute(db.pool())
+    .await?;
+    let automatic_release: (String, Option<i64>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT status, approved_by_user_id, approved_at
+               FROM patchnotes.guild_dispatch
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(manual_guild)
+        .bind(patch_id)
+        .bind(&automatic_release_hash)
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(automatic_release, ("pending".to_string(), None, None));
+
     let delivery_unknown = sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'delivery_unknown', send_lease_expires_at = NULL
@@ -607,6 +645,22 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&confirmed_delivery_hash)
     .execute(db.pool())
     .await?;
+    for outcome in ["partial", "not_delivered"] {
+        let invalid_send_result = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sent', sent_message_ids = ARRAY[9928015]::BIGINT[],
+                    recovery_outcome = $4, recovery_checked_at = now()
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_one)
+        .bind(patch_id)
+        .bind(&confirmed_delivery_hash)
+        .bind(outcome)
+        .execute(db.pool())
+        .await
+        .expect_err("live send cannot be marked sent with a recovery result");
+        assert_eq!(error_code(&invalid_send_result), Some("23514".to_string()));
+    }
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'delivery_unknown', send_lease_expires_at = NULL
@@ -676,6 +730,19 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&partial_hash)
     .execute(db.pool())
     .await?;
+    let provisional_partial = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET sent_message_ids = ARRAY[9928018]::BIGINT[],
+                recovery_outcome = 'partial', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&partial_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("partial delivery must be recorded with terminal failure");
+    assert_eq!(error_code(&provisional_partial), Some("23514".to_string()));
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'failed', sent_message_ids = ARRAY[9928018]::BIGINT[],
