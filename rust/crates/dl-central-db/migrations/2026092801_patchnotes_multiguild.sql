@@ -67,7 +67,14 @@ CREATE TABLE patchnotes.guild_dispatch (
         REFERENCES patchnotes.changelog_posts (id)
         ON DELETE RESTRICT,
     CONSTRAINT patchnotes_guild_dispatch_message_ids_check
-        CHECK (array_position(sent_message_ids, NULL) IS NULL AND 0 < ALL(sent_message_ids)),
+        CHECK (
+            array_position(sent_message_ids, NULL) IS NULL
+            AND 0 < ALL(sent_message_ids)
+            AND (
+                array_ndims(sent_message_ids) IS NULL
+                OR (array_ndims(sent_message_ids) = 1 AND array_lower(sent_message_ids, 1) = 1)
+            )
+        ),
     CONSTRAINT patchnotes_guild_dispatch_mention_snapshot_check
         CHECK (
             (mention_strategy_snapshot IS NULL AND mention_role_id_snapshot IS NULL)
@@ -122,6 +129,15 @@ CREATE TABLE patchnotes.guild_dispatch (
         CHECK (approved_by_user_id IS NULL OR approved_at IS NOT NULL)
 );
 
+CREATE TABLE patchnotes.guild_patch_ping_guard (
+    guild_id BIGINT NOT NULL CHECK (guild_id > 0),
+    patch_id BIGINT NOT NULL CHECK (patch_id > 0),
+    revision_hash TEXT NOT NULL CHECK (revision_hash ~ '^[0-9a-f]{64}$'),
+    first_send_attempt_id UUID NOT NULL,
+    first_send_started_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (guild_id, patch_id)
+);
+
 CREATE INDEX patchnotes_guild_dispatch_retry_idx
     ON patchnotes.guild_dispatch (guild_id, next_attempt_at, updated_at)
     WHERE status IN ('pending', 'retry');
@@ -138,6 +154,8 @@ DECLARE
     configured_channel_id BIGINT;
     configured_mention_strategy TEXT;
     configured_role_id BIGINT;
+    distinct_message_count BIGINT;
+    claimed_revision_hash TEXT;
 BEGIN
     SELECT approval_mode, enabled, channel_id, mention_strategy, role_id
       INTO configured_approval_mode, configured_enabled, configured_channel_id,
@@ -221,6 +239,37 @@ BEGIN
                 RAISE EXCEPTION 'patchnotes send retry requires a frozen mention plan'
                     USING ERRCODE = '23514';
             END IF;
+
+            IF NEW.send_started_at IS NULL
+               OR NEW.send_started_at < statement_timestamp() - interval '1 second'
+               OR NEW.send_started_at > clock_timestamp()
+               OR NEW.send_lease_expires_at IS NULL
+               OR NEW.send_lease_expires_at <= clock_timestamp()
+               OR NEW.send_lease_expires_at < NEW.send_started_at + interval '1 minute'
+               OR NEW.send_lease_expires_at > NEW.send_started_at + interval '10 minutes' THEN
+                RAISE EXCEPTION 'patchnotes send lease must remain active for one to ten minutes from its current start'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            IF NEW.mention_strategy_snapshot IN ('role', 'everyone') THEN
+                INSERT INTO patchnotes.guild_patch_ping_guard (
+                    guild_id, patch_id, revision_hash, first_send_attempt_id, first_send_started_at
+                ) VALUES (
+                    NEW.guild_id, NEW.patch_id, NEW.revision_hash,
+                    NEW.send_attempt_id, NEW.send_started_at
+                ) ON CONFLICT (guild_id, patch_id) DO NOTHING;
+
+                SELECT revision_hash
+                  INTO claimed_revision_hash
+                  FROM patchnotes.guild_patch_ping_guard
+                 WHERE guild_id = NEW.guild_id AND patch_id = NEW.patch_id
+                 FOR UPDATE;
+
+                IF claimed_revision_hash IS DISTINCT FROM NEW.revision_hash THEN
+                    RAISE EXCEPTION 'patchnotes patch already has a send claim for another revision'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
         ELSIF (NEW.mention_strategy_snapshot, NEW.mention_role_id_snapshot)
               IS DISTINCT FROM (OLD.mention_strategy_snapshot, OLD.mention_role_id_snapshot) THEN
             RAISE EXCEPTION 'patchnotes mention plan is immutable after the first send attempt'
@@ -233,7 +282,7 @@ BEGIN
                 OR OLD.status NOT IN ('sending', 'delivery_unknown')
                 OR NEW.status NOT IN ('sending', 'delivery_unknown', 'sent', 'failed')
                 OR NEW.mention_strategy_snapshot NOT IN ('role', 'everyone')
-                OR NOT NEW.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
+                OR NEW.sent_message_ids[1] IS DISTINCT FROM NEW.ping_message_id
                 OR (
                     OLD.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
                     AND NOT (
@@ -241,6 +290,14 @@ BEGIN
                         AND NEW.status = 'sent'
                         AND NEW.recovery_outcome = 'delivered'
                         AND NEW.recovery_checked_at IS NOT NULL
+                        AND OLD.sent_message_ids = ARRAY[NEW.ping_message_id]::BIGINT[]
+                    )
+                )
+                OR (
+                    NOT OLD.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
+                    AND (
+                        cardinality(OLD.sent_message_ids) <> 0
+                        OR cardinality(NEW.sent_message_ids) <> 1
                     )
                 )) THEN
             RAISE EXCEPTION 'patchnotes ping evidence can only record one newly confirmed message'
@@ -364,10 +421,18 @@ BEGIN
             END IF;
         END IF;
 
-        IF cardinality(OLD.sent_message_ids) > 0
-           AND NOT NEW.sent_message_ids @> OLD.sent_message_ids THEN
-            RAISE EXCEPTION 'patchnotes sent message evidence cannot be removed'
-                USING ERRCODE = '23514';
+        IF NEW.sent_message_ids IS DISTINCT FROM OLD.sent_message_ids THEN
+            SELECT count(DISTINCT message_id)
+              INTO distinct_message_count
+              FROM unnest(NEW.sent_message_ids) AS sent(message_id);
+
+            IF cardinality(NEW.sent_message_ids) < cardinality(OLD.sent_message_ids)
+               OR NEW.sent_message_ids[1:cardinality(OLD.sent_message_ids)]
+                  IS DISTINCT FROM OLD.sent_message_ids
+               OR distinct_message_count <> cardinality(NEW.sent_message_ids) THEN
+                RAISE EXCEPTION 'patchnotes sent message evidence must remain an ordered unique prefix'
+                    USING ERRCODE = '23514';
+            END IF;
         END IF;
 
         IF OLD.send_channel_id IS NOT NULL
@@ -567,6 +632,8 @@ $$;
 GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml, dl_patchnotes_privacy;
 GRANT dl_patchnotes_privacy TO deadlock;
 REVOKE ALL ON TABLE patchnotes.guild_settings, patchnotes.guild_dispatch FROM PUBLIC;
+REVOKE ALL ON TABLE patchnotes.guild_patch_ping_guard
+    FROM PUBLIC, dl_patchnotes_dml, dl_patchnotes_privacy;
 REVOKE DELETE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
 REVOKE UPDATE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
 GRANT SELECT, INSERT, UPDATE, DELETE ON patchnotes.guild_settings TO dl_patchnotes_dml;
