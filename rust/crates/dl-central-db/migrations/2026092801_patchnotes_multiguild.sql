@@ -110,7 +110,13 @@ BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.status NOT IN ('pending', 'awaiting_approval')
            OR NEW.approved_by_user_id IS NOT NULL
-           OR NEW.approved_at IS NOT NULL THEN
+           OR NEW.approved_at IS NOT NULL
+           OR cardinality(NEW.sent_message_ids) > 0
+           OR NEW.send_attempt_id IS NOT NULL
+           OR NEW.send_started_at IS NOT NULL
+           OR NEW.send_lease_expires_at IS NOT NULL
+           OR NEW.recovery_outcome IS NOT NULL
+           OR NEW.recovery_checked_at IS NOT NULL THEN
             RAISE EXCEPTION 'patchnotes dispatch must start without send or approval evidence'
                 USING ERRCODE = '23514';
         END IF;
@@ -252,8 +258,9 @@ BEGIN
                 OR NEW.recovery_checked_at IS NULL
                 OR NEW.recovery_checked_at < OLD.send_started_at
                 OR NEW.recovery_checked_at > clock_timestamp()
-                OR (NEW.recovery_outcome <> 'not_delivered'
-                    AND NOT (NEW.status = 'failed' AND NEW.recovery_outcome = 'partial'))) THEN
+                OR NEW.status NOT IN ('retry', 'failed')
+                OR (NEW.recovery_outcome = 'partial' AND NEW.status <> 'failed')
+                OR NEW.recovery_outcome = 'delivered') THEN
             RAISE EXCEPTION 'patchnotes retry requires a checked not-delivered result or terminal partial result'
                 USING ERRCODE = '23514';
         END IF;
@@ -309,7 +316,7 @@ BEGIN
             SELECT 1
               FROM patchnotes.guild_dispatch
              WHERE guild_id = NEW.guild_id
-               AND status = 'sending'
+               AND status IN ('sending', 'delivery_unknown', 'retry')
                AND approved_at IS NULL
        ) THEN
         RAISE EXCEPTION 'manual approval mode conflicts with an unapproved active dispatch'

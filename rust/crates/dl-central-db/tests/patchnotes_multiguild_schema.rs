@@ -353,6 +353,20 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await
     .expect_err("manual approval is required before sending");
     assert_eq!(error_code(&unapproved_send), Some("23514".to_string()));
+    let preloaded_recovery = sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch
+             (guild_id, patch_id, revision_hash, status, sent_message_ids,
+              send_attempt_id, send_started_at, recovery_outcome, recovery_checked_at)
+         VALUES ($1, $2, $3, 'awaiting_approval', ARRAY[9928014]::BIGINT[],
+                 '00000000-0000-0000-0000-000000000008'::UUID, now(), 'not_delivered', now())",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind("a".repeat(64))
+    .execute(db.pool())
+    .await
+    .expect_err("new dispatch cannot start with preloaded delivery evidence");
+    assert_eq!(error_code(&preloaded_recovery), Some("23514".to_string()));
     let unapproved_sent = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch
              (guild_id, patch_id, revision_hash, status, send_channel_id, sent_message_ids, approved_at)
@@ -497,6 +511,34 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await
     .expect_err("unknown delivery cannot be retried before reconciliation");
     assert_eq!(error_code(&blind_retry), Some("23514".to_string()));
+
+    let manual_mode_with_unknown = sqlx::query(
+        "UPDATE patchnotes.guild_settings SET approval_mode = 'manual' WHERE guild_id = $1",
+    )
+    .bind(guild_one)
+    .execute(db.pool())
+    .await
+    .expect_err("manual mode cannot inherit an unapproved unknown delivery");
+    assert_eq!(
+        error_code(&manual_mode_with_unknown),
+        Some("23514".to_string())
+    );
+
+    for blocked_status in ["pending", "awaiting_approval"] {
+        let stranded_recovery = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = $4, recovery_outcome = 'not_delivered', recovery_checked_at = now()
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_one)
+        .bind(patch_id)
+        .bind(&recovery_hash)
+        .bind(blocked_status)
+        .execute(db.pool())
+        .await
+        .expect_err("not-delivered recovery cannot strand dispatch outside retry");
+        assert_eq!(error_code(&stranded_recovery), Some("23514".to_string()));
+    }
 
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
@@ -706,12 +748,17 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
-    sqlx::query(
+    let manual_mode_with_retry = sqlx::query(
         "UPDATE patchnotes.guild_settings SET approval_mode = 'manual' WHERE guild_id = $1",
     )
     .bind(guild_one)
     .execute(db.pool())
-    .await?;
+    .await
+    .expect_err("manual mode cannot inherit an unapproved retry");
+    assert_eq!(
+        error_code(&manual_mode_with_retry),
+        Some("23514".to_string())
+    );
 
     let invalid_status = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
@@ -802,7 +849,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         .await?;
     let recreate_sent = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
-         VALUES ($1, $2, $3, 'awaiting_approval')",
+         VALUES ($1, $2, $3, 'pending')",
     )
     .bind(guild_one)
     .bind(patch_id)
