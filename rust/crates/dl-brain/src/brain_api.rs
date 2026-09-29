@@ -1,4 +1,4 @@
-//! Opt-in implementation of the existing command answer port. No runtime wiring.
+//! Opt-in implementation of the existing command answer port.
 //! Auth, allowlists, commands, cooldowns and Discord formatting stay in their current owners.
 use crate::{AiAnswerer, BrainError, BrainOutcome};
 use brain_client::{AnswerProfile, AnswerStatus, AsyncBrainClient, PublicAnswerResponse, Query};

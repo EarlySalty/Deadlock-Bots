@@ -8,11 +8,11 @@ Der Adapter verwendet ausschließlich den kanonischen `AsyncBrainClient` aus Dea
 
 `runtime.ai.brain_client_mode` in der normalen `bot.toml` steuert ausschließlich die Composition:
 
-- `legacy` — Default; bisheriger `SharedBrainAnswerer`
-- `typed` — sichtbare Antworten ausschließlich über brain-serve
-- `shadow` — bisherige Antwort bleibt sichtbar, der typisierte Client läuft zusätzlich report-only
+- `legacy`: Default; bisheriger `SharedBrainAnswerer`
+- `typed`: sichtbare Antworten ausschließlich über brain-serve
+- `shadow`: bisherige Antwort bleibt sichtbar, der typisierte Client läuft zusätzlich report-only
 
-Für `typed`/`shadow` stehen `runtime.ai.brain_api_endpoint` und `runtime.ai.brain_api_scopes` als typisierte Werte in derselben Datei; `runtime.ai.brain_api_timeout_ms` ist optional und beträgt ohne Angabe 8000 Millisekunden. Der Endpunkt muss lokal sein, Scopes müssen nichtleer und gültig sein. Der API-Token kommt ausschließlich als `BRAIN_API_TOKEN` über den bestehenden Infisical-Secret-Bootstrap und steht niemals in der TOML. Bei fehlender oder ungültiger Konfiguration scheitert der Start, statt den Command still abzuschalten. Die bestehenden `BRAIN_CMD_ENABLED`-, Channel-Allowlist-, Open-Test-, Cooldown-, Längen- und Emoji-/Ausgabe-Regeln bleiben bestehen.
+Für `typed`/`shadow` stehen `runtime.ai.brain_api_endpoint` und `runtime.ai.brain_api_scopes` als typisierte Werte in derselben Datei; `runtime.ai.brain_api_timeout_ms` ist optional und beträgt ohne Angabe 8000 Millisekunden. Der Endpunkt muss lokal sein, Scopes müssen nichtleer und gültig sein. Der API-Token kommt ausschließlich als `BRAIN_API_TOKEN` über den bestehenden Infisical-Secret-Bootstrap und steht niemals in der TOML. Eine ungültige TOML-Konfiguration wird beim Laden abgewiesen. Fehlt der Token, scheitert der Start bei der Registrierung des typisierten Commands; bei `BRAIN_CMD_ENABLED=false` oder ohne gültige Channel-Allowlist wird der Adapter nicht erstellt und der Command bleibt unregistriert. Die bestehenden `BRAIN_CMD_ENABLED`-, Channel-Allowlist-, Open-Test-, Cooldown-, Längen- und Emoji-/Ausgabe-Regeln bleiben bestehen.
 
 Im `shadow`-Modus protokolliert `ReportOnlyShadowBrainAnswerer` nur grobe Ergebnisarten des typisierten Pfads. Er verändert die sichtbare Antwort nicht und führt keine Merge-/Deployment-Aktion aus.
 

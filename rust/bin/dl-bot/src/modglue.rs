@@ -656,14 +656,11 @@ fn brain_embed_title(question: &str) -> String {
 
 fn truncate_brain_description(description: &str) -> String {
     let description = description.trim();
-    if description.chars().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
+    if description.encode_utf16().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
         return description.to_string();
     }
 
-    let mut truncated = description
-        .chars()
-        .take(BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT)
-        .collect::<String>();
+    let mut truncated = truncate_brain_chars(description, BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT, "");
     let trimmed_len = truncated.trim_end().len();
     truncated.truncate(trimmed_len);
     truncated.push_str(" …");
@@ -4221,6 +4218,11 @@ mod tests {
             BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT + " …".chars().count()
         );
         assert!(description.ends_with(" …"));
+
+        let emoji_description =
+            truncate_brain_description(&"🧠".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT));
+        assert!(emoji_description.encode_utf16().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT);
+        assert!(emoji_description.ends_with(" …"));
     }
 
     #[tokio::test]
