@@ -39,7 +39,7 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
         "patchnotes.guild_dispatch",
         "PRIMARY KEY (guild_id, patch_id, revision_hash)",
         "revision_hash TEXT NOT NULL CHECK (revision_hash ~ '^[0-9a-f]{64}$')",
-        "status IN ('pending', 'awaiting_approval', 'sending', 'delivery_unknown', 'sent', 'retry', 'failed')",
+        "status IN ('pending', 'awaiting_approval', 'sending', 'delivery_unknown', 'sent', 'retry', 'failed', 'rejected', 'expired')",
         "send_channel_id BIGINT",
         "sent_message_ids BIGINT[] NOT NULL DEFAULT ARRAY[]::BIGINT[]",
         "send_attempt_id UUID",
@@ -51,6 +51,12 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
         "unknown delivery must be reconciled as delivered before marking sent",
         "unknown patchnotes delivery must be reconciled before another send attempt",
         "new patchnotes send attempt cannot reuse a prior recovery result",
+        "patchnotes send requires an enabled guild and its configured channel",
+        "patchnotes sent message evidence requires an active send attempt",
+        "rejected or expired patchnotes request is terminal",
+        "patchnotes approval identity can only be anonymized by privacy erasure",
+        "patchnotes.approve_dispatch",
+        "patchnotes.anonymize_dispatch_approvals",
     ] {
         assert!(sql.contains(expected), "Dispatch-Vertrag fehlt: {expected}");
     }
@@ -78,25 +84,38 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     let guild_one = 9_928_001_i64;
     let guild_two = 9_928_002_i64;
     let manual_guild = 9_928_005_i64;
+    let disabled_guild = 9_928_011_i64;
     let patch_id = 9_928_003_i64;
     let missing_patch_id = 9_928_006_i64;
     let invalid_status_patch_id = 9_928_007_i64;
     let hash_one = "a".repeat(64);
     let hash_two = "b".repeat(64);
 
-    for guild_id in [guild_one, guild_two, manual_guild] {
+    for guild_id in [guild_one, guild_two, manual_guild, disabled_guild] {
         sqlx::query("INSERT INTO patchnotes.guild_settings (guild_id) VALUES ($1)")
             .bind(guild_id)
             .execute(db.pool())
             .await?;
     }
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET enabled = TRUE, channel_id = 9928004 WHERE guild_id = $1",
+    )
+    .bind(guild_one)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET enabled = TRUE, channel_id = 9928011 WHERE guild_id = $1",
+    )
+    .bind(manual_guild)
+    .execute(db.pool())
+    .await?;
 
     let defaults: (bool, Vec<String>, Vec<String>, String, String) = sqlx::query_as(
         "SELECT enabled, source_selection, section_selection, language, approval_mode
            FROM patchnotes.guild_settings
           WHERE guild_id = $1",
     )
-    .bind(guild_one)
+    .bind(disabled_guild)
     .fetch_one(db.pool())
     .await?;
     assert_eq!(
@@ -155,6 +174,61 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&hash_one)
     .execute(db.pool())
     .await?;
+    let forged_evidence = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET sent_message_ids = ARRAY[9928010]::BIGINT[],
+                send_attempt_id = '00000000-0000-0000-0000-000000000013'::UUID,
+                send_started_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_two)
+    .bind(patch_id)
+    .bind(&hash_one)
+    .execute(db.pool())
+    .await
+    .expect_err("pending dispatch cannot acquire fabricated send evidence");
+    assert_eq!(error_code(&forged_evidence), Some("23514".to_string()));
+
+    let disabled_hash = "1".repeat(64);
+    sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(disabled_guild)
+    .bind(patch_id)
+    .bind(&disabled_hash)
+    .execute(db.pool())
+    .await?;
+    let disabled_send = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928012,
+                send_attempt_id = '00000000-0000-0000-0000-000000000011'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(disabled_guild)
+    .bind(patch_id)
+    .bind(&disabled_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("disabled guild cannot start a patchnotes send");
+    assert_eq!(error_code(&disabled_send), Some("23514".to_string()));
+
+    let wrong_channel = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928012,
+                send_attempt_id = '00000000-0000-0000-0000-000000000012'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&hash_one)
+    .execute(db.pool())
+    .await
+    .expect_err("send must use the configured patchnotes channel");
+    assert_eq!(error_code(&wrong_channel), Some("23514".to_string()));
+
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', send_attempt_id = '00000000-0000-0000-0000-000000000010'::UUID,
@@ -285,6 +359,10 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    sqlx::query("UPDATE patchnotes.guild_settings SET channel_id = 9928014 WHERE guild_id = $1")
+        .bind(guild_one)
+        .execute(db.pool())
+        .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', send_channel_id = 9928014,
@@ -297,6 +375,19 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+
+    let premature_retry = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("active send lease blocks a not-delivered retry");
+    assert_eq!(error_code(&premature_retry), Some("23514".to_string()));
 
     let unapproved_mode_switch = sqlx::query(
         "UPDATE patchnotes.guild_settings SET approval_mode = 'manual' WHERE guild_id = $1",
@@ -339,6 +430,41 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(manual_guild)
     .execute(db.pool())
     .await?;
+    for (approval_hash, terminal_status) in
+        [("4".repeat(64), "rejected"), ("5".repeat(64), "expired")]
+    {
+        sqlx::query(
+            "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
+             VALUES ($1, $2, $3, 'awaiting_approval')",
+        )
+        .bind(manual_guild)
+        .bind(patch_id)
+        .bind(&approval_hash)
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            "UPDATE patchnotes.guild_dispatch SET status = $4
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(manual_guild)
+        .bind(patch_id)
+        .bind(&approval_hash)
+        .bind(terminal_status)
+        .execute(db.pool())
+        .await?;
+        let reopen_request = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch SET status = 'pending'
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(manual_guild)
+        .bind(patch_id)
+        .bind(&approval_hash)
+        .execute(db.pool())
+        .await
+        .expect_err("rejected or expired approval request cannot be sent later");
+        assert_eq!(error_code(&reopen_request), Some("23514".to_string()));
+    }
+
     let unapproved_send = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch
              (guild_id, patch_id, revision_hash, status, send_channel_id,
@@ -435,16 +561,36 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await
     .expect_err("approval time must be assigned by the database transition");
     assert_eq!(error_code(&forged_approval_time), Some("23514".to_string()));
-    sqlx::query(
-        "UPDATE patchnotes.guild_dispatch
-            SET status = 'pending', approved_by_user_id = 9928012
+    let mut direct_approval_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *direct_approval_tx)
+        .await?;
+    let direct_approval = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET approved_by_user_id = 9928012
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(manual_guild)
     .bind(patch_id)
     .bind("d".repeat(64))
-    .execute(db.pool())
-    .await?;
+    .execute(&mut *direct_approval_tx)
+    .await
+    .expect_err("runtime role must use the approval transition function");
+    assert_eq!(error_code(&direct_approval), Some("42501".to_string()));
+    direct_approval_tx.rollback().await?;
+
+    let mut approval_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *approval_tx)
+        .await?;
+    let approved: bool = sqlx::query_scalar("SELECT patchnotes.approve_dispatch($1, $2, $3, $4)")
+        .bind(manual_guild)
+        .bind(patch_id)
+        .bind("d".repeat(64))
+        .bind(9928012_i64)
+        .fetch_one(&mut *approval_tx)
+        .await?;
+    assert!(approved);
+    approval_tx.commit().await?;
     let approval_time: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
         sqlx::query_as(
             "SELECT approved_at, created_at FROM patchnotes.guild_dispatch
@@ -468,6 +614,66 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind("d".repeat(64))
     .execute(db.pool())
     .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sent', sent_message_ids = ARRAY[9928015]::BIGINT[],
+                send_lease_expires_at = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind("d".repeat(64))
+    .execute(db.pool())
+    .await?;
+    let mut direct_anonymize_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *direct_anonymize_tx)
+        .await?;
+    sqlx::query("SELECT set_config('patchnotes.privacy_erasure_user_id', '9928012', true)")
+        .execute(&mut *direct_anonymize_tx)
+        .await?;
+    let direct_anonymize = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET approved_by_user_id = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind("d".repeat(64))
+    .execute(&mut *direct_anonymize_tx)
+    .await
+    .expect_err("runtime role cannot directly erase approval identity");
+    assert_eq!(error_code(&direct_anonymize), Some("42501".to_string()));
+    direct_anonymize_tx.rollback().await?;
+
+    let mut privacy_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *privacy_tx)
+        .await?;
+    let anonymized: i64 = sqlx::query_scalar("SELECT patchnotes.anonymize_dispatch_approvals($1)")
+        .bind(9928012_i64)
+        .fetch_one(&mut *privacy_tx)
+        .await?;
+    assert_eq!(anonymized, 1);
+    privacy_tx.commit().await?;
+    let anonymized_dispatch: (
+        String,
+        Option<i64>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Vec<i64>,
+    ) = sqlx::query_as(
+        "SELECT status, approved_by_user_id, approved_at, sent_message_ids
+           FROM patchnotes.guild_dispatch
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind("d".repeat(64))
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(anonymized_dispatch.0, "sent");
+    assert_eq!(anonymized_dispatch.1, None);
+    assert_eq!(anonymized_dispatch.2, Some(approval_time.0));
+    assert_eq!(anonymized_dispatch.3, vec![9_928_015]);
 
     let automatic_release_hash = "7".repeat(64);
     sqlx::query(
@@ -643,6 +849,10 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    sqlx::query("UPDATE patchnotes.guild_settings SET channel_id = 9928016 WHERE guild_id = $1")
+        .bind(guild_one)
+        .execute(db.pool())
+        .await?;
     let stale_recovery_reuse = sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', send_lease_expires_at = now() + interval '1 minute'
@@ -680,7 +890,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'sending', send_channel_id = 9928014,
+            SET status = 'sending', send_channel_id = 9928016,
                 send_attempt_id = '00000000-0000-0000-0000-000000000004'::UUID,
                 send_started_at = now() - interval '2 minutes',
                 send_lease_expires_at = now() - interval '1 minute'
@@ -740,7 +950,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await?;
     assert_eq!(
         recovered,
-        ("sent".to_string(), Some(9_928_014), vec![9_928_015])
+        ("sent".to_string(), Some(9_928_016), vec![9_928_015])
     );
 
     let partial_hash = "9".repeat(64);
@@ -755,7 +965,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'sending', send_channel_id = 9928017,
+            SET status = 'sending', send_channel_id = 9928016,
                 send_attempt_id = '00000000-0000-0000-0000-000000000006'::UUID,
                 send_started_at = now() - interval '2 minutes',
                 send_lease_expires_at = now() - interval '1 minute'
@@ -960,9 +1170,27 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     )
     .fetch_one(db.pool())
     .await?;
+    let can_update_approval: bool = sqlx::query_scalar(
+        "SELECT has_column_privilege(
+            'dl_patchnotes_dml', 'patchnotes.guild_dispatch', 'approved_by_user_id', 'UPDATE'
+        )",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    let can_anonymize: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege(
+            'dl_patchnotes_dml',
+            'patchnotes.anonymize_dispatch_approvals(bigint)',
+            'EXECUTE'
+        )",
+    )
+    .fetch_one(db.pool())
+    .await?;
     assert!(can_insert);
     assert!(!can_delete);
     assert!(!can_create);
+    assert!(!can_update_approval);
+    assert!(can_anonymize);
 
     let mut dml_tx = db.pool().begin().await?;
     sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
@@ -1013,7 +1241,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .execute(&mut *update_tx)
     .await
     .expect_err("runtime role cannot mutate a sent guild identity");
-    assert_eq!(error_code(&mutate_sent_identity), Some("23514".to_string()));
+    assert_eq!(error_code(&mutate_sent_identity), Some("42501".to_string()));
     update_tx.rollback().await?;
 
     let mut duplicate_tx = db.pool().begin().await?;
@@ -1039,10 +1267,28 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         .bind(race_guild)
         .execute(db.pool())
         .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET enabled = TRUE, channel_id = 9928022 WHERE guild_id = $1",
+    )
+    .bind(race_guild)
+    .execute(db.pool())
+    .await?;
     let mut dispatch_tx = db.pool().begin().await?;
     sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
          VALUES ($1, $2, $3, 'pending')",
+    )
+    .bind(race_guild)
+    .bind(patch_id)
+    .bind(&race_hash)
+    .execute(&mut *dispatch_tx)
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928022,
+                send_attempt_id = '00000000-0000-0000-0000-000000000007'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(race_guild)
     .bind(patch_id)
@@ -1058,12 +1304,10 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
             .execute(&mut *tx)
             .await?;
         update_started.send(()).ok();
-        sqlx::query(
-            "UPDATE patchnotes.guild_settings SET approval_mode = 'manual' WHERE guild_id = $1",
-        )
-        .bind(race_guild)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE patchnotes.guild_settings SET enabled = FALSE WHERE guild_id = $1")
+            .bind(race_guild)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await
     });
     update_started_rx.await?;
@@ -1090,20 +1334,42 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     settings_update.await??;
     assert!(settings_update_waiting);
 
-    let raced_send = sqlx::query(
+    sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'sending', send_channel_id = 9928022,
-                send_attempt_id = '00000000-0000-0000-0000-000000000007'::UUID,
-                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+            SET status = 'sent', sent_message_ids = ARRAY[9928023]::BIGINT[],
+                send_lease_expires_at = NULL
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(race_guild)
     .bind(patch_id)
     .bind(&race_hash)
     .execute(db.pool())
+    .await?;
+
+    let paused_hash = "9".repeat(64);
+    sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
+         VALUES ($1, $2, $3, 'pending')",
+    )
+    .bind(race_guild)
+    .bind(patch_id)
+    .bind(&paused_hash)
+    .execute(db.pool())
+    .await?;
+    let paused_send = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928022,
+                send_attempt_id = '00000000-0000-0000-0000-000000000008'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(race_guild)
+    .bind(patch_id)
+    .bind(&paused_hash)
+    .execute(db.pool())
     .await
-    .expect_err("concurrent manual-mode change must guard the next send");
-    assert_eq!(error_code(&raced_send), Some("23514".to_string()));
+    .expect_err("paused guild cannot start a new send after an in-flight send completes");
+    assert_eq!(error_code(&paused_send), Some("23514".to_string()));
 
     Ok(())
 }

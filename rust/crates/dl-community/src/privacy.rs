@@ -2804,8 +2804,7 @@ async fn select_json_user_rows_for_user(
             JsonUserColumnExport::GenericProjected => {
                 let sql = format!(
                     "SELECT row_to_json(t)::text AS row_json FROM (SELECT id, {} FROM {} WHERE EXISTS (SELECT 1 FROM unnest($1::TEXT[]) AS target(target_ref) WHERE scrim.jsonb_contains_user_ref({}, target.target_ref)) ORDER BY id) t",
-                    spec.col,
-                    spec.relation, spec.col
+                    spec.col, spec.relation, spec.col
                 );
                 sqlx::query(&sql)
                     .bind(target_refs)
@@ -2826,10 +2825,7 @@ async fn select_json_user_rows_for_user(
             JsonUserColumnExport::HashOnly => {
                 let sql = format!(
                     "SELECT row_to_json(t)::text AS row_json FROM (SELECT id, jsonb_build_object('md5', md5(COALESCE({}, 'null'::jsonb)::text)) AS {} FROM {} WHERE EXISTS (SELECT 1 FROM unnest($1::TEXT[]) AS target(target_ref) WHERE scrim.jsonb_contains_user_ref({}, target.target_ref)) ORDER BY id) t",
-                    spec.col,
-                    spec.col,
-                    spec.relation,
-                    spec.col
+                    spec.col, spec.col, spec.relation, spec.col
                 );
                 sqlx::query(&sql)
                     .bind(target_refs)
@@ -3784,6 +3780,22 @@ pub async fn delete_user_data(
         counts.insert("user_privacy_updated".to_string(), 1);
     }
 
+    if relations.contains("patchnotes.guild_dispatch") {
+        sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+            .execute(&mut *tx)
+            .await?;
+        let anonymized =
+            sqlx::query_scalar::<_, i64>("SELECT patchnotes.anonymize_dispatch_approvals($1)")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query("RESET ROLE").execute(&mut *tx).await?;
+        counts.insert(
+            "patchnotes.guild_dispatch.approved_by_user_id".to_string(),
+            anonymized,
+        );
+    }
+
     for (key, value) in
         redact_json_user_columns(&mut tx, &relations, &user_key, &target_refs).await?
     {
@@ -3882,7 +3894,7 @@ pub async fn delete_user_data(
     }
 
     for &spec in NULLABLE_USER_COLUMNS {
-        if !relations.contains(spec.relation) {
+        if spec.relation == "patchnotes.guild_dispatch" || !relations.contains(spec.relation) {
             continue;
         }
         let n = null_user_column(&mut tx, spec, user_id, &user_key).await?;
@@ -4759,6 +4771,69 @@ mod runtime_gate_privacy_tests {
         )
         .execute(db.pool())
         .await?;
+        let guild_id = 9_928_041_i64;
+        let patch_id = 9_928_042_i64;
+        let revision_hash = "a".repeat(64);
+        sqlx::query(
+            "INSERT INTO patchnotes.guild_settings (guild_id, enabled, channel_id, approval_mode)
+             VALUES ($1, TRUE, 9928043, 'manual')",
+        )
+        .bind(guild_id)
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO patchnotes.changelog_posts (id, title, url)
+             VALUES ($1, 'privacy contract', 'https://example.invalid/privacy-contract')",
+        )
+        .bind(patch_id)
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
+             VALUES ($1, $2, $3, 'awaiting_approval')",
+        )
+        .bind(guild_id)
+        .bind(patch_id)
+        .bind(&revision_hash)
+        .execute(db.pool())
+        .await?;
+        let mut dispatch_tx = db.pool().begin().await?;
+        sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+            .execute(&mut *dispatch_tx)
+            .await?;
+        let approved: bool =
+            sqlx::query_scalar("SELECT patchnotes.approve_dispatch($1, $2, $3, $4)")
+                .bind(guild_id)
+                .bind(patch_id)
+                .bind(&revision_hash)
+                .bind(42_i64)
+                .fetch_one(&mut *dispatch_tx)
+                .await?;
+        assert!(approved);
+        sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sending', send_channel_id = 9928043,
+                    send_attempt_id = '00000000-0000-0000-0000-000000000041'::UUID,
+                    send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_id)
+        .bind(patch_id)
+        .bind(&revision_hash)
+        .execute(&mut *dispatch_tx)
+        .await?;
+        sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sent', sent_message_ids = ARRAY[9928044]::BIGINT[],
+                    send_lease_expires_at = NULL
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_id)
+        .bind(patch_id)
+        .bind(&revision_hash)
+        .execute(&mut *dispatch_tx)
+        .await?;
+        dispatch_tx.commit().await?;
         set_scrim_runtime_turniere(db.pool()).await?;
 
         delete_user_data(db.pool(), 42, "test".to_string(), 1_000).await?;
@@ -4768,6 +4843,25 @@ mod runtime_gate_privacy_tests {
                 .fetch_one(db.pool())
                 .await?;
         assert_eq!(remaining, 0);
+        let anonymized: (
+            String,
+            Option<i64>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Vec<i64>,
+        ) = sqlx::query_as(
+            "SELECT status, approved_by_user_id, approved_at, sent_message_ids
+                   FROM patchnotes.guild_dispatch
+                  WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_id)
+        .bind(patch_id)
+        .bind(&revision_hash)
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(anonymized.0, "sent");
+        assert_eq!(anonymized.1, None);
+        assert!(anonymized.2.is_some());
+        assert_eq!(anonymized.3, vec![9_928_044]);
         Ok(())
     }
 }

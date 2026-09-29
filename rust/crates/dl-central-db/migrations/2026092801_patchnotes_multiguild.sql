@@ -33,7 +33,7 @@ CREATE TABLE patchnotes.guild_dispatch (
     patch_id BIGINT NOT NULL CHECK (patch_id > 0),
     revision_hash TEXT NOT NULL CHECK (revision_hash ~ '^[0-9a-f]{64}$'),
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'awaiting_approval', 'sending', 'delivery_unknown', 'sent', 'retry', 'failed')),
+        CHECK (status IN ('pending', 'awaiting_approval', 'sending', 'delivery_unknown', 'sent', 'retry', 'failed', 'rejected', 'expired')),
     send_channel_id BIGINT CHECK (send_channel_id IS NULL OR send_channel_id > 0),
     sent_message_ids BIGINT[] NOT NULL DEFAULT ARRAY[]::BIGINT[],
     send_attempt_id UUID,
@@ -101,9 +101,11 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     configured_approval_mode TEXT;
+    configured_enabled BOOLEAN;
+    configured_channel_id BIGINT;
 BEGIN
-    SELECT approval_mode
-      INTO configured_approval_mode
+    SELECT approval_mode, enabled, channel_id
+      INTO configured_approval_mode, configured_enabled, configured_channel_id
       FROM patchnotes.guild_settings
      WHERE guild_id = NEW.guild_id
      FOR UPDATE;
@@ -159,6 +161,36 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
 
+        IF NEW.status = 'sending'
+           AND OLD.status IS DISTINCT FROM NEW.status
+           AND (configured_enabled IS DISTINCT FROM TRUE
+                OR configured_channel_id IS NULL
+                OR NEW.send_channel_id IS DISTINCT FROM configured_channel_id) THEN
+            RAISE EXCEPTION 'patchnotes send requires an enabled guild and its configured channel'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status IN ('rejected', 'expired')
+           AND OLD.status IS DISTINCT FROM NEW.status
+           AND (OLD.status <> 'awaiting_approval'
+                OR OLD.approved_at IS NOT NULL
+                OR OLD.approved_by_user_id IS NOT NULL
+                OR cardinality(OLD.sent_message_ids) > 0
+                OR OLD.send_attempt_id IS NOT NULL
+                OR OLD.send_started_at IS NOT NULL
+                OR OLD.recovery_outcome IS NOT NULL) THEN
+            RAISE EXCEPTION 'patchnotes approval request can only be rejected or expired before sending'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.sent_message_ids IS DISTINCT FROM OLD.sent_message_ids
+           AND (OLD.status NOT IN ('sending', 'delivery_unknown')
+                OR NEW.status NOT IN ('sending', 'delivery_unknown', 'sent', 'failed')
+                OR OLD.recovery_outcome IS NOT NULL) THEN
+            RAISE EXCEPTION 'patchnotes sent message evidence requires an active send attempt'
+                USING ERRCODE = '23514';
+        END IF;
+
         IF NEW.status = 'delivery_unknown'
            AND OLD.status IS DISTINCT FROM NEW.status
            AND OLD.status <> 'sending' THEN
@@ -177,6 +209,11 @@ BEGIN
            AND OLD.status IS DISTINCT FROM NEW.status
            AND OLD.status NOT IN ('sending', 'delivery_unknown') THEN
             RAISE EXCEPTION 'patchnotes retry requires a reconciled send attempt'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF OLD.status IN ('rejected', 'expired') AND NEW.status IS DISTINCT FROM OLD.status THEN
+            RAISE EXCEPTION 'rejected or expired patchnotes request is terminal'
                 USING ERRCODE = '23514';
         END IF;
 
@@ -220,11 +257,17 @@ BEGIN
                     USING ERRCODE = '23514';
             END IF;
         ELSE
-            IF NEW.approved_at IS DISTINCT FROM OLD.approved_at
-               OR (NEW.approved_by_user_id IS DISTINCT FROM OLD.approved_by_user_id
-                   AND NOT (OLD.approved_by_user_id IS NOT NULL
-                            AND NEW.approved_by_user_id IS NULL)) THEN
-                RAISE EXCEPTION 'patchnotes approval evidence cannot be changed or restored'
+            IF NEW.approved_at IS DISTINCT FROM OLD.approved_at THEN
+                RAISE EXCEPTION 'patchnotes approval timestamp cannot be changed'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            IF NEW.approved_by_user_id IS DISTINCT FROM OLD.approved_by_user_id
+               AND (OLD.approved_by_user_id IS NULL
+                    OR NEW.approved_by_user_id IS NOT NULL
+                    OR current_setting('patchnotes.privacy_erasure_user_id', true)
+                       IS DISTINCT FROM OLD.approved_by_user_id::TEXT) THEN
+                RAISE EXCEPTION 'patchnotes approval identity can only be anonymized by privacy erasure'
                     USING ERRCODE = '23514';
             END IF;
         END IF;
@@ -269,6 +312,12 @@ BEGIN
         END IF;
 
         IF OLD.status = 'sending' AND NEW.status = 'delivery_unknown'
+           AND OLD.send_lease_expires_at > clock_timestamp() THEN
+            RAISE EXCEPTION 'patchnotes send lease has not expired'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF OLD.status = 'sending' AND NEW.status IN ('retry', 'failed')
            AND OLD.send_lease_expires_at > clock_timestamp() THEN
             RAISE EXCEPTION 'patchnotes send lease has not expired'
                 USING ERRCODE = '23514';
@@ -356,6 +405,62 @@ CREATE TRIGGER patchnotes_guild_settings_manual_approval_trg
     BEFORE UPDATE OF approval_mode ON patchnotes.guild_settings
     FOR EACH ROW EXECUTE FUNCTION patchnotes.prevent_unapproved_manual_dispatch_mode();
 
+CREATE FUNCTION patchnotes.approve_dispatch(
+    p_guild_id BIGINT,
+    p_patch_id BIGINT,
+    p_revision_hash TEXT,
+    p_approver_user_id BIGINT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    changed_rows BIGINT;
+BEGIN
+    IF p_approver_user_id IS NULL OR p_approver_user_id <= 0 THEN
+        RAISE EXCEPTION 'patchnotes approval requires a positive user id'
+            USING ERRCODE = '23514';
+    END IF;
+
+    UPDATE patchnotes.guild_dispatch
+       SET status = 'pending', approved_by_user_id = p_approver_user_id
+     WHERE guild_id = p_guild_id
+       AND patch_id = p_patch_id
+       AND revision_hash = p_revision_hash
+       AND status = 'awaiting_approval'
+       AND approved_by_user_id IS NULL
+       AND approved_at IS NULL;
+    GET DIAGNOSTICS changed_rows = ROW_COUNT;
+    RETURN changed_rows = 1;
+END
+$$;
+
+CREATE FUNCTION patchnotes.anonymize_dispatch_approvals(p_user_id BIGINT)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    changed_rows BIGINT;
+BEGIN
+    IF p_user_id IS NULL OR p_user_id <= 0 THEN
+        RAISE EXCEPTION 'patchnotes privacy erasure requires a positive user id'
+            USING ERRCODE = '23514';
+    END IF;
+
+    PERFORM set_config('patchnotes.privacy_erasure_user_id', p_user_id::TEXT, true);
+    UPDATE patchnotes.guild_dispatch
+       SET approved_by_user_id = NULL
+     WHERE approved_by_user_id = p_user_id;
+    GET DIAGNOSTICS changed_rows = ROW_COUNT;
+    PERFORM set_config('patchnotes.privacy_erasure_user_id', '', true);
+    RETURN changed_rows;
+END
+$$;
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dl_patchnotes_dml') THEN
@@ -371,7 +476,28 @@ $$;
 GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml;
 REVOKE ALL ON TABLE patchnotes.guild_settings, patchnotes.guild_dispatch FROM PUBLIC;
 REVOKE DELETE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
+REVOKE UPDATE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
 GRANT SELECT, INSERT, UPDATE, DELETE ON patchnotes.guild_settings TO dl_patchnotes_dml;
-GRANT SELECT, INSERT, UPDATE ON patchnotes.guild_dispatch TO dl_patchnotes_dml;
+GRANT SELECT, INSERT ON patchnotes.guild_dispatch TO dl_patchnotes_dml;
+GRANT UPDATE (
+    status,
+    send_channel_id,
+    sent_message_ids,
+    send_attempt_id,
+    send_started_at,
+    send_lease_expires_at,
+    recovery_outcome,
+    recovery_checked_at,
+    attempts,
+    next_attempt_at,
+    last_error,
+    updated_at
+) ON patchnotes.guild_dispatch TO dl_patchnotes_dml;
 REVOKE EXECUTE ON FUNCTION patchnotes.validate_guild_dispatch_write() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION patchnotes.prevent_unapproved_manual_dispatch_mode() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION patchnotes.approve_dispatch(BIGINT, BIGINT, TEXT, BIGINT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION patchnotes.anonymize_dispatch_approvals(BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION patchnotes.approve_dispatch(BIGINT, BIGINT, TEXT, BIGINT)
+    TO dl_patchnotes_dml;
+GRANT EXECUTE ON FUNCTION patchnotes.anonymize_dispatch_approvals(BIGINT)
+    TO dl_patchnotes_dml;
