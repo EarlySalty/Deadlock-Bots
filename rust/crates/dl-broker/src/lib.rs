@@ -226,6 +226,10 @@ pub fn router(state: SharedBroker) -> Router {
             post(handlers::community_lobbies),
         )
         .route(
+            "/internal/master/v1/discord/streamer-voice-invite",
+            post(handlers::streamer_voice_invite),
+        )
+        .route(
             "/internal/master/v1/discord/voice-channel/members",
             post(handlers::voice_members),
         )

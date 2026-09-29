@@ -182,13 +182,18 @@ pub struct LlmConfig {
     pub use_cases: BTreeMap<UseCase, UseCaseConfig>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct UseCaseConfig {
     /// Modell-Pin und Provider-Override bleiben unabhängig voneinander.
     pub provider: Option<Provider>,
-    /// Bewusster Pin für diesen Anwendungsfall.
+    /// Bewusster Pin für diesen Anwendungsfall, auch vor älteren Aufruf-Pins.
     pub model: Option<String>,
+    /// Ohne Override bleiben die bisherigen Parameter des Aufrufers erhalten.
+    pub max_output_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub reasoning_effort: Option<String>,
+    pub request_timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -366,6 +371,22 @@ impl BotConfig {
             ));
         }
         for (use_case, cfg) in &self.llm.use_cases {
+            if cfg
+                .max_output_tokens
+                .is_some_and(|value| !(1..=32_768).contains(&value))
+                || cfg
+                    .temperature
+                    .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+                || cfg
+                    .request_timeout_seconds
+                    .is_some_and(|value| !(1..=110).contains(&value))
+                || cfg
+                    .reasoning_effort
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "none" | "low" | "medium" | "high"))
+            {
+                return Err(invalid("KI-Parameter: 1–32768 Ausgabetokens, Temperatur 0–2, Zeitlimit 1–110 Sekunden; Denkaufwand none/low/medium/high"));
+            }
             if cfg.model.as_deref().is_some_and(|id| {
                 id.is_empty()
                     || id.trim() != id

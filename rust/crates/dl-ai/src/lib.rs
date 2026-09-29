@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 mod chat_provider;
 mod chat_text;
+mod configured_chat;
 mod transparency;
 mod transparency_log;
 pub use chat_provider::*;
