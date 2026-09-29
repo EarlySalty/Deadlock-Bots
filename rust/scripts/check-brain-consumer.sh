@@ -18,6 +18,9 @@ run() {
   if ((result != 0)); then FAILED=1; tail -n 60 "$LOGS/$label.log"; fi
 }
 run fmt cargo fmt --manifest-path rust/Cargo.toml -p dl-brain -- --check
-run test cargo test --manifest-path rust/Cargo.toml -p dl-brain --all-targets --locked --offline
+run bot-fmt cargo fmt --manifest-path rust/Cargo.toml -p dl-bot -p dl-core -- --check
+run test cargo test --manifest-path rust/Cargo.toml -p dl-brain --all-targets --locked --offline -- --include-ignored --test-threads=2
+run bot-brain cargo test --manifest-path rust/Cargo.toml -p dl-bot --bin dl-bot brain_ --locked --offline -- --include-ignored --test-threads=2
+run bot-shadow cargo test --manifest-path rust/Cargo.toml -p dl-bot --bin dl-bot shadow_typed_probe --locked --offline -- --include-ignored --test-threads=2
 run clippy cargo clippy --manifest-path rust/Cargo.toml -p dl-brain --all-targets --locked --offline -- -D warnings
 exit "$FAILED"

@@ -82,4 +82,26 @@ mod tests {
             .iter()
             .any(|field| field.path == "runtime.start.owner_id" && !field.writable));
     }
+    #[test]
+    fn brain_runtime_fields_are_not_exposed_or_editable_in_browser() {
+        let config = BotConfig::parse(
+            "schema_version=1\n[runtime.ai]\nbrain_client_mode='typed'\nbrain_api_endpoint='http://127.0.0.1:8080'\nbrain_api_scopes=['fixture.game']\nbrain_api_timeout_ms=2000",
+        )
+        .expect("gültige Brain-Konfiguration");
+        let catalog = catalog(&config);
+        for path in [
+            "runtime.ai.brain_client_mode",
+            "runtime.ai.brain_api_endpoint",
+            "runtime.ai.brain_api_scopes",
+            "runtime.ai.brain_api_timeout_ms",
+        ] {
+            let field = catalog
+                .fields
+                .iter()
+                .find(|field| field.path == path)
+                .expect("Brain-Feld klassifiziert");
+            assert!(!field.writable, "{path}");
+            assert!(!catalog.values.contains_key(path), "{path}");
+        }
+    }
 }
