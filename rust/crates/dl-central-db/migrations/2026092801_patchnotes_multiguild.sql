@@ -170,6 +170,13 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
 
+        IF OLD.status = 'sending'
+           AND NEW.status = 'sending'
+           AND NEW.send_lease_expires_at IS DISTINCT FROM OLD.send_lease_expires_at THEN
+            RAISE EXCEPTION 'active patchnotes send lease cannot be changed'
+                USING ERRCODE = '23514';
+        END IF;
+
         IF NEW.status IN ('rejected', 'expired')
            AND OLD.status IS DISTINCT FROM NEW.status
            AND (OLD.status <> 'awaiting_approval'
@@ -470,10 +477,17 @@ BEGIN
             NULL;
         END;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dl_patchnotes_privacy') THEN
+        BEGIN
+            CREATE ROLE dl_patchnotes_privacy NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN
+            NULL;
+        END;
+    END IF;
 END
 $$;
 
-GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml;
+GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml, dl_patchnotes_privacy;
 REVOKE ALL ON TABLE patchnotes.guild_settings, patchnotes.guild_dispatch FROM PUBLIC;
 REVOKE DELETE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
 REVOKE UPDATE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
@@ -500,4 +514,4 @@ REVOKE EXECUTE ON FUNCTION patchnotes.anonymize_dispatch_approvals(BIGINT) FROM 
 GRANT EXECUTE ON FUNCTION patchnotes.approve_dispatch(BIGINT, BIGINT, TEXT, BIGINT)
     TO dl_patchnotes_dml;
 GRANT EXECUTE ON FUNCTION patchnotes.anonymize_dispatch_approvals(BIGINT)
-    TO dl_patchnotes_dml;
+    TO dl_patchnotes_privacy;

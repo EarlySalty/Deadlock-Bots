@@ -3781,7 +3781,7 @@ pub async fn delete_user_data(
     }
 
     if relations.contains("patchnotes.guild_dispatch") {
-        sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        sqlx::query("SET LOCAL ROLE dl_patchnotes_privacy")
             .execute(&mut *tx)
             .await?;
         let anonymized =

@@ -52,6 +52,7 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
         "unknown patchnotes delivery must be reconciled before another send attempt",
         "new patchnotes send attempt cannot reuse a prior recovery result",
         "patchnotes send requires an enabled guild and its configured channel",
+        "active patchnotes send lease cannot be changed",
         "patchnotes sent message evidence requires an active send attempt",
         "rejected or expired patchnotes request is terminal",
         "patchnotes approval identity can only be anonymized by privacy erasure",
@@ -66,6 +67,9 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
 fn dienstrolle_erhaelt_nur_scoped_dml_und_keine_ddl_rechte() {
     let sql = migration();
     assert!(sql.contains("dl_patchnotes_dml"));
+    assert!(sql
+        .contains("CREATE ROLE dl_patchnotes_privacy NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"));
+    assert!(sql.contains("TO dl_patchnotes_privacy"));
     assert!(sql.contains("NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"));
     assert!(sql.contains("GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml"));
     assert!(sql.contains("GRANT SELECT, INSERT, UPDATE, DELETE"));
@@ -350,13 +354,15 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     );
 
     let recovery_hash = "f".repeat(64);
+    let active_lease_hash = "e".repeat(64);
     sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
-         VALUES ($1, $2, $3, 'pending')",
+         VALUES ($1, $2, $3, 'pending'), ($1, $2, $4, 'pending')",
     )
     .bind(guild_one)
     .bind(patch_id)
     .bind(&recovery_hash)
+    .bind(&active_lease_hash)
     .execute(db.pool())
     .await?;
     sqlx::query("UPDATE patchnotes.guild_settings SET channel_id = 9928014 WHERE guild_id = $1")
@@ -367,7 +373,8 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', send_channel_id = 9928014,
                 send_attempt_id = '00000000-0000-0000-0000-000000000001'::UUID,
-                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+                send_started_at = now() - interval '12 minutes',
+                send_lease_expires_at = now() - interval '1 second'
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(guild_one)
@@ -375,6 +382,77 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928014,
+                send_attempt_id = '00000000-0000-0000-0000-000000000009'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '10 minutes'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&active_lease_hash)
+    .execute(db.pool())
+    .await?;
+
+    let mut shorten_lease_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *shorten_lease_tx)
+        .await?;
+    let shorten_active_lease = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET send_lease_expires_at = now() - interval '1 second'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&active_lease_hash)
+    .execute(&mut *shorten_lease_tx)
+    .await
+    .expect_err("runtime role cannot shorten a same-status active send lease");
+    assert_eq!(error_code(&shorten_active_lease), Some("23514".to_string()));
+    shorten_lease_tx.rollback().await?;
+
+    let mut premature_retry_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *premature_retry_tx)
+        .await?;
+    let premature_retry = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&active_lease_hash)
+    .execute(&mut *premature_retry_tx)
+    .await
+    .expect_err("active send lease blocks a not-delivered retry under the runtime role");
+    assert_eq!(error_code(&premature_retry), Some("23514".to_string()));
+    premature_retry_tx.rollback().await?;
+
+    let mut second_attempt_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *second_attempt_tx)
+        .await?;
+    let second_active_attempt = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending',
+                send_attempt_id = '00000000-0000-0000-0000-000000000099'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&active_lease_hash)
+    .execute(&mut *second_attempt_tx)
+    .await
+    .expect_err("active lease cannot be replaced by a second send attempt");
+    assert_eq!(
+        error_code(&second_active_attempt),
+        Some("23514".to_string())
+    );
+    second_attempt_tx.rollback().await?;
 
     let premature_retry = sqlx::query(
         "UPDATE patchnotes.guild_dispatch
@@ -625,6 +703,22 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind("d".repeat(64))
     .execute(db.pool())
     .await?;
+    let mut direct_anonymize_function_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *direct_anonymize_function_tx)
+        .await?;
+    let direct_anonymize_function =
+        sqlx::query("SELECT patchnotes.anonymize_dispatch_approvals($1)")
+            .bind(9928012_i64)
+            .execute(&mut *direct_anonymize_function_tx)
+            .await
+            .expect_err("runtime role cannot directly invoke privacy anonymization");
+    assert_eq!(
+        error_code(&direct_anonymize_function),
+        Some("42501".to_string())
+    );
+    direct_anonymize_function_tx.rollback().await?;
+
     let mut direct_anonymize_tx = db.pool().begin().await?;
     sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
         .execute(&mut *direct_anonymize_tx)
@@ -646,7 +740,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     direct_anonymize_tx.rollback().await?;
 
     let mut privacy_tx = db.pool().begin().await?;
-    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_privacy")
         .execute(&mut *privacy_tx)
         .await?;
     let anonymized: i64 = sqlx::query_scalar("SELECT patchnotes.anonymize_dispatch_approvals($1)")
@@ -713,29 +807,6 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         .await?;
     assert_eq!(automatic_release, ("pending".to_string(), None, None));
 
-    let delivery_unknown = sqlx::query(
-        "UPDATE patchnotes.guild_dispatch
-            SET status = 'delivery_unknown', send_lease_expires_at = NULL
-          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
-    )
-    .bind(guild_one)
-    .bind(patch_id)
-    .bind(&recovery_hash)
-    .execute(db.pool())
-    .await
-    .expect_err("active send lease cannot be recovered yet");
-    assert_eq!(error_code(&delivery_unknown), Some("23514".to_string()));
-
-    sqlx::query(
-        "UPDATE patchnotes.guild_dispatch
-            SET send_lease_expires_at = now() - interval '1 second'
-          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
-    )
-    .bind(guild_one)
-    .bind(patch_id)
-    .bind(&recovery_hash)
-    .execute(db.pool())
-    .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'delivery_unknown', send_lease_expires_at = NULL
@@ -869,7 +940,8 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', recovery_outcome = NULL, recovery_checked_at = NULL,
                 send_attempt_id = '00000000-0000-0000-0000-000000000005'::UUID,
-                send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+                send_started_at = now() - interval '12 minutes',
+                send_lease_expires_at = now() - interval '1 second'
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(guild_one)
@@ -1043,16 +1115,6 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
 
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET send_lease_expires_at = now() - interval '1 second'
-          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
-    )
-    .bind(guild_one)
-    .bind(patch_id)
-    .bind(&recovery_hash)
-    .execute(db.pool())
-    .await?;
-    sqlx::query(
-        "UPDATE patchnotes.guild_dispatch
             SET status = 'delivery_unknown', send_lease_expires_at = NULL
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
@@ -1186,11 +1248,21 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     )
     .fetch_one(db.pool())
     .await?;
+    let privacy_can_anonymize: bool = sqlx::query_scalar(
+        "SELECT has_function_privilege(
+            'dl_patchnotes_privacy',
+            'patchnotes.anonymize_dispatch_approvals(bigint)',
+            'EXECUTE'
+        )",
+    )
+    .fetch_one(db.pool())
+    .await?;
     assert!(can_insert);
     assert!(!can_delete);
     assert!(!can_create);
     assert!(!can_update_approval);
-    assert!(can_anonymize);
+    assert!(!can_anonymize);
+    assert!(privacy_can_anonymize);
 
     let mut dml_tx = db.pool().begin().await?;
     sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
