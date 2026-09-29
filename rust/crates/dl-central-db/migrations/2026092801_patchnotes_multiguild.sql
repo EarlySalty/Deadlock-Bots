@@ -488,6 +488,7 @@ END
 $$;
 
 GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml, dl_patchnotes_privacy;
+GRANT dl_patchnotes_privacy TO deadlock;
 REVOKE ALL ON TABLE patchnotes.guild_settings, patchnotes.guild_dispatch FROM PUBLIC;
 REVOKE DELETE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
 REVOKE UPDATE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;

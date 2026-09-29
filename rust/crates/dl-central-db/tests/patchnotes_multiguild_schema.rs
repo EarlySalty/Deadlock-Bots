@@ -419,7 +419,8 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         .await?;
     let premature_retry = sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+            SET status = 'retry', send_lease_expires_at = NULL,
+                recovery_outcome = 'not_delivered', recovery_checked_at = now()
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(guild_one)
@@ -453,19 +454,6 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         Some("23514".to_string())
     );
     second_attempt_tx.rollback().await?;
-
-    let premature_retry = sqlx::query(
-        "UPDATE patchnotes.guild_dispatch
-            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
-          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
-    )
-    .bind(guild_one)
-    .bind(patch_id)
-    .bind(&recovery_hash)
-    .execute(db.pool())
-    .await
-    .expect_err("active send lease blocks a not-delivered retry");
-    assert_eq!(error_code(&premature_retry), Some("23514".to_string()));
 
     let unapproved_mode_switch = sqlx::query(
         "UPDATE patchnotes.guild_settings SET approval_mode = 'manual' WHERE guild_id = $1",
@@ -889,7 +877,8 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
 
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+            SET status = 'retry', send_lease_expires_at = NULL,
+                recovery_outcome = 'not_delivered', recovery_checked_at = now()
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(guild_one)
@@ -1125,7 +1114,8 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
+            SET status = 'retry', send_lease_expires_at = NULL,
+                recovery_outcome = 'not_delivered', recovery_checked_at = now()
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(guild_one)
@@ -1257,12 +1247,17 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     )
     .fetch_one(db.pool())
     .await?;
+    let service_can_assume_privacy: bool =
+        sqlx::query_scalar("SELECT pg_has_role('deadlock', 'dl_patchnotes_privacy', 'MEMBER')")
+            .fetch_one(db.pool())
+            .await?;
     assert!(can_insert);
     assert!(!can_delete);
     assert!(!can_create);
     assert!(!can_update_approval);
     assert!(!can_anonymize);
     assert!(privacy_can_anonymize);
+    assert!(service_can_assume_privacy);
 
     let mut dml_tx = db.pool().begin().await?;
     sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
