@@ -17,9 +17,12 @@ fn guild_settings_haben_sichere_defaults_und_begrenzte_werte() {
         "enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "source_selection TEXT[] NOT NULL DEFAULT ARRAY['forum', 'steam']::TEXT[]",
         "language IN ('de', 'en')",
+        "mention_strategy TEXT NOT NULL DEFAULT 'none'",
+        "mention_strategy IN ('none', 'role', 'everyone')",
         "approval_mode IN ('automatic', 'manual')",
         "NOT enabled OR channel_id IS NOT NULL",
-        "NOT mention_role OR role_id IS NOT NULL",
+        "mention_strategy = 'role' AND role_id IS NOT NULL",
+        "mention_strategy IN ('none', 'everyone') AND role_id IS NULL",
         "cardinality(section_selection) <= 100",
         "char_length(array_to_string(section_selection, '')) <= 4096",
         "array_to_string(section_selection, '') !~ '[[:cntrl:]]'",
@@ -42,6 +45,11 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
         "status IN ('pending', 'awaiting_approval', 'sending', 'delivery_unknown', 'sent', 'retry', 'failed', 'rejected', 'expired')",
         "send_channel_id BIGINT",
         "sent_message_ids BIGINT[] NOT NULL DEFAULT ARRAY[]::BIGINT[]",
+        "mention_strategy_snapshot TEXT",
+        "mention_role_id_snapshot BIGINT",
+        "ping_message_id BIGINT",
+        "patchnotes mention plan is immutable after the first send attempt",
+        "patchnotes ping evidence can only record one newly confirmed message",
         "send_attempt_id UUID",
         "send_lease_expires_at TIMESTAMPTZ",
         "recovery_outcome TEXT CHECK (recovery_outcome IN ('delivered', 'not_delivered', 'partial'))",
@@ -89,13 +97,22 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     let guild_two = 9_928_002_i64;
     let manual_guild = 9_928_005_i64;
     let disabled_guild = 9_928_011_i64;
+    let role_ping_guild = 9_928_025_i64;
+    let everyone_ping_guild = 9_928_027_i64;
     let patch_id = 9_928_003_i64;
     let missing_patch_id = 9_928_006_i64;
     let invalid_status_patch_id = 9_928_007_i64;
     let hash_one = "a".repeat(64);
     let hash_two = "b".repeat(64);
 
-    for guild_id in [guild_one, guild_two, manual_guild, disabled_guild] {
+    for guild_id in [
+        guild_one,
+        guild_two,
+        manual_guild,
+        disabled_guild,
+        role_ping_guild,
+        everyone_ping_guild,
+    ] {
         sqlx::query("INSERT INTO patchnotes.guild_settings (guild_id) VALUES ($1)")
             .bind(guild_id)
             .execute(db.pool())
@@ -114,8 +131,17 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .execute(db.pool())
     .await?;
 
-    let defaults: (bool, Vec<String>, Vec<String>, String, String) = sqlx::query_as(
-        "SELECT enabled, source_selection, section_selection, language, approval_mode
+    let defaults: (
+        bool,
+        Vec<String>,
+        Vec<String>,
+        String,
+        String,
+        String,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT enabled, source_selection, section_selection, language, approval_mode,
+                mention_strategy, role_id
            FROM patchnotes.guild_settings
           WHERE guild_id = $1",
     )
@@ -130,7 +156,64 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
             Vec::new(),
             "de".to_string(),
             "automatic".to_string(),
+            "none".to_string(),
+            None,
         )
+    );
+
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings
+            SET mention_strategy = 'role', role_id = 9928026
+          WHERE guild_id = $1",
+    )
+    .bind(role_ping_guild)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET mention_strategy = 'everyone' WHERE guild_id = $1",
+    )
+    .bind(everyone_ping_guild)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET enabled = TRUE, channel_id = 9928028 WHERE guild_id = $1",
+    )
+    .bind(role_ping_guild)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings SET enabled = TRUE, channel_id = 9928029 WHERE guild_id = $1",
+    )
+    .bind(everyone_ping_guild)
+    .execute(db.pool())
+    .await?;
+    let missing_role_id = sqlx::query(
+        "UPDATE patchnotes.guild_settings SET mention_strategy = 'role' WHERE guild_id = $1",
+    )
+    .bind(disabled_guild)
+    .execute(db.pool())
+    .await
+    .expect_err("role strategy requires a configured role id");
+    assert_eq!(error_code(&missing_role_id), Some("23514".to_string()));
+    let role_id_without_role_strategy =
+        sqlx::query("UPDATE patchnotes.guild_settings SET role_id = 9928026 WHERE guild_id = $1")
+            .bind(disabled_guild)
+            .execute(db.pool())
+            .await
+            .expect_err("none strategy cannot retain a role id");
+    assert_eq!(
+        error_code(&role_id_without_role_strategy),
+        Some("23514".to_string())
+    );
+    let everyone_with_role_id =
+        sqlx::query("UPDATE patchnotes.guild_settings SET role_id = 9928026 WHERE guild_id = $1")
+            .bind(everyone_ping_guild)
+            .execute(db.pool())
+            .await
+            .expect_err("everyone strategy cannot retain a role id");
+    assert_eq!(
+        error_code(&everyone_with_role_id),
+        Some("23514".to_string())
     );
 
     sqlx::query(
@@ -165,6 +248,194 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(invalid_status_patch_id)
     .execute(db.pool())
     .await?;
+
+    let role_ping_hash = "2".repeat(64);
+    let role_ping_message_id = 9_928_030_i64;
+    let role_ping_followup_id = 9_928_031_i64;
+    sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .execute(db.pool())
+    .await?;
+    let mut role_ping_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *role_ping_tx)
+        .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928028,
+                send_attempt_id = '00000000-0000-0000-0000-000000000021'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '10 minutes'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .execute(&mut *role_ping_tx)
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET sent_message_ids = ARRAY[$4]::BIGINT[], ping_message_id = $4
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .bind(role_ping_message_id)
+    .execute(&mut *role_ping_tx)
+    .await?;
+    role_ping_tx.commit().await?;
+    let role_snapshot: (String, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT mention_strategy_snapshot, mention_role_id_snapshot, ping_message_id
+           FROM patchnotes.guild_dispatch
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(
+        role_snapshot,
+        (
+            "role".to_string(),
+            Some(9_928_026),
+            Some(role_ping_message_id)
+        )
+    );
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings
+            SET mention_strategy = 'everyone', role_id = NULL
+          WHERE guild_id = $1",
+    )
+    .bind(role_ping_guild)
+    .execute(db.pool())
+    .await?;
+    let mut changed_ping_plan_tx = db.pool().begin().await?;
+    let changed_ping_plan = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET mention_strategy_snapshot = 'everyone', mention_role_id_snapshot = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .execute(&mut *changed_ping_plan_tx)
+    .await
+    .expect_err("a retry cannot replace a confirmed role ping with everyone");
+    assert_eq!(error_code(&changed_ping_plan), Some("23514".to_string()));
+    changed_ping_plan_tx.rollback().await?;
+    let mut second_ping_tx = db.pool().begin().await?;
+    let second_ping_message = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET ping_message_id = $4
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .bind(role_ping_followup_id)
+    .execute(&mut *second_ping_tx)
+    .await
+    .expect_err("a dispatch cannot record a second ping message");
+    assert_eq!(error_code(&second_ping_message), Some("23514".to_string()));
+    second_ping_tx.rollback().await?;
+    let mut followup_retry_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *followup_retry_tx)
+        .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sent',
+                sent_message_ids = ARRAY[$4, $5]::BIGINT[],
+                send_lease_expires_at = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .bind(role_ping_message_id)
+    .bind(role_ping_followup_id)
+    .execute(&mut *followup_retry_tx)
+    .await?;
+    followup_retry_tx.commit().await?;
+    let followed_up_role_snapshot: (String, Option<i64>, Option<i64>, Vec<i64>) = sqlx::query_as(
+        "SELECT mention_strategy_snapshot, mention_role_id_snapshot, ping_message_id, sent_message_ids
+           FROM patchnotes.guild_dispatch
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(patch_id)
+    .bind(&role_ping_hash)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(
+        followed_up_role_snapshot,
+        (
+            "role".to_string(),
+            Some(9_928_026),
+            Some(role_ping_message_id),
+            vec![role_ping_message_id, role_ping_followup_id]
+        )
+    );
+
+    let everyone_ping_hash = "3".repeat(64);
+    let everyone_ping_message_id = 9_928_032_i64;
+    sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(everyone_ping_guild)
+    .bind(patch_id)
+    .bind(&everyone_ping_hash)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928029,
+                send_attempt_id = '00000000-0000-0000-0000-000000000022'::UUID,
+                send_started_at = now(), send_lease_expires_at = now() + interval '10 minutes'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(everyone_ping_guild)
+    .bind(patch_id)
+    .bind(&everyone_ping_hash)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sent', sent_message_ids = ARRAY[$4]::BIGINT[],
+                ping_message_id = $4, send_lease_expires_at = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(everyone_ping_guild)
+    .bind(patch_id)
+    .bind(&everyone_ping_hash)
+    .bind(everyone_ping_message_id)
+    .execute(db.pool())
+    .await?;
+    let everyone_snapshot: (i64, String, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT guild_id, mention_strategy_snapshot, mention_role_id_snapshot, ping_message_id
+           FROM patchnotes.guild_dispatch
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(everyone_ping_guild)
+    .bind(patch_id)
+    .bind(&everyone_ping_hash)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(
+        everyone_snapshot,
+        (
+            everyone_ping_guild,
+            "everyone".to_string(),
+            None,
+            Some(everyone_ping_message_id)
+        )
+    );
 
     sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch
@@ -1229,6 +1500,13 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     )
     .fetch_one(db.pool())
     .await?;
+    let can_update_ping_message: bool = sqlx::query_scalar(
+        "SELECT has_column_privilege(
+            'dl_patchnotes_dml', 'patchnotes.guild_dispatch', 'ping_message_id', 'UPDATE'
+        )",
+    )
+    .fetch_one(db.pool())
+    .await?;
     let can_anonymize: bool = sqlx::query_scalar(
         "SELECT has_function_privilege(
             'dl_patchnotes_dml',
@@ -1255,6 +1533,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     assert!(!can_delete);
     assert!(!can_create);
     assert!(!can_update_approval);
+    assert!(can_update_ping_message);
     assert!(!can_anonymize);
     assert!(privacy_can_anonymize);
     assert!(service_can_assume_privacy);

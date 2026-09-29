@@ -6,7 +6,8 @@ CREATE TABLE patchnotes.guild_settings (
     source_selection TEXT[] NOT NULL DEFAULT ARRAY['forum', 'steam']::TEXT[],
     section_selection TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     language TEXT NOT NULL DEFAULT 'de' CHECK (language IN ('de', 'en')),
-    mention_role BOOLEAN NOT NULL DEFAULT FALSE,
+    mention_strategy TEXT NOT NULL DEFAULT 'none'
+        CHECK (mention_strategy IN ('none', 'role', 'everyone')),
     approval_mode TEXT NOT NULL DEFAULT 'automatic' CHECK (approval_mode IN ('automatic', 'manual')),
     updated_by_user_id BIGINT CHECK (updated_by_user_id IS NULL OR updated_by_user_id > 0),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -25,7 +26,10 @@ CREATE TABLE patchnotes.guild_settings (
     CONSTRAINT patchnotes_guild_settings_enabled_channel_check
         CHECK (NOT enabled OR channel_id IS NOT NULL),
     CONSTRAINT patchnotes_guild_settings_role_mention_check
-        CHECK (NOT mention_role OR role_id IS NOT NULL)
+        CHECK (
+            (mention_strategy = 'role' AND role_id IS NOT NULL)
+            OR (mention_strategy IN ('none', 'everyone') AND role_id IS NULL)
+        )
 );
 
 CREATE TABLE patchnotes.guild_dispatch (
@@ -36,6 +40,11 @@ CREATE TABLE patchnotes.guild_dispatch (
         CHECK (status IN ('pending', 'awaiting_approval', 'sending', 'delivery_unknown', 'sent', 'retry', 'failed', 'rejected', 'expired')),
     send_channel_id BIGINT CHECK (send_channel_id IS NULL OR send_channel_id > 0),
     sent_message_ids BIGINT[] NOT NULL DEFAULT ARRAY[]::BIGINT[],
+    mention_strategy_snapshot TEXT
+        CHECK (mention_strategy_snapshot IS NULL OR mention_strategy_snapshot IN ('none', 'role', 'everyone')),
+    mention_role_id_snapshot BIGINT
+        CHECK (mention_role_id_snapshot IS NULL OR mention_role_id_snapshot > 0),
+    ping_message_id BIGINT CHECK (ping_message_id IS NULL OR ping_message_id > 0),
     send_attempt_id UUID,
     send_started_at TIMESTAMPTZ,
     send_lease_expires_at TIMESTAMPTZ,
@@ -59,13 +68,36 @@ CREATE TABLE patchnotes.guild_dispatch (
         ON DELETE RESTRICT,
     CONSTRAINT patchnotes_guild_dispatch_message_ids_check
         CHECK (array_position(sent_message_ids, NULL) IS NULL AND 0 < ALL(sent_message_ids)),
+    CONSTRAINT patchnotes_guild_dispatch_mention_snapshot_check
+        CHECK (
+            (mention_strategy_snapshot IS NULL AND mention_role_id_snapshot IS NULL)
+            OR (mention_strategy_snapshot = 'role' AND mention_role_id_snapshot IS NOT NULL)
+            OR (mention_strategy_snapshot IN ('none', 'everyone') AND mention_role_id_snapshot IS NULL)
+        ),
+    CONSTRAINT patchnotes_guild_dispatch_ping_message_check
+        CHECK (
+            ping_message_id IS NULL
+            OR (
+                COALESCE(mention_strategy_snapshot IN ('role', 'everyone'), FALSE)
+                AND ping_message_id = ANY(sent_message_ids)
+            )
+        ),
     CONSTRAINT patchnotes_guild_dispatch_sent_channel_check
         CHECK (
             (cardinality(sent_message_ids) = 0 OR send_channel_id IS NOT NULL)
             AND (status NOT IN ('sending', 'delivery_unknown', 'sent') OR send_channel_id IS NOT NULL)
         ),
     CONSTRAINT patchnotes_guild_dispatch_sent_status_check
-        CHECK (status <> 'sent' OR cardinality(sent_message_ids) > 0),
+        CHECK (
+            status <> 'sent'
+            OR (
+                cardinality(sent_message_ids) > 0
+                AND mention_strategy_snapshot IS NOT NULL
+                AND (mention_strategy_snapshot = 'none' OR ping_message_id IS NOT NULL)
+            )
+        ),
+    CONSTRAINT patchnotes_guild_dispatch_attempt_mention_snapshot_check
+        CHECK (send_attempt_id IS NULL OR mention_strategy_snapshot IS NOT NULL),
     CONSTRAINT patchnotes_guild_dispatch_sending_lease_check
         CHECK (
             (status = 'sending'
@@ -103,9 +135,12 @@ DECLARE
     configured_approval_mode TEXT;
     configured_enabled BOOLEAN;
     configured_channel_id BIGINT;
+    configured_mention_strategy TEXT;
+    configured_role_id BIGINT;
 BEGIN
-    SELECT approval_mode, enabled, channel_id
-      INTO configured_approval_mode, configured_enabled, configured_channel_id
+    SELECT approval_mode, enabled, channel_id, mention_strategy, role_id
+      INTO configured_approval_mode, configured_enabled, configured_channel_id,
+           configured_mention_strategy, configured_role_id
       FROM patchnotes.guild_settings
      WHERE guild_id = NEW.guild_id
      FOR UPDATE;
@@ -119,7 +154,10 @@ BEGIN
            OR NEW.send_started_at IS NOT NULL
            OR NEW.send_lease_expires_at IS NOT NULL
            OR NEW.recovery_outcome IS NOT NULL
-           OR NEW.recovery_checked_at IS NOT NULL THEN
+           OR NEW.recovery_checked_at IS NOT NULL
+           OR NEW.mention_strategy_snapshot IS NOT NULL
+           OR NEW.mention_role_id_snapshot IS NOT NULL
+           OR NEW.ping_message_id IS NOT NULL THEN
             RAISE EXCEPTION 'patchnotes dispatch must start without send or approval evidence'
                 USING ERRCODE = '23514';
         END IF;
@@ -167,6 +205,44 @@ BEGIN
                 OR configured_channel_id IS NULL
                 OR NEW.send_channel_id IS DISTINCT FROM configured_channel_id) THEN
             RAISE EXCEPTION 'patchnotes send requires an enabled guild and its configured channel'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status = 'sending' AND OLD.status IS DISTINCT FROM NEW.status THEN
+            IF OLD.status = 'pending' THEN
+                NEW.mention_strategy_snapshot := configured_mention_strategy;
+                NEW.mention_role_id_snapshot := configured_role_id;
+            ELSIF OLD.status = 'retry'
+               AND OLD.mention_strategy_snapshot IS NOT NULL THEN
+                NEW.mention_strategy_snapshot := OLD.mention_strategy_snapshot;
+                NEW.mention_role_id_snapshot := OLD.mention_role_id_snapshot;
+            ELSE
+                RAISE EXCEPTION 'patchnotes send retry requires a frozen mention plan'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSIF (NEW.mention_strategy_snapshot, NEW.mention_role_id_snapshot)
+              IS DISTINCT FROM (OLD.mention_strategy_snapshot, OLD.mention_role_id_snapshot) THEN
+            RAISE EXCEPTION 'patchnotes mention plan is immutable after the first send attempt'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.ping_message_id IS DISTINCT FROM OLD.ping_message_id
+           AND (OLD.ping_message_id IS NOT NULL
+                OR NEW.ping_message_id IS NULL
+                OR OLD.status NOT IN ('sending', 'delivery_unknown')
+                OR NEW.status NOT IN ('sending', 'delivery_unknown', 'sent', 'failed')
+                OR NEW.mention_strategy_snapshot NOT IN ('role', 'everyone')
+                OR NOT NEW.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
+                OR (
+                    OLD.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
+                    AND NOT (
+                        OLD.status = 'delivery_unknown'
+                        AND NEW.status = 'sent'
+                        AND NEW.recovery_outcome = 'delivered'
+                        AND NEW.recovery_checked_at IS NOT NULL
+                    )
+                )) THEN
+            RAISE EXCEPTION 'patchnotes ping evidence can only record one newly confirmed message'
                 USING ERRCODE = '23514';
         END IF;
 
@@ -498,6 +574,7 @@ GRANT UPDATE (
     status,
     send_channel_id,
     sent_message_ids,
+    ping_message_id,
     send_attempt_id,
     send_started_at,
     send_lease_expires_at,
