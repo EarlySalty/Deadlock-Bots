@@ -1259,6 +1259,21 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&confirmed_delivery_hash)
     .execute(db.pool())
     .await?;
+    let delivered_without_message_id = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET recovery_outcome = 'delivered', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&confirmed_delivery_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("delivered recovery must include confirmed message ids");
+    assert_eq!(
+        error_code(&delivered_without_message_id),
+        Some("23514".to_string())
+    );
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sent', sent_message_ids = ARRAY[9928015]::BIGINT[],

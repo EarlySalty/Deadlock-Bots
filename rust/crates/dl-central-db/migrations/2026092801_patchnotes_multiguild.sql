@@ -116,6 +116,7 @@ CREATE TABLE patchnotes.guild_dispatch (
             ((recovery_outcome IS NULL) = (recovery_checked_at IS NULL))
             AND (recovery_outcome IS DISTINCT FROM 'partial' OR cardinality(sent_message_ids) > 0)
             AND (recovery_outcome IS DISTINCT FROM 'not_delivered' OR cardinality(sent_message_ids) = 0)
+            AND (recovery_outcome IS DISTINCT FROM 'delivered' OR cardinality(sent_message_ids) > 0)
         ),
     CONSTRAINT patchnotes_guild_dispatch_approval_check
         CHECK (approved_by_user_id IS NULL OR approved_at IS NOT NULL)
