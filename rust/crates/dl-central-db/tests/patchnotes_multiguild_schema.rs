@@ -1068,7 +1068,10 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     });
     update_started_rx.await?;
     let mut settings_update_waiting = false;
-    while !settings_update_waiting && !settings_update.is_finished() {
+    for _ in 0..10_000 {
+        if settings_update.is_finished() {
+            break;
+        }
         settings_update_waiting = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM pg_stat_activity
@@ -1078,9 +1081,10 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         )
         .fetch_one(db.pool())
         .await?;
-        if !settings_update_waiting {
-            tokio::task::yield_now().await;
+        if settings_update_waiting {
+            break;
         }
+        tokio::task::yield_now().await;
     }
     dispatch_tx.commit().await?;
     settings_update.await??;
