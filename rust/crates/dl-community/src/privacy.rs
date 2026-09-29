@@ -4811,7 +4811,7 @@ mod runtime_gate_privacy_tests {
             "UPDATE patchnotes.guild_dispatch
                 SET status = 'sending', send_channel_id = 9928043,
                     send_attempt_id = '00000000-0000-0000-0000-000000000041'::UUID,
-                    send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+                    send_started_at = now(), send_lease_expires_at = now() + interval '10 minutes'
               WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
         )
         .bind(guild_id)
