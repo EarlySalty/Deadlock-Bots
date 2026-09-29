@@ -578,6 +578,23 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         assert_eq!(error_code(&stranded_recovery), Some("23514".to_string()));
     }
 
+    let contradictory_not_delivered = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'retry', sent_message_ids = ARRAY[9928014]::BIGINT[],
+                recovery_outcome = 'not_delivered', recovery_checked_at = now()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await
+    .expect_err("not-delivered recovery cannot retain evidence of a sent message");
+    assert_eq!(
+        error_code(&contradictory_not_delivered),
+        Some("23514".to_string())
+    );
+
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'retry', recovery_outcome = 'not_delivered', recovery_checked_at = now()
