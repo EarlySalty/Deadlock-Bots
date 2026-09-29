@@ -80,7 +80,10 @@ CREATE TABLE patchnotes.guild_dispatch (
             OR (send_attempt_id IS NOT NULL AND send_started_at IS NOT NULL AND send_channel_id IS NOT NULL)
         ),
     CONSTRAINT patchnotes_guild_dispatch_recovery_check
-        CHECK ((recovery_outcome IS NULL) = (recovery_checked_at IS NULL)),
+        CHECK (
+            ((recovery_outcome IS NULL) = (recovery_checked_at IS NULL))
+            AND (recovery_outcome <> 'partial' OR cardinality(sent_message_ids) > 0)
+        ),
     CONSTRAINT patchnotes_guild_dispatch_approval_check
         CHECK (approved_by_user_id IS NULL OR approved_at IS NOT NULL)
 );
@@ -104,11 +107,23 @@ BEGIN
      WHERE guild_id = NEW.guild_id
      FOR UPDATE;
 
-    IF configured_approval_mode = 'manual'
-       AND NEW.status IN ('sending', 'sent')
-       AND NEW.approved_at IS NULL THEN
-        RAISE EXCEPTION 'manual patchnotes dispatch requires approval before sending'
-            USING ERRCODE = '23514';
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status NOT IN ('pending', 'awaiting_approval')
+           OR NEW.approved_by_user_id IS NOT NULL
+           OR NEW.approved_at IS NOT NULL THEN
+            RAISE EXCEPTION 'patchnotes dispatch must start without send or approval evidence'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF configured_approval_mode = 'manual' AND NEW.status <> 'awaiting_approval' THEN
+            RAISE EXCEPTION 'manual patchnotes dispatch must await approval'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF configured_approval_mode = 'automatic' AND NEW.status = 'awaiting_approval' THEN
+            RAISE EXCEPTION 'automatic patchnotes dispatch cannot await manual approval'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     IF NEW.status = 'sending' AND NEW.recovery_outcome IS NOT NULL THEN
@@ -116,20 +131,98 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    IF TG_OP = 'INSERT' AND NEW.status = 'delivery_unknown' THEN
-        RAISE EXCEPTION 'unknown delivery requires a prior sending attempt'
+    IF configured_approval_mode = 'manual'
+       AND NEW.status IN ('sending', 'sent', 'retry', 'failed')
+       AND NEW.approved_at IS NULL THEN
+        RAISE EXCEPTION 'manual patchnotes dispatch requires approval before sending'
             USING ERRCODE = '23514';
     END IF;
 
     IF TG_OP = 'UPDATE' THEN
+        IF (NEW.guild_id, NEW.patch_id, NEW.revision_hash)
+           IS DISTINCT FROM (OLD.guild_id, OLD.patch_id, OLD.revision_hash) THEN
+            RAISE EXCEPTION 'patchnotes dispatch identity is immutable'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status = 'sending'
+           AND OLD.status IS DISTINCT FROM NEW.status
+           AND OLD.status NOT IN ('pending', 'retry') THEN
+            RAISE EXCEPTION 'patchnotes send attempt must start from pending or reconciled retry'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status = 'delivery_unknown'
+           AND OLD.status IS DISTINCT FROM NEW.status
+           AND OLD.status <> 'sending' THEN
+            RAISE EXCEPTION 'unknown delivery requires an existing send attempt'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status = 'sent'
+           AND OLD.status IS DISTINCT FROM NEW.status
+           AND OLD.status NOT IN ('sending', 'delivery_unknown') THEN
+            RAISE EXCEPTION 'patchnotes dispatch can be sent only from an active or reconciled attempt'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.status = 'retry'
+           AND OLD.status IS DISTINCT FROM NEW.status
+           AND OLD.status NOT IN ('sending', 'delivery_unknown') THEN
+            RAISE EXCEPTION 'patchnotes retry requires a reconciled send attempt'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF OLD.approved_at IS NULL THEN
+            IF OLD.approved_by_user_id IS NOT NULL THEN
+                RAISE EXCEPTION 'patchnotes approval identity requires an approval transition'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            IF OLD.status = 'awaiting_approval' AND NEW.status = 'pending' THEN
+                IF configured_approval_mode <> 'manual'
+                   OR NEW.approved_by_user_id IS NULL
+                   OR NEW.approved_at IS NOT NULL THEN
+                    RAISE EXCEPTION 'patchnotes approval must be an explicit manual approval transition'
+                        USING ERRCODE = '23514';
+                END IF;
+                NEW.approved_at := clock_timestamp();
+            ELSIF NEW.approved_by_user_id IS NOT NULL OR NEW.approved_at IS NOT NULL THEN
+                RAISE EXCEPTION 'patchnotes approval evidence requires an awaiting-approval transition'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSE
+            IF NEW.approved_at IS DISTINCT FROM OLD.approved_at
+               OR (NEW.approved_by_user_id IS DISTINCT FROM OLD.approved_by_user_id
+                   AND NOT (OLD.approved_by_user_id IS NOT NULL
+                            AND NEW.approved_by_user_id IS NULL)) THEN
+                RAISE EXCEPTION 'patchnotes approval evidence cannot be changed or restored'
+                    USING ERRCODE = '23514';
+            END IF;
+        END IF;
+
+        IF OLD.status = 'sent' OR OLD.recovery_outcome = 'partial' THEN
+            IF (to_jsonb(NEW) - 'approved_by_user_id')
+               IS DISTINCT FROM (to_jsonb(OLD) - 'approved_by_user_id') THEN
+                RAISE EXCEPTION 'confirmed patchnotes delivery evidence is immutable'
+                    USING ERRCODE = '23514';
+            END IF;
+        END IF;
+
+        IF cardinality(OLD.sent_message_ids) > 0
+           AND NOT NEW.sent_message_ids @> OLD.sent_message_ids THEN
+            RAISE EXCEPTION 'patchnotes sent message evidence cannot be removed'
+                USING ERRCODE = '23514';
+        END IF;
+
         IF OLD.send_channel_id IS NOT NULL
            AND NEW.send_channel_id IS DISTINCT FROM OLD.send_channel_id
            AND (cardinality(OLD.sent_message_ids) > 0
                 OR OLD.status IN ('sending', 'delivery_unknown', 'sent')
-                OR OLD.send_attempt_id IS NOT NULL AND (
+                OR (OLD.send_attempt_id IS NOT NULL AND (
                     OLD.recovery_outcome IS DISTINCT FROM 'not_delivered'
                     OR OLD.recovery_checked_at IS NULL
-                )) THEN
+                ))) THEN
             RAISE EXCEPTION 'patchnotes dispatch channel cannot change before delivery is reconciled'
                 USING ERRCODE = '23514';
         END IF;
@@ -157,16 +250,45 @@ BEGIN
            AND NEW.status NOT IN ('sending', 'delivery_unknown', 'sent')
            AND (NEW.recovery_outcome IS NULL
                 OR NEW.recovery_checked_at IS NULL
-                OR NEW.recovery_outcome NOT IN ('not_delivered', 'partial')) THEN
-            RAISE EXCEPTION 'patchnotes dispatch recovery must confirm no or partial delivery before retry'
+                OR NEW.recovery_checked_at < OLD.send_started_at
+                OR NEW.recovery_checked_at > clock_timestamp()
+                OR (NEW.recovery_outcome <> 'not_delivered'
+                    AND NOT (NEW.status = 'failed' AND NEW.recovery_outcome = 'partial'))) THEN
+            RAISE EXCEPTION 'patchnotes retry requires a checked not-delivered result or terminal partial result'
                 USING ERRCODE = '23514';
         END IF;
 
         IF OLD.status = 'delivery_unknown' AND NEW.status = 'sent'
-           AND (NEW.recovery_outcome IS NULL
+           AND (NEW.recovery_outcome IS DISTINCT FROM 'delivered'
                 OR NEW.recovery_checked_at IS NULL
-                OR NEW.recovery_outcome NOT IN ('delivered', 'partial')) THEN
-            RAISE EXCEPTION 'unknown delivery must be reconciled before marking sent'
+                OR NEW.recovery_checked_at < OLD.send_started_at
+                OR NEW.recovery_checked_at > clock_timestamp()) THEN
+            RAISE EXCEPTION 'unknown delivery must be reconciled as delivered before marking sent'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.recovery_outcome IS NOT NULL
+           AND OLD.recovery_outcome IS NULL
+           AND (OLD.status NOT IN ('sending', 'delivery_unknown')
+                OR NEW.recovery_checked_at IS NULL
+                OR NEW.recovery_checked_at < OLD.send_started_at
+                OR NEW.recovery_checked_at > clock_timestamp()) THEN
+            RAISE EXCEPTION 'patchnotes recovery result requires a current send attempt check'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.recovery_outcome IS DISTINCT FROM OLD.recovery_outcome
+           AND OLD.recovery_outcome IS NOT NULL
+           AND NOT (
+                OLD.status = 'retry'
+                AND NEW.status = 'sending'
+                AND OLD.recovery_outcome = 'not_delivered'
+                AND NEW.recovery_outcome IS NULL
+                AND NEW.recovery_checked_at IS NULL
+                AND NEW.send_attempt_id IS DISTINCT FROM OLD.send_attempt_id
+                AND NEW.send_started_at IS DISTINCT FROM OLD.send_started_at
+           ) THEN
+            RAISE EXCEPTION 'patchnotes recovery result is immutable once recorded'
                 USING ERRCODE = '23514';
         END IF;
     END IF;
@@ -219,7 +341,8 @@ $$;
 
 GRANT USAGE ON SCHEMA patchnotes TO dl_patchnotes_dml;
 REVOKE ALL ON TABLE patchnotes.guild_settings, patchnotes.guild_dispatch FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE
-    ON patchnotes.guild_settings, patchnotes.guild_dispatch TO dl_patchnotes_dml;
+REVOKE DELETE ON patchnotes.guild_dispatch FROM dl_patchnotes_dml;
+GRANT SELECT, INSERT, UPDATE, DELETE ON patchnotes.guild_settings TO dl_patchnotes_dml;
+GRANT SELECT, INSERT, UPDATE ON patchnotes.guild_dispatch TO dl_patchnotes_dml;
 REVOKE EXECUTE ON FUNCTION patchnotes.validate_guild_dispatch_write() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION patchnotes.prevent_unapproved_manual_dispatch_mode() FROM PUBLIC;

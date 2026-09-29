@@ -5058,26 +5058,60 @@ mod tests {
             .await
             .expect("patch post");
         sqlx::query(
-            "INSERT INTO patchnotes.guild_dispatch(
-                 guild_id, patch_id, revision_hash, status, send_channel_id,
-                 send_attempt_id, send_started_at, send_lease_expires_at,
-                 sent_message_ids, approved_by_user_id, approved_at
-             ) VALUES
-                 (9984201, 9984202, $1, 'pending', NULL, NULL, NULL, NULL,
-                  ARRAY[]::BIGINT[], 42, now()),
-                 (9984201, 9984202, $2, 'sending', 9984203,
-                  '00000000-0000-0000-0000-000000000042'::UUID, now(), now() + interval '1 minute',
-                  ARRAY[]::BIGINT[], 42, now()),
-                 (9984201, 9984202, $3, 'sent', 9984203, NULL, NULL, NULL,
-                  ARRAY[9984204]::BIGINT[], 42, now())",
+            "INSERT INTO patchnotes.guild_dispatch(guild_id, patch_id, revision_hash, status)
+             VALUES (9984201, 9984202, $1, 'awaiting_approval'),
+                    (9984201, 9984202, $2, 'awaiting_approval'),
+                    (9984201, 9984202, $3, 'awaiting_approval')",
         )
         .bind("a".repeat(64))
         .bind("b".repeat(64))
         .bind("c".repeat(64))
         .execute(pool)
         .await
-        .expect("dispatch approvals");
-
+        .expect("approval requests");
+        for revision_hash in ["a".repeat(64), "b".repeat(64), "c".repeat(64)] {
+            sqlx::query(
+                "UPDATE patchnotes.guild_dispatch
+                    SET status = 'pending', approved_by_user_id = 42
+                  WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+            )
+            .bind(&revision_hash)
+            .execute(pool)
+            .await
+            .expect("approve dispatch");
+        }
+        sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sending', send_channel_id = 9984203,
+                    send_attempt_id = '00000000-0000-0000-0000-000000000042'::UUID,
+                    send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+              WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+        )
+        .bind("b".repeat(64))
+        .execute(pool)
+        .await
+        .expect("start sending dispatch");
+        sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sending', send_channel_id = 9984203,
+                    send_attempt_id = '00000000-0000-0000-0000-000000000043'::UUID,
+                    send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
+              WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+        )
+        .bind("c".repeat(64))
+        .execute(pool)
+        .await
+        .expect("start sent dispatch");
+        sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sent', send_lease_expires_at = NULL,
+                    sent_message_ids = ARRAY[9984204]::BIGINT[]
+              WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+        )
+        .bind("c".repeat(64))
+        .execute(pool)
+        .await
+        .expect("complete sent dispatch");
         let export = export_user_data(pool, 42, 1_000)
             .await
             .expect("privacy export");
@@ -5090,6 +5124,15 @@ mod tests {
         assert!(dispatch_rows
             .iter()
             .all(|row| row["approved_by_user_id"] == 42));
+        let approvals_before: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT revision_hash, approved_at
+               FROM patchnotes.guild_dispatch
+              WHERE guild_id = 9984201 AND patch_id = 9984202
+              ORDER BY revision_hash",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("approval timestamps before deletion");
 
         let summary = delete_user_data(pool, 42, "test".into(), 2_000)
             .await
@@ -5116,6 +5159,16 @@ mod tests {
         .await
         .expect("redacted actor ids");
         assert_eq!(remaining, (None, Some(0), Some(1), Some(1)));
+        let approvals_after: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT revision_hash, approved_at
+               FROM patchnotes.guild_dispatch
+              WHERE guild_id = 9984201 AND patch_id = 9984202
+              ORDER BY revision_hash",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("approval timestamps after deletion");
+        assert_eq!(approvals_after, approvals_before);
     }
 
     #[tokio::test]
