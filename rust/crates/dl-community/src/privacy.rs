@@ -3790,10 +3790,7 @@ pub async fn delete_user_data(
                 .fetch_one(&mut *tx)
                 .await?;
         sqlx::query("RESET ROLE").execute(&mut *tx).await?;
-        counts.insert(
-            "patchnotes.guild_dispatch.approved_by_user_id".to_string(),
-            anonymized,
-        );
+        counts.insert("guild_dispatch.approved_by_user_id".to_string(), anonymized);
     }
 
     for (key, value) in
@@ -5143,7 +5140,7 @@ mod tests {
             .execute(pool)
             .await
             .expect("core user");
-        sqlx::query("INSERT INTO patchnotes.guild_settings(guild_id, updated_by_user_id, approval_mode) VALUES (9984201, 42, 'manual')")
+        sqlx::query("INSERT INTO patchnotes.guild_settings(guild_id, enabled, channel_id, updated_by_user_id, approval_mode) VALUES (9984201, TRUE, 9984203, 42, 'manual')")
             .execute(pool)
             .await
             .expect("guild settings");
