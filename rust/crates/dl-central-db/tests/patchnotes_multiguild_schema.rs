@@ -353,19 +353,34 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await
     .expect_err("manual approval is required before sending");
     assert_eq!(error_code(&unapproved_send), Some("23514".to_string()));
-    let preloaded_recovery = sqlx::query(
+    let preloaded_send_evidence = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch
-             (guild_id, patch_id, revision_hash, status, sent_message_ids,
-              send_attempt_id, send_started_at, recovery_outcome, recovery_checked_at)
-         VALUES ($1, $2, $3, 'awaiting_approval', ARRAY[9928014]::BIGINT[],
-                 '00000000-0000-0000-0000-000000000008'::UUID, now(), 'not_delivered', now())",
+             (guild_id, patch_id, revision_hash, status, send_channel_id,
+              sent_message_ids, send_attempt_id, send_started_at)
+         VALUES ($1, $2, $3, 'awaiting_approval', 9928014, ARRAY[9928015]::BIGINT[],
+                 '00000000-0000-0000-0000-000000000008'::UUID, now())",
     )
     .bind(manual_guild)
     .bind(patch_id)
     .bind("a".repeat(64))
     .execute(db.pool())
     .await
-    .expect_err("new dispatch cannot start with preloaded delivery evidence");
+    .expect_err("new dispatch cannot start with preloaded send evidence");
+    assert_eq!(
+        error_code(&preloaded_send_evidence),
+        Some("23514".to_string())
+    );
+    let preloaded_recovery = sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch
+             (guild_id, patch_id, revision_hash, status, recovery_outcome, recovery_checked_at)
+         VALUES ($1, $2, $3, 'awaiting_approval', 'not_delivered', now())",
+    )
+    .bind(manual_guild)
+    .bind(patch_id)
+    .bind("b".repeat(64))
+    .execute(db.pool())
+    .await
+    .expect_err("new dispatch cannot start with preloaded recovery evidence");
     assert_eq!(error_code(&preloaded_recovery), Some("23514".to_string()));
     let unapproved_sent = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch
@@ -879,6 +894,43 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         .await
         .expect_err("terminal failure cannot return to a non-recovery state");
         assert_eq!(error_code(&stranded_failure), Some("23514".to_string()));
+    }
+
+    let failed_without_recovery_hash = "6".repeat(64);
+    sqlx::query(
+        "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
+         VALUES ($1, $2, $3, 'pending')",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&failed_without_recovery_hash)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET status = 'failed'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&failed_without_recovery_hash)
+    .execute(db.pool())
+    .await?;
+    for blocked_status in ["pending", "awaiting_approval"] {
+        let failed_without_evidence = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch SET status = $4
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_one)
+        .bind(patch_id)
+        .bind(&failed_without_recovery_hash)
+        .bind(blocked_status)
+        .execute(db.pool())
+        .await
+        .expect_err("failed dispatch without recovery evidence remains terminal");
+        assert_eq!(
+            error_code(&failed_without_evidence),
+            Some("23514".to_string())
+        );
     }
 
     let invalid_status = sqlx::query(

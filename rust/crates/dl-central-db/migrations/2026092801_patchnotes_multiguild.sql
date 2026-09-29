@@ -180,9 +180,9 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
 
-        IF OLD.recovery_outcome = 'not_delivered'
+        IF (OLD.status = 'failed' OR OLD.recovery_outcome = 'not_delivered')
            AND NEW.status IN ('pending', 'awaiting_approval') THEN
-            RAISE EXCEPTION 'not-delivered patchnotes recovery must remain retryable or terminal'
+            RAISE EXCEPTION 'failed or reconciled patchnotes dispatch cannot return to an initial state'
                 USING ERRCODE = '23514';
         END IF;
 
