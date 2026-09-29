@@ -5144,15 +5144,21 @@ mod tests {
             .execute(pool)
             .await
             .expect("guild settings");
-        sqlx::query("INSERT INTO patchnotes.changelog_posts(id, title, url) VALUES (9984202, 'privacy patch', 'https://example.invalid/privacy-patch')")
-            .execute(pool)
-            .await
-            .expect("patch post");
+        sqlx::query(
+            "INSERT INTO patchnotes.changelog_posts(id, title, url)
+             VALUES
+                (9984202, 'privacy pending patch', 'https://example.invalid/privacy-pending'),
+                (9984205, 'privacy sending patch', 'https://example.invalid/privacy-sending'),
+                (9984206, 'privacy sent patch', 'https://example.invalid/privacy-sent')",
+        )
+        .execute(pool)
+        .await
+        .expect("patch posts");
         sqlx::query(
             "INSERT INTO patchnotes.guild_dispatch(guild_id, patch_id, revision_hash, status)
              VALUES (9984201, 9984202, $1, 'awaiting_approval'),
-                    (9984201, 9984202, $2, 'awaiting_approval'),
-                    (9984201, 9984202, $3, 'awaiting_approval')",
+                    (9984201, 9984205, $2, 'awaiting_approval'),
+                    (9984201, 9984206, $3, 'awaiting_approval')",
         )
         .bind("a".repeat(64))
         .bind("b".repeat(64))
@@ -5160,12 +5166,17 @@ mod tests {
         .execute(pool)
         .await
         .expect("approval requests");
-        for revision_hash in ["a".repeat(64), "b".repeat(64), "c".repeat(64)] {
+        for (patch_id, revision_hash) in [
+            (9984202_i64, "a".repeat(64)),
+            (9984205_i64, "b".repeat(64)),
+            (9984206_i64, "c".repeat(64)),
+        ] {
             sqlx::query(
                 "UPDATE patchnotes.guild_dispatch
                     SET status = 'pending', approved_by_user_id = 42
-                  WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+                  WHERE guild_id = 9984201 AND patch_id = $1 AND revision_hash = $2",
             )
+            .bind(patch_id)
             .bind(&revision_hash)
             .execute(pool)
             .await
@@ -5175,8 +5186,9 @@ mod tests {
             "UPDATE patchnotes.guild_dispatch
                 SET status = 'sending', send_channel_id = 9984203,
                     send_attempt_id = '00000000-0000-0000-0000-000000000042'::UUID,
-                    send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
-              WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+                    send_started_at = statement_timestamp(),
+                    send_lease_expires_at = statement_timestamp() + interval '10 minutes'
+              WHERE guild_id = 9984201 AND patch_id = 9984205 AND revision_hash = $1",
         )
         .bind("b".repeat(64))
         .execute(pool)
@@ -5186,8 +5198,9 @@ mod tests {
             "UPDATE patchnotes.guild_dispatch
                 SET status = 'sending', send_channel_id = 9984203,
                     send_attempt_id = '00000000-0000-0000-0000-000000000043'::UUID,
-                    send_started_at = now(), send_lease_expires_at = now() + interval '1 minute'
-              WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+                    send_started_at = statement_timestamp(),
+                    send_lease_expires_at = statement_timestamp() + interval '10 minutes'
+              WHERE guild_id = 9984201 AND patch_id = 9984206 AND revision_hash = $1",
         )
         .bind("c".repeat(64))
         .execute(pool)
@@ -5197,7 +5210,7 @@ mod tests {
             "UPDATE patchnotes.guild_dispatch
                 SET status = 'sent', send_lease_expires_at = NULL,
                     sent_message_ids = ARRAY[9984204]::BIGINT[]
-              WHERE guild_id = 9984201 AND patch_id = 9984202 AND revision_hash = $1",
+              WHERE guild_id = 9984201 AND patch_id = 9984206 AND revision_hash = $1",
         )
         .bind("c".repeat(64))
         .execute(pool)
@@ -5215,11 +5228,11 @@ mod tests {
         assert!(dispatch_rows
             .iter()
             .all(|row| row["approved_by_user_id"] == 42));
-        let approvals_before: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT revision_hash, approved_at
+        let approvals_before: Vec<(i64, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT patch_id, revision_hash, approved_at
                FROM patchnotes.guild_dispatch
-              WHERE guild_id = 9984201 AND patch_id = 9984202
-              ORDER BY revision_hash",
+              WHERE guild_id = 9984201
+              ORDER BY patch_id, revision_hash",
         )
         .fetch_all(pool)
         .await
@@ -5250,11 +5263,11 @@ mod tests {
         .await
         .expect("redacted actor ids");
         assert_eq!(remaining, (None, Some(0), Some(1), Some(1)));
-        let approvals_after: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT revision_hash, approved_at
+        let approvals_after: Vec<(i64, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT patch_id, revision_hash, approved_at
                FROM patchnotes.guild_dispatch
-              WHERE guild_id = 9984201 AND patch_id = 9984202
-              ORDER BY revision_hash",
+              WHERE guild_id = 9984201
+              ORDER BY patch_id, revision_hash",
         )
         .fetch_all(pool)
         .await

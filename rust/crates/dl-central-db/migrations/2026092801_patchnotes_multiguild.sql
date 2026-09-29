@@ -245,30 +245,27 @@ BEGIN
                OR NEW.send_started_at > clock_timestamp()
                OR NEW.send_lease_expires_at IS NULL
                OR NEW.send_lease_expires_at <= clock_timestamp()
-               OR NEW.send_lease_expires_at < NEW.send_started_at + interval '1 minute'
-               OR NEW.send_lease_expires_at > NEW.send_started_at + interval '10 minutes' THEN
-                RAISE EXCEPTION 'patchnotes send lease must remain active for one to ten minutes from its current start'
+               OR NEW.send_lease_expires_at IS DISTINCT FROM NEW.send_started_at + interval '10 minutes' THEN
+                RAISE EXCEPTION 'patchnotes send lease must expire ten minutes after its current start'
                     USING ERRCODE = '23514';
             END IF;
 
-            IF NEW.mention_strategy_snapshot IN ('role', 'everyone') THEN
-                INSERT INTO patchnotes.guild_patch_ping_guard (
-                    guild_id, patch_id, revision_hash, first_send_attempt_id, first_send_started_at
-                ) VALUES (
-                    NEW.guild_id, NEW.patch_id, NEW.revision_hash,
-                    NEW.send_attempt_id, NEW.send_started_at
-                ) ON CONFLICT (guild_id, patch_id) DO NOTHING;
+            INSERT INTO patchnotes.guild_patch_ping_guard (
+                guild_id, patch_id, revision_hash, first_send_attempt_id, first_send_started_at
+            ) VALUES (
+                NEW.guild_id, NEW.patch_id, NEW.revision_hash,
+                NEW.send_attempt_id, NEW.send_started_at
+            ) ON CONFLICT (guild_id, patch_id) DO NOTHING;
 
-                SELECT revision_hash
-                  INTO claimed_revision_hash
-                  FROM patchnotes.guild_patch_ping_guard
-                 WHERE guild_id = NEW.guild_id AND patch_id = NEW.patch_id
-                 FOR UPDATE;
+            SELECT revision_hash
+              INTO claimed_revision_hash
+              FROM patchnotes.guild_patch_ping_guard
+             WHERE guild_id = NEW.guild_id AND patch_id = NEW.patch_id
+             FOR UPDATE;
 
-                IF claimed_revision_hash IS DISTINCT FROM NEW.revision_hash THEN
-                    RAISE EXCEPTION 'patchnotes patch already has a send claim for another revision'
-                        USING ERRCODE = '23514';
-                END IF;
+            IF claimed_revision_hash IS DISTINCT FROM NEW.revision_hash THEN
+                RAISE EXCEPTION 'patchnotes patch already has a send claim for another revision'
+                    USING ERRCODE = '23514';
             END IF;
         ELSIF (NEW.mention_strategy_snapshot, NEW.mention_role_id_snapshot)
               IS DISTINCT FROM (OLD.mention_strategy_snapshot, OLD.mention_role_id_snapshot) THEN
@@ -283,23 +280,8 @@ BEGIN
                 OR NEW.status NOT IN ('sending', 'delivery_unknown', 'sent', 'failed')
                 OR NEW.mention_strategy_snapshot NOT IN ('role', 'everyone')
                 OR NEW.sent_message_ids[1] IS DISTINCT FROM NEW.ping_message_id
-                OR (
-                    OLD.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
-                    AND NOT (
-                        OLD.status = 'delivery_unknown'
-                        AND NEW.status = 'sent'
-                        AND NEW.recovery_outcome = 'delivered'
-                        AND NEW.recovery_checked_at IS NOT NULL
-                        AND OLD.sent_message_ids = ARRAY[NEW.ping_message_id]::BIGINT[]
-                    )
-                )
-                OR (
-                    NOT OLD.sent_message_ids @> ARRAY[NEW.ping_message_id]::BIGINT[]
-                    AND (
-                        cardinality(OLD.sent_message_ids) <> 0
-                        OR cardinality(NEW.sent_message_ids) <> 1
-                    )
-                )) THEN
+                OR cardinality(OLD.sent_message_ids) <> 0
+                OR cardinality(NEW.sent_message_ids) <> 1) THEN
             RAISE EXCEPTION 'patchnotes ping evidence can only record one newly confirmed message'
                 USING ERRCODE = '23514';
         END IF;

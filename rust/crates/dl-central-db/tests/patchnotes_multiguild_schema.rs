@@ -63,7 +63,7 @@ fn dispatch_ist_guild_und_revision_getrennt_und_schuetzt_recovery() {
         "new patchnotes send attempt cannot reuse a prior recovery result",
         "patchnotes send requires an enabled guild and its configured channel",
         "active patchnotes send lease cannot be changed",
-        "patchnotes send lease must remain active for one to ten minutes from its current start",
+        "patchnotes send lease must expire ten minutes after its current start",
         "patchnotes patch already has a send claim for another revision",
         "patchnotes sent message evidence must remain an ordered unique prefix",
         "patchnotes sent message evidence requires an active send attempt",
@@ -162,9 +162,11 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         .await?;
     }
     sqlx::query(
-        "UPDATE patchnotes.guild_settings SET mention_strategy = 'everyone' WHERE guild_id = $1",
+        "UPDATE patchnotes.guild_settings
+            SET mention_strategy = 'role', role_id = 9928044
+          WHERE guild_id = $1",
     )
-    .bind(patch_race_guild)
+    .bind(confirmed_guild)
     .execute(db.pool())
     .await?;
 
@@ -428,6 +430,42 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .expect_err("a ping proof must be stored with the first message proof");
     assert_eq!(error_code(&late_first_proof), Some("23514".to_string()));
     late_ping_first_proof_tx.rollback().await?;
+    expire_send_lease(
+        db.pool(),
+        role_ping_guild,
+        ping_late_patch_id,
+        &late_ping_hash,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'delivery_unknown', send_lease_expires_at = NULL
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(ping_late_patch_id)
+    .bind(&late_ping_hash)
+    .execute(db.pool())
+    .await?;
+    let mut recovered_late_ping_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *recovered_late_ping_tx)
+        .await?;
+    let recovered_late_ping = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sent', ping_message_id = $4,
+                recovery_outcome = 'delivered', recovery_checked_at = clock_timestamp()
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(role_ping_guild)
+    .bind(ping_late_patch_id)
+    .bind(&late_ping_hash)
+    .bind(late_ping_first_id)
+    .execute(&mut *recovered_late_ping_tx)
+    .await
+    .expect_err("delivery recovery cannot add ping evidence for an already recorded message");
+    assert_eq!(error_code(&recovered_late_ping), Some("23514".to_string()));
+    recovered_late_ping_tx.rollback().await?;
 
     sqlx::query(
         "UPDATE patchnotes.guild_settings
@@ -582,6 +620,52 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
             Some(everyone_ping_message_id)
         )
     );
+    for (guild_id, revision_hash, channel_id, attempt_id) in [
+        (
+            role_ping_guild,
+            "5".repeat(64),
+            9928028_i64,
+            "00000000-0000-0000-0000-000000000094",
+        ),
+        (
+            everyone_ping_guild,
+            "6".repeat(64),
+            9928029_i64,
+            "00000000-0000-0000-0000-000000000093",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(guild_id)
+        .bind(patch_id)
+        .bind(&revision_hash)
+        .execute(db.pool())
+        .await?;
+        let mut second_strategy_tx = db.pool().begin().await?;
+        sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+            .execute(&mut *second_strategy_tx)
+            .await?;
+        let second_strategy_send = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch
+                SET status = 'sending', send_channel_id = $4,
+                    send_attempt_id = $5::UUID,
+                    send_started_at = statement_timestamp(),
+                    send_lease_expires_at = statement_timestamp() + interval '10 minutes'
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_id)
+        .bind(patch_id)
+        .bind(&revision_hash)
+        .bind(channel_id)
+        .bind(attempt_id)
+        .execute(&mut *second_strategy_tx)
+        .await
+        .expect_err("a ping strategy cannot claim a second revision for the same patch");
+        assert_eq!(error_code(&second_strategy_send), Some("23514".to_string()));
+        second_strategy_tx.rollback().await?;
+    }
 
     sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch
@@ -809,6 +893,26 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         Some("23514".to_string())
     );
     initial_expired_lease_tx.rollback().await?;
+    let mut short_lease_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *short_lease_tx)
+        .await?;
+    let short_initial_lease = sqlx::query(
+        "UPDATE patchnotes.guild_dispatch
+            SET status = 'sending', send_channel_id = 9928014,
+                send_attempt_id = '00000000-0000-0000-0000-000000000098'::UUID,
+                send_started_at = clock_timestamp(),
+                send_lease_expires_at = clock_timestamp() + interval '1 minute 2 seconds'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(active_lease_guild)
+    .bind(patch_id)
+    .bind(&active_lease_hash)
+    .execute(&mut *short_lease_tx)
+    .await
+    .expect_err("a send lease must reserve the complete ten-minute window");
+    assert_eq!(error_code(&short_initial_lease), Some("23514".to_string()));
+    short_lease_tx.rollback().await?;
 
     sqlx::query("UPDATE patchnotes.guild_settings SET channel_id = 9928014 WHERE guild_id = $1")
         .bind(recovery_guild)
@@ -827,6 +931,10 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    let mut valid_lease_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *valid_lease_tx)
+        .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sending', send_channel_id = 9928014,
@@ -837,8 +945,9 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(active_lease_guild)
     .bind(patch_id)
     .bind(&active_lease_hash)
-    .execute(db.pool())
+    .execute(&mut *valid_lease_tx)
     .await?;
+    valid_lease_tx.commit().await?;
 
     let mut shorten_lease_tx = db.pool().begin().await?;
     sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
@@ -1456,19 +1565,26 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         error_code(&delivered_without_message_id),
         Some("23514".to_string())
     );
+    let mut first_delivery_recovery_tx = db.pool().begin().await?;
+    sqlx::query("SET LOCAL ROLE dl_patchnotes_dml")
+        .execute(&mut *first_delivery_recovery_tx)
+        .await?;
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
-            SET status = 'sent', sent_message_ids = ARRAY[9928015]::BIGINT[],
-                recovery_outcome = 'delivered', recovery_checked_at = now()
+            SET status = 'sent', sent_message_ids = ARRAY[$4]::BIGINT[],
+                ping_message_id = $4, recovery_outcome = 'delivered',
+                recovery_checked_at = now()
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(confirmed_guild)
     .bind(patch_id)
     .bind(&confirmed_delivery_hash)
-    .execute(db.pool())
+    .bind(9_928_015_i64)
+    .execute(&mut *first_delivery_recovery_tx)
     .await?;
-    let recovered: (String, Option<i64>, Vec<i64>) = sqlx::query_as(
-        "SELECT status, send_channel_id, sent_message_ids
+    first_delivery_recovery_tx.commit().await?;
+    let recovered: (String, Option<i64>, Vec<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT status, send_channel_id, sent_message_ids, ping_message_id
            FROM patchnotes.guild_dispatch
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
@@ -1479,7 +1595,12 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .await?;
     assert_eq!(
         recovered,
-        ("sent".to_string(), Some(9_928_016), vec![9_928_015])
+        (
+            "sent".to_string(),
+            Some(9_928_016),
+            vec![9_928_015],
+            Some(9_928_015)
+        )
     );
 
     let partial_hash = "9".repeat(64);
@@ -1905,12 +2026,20 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch
             SET status = 'sent', sent_message_ids = ARRAY[9928037]::BIGINT[],
-                ping_message_id = 9928037, send_lease_expires_at = NULL
+                send_lease_expires_at = NULL
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
     )
     .bind(patch_race_guild)
     .bind(patch_id)
     .bind(&competing_revision_one)
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE patchnotes.guild_settings
+            SET mention_strategy = 'everyone'
+          WHERE guild_id = $1",
+    )
+    .bind(patch_race_guild)
     .execute(db.pool())
     .await?;
     let mut second_revision_after_sent_tx = db.pool().begin().await?;
