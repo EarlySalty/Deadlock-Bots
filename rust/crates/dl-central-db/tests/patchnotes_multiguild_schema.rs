@@ -605,6 +605,20 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     .bind(&recovery_hash)
     .execute(db.pool())
     .await?;
+    for blocked_status in ["pending", "awaiting_approval"] {
+        let stranded_retry = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch SET status = $4
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_one)
+        .bind(patch_id)
+        .bind(&recovery_hash)
+        .bind(blocked_status)
+        .execute(db.pool())
+        .await
+        .expect_err("reconciled retry cannot return to a state that cannot consume its evidence");
+        assert_eq!(error_code(&stranded_retry), Some("23514".to_string()));
+    }
     sqlx::query(
         "UPDATE patchnotes.guild_dispatch SET send_channel_id = 9928016
           WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
@@ -843,6 +857,29 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         error_code(&manual_mode_with_retry),
         Some("23514".to_string())
     );
+    sqlx::query(
+        "UPDATE patchnotes.guild_dispatch SET status = 'failed'
+          WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+    )
+    .bind(guild_one)
+    .bind(patch_id)
+    .bind(&recovery_hash)
+    .execute(db.pool())
+    .await?;
+    for blocked_status in ["pending", "awaiting_approval"] {
+        let stranded_failure = sqlx::query(
+            "UPDATE patchnotes.guild_dispatch SET status = $4
+              WHERE guild_id = $1 AND patch_id = $2 AND revision_hash = $3",
+        )
+        .bind(guild_one)
+        .bind(patch_id)
+        .bind(&recovery_hash)
+        .bind(blocked_status)
+        .execute(db.pool())
+        .await
+        .expect_err("terminal failure cannot return to a non-recovery state");
+        assert_eq!(error_code(&stranded_failure), Some("23514".to_string()));
+    }
 
     let invalid_status = sqlx::query(
         "INSERT INTO patchnotes.guild_dispatch (guild_id, patch_id, revision_hash, status)
@@ -979,7 +1016,7 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
     });
     update_started_rx.await?;
     let mut settings_update_waiting = false;
-    for _ in 0..100 {
+    while !settings_update_waiting && !settings_update.is_finished() {
         settings_update_waiting = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM pg_stat_activity
@@ -989,10 +1026,9 @@ async fn migration_ist_isoliert_anwendbar_und_erfuellt_guild_dispatch_vertraege(
         )
         .fetch_one(db.pool())
         .await?;
-        if settings_update_waiting {
-            break;
+        if !settings_update_waiting {
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
     }
     dispatch_tx.commit().await?;
     settings_update.await??;

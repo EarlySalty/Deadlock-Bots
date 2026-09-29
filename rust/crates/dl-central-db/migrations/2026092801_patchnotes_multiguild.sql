@@ -180,6 +180,12 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
 
+        IF OLD.recovery_outcome = 'not_delivered'
+           AND NEW.status IN ('pending', 'awaiting_approval') THEN
+            RAISE EXCEPTION 'not-delivered patchnotes recovery must remain retryable or terminal'
+                USING ERRCODE = '23514';
+        END IF;
+
         IF NEW.status = 'sent'
            AND OLD.status = 'sending'
            AND NEW.recovery_outcome IS NOT NULL THEN
