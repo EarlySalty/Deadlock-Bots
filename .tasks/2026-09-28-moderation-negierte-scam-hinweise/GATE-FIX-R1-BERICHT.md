@@ -30,7 +30,12 @@ Rust-Arbeitsverzeichnis: `/home/nathanael/.worktrees/dl-moderation-negierte-scam
 
 ## Stand
 
-Der eigene Quell-Diff umfasst `rust/crates/dl-moderation/src/moderation_verdict.rs`. `REGISTER.md` war vorbestehend geändert und `GATE-FIX-R1.md` vorbestehend ungetrackt; beide wurden nicht gestaged. Der Gate-Selbstreview ist noch offen und wird nach dem Code-Commit genau einmal ausgeführt.
+Der eigene Quell-Diff umfasst `rust/crates/dl-moderation/src/moderation_verdict.rs`. `REGISTER.md` war vorbestehend geändert und `GATE-FIX-R1.md` vorbestehend ungetrackt; beide wurden nicht gestaged. Der einzige Selbstreview nach Code-Commit ergab `BLOCK`. Zum Zeitpunkt des Urteils wurde nicht gepusht; der Feature-Branch wird nach Dokumentation der Befunde zur Übergabe hochgeladen.
+
+1. `moderation_verdict.rs:128`: Jedes `:` trennt den Kontext. Dadurch wird „Nicht belegt: sichtbarer Scam.“ fälschlich als positiver Befund behandelt.
+2. `moderation_verdict.rs:380`: Das erweiterte Wortfenster erfasst auch Negationen eines anderen Sachverhalts. „Sichtbarer Scam, das Logo ist nicht erkennbar.“ wird dadurch fälschlich unterdrückt.
+
+Die zwei Gate-Befunde sind offen. Es gab keinen zweiten Review-Aufruf und keine Änderung am Gate-Zähler.
 
 TESTNACHWEIS[TW-1]: 91 passed, 0 ignored | Baseline: nicht erhoben, kein Altfehlerurteil
 WIRKUNGSPRUEFUNG[WP-1]: 2 Befunde | Zwillingssuche: grep-belegt | Fremddienst-Pfade: 0/0 geprüft
