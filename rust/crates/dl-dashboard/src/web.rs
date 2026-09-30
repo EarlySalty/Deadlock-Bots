@@ -336,6 +336,23 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/auth/discord/callback", get(own_callback))
         .route("/callback/discord", get(callback))
         .route("/auth/logout", get(logout).post(logout))
+        .route("/api/admin/bot-configs", get(crate::bot_configs::list))
+        .route(
+            "/api/admin/bot-configs/{id}",
+            get(crate::bot_configs::get).post(crate::bot_configs::mutate),
+        )
+        .route(
+            "/api/admin/bot-config-editor/{name}",
+            get(crate::bot_configs::ui),
+        )
+        .route(
+            "/internal/twitch/v1/bot-config",
+            get(crate::bot_configs::twitch_get).post(crate::bot_configs::twitch_mutate),
+        )
+        .route(
+            "/internal/twitch/v1/bot-config-editor/{name}",
+            get(crate::bot_configs::twitch_ui),
+        )
         .route("/internal/v1/discord/initiate", post(initiate))
         .route("/internal/v1/discord/consume-result", post(consume_result))
         .route(
@@ -1496,7 +1513,7 @@ fn guard_turnier(
     .map_err(reject)
 }
 
-fn guard_twitch(
+pub(crate) fn guard_twitch(
     app: &DashboardApp,
     peer: &SocketAddr,
     headers: &HeaderMap,
@@ -2284,13 +2301,21 @@ mod visual_brain_route_tests {
             "/api/admin/betriebskonfiguration",
             "/api/admin/steam-betriebskonfiguration",
             "/api/admin/betriebskonfiguration.js",
+            "/api/admin/bot-configs",
+            "/api/admin/bot-configs/discord",
+            "/api/admin/bot-configs/twitch",
+            "/api/admin/bot-config-editor/js",
+            "/api/admin/bot-config-editor/css",
         ] {
             for (cookie, expected) in [
                 (None, 401),
                 (Some(&cookies[0]), 403),
                 (
                     Some(&cookies[1]),
-                    if path.ends_with("graph-ui.js") || path.ends_with("betriebskonfiguration.js") {
+                    if path.ends_with("graph-ui.js")
+                        || path.ends_with("betriebskonfiguration.js")
+                        || path.starts_with("/api/admin/bot-config-editor/")
+                    {
                         200
                     } else {
                         503
@@ -2314,9 +2339,11 @@ mod visual_brain_route_tests {
                 assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
             }
         }
-        for path in [
-            "/api/admin/betriebskonfiguration",
-            "/api/admin/steam-betriebskonfiguration",
+        for (method, path) in [
+            ("PATCH", "/api/admin/betriebskonfiguration"),
+            ("PATCH", "/api/admin/steam-betriebskonfiguration"),
+            ("POST", "/api/admin/bot-configs/discord"),
+            ("POST", "/api/admin/bot-configs/twitch"),
         ] {
             for (cookie, expected) in [
                 (None, 401),
@@ -2324,7 +2351,7 @@ mod visual_brain_route_tests {
                 (Some(&cookies[1]), 403),
             ] {
                 let mut request = axum::http::Request::builder()
-                    .method("PATCH")
+                    .method(method)
                     .uri(path)
                     .header(header::CONTENT_TYPE, "application/json");
                 if let Some(cookie) = cookie {

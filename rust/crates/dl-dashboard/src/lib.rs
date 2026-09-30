@@ -26,6 +26,7 @@ pub mod audit;
 pub mod auth;
 pub mod authority;
 pub mod brain;
+pub mod bot_configs;
 pub mod config;
 pub mod db;
 pub mod deadlock;
