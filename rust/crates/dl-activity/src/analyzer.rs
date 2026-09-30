@@ -20,8 +20,8 @@ use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use sqlx::PgPool;
 
 use crate::db::{
-    ActivityDbResult, discord_id_to_i64, i64_to_i32, i64_to_u64, lock_member_events,
-    next_member_event_id_in_tx, validate_json_text,
+    discord_id_to_i64, i64_to_i32, i64_to_u64, lock_member_events, next_member_event_id_in_tx,
+    validate_json_text, ActivityDbResult,
 };
 
 pub const ANALYZE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
@@ -1018,8 +1018,8 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "testing")]
-    async fn opt_out_leave_updates_only_qualified_membership_state()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn opt_out_leave_updates_only_qualified_membership_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = test_database::database().await;
         let pool = db.pool();
         let user_id = 9_876_543_211_i64;
@@ -1178,8 +1178,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn opted_out_user_bekommt_keinen_activity_pattern_refill()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn opted_out_user_bekommt_keinen_activity_pattern_refill(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, analyzer, _voice) = setup().await?;
         sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(101, TRUE)")
             .execute(db.pool())
@@ -1238,8 +1238,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn opted_out_user_bekommt_keinen_co_player_refill()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn opted_out_user_bekommt_keinen_co_player_refill(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (db, analyzer, _voice) = setup().await?;
         sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(100, TRUE)")
             .execute(db.pool())
@@ -1285,8 +1285,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn leave_event_speichert_display_name_und_skippt_bots()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn leave_event_speichert_display_name_und_skippt_bots(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         handle_member_event(
@@ -1329,8 +1329,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         sqlx::query!(
@@ -1428,8 +1428,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool().clone();
         let port = Arc::new(SequencedBackfillPort {

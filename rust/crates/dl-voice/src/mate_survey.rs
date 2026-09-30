@@ -145,11 +145,7 @@ impl MateSurvey {
             return;
         }
         let before = now - Duration::seconds(seconds) - HISTORY_GUARD;
-        let known = match self
-            .port
-            .previous_mates(user_id, &candidates, before)
-            .await
-        {
+        let known = match self.port.previous_mates(user_id, &candidates, before).await {
             Ok(known) => known,
             Err(error) => {
                 tracing::warn!(%error, user_id, "Mitspieler-Umfrage: Vorgeschichte nicht lesbar");
@@ -1012,7 +1008,12 @@ mod tests {
         let survey = MateSurvey::new(port.clone());
         let seconds = 3 * 3600;
         survey.on_session_end(1, 99, vec![2], seconds, now()).await;
-        let before = port.state.lock().expect("lock").asked_before.expect("gefragt");
+        let before = port
+            .state
+            .lock()
+            .expect("lock")
+            .asked_before
+            .expect("gefragt");
         assert_eq!(before, now() - Duration::seconds(seconds) - HISTORY_GUARD);
         assert!(
             before < now() - Duration::seconds(seconds),
@@ -1023,14 +1024,23 @@ mod tests {
     /// Der eigentliche Filter steckt im SQL, deshalb hier gegen echte Zeilen.
     #[tokio::test]
     async fn previous_mates_db_sieht_nur_die_zeit_vor_der_session() {
-        let db = dl_central_db::testing::test_pool().await.expect("test_pool");
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let pool = db.pool();
         let rater = 4001i64;
         let alter_bekannter = 4002i64;
         let neuer = 4003i64;
         let session_start = now() - Duration::hours(4);
         // Vorgeschichte: eine gemeinsame Session vor drei Tagen.
-        insert_session(pool, 1, rater, now() - Duration::days(3), &[alter_bekannter]).await;
+        insert_session(
+            pool,
+            1,
+            rater,
+            now() - Duration::days(3),
+            &[alter_bekannter],
+        )
+        .await;
         // Die eben beendete Session, in der beide dabei waren.
         insert_session(pool, 2, rater, session_start, &[alter_bekannter, neuer]).await;
 

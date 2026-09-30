@@ -287,8 +287,11 @@ impl RecordingArchive for RcloneArchive {
         ])
         .await?;
         let file_link = Self::last_link(&self.run(&["link".to_string(), remote_file]).await?)?;
-        let folder_link =
-            Self::last_link(&self.run(&["link".to_string(), self.folder_path(folder)]).await?)?;
+        let folder_link = Self::last_link(
+            &self
+                .run(&["link".to_string(), self.folder_path(folder)])
+                .await?,
+        )?;
         Ok(ArchivedRecording {
             file_link,
             folder_link,
@@ -1391,8 +1394,7 @@ impl ScrimRecorder {
         trigger: StopTrigger,
         text: &str,
     ) {
-        match self.port.post_text(text_channel_id, text).await
-        {
+        match self.port.post_text(text_channel_id, text).await {
             Ok(()) => tracing::warn!(
                 guild_id = SCRIM_GUILD_ID,
                 channel_id = voice_channel_id,

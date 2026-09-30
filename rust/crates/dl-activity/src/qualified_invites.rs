@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Instant};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::join_source::classify;

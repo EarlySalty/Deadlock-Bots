@@ -50,7 +50,10 @@ fn fenced_block(raw: &str, info: &str) -> Result<String, String> {
         .by_ref()
         .find(|line| line.trim() == start_marker)
         .ok_or_else(|| format!("Akte ohne ```{info}-Block"))?;
-    let block: Vec<&str> = lines.by_ref().take_while(|line| line.trim() != "```").collect();
+    let block: Vec<&str> = lines
+        .by_ref()
+        .take_while(|line| line.trim() != "```")
+        .collect();
     let text = block.join("\n").trim().to_string();
     if text.is_empty() {
         return Err(format!("```{info}-Block ist leer"));
@@ -211,8 +214,14 @@ pub fn parse_match_antwort(raw: &str) -> Result<MatchUrteil, String> {
     Ok(MatchUrteil {
         decision,
         confidence: value["confidence"].as_f64().map(|v| v as f32),
-        begruendung: value["begruendung"].as_str().unwrap_or_default().to_string(),
-        vorschlagstext: value["vorschlagstext"].as_str().unwrap_or_default().to_string(),
+        begruendung: value["begruendung"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        vorschlagstext: value["vorschlagstext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         kanal: value["kanal"].as_str().unwrap_or_default().to_string(),
     })
 }
@@ -234,7 +243,10 @@ pub fn parse_kritik_antwort(raw: &str) -> Result<KritikUrteil, String> {
     Ok(KritikUrteil {
         ok,
         achsen: value["achsen"].clone(),
-        begruendung: value["begruendung"].as_str().unwrap_or_default().to_string(),
+        begruendung: value["begruendung"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -376,7 +388,11 @@ pub fn zaehle_klassen(entries: &[LedgerEntry]) -> BTreeMap<&'static str, u64> {
     zaehler
 }
 
-pub fn pflichtzeile(nonce: &str, kandidaten: usize, zaehler: &BTreeMap<&'static str, u64>) -> String {
+pub fn pflichtzeile(
+    nonce: &str,
+    kandidaten: usize,
+    zaehler: &BTreeMap<&'static str, u64>,
+) -> String {
     format!(
         "VERBINDER[{nonce}]: kandidaten={kandidaten} | yes={} no={} unsure={} timeout={} error={} suppressed={}",
         zaehler.get("yes").unwrap_or(&0),
@@ -501,7 +517,9 @@ pub fn render_staff_post(
         ));
     }
     if errors > 0 {
-        zeilen.push(format!("- {errors} Lauf-Fehler/Timeouts, Details im Ledger."));
+        zeilen.push(format!(
+            "- {errors} Lauf-Fehler/Timeouts, Details im Ledger."
+        ));
     }
     Some(zeilen.join("\n"))
 }
@@ -678,7 +696,10 @@ mod tests {
 
     #[test]
     fn akte_ohne_nonce_oder_prompt_ist_fehler() {
-        assert!(Akte::parse("---\nname: x\n---\n```prompt-match\na\n```\n```prompt-kritik\nb\n```").is_err());
+        assert!(Akte::parse(
+            "---\nname: x\n---\n```prompt-match\na\n```\n```prompt-kritik\nb\n```"
+        )
+        .is_err());
         assert!(Akte::parse("---\nnonce: VB-1\n---\n```prompt-match\na\n```").is_err());
     }
 
@@ -709,7 +730,10 @@ mod tests {
         assert!(durch.is_empty());
         assert_eq!(unterdrueckt.len(), 1);
         assert_eq!(unterdrueckt[0].decision, Decision::Suppressed);
-        assert_eq!(unterdrueckt[0].subject_user_id, None, "opted_out nie mit ID");
+        assert_eq!(
+            unterdrueckt[0].subject_user_id, None,
+            "opted_out nie mit ID"
+        );
     }
 
     #[test]
@@ -738,12 +762,8 @@ mod tests {
         assert_eq!(durch.len(), 1);
         assert_eq!(unterdrueckt[0].reason, "run_cap");
 
-        let (durch, unterdrueckt) = waechter_filter(
-            vec![kandidat(1, 2)],
-            &HashSet::new(),
-            150,
-            &Caps::default(),
-        );
+        let (durch, unterdrueckt) =
+            waechter_filter(vec![kandidat(1, 2)], &HashSet::new(), 150, &Caps::default());
         assert!(durch.is_empty());
         assert_eq!(unterdrueckt[0].reason, "day_cap");
     }
@@ -751,12 +771,8 @@ mod tests {
     #[test]
     fn day_cap_rechnet_kritik_aufrufe_mit_ein() {
         // 149 von 150 verbraucht: 1 Restaufruf reicht nicht für Match+Kritik.
-        let (durch, unterdrueckt) = waechter_filter(
-            vec![kandidat(1, 2)],
-            &HashSet::new(),
-            149,
-            &Caps::default(),
-        );
+        let (durch, unterdrueckt) =
+            waechter_filter(vec![kandidat(1, 2)], &HashSet::new(), 149, &Caps::default());
         assert!(durch.is_empty());
         assert_eq!(unterdrueckt[0].reason, "day_cap");
     }
@@ -832,7 +848,13 @@ mod tests {
     fn chunk_trennt_an_zeilengrenzen_ohne_zeichen_zu_verlieren() {
         // Fünf Zeilen à 10 Zeichen bei Limit 25: je zwei Zeilen passen
         // zusammen (21), drei nicht mehr (32).
-        let zeilen = ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc", "dddddddddd", "eeeeeeeeee"];
+        let zeilen = [
+            "aaaaaaaaaa",
+            "bbbbbbbbbb",
+            "cccccccccc",
+            "dddddddddd",
+            "eeeeeeeeee",
+        ];
         let text = zeilen.join("\n");
         let chunks = chunk_message(&text, 25);
 
@@ -862,7 +884,14 @@ mod tests {
     #[test]
     fn pflichtzeile_traegt_alle_sechs_klassen() {
         let zeile = pflichtzeile("VB-1", 0, &zaehle_klassen(&[]));
-        for klasse in ["yes=", "no=", "unsure=", "timeout=", "error=", "suppressed="] {
+        for klasse in [
+            "yes=",
+            "no=",
+            "unsure=",
+            "timeout=",
+            "error=",
+            "suppressed=",
+        ] {
             assert!(zeile.contains(klasse), "fehlende Klasse {klasse}");
         }
     }
@@ -889,7 +918,8 @@ mod tests {
             },
         );
         assert!(bericht.contains("t1_solo_doppel: 2/3 eingetreten = 66.7 Prozent (unter Gate"));
-        assert!(bericht.contains("t3_rueckkehrer_anker: 1/1 eingetreten = 100.0 Prozent (Gate erreicht"));
+        assert!(bericht
+            .contains("t3_rueckkehrer_anker: 1/1 eingetreten = 100.0 Prozent (Gate erreicht"));
         assert!(bericht.contains("Nur eine Urteilsklasse"));
         assert!(bericht.contains("2 yes noch unaufgelöst"));
     }
@@ -955,7 +985,10 @@ mod tests {
 
         let aufgeloest = resolve_outcomes(&pool, 7).await.expect("resolve");
 
-        assert_eq!(aufgeloest, 1, "genau das eine offene yes muss aufgelöst sein");
+        assert_eq!(
+            aufgeloest, 1,
+            "genau das eine offene yes muss aufgelöst sein"
+        );
         let (outcome, hat_zeitstempel) = outcome_von(&pool, ledger_id).await;
         assert_eq!(outcome.as_deref(), Some("met"));
         assert!(hat_zeitstempel, "outcome_at muss gesetzt sein");
@@ -974,7 +1007,10 @@ mod tests {
         assert_eq!(aufgeloest, 1);
         let (outcome, hat_zeitstempel) = outcome_von(&pool, ledger_id).await;
         assert_eq!(outcome.as_deref(), Some("not_met"));
-        assert!(hat_zeitstempel, "outcome_at muss auch bei not_met gesetzt sein");
+        assert!(
+            hat_zeitstempel,
+            "outcome_at muss auch bei not_met gesetzt sein"
+        );
     }
 
     #[tokio::test]
