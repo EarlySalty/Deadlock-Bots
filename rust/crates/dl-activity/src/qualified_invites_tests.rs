@@ -451,6 +451,14 @@ async fn private_departure_preserves_membership_boundary_without_activity_event(
         .expect("membership-only departure");
     tx.commit().await.expect("private departure commit");
 
+    let private_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM activity.member_events WHERE guild_id = 1 AND user_id = 990001",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("private event count");
+    assert_eq!(private_events, 0);
+
     let metadata = json!({
         "discord_joined_at": rejoined_at.to_rfc3339(),
         "invite_code": "ViewerCode"
@@ -490,13 +498,6 @@ async fn private_departure_preserves_membership_boundary_without_activity_event(
     .await
     .expect("membership boundary");
     assert_eq!(membership, (true, Some(departed_at), Some(rejoined_at)));
-    let private_events: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM activity.member_events WHERE guild_id = 1 AND user_id = 990001",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("private event count");
-    assert_eq!(private_events, 0);
     let eligible: bool =
         sqlx::query_scalar("SELECT eligible FROM bot.twitch_invite_joins WHERE join_id = 990001")
             .fetch_one(pool)
