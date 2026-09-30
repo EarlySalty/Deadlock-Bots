@@ -19,7 +19,7 @@ BEGIN
            OR NEW.ended_at < NEW.started_at + INTERVAL '15 minutes' THEN
             RETURN NEW;
         END IF;
-        evidence_at := (NEW.started_at AT TIME ZONE 'UTC') + INTERVAL '15 minutes';
+        evidence_at := NEW.started_at + INTERVAL '15 minutes';
     ELSE
         IF NEW.voice_qualified_at IS NULL OR
            NEW.voice_qualified_at IS NOT DISTINCT FROM OLD.voice_qualified_at THEN

@@ -4,6 +4,66 @@ async fn evidence_queue_count(pool: &PgPool, user: i64) -> i64 {
 }
 
 #[tokio::test]
+async fn late_voice_evidence_is_independent_of_the_writer_session_timezone() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined = at("2026-01-01T12:00:00Z");
+    let now = joined + Duration::days(31);
+    for (user, timezone, start) in [
+        (991_700_i64, "Pacific/Kiritimati", joined),
+        (
+            991_701,
+            "America/Los_Angeles",
+            joined + Duration::days(30) - Duration::minutes(15),
+        ),
+    ] {
+        join(pool, user, user, joined, "ViewerCode").await;
+        let invite = candidate(pool, user).await;
+        let member = MemberProof {
+            joined_at: Some(joined),
+            is_bot: false,
+            checked_at: now,
+        };
+        assert_eq!(
+            evaluate_one(pool, &invite, Some(&member), &[], now)
+                .await
+                .expect("deadline before voice persistence"),
+            Some("expired")
+        );
+        let mut tx = pool.begin().await.expect("non-UTC writer");
+        sqlx::query("SELECT set_config('TimeZone',$1,TRUE)")
+            .bind(timezone)
+            .execute(&mut *tx)
+            .await
+            .expect("set local writer timezone");
+        sqlx::query("INSERT INTO activity.voice_session_log (id,user_id,guild_id,channel_id,started_at,ended_at,duration_seconds,points) VALUES($1,$1,1,20,$2,$3,900,0)")
+            .bind(user).bind(start).bind(start + Duration::minutes(15)).execute(&mut *tx).await.expect("late real timestamptz voice evidence");
+        tx.commit().await.expect("voice commit");
+        assert_eq!(
+            evidence_queue_count(pool, user).await,
+            1,
+            "timezone {timezone}"
+        );
+        assert_eq!(
+            evaluate_one(pool, &invite, Some(&member), &[], now)
+                .await
+                .expect("timezone independent qualification"),
+            Some("qualified")
+        );
+        let qualified: DateTime<Utc> =
+            sqlx::query_scalar("SELECT qualified_at FROM bot.twitch_invite_joins WHERE join_id=$1")
+                .bind(user)
+                .fetch_one(pool)
+                .await
+                .expect("exact qualified timestamp");
+        assert_eq!(
+            qualified,
+            (start + Duration::minutes(15)).max(joined + Duration::days(14))
+        );
+    }
+}
+
+#[tokio::test]
 async fn pre_attribution_evidence_remains_queued_after_deadline_with_rejoin_proof() {
     let db = database().await;
     let pool = db.pool();
