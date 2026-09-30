@@ -12,8 +12,11 @@ const DAY: u64 = 86_400;
 const WEEK: u64 = 7 * DAY;
 
 #[derive(Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct State {
+    /// Lesekompatibilität mit der ersten Rust-Zustandsfassung.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_invocation: Option<String>,
     pub recent_invocations: Vec<String>,
     pub unreported: u64,
     pub confirmed: Vec<u64>,
@@ -140,8 +143,20 @@ impl Store {
                 if file.metadata()?.len() > 32_768 {
                     bail!("Meldezustand ist zu groß.");
                 }
-                serde_json::from_reader(file)
-                    .context("Meldezustand ist ungültig; Versand bleibt gesperrt.")
+                let mut state: State = serde_json::from_reader(file)
+                    .context("Meldezustand ist ungültig; Versand bleibt gesperrt.")?;
+                if let Some(invocation) = state.last_invocation.take() {
+                    if !state.recent_invocations.contains(&invocation) {
+                        state.recent_invocations.push(invocation);
+                    }
+                    // Frühere sichere Payload bleibt erhalten, aber ihr damaliger
+                    // HTTP-Versuch ist nicht belegt: konservativ einmal reservieren.
+                    if state.pending.is_some() && state.uncertain_attempts.is_empty() {
+                        state.reserve_attempt(crate::now()?);
+                    }
+                    self.save(&state)?;
+                }
+                Ok(state)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(_) => bail!("Meldezustand ist nicht lesbar."),
@@ -454,5 +469,22 @@ mod tests {
         assert_eq!(state.confirmed, vec![1_005]);
         assert_eq!(state.unreported, 0);
         assert!(state.eligible(1_005 + DAY));
+    }
+
+    #[test]
+    fn first_rust_schema_upgrades_without_losing_budget_pending_or_counter() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(root.path(), "unit").unwrap();
+        fs::write(&store.path, r#"{"last_invocation":"old-id","unreported":12,"confirmed":[1000],"sequence":2,"pending":{"key":"stable-key","content":"sicher","included":3}}"#).unwrap();
+        let state = store.load().unwrap();
+        assert_eq!(state.recent_invocations, vec!["old-id"]);
+        assert_eq!(state.unreported, 12);
+        assert_eq!(state.confirmed, vec![1000]);
+        assert_eq!(state.pending.as_ref().unwrap().key, "stable-key");
+        assert_eq!(state.uncertain_attempts.len(), 1);
+        let again = store.load().unwrap();
+        assert_eq!(again.uncertain_attempts, state.uncertain_attempts);
+        assert!(!again.eligible(crate::now().unwrap()));
     }
 }

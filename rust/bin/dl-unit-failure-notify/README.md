@@ -68,3 +68,9 @@ versucht werden, höchstens zweimal in sieben Tagen. Erst eine Nachrichten-ID
 ersetzt diese Reservierung durch einen bestätigten Versand, ohne doppelte
 Budgetzählung. Fehler beim vorherigen Secretladen verbrauchen kein Versandbudget.
 Parallele OneShots derselben Unit sind durch flock gesperrt.
+
+Eine vorhandene erste Rust-Zustandsfassung mit `last_invocation` wird ebenfalls
+einmalig übernommen: Event-ID, echte bestätigte Zeiten, Zähler und offene Payload
+bleiben erhalten. Fehlt bei einer alten offenen Payload die Versuchshistorie,
+entsteht eine konservative unbestätigte Reservierung; keine bestätigte Sendung
+wird erfunden und die Ruhe wird beim erneuten Laden nicht verschoben.
