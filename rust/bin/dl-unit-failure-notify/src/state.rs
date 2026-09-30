@@ -12,20 +12,23 @@ const DAY: u64 = 86_400;
 const WEEK: u64 = 7 * DAY;
 
 #[derive(Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     /// Lesekompatibilität mit der ersten Rust-Zustandsfassung.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_invocation: Option<String>,
+    #[serde(default)]
     pub recent_invocations: Vec<String>,
     pub unreported: u64,
     pub confirmed: Vec<u64>,
     /// Versandversuche ohne bestätigte Message-ID. Keine erfundenen Sends;
     /// diese Reservierungen verhindern Replay nach verlorener Bestätigung.
+    #[serde(default)]
     pub uncertain_attempts: Vec<u64>,
     pub sequence: u64,
     pub pending: Option<Pending>,
     /// Einmalige Übergangsruhe: Legacy hat keine vollständige Wochenhistorie.
+    #[serde(default)]
     pub legacy_not_before: u64,
 }
 
@@ -486,5 +489,20 @@ mod tests {
         let again = store.load().unwrap();
         assert_eq!(again.uncertain_attempts, state.uncertain_attempts);
         assert!(!again.eligible(crate::now().unwrap()));
+    }
+
+    #[test]
+    fn incomplete_json_state_cannot_reset_confirmed_budget_or_counter() {
+        for json in [
+            "{}",
+            r#"{"last_invocation":"old-id"}"#,
+            r#"{"unreported":0,"sequence":0,"pending":null}"#,
+        ] {
+            assert!(serde_json::from_str::<State>(json).is_err());
+        }
+        assert!(serde_json::from_str::<State>(
+            r#"{"unreported":0,"confirmed":[],"sequence":0,"pending":null}"#
+        )
+        .is_ok());
     }
 }
