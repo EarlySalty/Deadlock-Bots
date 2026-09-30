@@ -35,7 +35,13 @@ Die R1-Prüfung hatte zwei blockierende Befunde:
 1. Eine pauschale Doppelpunkt-Grenze hätte „Nicht belegt: sichtbarer Scam.“ fälschlich positiv eingestuft. Doppelpunkte werden nun nur innerhalb der lokal erkannten Aussagegrenzen behandelt; diese Negation unterdrückt die Scam-Aussage.
 2. Ein beliebiges Wortfenster nach „Scam“ hätte die Logo-Negation auf die Scam-Aussage übertragen. Die Nachprüfung ist jetzt aussagebezogen; „Sichtbarer Scam, das Logo ist nicht erkennbar.“ bleibt positiv.
 
-Beide Fälle sowie die Präfix-Negationen und die angegebenen harmlosen Aufzählungen sind Regressionen durch beide gemeinsamen Konfliktprüfer. Formatter, Check, Clippy und vollständige Suite sind für den aktuellen Stand erfolgreich. Der einzelne finale Selbstreview für diesen Stand steht noch aus.
+Beide ursprünglichen Fälle sowie die Präfix-Negationen und die angegebenen harmlosen Aufzählungen sind Regressionen durch beide gemeinsamen Konfliktprüfer. Formatter, Check, Clippy und vollständige Suite sind für den geprüften Stand erfolgreich.
+
+Der eine finale Selbstreview für Commit `da1e75bf` ergab `BLOCK`. Die beiden vorherigen Befunde wurden als behoben bestätigt. Der neue blockierende Befund lautet:
+
+`rust/crates/dl-moderation/src/moderation_verdict.rs:261 | BLOCKING | Relative-clause negation is discarded | “Ein Scam-Muster, das bisher nicht belegt ist.” treats “das bisher…” as an independent statement, truncating the suffix before its negation. Both shared checks now falsely report a contradiction; the previous scan recognized “nicht belegt”.`
+
+Kein weiterer Review-Aufruf. Der Befund ist offen und vor einem Push oder Merge zu beheben.
 
 Der eigene Code-Diff betrifft `rust/crates/dl-moderation/src/moderation_verdict.rs`. `REGISTER.md` war vor Beginn dieser Runde bereits geändert und `GATE-FIX-R1.md` bereits ungetrackt; beide wurden nicht geändert oder gestaged. `BERICHT.md` bleibt unverändert bytegleich zum Inhalt des Auftrags-Ausgangs-HEAD `e1fe6c6c71088cc1368433ca8355e014d1e4a5be`.
 
