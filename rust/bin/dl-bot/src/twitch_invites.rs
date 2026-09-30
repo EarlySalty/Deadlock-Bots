@@ -143,21 +143,70 @@ impl TwitchInvites {
         }
     }
 
+    async fn record_qualification_status(&self, succeeded: bool) -> Result<(), String> {
+        let interval = i32::try_from(self.config.evaluation_interval_seconds)
+            .map_err(|_| "Ungültiges Qualifikationsintervall")?;
+        sqlx::query("SELECT bot.record_twitch_invite_qualification($1, $2)")
+            .bind(succeeded)
+            .bind(interval)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn run_qualification_loop(&self) {
+        let mut tick =
+            tokio::time::interval(Duration::from_secs(self.config.evaluation_interval_seconds));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_warning: Option<std::time::Instant> = None;
+        loop {
+            tick.tick().await;
+            let error = match self.evaluate_cycle().await {
+                Ok(()) => self.record_qualification_status(true).await.err(),
+                Err(cycle_error) => {
+                    let marker_error = self.record_qualification_status(false).await.err();
+                    Some(marker_error.map_or(cycle_error, |marker_error| {
+                        format!("{cycle_error}; Qualifikationsstatus konnte nicht gespeichert werden: {marker_error}")
+                    }))
+                }
+            };
+            if let Some(error) = error {
+                if last_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(86400)) {
+                    tracing::warn!(%error, "Einladungsqualifikation wird erneut geprüft");
+                    last_warning = Some(std::time::Instant::now());
+                }
+            }
+        }
+    }
+
     pub fn spawn(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut tick =
-                tokio::time::interval(Duration::from_secs(self.config.evaluation_interval_seconds));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut worker = tokio::task::JoinSet::new();
+            let interval = Duration::from_secs(self.config.evaluation_interval_seconds);
             let mut last_warning: Option<std::time::Instant> = None;
             loop {
-                tick.tick().await;
-                if let Err(error) = self.evaluate_cycle().await {
-                    if last_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(86400))
-                    {
-                        tracing::warn!(%error, "Einladungsqualifikation wird erneut geprüft");
-                        last_warning = Some(std::time::Instant::now());
+                let task = self.clone();
+                worker.spawn(async move { task.run_qualification_loop().await });
+                let exit = match worker.join_next().await {
+                    Some(Ok(())) => "returned",
+                    Some(Err(error)) if error.is_cancelled() => "cancelled",
+                    Some(Err(_)) => "panicked",
+                    None => "missing",
+                };
+                let marker_error = self.record_qualification_status(false).await.err();
+                if last_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(86400)) {
+                    if let Some(error) = marker_error {
+                        tracing::warn!(task_exit = exit, %error, "Einladungsqualifikation wird neu gestartet");
+                    } else {
+                        tracing::warn!(
+                            task_exit = exit,
+                            "Einladungsqualifikation wird neu gestartet"
+                        );
                     }
+                    last_warning = Some(std::time::Instant::now());
                 }
+                tokio::time::sleep(interval).await;
             }
         })
     }
