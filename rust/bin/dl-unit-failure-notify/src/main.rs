@@ -7,9 +7,10 @@ use clap::Parser;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -36,6 +37,8 @@ pub struct Config {
     broker_origin: String,
     channel_id: u64,
     state_directory: PathBuf,
+    #[serde(default)]
+    legacy_state_directory: Option<PathBuf>,
     infisical_socket: PathBuf,
     project_id: String,
     environment: String,
@@ -45,8 +48,19 @@ pub struct Config {
 }
 
 fn config(path: &Path) -> Result<Config> {
-    let bytes =
-        fs::read(path).map_err(|_| anyhow::anyhow!("Meldekonfiguration ist nicht lesbar."))?;
+    protected_path(path, false)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| anyhow::anyhow!("Meldekonfiguration ist nicht lesbar."))?;
+    if !file.metadata()?.is_file() {
+        bail!("Meldekonfiguration muss eine reguläre Datei sein.");
+    }
+    let mut bytes = Vec::new();
+    file.take(16_385)
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("Meldekonfiguration ist nicht lesbar."))?;
     if bytes.len() > 16_384 {
         bail!("Meldekonfiguration ist zu groß.");
     }
@@ -68,6 +82,10 @@ fn config(path: &Path) -> Result<Config> {
         || url.fragment().is_some()
         || config.channel_id == 0
         || !config.state_directory.is_absolute()
+        || config
+            .legacy_state_directory
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute() || path == &config.state_directory)
         || !config.infisical_socket.is_absolute()
         || config.project_id.is_empty()
         || config.environment.is_empty()
@@ -83,6 +101,43 @@ fn config(path: &Path) -> Result<Config> {
     }
     config.broker_origin = url.as_str().trim_end_matches('/').into();
     Ok(config)
+}
+
+/// Dieselbe Eigentümer-/Sticky-Verzeichnisregel wie der vorhandene UDS-Client,
+/// hier für vertrauenswürdige Betriebsdateien und den Installationspfad.
+fn protected_path(path: &Path, directory: bool) -> Result<()> {
+    if !path.is_absolute() {
+        bail!("Betriebspfad muss absolut sein.");
+    }
+    // SAFETY: geteuid hat keine Zeigerargumente und verändert keinen Zustand.
+    let uid = unsafe { libc::geteuid() };
+    let components: Vec<_> = path.components().collect();
+    let mut current = PathBuf::new();
+    let mut after_sticky = false;
+    for (index, component) in components.iter().enumerate() {
+        if !matches!(component, Component::RootDir | Component::Normal(_)) {
+            bail!("Betriebspfad ist nicht geschützt.");
+        }
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|_| anyhow::anyhow!("Betriebspfad ist nicht verfügbar."))?;
+        let last = index + 1 == components.len();
+        if ![0, uid].contains(&metadata.uid())
+            || metadata.file_type().is_symlink()
+            || (last && !directory && !metadata.is_file())
+            || ((!last || directory) && !metadata.is_dir())
+            || (after_sticky && (metadata.uid() != uid || metadata.mode() & 0o077 != 0))
+        {
+            bail!("Betriebspfad hat keine vertrauenswürdigen Eigentümer oder Rechte.");
+        }
+        after_sticky = metadata.mode() & 0o022 != 0;
+        if after_sticky
+            && !(metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o1000 != 0 && !last)
+        {
+            bail!("Betriebspfad darf nicht gruppen- oder weltbeschreibbar sein.");
+        }
+    }
+    Ok(())
 }
 
 fn valid_unit(unit: &str) -> bool {
@@ -125,13 +180,35 @@ fn install(args: &Args) -> Result<()> {
             bail!("Installationspfade müssen absolute einfache Dateipfade sein.");
         }
     }
-    fs::create_dir_all(directory)?;
+    if !directory.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)?;
+    }
+    protected_path(directory, true)?;
+    protected_path(binary, false)?;
+    protected_path(&args.config, false)?;
+    if fs::symlink_metadata(binary)?.mode() & 0o111 == 0 {
+        bail!("Installiertes Binary ist nicht ausführbar.");
+    }
     let unit = include_str!("../../../../service/systemd/unit-failure-notify@.service")
         .replace("@BINARY@", &binary.to_string_lossy())
         .replace("@CONFIG@", &args.config.to_string_lossy());
-    let temporary = directory.join("unit-failure-notify@.service.tmp");
-    fs::write(&temporary, unit)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644))?;
+    let temporary = directory.join(format!(
+        "unit-failure-notify@.service.{}.tmp",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .context("Geschützte Unit-Installation konnte nicht vorbereitet werden.")?;
+    file.write_all(unit.as_bytes())?;
+    file.set_permissions(fs::Permissions::from_mode(0o644))?;
+    file.sync_all()?;
     fs::rename(temporary, directory.join("unit-failure-notify@.service"))?;
     println!(
         "OnFailure-Template installiert. Der User-Manager muss anschließend neu geladen werden."
@@ -155,7 +232,7 @@ async fn run(args: Args) -> Result<()> {
         .context("Systemd hat keine auslösende Dienstinstanz übergeben.")?;
     let invocation = journal::validate_invocation(&invocation)?;
     let store = state::Store::open(&config.state_directory, &key(unit))?;
-    let mut state = store.load()?;
+    let mut state = store.load_or_import(config.legacy_state_directory.as_deref(), unit)?;
     state.observe(invocation);
     store.save(&state)?;
     if state.unreported == 0 && state.pending.is_none() {
@@ -167,7 +244,7 @@ async fn run(args: Args) -> Result<()> {
         return Ok(());
     }
     if state.pending.is_none() {
-        let cause = journal::cause(unit, invocation).await?;
+        let cause = safe_cause(journal::cause(unit, invocation).await);
         let repeats = state.unreported.saturating_sub(1);
         let attempts = if state.unreported == 1 {
             "ein fehlgeschlagener Start".to_owned()
@@ -204,6 +281,10 @@ async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+fn safe_cause(diagnostic: Result<&'static str>) -> &'static str {
+    diagnostic.unwrap_or("Die Ursache konnte aus dem begrenzten Journal dieser Dienstinstanz nicht sicher ermittelt werden. Das lokale Journal muss geprüft werden.")
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(error) = run(Args::parse()).await {
@@ -229,5 +310,61 @@ mod tests {
         }
         assert!(journal::validate_invocation(&"a".repeat(32)).is_ok());
         assert!(journal::validate_invocation("--all").is_err());
+    }
+
+    #[test]
+    fn diagnostic_failure_falls_back_without_exposing_error_text() {
+        let text = safe_cause(Err(anyhow::anyhow!("synthetic-secret-value")));
+        assert!(text.contains("nicht sicher ermittelt"));
+        assert!(!text.contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn config_symlinks_and_writable_config_are_rejected() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let file = root.path().join("config.json");
+        fs::write(&file, "{}").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(protected_path(&file, false).is_ok());
+        let alias = root.path().join("alias.json");
+        symlink(&file, &alias).unwrap();
+        assert!(config(&alias).is_err());
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(config(&file).is_err());
+    }
+
+    #[test]
+    fn installer_does_not_follow_existing_temporary_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = root.path().join("binary");
+        fs::write(&binary, "synthetic").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = root.path().join("config.json");
+        fs::write(&config, "{}").unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let victim = root.path().join("victim");
+        fs::write(&victim, "unchanged").unwrap();
+        symlink(
+            &victim,
+            root.path().join(format!(
+                "unit-failure-notify@.service.{}.tmp",
+                std::process::id()
+            )),
+        )
+        .unwrap();
+        let args = Args {
+            config,
+            unit: None,
+            credential: None,
+            install: true,
+            unit_directory: Some(root.path().to_owned()),
+            binary: Some(binary),
+        };
+        assert!(install(&args).is_err());
+        assert_eq!(fs::read_to_string(victim).unwrap(), "unchanged");
     }
 }

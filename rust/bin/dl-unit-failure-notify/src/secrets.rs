@@ -96,7 +96,7 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
     }
     let reply: Reply = serde_json::from_slice(&body)
         .map_err(|_| anyhow::anyhow!("Infisical-Antwort ist ungültig."))?;
-    let mut value = None;
+    let mut values = std::collections::HashMap::new();
     // Wie der vorhandene Dashboard-Leser: lokale Werte gewinnen vor Imports.
     for mut entry in reply
         .imports
@@ -104,16 +104,35 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
         .flat_map(|import| import.secrets)
         .chain(reply.secrets)
     {
-        if entry.name == "MASTER_BROKER_TOKEN" {
-            value = Some(Zeroizing::new(std::mem::take(&mut entry.value)));
+        if [
+            "MASTER_BROKER_TOKEN",
+            "MAIN_BOT_INTERNAL_TOKEN",
+            "TWITCH_INTERNAL_API_TOKEN",
+        ]
+        .contains(&entry.name.as_str())
+        {
+            values.insert(
+                entry.name.clone(),
+                Zeroizing::new(std::mem::take(&mut entry.value)),
+            );
         }
     }
-    value
-        .filter(|value| !value.trim().is_empty())
-        .context("Bestehender Broker-Zugang fehlt in Infisical.")
+    for name in [
+        "MASTER_BROKER_TOKEN",
+        "MAIN_BOT_INTERNAL_TOKEN",
+        "TWITCH_INTERNAL_API_TOKEN",
+    ] {
+        if let Some(value) = values.remove(name).filter(|value| !value.trim().is_empty()) {
+            return Ok(value);
+        }
+    }
+    bail!("Bestehender Broker-Zugang fehlt in Infisical.")
 }
 
 pub async fn send(config: &Config, pending: &crate::state::Pending, token: &str) -> Result<()> {
+    let mut token_header = reqwest::header::HeaderValue::from_str(token.trim())
+        .map_err(|_| anyhow::anyhow!("Bestehender Broker-Zugang ist ungültig."))?;
+    token_header.set_sensitive(true);
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -126,7 +145,7 @@ pub async fn send(config: &Config, pending: &crate::state::Pending, token: &str)
             "{}/internal/master/v1/discord/send-message",
             config.broker_origin
         ))
-        .header("X-Internal-Token", token.trim())
+        .header("X-Internal-Token", token_header)
         .header("X-Idempotency-Key", &pending.key)
         .json(&serde_json::json!({ "channel_id": config.channel_id, "content": pending.content }))
         .send()
@@ -218,6 +237,7 @@ mod tests {
             broker_origin: format!("http://{address}"),
             channel_id: 42,
             state_directory: "/unused".into(),
+            legacy_state_directory: None,
             infisical_socket: "/unused".into(),
             project_id: "synthetic-project".into(),
             environment: "test".into(),

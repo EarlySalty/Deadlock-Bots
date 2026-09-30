@@ -14,11 +14,13 @@ const WEEK: u64 = 7 * DAY;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    pub last_invocation: Option<String>,
+    pub recent_invocations: Vec<String>,
     pub unreported: u64,
     pub confirmed: Vec<u64>,
     pub sequence: u64,
     pub pending: Option<Pending>,
+    /// Einmalige Übergangsruhe: Legacy hat keine vollständige Wochenhistorie.
+    pub legacy_not_before: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -31,13 +33,23 @@ pub struct Pending {
 
 impl State {
     pub fn observe(&mut self, invocation: &str) {
-        if self.last_invocation.as_deref() != Some(invocation) {
-            self.last_invocation = Some(invocation.to_owned());
+        if !self
+            .recent_invocations
+            .iter()
+            .any(|known| known == invocation)
+        {
+            if self.recent_invocations.len() >= 256 {
+                self.recent_invocations.remove(0);
+            }
+            self.recent_invocations.push(invocation.to_owned());
             self.unreported = self.unreported.saturating_add(1);
         }
     }
 
     pub fn eligible(&self, now: u64) -> bool {
+        if now < self.legacy_not_before {
+            return false;
+        }
         let week = self
             .confirmed
             .iter()
@@ -79,8 +91,10 @@ impl Store {
             .mode(0o700)
             .create(directory)
             .context("Zustandsverzeichnis ist nicht verfügbar.")?;
+        crate::protected_path(directory, true)?;
         let metadata =
             fs::symlink_metadata(directory).context("Zustandsverzeichnis ist nicht verfügbar.")?;
+        // SAFETY: geteuid hat keine Zeigerargumente und verändert keinen Zustand.
         let uid = unsafe { libc::geteuid() };
         if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
             bail!("Zustandsverzeichnis muss dem Dienstnutzer gehören und Modus 0700 haben.");
@@ -118,6 +132,64 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(_) => bail!("Meldezustand ist nicht lesbar."),
         }
+    }
+
+    pub fn load_or_import(&self, legacy_directory: Option<&Path>, unit: &str) -> Result<State> {
+        match fs::symlink_metadata(&self.path) {
+            Ok(_) => return self.load(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => bail!("Meldezustand ist nicht verfügbar."),
+        }
+        let Some(directory) = legacy_directory else {
+            return Ok(State::default());
+        };
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(directory.join(format!("{unit}.state")))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(State::default())
+            }
+            Err(_) => bail!("Bestehender Meldezustand ist nicht sicher lesbar."),
+        };
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid hat keine Zeigerargumente und verändert keinen Zustand.
+        if !metadata.is_file()
+            || metadata.mode() & 0o022 != 0
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.len() > 256
+        {
+            bail!("Bestehender Meldezustand ist nicht als begrenzte eigene Datei bestätigt.");
+        }
+        use std::io::Read;
+        let mut text = String::new();
+        file.take(257)
+            .read_to_string(&mut text)
+            .context("Bestehender Meldezustand ist ungültig.")?;
+        let values: Vec<u64> = text
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<std::result::Result<_, _>>()
+            .context("Bestehender Meldezustand enthält ungültige Zähler.")?;
+        if values.len() != 4 || text.len() > 256 || values[0] > values[2] || values[1] > values[2] {
+            bail!("Bestehender Meldezustand hat ein ungültiges Format.");
+        }
+        // LAST_NOTIFY FIRST_FAIL LAST_FAIL SUPPRESSED. Keine erfundenen Sends:
+        // fehlende Wochenhistorie führt nur zu einer einmaligen Übergangsruhe.
+        let mut state = State {
+            unreported: values[3],
+            ..State::default()
+        };
+        if values[0] > 0 {
+            state.confirmed.push(values[0]);
+            state.legacy_not_before = values[0]
+                .checked_add(WEEK)
+                .context("Bestehende Meldezeit ist ungültig.")?;
+        }
+        self.save(&state)?;
+        Ok(state)
     }
 
     pub fn save(&self, state: &State) -> Result<()> {
@@ -161,6 +233,7 @@ mod tests {
         state.observe("first");
         state.observe("first");
         state.observe("second");
+        state.observe("first");
         assert_eq!(state.unreported, 2);
         state.pending = Some(Pending {
             key: "synthetic-key".into(),
@@ -215,5 +288,67 @@ mod tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(dir.path().join("unit.json"), "broken state").unwrap();
         assert!(Store::open(dir.path(), "unit").unwrap().load().is_err());
+    }
+
+    #[test]
+    fn legacy_cutover_imports_real_confirmed_time_and_counter_once() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        fs::create_dir(&legacy).unwrap();
+        fs::write(
+            legacy.join("steam-core.service.state"),
+            "1000 950 1100 12\n",
+        )
+        .unwrap();
+        let store = Store::open(&root.path().join("private"), "unit").unwrap();
+        let state = store
+            .load_or_import(Some(&legacy), "steam-core.service")
+            .unwrap();
+        assert_eq!(state.unreported, 12);
+        assert_eq!(state.confirmed, vec![1000]);
+        assert!(!state.eligible(1000 + WEEK - 1));
+        assert!(state.eligible(1000 + WEEK));
+        fs::write(
+            legacy.join("steam-core.service.state"),
+            "1000 950 999999 99\n",
+        )
+        .unwrap();
+        let loaded = store
+            .load_or_import(Some(&legacy), "steam-core.service")
+            .unwrap();
+        assert_eq!(loaded.legacy_not_before, 1000 + WEEK);
+        assert_eq!(loaded.unreported, 12);
+    }
+
+    #[test]
+    fn malformed_legacy_state_fails_closed_without_creating_new_state() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        fs::create_dir(&legacy).unwrap();
+        fs::write(
+            legacy.join("steam-core.service.state"),
+            "not valid counters",
+        )
+        .unwrap();
+        let store = Store::open(&root.path().join("private"), "unit").unwrap();
+        assert!(store
+            .load_or_import(Some(&legacy), "steam-core.service")
+            .is_err());
+        assert!(!store.path.exists());
+    }
+
+    #[test]
+    fn no_confirmed_legacy_send_does_not_invent_budget_or_wait() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy");
+        fs::create_dir(&legacy).unwrap();
+        fs::write(legacy.join("steam-core.service.state"), "0 1000 1100 12").unwrap();
+        let store = Store::open(&root.path().join("private"), "unit").unwrap();
+        let state = store
+            .load_or_import(Some(&legacy), "steam-core.service")
+            .unwrap();
+        assert!(state.confirmed.is_empty());
+        assert!(state.eligible(1100));
+        assert_eq!(state.unreported, 12);
     }
 }
