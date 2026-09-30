@@ -82,6 +82,61 @@ fn parse_optional_timestamp(raw: Option<&str>) -> anyhow::Result<Option<DateTime
     Ok(Some(parsed.and_utc()))
 }
 
+async fn lock_invite_sync_guilds(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entries: &[InviteEntry],
+) -> anyhow::Result<()> {
+    // Lock existing and incoming Guilds in one order, then reject stale discovery.
+    let logins: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.streamer_login.trim().to_lowercase())
+        .filter(|login| !login.is_empty())
+        .collect();
+    let twitch_user_ids: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| entry.twitch_user_id.clone())
+        .collect();
+    let new_guilds: Vec<i64> = entries
+        .iter()
+        .filter(|entry| !entry.streamer_login.trim().is_empty())
+        .map(|entry| entry.guild_id)
+        .collect();
+
+    let mut guilds: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT guild_id FROM bot.twitch_streamer_invites
+         WHERE guild_id IS NOT NULL
+           AND (streamer_login = ANY($1::text[]) OR twitch_user_id = ANY($2::text[]))",
+    )
+    .bind(&logins)
+    .bind(&twitch_user_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    guilds.extend(new_guilds);
+    guilds.sort_unstable();
+    guilds.dedup();
+
+    for guild_id in &guilds {
+        dl_activity::qualified_invites::lock_changes(&mut **tx, *guild_id).await?;
+    }
+
+    let current_guilds: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT guild_id FROM bot.twitch_streamer_invites
+         WHERE guild_id IS NOT NULL
+           AND (streamer_login = ANY($1::text[]) OR twitch_user_id = ANY($2::text[]))",
+    )
+    .bind(&logins)
+    .bind(&twitch_user_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    if current_guilds
+        .iter()
+        .any(|guild_id| guilds.binary_search(guild_id).is_err())
+    {
+        anyhow::bail!("Twitch-Invite-Zuordnung änderte sich während Guild-Sperren erworben wurden");
+    }
+    Ok(())
+}
+
 async fn sync_invites_and_reclassify(
     pool: &PgPool,
     entries: Vec<InviteEntry>,
@@ -89,6 +144,7 @@ async fn sync_invites_and_reclassify(
 ) -> anyhow::Result<SyncSummary> {
     {
         let mut populate_tx = pool.begin().await?;
+        lock_invite_sync_guilds(&mut populate_tx, &entries).await?;
 
         for entry in &entries {
             let login = entry.streamer_login.trim().to_lowercase();
@@ -469,6 +525,119 @@ mod tests {
         Ok(())
     }
 
+    async fn assert_writer_reconcile_serialization(
+        commit_writer: bool,
+        join_id: i64,
+    ) -> anyhow::Result<()> {
+        let db = test_database::database().await;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO bot.twitch_streamer_invites
+             (streamer_login, guild_id, invite_code, invite_url, created_at, twitch_user_id, channel_id)
+             VALUES ('serial-login', 1, 'SERIAL_A', 'https://discord.gg/SERIAL_A', now(), '918273645201', 201)",
+        )
+        .execute(pool)
+        .await?;
+
+        let mut incoming = invite("serial-login", "SERIAL_B");
+        incoming.twitch_user_id = Some("918273645201".into());
+        incoming.channel_id = Some(202);
+        incoming.guild_id = 2;
+        let writer_pool = pool.clone();
+        let (writer_ready, writer_ready_rx) = tokio::sync::oneshot::channel();
+        let (release_writer, release_writer_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let mut tx = writer_pool.begin().await?;
+            lock_invite_sync_guilds(&mut tx, std::slice::from_ref(&incoming)).await?;
+            let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await?;
+            sqlx::query(
+                "UPDATE bot.twitch_streamer_invites
+                 SET guild_id = 2, invite_code = 'SERIAL_B', channel_id = 202
+                 WHERE twitch_user_id = '918273645201'",
+            )
+            .execute(&mut *tx)
+            .await?;
+            let interval_end: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+                "SELECT valid_until FROM bot.twitch_streamer_invite_code_history
+                 WHERE guild_id = 1 AND invite_code = 'SERIAL_A' AND twitch_user_id = '918273645201'",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            writer_ready
+                .send((writer_pid, interval_end))
+                .map_err(|_| anyhow::anyhow!("serialization test receiver dropped"))?;
+            let should_commit = release_writer_rx.await.unwrap_or(false);
+            if should_commit {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+        let (writer_pid, interval_end) = writer_ready_rx.await?;
+        let held_advisory_locks: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_locks
+             WHERE pid = $1 AND locktype = 'advisory' AND granted",
+        )
+        .bind(writer_pid)
+        .fetch_one(pool)
+        .await?;
+        if held_advisory_locks < 2 {
+            let _ = release_writer.send(false);
+            writer.await??;
+            anyhow::bail!("writer did not lock both old and new Guilds");
+        }
+
+        insert_qualified_join(
+            pool,
+            join_id,
+            930_000 + join_id,
+            "SERIAL_A",
+            interval_end + chrono::Duration::milliseconds(1),
+        )
+        .await?;
+        let reader_pool = pool.clone();
+        let mut reconcile = tokio::spawn(async move {
+            dl_activity::qualified_invites::reconcile_attribution(&reader_pool, 1).await
+        });
+        tokio::task::yield_now().await;
+        let completed_early =
+            match tokio::time::timeout(std::time::Duration::from_millis(100), &mut reconcile).await
+            {
+                Ok(result) => Some(result??),
+                Err(_) => None,
+            };
+        release_writer
+            .send(commit_writer)
+            .map_err(|_| anyhow::anyhow!("writer task ended before release"))?;
+        writer.await??;
+        if completed_early.is_some() {
+            anyhow::bail!("reconcile completed before the mapping writer released its Guild locks");
+        }
+        reconcile.await??;
+
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT streamer_twitch_user_id FROM bot.twitch_invite_joins WHERE join_id = $1",
+        )
+        .bind(join_id)
+        .fetch_optional(pool)
+        .await?;
+        if commit_writer {
+            anyhow::ensure!(
+                owner.is_none(),
+                "committed code change attributed the old owner"
+            );
+        } else {
+            anyhow::ensure!(
+                owner.as_deref() == Some("918273645201"),
+                "rolled-back code change did not retain the old owner"
+            );
+        }
+        Ok(())
+    }
+
     async fn metadata_bucket(pool: &PgPool, id: i64) -> Result<String, Box<dyn std::error::Error>> {
         let raw: String = sqlx::query_scalar(
             r#"
@@ -630,7 +799,9 @@ mod tests {
              VALUES
                ('old-rename', 1, 'CODE_A', 'https://discord.gg/CODE_A', now(), '918273645101', 101),
                ('recycled-login', 1, 'RECYCLE_A', 'https://discord.gg/RECYCLE_A', now(), '918273645102', 102),
-               ('legacy-login', 1, 'UNKNOWN_CODE', 'https://discord.gg/UNKNOWN_CODE', now(), NULL, NULL)",
+               ('legacy-login', 1, 'UNKNOWN_CODE', 'https://discord.gg/UNKNOWN_CODE', now(), NULL, NULL),
+               ('legacy-same', 1, 'SAME_CODE', 'https://discord.gg/SAME_CODE', now(), NULL, NULL),
+               ('recycled-same', 1, 'SAME_RECYCLE', 'https://discord.gg/SAME_RECYCLE', now(), '918273645105', 105)",
         )
         .execute(pool)
         .await?;
@@ -653,28 +824,42 @@ mod tests {
         )
         .fetch_one(pool)
         .await?;
-        insert_qualified_join(
-            pool,
-            910_001,
-            920_001,
-            "CODE_A",
-            code_a_start,
+        let same_code_legacy_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'SAME_CODE' AND valid_until IS NULL",
         )
+        .fetch_one(pool)
         .await?;
-        insert_qualified_join(
-            pool,
-            910_002,
-            920_002,
-            "RECYCLE_A",
-            recycle_a_start,
+        let same_code_recycled_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'SAME_RECYCLE' AND valid_until IS NULL",
         )
+        .fetch_one(pool)
         .await?;
+        insert_qualified_join(pool, 910_001, 920_001, "CODE_A", code_a_start).await?;
+        insert_qualified_join(pool, 910_002, 920_002, "RECYCLE_A", recycle_a_start).await?;
         insert_qualified_join(
             pool,
             910_003,
             920_003,
             "UNKNOWN_CODE",
             unknown_start + chrono::Duration::milliseconds(1),
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_009,
+            920_009,
+            "SAME_CODE",
+            same_code_legacy_start + chrono::Duration::milliseconds(1),
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_010,
+            920_010,
+            "SAME_RECYCLE",
+            same_code_recycled_start,
         )
         .await?;
 
@@ -687,9 +872,21 @@ mod tests {
         let mut legacy_replacement = invite("legacy-login", "NEW_CODE");
         legacy_replacement.twitch_user_id = Some("918273645104".into());
         legacy_replacement.channel_id = Some(104);
+        let mut same_code_legacy = invite("legacy-same", "SAME_CODE");
+        same_code_legacy.twitch_user_id = Some("918273645106".into());
+        same_code_legacy.channel_id = Some(106);
+        let mut same_code_recycled = invite("recycled-same", "SAME_RECYCLE");
+        same_code_recycled.twitch_user_id = Some("918273645107".into());
+        same_code_recycled.channel_id = Some(107);
         sync_invites_and_reclassify(
             pool,
-            vec![renamed, recycled_owner, legacy_replacement],
+            vec![
+                renamed,
+                recycled_owner,
+                legacy_replacement,
+                same_code_legacy,
+                same_code_recycled,
+            ],
             false,
         )
         .await?;
@@ -750,38 +947,22 @@ mod tests {
         )
         .fetch_one(pool)
         .await?;
-        insert_qualified_join(
-            pool,
-            910_004,
-            920_004,
-            "CODE_A",
-            code_a_end,
+        let same_code_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'SAME_CODE' AND valid_until IS NULL",
         )
+        .fetch_one(pool)
         .await?;
-        insert_qualified_join(
-            pool,
-            910_005,
-            920_005,
-            "RECYCLE_A",
-            recycle_a_end,
+        let same_recycle_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'SAME_RECYCLE' AND valid_until IS NULL",
         )
+        .fetch_one(pool)
         .await?;
-        insert_qualified_join(
-            pool,
-            910_006,
-            920_006,
-            "CODE_B",
-            code_b_start,
-        )
-        .await?;
-        insert_qualified_join(
-            pool,
-            910_007,
-            920_007,
-            "RECYCLE_B",
-            recycle_b_start,
-        )
-        .await?;
+        insert_qualified_join(pool, 910_004, 920_004, "CODE_A", code_a_end).await?;
+        insert_qualified_join(pool, 910_005, 920_005, "RECYCLE_A", recycle_a_end).await?;
+        insert_qualified_join(pool, 910_006, 920_006, "CODE_B", code_b_start).await?;
+        insert_qualified_join(pool, 910_007, 920_007, "RECYCLE_B", recycle_b_start).await?;
         insert_qualified_join(
             pool,
             910_008,
@@ -790,11 +971,13 @@ mod tests {
             unknown_after_sync + chrono::Duration::milliseconds(1),
         )
         .await?;
+        insert_qualified_join(pool, 910_011, 920_011, "SAME_CODE", same_code_start).await?;
+        insert_qualified_join(pool, 910_012, 920_012, "SAME_RECYCLE", same_recycle_start).await?;
 
         dl_activity::qualified_invites::reconcile_attribution(pool, 1).await?;
         let owners: Vec<(i64, Option<String>, String)> = sqlx::query_as(
             "SELECT join_id, streamer_twitch_user_id, streamer_login
-             FROM bot.twitch_invite_joins WHERE join_id BETWEEN 910001 AND 910008
+             FROM bot.twitch_invite_joins WHERE join_id BETWEEN 910001 AND 910012
              ORDER BY join_id",
         )
         .fetch_all(pool)
@@ -814,9 +997,22 @@ mod tests {
                     Some("918273645103".into()),
                     "recycled-login".into()
                 ),
+                (910_010, Some("918273645105".into()), "recycled-same".into()),
+                (910_011, Some("918273645106".into()), "legacy-same".into()),
+                (910_012, Some("918273645107".into()), "recycled-same".into()),
             ]
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconcile_waits_for_guild_history_writer_commit() -> anyhow::Result<()> {
+        assert_writer_reconcile_serialization(true, 930_021).await
+    }
+
+    #[tokio::test]
+    async fn reconcile_waits_for_guild_history_writer_rollback() -> anyhow::Result<()> {
+        assert_writer_reconcile_serialization(false, 930_022).await
     }
 
     #[tokio::test]

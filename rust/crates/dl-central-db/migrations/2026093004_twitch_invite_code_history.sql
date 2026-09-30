@@ -74,7 +74,8 @@ BEGIN
         RETURN OLD;
     END IF;
 
-    mapping_changed := ROW(NEW.guild_id, NEW.invite_code, NEW.twitch_user_id, NEW.channel_id)
+    mapping_changed := left(NEW.streamer_login, 9) = '__legacy_'
+        OR ROW(NEW.guild_id, NEW.invite_code, NEW.twitch_user_id, NEW.channel_id)
             IS DISTINCT FROM ROW(OLD.guild_id, OLD.invite_code, OLD.twitch_user_id, OLD.channel_id)
         OR ((OLD.twitch_user_id IS NULL OR NEW.twitch_user_id IS NULL)
             AND NEW.streamer_login IS DISTINCT FROM OLD.streamer_login);
@@ -111,6 +112,10 @@ BEGIN
       AND channel_id IS NOT DISTINCT FROM OLD.channel_id
       AND (OLD.twitch_user_id IS NOT NULL
            OR source_login_snapshot = OLD.streamer_login);
+
+    IF left(NEW.streamer_login, 9) = '__legacy_' THEN
+        RETURN NEW;
+    END IF;
 
     INSERT INTO bot.twitch_streamer_invite_code_history (
         source_login_snapshot, guild_id, invite_code, twitch_user_id,
