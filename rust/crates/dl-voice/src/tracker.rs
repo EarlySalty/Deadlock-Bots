@@ -141,6 +141,7 @@ pub trait VoiceSnapshot: Send + Sync {
 #[derive(Debug, Clone)]
 struct Session {
     generation: u64,
+    sequence: u64,
     user_id: u64,
     display_name: String,
     guild_id: u64,
@@ -308,75 +309,38 @@ impl VoiceTracker {
         if let Some(observer) = self.activity_observer.read().await.clone() {
             observer.observe_event(&event).await;
         }
-        match event {
+        // Queued events only wake the writer. The confirmed cache and gateway
+        // observation sequence, never an old payload at processing time, decide.
+        let (guild_id, user_id, channels) = match event {
             VoiceEvent::Join {
                 guild_id,
                 user_id,
                 channel_id,
-            } => {
-                if self.is_opted_out(user_id).await {
-                    self.drop_runtime_state(user_id).await;
-                    return;
-                }
-                self.update_channel(guild_id, channel_id).await;
             }
-            VoiceEvent::Leave {
+            | VoiceEvent::Leave {
                 guild_id,
                 user_id,
                 channel_id,
-            } => {
-                if self.is_opted_out(user_id).await {
-                    self.drop_runtime_state(user_id).await;
-                    return;
-                }
-                self.end_session(user_id, guild_id, Utc::now().naive_utc())
-                    .await;
-                self.update_channel(guild_id, channel_id).await;
             }
+            | VoiceEvent::Update {
+                guild_id,
+                user_id,
+                channel_id,
+                ..
+            } => (guild_id, user_id, vec![channel_id]),
             VoiceEvent::Move {
                 guild_id,
                 user_id,
                 from_channel_id,
                 to_channel_id,
-            } => {
-                if self.is_opted_out(user_id).await {
-                    self.drop_runtime_state(user_id).await;
-                    return;
-                }
-                self.end_session(user_id, guild_id, Utc::now().naive_utc())
-                    .await;
-                self.update_channel(guild_id, from_channel_id).await;
-                self.update_channel(guild_id, to_channel_id).await;
-            }
-            VoiceEvent::Update {
-                guild_id,
-                user_id,
-                channel_id,
-                was_muted,
-                is_muted,
-            } => {
-                if self.is_opted_out(user_id).await {
-                    self.drop_runtime_state(user_id).await;
-                    return;
-                }
-                // Grace-Logik bei Mute-Wechsel (nur mit Grace-Rolle)
-                if !was_muted && is_muted {
-                    let cfg = self.config(guild_id).await;
-                    let states = self
-                        .snapshot
-                        .channel_states(guild_id, channel_id, cfg.special_role_id)
-                        .await;
-                    if states
-                        .iter()
-                        .any(|s| s.user_id == user_id && s.has_grace_role)
-                    {
-                        self.start_grace(user_id, guild_id).await;
-                    }
-                } else if was_muted && !is_muted {
-                    self.end_grace(user_id, guild_id).await;
-                }
-                self.update_channel(guild_id, channel_id).await;
-            }
+            } => (guild_id, user_id, vec![from_channel_id, to_channel_id]),
+        };
+        if self.is_opted_out(user_id).await {
+            self.drop_runtime_state(user_id).await;
+            return;
+        }
+        for channel in channels {
+            self.update_channel(guild_id, channel).await;
         }
     }
 
@@ -384,16 +348,6 @@ impl VoiceTracker {
         let mut state = self.state.lock().await;
         state.sessions.retain(|(uid, _), _| *uid != user_id);
         state.grace.retain(|(uid, _), _| *uid != user_id);
-    }
-
-    async fn start_grace(&self, user_id: u64, guild_id: u64) {
-        let mut state = self.state.lock().await;
-        state
-            .grace
-            .entry((user_id, guild_id))
-            .or_insert(GracePeriod {
-                started: Utc::now().naive_utc(),
-            });
     }
 
     async fn end_grace(&self, user_id: u64, guild_id: u64) {
@@ -440,11 +394,31 @@ impl VoiceTracker {
             filtered.push(member);
         }
 
-        let mut to_finalize: Vec<Session> = Vec::new();
+        let mut to_finalize: Vec<(Session, NaiveDateTime)> = Vec::new();
         {
             let mut state = self.state.lock().await;
             if state.generations.get(&guild_id) != Some(&snapshot.generation) {
                 return;
+            }
+
+            for member in &filtered {
+                let key = (member.user_id, guild_id);
+                if member.muted_or_deaf && member.has_grace_role {
+                    if let Some(started) = snapshot
+                        .observations
+                        .get(&member.user_id)
+                        .and_then(|o| o.muted_since)
+                    {
+                        state.grace.insert(
+                            key,
+                            GracePeriod {
+                                started: started.naive_utc(),
+                            },
+                        );
+                    }
+                } else {
+                    state.grace.remove(&key);
+                }
             }
 
             // aktiv = ungemutet ODER (Grace-Rolle && Grace läuft noch)
@@ -484,6 +458,10 @@ impl VoiceTracker {
                     let key = (member.user_id, guild_id);
                     state.sessions.entry(key).or_insert_with(|| Session {
                         generation: snapshot.generation,
+                        sequence: snapshot
+                            .observations
+                            .get(&member.user_id)
+                            .map_or(0, |o| o.sequence),
                         user_id: member.user_id,
                         display_name: member.display_name.clone(),
                         guild_id,
@@ -506,17 +484,32 @@ impl VoiceTracker {
                 let key = (member.user_id, guild_id);
                 if !active_ids.contains(&member.user_id) {
                     if let Some(session) = state.sessions.remove(&key) {
-                        to_finalize.push(session);
+                        let end = snapshot
+                            .observations
+                            .get(&member.user_id)
+                            .and_then(|o| o.muted_since)
+                            .map(|time| {
+                                time.naive_utc()
+                                    + chrono::Duration::seconds(if member.has_grace_role {
+                                        cfg.grace_period_duration
+                                    } else {
+                                        0
+                                    })
+                            })
+                            .unwrap_or(session.last_update)
+                            .min(now);
+                        to_finalize.push((session, end));
                     }
                     state.grace.remove(&key);
                 }
             }
         }
-        for session in to_finalize {
-            self.finalize(session, now).await;
+        for (session, end) in to_finalize {
+            self.finalize(session, end).await;
         }
     }
 
+    #[cfg(test)]
     async fn end_session(self: &Arc<Self>, user_id: u64, guild_id: u64, end_time: NaiveDateTime) {
         let snapshot = self.snapshot.guild_voice_snapshot(guild_id).await;
         let session = {
@@ -845,6 +838,7 @@ mod tests {
         generation: std::sync::atomic::AtomicU64,
         states: StdMutex<HashMap<(u64, u64), Vec<VoiceMemberState>>>,
         names: StdMutex<HashMap<u64, String>>,
+        observations: StdMutex<HashMap<u64, dl_discord::voice_cache::VoiceObservation>>,
     }
 
     #[async_trait::async_trait]
@@ -854,7 +848,8 @@ mod tests {
             guild_id: u64,
         ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
             Some(dl_discord::voice_cache::GuildVoiceSnapshot {
-            generation: self.generation.load(std::sync::atomic::Ordering::Acquire),
+                observations: self.observations.lock().expect("observations").clone(),
+                generation: self.generation.load(std::sync::atomic::Ordering::Acquire),
                 guild_id,
                 observed_at: Utc::now(),
                 channels: self
@@ -917,17 +912,104 @@ mod tests {
             generation: std::sync::atomic::AtomicU64::new(1),
             states: StdMutex::new(HashMap::new()),
             names: StdMutex::new(HashMap::new()),
+            observations: StdMutex::new(HashMap::new()),
         });
         let tracker = VoiceTracker::new(db.pool().clone(), snapshot.clone());
         (db, tracker, snapshot)
     }
 
     #[tokio::test]
+    async fn queued_leave_and_rejoin_cannot_extend_the_historical_session() {
+        let (_db, tracker, snapshot) = setup().await;
+        snapshot
+            .states
+            .lock()
+            .expect("states")
+            .insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
+        tracker.update_channel(1, 10).await;
+        let start = Utc::now() - chrono::Duration::minutes(16);
+        {
+            let mut state = tracker.state.lock().await;
+            let session = state.sessions.get_mut(&(100, 1)).expect("session");
+            session.start_time = start.naive_utc();
+            session.last_update = (start + chrono::Duration::minutes(13)).naive_utc();
+        }
+        snapshot
+            .states
+            .lock()
+            .expect("states")
+            .insert((1, 10), vec![member(200, "Ben")]);
+        snapshot.observations.lock().expect("observations").insert(
+            100,
+            dl_discord::voice_cache::VoiceObservation {
+                sequence: 1,
+                changed_at: start + chrono::Duration::minutes(14),
+                from_channel: Some(10),
+                channel: None,
+                muted_since: None,
+            },
+        );
+        tracker
+            .handle_event(VoiceEvent::Leave {
+                guild_id: 1,
+                user_id: 100,
+                channel_id: 10,
+            })
+            .await;
+        let seconds: i64 = sqlx::query_scalar(
+            "SELECT duration_seconds::bigint FROM activity.voice_session_log WHERE user_id=100",
+        )
+        .fetch_one(&tracker.pool)
+        .await
+        .expect("historical prefix");
+        assert_eq!(seconds, 14 * 60);
+        snapshot
+            .states
+            .lock()
+            .expect("states")
+            .insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
+        snapshot.observations.lock().expect("observations").insert(
+            100,
+            dl_discord::voice_cache::VoiceObservation {
+                sequence: 2,
+                changed_at: Utc::now(),
+                from_channel: None,
+                channel: Some(10),
+                muted_since: None,
+            },
+        );
+        tracker.update_channel(1, 10).await;
+        let new_start = tracker.state.lock().await.sessions[&(100, 1)].start_time;
+        tracker
+            .handle_event(VoiceEvent::Leave {
+                guild_id: 1,
+                user_id: 100,
+                channel_id: 10,
+            })
+            .await;
+        assert_eq!(
+            tracker.state.lock().await.sessions[&(100, 1)].start_time,
+            new_start
+        );
+        snapshot
+            .observations
+            .lock()
+            .expect("observations")
+            .get_mut(&100)
+            .expect("observation")
+            .sequence = 4;
+        tracker.update_channel(1, 10).await;
+        assert!(tracker.state.lock().await.sessions[&(100, 1)].start_time >= new_start);
+    }
+
+    #[tokio::test]
     async fn reconnect_between_observations_closes_only_confirmed_prefix() {
         let (_db, tracker, snapshot) = setup().await;
-        snapshot.states.lock().expect("states").insert(
-            (1, 10), vec![member(100, "Anna"), member(200, "Ben")],
-        );
+        snapshot
+            .states
+            .lock()
+            .expect("states")
+            .insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
         tracker.update_channel(1, 10).await;
         let last = Utc::now().naive_utc() - chrono::Duration::minutes(3);
         {
@@ -937,21 +1019,41 @@ mod tests {
                 session.last_update = last;
             }
         }
-        let old_snapshot = snapshot.guild_voice_snapshot(1).await.expect("old snapshot");
+        let old_snapshot = snapshot
+            .guild_voice_snapshot(1)
+            .await
+            .expect("old snapshot");
         // Disconnect and a complete fresh guild load both happen between polls.
-        snapshot.generation.store(2, std::sync::atomic::Ordering::Release);
+        snapshot
+            .generation
+            .store(2, std::sync::atomic::Ordering::Release);
         tracker.update_channel(1, 10).await;
         let rows: Vec<(i64, chrono::DateTime<Utc>)> = sqlx::query_as(
             "SELECT duration_seconds, ended_at FROM activity.voice_session_log ORDER BY user_id",
-        ).fetch_all(&tracker.pool).await.expect("history");
+        )
+        .fetch_all(&tracker.pool)
+        .await
+        .expect("history");
         assert_eq!(rows.len(), 2);
         for (seconds, ended) in rows {
             assert_eq!(seconds, 420);
             assert_eq!(ended.timestamp_micros(), last.and_utc().timestamp_micros());
         }
         assert_eq!(tracker.active_sessions().await, 2);
-        assert_eq!(tracker.reconcile_snapshot(&old_snapshot).await.expect("stale snapshot"), 0);
-        assert!(tracker.state.lock().await.sessions.values().all(|s| s.generation == 2));
+        assert_eq!(
+            tracker
+                .reconcile_snapshot(&old_snapshot)
+                .await
+                .expect("stale snapshot"),
+            0
+        );
+        assert!(tracker
+            .state
+            .lock()
+            .await
+            .sessions
+            .values()
+            .all(|s| s.generation == 2));
         // An uninterrupted new epoch still extends its own confirmed session.
         {
             let mut state = tracker.state.lock().await;
@@ -960,17 +1062,26 @@ mod tests {
             }
         }
         tracker.update_channel(1, 10).await;
-        snapshot.generation.store(3, std::sync::atomic::Ordering::Release);
+        snapshot
+            .generation
+            .store(3, std::sync::atomic::Ordering::Release);
         // A delayed Leave uses the same boundary before its direct finalizer.
         for user in [100, 200] {
-            tracker.end_session(user, 1, Utc::now().naive_utc() + chrono::Duration::hours(1)).await;
+            tracker
+                .end_session(user, 1, Utc::now().naive_utc() + chrono::Duration::hours(1))
+                .await;
         }
         let durations: Vec<i64> = sqlx::query_scalar(
             "SELECT duration_seconds FROM activity.voice_session_log ORDER BY duration_seconds",
-        ).fetch_all(&tracker.pool).await.expect("history");
+        )
+        .fetch_all(&tracker.pool)
+        .await
+        .expect("history");
         assert_eq!(durations.len(), 4);
         assert_eq!(&durations[..2], &[420, 420]);
-        assert!(durations[2..].iter().all(|seconds| (960..970).contains(seconds)));
+        assert!(durations[2..]
+            .iter()
+            .all(|seconds| (960..970).contains(seconds)));
     }
 
     #[tokio::test]
@@ -1045,6 +1156,7 @@ mod tests {
             }
         }
         let snapshot = dl_discord::voice_cache::GuildVoiceSnapshot {
+            observations: HashMap::new(),
             generation: 1,
             guild_id: 1,
             observed_at: Utc::now(),
@@ -1248,6 +1360,16 @@ mod tests {
 
         // Anna mutet sich — Grace-Rolle → Session bleibt
         anna.muted_or_deaf = true;
+        snapshot.observations.lock().expect("observations").insert(
+            100,
+            dl_discord::voice_cache::VoiceObservation {
+                sequence: 0,
+                changed_at: Utc::now(),
+                from_channel: Some(10),
+                channel: Some(10),
+                muted_since: Some(Utc::now()),
+            },
+        );
         snapshot
             .states
             .lock()

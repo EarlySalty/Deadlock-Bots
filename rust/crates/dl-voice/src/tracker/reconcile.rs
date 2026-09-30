@@ -34,13 +34,28 @@ impl VoiceTracker {
             let Some(session) = state.sessions.get_mut(&key) else {
                 continue;
             };
+            let observation = snapshot.observations.get(&session.user_id);
+            let sequence = observation.map_or(0, |value| value.sequence);
             if session.generation == snapshot.generation
+                && session.sequence == sequence
                 && snapshot.members.get(&session.user_id) == Some(&session.channel_id)
             {
-                session.last_update = observed;
+                // Mute/grace activity is decided with current role state by
+                // update_channel, not from a delayed event's processing time.
+                if observation.and_then(|value| value.muted_since).is_none() {
+                    session.last_update = observed;
+                }
                 continue;
             }
-            let end_time = session.last_update.min(observed);
+            let end_time = observation
+                .filter(|value| {
+                    session.generation == snapshot.generation
+                        && session.sequence.checked_add(1) == Some(value.sequence)
+                        && value.from_channel == Some(session.channel_id)
+                        && value.channel == snapshot.members.get(&session.user_id).copied()
+                })
+                .map_or(session.last_update, |value| value.changed_at.naive_utc())
+                .min(observed);
             let seconds = (end_time - session.start_time).num_seconds().max(0);
             if seconds > 0 {
                 let points = calculate_points(seconds, session.peak_users.max(1));

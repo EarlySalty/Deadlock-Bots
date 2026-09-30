@@ -4,7 +4,7 @@ mod personal;
 mod voice;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -28,6 +28,7 @@ pub struct TwitchInvites {
     voice_needs_reset: std::sync::atomic::AtomicBool,
     voice_generation: std::sync::atomic::AtomicU64,
     voice_observation_lock: tokio::sync::Mutex<()>,
+    voice_sequences: Mutex<HashMap<u64, u64>>,
 }
 
 #[derive(Default)]
@@ -74,6 +75,7 @@ impl TwitchInvites {
             voice_needs_reset: std::sync::atomic::AtomicBool::new(true),
             voice_generation: std::sync::atomic::AtomicU64::new(0),
             voice_observation_lock: tokio::sync::Mutex::new(()),
+            voice_sequences: Mutex::new(HashMap::new()),
         })
     }
 

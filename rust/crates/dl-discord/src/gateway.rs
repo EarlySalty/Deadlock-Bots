@@ -674,12 +674,21 @@ impl EventHandler for Handler {
     }
 
     async fn voice_state_update(&self, _ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+        let observed_at = chrono::Utc::now();
         let Some(guild_id) = new.guild_id.map(|g| g.get()) else {
             return;
         };
         let user_id = new.user_id.get();
         let old_channel = old.as_ref().and_then(|v| v.channel_id).map(|c| c.get());
         let new_channel = new.channel_id.map(|c| c.get());
+        self.adapter.voice_cache_health.observe_voice(
+            guild_id,
+            user_id,
+            old_channel,
+            new_channel,
+            new.mute || new.deaf || new.self_mute || new.self_deaf,
+            observed_at,
+        );
         let event = match (old_channel, new_channel) {
             (None, Some(channel_id)) => VoiceEvent::Join {
                 guild_id,

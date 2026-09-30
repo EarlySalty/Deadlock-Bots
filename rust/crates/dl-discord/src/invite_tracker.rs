@@ -61,8 +61,10 @@ pub struct InviteTracker {
     health: Arc<InviteSnapshotHealth>,
 }
 
-fn should_retry_join_source(has_baseline: bool, kind: &str) -> bool {
-    has_baseline && matches!(kind, "server_discovery" | "unknown")
+fn should_retry_join_source(has_baseline: bool, kind: &str, reason: Option<&str>) -> bool {
+    has_baseline
+        && matches!(kind, "server_discovery" | "unknown")
+        && reason != Some("ambiguous_invite_delta")
 }
 
 fn has_trusted_join_baseline(snapshot_current: bool, has_cached_snapshot: bool) -> bool {
@@ -492,7 +494,12 @@ impl InviteTracker {
             latest_observed_at = chrono::Utc::now();
             latest_after = Self::fetch(http, guild_id).await;
             let kind = classify_snapshots(&mut meta, before.as_ref(), latest_after.as_ref());
-            if !should_retry_join_source(has_baseline, &kind) || attempt + 1 >= attempts {
+            if !should_retry_join_source(
+                has_baseline,
+                &kind,
+                meta.get("join_source_reason").and_then(Value::as_str),
+            ) || attempt + 1 >= attempts
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -798,9 +805,18 @@ mod tests {
 
     #[test]
     fn retry_nur_bei_baseline_und_unbarer_erkennung() {
-        assert!(should_retry_join_source(true, "server_discovery"));
-        assert!(should_retry_join_source(true, "unknown"));
-        assert!(!should_retry_join_source(false, "server_discovery"));
-        assert!(!should_retry_join_source(true, "invite_link"));
+        assert!(should_retry_join_source(true, "server_discovery", None));
+        assert!(should_retry_join_source(
+            true,
+            "unknown",
+            Some("invite_snapshot_unavailable")
+        ));
+        assert!(!should_retry_join_source(false, "server_discovery", None));
+        assert!(!should_retry_join_source(true, "invite_link", None));
+        assert!(!should_retry_join_source(
+            true,
+            "unknown",
+            Some("ambiguous_invite_delta")
+        ));
     }
 }

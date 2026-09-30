@@ -21,6 +21,17 @@ pub struct GuildVoiceSnapshot {
     pub channels: HashMap<u64, Option<u64>>,
     /// Mitglied -> Voice-/Stage-Kanal, einschließlich Bots.
     pub members: HashMap<u64, u64>,
+    pub observations: HashMap<u64, VoiceObservation>,
+}
+
+/// Latest locally observed gateway transition, captured before subscriber work.
+#[derive(Debug, Clone)]
+pub struct VoiceObservation {
+    pub sequence: u64,
+    pub changed_at: DateTime<Utc>,
+    pub from_channel: Option<u64>,
+    pub channel: Option<u64>,
+    pub muted_since: Option<DateTime<Utc>>,
 }
 
 impl GuildVoiceSnapshot {
@@ -35,6 +46,7 @@ struct ShardCache {
     connected: bool,
     expected: HashSet<u64>,
     loaded: HashSet<u64>,
+    observations: HashMap<u64, HashMap<u64, VoiceObservation>>,
 }
 
 /// Getrennt vom allgemeinen READY-Flag: READY allein enthält keine Voice-States.
@@ -56,6 +68,7 @@ impl VoiceCacheHealth {
                 connected: true,
                 expected: guilds.into_iter().collect(),
                 loaded: HashSet::new(),
+                observations: HashMap::new(),
             },
         );
     }
@@ -76,6 +89,7 @@ impl VoiceCacheHealth {
         for shard in shards.values_mut() {
             if shard.loaded.remove(&guild_id) {
                 shard.generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                shard.observations.clear();
             }
         }
     }
@@ -87,6 +101,7 @@ impl VoiceCacheHealth {
         if let Some(shard) = shards.get_mut(&shard_id) {
             if shard.connected {
                 shard.generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                shard.observations.clear();
             }
             shard.connected = false;
         }
@@ -105,17 +120,32 @@ impl VoiceCacheHealth {
 
     pub(crate) fn snapshot(&self, cache: &Cache, guild_id: u64) -> Option<GuildVoiceSnapshot> {
         let shards = self.shards.lock().ok()?;
-        let generation = shards
+        let shard = shards
             .values()
-            .find(|shard| shard.connected && shard.loaded.contains(&guild_id))?
-            .generation;
+            .find(|shard| shard.connected && shard.loaded.contains(&guild_id))?;
         let guild = cache.guild(GuildId::new(guild_id))?;
         if guild.unavailable {
             return None;
         }
+        let observations = shard
+            .observations
+            .get(&guild_id)
+            .cloned()
+            .unwrap_or_default();
+        if observations.iter().any(|(user, observation)| {
+            guild
+                .voice_states
+                .get(&serenity::all::UserId::new(*user))
+                .and_then(|state| state.channel_id)
+                .map(|id| id.get())
+                != observation.channel
+        }) {
+            return None;
+        }
         Some(GuildVoiceSnapshot {
             guild_id,
-            generation,
+            generation: shard.generation,
+            observations,
             observed_at: Utc::now(),
             channels: guild
                 .channels
@@ -131,6 +161,50 @@ impl VoiceCacheHealth {
                 })
                 .collect(),
         })
+    }
+
+    pub(crate) fn observe_voice(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        from_channel: Option<u64>,
+        channel: Option<u64>,
+        muted: bool,
+        observed_at: DateTime<Utc>,
+    ) {
+        let Ok(mut shards) = self.shards.lock() else {
+            return;
+        };
+        let Some(shard) = shards
+            .values_mut()
+            .find(|s| s.connected && s.loaded.contains(&guild_id))
+        else {
+            return;
+        };
+        let observation = shard
+            .observations
+            .entry(guild_id)
+            .or_default()
+            .entry(user_id)
+            .or_insert(VoiceObservation {
+                sequence: 0,
+                changed_at: observed_at,
+                from_channel,
+                channel: from_channel,
+                muted_since: None,
+            });
+        if from_channel != channel {
+            observation.sequence += 1;
+            observation.changed_at = observed_at;
+            observation.from_channel = from_channel;
+            observation.channel = channel;
+            observation.muted_since = None;
+        }
+        observation.muted_since = if muted {
+            observation.muted_since.or(Some(observed_at))
+        } else {
+            None
+        };
     }
 }
 

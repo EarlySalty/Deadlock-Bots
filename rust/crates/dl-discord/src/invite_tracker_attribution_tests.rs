@@ -63,3 +63,56 @@ async fn join_snapshot_locks_serialize_the_same_guild_without_blocking_other_gui
     drop(held);
     let _same = tracker.lock_guild(1).await;
 }
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn observed_ambiguous_join_stays_unknown_after_a_code_disappears() {
+    let db = invite_db().await;
+    let tracker = InviteTracker::new(db.pool().clone());
+    let before = HashMap::from([
+        ("First".into(), attribution_snapshot(0)),
+        ("Second".into(), attribution_snapshot(0)),
+    ]);
+    let after = HashMap::from([
+        ("First".into(), attribution_snapshot(1)),
+        ("Second".into(), attribution_snapshot(1)),
+    ]);
+    let mut metadata = Map::new();
+    let kind = classify_snapshots(&mut metadata, Some(&before), Some(&after));
+    assert_eq!(kind, "unknown");
+    assert!(!should_retry_join_source(
+        true,
+        &kind,
+        metadata.get("join_source_reason").and_then(Value::as_str)
+    ));
+    metadata.insert("join_source".into(), Value::String(kind.into()));
+    tracker
+        .persist_complete_snapshot(1, &after, chrono::Utc::now())
+        .await
+        .expect("consume ambiguous snapshot");
+    sqlx::query(
+        "INSERT INTO activity.member_events (id,user_id,guild_id,event_type,occurred_at,metadata)
+        VALUES (918273645,100,1,'join',NOW(),$1)",
+    )
+    .bind(Value::Object(metadata.clone()))
+    .execute(db.pool())
+    .await
+    .expect("terminal join evidence");
+    let later = HashMap::from([("First".into(), attribution_snapshot(1))]);
+    tracker
+        .persist_complete_snapshot(1, &later, chrono::Utc::now())
+        .await
+        .expect("later complete snapshot");
+    let stored: Value =
+        sqlx::query_scalar("SELECT metadata FROM activity.member_events WHERE id=918273645")
+            .fetch_one(db.pool())
+            .await
+            .expect("join evidence");
+    assert_eq!(stored["join_source_reason"], "ambiguous_invite_delta");
+    assert!(stored.get("invite_code").is_none());
+    let baseline = tracker
+        .load_snapshot_from_db(1)
+        .await
+        .expect("new baseline");
+    assert_eq!(baseline["First"].uses, 1);
+}
