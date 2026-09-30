@@ -154,14 +154,11 @@ pub async fn record_message(
     message_id: u64,
     guild_id: u64,
     user_id: u64,
-    message_created_at: i64,
+    occurred_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let convert = |id| {
         i64::try_from(id)
             .map_err(|_| sqlx::Error::Protocol("Discord-ID außerhalb von BIGINT".into()))
-    };
-    let Some(occurred_at) = DateTime::from_timestamp(message_created_at, 0) else {
-        return Ok(());
     };
     sqlx::query(
         "INSERT INTO activity.twitch_invite_messages (message_id, guild_id, user_id, occurred_at)

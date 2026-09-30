@@ -963,7 +963,7 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: content.to_string(),
-            message_created_at: chrono::Utc::now().timestamp(),
+            message_created_at: chrono::Utc::now(),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,

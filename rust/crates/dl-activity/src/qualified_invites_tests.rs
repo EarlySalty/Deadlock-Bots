@@ -119,7 +119,7 @@ fn proof(invite: &PendingInvite, days: i64) -> MemberProof {
 
 async fn messages(pool: &PgPool, user: u64, first_id: u64, times: &[DateTime<Utc>]) {
     for (index, time) in times.iter().enumerate() {
-        record_message(pool, first_id + index as u64, 1, user, time.timestamp())
+        record_message(pool, first_id + index as u64, 1, user, *time)
             .await
             .expect("message evidence");
     }
@@ -172,7 +172,7 @@ async fn messages_require_five_events_on_two_berlin_days_and_retention() {
             .expect("evaluate"),
         None
     );
-    record_message(pool, 1000, 1, 101, first.timestamp())
+    record_message(pool, 1000, 1, 101, first)
         .await
         .expect("replayed message");
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM activity.twitch_invite_messages")
@@ -295,6 +295,53 @@ async fn voice_needs_one_continuous_session_outside_excluded_channels() {
             .expect("voice threshold"),
         Some("qualified")
     );
+}
+
+#[tokio::test]
+async fn fractional_message_times_preserve_join_departure_and_deadline_boundaries() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined = at("2026-01-01T12:00:00.500123Z");
+    let deadline = joined + Duration::days(30);
+    for (user, extra, expected) in [(990_301, 0, "qualified"), (990_302, 1, "expired")] {
+        join(pool, user, user, joined, "ViewerCode").await;
+        let first_id = user as u64 * 10;
+        let times = [
+            joined + Duration::microseconds(1),
+            joined + Duration::microseconds(2),
+            joined + Duration::microseconds(3),
+            joined + Duration::microseconds(4),
+            deadline + Duration::microseconds(extra),
+        ];
+        messages(pool, user as u64, first_id, &times).await;
+        let stored: Vec<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT occurred_at FROM activity.twitch_invite_messages WHERE user_id = $1 ORDER BY message_id",
+        ).bind(user).fetch_all(pool).await.expect("exact event timestamps");
+        assert_eq!(stored, times[..if extra == 0 { 5 } else { 4 }]);
+        let invite = candidate(pool, user).await;
+        let retained = proof(&invite, 31);
+        assert_eq!(evaluate_one(pool, &invite, Some(&retained), &[], retained.checked_at)
+            .await.expect("fractional deadline"), Some(expected));
+        let qualified: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT qualified_at FROM bot.twitch_invite_joins WHERE user_id = $1",
+        ).bind(user).fetch_one(pool).await.expect("precise qualification");
+        assert_eq!(qualified, (extra == 0).then_some(deadline));
+    }
+    let user = 990_303;
+    join(pool, user, user, joined, "ViewerCode").await;
+    let left = joined + Duration::days(15);
+    let mut tx = pool.begin().await.expect("departure");
+    remember_member_event(&mut tx, 990_304, 1, user, "leave", Some(left), None)
+        .await.expect("precise departure");
+    tx.commit().await.expect("departure committed first");
+    messages(pool, user as u64, 9_903_030, &[
+        joined - Duration::microseconds(1), joined + Duration::microseconds(1),
+        left - Duration::microseconds(1), left, left + Duration::microseconds(1),
+    ]).await;
+    let stored: Vec<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT occurred_at FROM activity.twitch_invite_messages WHERE user_id = $1 ORDER BY message_id",
+    ).bind(user).fetch_all(pool).await.expect("precise membership boundaries");
+    assert_eq!(stored, [joined + Duration::microseconds(1), left - Duration::microseconds(1)]);
 }
 
 #[tokio::test]
@@ -587,7 +634,7 @@ async fn delayed_message_before_departure_qualifies_but_departure_boundary_is_ex
         &[last_message, left_at, left_at + Duration::seconds(1)],
     )
     .await;
-    record_message(pool, 991_107, 1, 990_103, last_message.timestamp())
+    record_message(pool, 991_107, 1, 990_103, last_message)
         .await
         .expect("prior member remains excluded");
     let stored: Vec<i64> = sqlx::query_scalar(

@@ -1476,7 +1476,7 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: "free crypto".into(),
-            message_created_at: 1_000,
+            message_created_at: chrono::DateTime::from_timestamp(1_000, 0).expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,
@@ -1548,7 +1548,7 @@ mod tests {
         let mut event = scanned_text_event(message_id, "lfg wer hat bock auf ranked");
         event.author_id = user_id;
         event.channel_id = channel_id;
-        event.message_created_at = chrono::Utc::now().timestamp();
+        event.message_created_at = chrono::Utc::now();
         event.attachment_count = 1;
         event.image_attachment_count = 0;
         event.image_attachment_urls = Vec::new();

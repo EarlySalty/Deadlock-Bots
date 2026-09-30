@@ -446,6 +446,13 @@ impl EventHandler for Handler {
         if !is_user_message(&message) {
             return;
         }
+        let Some(message_created_at) = chrono::DateTime::from_timestamp(
+            message.timestamp.unix_timestamp(),
+            message.timestamp.nanosecond(),
+        ) else {
+            tracing::error!("Discord-Nachricht enthält keinen gültigen UTC-Zeitpunkt");
+            return;
+        };
         self.record_core_user(
             CoreUserEventKind::MessageCreate,
             profile_from_user(&message.author),
@@ -527,7 +534,7 @@ impl EventHandler for Handler {
             author_is_staff,
             author_staff_status_known,
             content: message.content.clone(),
-            message_created_at: message.timestamp.unix_timestamp(),
+            message_created_at,
             is_reply: message.message_reference.is_some(),
             reply_message_id,
             reply_channel_id,
