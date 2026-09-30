@@ -125,7 +125,7 @@ fn explicit_scam_reason(reason: &str) -> bool {
     let reason = reason.to_lowercase();
 
     reason
-        .split([';', '.', '!', '?', ':', '\n'])
+        .split([';', '.', '!', '?', '\n'])
         .flat_map(split_assertion_scopes)
         .any(|part| {
             EXPLICIT_SCAM.iter().any(|needle| {
@@ -178,6 +178,21 @@ fn split_assertion_scopes(part: &str) -> Vec<String> {
     scopes
 }
 
+fn prefix_negation_is_relevant(context: &[&str], position: usize, word: &str) -> bool {
+    let next = context.get(position + 1).copied();
+    match word {
+        "ohne" => next != Some("zweifel"),
+        "kein" | "keine" | "keinen" | "keinem" | "keiner" | "keines" => {
+            !matches!(next, Some("zweifel" | "entwarnung"))
+        }
+        "nicht" => !matches!(
+            next,
+            Some("harmlos" | "bloß" | "bloss" | "nur" | "im" | "in" | "auf" | "am" | "bei")
+        ),
+        _ => true,
+    }
+}
+
 fn text_before_word(text: &str, word_position: usize) -> &str {
     let mut words_seen = 0;
     let mut in_word = false;
@@ -195,6 +210,130 @@ fn text_before_word(text: &str, word_position: usize) -> &str {
         }
     }
     text
+}
+
+fn starts_independent_statement(text: &str) -> bool {
+    let words = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let Some(mut first) = words.first().copied() else {
+        return false;
+    };
+    let mut second = words.get(1).copied();
+    if matches!(
+        first,
+        "aber" | "doch" | "stattdessen" | "jedoch" | "hingegen" | "sondern" | "allerdings"
+    ) {
+        first = words.get(1).copied().unwrap_or(first);
+        second = words.get(2).copied();
+    }
+    if matches!(first, "warnung" | "bericht" | "reporting" | "zitat") {
+        return true;
+    }
+    let Some(second) = second else {
+        return false;
+    };
+    if matches!(
+        first,
+        "der"
+            | "die"
+            | "das"
+            | "dieser"
+            | "diese"
+            | "dieses"
+            | "diesem"
+            | "diesen"
+            | "ein"
+            | "eine"
+            | "einer"
+            | "einem"
+            | "einen"
+            | "eines"
+            | "mein"
+            | "meine"
+            | "sein"
+            | "seine"
+            | "seiner"
+            | "ihre"
+            | "ihr"
+    ) {
+        return !matches!(
+            second,
+            "ist"
+                | "sind"
+                | "war"
+                | "waren"
+                | "wird"
+                | "werden"
+                | "bleibt"
+                | "bleiben"
+                | "nicht"
+                | "weder"
+                | "noch"
+                | "aber"
+                | "doch"
+                | "und"
+                | "oder"
+                | "sowie"
+                | "im"
+                | "in"
+                | "auf"
+                | "am"
+                | "bei"
+                | "eindeutig"
+                | "belegt"
+                | "sichtbar"
+                | "klar"
+        );
+    }
+    matches!(
+        second,
+        "ist"
+            | "sind"
+            | "war"
+            | "waren"
+            | "wird"
+            | "werden"
+            | "bleibt"
+            | "bleiben"
+            | "lässt"
+            | "laesst"
+            | "scheint"
+            | "scheinen"
+            | "zeigt"
+            | "zeigen"
+            | "fehlt"
+            | "fehlen"
+            | "kann"
+            | "könnte"
+            | "koennte"
+    )
+}
+
+fn scoped_assertion_suffix(suffix: &str) -> &str {
+    let mut boundaries = suffix
+        .char_indices()
+        .filter_map(|(index, character)| matches!(character, ',' | ':').then_some((index, 1)))
+        .collect::<Vec<_>>();
+    for conjunction in CONTRAST_CONJUNCTIONS
+        .iter()
+        .copied()
+        .chain([" und ", " oder ", " sowie "])
+    {
+        boundaries.extend(
+            suffix
+                .match_indices(conjunction)
+                .map(|(index, value)| (index, value.len())),
+        );
+    }
+    boundaries.sort_unstable_by_key(|(index, _)| *index);
+    boundaries
+        .into_iter()
+        .find_map(|(index, length)| {
+            starts_independent_statement(&suffix[index + length..]).then_some(&suffix[..index])
+        })
+        .unwrap_or(suffix)
 }
 
 fn direct_warn_report_context(prefix: &str) -> bool {
@@ -271,13 +410,7 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
         .collect::<Vec<_>>();
     let context = before.as_slice();
     if context.iter().enumerate().any(|(position, word)| {
-        if (*word == "nicht"
-            && context.get(position + 1).is_some_and(|next| {
-                matches!(*next, "harmlos" | "im" | "in" | "auf" | "am" | "bei")
-            }))
-            || (matches!(*word, "kein" | "keine" | "keinen")
-                && context.get(position + 1) == Some(&"zweifel"))
-        {
+        if !prefix_negation_is_relevant(context, position, word) {
             return false;
         }
         let trailing = &context[position + 1..];
@@ -350,10 +483,10 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
         return false;
     }
 
-    let after = part[index + length..]
+    let after_text = scoped_assertion_suffix(&part[index + length..]);
+    let after = after_text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .take(5)
         .collect::<Vec<_>>();
     if after.iter().enumerate().any(|(position, word)| {
         matches!(
@@ -373,18 +506,19 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
             && !lead.contains(&"oder")
             && (position == 0
                 || lead.contains(&"als")
-                || direct_warn_report_context(text_before_word(&part[index + length..], position)))
+                || direct_warn_report_context(text_before_word(after_text, position)))
     }) {
         return false;
     }
-    !after.iter().enumerate().any(|(position, word)| {
-        if *word == "weder" {
-            return true;
-        }
-        *word == "nicht"
-            && after[position + 1..].iter().take(3).any(|word| {
-                matches!(
-                    *word,
+    !has_epistemic_negation(&after)
+}
+
+fn has_epistemic_negation(words: &[&str]) -> bool {
+    words.contains(&"weder")
+        || words.windows(2).any(|phrase| {
+            phrase[0] == "nicht"
+                && matches!(
+                    phrase[1],
                     "eindeutig"
                         | "belegt"
                         | "klar"
@@ -399,8 +533,12 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
                         | "festgestellt"
                         | "nachweisen"
                 )
-            })
-    })
+        })
+        || words.windows(3).any(|phrase| {
+            phrase[0] == "nicht"
+                && phrase[1] == "zu"
+                && matches!(phrase[2], "sehen" | "erkennen" | "nachweisen")
+        })
 }
 
 fn raw_envelope(raw_text: Option<&str>, parsed: Option<Value>) -> String {
@@ -559,6 +697,8 @@ mod tests {
             "Ein Scam-Muster ist nicht belegt.",
             "Sichtbarer Scam ist nach Prüfung nicht belegt.",
             "Sichtbarer Scam ist nach Prüfung nicht eindeutig.",
+            "Nicht belegt: sichtbarer Scam.",
+            "Sichtbarer Scam: nicht eindeutig.",
             "Warnung vor sichtbarem Phishing, keine Werbung.",
             "Der Screenshot zitiert einen sichtbaren Scam als Warnung.",
             "Eine Phishing-Warnung im Bericht.",
@@ -643,9 +783,24 @@ mod tests {
             "Keine Entwarnung: sichtbarer Scam.",
             "Nicht bloß Werbung: sichtbarer Scam.",
             "Sichtbarer Scam und Phishing ist unbestätigt.",
+            "Sichtbarer Scam, das Logo ist nicht erkennbar.",
+            "Sichtbarer Scam: Das Logo ist nicht erkennbar.",
+            "Sichtbarer Scam, aber das Logo ist nicht erkennbar.",
+            "Sichtbarer Scam und das Logo ist nicht erkennbar.",
         ] {
             assert!(
                 high_confidence_scam_reason_conflict(&ModerationCategory::Other, 0.90, reason),
+                "{reason}"
+            );
+            let verification = VerificationDecision {
+                confirmed: false,
+                category: ModerationCategory::Other,
+                confidence: 0.90,
+                reason: reason.to_string(),
+                raw_json: "{}".to_string(),
+            };
+            assert!(
+                high_confidence_scam_verification_conflict(&verification),
                 "{reason}"
             );
         }
