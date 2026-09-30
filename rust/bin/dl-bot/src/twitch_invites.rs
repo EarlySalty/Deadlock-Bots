@@ -4,8 +4,9 @@ mod personal;
 mod voice;
 
 use std::{
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
+    collections::VecDeque,
+    sync::{atomic::Ordering, Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -23,8 +24,24 @@ pub struct TwitchInvites {
     adapter: Arc<DiscordAdapter>,
     guild_id: u64,
     config: TwitchInvitesConfig,
+    last_warning: Mutex<VecDeque<Instant>>,
     voice_needs_reset: std::sync::atomic::AtomicBool,
     voice_observation_lock: tokio::sync::Mutex<()>,
+}
+
+fn warning_allowed(warnings: &mut VecDeque<Instant>, now: Instant) -> bool {
+    let window = Duration::from_secs(7 * 24 * 60 * 60);
+    while warnings
+        .front()
+        .is_some_and(|warning| now.saturating_duration_since(*warning) >= window)
+    {
+        warnings.pop_front();
+    }
+    if warnings.len() >= 2 {
+        return false;
+    }
+    warnings.push_back(now);
+    true
 }
 
 impl TwitchInvites {
@@ -39,6 +56,7 @@ impl TwitchInvites {
                 .and_then(|id| id.parse().ok())
                 .unwrap_or(0),
             config: config.twitch_invites.clone(),
+            last_warning: Mutex::new(VecDeque::new()),
             voice_needs_reset: std::sync::atomic::AtomicBool::new(true),
             voice_observation_lock: tokio::sync::Mutex::new(()),
         })
@@ -143,6 +161,13 @@ impl TwitchInvites {
         }
     }
 
+    fn should_warn(&self) -> bool {
+        let Ok(mut warnings) = self.last_warning.lock() else {
+            return false;
+        };
+        warning_allowed(&mut warnings, Instant::now())
+    }
+
     async fn record_qualification_status(&self, succeeded: bool) -> Result<(), String> {
         let interval = i32::try_from(self.config.evaluation_interval_seconds)
             .map_err(|_| "Ungültiges Qualifikationsintervall")?;
@@ -159,22 +184,21 @@ impl TwitchInvites {
         let mut tick =
             tokio::time::interval(Duration::from_secs(self.config.evaluation_interval_seconds));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_warning: Option<std::time::Instant> = None;
         loop {
             tick.tick().await;
             let error = match self.evaluate_cycle().await {
                 Ok(()) => self.record_qualification_status(true).await.err(),
                 Err(cycle_error) => {
                     let marker_error = self.record_qualification_status(false).await.err();
-                    Some(marker_error.map_or(cycle_error, |marker_error| {
-                        format!("{cycle_error}; Qualifikationsstatus konnte nicht gespeichert werden: {marker_error}")
-                    }))
+                    Some(match marker_error {
+                        Some(marker_error) => format!("{cycle_error}; Qualifikationsstatus konnte nicht gespeichert werden: {marker_error}"),
+                        None => cycle_error,
+                    })
                 }
             };
             if let Some(error) = error {
-                if last_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(86400)) {
+                if self.should_warn() {
                     tracing::warn!(%error, "Einladungsqualifikation wird erneut geprüft");
-                    last_warning = Some(std::time::Instant::now());
                 }
             }
         }
@@ -184,7 +208,6 @@ impl TwitchInvites {
         tokio::spawn(async move {
             let mut worker = tokio::task::JoinSet::new();
             let interval = Duration::from_secs(self.config.evaluation_interval_seconds);
-            let mut last_warning: Option<std::time::Instant> = None;
             loop {
                 let task = self.clone();
                 worker.spawn(async move { task.run_qualification_loop().await });
@@ -195,7 +218,7 @@ impl TwitchInvites {
                     None => "missing",
                 };
                 let marker_error = self.record_qualification_status(false).await.err();
-                if last_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(86400)) {
+                if self.should_warn() {
                     if let Some(error) = marker_error {
                         tracing::warn!(task_exit = exit, %error, "Einladungsqualifikation wird neu gestartet");
                     } else {
@@ -204,7 +227,6 @@ impl TwitchInvites {
                             "Einladungsqualifikation wird neu gestartet"
                         );
                     }
-                    last_warning = Some(std::time::Instant::now());
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -286,5 +308,38 @@ impl TwitchInvitePort for TwitchInvites {
         .await
         .map_err(|error| error.to_string())?;
         serde_json::to_value(page).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::warning_allowed;
+    use std::{
+        collections::VecDeque,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn warning_debounce_caps_repeated_messages_at_two_per_week() {
+        let start = Instant::now();
+        let mut warnings = VecDeque::new();
+
+        assert!(warning_allowed(&mut warnings, start));
+        assert!(warning_allowed(
+            &mut warnings,
+            start + Duration::from_secs(24 * 60 * 60)
+        ));
+        assert!(!warning_allowed(
+            &mut warnings,
+            start + Duration::from_secs(2 * 24 * 60 * 60)
+        ));
+        assert!(warning_allowed(
+            &mut warnings,
+            start + Duration::from_secs(7 * 24 * 60 * 60)
+        ));
+        assert!(!warning_allowed(
+            &mut warnings,
+            start + Duration::from_secs(7 * 24 * 60 * 60 + 1)
+        ));
     }
 }
