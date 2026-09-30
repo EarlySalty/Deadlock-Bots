@@ -7,6 +7,7 @@ mod test_database {
 
 use super::*;
 include!("qualified_invite_live_tests.rs");
+include!("qualified_invite_late_tests.rs");
 
 fn at(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)

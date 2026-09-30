@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -333,7 +333,10 @@ pub async fn pending(pool: &PgPool, guild_id: i64) -> Result<Vec<PendingInvite>,
         "SELECT j.join_id, j.guild_id, j.user_id, j.joined_at, j.eligible, m.left_at
          FROM bot.twitch_invite_joins j
          JOIN activity.twitch_invite_members m USING (guild_id, user_id)
-         WHERE j.guild_id = $1 AND j.status = 'pending'
+         WHERE j.guild_id = $1 AND (j.status = 'pending' OR
+             (j.status = 'expired' AND j.reason = 'deadline' AND EXISTS (
+                 SELECT 1 FROM activity.twitch_invite_evidence_queue q
+                 WHERE q.guild_id = j.guild_id AND q.user_id = j.user_id)))
          ORDER BY j.joined_at, j.join_id",
     )
     .bind(guild_id)
@@ -387,7 +390,23 @@ pub fn qualifying_at(
     member: Option<&MemberProof>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    if !invite.eligible || member.is_some_and(|proof| proof.is_bot) {
+    if member.is_some_and(|proof| proof.is_bot) {
+        return None;
+    }
+    let ready_at = timely_activity_at(invite, activity_at, now)?;
+    let current_proof = member.is_some_and(|proof| {
+        proof.joined_at == Some(invite.joined_at) && proof.checked_at >= ready_at
+    });
+    let historical_proof = invite.left_at.is_some_and(|left_at| left_at > ready_at);
+    (current_proof || historical_proof).then_some(ready_at)
+}
+
+fn timely_activity_at(
+    invite: &PendingInvite,
+    activity_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if !invite.eligible {
         return None;
     }
     let ready_at = activity_at?.max(invite.joined_at + Duration::days(14));
@@ -397,11 +416,7 @@ pub fn qualifying_at(
     if invite.left_at.is_some_and(|left_at| ready_at >= left_at) {
         return None;
     }
-    let current_proof = member.is_some_and(|proof| {
-        proof.joined_at == Some(invite.joined_at) && proof.checked_at >= ready_at
-    });
-    let historical_proof = invite.left_at.is_some_and(|left_at| left_at > ready_at);
-    (current_proof || historical_proof).then_some(ready_at)
+    Some(ready_at)
 }
 
 pub async fn evaluate_one(
@@ -411,13 +426,17 @@ pub async fn evaluate_one(
     excluded_channels: &[i64],
     now: DateTime<Utc>,
 ) -> Result<Option<&'static str>, sqlx::Error> {
+    let started = Instant::now();
     let mut tx = pool.begin().await?;
     lock_changes(&mut tx, invite.guild_id).await?;
     let current: Option<PendingInvite> = sqlx::query_as(
         "SELECT j.join_id, j.guild_id, j.user_id, j.joined_at, j.eligible, m.left_at
          FROM bot.twitch_invite_joins j
          JOIN activity.twitch_invite_members m USING (guild_id, user_id)
-         WHERE j.join_id = $1 AND j.status = 'pending' FOR UPDATE OF j",
+         WHERE j.join_id = $1 AND (j.status = 'pending' OR
+             (j.status = 'expired' AND j.reason = 'deadline' AND EXISTS (
+                 SELECT 1 FROM activity.twitch_invite_evidence_queue q
+                 WHERE q.guild_id = j.guild_id AND q.user_id = j.user_id))) FOR UPDATE OF j",
     )
     .bind(invite.join_id)
     .fetch_optional(&mut *tx)
@@ -426,18 +445,43 @@ pub async fn evaluate_one(
         tx.commit().await?;
         return Ok(None);
     };
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM bot.twitch_invite_joins WHERE join_id=$1")
+            .bind(current.join_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    // Evidence writers take the join SHARE lock before marking this row.
+    // A later writer therefore marks a new generation after this transaction.
+    let marked: Option<bool> = sqlx::query_scalar(
+        "SELECT TRUE FROM activity.twitch_invite_evidence_queue WHERE guild_id=$1 AND user_id=$2 FOR UPDATE",
+    ).bind(current.guild_id).bind(current.user_id).fetch_optional(&mut *tx).await?;
     let opted_out: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out = TRUE)",
+        "SELECT EXISTS (SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out = TRUE)
+             OR EXISTS (SELECT 1 FROM activity.twitch_invite_members WHERE guild_id=$2 AND user_id=$1 AND prior_member)",
     )
     .bind(current.user_id)
+    .bind(current.guild_id)
     .fetch_one(&mut *tx)
     .await?;
+    // Preserve the caller's clock while accounting for actual lock waits. A
+    // completed evidence transaction must not look future-dated merely because
+    // this evaluation began before it could acquire the join lock.
+    let elapsed = Duration::from_std(started.elapsed()).map_err(|_| {
+        sqlx::Error::Protocol("Evaluierungsdauer außerhalb des Zeitbereichs".into())
+    })?;
+    let now = now.checked_add_signed(elapsed).ok_or_else(|| {
+        sqlx::Error::Protocol("Evaluierungszeit außerhalb des Zeitbereichs".into())
+    })?;
     let evidence = if current.eligible && !opted_out {
         activity_at(&mut tx, &current, excluded_channels, now).await?
     } else {
         None
     };
     let qualified_at = qualifying_at(&current, evidence, member, now);
+    let awaiting_membership = !opted_out
+        && !member.is_some_and(|proof| proof.is_bot)
+        && qualified_at.is_none()
+        && timely_activity_at(&current, evidence, now).is_some();
     let result = if qualified_at.is_some() {
         Some(("qualified", "activity_and_membership"))
     } else if !current.eligible || opted_out || member.is_some_and(|proof| proof.is_bot) {
@@ -447,20 +491,32 @@ pub async fn evaluate_one(
         .is_some_and(|left_at| left_at <= current.joined_at + Duration::days(14))
     {
         Some(("expired", "left_before_retention"))
-    } else if now >= current.joined_at + Duration::days(30) {
+    } else if now >= current.joined_at + Duration::days(30) && !awaiting_membership {
         Some(("expired", "deadline"))
     } else {
         None
     };
+    let result = result.filter(|(next, _)| *next != status);
     if let Some((status, reason)) = result {
         sqlx::query(
             "UPDATE bot.twitch_invite_joins SET status = $2, qualified_at = $3, reason = $4
-             WHERE join_id = $1 AND status = 'pending'",
+             WHERE join_id = $1",
         )
         .bind(current.join_id)
         .bind(status)
         .bind(qualified_at)
         .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // A valid activity timestamp may be newer than the REST membership proof.
+    // Keep its marker until a fresh proof (or a definitive exclusion) resolves it.
+    if marked.is_some() && !awaiting_membership {
+        sqlx::query(
+            "DELETE FROM activity.twitch_invite_evidence_queue WHERE guild_id=$1 AND user_id=$2",
+        )
+        .bind(current.guild_id)
+        .bind(current.user_id)
         .execute(&mut *tx)
         .await?;
     }
