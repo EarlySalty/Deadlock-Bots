@@ -1443,9 +1443,13 @@ dependencies = [
 name = "dl-central-migrate"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "dl-central-db",
+ "serde",
+ "serde_json",
  "sqlx",
  "tokio",
+ "url",
 ]
 
 [[package]]

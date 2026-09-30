@@ -13,3 +13,20 @@ Reihenfolge nach Freigabe: frischen `dl-central-migrate` mit beiden Migrationen 
 Live-Abnahme: keine künstlichen Community-Nachrichten senden. Interne Feed-Verfügbarkeit, monotone Cursor, gesperrte anonyme Mutationen und öffentlich erreichbare Clip-/Challenges-Seiten prüfen; Datenentstehung bei echten Ereignissen passiv nachhalten. Anschließend PRs dem tatsächlichen Integrationsstand zuordnen und gesicherte, saubere Arbeitszweige/Worktrees entfernen.
 
 Stand dieser Übergabe: Migration ergänzt, kein Build/Deploy/Neustart, keine Produktionsdaten geändert. Caddy-Paket separat mit 15/15 Routentests und erfolgreichem vollständigem `caddy adapt` geprüft. Rust-Prüfungen und Gate gehören in den koordinierten Integrationslauf.
+
+## Lokaler Migrator ohne Umgebungsvariablen
+
+Der vorhandene Rust-Migrator unterstützt zusätzlich `--config <JSON-Datei>` im
+bereits verwendeten normalen `database_url`-Format. Beispiel:
+`config/central-migrate.example.json`. Dieser explizite Weg akzeptiert nur eine
+benannte Datenbank und Rolle über einen absoluten lokalen PostgreSQL-Socketpfad;
+Passwörter, entfernte Server und zusätzliche URL-Optionen werden abgewiesen.
+Die Peer-Identität des ausführenden Betriebssystemkontos muss zur angegebenen
+Datenbankrolle passen. Es werden weder neue Credentials noch Passwortdateien
+angelegt. Ohne Argumente bleibt der bisherige Aufrufer kompatibel; der koordinierte
+Rollout verwendet ausschließlich den expliziten Configweg.
+
+Vor Produktivlauf wird dasselbe frisch gebaute Binary mit einer separaten normalen
+Config gegen eine isolierte Datenbank ausgeführt. Erst nach unabhängiger Abnahme
+und Gate erfolgt der Lauf gegen `deadlock`, unter der dafür vorhandenen lokalen
+Administratoridentität. Die Startwrapper im gemeinsamen Checkout bleiben bestehen.
