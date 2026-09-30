@@ -26,6 +26,10 @@ impl VoiceTracker {
         state
             .generations
             .insert(snapshot.guild_id, snapshot.generation);
+        // This is an ordering watermark, not a persistence acknowledgement.
+        // A partial close must still exclude older continuations; equal-time
+        // retries remain allowed by the strict comparison above.
+        state.observed.insert(snapshot.guild_id, observed);
         let keys: Vec<_> = state
             .sessions
             .iter()
@@ -75,8 +79,6 @@ impl VoiceTracker {
             state.grace.remove(&key);
             closed += 1;
         }
-        // Advance only after successful persistence. A failed close remains retryable.
-        state.observed.insert(snapshot.guild_id, observed);
         if closed > 0 {
             tracing::info!(
                 closed,
