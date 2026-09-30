@@ -85,7 +85,7 @@ async fn observed_ambiguous_join_stays_unknown_after_a_code_disappears() {
         &kind,
         metadata.get("join_source_reason").and_then(Value::as_str)
     ));
-    metadata.insert("join_source".into(), Value::String(kind.into()));
+    metadata.insert("join_source".into(), Value::String(kind));
     tracker
         .persist_complete_snapshot(1, &after, chrono::Utc::now())
         .await

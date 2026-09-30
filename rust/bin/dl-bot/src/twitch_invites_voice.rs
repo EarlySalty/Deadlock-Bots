@@ -170,7 +170,9 @@ mod tests {
     #[tokio::test]
     async fn delayed_gateway_transition_does_not_turn_fourteen_minutes_into_fifteen() {
         let db = peer_database::database().await;
-        let start = Utc::now() - chrono::Duration::minutes(16);
+        let start = DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+            .expect("PostgreSQL timestamp precision")
+            - chrono::Duration::minutes(16);
         sqlx::query(
             "INSERT INTO activity.twitch_invite_members
             (guild_id,user_id,first_joined_at,current_joined_at,prior_member,
