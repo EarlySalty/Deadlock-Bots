@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 use dl_broker::port::{
     DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
     MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers,
@@ -20,7 +21,6 @@ use serenity::all::{
     Cache, ChannelId, ChannelType, GuildId, Http, MessageId, ReactionType, RoleId, UserId,
 };
 use serenity::builder::CreateAttachment;
-use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
@@ -72,15 +72,12 @@ impl DiscordAdapter {
         let _ = self.invite_tracker.set(tracker);
     }
 
-    pub async fn ensure_invite_snapshot_current(
-        &self,
-        guild_id: u64,
-    ) -> Result<bool, sqlx::Error> {
+    pub async fn ensure_invite_snapshot_current(&self, guild_id: u64) -> Result<bool, sqlx::Error> {
         if self.invite_snapshot_health.is_current(guild_id).await {
             return Ok(true);
         }
         let Some(tracker) = self.invite_tracker.get() else {
-            return Ok(true);
+            return Ok(false);
         };
         tracker.prime(&self.http, guild_id).await
     }
@@ -1430,6 +1427,16 @@ mod tests {
             }),
             "party:123"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_snapshot_without_linked_tracker_is_not_current() {
+        let adapter = DiscordAdapter::new("test-token");
+
+        assert!(matches!(
+            adapter.ensure_invite_snapshot_current(42).await,
+            Ok(false)
+        ));
     }
 
     #[test]

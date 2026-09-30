@@ -389,9 +389,9 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
           AND current.channel_id IS NOT NULL
          WHERE personal.revoked_at IS NULL",
     )
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
     for (login, code) in personal {
         twitch.entry(code.to_ascii_lowercase()).or_insert(login);
     }
@@ -987,7 +987,8 @@ mod tests {
 
     #[tokio::test]
     #[cfg(feature = "testing")]
-    async fn personal_source_lookup_resolves_current_login_by_owner_id() -> Result<(), Box<dyn std::error::Error>> {
+    async fn personal_source_lookup_resolves_current_login_by_owner_id(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = test_database::database().await;
         let pool = db.pool();
         sqlx::query(
@@ -1008,7 +1009,10 @@ mod tests {
         .await?;
 
         let (twitch, _) = load_lookups(pool).await;
-        assert_eq!(twitch.get("personallink").map(String::as_str), Some("new-login"));
+        assert_eq!(
+            twitch.get("personallink").map(String::as_str),
+            Some("new-login")
+        );
         Ok(())
     }
 

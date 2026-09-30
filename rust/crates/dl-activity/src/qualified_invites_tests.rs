@@ -699,18 +699,14 @@ async fn personal_owner_names_follow_stable_id_and_preserve_join_snapshots() {
         ]
     );
 
-    let page = list_page(
-        pool,
-        1,
-        joined_at - Duration::days(1),
-        None,
-        None,
-        10,
-    )
-    .await
-    .expect("current owner names");
+    let page = list_page(pool, 1, joined_at - Duration::days(1), None, None, 10)
+        .await
+        .expect("current owner names");
     assert_eq!(page.invites.len(), 2);
-    assert!(page.invites.iter().all(|invite| invite.streamer_login == "new-login"));
+    assert!(page
+        .invites
+        .iter()
+        .all(|invite| invite.streamer_login == "new-login"));
     let historical_login: String = sqlx::query_scalar(
         "SELECT streamer_login FROM bot.twitch_personal_invites
          WHERE streamer_twitch_user_id = '42' AND inviter_twitch_user_id = '43'",

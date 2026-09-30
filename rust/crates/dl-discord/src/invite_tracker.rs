@@ -6,7 +6,10 @@
 //! werden NICHT getrackt (serenity liefert keinen) — Vanity-Joins fallen in die
 //! Discovery-Heuristik (Bucket `public`), was den Bucket-Count nicht verändert.
 
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -262,14 +265,14 @@ impl InviteTracker {
         guild_id: u64,
         snapshot: &HashMap<String, InviteSnap>,
     ) -> Result<(), sqlx::Error> {
-        let guild_id = i64::try_from(guild_id)
-            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+        let guild_id =
+            i64::try_from(guild_id).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         let payload = serde_json::json!({
             "invites": snapshot,
             "vanity": {},
         });
         let payload = serde_json::to_string(&payload)
-            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         sqlx::query(
             "INSERT INTO bot.invite_snapshot_cache (guild_id, snapshot_json, updated_at)
              VALUES ($1, $2::text::jsonb, now())
@@ -308,8 +311,8 @@ impl InviteTracker {
         snapshot: &HashMap<String, InviteSnap>,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), sqlx::Error> {
-        let guild_db_id = i64::try_from(guild_id)
-            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+        let guild_db_id =
+            i64::try_from(guild_id).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         let present_codes: Vec<String> = snapshot.keys().cloned().collect();
         sqlx::query(
             "UPDATE bot.twitch_personal_invites
@@ -339,10 +342,11 @@ impl InviteTracker {
             tx.commit().await
         }
         .await;
-        if let Err(error) = persist {
-            return Err(error);
-        }
-        self.by_guild.lock().await.insert(guild_id, snapshot.clone());
+        persist?;
+        self.by_guild
+            .lock()
+            .await
+            .insert(guild_id, snapshot.clone());
         self.health.mark_current(guild_id).await;
         Ok(())
     }
@@ -370,10 +374,7 @@ impl InviteTracker {
     }
 
     /// Übernimmt einen frisch erstellten Invite in den Cache (uses = 0).
-    pub async fn on_invite_create(
-        &self,
-        ev: &InviteCreateEvent,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn on_invite_create(&self, ev: &InviteCreateEvent) -> Result<(), sqlx::Error> {
         let Some(guild_id) = ev.guild_id else {
             return Ok(());
         };
@@ -409,14 +410,10 @@ impl InviteTracker {
     }
 
     /// Entfernt einen gelöschten Invite aus dem Cache.
-    pub async fn on_invite_delete(
-        &self,
-        guild_id: u64,
-        code: &str,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn on_invite_delete(&self, guild_id: u64, code: &str) -> Result<(), sqlx::Error> {
         let _guard = self.lock_guild(guild_id).await;
-        let guild_db_id = i64::try_from(guild_id)
-            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+        let guild_db_id =
+            i64::try_from(guild_id).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         let mut snapshot = self.by_guild.lock().await.get(&guild_id).cloned();
         if let Some(map) = snapshot.as_mut() {
             map.remove(code);
@@ -451,11 +448,7 @@ impl InviteTracker {
 
     /// Detektiert die Beitrittsquelle: aktuellen Invite-Stand holen, gegen den
     /// Cache differenzieren und nur nach erfolgreichem DB-Commit übernehmen.
-    pub async fn on_join(
-        &self,
-        http: &Http,
-        member: &Member,
-    ) -> Result<Value, InviteJoinError> {
+    pub async fn on_join(&self, http: &Http, member: &Member) -> Result<Value, InviteJoinError> {
         let guild_id = member.guild_id.get();
         let _guard = self.lock_guild(guild_id).await;
         let mut meta = Map::new();
@@ -722,7 +715,10 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("invite status");
-        assert!(revoked_at.is_none(), "failed snapshot must roll back revocation");
+        assert!(
+            revoked_at.is_none(),
+            "failed snapshot must roll back revocation"
+        );
         assert!(!tracker.health.is_current(guild_id as u64).await);
         assert_eq!(tracker.by_guild.lock().await[&(guild_id as u64)].len(), 1);
     }
