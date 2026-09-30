@@ -15894,16 +15894,17 @@ mod tests {
             let edits = port.edited_channels.lock().unwrap();
             assert_eq!(edits.len(), 1);
         }
-        let alerts = port.sent_channel_v2.lock().unwrap();
-        assert_eq!(alerts.len(), 1);
-        let alert = &alerts[0];
-        assert_eq!(alert["message_reference"]["message_id"], "555");
-        assert_eq!(
-            alert["allowed_mentions"]["users"][0],
-            CONCIERGE_OWNER_ID.to_string()
-        );
-        assert_eq!(alert["enforce_nonce"], true);
-        drop(alerts);
+        {
+            let alerts = port.sent_channel_v2.lock().unwrap();
+            assert_eq!(alerts.len(), 1);
+            let alert = &alerts[0];
+            assert_eq!(alert["message_reference"]["message_id"], "555");
+            assert_eq!(
+                alert["allowed_mentions"]["users"][0],
+                CONCIERGE_OWNER_ID.to_string()
+            );
+            assert_eq!(alert["enforce_nonce"], true);
+        }
         let escalated: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
         )
