@@ -61,4 +61,10 @@ Bei unbestätigtem Versand bleiben Idempotenz-Key und Payload gleich. Der besteh
 Broker dedupliziert diese Wiederholung innerhalb seines Cache-Fensters. Es gibt
 keine Änderung an diesem Brokervertrag; eine verlorene Bestätigung über einen
 Broker-Neustart bzw. seine Cache-TTL hinaus bietet weiterhin keine garantierte
-genau-einmal-Zustellung. Parallele OneShots derselben Unit sind durch flock gesperrt.
+genau-einmal-Zustellung. Deshalb wird unmittelbar vor HTTP ein eigener
+unbestätigter Versandversuch atomar reserviert und beim Budget konservativ
+mitgezählt. Auch nach verlorenem ACK kann frühestens nach 24 Stunden erneut
+versucht werden, höchstens zweimal in sieben Tagen. Erst eine Nachrichten-ID
+ersetzt diese Reservierung durch einen bestätigten Versand, ohne doppelte
+Budgetzählung. Fehler beim vorherigen Secretladen verbrauchen kein Versandbudget.
+Parallele OneShots derselben Unit sind durch flock gesperrt.

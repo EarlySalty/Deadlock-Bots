@@ -261,7 +261,8 @@ async fn run(args: Args) -> Result<()> {
             included: state.unreported,
         });
         // Dieselbe Idempotenz-ID und derselbe Text bleiben nach unbestätigtem
-        // Versand erhalten. Ausschließlich erfolgreiche Sendungen zählen zum Budget.
+        // Versand erhalten. Bestätigte Sendungen und mögliche ACK-Verluste werden
+        // getrennt gespeichert und gemeinsam konservativ zum Budget gezählt.
         store.save(&state)?;
     }
     let credential = args
@@ -269,6 +270,14 @@ async fn run(args: Args) -> Result<()> {
         .as_deref()
         .context("Bestehender Credential-Pfad fehlt.")?;
     let token = secrets::broker_token(&config, credential).await?;
+    // Erst nach erfolgreichem Secretladen und unmittelbar vor HTTP reservieren:
+    // verlorene ACKs dürfen nach Broker-TTL/Neustart keinen Replay-Sturm erzeugen.
+    let attempt_time = now()?;
+    if !state.eligible(attempt_time) {
+        return Ok(());
+    }
+    state.reserve_attempt(attempt_time);
+    store.save(&state)?;
     secrets::send(
         &config,
         state.pending.as_ref().context("Meldung fehlt.")?,

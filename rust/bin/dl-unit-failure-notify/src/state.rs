@@ -17,6 +17,9 @@ pub struct State {
     pub recent_invocations: Vec<String>,
     pub unreported: u64,
     pub confirmed: Vec<u64>,
+    /// Versandversuche ohne bestätigte Message-ID. Keine erfundenen Sends;
+    /// diese Reservierungen verhindern Replay nach verlorener Bestätigung.
+    pub uncertain_attempts: Vec<u64>,
     pub sequence: u64,
     pub pending: Option<Pending>,
     /// Einmalige Übergangsruhe: Legacy hat keine vollständige Wochenhistorie.
@@ -53,23 +56,34 @@ impl State {
         let week = self
             .confirmed
             .iter()
+            .chain(self.uncertain_attempts.iter())
             .filter(|time| now.saturating_sub(**time) < WEEK)
             .count();
         week < 2
             && !self
                 .confirmed
                 .iter()
+                .chain(self.uncertain_attempts.iter())
                 .any(|time| now.saturating_sub(*time) < DAY)
     }
 
     pub fn confirm(&mut self, now: u64) {
         if let Some(pending) = self.pending.take() {
+            // Die aktuelle Reservierung wird durch genau eine bestätigte
+            // Nachricht ersetzt, niemals in beiden Budgets doppelt gezählt.
+            self.uncertain_attempts.pop();
             self.unreported = self.unreported.saturating_sub(pending.included);
             self.sequence = self.sequence.saturating_add(1);
             self.confirmed
                 .retain(|time| now.saturating_sub(*time) < WEEK);
             self.confirmed.push(now);
         }
+    }
+
+    pub fn reserve_attempt(&mut self, now: u64) {
+        self.uncertain_attempts
+            .retain(|time| now.saturating_sub(*time) < WEEK);
+        self.uncertain_attempts.push(now);
     }
 }
 
@@ -157,7 +171,7 @@ impl Store {
         let metadata = file.metadata()?;
         // SAFETY: geteuid hat keine Zeigerargumente und verändert keinen Zustand.
         if !metadata.is_file()
-            || metadata.mode() & 0o022 != 0
+            || (metadata.mode() & 0o022 != 0 && !private_legacy_directory(directory))
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.len() > 256
         {
@@ -209,6 +223,34 @@ impl Store {
         File::open(self.path.parent().context("Zustandsverzeichnis fehlt.")?)?.sync_all()?;
         Ok(())
     }
+}
+
+/// Legacydateien sind teilweise 0664 unter .local (0700). Dort schützt die
+/// private eigene Grenze auch tiefere Gruppenrechte. Diese Ausnahme gilt nur
+/// für den einmaligen Import, nicht für Config, Binary oder neuen Meldezustand.
+fn private_legacy_directory(directory: &Path) -> bool {
+    if directory.components().any(|component| {
+        !matches!(
+            component,
+            std::path::Component::RootDir | std::path::Component::Normal(_)
+        )
+    }) {
+        return false;
+    }
+    // SAFETY: geteuid hat keine Zeigerargumente und verändert keinen Zustand.
+    let uid = unsafe { libc::geteuid() };
+    for ancestor in directory.ancestors() {
+        let Ok(metadata) = fs::symlink_metadata(ancestor) else {
+            return false;
+        };
+        if !metadata.is_dir() || ![0, uid].contains(&metadata.uid()) {
+            return false;
+        }
+        if metadata.uid() == uid && metadata.mode() & 0o077 == 0 {
+            return crate::protected_path(ancestor, true).is_ok();
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -293,6 +335,7 @@ mod tests {
     #[test]
     fn legacy_cutover_imports_real_confirmed_time_and_counter_once() {
         let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let legacy = root.path().join("legacy");
         fs::create_dir(&legacy).unwrap();
         fs::write(
@@ -321,8 +364,30 @@ mod tests {
     }
 
     #[test]
+    fn group_writable_legacy_state_requires_verified_private_ancestor() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let legacy = root.path().join("legacy");
+        fs::create_dir(&legacy).unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o775)).unwrap();
+        let path = legacy.join("steam-core.service.state");
+        fs::write(&path, "1000 950 1100 12").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+        let store = Store::open(&root.path().join("private"), "unit").unwrap();
+        assert!(store
+            .load_or_import(Some(&legacy), "steam-core.service")
+            .is_ok());
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&legacy, &alias).unwrap();
+        assert!(!private_legacy_directory(&alias));
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!private_legacy_directory(&legacy));
+    }
+
+    #[test]
     fn malformed_legacy_state_fails_closed_without_creating_new_state() {
         let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let legacy = root.path().join("legacy");
         fs::create_dir(&legacy).unwrap();
         fs::write(
@@ -340,6 +405,7 @@ mod tests {
     #[test]
     fn no_confirmed_legacy_send_does_not_invent_budget_or_wait() {
         let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let legacy = root.path().join("legacy");
         fs::create_dir(&legacy).unwrap();
         fs::write(legacy.join("steam-core.service.state"), "0 1000 1100 12").unwrap();
@@ -350,5 +416,43 @@ mod tests {
         assert!(state.confirmed.is_empty());
         assert!(state.eligible(1100));
         assert_eq!(state.unreported, 12);
+    }
+
+    #[test]
+    fn lost_ack_and_broker_cache_loss_cannot_create_unbounded_replays() {
+        let mut state = State::default();
+        state.observe("first");
+        state.pending = Some(Pending {
+            key: "stable-key".into(),
+            content: "sicher".into(),
+            included: 1,
+        });
+        state.reserve_attempt(1_000);
+        assert!(state.confirmed.is_empty());
+        assert!(!state.eligible(1_000 + 601)); // Broker-RAMcache bereits abgelaufen.
+        assert!(!state.eligible(1_000 + DAY - 1));
+        assert!(state.eligible(1_000 + DAY));
+        state.reserve_attempt(1_000 + DAY);
+        assert!(!state.eligible(1_000 + 2 * DAY));
+        assert!(state.eligible(1_000 + WEEK));
+        assert_eq!(state.pending.as_ref().unwrap().key, "stable-key");
+        assert_eq!(state.unreported, 1);
+    }
+
+    #[test]
+    fn confirmed_message_replaces_attempt_reservation_instead_of_counting_twice() {
+        let mut state = State::default();
+        state.observe("first");
+        state.pending = Some(Pending {
+            key: "stable-key".into(),
+            content: "sicher".into(),
+            included: 1,
+        });
+        state.reserve_attempt(1_000);
+        state.confirm(1_005);
+        assert!(state.uncertain_attempts.is_empty());
+        assert_eq!(state.confirmed, vec![1_005]);
+        assert_eq!(state.unreported, 0);
+        assert!(state.eligible(1_005 + DAY));
     }
 }
