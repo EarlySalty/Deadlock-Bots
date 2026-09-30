@@ -54,23 +54,50 @@ async fn voice_epoch_reset_keeps_same_channel_sessions_separate() {
     join(db.pool(), 990_200, 990_200, joined, "ViewerCode").await;
     let members = std::collections::HashMap::from([(990_200_u64, 2_u64)]);
     for minute in 0..=7 {
-        record_snapshot(db.pool(), 1, &members, &[], joined + Duration::minutes(minute), None, false)
-            .await.expect("first confirmed epoch");
+        record_snapshot(
+            db.pool(),
+            1,
+            &members,
+            &[],
+            joined + Duration::minutes(minute),
+            None,
+            false,
+        )
+        .await
+        .expect("first confirmed epoch");
     }
     // Same channel after a reconnect entirely between observations: the runtime
     // generation guard invokes this reset before it records the new snapshot.
     reset_live_clocks(db.pool(), 1).await.expect("epoch reset");
     for minute in 8..=15 {
-        record_snapshot(db.pool(), 1, &members, &[], joined + Duration::minutes(minute), None, false)
-            .await.expect("new confirmed epoch");
+        record_snapshot(
+            db.pool(),
+            1,
+            &members,
+            &[],
+            joined + Duration::minutes(minute),
+            None,
+            false,
+        )
+        .await
+        .expect("new confirmed epoch");
     }
     let before: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT voice_qualified_at FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 990200",
     ).fetch_one(db.pool()).await.expect("not combined");
     assert_eq!(before, None);
     for minute in 16..=23 {
-        record_snapshot(db.pool(), 1, &members, &[], joined + Duration::minutes(minute), None, false)
-            .await.expect("continuous new epoch");
+        record_snapshot(
+            db.pool(),
+            1,
+            &members,
+            &[],
+            joined + Duration::minutes(minute),
+            None,
+            false,
+        )
+        .await
+        .expect("continuous new epoch");
     }
     let after: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT voice_qualified_at FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 990200",
@@ -321,11 +348,19 @@ async fn fractional_message_times_preserve_join_departure_and_deadline_boundarie
         assert_eq!(stored, times[..if extra == 0 { 5 } else { 4 }]);
         let invite = candidate(pool, user).await;
         let retained = proof(&invite, 31);
-        assert_eq!(evaluate_one(pool, &invite, Some(&retained), &[], retained.checked_at)
-            .await.expect("fractional deadline"), Some(expected));
+        assert_eq!(
+            evaluate_one(pool, &invite, Some(&retained), &[], retained.checked_at)
+                .await
+                .expect("fractional deadline"),
+            Some(expected)
+        );
         let qualified: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT qualified_at FROM bot.twitch_invite_joins WHERE user_id = $1",
-        ).bind(user).fetch_one(pool).await.expect("precise qualification");
+        )
+        .bind(user)
+        .fetch_one(pool)
+        .await
+        .expect("precise qualification");
         assert_eq!(qualified, (extra == 0).then_some(deadline));
     }
     let user = 990_303;
@@ -333,16 +368,32 @@ async fn fractional_message_times_preserve_join_departure_and_deadline_boundarie
     let left = joined + Duration::days(15);
     let mut tx = pool.begin().await.expect("departure");
     remember_member_event(&mut tx, 990_304, 1, user, "leave", Some(left), None)
-        .await.expect("precise departure");
+        .await
+        .expect("precise departure");
     tx.commit().await.expect("departure committed first");
-    messages(pool, user as u64, 9_903_030, &[
-        joined - Duration::microseconds(1), joined + Duration::microseconds(1),
-        left - Duration::microseconds(1), left, left + Duration::microseconds(1),
-    ]).await;
+    messages(
+        pool,
+        user as u64,
+        9_903_030,
+        &[
+            joined - Duration::microseconds(1),
+            joined + Duration::microseconds(1),
+            left - Duration::microseconds(1),
+            left,
+            left + Duration::microseconds(1),
+        ],
+    )
+    .await;
     let stored: Vec<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT occurred_at FROM activity.twitch_invite_messages WHERE user_id = $1 ORDER BY message_id",
     ).bind(user).fetch_all(pool).await.expect("precise membership boundaries");
-    assert_eq!(stored, [joined + Duration::microseconds(1), left - Duration::microseconds(1)]);
+    assert_eq!(
+        stored,
+        [
+            joined + Duration::microseconds(1),
+            left - Duration::microseconds(1)
+        ]
+    );
 }
 
 #[tokio::test]
@@ -500,12 +551,10 @@ async fn incremental_pages_find_late_transitions_without_discord_identity() {
     )
     .await
     .expect("changed rows");
-    assert!(
-        changes
-            .invites
-            .iter()
-            .any(|row| row.join_id == "13" && row.status == "qualified")
-    );
+    assert!(changes
+        .invites
+        .iter()
+        .any(|row| row.join_id == "13" && row.status == "qualified"));
     let value = serde_json::to_value(&changes.invites[0]).expect("DTO");
     let keys: std::collections::BTreeSet<_> = value
         .as_object()
@@ -606,7 +655,13 @@ async fn delayed_message_before_departure_qualifies_but_departure_boundary_is_ex
     let left_at = joined_at + Duration::days(15);
     let user_id = 990_101;
     join(pool, 990_101, user_id, joined_at, "ViewerCode").await;
-    messages(pool, user_id as u64, 991_100, &[joined_at + Duration::days(1); 4]).await;
+    messages(
+        pool,
+        user_id as u64,
+        991_100,
+        &[joined_at + Duration::days(1); 4],
+    )
+    .await;
 
     let mut tx = pool.begin().await.expect("departure transaction");
     remember_member_event(&mut tx, 990_102, 1, user_id, "leave", Some(left_at), None)
@@ -744,7 +799,6 @@ async fn delayed_voice_before_departure_survives_rejoin_without_counting_later_v
         }
     }
 }
-
 
 #[tokio::test]
 async fn delayed_attribution_after_day_15_leave_preserves_day_14_qualification() {

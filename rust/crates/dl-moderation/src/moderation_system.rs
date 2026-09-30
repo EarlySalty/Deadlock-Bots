@@ -1476,7 +1476,8 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: "free crypto".into(),
-            message_created_at: chrono::DateTime::from_timestamp(1_000, 0).expect("fixture timestamp"),
+            message_created_at: chrono::DateTime::from_timestamp(1_000, 0)
+                .expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,
