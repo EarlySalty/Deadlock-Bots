@@ -309,6 +309,7 @@ impl EventHandler for Handler {
     }
 
     async fn resume(&self, ctx: Context, _event: serenity::all::ResumedEvent) {
+        self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter.community_gateway.resume(ctx.shard_id.0);
         let guild_ids = self.adapter.voice_cache_health.resumed(ctx.shard_id.0);
         self.dispatcher
