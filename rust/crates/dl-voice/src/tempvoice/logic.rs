@@ -5,11 +5,11 @@ pub const RANK_ORDER: [&str; 12] = [
     "unknown",
     "initiate",
     "seeker",
-    "alchemist",
-    "arcanist",
+    "acolyte",
+    "sentinel",
+    "mystic",
     "ritualist",
     "emissary",
-    "archon",
     "oracle",
     "phantom",
     "ascendant",
@@ -27,11 +27,11 @@ pub const OWNER_CLAIM_MIN_SECONDS: i64 = 20 * 60;
 const RANK_SHORT: [(&str, &str); 11] = [
     ("ini", "initiate"),
     ("see", "seeker"),
-    ("alc", "alchemist"),
-    ("arc", "arcanist"),
+    ("aco", "acolyte"),
+    ("sen", "sentinel"),
+    ("mys", "mystic"),
     ("rit", "ritualist"),
     ("emi", "emissary"),
-    ("arch", "archon"),
     ("ora", "oracle"),
     ("pha", "phantom"),
     ("asc", "ascendant"),
@@ -218,16 +218,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aktuelle_rangfolge_enthaelt_mystic_und_keinen_archon() {
+        assert_eq!(
+            RANK_ORDER,
+            [
+                "unknown",
+                "initiate",
+                "seeker",
+                "acolyte",
+                "sentinel",
+                "mystic",
+                "ritualist",
+                "emissary",
+                "oracle",
+                "phantom",
+                "ascendant",
+                "eternus",
+            ]
+        );
+        assert_eq!(rank_index("mystic"), 5);
+        assert_eq!(rank_index("archon"), 0);
+    }
+
+    #[test]
     fn rank_scores_wie_python() {
         // Referenz aus CPython (_rank_score)
         assert_eq!(rank_score("initiate"), 6);
         assert_eq!(rank_score("Initiate 3"), 9);
-        assert_eq!(rank_score("Emissary 1"), 37);
+        assert_eq!(rank_score("Emissary 1"), 43);
         assert_eq!(rank_score("Asc 3"), 63);
         assert_eq!(rank_score("eternus"), 66);
         assert_eq!(rank_score("quatsch"), 0);
         assert_eq!(rank_score("Phantom 6"), 60);
-        assert_eq!(rank_score("arch 2"), 44);
+        assert_eq!(rank_score("emi 2"), 44);
     }
 
     #[test]
@@ -244,8 +267,8 @@ mod tests {
 
     #[test]
     fn durchschnittsrang() {
-        // initiate(1) + eternus(11) → avg 6 → emissary
-        assert_eq!(average_rank_prefix(&[1, 11]).as_deref(), Some("Emissary"));
+        // initiate(1) + eternus(11) → avg 6 → ritualist
+        assert_eq!(average_rank_prefix(&[1, 11]).as_deref(), Some("Ritualist"));
         assert_eq!(average_rank_prefix(&[0, 0]), None);
         // unknown wird ignoriert: nur seeker(2)
         assert_eq!(average_rank_prefix(&[0, 2]).as_deref(), Some("Seeker"));

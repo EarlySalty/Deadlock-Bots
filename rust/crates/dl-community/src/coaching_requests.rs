@@ -346,10 +346,9 @@ pub const REQUEST_LOGO_FILENAME: &str = "logo-badge.png";
 pub const REQUEST_LOGO_BYTES: &[u8] =
     include_bytes!("../../../../assets/welcome-banners/logo-badge.png");
 
-/// Rang-Emojis des Servers, Stand 2026-09-10 live gegen
-/// `GET /guilds/{id}/emojis` geprüft. Für Alchemist, Arcanist und Archon
-/// existiert im Server kein Emoji — diese Ränge fallen auf das reine Label
-/// zurück, statt ein nicht vorhandenes `<:name:id>` zu referenzieren.
+/// Rang-Emojis des Servers, Stand 2026-09-23 live gegen
+/// `GET /guilds/{id}/emojis` geprüft. Die Liste entspricht der aktuellen
+/// Rangfolge von Initiate bis Eternus.
 pub const RANK_EMOJIS: [(&str, &str); 11] = [
     ("initiate", "1546480749845418037"),
     ("acolyte", "1546480764093202542"),
@@ -2896,7 +2895,7 @@ mod tests {
             id: 7,
             user_id: 4242,
             username: "Fate".to_string(),
-            rank: "Arcanist 1".to_string(),
+            rank: "Sentinel 1".to_string(),
             hero: "Lady Geist".to_string(),
             games_played: "555Std / 555Std".to_string(),
             scheduled_slot: String::new(),
@@ -2958,7 +2957,7 @@ mod tests {
         assert!(text.contains("## 🎮 Neue Coaching-Anfrage"), "{text}");
         assert!(text.contains("**Fate** · <@4242>"), "{text}");
         assert!(
-            text.contains("Arcanist 1") && text.contains("Lady Geist"),
+            text.contains("Sentinel 1") && text.contains("Lady Geist"),
             "{text}"
         );
         assert!(text.contains("Midgame und etwas Farm"), "{text}");

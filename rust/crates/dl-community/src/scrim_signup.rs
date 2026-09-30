@@ -42,18 +42,73 @@ const SCRIM_SIGNUP_REPLY_RUNTIME_DENIED: &str =
 
 const DAY_KEYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
-const RANK_ROLE_IDS: [(u64, &str); 11] = [
-    (1331457571118387210, "initiate"),
-    (1331457652877955072, "seeker"),
-    (1331457699992436829, "alchemist"),
-    (1331457724848017539, "arcanist"),
-    (1331457879345070110, "ritualist"),
-    (1331457898781474836, "emissary"),
-    (1331457949654319114, "archon"),
-    (1316966867033653338, "oracle"),
-    (1331458016356208680, "phantom"),
-    (1331458049637875785, "ascendant"),
-    (1331458087349129296, "eternus"),
+const RANK_ROLE_IDS: [(u64, &str); 66] = [
+    (1474192393799733382, "initiate"),
+    (1474192394936123511, "initiate"),
+    (1474192395930177620, "initiate"),
+    (1474192397163561142, "initiate"),
+    (1474192397800968297, "initiate"),
+    (1474192398836961448, "initiate"),
+    (1474192400195911763, "seeker"),
+    (1474192401068200088, "seeker"),
+    (1474192401764712712, "seeker"),
+    (1474192402678812808, "seeker"),
+    (1474192403681382512, "seeker"),
+    (1474192404834943056, "seeker"),
+    (1474192405933719616, "acolyte"),
+    (1474192407795994626, "acolyte"),
+    (1474192408941170830, "acolyte"),
+    (1474192409394024540, "acolyte"),
+    (1474192410560168122, "acolyte"),
+    (1474192411843363049, "acolyte"),
+    (1474192413009383464, "sentinel"),
+    (1474192413408100454, "sentinel"),
+    (1474192414515396715, "sentinel"),
+    (1474192415509315605, "sentinel"),
+    (1474192416344117440, "sentinel"),
+    (1474192417925234688, "sentinel"),
+    (1474192418470625402, "mystic"),
+    (1474192419632185497, "mystic"),
+    (1474192419988967664, "mystic"),
+    (1474192420974493737, "mystic"),
+    (1474192422069338132, "mystic"),
+    (1474192422941495501, "mystic"),
+    (1474192423935545449, "ritualist"),
+    (1474192425269461002, "ritualist"),
+    (1474192426519494698, "ritualist"),
+    (1474192427328737354, "ritualist"),
+    (1474192428201279650, "ritualist"),
+    (1474192429279350824, "ritualist"),
+    (1474192430239584288, "emissary"),
+    (1474192431271383091, "emissary"),
+    (1474192432248914057, "emissary"),
+    (1474192433062609017, "emissary"),
+    (1474192433540628719, "emissary"),
+    (1474192434920685702, "emissary"),
+    (1474192436036239401, "oracle"),
+    (1474192437063979018, "oracle"),
+    (1474192437827207168, "oracle"),
+    (1474192438649426013, "oracle"),
+    (1474192439374905576, "oracle"),
+    (1474192440805298357, "oracle"),
+    (1474192441769988209, "phantom"),
+    (1474192442717900933, "phantom"),
+    (1474192443829260410, "phantom"),
+    (1474192444537962559, "phantom"),
+    (1474192445813166102, "phantom"),
+    (1474192446723330140, "phantom"),
+    (1474192447683825705, "ascendant"),
+    (1474192448459767829, "ascendant"),
+    (1474192449542029463, "ascendant"),
+    (1474192450934276270, "ascendant"),
+    (1474192451957817465, "ascendant"),
+    (1474192452981231727, "ascendant"),
+    (1474192454134661222, "eternus"),
+    (1474192454969462907, "eternus"),
+    (1474192455766249523, "eternus"),
+    (1474192456693190759, "eternus"),
+    (1474192457444098049, "eternus"),
+    (1474192458522038367, "eternus"),
 ];
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -762,7 +817,7 @@ mod tests {
     #[test]
     fn rank_takeover_nimmt_steam_vor_rolle_und_manuell() {
         let choice =
-            choose_rank(Some("Oracle"), &[1331458016356208680], Some("initiate")).expect("rank");
+            choose_rank(Some("Oracle"), &[1474192441769988209], Some("initiate")).expect("rank");
         assert_eq!(
             choice,
             RankChoice {
@@ -775,7 +830,7 @@ mod tests {
 
     #[test]
     fn rank_takeover_nimmt_rolle_vor_manuell() {
-        let choice = choose_rank(None, &[1331458016356208680], Some("initiate")).expect("rank");
+        let choice = choose_rank(None, &[1474192441769988209], Some("initiate")).expect("rank");
         assert_eq!(
             choice,
             RankChoice {

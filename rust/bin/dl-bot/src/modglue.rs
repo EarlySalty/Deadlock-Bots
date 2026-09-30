@@ -2563,41 +2563,28 @@ const LFG_STAGINGS: [u64; 3] = [
 ];
 const JUICE_KAMMER_ID: u64 = 1493690350580138114;
 const OFFTOPIC_NAME_SUBSTRING: &str = "off topic voice";
-const DISCORD_RANK_ROLES: [(u64, &str, i64); 12] = [
-    (1331457571118387210, "Initiate", 1),
-    (1331457652877955072, "Seeker", 2),
-    (1331457699992436829, "Alchemist", 3),
-    (1331457724848017539, "Arcanist", 4),
-    (1331457879345070110, "Ritualist", 5),
-    (1331457898781474836, "Emissary", 6),
-    (1331457949654319114, "Archon", 7),
-    (1316966867033653338, "Oracle", 8),
-    (1331458016356208680, "Phantom", 9),
-    (1331458049637875785, "Ascendant", 10),
-    (1331458087349129296, "Eternus", 11),
-    (1397687886580547745, "Unbekannt", 0),
-];
+const DISCORD_RANK_ROLES: [(u64, &str, i64); 0] = [];
 const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
     (1492959003700101180, "Eternus", 11),
     (1491935935414276198, "Ascendant", 10),
     (1492959474468655134, "Phantom", 9),
     (1492959889767534602, "Oracle", 8),
-    (1492959936513052672, "Archon", 7),
-    (1492960184920834110, "Emissary", 6),
-    (1492960262184239178, "Ritualist", 5),
-    (1492960274096066831, "Arcanist", 4),
-    (1492960350755225730, "Alchemist", 3),
+    (1492959936513052672, "Emissary", 7),
+    (1492960184920834110, "Ritualist", 6),
+    (1492960262184239178, "Mystic", 5),
+    (1492960274096066831, "Sentinel", 4),
+    (1492960350755225730, "Acolyte", 3),
     (1492959966284218611, "Seeker", 2),
     (1492960891619250408, "Initiate", 1),
 ];
 const RANK_SHORT_NAMES: [(&str, &str); 11] = [
     ("ini", "Initiate"),
     ("see", "Seeker"),
-    ("alc", "Alchemist"),
-    ("arc", "Arcanist"),
+    ("aco", "Acolyte"),
+    ("sen", "Sentinel"),
+    ("mys", "Mystic"),
     ("rit", "Ritualist"),
     ("emi", "Emissary"),
-    ("arch", "Archon"),
     ("ora", "Oracle"),
     ("pha", "Phantom"),
     ("asc", "Ascendant"),
@@ -2612,11 +2599,11 @@ fn rank_value_by_name(name: &str) -> Option<(&'static str, i64)> {
         .map(|(rank, value)| match *rank {
             "initiate" => ("Initiate", *value),
             "seeker" => ("Seeker", *value),
-            "alchemist" => ("Alchemist", *value),
-            "arcanist" => ("Arcanist", *value),
+            "acolyte" => ("Acolyte", *value),
+            "sentinel" => ("Sentinel", *value),
+            "mystic" => ("Mystic", *value),
             "ritualist" => ("Ritualist", *value),
             "emissary" => ("Emissary", *value),
-            "archon" => ("Archon", *value),
             "oracle" => ("Oracle", *value),
             "phantom" => ("Phantom", *value),
             "ascendant" => ("Ascendant", *value),
@@ -2683,6 +2670,11 @@ fn rank_from_roles(roles: &[(u64, String)]) -> (String, i64, Option<i64>) {
             candidate = Some((rank_name, value, Some(sub), value * 10 + sub));
         }
         if candidate.is_none() {
+            if let Some((rank_name, value)) = rank_value_by_name(name) {
+                candidate = Some((rank_name, value, None, value * 10 + 5));
+            }
+        }
+        if candidate.is_none() {
             if let Some((_, rank_name, value)) =
                 DISCORD_RANK_ROLES.iter().find(|(id, _, _)| id == role_id)
             {
@@ -2700,14 +2692,20 @@ fn rank_from_roles(roles: &[(u64, String)]) -> (String, i64, Option<i64>) {
         if candidate.is_none() {
             let trimmed = name.trim();
             let lower = trimmed.to_lowercase();
-            if lower.starts_with("unverifiziert ") {
-                let rank_name = trimmed
+            let unverified_rank = if lower.starts_with("unverifiziert ") {
+                trimmed
                     .split_once(char::is_whitespace)
                     .map(|(_, rest)| rest.trim())
-                    .unwrap_or_default();
-                if let Some((rank_name, value)) = rank_value_by_name(rank_name) {
-                    candidate = Some((rank_name, value, Some(3), value * 10 + 3));
-                }
+            } else if lower.ends_with(" (unverifiziert)") {
+                trimmed
+                    .strip_suffix(" (unverifiziert)")
+                    .or_else(|| trimmed.strip_suffix(" (Unverifiziert)"))
+                    .map(str::trim)
+            } else {
+                None
+            };
+            if let Some((rank_name, value)) = unverified_rank.and_then(rank_value_by_name) {
+                candidate = Some((rank_name, value, Some(3), value * 10 + 3));
             }
         }
         let Some((rank_name, value, sub, score)) = candidate else {
@@ -4315,7 +4313,7 @@ mod tests {
     #[test]
     fn lfg_rankrollen_erkennen_ids_subranks_und_unverifiziert() {
         assert_eq!(
-            rank_from_roles(&[(1331458016356208680, "irgendein name".to_string())]),
+            rank_from_roles(&[(0, "Phantom".to_string())]),
             ("Phantom".to_string(), 9, None)
         );
         assert_eq!(
@@ -4328,7 +4326,11 @@ mod tests {
         );
         assert_eq!(
             rank_from_roles(&[(0, "Unverifiziert Emissary".to_string())]),
-            ("Emissary".to_string(), 6, Some(3))
+            ("Emissary".to_string(), 7, Some(3))
+        );
+        assert_eq!(
+            rank_from_roles(&[(0, "Mystic (unverifiziert)".to_string())]),
+            ("Mystic".to_string(), 5, Some(3))
         );
     }
 

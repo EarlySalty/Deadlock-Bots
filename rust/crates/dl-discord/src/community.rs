@@ -71,11 +71,11 @@ fn role_rank(name: &str) -> Option<f64> {
     const RANKS: [&str; 11] = [
         "initiate",
         "seeker",
-        "alchemist",
-        "arcanist",
+        "acolyte",
+        "sentinel",
+        "mystic",
         "ritualist",
         "emissary",
-        "archon",
         "oracle",
         "phantom",
         "ascendant",
@@ -226,8 +226,10 @@ mod tests {
     }
     #[test]
     fn rank_roles_are_optional_and_never_substring_matched() {
+        assert_eq!(role_rank("Mystic 2"), Some(5.2));
         assert_eq!(role_rank("Oracle III"), Some(8.3));
-        assert_eq!(role_rank("Emissary 6"), Some(6.6));
+        assert_eq!(role_rank("Emissary 6"), Some(7.6));
+        assert_eq!(role_rank("Archon 3"), None);
         assert_eq!(role_rank("Unranked"), None);
         assert_eq!(role_rank("PhantomFan"), None);
     }

@@ -3047,7 +3047,7 @@ mod tests {
         ];
 
         engine
-            .apply_rank_gate(1, lane_id, 100, "archon", 3, 9)
+            .apply_rank_gate(1, lane_id, 100, "emissary", 3, 9)
             .await
             .expect("gate on");
         assert!(engine.rank_gate_active(lane_id).await);

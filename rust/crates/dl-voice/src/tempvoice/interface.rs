@@ -2981,7 +2981,7 @@ mod tests {
                 mode: "ranked".to_string(),
                 base_name: "Scrim Lane".to_string(),
                 limit: 5,
-                min_rank: "archon 2".to_string(),
+                min_rank: "emissary 2".to_string(),
             })
             .await
             .expect("default");
@@ -2997,7 +2997,7 @@ mod tests {
 
         assert_eq!(
             reply_prefs_text(&reply),
-            "## ⚙️ Voreinstellungen\n**Modus:** Ranked\n**Name:** Scrim Lane\n**Limit:** 5\n**Rang:** archon 2"
+            "## ⚙️ Voreinstellungen\n**Modus:** Ranked\n**Name:** Scrim Lane\n**Limit:** 5\n**Rang:** emissary 2"
         );
         assert!(!reply_custom_ids(&reply).contains(&"tv_prefs_apply_lane".to_string()));
     }

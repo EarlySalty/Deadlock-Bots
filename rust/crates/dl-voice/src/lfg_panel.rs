@@ -314,67 +314,67 @@ const LFG_RANK_SELECT_OPTIONS: [LfgRankSelectOption; 11] = [
         label: "Initiate",
         value: "initiate",
         emoji_name: "initiate",
-        emoji_id: "1316457822518775869",
+        emoji_id: "1546480749845418037",
     },
     LfgRankSelectOption {
         label: "Seeker",
         value: "seeker",
         emoji_name: "seeker",
-        emoji_id: "1316458138886475876",
+        emoji_id: "1546480757155827752",
     },
     LfgRankSelectOption {
-        label: "Alchemist",
-        value: "alchemist",
-        emoji_name: "alchemist",
-        emoji_id: "1316455291629342750",
+        label: "Acolyte",
+        value: "acolyte",
+        emoji_name: "acolyte",
+        emoji_id: "1546480764093202542",
     },
     LfgRankSelectOption {
-        label: "Arcanist",
-        value: "arcanist",
-        emoji_name: "arcanist",
-        emoji_id: "1316455305315352587",
+        label: "Sentinel",
+        value: "sentinel",
+        emoji_name: "sentinel",
+        emoji_id: "1546480771131514991",
+    },
+    LfgRankSelectOption {
+        label: "Mystic",
+        value: "mystic",
+        emoji_name: "mystic",
+        emoji_id: "1546480778496581734",
     },
     LfgRankSelectOption {
         label: "Ritualist",
         value: "ritualist",
         emoji_name: "ritualist",
-        emoji_id: "1316458203298660533",
+        emoji_id: "1546480786763415567",
     },
     LfgRankSelectOption {
         label: "Emissary",
         value: "emissary",
         emoji_name: "emissary",
-        emoji_id: "1316457650367496306",
-    },
-    LfgRankSelectOption {
-        label: "Archon",
-        value: "archon",
-        emoji_name: "archon",
-        emoji_id: "1397687455313952918",
+        emoji_id: "1546480793961107476",
     },
     LfgRankSelectOption {
         label: "Oracle",
         value: "oracle",
         emoji_name: "oracle",
-        emoji_id: "1316457885743579317",
+        emoji_id: "1546480801032704000",
     },
     LfgRankSelectOption {
         label: "Phantom",
         value: "phantom",
         emoji_name: "phantom",
-        emoji_id: "1316457982363701278",
+        emoji_id: "1546480809433763902",
     },
     LfgRankSelectOption {
         label: "Ascendant",
         value: "ascendant",
         emoji_name: "ascendant",
-        emoji_id: "1316457367818338385",
+        emoji_id: "1546480817046298675",
     },
     LfgRankSelectOption {
         label: "Eternus",
         value: "eternus",
         emoji_name: "eternus",
-        emoji_id: "1316457737621868574",
+        emoji_id: "1546480824222748674",
     },
 ];
 
@@ -3752,7 +3752,7 @@ mod tests {
         assert_eq!(
             parse_rank_range("Ritualist bis Phantom"),
             Some(LfgRankRange {
-                min: Some(5),
+                min: Some(6),
                 max: Some(9)
             })
         );
@@ -3858,7 +3858,7 @@ mod tests {
     fn lfg_draft_rank_range_tauscht_vertauchte_werte_und_erlaubt_offene_bereiche() {
         let mut draft = LfgDraft::new(LfgMode::Ranked, None);
         draft.rank_from = Some("phantom".to_string());
-        draft.rank_to = Some("archon".to_string());
+        draft.rank_to = Some("emissary".to_string());
         assert_eq!(
             lfg_rank_range_from_draft(&draft),
             Some(LfgRankRange {
@@ -3867,7 +3867,7 @@ mod tests {
             })
         );
 
-        draft.rank_from = Some("archon".to_string());
+        draft.rank_from = Some("emissary".to_string());
         draft.rank_to = None;
         assert_eq!(
             lfg_rank_range_from_draft(&draft),
@@ -3881,19 +3881,19 @@ mod tests {
     #[test]
     fn lfg_draft_content_zeigt_live_zusammenfassung_mit_rangrichtung() {
         let mut draft = LfgDraft::new(LfgMode::Ranked, None);
-        draft.rank_from = Some("archon".to_string());
+        draft.rank_from = Some("emissary".to_string());
         draft.rank_to = Some("phantom".to_string());
         draft.slots = Some(3);
 
         assert_eq!(
             lfg_draft_content(&draft),
-            "**Ranked** · Archon → Phantom · 3 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+            "**Ranked** · Emissary → Phantom · 3 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
         );
 
         draft.play_window = Some(LfgPlayWindow::HeuteAbend);
         assert_eq!(
             lfg_draft_content(&draft),
-            "**Ranked** · Archon → Phantom · 3 Plätze · 🌙 Heute Abend\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+            "**Ranked** · Emissary → Phantom · 3 Plätze · 🌙 Heute Abend\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
         );
     }
 
@@ -4004,13 +4004,13 @@ mod tests {
         assert_eq!(rank_options[0]["label"], LFG_RANK_ANY_LABEL);
         assert_eq!(rank_options[0]["emoji"]["name"], "dl_rang_egal");
         assert_eq!(rank_options[0]["emoji"]["id"], "1522801043803472064");
-        let archon = rank_options
+        let emissary = rank_options
             .iter()
-            .find(|option| option["value"] == "archon")
-            .expect("archon option");
-        assert_eq!(archon["label"], "Archon");
-        assert_eq!(archon["emoji"]["name"], "archon");
-        assert_eq!(archon["emoji"]["id"], "1397687455313952918");
+            .find(|option| option["value"] == "emissary")
+            .expect("emissary option");
+        assert_eq!(emissary["label"], "Emissary");
+        assert_eq!(emissary["emoji"]["name"], "emissary");
+        assert_eq!(emissary["emoji"]["id"], "1546480793961107476");
         assert_eq!(
             rows[4]["components"][0]["custom_id"],
             lfg_post_custom_id(LfgMode::Ranked)
@@ -4135,7 +4135,7 @@ mod tests {
         assert_eq!(row.3, Some(9902));
         assert_eq!(row.4, 42);
         assert_eq!(row.5, "casual");
-        assert_eq!(row.6, Some(5));
+        assert_eq!(row.6, Some(6));
         assert_eq!(row.7, Some(9));
         assert_eq!(row.8, 3);
         assert_eq!(row.9, "open");
@@ -4449,7 +4449,7 @@ mod tests {
                 max: Some(9),
             },
             Some("jetzt".into()),
-            "Archon bis Phantom".into(),
+            "Emissary bis Phantom".into(),
         )
         .await;
         assert!(port.sent_dms().is_empty());
@@ -4470,7 +4470,7 @@ mod tests {
             .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), user_id))
             .await;
         assert!(draft.update_message);
-        fill_lfg_draft(&interface, user_id, "archon", "phantom", "5").await;
+        fill_lfg_draft(&interface, user_id, "emissary", "phantom", "5").await;
         let reply = post_lfg_draft(&interface, LfgMode::Casual, user_id).await;
         assert!(reply.update_message);
 
@@ -4482,7 +4482,7 @@ mod tests {
         assert_eq!(
             saved,
             json!({
-                "rank_from": "archon",
+                "rank_from": "emissary",
                 "rank_to": "phantom",
                 "slots": 5,
             })
@@ -4498,7 +4498,7 @@ mod tests {
         assert_eq!(
             reopened.content.as_deref(),
             Some(
-                "**Street Brawl** · Archon → Phantom · 4 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+                "**Street Brawl** · Emissary → Phantom · 4 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
             )
         );
         let rows = reopened
@@ -4507,7 +4507,7 @@ mod tests {
             .expect("components")
             .as_array()
             .expect("component rows");
-        assert_select_default_value(&rows[0], "archon");
+        assert_select_default_value(&rows[0], "emissary");
         assert_select_default_value(&rows[1], "phantom");
         assert_select_default_value(&rows[2], "4");
 
@@ -4518,14 +4518,14 @@ mod tests {
             .get(&user_id)
             .cloned()
             .expect("stored draft");
-        assert_eq!(stored_draft.rank_from.as_deref(), Some("archon"));
+        assert_eq!(stored_draft.rank_from.as_deref(), Some("emissary"));
         assert_eq!(stored_draft.rank_to.as_deref(), Some("phantom"));
         assert_eq!(stored_draft.slots, Some(4));
         assert_eq!(stored_draft.lane_id, None);
     }
 
     #[tokio::test]
-    async fn lfg_select_flow_archon_bis_phantom_slots_3_erstellt_ranked_post_mit_auto_tags() {
+    async fn lfg_select_flow_emissary_bis_phantom_slots_3_erstellt_ranked_post_mit_auto_tags() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -4539,7 +4539,7 @@ mod tests {
             .handle(lfg_interaction(LfgMode::Ranked.mode_custom_id(), 42))
             .await;
         assert!(draft.update_message);
-        fill_lfg_draft(&interface, 42, "archon", "phantom", "3").await;
+        fill_lfg_draft(&interface, 42, "emissary", "phantom", "3").await;
         let reply = post_lfg_draft(&interface, LfgMode::Ranked, 42).await;
 
         assert!(reply.update_message);
@@ -4556,7 +4556,7 @@ mod tests {
                     LFG_FORUM_TAG_STATUS_LOOKING,
                 ]
             );
-            assert!(posts[0].1.title.contains("Archon bis Phantom"));
+            assert!(posts[0].1.title.contains("Emissary bis Phantom"));
         }
 
         let row: (Option<i32>, Option<i32>, i32) = sqlx::query_as(

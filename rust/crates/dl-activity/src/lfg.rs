@@ -7,46 +7,44 @@
 
 use serde_json::json;
 
-const RANK_TOKENS: [&str; 35] = [
-    // RANK_NAME_TO_VALUE-Schlüssel
+const RANK_TOKENS: [&str; 37] = [
     "obscurus",
     "initiate",
     "seeker",
-    "alchemist",
-    "arcanist",
+    "acolyte",
+    "sentinel",
+    "mystic",
     "ritualist",
     "emissary",
-    "archon",
     "oracle",
     "phantom",
     "ascendant",
     "eternus",
-    // SHORT_NAME_TO_RANK-Schlüssel
     "ini",
     "see",
-    "alc",
-    "arc",
+    "aco",
+    "sen",
+    "sent",
+    "mys",
     "rit",
     "emi",
-    "arch",
     "ora",
     "pha",
     "asc",
     "ete",
-    // MESSAGE_RANK_ALIASES-Schlüssel
     "seek",
-    "alch",
+    "acoly",
+    "senti",
+    "myst",
     "emiss",
     "et",
-    "arkanist",
     "ascendent",
     "ethernus",
-    // Auffüllung auf Originalumfang (Aliasse mit identischen Kurzformen)
     "ini",
-    "arc",
     "rit",
     "emi",
-    "arch",
+    "mys",
+    "sent",
 ];
 
 fn contains_any(text: &str, words: &[&str]) -> bool {
@@ -1208,11 +1206,11 @@ pub fn build_lfg_reply(
 pub const RANK_NAMES: [(&str, i64); 11] = [
     ("initiate", 1),
     ("seeker", 2),
-    ("alchemist", 3),
-    ("arcanist", 4),
-    ("ritualist", 5),
-    ("emissary", 6),
-    ("archon", 7),
+    ("acolyte", 3),
+    ("sentinel", 4),
+    ("mystic", 5),
+    ("ritualist", 6),
+    ("emissary", 7),
     ("oracle", 8),
     ("phantom", 9),
     ("ascendant", 10),
@@ -1222,18 +1220,25 @@ pub const RANK_NAMES: [(&str, i64); 11] = [
 /// Rang aus dem Nachrichtentext ("Oracle 3", "emi II") — wie
 /// `_parse_rank_from_message` inkl. Kurz-Aliasse und römischer Subränge.
 pub fn parse_rank_from_message(content_lower: &str) -> (String, i64, Option<i64>) {
-    const ALIASES: [(&str, &str); 13] = [
+    const ALIASES: [(&str, &str); 20] = [
         ("ini", "initiate"),
+        ("see", "seeker"),
         ("seek", "seeker"),
-        ("alch", "alchemist"),
-        ("arc", "arcanist"),
+        ("aco", "acolyte"),
+        ("acoly", "acolyte"),
+        ("sen", "sentinel"),
+        ("sent", "sentinel"),
+        ("senti", "sentinel"),
+        ("mys", "mystic"),
+        ("myst", "mystic"),
         ("rit", "ritualist"),
         ("emi", "emissary"),
         ("emiss", "emissary"),
-        ("arch", "archon"),
+        ("ora", "oracle"),
+        ("pha", "phantom"),
         ("asc", "ascendant"),
+        ("ete", "eternus"),
         ("et", "eternus"),
-        ("arkanist", "arcanist"),
         ("ascendent", "ascendant"),
         ("ethernus", "eternus"),
     ];
@@ -1539,7 +1544,7 @@ impl LfgResponder {
             "Unbekannt".to_string()
         };
         let is_new_player = is_new_player_request(&content_lower, rank_value, has_rank_role);
-        // Anfänger ohne Rang routen wie ein Alchemist 1 (Original-Fallback)
+        // Anfänger ohne Rang routen wie ein Acolyte 1 (Original-Fallback)
         let (routing_value, routing_sub) = if is_new_player && !has_rank_role && rank_value == 0 {
             has_explicit_rank = true;
             (3, Some(1))
@@ -1820,6 +1825,27 @@ mod tests {
     }
 
     #[test]
+    fn aktuelle_rangfolge_ist_2026er_reihenfolge() {
+        assert_eq!(
+            RANK_NAMES,
+            [
+                ("initiate", 1),
+                ("seeker", 2),
+                ("acolyte", 3),
+                ("sentinel", 4),
+                ("mystic", 5),
+                ("ritualist", 6),
+                ("emissary", 7),
+                ("oracle", 8),
+                ("phantom", 9),
+                ("ascendant", 10),
+                ("eternus", 11),
+            ]
+        );
+        assert!(!RANK_NAMES.iter().any(|(rank, _)| *rank == "archon"));
+    }
+
+    #[test]
     fn rang_aus_nachricht() {
         assert_eq!(
             parse_rank_from_message("suche leute, bin oracle 3"),
@@ -1827,7 +1853,11 @@ mod tests {
         );
         assert_eq!(
             parse_rank_from_message("emi ii lobby?"),
-            ("Emissary".to_string(), 6, Some(2))
+            ("Emissary".to_string(), 7, Some(2))
+        );
+        assert_eq!(
+            parse_rank_from_message("myst 4 ranked"),
+            ("Mystic".to_string(), 5, Some(4))
         );
         assert_eq!(
             parse_rank_from_message("wer bock auf et"),
@@ -1989,7 +2019,7 @@ mod tests {
             .expect("decision log");
         let rendered = embed.to_string();
         assert!(rendered.contains("42"));
-        assert!(rendered.contains("Alchemist 3"));
+        assert!(rendered.contains("Acolyte 3"));
         assert!(rendered.contains("JoinExisting"));
         assert!(rendered.contains("<#1>"));
         assert!(rendered.contains("1"));
@@ -2051,7 +2081,7 @@ mod tests {
             .expect("route debug embed");
         let rendered = route.1.to_string();
         assert!(rendered.contains("42"));
-        assert!(rendered.contains("Alchemist 3"));
+        assert!(rendered.contains("Acolyte 3"));
         assert!(rendered.contains("JoinExisting"));
         assert!(rendered.contains("<#987654321>"));
         assert!(rendered.contains("1"));
@@ -2094,7 +2124,7 @@ mod tests {
         }
 
         async fn member_rank(&self, _guild_id: u64, _user_id: u64) -> (String, i64, Option<i64>) {
-            ("Alchemist".to_string(), 3, Some(3))
+            ("Acolyte".to_string(), 3, Some(3))
         }
 
         async fn member_in_voice(&self, _guild_id: u64, _user_id: u64) -> bool {
