@@ -252,9 +252,9 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
             let Some(joined_at) = actual_join.or(source.occurred_at) else {
                 continue;
             };
-            let owners: Vec<(Option<String>, Option<String>, Option<String>, bool)> =
-                sqlx::query_as(
-                    "WITH channel_owners AS (
+            type OwnerCandidateRow = (Option<String>, Option<String>, Option<String>, bool);
+            let owners: Vec<OwnerCandidateRow> = sqlx::query_as(
+                "WITH channel_owners AS (
                          SELECT twitch_user_id,
                                 MAX(source_login_snapshot) AS streamer_login,
                                 BOOL_AND(attribution_safe) AS attribution_safe
@@ -282,12 +282,12 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
                      WHERE personal.guild_id = $1 AND personal.invite_code = $2
                        AND personal.created_at <= $3
                        AND (personal.revoked_at IS NULL OR personal.revoked_at >= $3)",
-                )
-                .bind(guild_id)
-                .bind(&code)
-                .bind(joined_at)
-                .fetch_all(&mut *tx)
-                .await?;
+            )
+            .bind(guild_id)
+            .bind(&code)
+            .bind(joined_at)
+            .fetch_all(&mut *tx)
+            .await?;
             if owners.len() != 1 {
                 continue;
             }

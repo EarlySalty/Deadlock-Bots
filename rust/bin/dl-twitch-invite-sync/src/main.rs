@@ -116,7 +116,7 @@ async fn lock_invite_sync_guilds(
     guilds.dedup();
 
     for guild_id in &guilds {
-        dl_activity::qualified_invites::lock_changes(&mut **tx, *guild_id).await?;
+        dl_activity::qualified_invites::lock_changes(tx, *guild_id).await?;
     }
 
     let current_guilds: Vec<i64> = sqlx::query_scalar(
@@ -526,10 +526,7 @@ mod tests {
     }
 
     fn test_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            error.to_string(),
-        ))
+        Box::new(std::io::Error::other(error.to_string()))
     }
 
     async fn assert_writer_reconcile_serialization(
@@ -934,14 +931,15 @@ mod tests {
         )
         .fetch_one(pool)
         .await?;
-        let code_a_history: (
+        type HistorySnapshotRow = (
             String,
             Option<i64>,
             Option<String>,
             Option<i64>,
             bool,
             Option<chrono::DateTime<chrono::Utc>>,
-        ) = sqlx::query_as(
+        );
+        let code_a_history: HistorySnapshotRow = sqlx::query_as(
             "SELECT source_login_snapshot, guild_id, twitch_user_id, channel_id,
                     attribution_safe, valid_until
              FROM bot.twitch_streamer_invite_code_history
@@ -957,7 +955,7 @@ mod tests {
                 Some("918273645101".into()),
                 Some(101),
                 true,
-                Some(code_a_end.clone()),
+                Some(code_a_end),
             )
         );
         let recycle_a_end: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
