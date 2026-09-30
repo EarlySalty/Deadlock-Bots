@@ -2611,6 +2611,95 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             .map(|_| ())
             .map_err(|err| err.to_string())
     }
+
+    async fn pinned_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Option<bool>, String> {
+        match ChannelId::new(channel_id)
+            .message(&self.adapter.http, MessageId::new(message_id))
+            .await
+        {
+            Ok(message) => Ok(Some(message.pinned)),
+            Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+                if response.status_code.as_u16() == 404 || response.error.code == 10008 =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    async fn existing_pate_request_cards(
+        &self,
+    ) -> Result<Vec<dl_community::concierge::LegacyPateRequestMessage>, String> {
+        fn collect_user_ids(value: &Value, user_ids: &mut HashSet<u64>) {
+            match value {
+                Value::Object(object) => {
+                    if let Some(custom_id) = object.get("custom_id").and_then(Value::as_str) {
+                        if let Some(raw_user_id) = custom_id.strip_prefix("concierge:pate:claim:") {
+                            if let Ok(user_id) = raw_user_id.parse() {
+                                user_ids.insert(user_id);
+                            }
+                        }
+                    }
+                    for child in object.values() {
+                        collect_user_ids(child, user_ids);
+                    }
+                }
+                Value::Array(array) => {
+                    for child in array {
+                        collect_user_ids(child, user_ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut before = None;
+        let mut requests = Vec::new();
+        loop {
+            let mut pagination = GetMessages::new().limit(100);
+            if let Some(message_id) = before {
+                pagination = pagination.before(MessageId::new(message_id));
+            }
+            let messages = ChannelId::new(dl_community::concierge::PATE_REQUEST_CHANNEL_ID)
+                .messages(&self.adapter.http, pagination)
+                .await
+                .map_err(|err| err.to_string())?;
+            if messages.is_empty() {
+                break;
+            }
+            for message in &messages {
+                let components =
+                    serde_json::to_value(&message.components).map_err(|err| err.to_string())?;
+                let mut user_ids = HashSet::new();
+                collect_user_ids(&components, &mut user_ids);
+                let Some(created_at) =
+                    chrono::DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0)
+                else {
+                    continue;
+                };
+                for user_id in user_ids {
+                    requests.push(dl_community::concierge::LegacyPateRequestMessage {
+                        user_id,
+                        message_id: message.id.get(),
+                        created_at,
+                    });
+                }
+            }
+            let oldest = messages.iter().map(|message| message.id.get()).min();
+            if oldest == before {
+                return Err("Discord-Verlauf im Patenkanal bewegt sich nicht weiter".to_string());
+            }
+            before = oldest;
+            if messages.len() < 100 {
+                break;
+            }
+        }
+        Ok(requests)
+    }
 }
 
 // ── Anonymes-Feedback-Anbindung ────────────────────────────────────────────
