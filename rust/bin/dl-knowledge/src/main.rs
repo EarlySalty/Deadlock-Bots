@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 
+mod eval;
+
 const DEFAULT_DOCS_PATH: &str = "/home/naniadm/.local/share/dl-knowledge/current/public/";
 const BIND_ADDR: &str = "127.0.0.1:8896";
 
@@ -673,6 +675,9 @@ struct PromptCandidate<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if eval::run()? {
+        return Ok(());
+    }
     dl_core::observability::init_tracing("info");
 
     let docs_path = resolve_production_docs_path(
@@ -1985,6 +1990,8 @@ mod tests {
         context_terms: Vec<String>,
         answer_terms: Vec<String>,
         forbidden_terms: Vec<String>,
+        #[serde(default)]
+        herkunft: Option<String>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -2081,6 +2088,12 @@ mod tests {
                     questions.insert(question.to_string()),
                     "Doppelte Golden-Frage: {question:?}"
                 );
+                if let Some(origin) = &case.herkunft {
+                    ensure!(
+                        origin == "synthetisch",
+                        "Unbekannte Golden-Herkunft {origin:?}: {question:?}"
+                    );
+                }
                 if case.answerable {
                     ensure!(
                         !case.expected_sources.is_empty()
@@ -2126,8 +2139,8 @@ mod tests {
             }
         }
         ensure!(
-            cases.len() == GOLDEN_CASE_COUNT,
-            "Golden-Suite hat {} statt exakt {GOLDEN_CASE_COUNT} Faellen",
+            cases.len() >= GOLDEN_CASE_COUNT,
+            "Golden-Suite hat {} statt mindestens {GOLDEN_CASE_COUNT} Faellen",
             cases.len()
         );
         Ok(cases)
@@ -2196,6 +2209,7 @@ mod tests {
                 .map(|term| (*term).to_string())
                 .collect(),
             forbidden_terms: vec![],
+            herkunft: None,
         };
 
         let five_candidates = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
@@ -2259,7 +2273,8 @@ mod tests {
         assert_eq!(cases.len(), GOLDEN_CASE_COUNT);
 
         write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT + 1)?;
-        assert!(load_golden_cases(&golden_dir, &docs_path).is_err());
+        let expanded = load_golden_cases(&golden_dir, &docs_path)?;
+        assert_eq!(expanded.len(), GOLDEN_CASE_COUNT + 1);
         Ok(())
     }
 
