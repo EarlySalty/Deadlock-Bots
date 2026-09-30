@@ -171,6 +171,7 @@ mod tests {
             VALUES(100, 42, 10, '2026-08-02 20:00Z', '2026-08-02 20:01Z')")
             .execute(db.pool()).await.expect("seed");
         let mut snapshot = GuildVoiceSnapshot {
+            generation: 1,
             guild_id: 42,
             observed_at: Utc::now(),
             channels: HashMap::from([(10, None)]),
@@ -221,6 +222,7 @@ mod tests {
         .await
         .expect("seed");
         let snapshot = GuildVoiceSnapshot {
+            generation: 1,
             guild_id: 42,
             observed_at: Utc::now(),
             channels: HashMap::from([(10, None), (12, None)]),
@@ -282,6 +284,7 @@ mod tests {
         .await
         .expect("seed");
         let snapshot = GuildVoiceSnapshot {
+            generation: 1,
             guild_id: 42,
             observed_at: now,
             channels: HashMap::from([(10, None), (11, None)]),

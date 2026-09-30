@@ -64,6 +64,13 @@ impl TwitchInvites {
                 .map_err(|error| error.to_string())?;
             return Err("Voice-Cache ist nicht vollständig bestätigt".into());
         };
+        if self.voice_generation.load(Ordering::Acquire) != snapshot.generation {
+            self.reset_voice_clock()
+                .await
+                .map_err(|error| error.to_string())?;
+            self.voice_generation
+                .store(snapshot.generation, Ordering::Release);
+        }
         match event {
             Some(dl_discord::VoiceEvent::Join {
                 user_id,

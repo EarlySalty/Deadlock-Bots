@@ -1,7 +1,10 @@
 //! Vollständige Voice-Momentaufnahmen für konservative Reconcile-Läufe.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 
 use chrono::{DateTime, Utc};
 use serenity::all::{Cache, ChannelType, GuildId};
@@ -11,6 +14,8 @@ use serenity::all::{Cache, ChannelType, GuildId};
 #[derive(Debug, Clone)]
 pub struct GuildVoiceSnapshot {
     pub guild_id: u64,
+    /// Monotone Grenze einer lückenlos beobachteten Gateway-Verbindung.
+    pub generation: u64,
     pub observed_at: DateTime<Utc>,
     /// Voice-/Stage-Kanal -> Kategorie, einschließlich fester Kanäle.
     pub channels: HashMap<u64, Option<u64>>,
@@ -26,6 +31,7 @@ impl GuildVoiceSnapshot {
 
 #[derive(Default)]
 struct ShardCache {
+    generation: u64,
     connected: bool,
     expected: HashSet<u64>,
     loaded: HashSet<u64>,
@@ -35,6 +41,7 @@ struct ShardCache {
 #[derive(Default)]
 pub(crate) struct VoiceCacheHealth {
     shards: Mutex<HashMap<u32, ShardCache>>,
+    next_generation: AtomicU64,
 }
 
 impl VoiceCacheHealth {
@@ -45,6 +52,7 @@ impl VoiceCacheHealth {
         shards.insert(
             shard_id,
             ShardCache {
+                generation: self.next_generation.fetch_add(1, Ordering::Relaxed) + 1,
                 connected: true,
                 expected: guilds.into_iter().collect(),
                 loaded: HashSet::new(),
@@ -66,7 +74,9 @@ impl VoiceCacheHealth {
             return;
         };
         for shard in shards.values_mut() {
-            shard.loaded.remove(&guild_id);
+            if shard.loaded.remove(&guild_id) {
+                shard.generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            }
         }
     }
 
@@ -75,6 +85,9 @@ impl VoiceCacheHealth {
             return;
         };
         if let Some(shard) = shards.get_mut(&shard_id) {
+            if shard.connected {
+                shard.generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            }
             shard.connected = false;
         }
     }
@@ -92,18 +105,17 @@ impl VoiceCacheHealth {
 
     pub(crate) fn snapshot(&self, cache: &Cache, guild_id: u64) -> Option<GuildVoiceSnapshot> {
         let shards = self.shards.lock().ok()?;
-        if !shards
+        let generation = shards
             .values()
-            .any(|shard| shard.connected && shard.loaded.contains(&guild_id))
-        {
-            return None;
-        }
+            .find(|shard| shard.connected && shard.loaded.contains(&guild_id))?
+            .generation;
         let guild = cache.guild(GuildId::new(guild_id))?;
         if guild.unavailable {
             return None;
         }
         Some(GuildVoiceSnapshot {
             guild_id,
+            generation,
             observed_at: Utc::now(),
             channels: guild
                 .channels
@@ -142,12 +154,23 @@ mod tests {
         assert!(!available(&health, 42));
         health.guild_loaded(0, 42);
         assert!(available(&health, 42));
+        let first = health.shards.lock().expect("shards")[&0].generation;
+        health.guild_loaded(0, 42);
+        assert_eq!(health.shards.lock().expect("shards")[&0].generation, first);
         health.disconnected(0);
+        let interrupted = health.shards.lock().expect("shards")[&0].generation;
+        assert!(interrupted > first);
         assert!(!available(&health, 42));
         assert_eq!(health.resumed(0), vec![42]);
         assert!(available(&health, 42));
+        // Replay restores the cache, but not uninterrupted wall-clock evidence.
+        assert_eq!(
+            health.shards.lock().expect("shards")[&0].generation,
+            interrupted
+        );
         // Eine neue Sitzung darf den alten Guild-Cache nicht freigeben.
         health.ready(0, [42]);
+        assert!(health.shards.lock().expect("shards")[&0].generation > interrupted);
         assert!(!available(&health, 42));
         assert!(health.resumed(0).is_empty());
         health.guild_loaded(0, 42);

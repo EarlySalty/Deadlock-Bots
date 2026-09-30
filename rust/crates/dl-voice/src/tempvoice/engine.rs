@@ -2402,6 +2402,7 @@ mod tests {
             let names = self.names.lock().expect("lock");
             let categories = self.categories.lock().expect("lock");
             Some(dl_discord::voice_cache::GuildVoiceSnapshot {
+            generation: 1,
                 guild_id, observed_at: Utc::now(),
                 channels: names.keys().map(|&channel| (channel, categories.get(&channel).copied())).collect(),
                 members: self.members.lock().expect("lock").iter()

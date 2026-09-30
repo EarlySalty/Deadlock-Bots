@@ -26,6 +26,7 @@ pub struct TwitchInvites {
     config: TwitchInvitesConfig,
     warning_state: Arc<Mutex<WarningState>>,
     voice_needs_reset: std::sync::atomic::AtomicBool,
+    voice_generation: std::sync::atomic::AtomicU64,
     voice_observation_lock: tokio::sync::Mutex<()>,
 }
 
@@ -71,6 +72,7 @@ impl TwitchInvites {
             config: config.twitch_invites.clone(),
             warning_state: Arc::new(Mutex::new(WarningState::default())),
             voice_needs_reset: std::sync::atomic::AtomicBool::new(true),
+            voice_generation: std::sync::atomic::AtomicU64::new(0),
             voice_observation_lock: tokio::sync::Mutex::new(()),
         })
     }

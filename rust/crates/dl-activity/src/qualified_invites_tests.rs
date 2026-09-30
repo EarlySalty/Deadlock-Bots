@@ -45,6 +45,38 @@ async fn database() -> dl_central_db::TestDb {
     db
 }
 
+#[tokio::test]
+async fn voice_epoch_reset_keeps_same_channel_sessions_separate() {
+    use crate::qualified_invite_voice::{record_snapshot, reset_live_clocks};
+    let db = database().await;
+    let joined = at("2026-01-01T12:00:00Z");
+    join(db.pool(), 990_200, 990_200, joined, "ViewerCode").await;
+    let members = std::collections::HashMap::from([(990_200_u64, 2_u64)]);
+    for minute in 0..=7 {
+        record_snapshot(db.pool(), 1, &members, &[], joined + Duration::minutes(minute), None, false)
+            .await.expect("first confirmed epoch");
+    }
+    // Same channel after a reconnect entirely between observations: the runtime
+    // generation guard invokes this reset before it records the new snapshot.
+    reset_live_clocks(db.pool(), 1).await.expect("epoch reset");
+    for minute in 8..=15 {
+        record_snapshot(db.pool(), 1, &members, &[], joined + Duration::minutes(minute), None, false)
+            .await.expect("new confirmed epoch");
+    }
+    let before: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT voice_qualified_at FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 990200",
+    ).fetch_one(db.pool()).await.expect("not combined");
+    assert_eq!(before, None);
+    for minute in 16..=23 {
+        record_snapshot(db.pool(), 1, &members, &[], joined + Duration::minutes(minute), None, false)
+            .await.expect("continuous new epoch");
+    }
+    let after: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT voice_qualified_at FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 990200",
+    ).fetch_one(db.pool()).await.expect("new epoch qualified");
+    assert_eq!(after, Some(joined + Duration::minutes(23)));
+}
+
 async fn join(pool: &PgPool, id: i64, user: i64, joined_at: DateTime<Utc>, code: &str) {
     let metadata = json!({"invite_code": code, "discord_joined_at": joined_at.to_rfc3339()});
     let mut tx = pool.begin().await.expect("join transaction");

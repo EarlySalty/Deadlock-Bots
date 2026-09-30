@@ -140,6 +140,7 @@ pub trait VoiceSnapshot: Send + Sync {
 
 #[derive(Debug, Clone)]
 struct Session {
+    generation: u64,
     user_id: u64,
     display_name: String,
     guild_id: u64,
@@ -159,6 +160,7 @@ struct GracePeriod {
 
 #[derive(Default)]
 struct TrackerState {
+    generations: HashMap<u64, u64>,
     sessions: HashMap<(u64, u64), Session>,
     grace: HashMap<(u64, u64), GracePeriod>,
     config_cache: HashMap<u64, TrackerConfig>,
@@ -401,6 +403,13 @@ impl VoiceTracker {
     /// Kern: Sessions im Kanal starten/aktualisieren/beenden
     /// (wie `update_channel_sessions`).
     pub async fn update_channel(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
+        let Some(snapshot) = self.snapshot.guild_voice_snapshot(guild_id).await else {
+            return;
+        };
+        if let Err(error) = self.reconcile_snapshot(&snapshot).await {
+            tracing::debug!(%error, guild_id, "Voice-Fortschreibung wartet auf bestätigten Session-Abschluss");
+            return;
+        }
         let cfg = self.config(guild_id).await;
         let states = self
             .snapshot
@@ -409,7 +418,7 @@ impl VoiceTracker {
         if states.is_empty() {
             return;
         }
-        let now = Utc::now().naive_utc();
+        let now = snapshot.observed_at.min(Utc::now()).naive_utc();
         let channel_name = self
             .snapshot
             .channel_name(guild_id, channel_id)
@@ -419,6 +428,9 @@ impl VoiceTracker {
         // Opt-outs vorab filtern (nie tracken)
         let mut filtered = Vec::new();
         for member in states {
+            if snapshot.members.get(&member.user_id) != Some(&channel_id) {
+                continue;
+            }
             if member.is_bot || member.is_afk_channel {
                 continue;
             }
@@ -431,6 +443,9 @@ impl VoiceTracker {
         let mut to_finalize: Vec<Session> = Vec::new();
         {
             let mut state = self.state.lock().await;
+            if state.generations.get(&guild_id) != Some(&snapshot.generation) {
+                return;
+            }
 
             // aktiv = ungemutet ODER (Grace-Rolle && Grace läuft noch)
             let active: Vec<&VoiceMemberState> = filtered
@@ -468,6 +483,7 @@ impl VoiceTracker {
                 for member in &active {
                     let key = (member.user_id, guild_id);
                     state.sessions.entry(key).or_insert_with(|| Session {
+                        generation: snapshot.generation,
                         user_id: member.user_id,
                         display_name: member.display_name.clone(),
                         guild_id,
@@ -502,12 +518,19 @@ impl VoiceTracker {
     }
 
     async fn end_session(self: &Arc<Self>, user_id: u64, guild_id: u64, end_time: NaiveDateTime) {
+        let snapshot = self.snapshot.guild_voice_snapshot(guild_id).await;
         let session = {
             let mut state = self.state.lock().await;
             state.grace.remove(&(user_id, guild_id));
             state.sessions.remove(&(user_id, guild_id))
         };
         if let Some(session) = session {
+            let end_time = match snapshot {
+                Some(snapshot) if snapshot.generation == session.generation => {
+                    end_time.min(snapshot.observed_at.naive_utc())
+                }
+                _ => end_time.min(session.last_update),
+            };
             self.finalize(session, end_time).await;
         }
     }
@@ -819,6 +842,7 @@ mod tests {
 
     /// Mock-Snapshot mit setzbarem Kanal-Zustand.
     struct MockSnapshot {
+        generation: std::sync::atomic::AtomicU64,
         states: StdMutex<HashMap<(u64, u64), Vec<VoiceMemberState>>>,
         names: StdMutex<HashMap<u64, String>>,
     }
@@ -830,6 +854,7 @@ mod tests {
             guild_id: u64,
         ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
             Some(dl_discord::voice_cache::GuildVoiceSnapshot {
+            generation: self.generation.load(std::sync::atomic::Ordering::Acquire),
                 guild_id,
                 observed_at: Utc::now(),
                 channels: self
@@ -884,15 +909,68 @@ mod tests {
     }
 
     async fn setup() -> (dl_central_db::TestDb, Arc<VoiceTracker>, Arc<MockSnapshot>) {
-        let db = dl_central_db::testing::test_pool()
-            .await
-            .expect("test_pool");
+        mod peer_database {
+            include!("../../../test-support/peer_database.rs");
+        }
+        let db = peer_database::database().await;
         let snapshot = Arc::new(MockSnapshot {
+            generation: std::sync::atomic::AtomicU64::new(1),
             states: StdMutex::new(HashMap::new()),
             names: StdMutex::new(HashMap::new()),
         });
         let tracker = VoiceTracker::new(db.pool().clone(), snapshot.clone());
         (db, tracker, snapshot)
+    }
+
+    #[tokio::test]
+    async fn reconnect_between_observations_closes_only_confirmed_prefix() {
+        let (_db, tracker, snapshot) = setup().await;
+        snapshot.states.lock().expect("states").insert(
+            (1, 10), vec![member(100, "Anna"), member(200, "Ben")],
+        );
+        tracker.update_channel(1, 10).await;
+        let last = Utc::now().naive_utc() - chrono::Duration::minutes(3);
+        {
+            let mut state = tracker.state.lock().await;
+            for session in state.sessions.values_mut() {
+                session.start_time = last - chrono::Duration::minutes(7);
+                session.last_update = last;
+            }
+        }
+        let old_snapshot = snapshot.guild_voice_snapshot(1).await.expect("old snapshot");
+        // Disconnect and a complete fresh guild load both happen between polls.
+        snapshot.generation.store(2, std::sync::atomic::Ordering::Release);
+        tracker.update_channel(1, 10).await;
+        let rows: Vec<(i64, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT duration_seconds, ended_at FROM activity.voice_session_log ORDER BY user_id",
+        ).fetch_all(&tracker.pool).await.expect("history");
+        assert_eq!(rows.len(), 2);
+        for (seconds, ended) in rows {
+            assert_eq!(seconds, 420);
+            assert_eq!(ended.timestamp_micros(), last.and_utc().timestamp_micros());
+        }
+        assert_eq!(tracker.active_sessions().await, 2);
+        assert_eq!(tracker.reconcile_snapshot(&old_snapshot).await.expect("stale snapshot"), 0);
+        assert!(tracker.state.lock().await.sessions.values().all(|s| s.generation == 2));
+        // An uninterrupted new epoch still extends its own confirmed session.
+        {
+            let mut state = tracker.state.lock().await;
+            for session in state.sessions.values_mut() {
+                session.start_time -= chrono::Duration::minutes(16);
+            }
+        }
+        tracker.update_channel(1, 10).await;
+        snapshot.generation.store(3, std::sync::atomic::Ordering::Release);
+        // A delayed Leave uses the same boundary before its direct finalizer.
+        for user in [100, 200] {
+            tracker.end_session(user, 1, Utc::now().naive_utc() + chrono::Duration::hours(1)).await;
+        }
+        let durations: Vec<i64> = sqlx::query_scalar(
+            "SELECT duration_seconds FROM activity.voice_session_log ORDER BY duration_seconds",
+        ).fetch_all(&tracker.pool).await.expect("history");
+        assert_eq!(durations.len(), 4);
+        assert_eq!(&durations[..2], &[420, 420]);
+        assert!(durations[2..].iter().all(|seconds| (960..970).contains(seconds)));
     }
 
     #[tokio::test]
@@ -967,6 +1045,7 @@ mod tests {
             }
         }
         let snapshot = dl_discord::voice_cache::GuildVoiceSnapshot {
+            generation: 1,
             guild_id: 1,
             observed_at: Utc::now(),
             channels: HashMap::new(),

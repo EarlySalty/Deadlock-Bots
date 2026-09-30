@@ -9,11 +9,23 @@ impl VoiceTracker {
     pub async fn reconcile_snapshot(&self, snapshot: &GuildVoiceSnapshot) -> VoiceDbResult<usize> {
         let observed = snapshot.observed_at.min(Utc::now()).naive_utc();
         let mut state = self.state.lock().await;
+        if state
+            .generations
+            .get(&snapshot.guild_id)
+            .is_some_and(|generation| *generation > snapshot.generation)
+        {
+            return Ok(0);
+        }
+        state
+            .generations
+            .insert(snapshot.guild_id, snapshot.generation);
         let keys: Vec<_> = state
             .sessions
             .iter()
             .filter(|(_, session)| {
-                session.guild_id == snapshot.guild_id && session.last_update <= observed
+                session.guild_id == snapshot.guild_id
+                    && (session.generation != snapshot.generation
+                        || session.last_update <= observed)
             })
             .map(|(key, _)| *key)
             .collect();
@@ -22,7 +34,9 @@ impl VoiceTracker {
             let Some(session) = state.sessions.get_mut(&key) else {
                 continue;
             };
-            if snapshot.members.get(&session.user_id) == Some(&session.channel_id) {
+            if session.generation == snapshot.generation
+                && snapshot.members.get(&session.user_id) == Some(&session.channel_id)
+            {
                 session.last_update = observed;
                 continue;
             }
