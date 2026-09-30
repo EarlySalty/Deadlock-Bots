@@ -102,8 +102,19 @@ async fn sync_invites_and_reclassify(
             if let Some(twitch_user_id) = entry.twitch_user_id.as_deref() {
                 sqlx::query(
                     "UPDATE bot.twitch_streamer_invites
-                     SET streamer_login = 'retired:' || twitch_user_id,
-                         invite_code = NULL, invite_url = NULL, channel_id = NULL
+                     SET streamer_login = '__legacy_unresolved__:' || streamer_login || ':'
+                         || md5(ctid::text || clock_timestamp()::text)
+                     WHERE streamer_login = $1 AND twitch_user_id IS NULL",
+                )
+                .bind(&login)
+                .execute(&mut *populate_tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE bot.twitch_streamer_invites
+                     SET streamer_login = '__legacy_recycled__:' || twitch_user_id || ':'
+                         || md5(ctid::text || clock_timestamp()::text),
+                         channel_id = NULL
                      WHERE streamer_login = $1 AND twitch_user_id IS NOT NULL
                        AND twitch_user_id <> $2",
                 )
@@ -175,7 +186,12 @@ async fn sync_invites_and_reclassify(
     }
 
     let personal: Vec<(String, String)> = sqlx::query_as(
-        "SELECT streamer_login, invite_code FROM bot.twitch_personal_invites WHERE revoked_at IS NULL",
+        "SELECT current.streamer_login, personal.invite_code
+         FROM bot.twitch_personal_invites AS personal
+         JOIN bot.twitch_streamer_invites AS current
+           ON current.twitch_user_id = personal.streamer_twitch_user_id
+          AND current.channel_id IS NOT NULL
+         WHERE personal.revoked_at IS NULL",
     )
             .fetch_all(pool)
             .await?;
@@ -440,6 +456,11 @@ mod tests {
     async fn sync_uses_twitch_ids_and_replaces_incomplete_authority() -> anyhow::Result<()> {
         let db = test_database::database().await;
         let pool = db.pool();
+        let mut legacy = invite("current-login", "LEGACYCODE");
+        legacy.twitch_user_id = None;
+        legacy.channel_id = None;
+        legacy.guild_id = 918274;
+        legacy.invite_url = "https://discord.gg/LEGACYCODE".into();
         let mut first = invite("former-login", "FIRSTCODE");
         first.twitch_user_id = Some("918273645001".into());
         first.channel_id = Some(111);
@@ -477,7 +498,7 @@ mod tests {
 
         sync_invites_and_reclassify(
             pool,
-            vec![first, renamed, recycled, new_owner, complete, incomplete],
+            vec![legacy, first, renamed, recycled, new_owner, complete, incomplete],
             false,
         )
         .await?;
@@ -500,13 +521,36 @@ mod tests {
             )
         );
 
-        let retired_row: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT streamer_login, invite_code, channel_id FROM bot.twitch_streamer_invites
-             WHERE twitch_user_id = '918273645002'",
-        )
-        .fetch_one(pool)
-        .await?;
-        assert_eq!(retired_row, ("retired:918273645002".into(), None, None));
+        let retired_row: (String, Option<String>, Option<String>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT streamer_login, invite_code, invite_url, channel_id
+                 FROM bot.twitch_streamer_invites
+                 WHERE twitch_user_id = '918273645002'",
+            )
+            .fetch_one(pool)
+            .await?;
+        assert!(retired_row.0.starts_with("__legacy_recycled__:"));
+        assert_eq!(
+            retired_row.1.as_deref(),
+            Some("OLDRECYCLE")
+        );
+        assert_eq!(
+            retired_row.2.as_deref(),
+            Some("https://discord.gg/OLDRECYCLE")
+        );
+        assert_eq!(retired_row.3, None);
+
+        let legacy_row: (String, Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT streamer_login, twitch_user_id, invite_code, invite_url
+                 FROM bot.twitch_streamer_invites WHERE invite_code = 'LEGACYCODE'",
+            )
+            .fetch_one(pool)
+            .await?;
+        assert!(legacy_row.0.starts_with("__legacy_unresolved__:current-login:"));
+        assert_eq!(legacy_row.1, None);
+        assert_eq!(legacy_row.2.as_deref(), Some("LEGACYCODE"));
+        assert_eq!(legacy_row.3.as_deref(), Some("https://discord.gg/LEGACYCODE"));
 
         let missing_channel: (Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT twitch_user_id, channel_id FROM bot.twitch_streamer_invites

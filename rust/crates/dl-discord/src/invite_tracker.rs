@@ -6,13 +6,13 @@
 //! werden NICHT getrackt (serenity liefert keinen) — Vanity-Joins fallen in die
 //! Discovery-Heuristik (Bucket `public`), was den Bucket-Count nicht verändert.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serenity::all::{GuildId, Http, InviteCreateEvent, Member};
-use sqlx::PgPool;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use sqlx::{PgPool, Postgres, Transaction};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct InviteSnap {
@@ -25,11 +25,37 @@ struct InviteSnap {
     channel_name: String,
 }
 
+#[derive(Default)]
+pub struct InviteSnapshotHealth {
+    current_guilds: RwLock<HashSet<u64>>,
+}
+
+impl InviteSnapshotHealth {
+    pub async fn is_current(&self, guild_id: u64) -> bool {
+        self.current_guilds.read().await.contains(&guild_id)
+    }
+
+    async fn mark_current(&self, guild_id: u64) {
+        self.current_guilds.write().await.insert(guild_id);
+    }
+
+    async fn mark_stale(&self, guild_id: u64) {
+        self.current_guilds.write().await.remove(&guild_id);
+    }
+}
+
+#[derive(Debug)]
+pub struct InviteJoinError {
+    pub metadata: Value,
+    pub source: sqlx::Error,
+}
+
 /// Pro-Gilde-Cache der Invite-Stände (`code → Snapshot`).
 pub struct InviteTracker {
     by_guild: Mutex<HashMap<u64, HashMap<String, InviteSnap>>>,
     join_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
     pool: PgPool,
+    health: Arc<InviteSnapshotHealth>,
 }
 
 fn should_retry_join_source(has_baseline: bool, kind: &str) -> bool {
@@ -137,12 +163,36 @@ fn classify_snapshots(
     }
 }
 
+fn set_unknown_source(meta: &mut Map<String, Value>, reason: &str) {
+    for key in [
+        "invite_code",
+        "invite_url",
+        "inviter_id",
+        "inviter_name",
+        "inviter_bot",
+        "invite_channel_id",
+        "invite_channel_name",
+    ] {
+        meta.remove(key);
+    }
+    meta.insert("join_source_bucket".into(), Value::from("unknown"));
+    meta.insert("join_source_kind".into(), Value::from("unknown"));
+    meta.insert("join_source_label".into(), Value::from("Unbekannt"));
+    meta.insert("join_source_confidence".into(), Value::from("low"));
+    meta.insert("join_source_reason".into(), Value::from(reason));
+}
+
 impl InviteTracker {
     pub fn new(pool: PgPool) -> Self {
+        Self::with_health(pool, Arc::new(InviteSnapshotHealth::default()))
+    }
+
+    pub fn with_health(pool: PgPool, health: Arc<InviteSnapshotHealth>) -> Self {
         Self {
             by_guild: Mutex::new(HashMap::new()),
             join_locks: Mutex::new(HashMap::new()),
             pool,
+            health,
         }
     }
 
@@ -207,37 +257,41 @@ impl InviteTracker {
             .and_then(|v| serde_json::from_value::<HashMap<String, InviteSnap>>(v).ok())
     }
 
-    async fn save_snapshot_to_db(&self, guild_id: u64, snapshot: &HashMap<String, InviteSnap>) {
-        let guild_id = match i64::try_from(guild_id) {
-            Ok(guild_id) => guild_id,
-            Err(err) => {
-                tracing::debug!(%err, guild_id, "Invite-Snapshot-Guild-ID passt nicht in BIGINT");
-                return;
-            }
-        };
+    async fn write_snapshot_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        guild_id: u64,
+        snapshot: &HashMap<String, InviteSnap>,
+    ) -> Result<(), sqlx::Error> {
+        let guild_id = i64::try_from(guild_id)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
         let payload = serde_json::json!({
             "invites": snapshot,
             "vanity": {},
         });
-        let Ok(payload) = serde_json::to_string(&payload) else {
-            return;
-        };
-        let result = sqlx::query!(
-            r#"
-            INSERT INTO bot.invite_snapshot_cache (guild_id, snapshot_json, updated_at)
-            VALUES ($1, $2::text::jsonb, now())
-            ON CONFLICT (guild_id) DO UPDATE SET
-              snapshot_json = EXCLUDED.snapshot_json,
-              updated_at = EXCLUDED.updated_at
-            "#,
-            guild_id,
-            payload,
+        let payload = serde_json::to_string(&payload)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+        sqlx::query(
+            "INSERT INTO bot.invite_snapshot_cache (guild_id, snapshot_json, updated_at)
+             VALUES ($1, $2::text::jsonb, now())
+             ON CONFLICT (guild_id) DO UPDATE SET
+               snapshot_json = EXCLUDED.snapshot_json,
+               updated_at = EXCLUDED.updated_at",
         )
-        .execute(&self.pool)
-        .await;
-        if let Err(err) = result {
-            tracing::debug!(%err, guild_id, "Invite-Snapshot konnte nicht persistiert werden");
-        }
+        .bind(guild_id)
+        .bind(payload)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn save_snapshot_to_db(
+        &self,
+        guild_id: u64,
+        snapshot: &HashMap<String, InviteSnap>,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        Self::write_snapshot_tx(&mut tx, guild_id, snapshot).await?;
+        tx.commit().await
     }
 
     async fn restore_from_db(&self, guild_id: u64) -> bool {
@@ -249,16 +303,15 @@ impl InviteTracker {
     }
 
     async fn reconcile_personal_invites(
-        &self,
+        tx: &mut Transaction<'_, Postgres>,
         guild_id: u64,
         snapshot: &HashMap<String, InviteSnap>,
         observed_at: chrono::DateTime<chrono::Utc>,
-    ) {
-        let Ok(guild_db_id) = i64::try_from(guild_id) else {
-            return;
-        };
+    ) -> Result<(), sqlx::Error> {
+        let guild_db_id = i64::try_from(guild_id)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
         let present_codes: Vec<String> = snapshot.keys().cloned().collect();
-        if let Err(error) = sqlx::query(
+        sqlx::query(
             "UPDATE bot.twitch_personal_invites
              SET revoked_at = clock_timestamp()
              WHERE guild_id = $1 AND revoked_at IS NULL AND created_at <= $3
@@ -267,35 +320,65 @@ impl InviteTracker {
         .bind(guild_db_id)
         .bind(present_codes)
         .bind(observed_at)
-        .execute(&self.pool)
-        .await
-        {
-            tracing::debug!(%error, guild_id, "Discord-Invite-Snapshot konnte nicht abgeglichen werden");
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn persist_complete_snapshot(
+        &self,
+        guild_id: u64,
+        snapshot: &HashMap<String, InviteSnap>,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error> {
+        self.health.mark_stale(guild_id).await;
+        let persist = async {
+            let mut tx = self.pool.begin().await?;
+            Self::reconcile_personal_invites(&mut tx, guild_id, snapshot, observed_at).await?;
+            Self::write_snapshot_tx(&mut tx, guild_id, snapshot).await?;
+            tx.commit().await
         }
+        .await;
+        if let Err(error) = persist {
+            return Err(error);
+        }
+        self.by_guild.lock().await.insert(guild_id, snapshot.clone());
+        self.health.mark_current(guild_id).await;
+        Ok(())
     }
 
     /// Primt den Cache einer Gilde (API-Fetch). Beim Start für alle Gilden.
-    pub async fn prime(&self, http: &Http, guild_id: u64) {
+    pub async fn prime(&self, http: &Http, guild_id: u64) -> Result<bool, sqlx::Error> {
         let _guard = self.lock_guild(guild_id).await;
         let has_cache = self.by_guild.lock().await.contains_key(&guild_id);
         if !has_cache {
             self.restore_from_db(guild_id).await;
         }
         let observed_at = chrono::Utc::now();
-        if let Some(map) = Self::fetch(http, guild_id).await {
-            self.reconcile_personal_invites(guild_id, &map, observed_at)
-                .await;
-            self.save_snapshot_to_db(guild_id, &map).await;
-            self.by_guild.lock().await.insert(guild_id, map);
+        let Some(map) = Self::fetch(http, guild_id).await else {
+            self.health.mark_stale(guild_id).await;
+            return Ok(false);
+        };
+        if let Err(error) = self
+            .persist_complete_snapshot(guild_id, &map, observed_at)
+            .await
+        {
+            self.health.mark_stale(guild_id).await;
+            return Err(error);
         }
+        Ok(true)
     }
 
     /// Übernimmt einen frisch erstellten Invite in den Cache (uses = 0).
-    pub async fn on_invite_create(&self, ev: &InviteCreateEvent) {
+    pub async fn on_invite_create(
+        &self,
+        ev: &InviteCreateEvent,
+    ) -> Result<(), sqlx::Error> {
         let Some(guild_id) = ev.guild_id else {
-            return;
+            return Ok(());
         };
-        let _guard = self.lock_guild(guild_id.get()).await;
+        let guild_id = guild_id.get();
+        let _guard = self.lock_guild(guild_id).await;
         let snap = InviteSnap {
             uses: 0,
             url: format!("https://discord.gg/{}", ev.code),
@@ -309,47 +392,70 @@ impl InviteTracker {
             channel_id: Some(ev.channel_id.get()),
             channel_name: String::new(),
         };
-        let guild_id = guild_id.get();
-        let snapshot = {
-            let mut guard = self.by_guild.lock().await;
-            let entry = guard.entry(guild_id).or_default();
-            entry.entry(ev.code.to_string()).or_insert(snap);
-            entry.clone()
-        };
-        self.save_snapshot_to_db(guild_id, &snapshot).await;
+        let mut snapshot = self
+            .by_guild
+            .lock()
+            .await
+            .get(&guild_id)
+            .cloned()
+            .unwrap_or_default();
+        snapshot.entry(ev.code.to_string()).or_insert(snap);
+        if let Err(error) = self.save_snapshot_to_db(guild_id, &snapshot).await {
+            self.health.mark_stale(guild_id).await;
+            return Err(error);
+        }
+        self.by_guild.lock().await.insert(guild_id, snapshot);
+        Ok(())
     }
 
     /// Entfernt einen gelöschten Invite aus dem Cache.
-    pub async fn on_invite_delete(&self, guild_id: u64, code: &str) {
+    pub async fn on_invite_delete(
+        &self,
+        guild_id: u64,
+        code: &str,
+    ) -> Result<(), sqlx::Error> {
         let _guard = self.lock_guild(guild_id).await;
-        if let Ok(guild_db_id) = i64::try_from(guild_id) {
-            if let Err(error) = sqlx::query(
+        let guild_db_id = i64::try_from(guild_id)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string().into()))?;
+        let mut snapshot = self.by_guild.lock().await.get(&guild_id).cloned();
+        if let Some(map) = snapshot.as_mut() {
+            map.remove(code);
+        }
+        let result = async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
                 "UPDATE bot.twitch_personal_invites SET revoked_at = clock_timestamp()
                  WHERE guild_id = $1 AND invite_code = $2 AND revoked_at IS NULL",
             )
             .bind(guild_db_id)
             .bind(code)
-            .execute(&self.pool)
-            .await
-            {
-                tracing::warn!(%error, "Widerruf eines persönlichen Twitch-Invites nicht gespeichert");
+            .execute(&mut *tx)
+            .await?;
+            if let Some(map) = snapshot.as_ref() {
+                Self::write_snapshot_tx(&mut tx, guild_id, map).await?;
             }
+            tx.commit().await
         }
-        let snapshot = {
-            let mut guard = self.by_guild.lock().await;
-            let Some(g) = guard.get_mut(&guild_id) else {
-                return;
-            };
-            g.remove(code);
-            g.clone()
-        };
-        self.save_snapshot_to_db(guild_id, &snapshot).await;
+        .await;
+        if let Err(error) = result {
+            self.health.mark_stale(guild_id).await;
+            return Err(error);
+        }
+        if let Some(map) = snapshot {
+            self.by_guild.lock().await.insert(guild_id, map);
+        } else {
+            self.health.mark_stale(guild_id).await;
+        }
+        Ok(())
     }
 
     /// Detektiert die Beitrittsquelle: aktuellen Invite-Stand holen, gegen den
-    /// Cache differenzieren, Cache aktualisieren, rohe `join_source_*`-Metadaten
-    /// zurückgeben.
-    pub async fn on_join(&self, http: &Http, member: &Member) -> Value {
+    /// Cache differenzieren und nur nach erfolgreichem DB-Commit übernehmen.
+    pub async fn on_join(
+        &self,
+        http: &Http,
+        member: &Member,
+    ) -> Result<Value, InviteJoinError> {
         let guild_id = member.guild_id.get();
         let _guard = self.lock_guild(guild_id).await;
         let mut meta = Map::new();
@@ -393,14 +499,23 @@ impl InviteTracker {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        if let Some(after_map) = latest_after {
-            self.reconcile_personal_invites(guild_id, &after_map, latest_observed_at)
-                .await;
-            self.save_snapshot_to_db(guild_id, &after_map).await;
-            self.by_guild.lock().await.insert(guild_id, after_map);
+        let Some(after_map) = latest_after else {
+            self.health.mark_stale(guild_id).await;
+            return Ok(Value::Object(meta));
+        };
+        if let Err(source) = self
+            .persist_complete_snapshot(guild_id, &after_map, latest_observed_at)
+            .await
+        {
+            self.health.mark_stale(guild_id).await;
+            set_unknown_source(&mut meta, "invite_snapshot_store_failed");
+            return Err(InviteJoinError {
+                metadata: Value::Object(meta),
+                source,
+            });
         }
 
-        Value::Object(meta)
+        Ok(Value::Object(meta))
     }
 }
 
@@ -442,7 +557,10 @@ mod tests {
             },
         );
 
-        tracker.save_snapshot_to_db(1, &snapshot).await;
+        tracker
+            .save_snapshot_to_db(1, &snapshot)
+            .await
+            .expect("save snapshot");
         let restored = tracker.load_snapshot_from_db(1).await.expect("snapshot");
         assert_eq!(restored.get("abc").map(|snap| snap.uses), Some(7));
         tracker.restore_from_db(1).await;
@@ -487,7 +605,8 @@ mod tests {
 
         tracker
             .save_snapshot_to_db(missing_guild_id, &snapshot)
-            .await;
+            .await
+            .expect("save snapshot");
         let snapshot_json_type: String = sqlx::query_scalar(
             "SELECT jsonb_typeof(snapshot_json) FROM bot.invite_snapshot_cache WHERE guild_id = $1",
         )
@@ -524,8 +643,9 @@ mod tests {
 
         let snapshot = HashMap::from([("present-code".to_string(), attribution_snapshot(0))]);
         tracker
-            .reconcile_personal_invites(guild_id as u64, &snapshot, observed_at)
-            .await;
+            .persist_complete_snapshot(guild_id as u64, &snapshot, observed_at)
+            .await
+            .expect("complete snapshot");
         let statuses: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
             "SELECT invite_code, revoked_at FROM bot.twitch_personal_invites
              WHERE guild_id = $1 ORDER BY invite_code",
@@ -559,6 +679,52 @@ mod tests {
                 .1
                 .is_none()
         );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn snapshot_write_failure_rolls_back_revocation_and_keeps_cache_stale() {
+        let db = invite_db().await;
+        let pool = db.pool();
+        let tracker = InviteTracker::new(pool.clone());
+        let guild_id = 9_876_543_212_i64;
+        sqlx::query(
+            "INSERT INTO bot.twitch_personal_invites
+             (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id,
+              channel_id, invite_code, invite_url, created_at)
+             VALUES ('918273645111', '918273645112', 'snapshot-failure', $1, 22,
+                     'missing-after-failure', 'https://discord.gg/missing-after-failure', '2026-01-01T00:00:00Z')",
+        )
+        .bind(guild_id)
+        .execute(pool)
+        .await
+        .expect("personal invite fixture");
+        sqlx::query(&format!(
+            "ALTER TABLE bot.invite_snapshot_cache ADD CONSTRAINT reject_snapshot_{guild_id} CHECK (guild_id <> {guild_id})"
+        ))
+        .execute(pool)
+        .await
+        .expect("snapshot failure constraint");
+
+        let prior = HashMap::from([("previous".to_string(), attribution_snapshot(2))]);
+        tracker.by_guild.lock().await.insert(guild_id as u64, prior);
+        tracker.health.mark_current(guild_id as u64).await;
+        let snapshot = HashMap::new();
+        let observed_at = chrono::Utc::now();
+        assert!(tracker
+            .persist_complete_snapshot(guild_id as u64, &snapshot, observed_at)
+            .await
+            .is_err());
+
+        let revoked_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT revoked_at FROM bot.twitch_personal_invites WHERE invite_code = 'missing-after-failure'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("invite status");
+        assert!(revoked_at.is_none(), "failed snapshot must roll back revocation");
+        assert!(!tracker.health.is_current(guild_id as u64).await);
+        assert_eq!(tracker.by_guild.lock().await[&(guild_id as u64)].len(), 1);
     }
 
     #[test]

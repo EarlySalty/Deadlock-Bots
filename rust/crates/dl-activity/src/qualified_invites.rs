@@ -84,7 +84,6 @@ pub async fn remember_private_departure(
              (guild_id, user_id, prior_member, left_at)
          VALUES ($1, $2, TRUE, $3)
          ON CONFLICT (guild_id, user_id) DO UPDATE SET
-             prior_member = TRUE,
              left_at = LEAST(activity.twitch_invite_members.left_at, EXCLUDED.left_at),
              current_joined_at = NULL",
     )
@@ -138,7 +137,6 @@ pub async fn remember_member_event(
                  (guild_id, user_id, prior_member, left_at)
              VALUES ($1, $2, TRUE, $3)
              ON CONFLICT (guild_id, user_id) DO UPDATE SET
-                 prior_member = TRUE,
                  left_at = LEAST(activity.twitch_invite_members.left_at, EXCLUDED.left_at),
                  current_joined_at = NULL",
         )
@@ -246,10 +244,24 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
             else {
                 continue;
             };
+            let actual_join = metadata
+                .get("discord_joined_at")
+                .and_then(Value::as_str)
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            let Some(joined_at) = actual_join.or(source.occurred_at) else {
+                continue;
+            };
             let owners: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT streamer_login, streamer_twitch_user_id, inviter_twitch_user_id
-                 FROM bot.twitch_personal_invites
-                 WHERE guild_id = $1 AND invite_code = $2 AND revoked_at IS NULL
+                "SELECT COALESCE(current.streamer_login, personal.streamer_login),
+                        personal.streamer_twitch_user_id, personal.inviter_twitch_user_id
+                 FROM bot.twitch_personal_invites AS personal
+                 LEFT JOIN bot.twitch_streamer_invites AS current
+                   ON current.twitch_user_id = personal.streamer_twitch_user_id
+                  AND current.channel_id IS NOT NULL
+                 WHERE personal.guild_id = $1 AND personal.invite_code = $2
+                   AND personal.created_at <= $3
+                   AND (personal.revoked_at IS NULL OR personal.revoked_at >= $3)
                  UNION ALL
                  SELECT streamer_login, twitch_user_id, NULL::text
                  FROM bot.twitch_streamer_invites
@@ -258,6 +270,7 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
             )
             .bind(guild_id)
             .bind(&code)
+            .bind(joined_at)
             .fetch_all(&mut *tx)
             .await?;
             if owners.len() != 1 {
@@ -269,14 +282,6 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
             if classify(&metadata, &lookup, &websites).bucket != "twitch" {
                 continue;
             }
-            let actual_join = metadata
-                .get("discord_joined_at")
-                .and_then(Value::as_str)
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| value.with_timezone(&Utc));
-            let Some(joined_at) = actual_join.or(source.occurred_at) else {
-                continue;
-            };
             let eligible = !source.prior_member
                 && actual_join.is_some()
                 && source.first_joined_at == actual_join;
@@ -461,12 +466,17 @@ pub async fn list_page(
     let until = until.unwrap_or(captured_at).min(captured_at);
     let limit = i64::from(limit.clamp(1, 1000));
     let mut invites: Vec<QualifiedInvite> = sqlx::query_as(
-        "SELECT join_id::text AS join_id, streamer_login, inviter_twitch_user_id,
-                joined_at, status, qualified_at, updated_at
-         FROM bot.twitch_invite_joins
-         WHERE guild_id = $1 AND updated_at >= $2 AND updated_at <= $3
-             AND ($4::timestamptz IS NULL OR (updated_at, join_id) > ($4, $5))
-         ORDER BY updated_at, join_id LIMIT $6",
+        "SELECT join_id::text AS join_id,
+                COALESCE(current.streamer_login, joins.streamer_login) AS streamer_login,
+                joins.inviter_twitch_user_id, joins.joined_at, joins.status,
+                joins.qualified_at, joins.updated_at
+         FROM bot.twitch_invite_joins AS joins
+         LEFT JOIN bot.twitch_streamer_invites AS current
+           ON current.twitch_user_id = joins.streamer_twitch_user_id
+          AND current.channel_id IS NOT NULL
+         WHERE joins.guild_id = $1 AND joins.updated_at >= $2 AND joins.updated_at <= $3
+             AND ($4::timestamptz IS NULL OR (joins.updated_at, joins.join_id) > ($4, $5))
+         ORDER BY joins.updated_at, joins.join_id LIMIT $6",
     )
     .bind(guild_id)
     .bind(since)

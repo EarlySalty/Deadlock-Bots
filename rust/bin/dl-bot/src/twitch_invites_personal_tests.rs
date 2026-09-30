@@ -13,6 +13,8 @@ struct Issuer {
     created: AtomicUsize,
     revoked: AtomicUsize,
     failure: bool,
+    snapshot_available: bool,
+    snapshot_error: bool,
 }
 
 #[async_trait::async_trait]
@@ -33,6 +35,13 @@ impl InviteIssuer for Issuer {
     }
     async fn revoke(&self, _: &str) {
         self.revoked.fetch_add(1, Ordering::SeqCst);
+    }
+    async fn ensure_snapshot_current(&self, _: u64) -> Result<bool, String> {
+        if self.snapshot_error {
+            Err("snapshot store failed".into())
+        } else {
+            Ok(self.snapshot_available)
+        }
     }
 }
 
@@ -69,6 +78,8 @@ async fn setup() -> (
             created: AtomicUsize::new(0),
             revoked: AtomicUsize::new(0),
             failure: false,
+            snapshot_available: true,
+            snapshot_error: false,
         },
     )
 }
@@ -158,6 +169,39 @@ async fn revoked_invites_keep_their_attribution_and_return_channel_fallback() {
             .await
             .expect("owner retained");
     assert_eq!(owner, "43");
+}
+
+#[tokio::test]
+async fn stale_snapshot_blocks_personal_link_until_reconciled() {
+    let (db, destination, config, mut issuer) = setup().await;
+    assert!(
+        resolve(db.pool(), &config, &destination, "43", &issuer)
+            .await
+            .expect("create")
+            .personal
+    );
+
+    issuer.snapshot_error = true;
+    assert!(resolve(db.pool(), &config, &destination, "43", &issuer)
+        .await
+        .is_err());
+
+    issuer.snapshot_error = false;
+    issuer.snapshot_available = false;
+    let stale = resolve(db.pool(), &config, &destination, "43", &issuer)
+        .await
+        .expect("stale fallback");
+    assert!(!stale.personal);
+    assert_eq!(stale.invite_url, destination.invite_url);
+    assert_eq!(issuer.created.load(Ordering::SeqCst), 1);
+
+    issuer.snapshot_available = true;
+    assert!(
+        resolve(db.pool(), &config, &destination, "43", &issuer)
+            .await
+            .expect("reconciled link")
+            .personal
+    );
 }
 
 #[tokio::test]

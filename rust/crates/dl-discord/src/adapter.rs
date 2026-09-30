@@ -15,11 +15,13 @@ use dl_broker::port::{
     ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
+use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 use serde_json::{json, Map, Value};
 use serenity::all::{
     Cache, ChannelId, ChannelType, GuildId, Http, MessageId, ReactionType, RoleId, UserId,
 };
 use serenity::builder::CreateAttachment;
+use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
@@ -33,6 +35,8 @@ pub struct DiscordAdapter {
     pub(crate) community_gateway: crate::community::GatewayFreshness,
     pub(crate) voice_cache_health: crate::voice_cache::VoiceCacheHealth,
     pub(crate) streamer_voice_lock: tokio::sync::Mutex<()>,
+    invite_snapshot_health: Arc<InviteSnapshotHealth>,
+    invite_tracker: OnceLock<Arc<InviteTracker>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +54,8 @@ impl DiscordAdapter {
             community_gateway: crate::community::GatewayFreshness::default(),
             voice_cache_health: crate::voice_cache::VoiceCacheHealth::default(),
             streamer_voice_lock: tokio::sync::Mutex::new(()),
+            invite_snapshot_health: Arc::new(InviteSnapshotHealth::default()),
+            invite_tracker: OnceLock::new(),
         })
     }
 
@@ -57,6 +63,27 @@ impl DiscordAdapter {
     /// Einmalig direkt nach dem Client-Build aufzurufen.
     pub fn link_cache(&self, cache: Arc<Cache>) {
         let _ = self.cache.set(cache);
+    }
+
+    pub fn invite_snapshot_health(&self) -> Arc<InviteSnapshotHealth> {
+        self.invite_snapshot_health.clone()
+    }
+
+    pub fn link_invite_tracker(&self, tracker: Arc<InviteTracker>) {
+        let _ = self.invite_tracker.set(tracker);
+    }
+
+    pub async fn ensure_invite_snapshot_current(
+        &self,
+        guild_id: u64,
+    ) -> Result<bool, sqlx::Error> {
+        if self.invite_snapshot_health.is_current(guild_id).await {
+            return Ok(true);
+        }
+        let Some(tracker) = self.invite_tracker.get() else {
+            return Ok(true);
+        };
+        tracker.prime(&self.http, guild_id).await
     }
 
     /// Lädt die Application-ID per REST und setzt sie auf dem Http-Client.

@@ -10,6 +10,9 @@ pub(super) trait InviteIssuer: Send + Sync {
     async fn count(&self, guild_id: u64) -> Result<usize, String>;
     async fn create(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, String>;
     async fn revoke(&self, code: &str);
+    async fn ensure_snapshot_current(&self, _guild_id: u64) -> Result<bool, String> {
+        Ok(true)
+    }
 }
 
 #[async_trait::async_trait]
@@ -41,6 +44,12 @@ impl InviteIssuer for DiscordAdapter {
             tracing::warn!("Nicht zugeordnete Discord-Einladung konnte nicht entfernt werden");
         }
     }
+
+    async fn ensure_snapshot_current(&self, guild_id: u64) -> Result<bool, String> {
+        self.ensure_invite_snapshot_current(guild_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 pub(super) async fn resolve(
@@ -59,6 +68,13 @@ pub(super) async fn resolve(
     }
     let guild_id = i64::try_from(destination.guild_id).map_err(|_| "Ungültige Guild-ID")?;
     let channel_id = i64::try_from(destination.channel_id).map_err(|_| "Ungültige Kanal-ID")?;
+    match issuer
+        .ensure_snapshot_current(destination.guild_id)
+        .await?
+    {
+        true => {}
+        false => return Ok(fallback()),
+    }
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
     store::lock_changes(&mut tx, guild_id)
         .await

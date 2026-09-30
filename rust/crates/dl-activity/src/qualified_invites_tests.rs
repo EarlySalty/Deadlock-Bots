@@ -30,8 +30,8 @@ async fn database() -> dl_central_db::TestDb {
     .expect("channel mapping");
     sqlx::query(
         "INSERT INTO bot.twitch_personal_invites
-         (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id, channel_id, invite_code, invite_url)
-         VALUES ('42', '43', 'streamer', 1, 2, 'ViewerCode', 'https://discord.gg/ViewerCode')",
+         (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id, channel_id, invite_code, invite_url, created_at)
+         VALUES ('42', '43', 'streamer', 1, 2, 'ViewerCode', 'https://discord.gg/ViewerCode', '2025-01-01T00:00:00Z')",
     ).execute(db.pool()).await.expect("viewer mapping");
     db
 }
@@ -510,7 +510,219 @@ async fn private_departure_preserves_membership_boundary_without_activity_event(
 }
 
 #[tokio::test]
-async fn regular_departure_marks_prior_membership_without_rewriting_join_time() {
+async fn delayed_attribution_after_day_15_leave_preserves_day_14_qualification() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined_at = at("2026-01-01T12:00:00Z");
+    let ready_at = joined_at + Duration::days(14);
+    let left_at = joined_at + Duration::days(15);
+    let metadata = json!({
+        "discord_joined_at": joined_at.to_rfc3339(),
+        "invite_code": "ViewerCode"
+    })
+    .to_string();
+    let join_id = 990_015_i64;
+    let user_id = 990_015_i64;
+
+    let mut tx = pool.begin().await.expect("delayed attribution transaction");
+    remember_member_event(
+        &mut tx,
+        join_id,
+        1,
+        user_id,
+        "join",
+        Some(joined_at),
+        Some(&metadata),
+    )
+    .await
+    .expect("first membership");
+    sqlx::query(
+        "INSERT INTO activity.member_events (id, user_id, guild_id, event_type, occurred_at, metadata)
+         VALUES ($1, $2, 1, 'join', $3, $4::jsonb)",
+    )
+    .bind(join_id)
+    .bind(user_id)
+    .bind(joined_at)
+    .bind(&metadata)
+    .execute(&mut *tx)
+    .await
+    .expect("source join");
+    sqlx::query(
+        "UPDATE activity.twitch_invite_members SET voice_qualified_at = $3
+         WHERE guild_id = 1 AND user_id = $2",
+    )
+    .bind(1_i64)
+    .bind(user_id)
+    .bind(ready_at)
+    .execute(&mut *tx)
+    .await
+    .expect("day 14 activity proof");
+    remember_member_event(
+        &mut tx,
+        join_id + 1,
+        1,
+        user_id,
+        "leave",
+        Some(left_at),
+        None,
+    )
+    .await
+    .expect("day 15 departure");
+    tx.commit().await.expect("join and departure commit");
+
+    reconcile_attribution(pool, 1)
+        .await
+        .expect("delayed attribution after departure");
+    let invite = candidate(pool, user_id).await;
+    assert!(invite.eligible);
+    assert_eq!(invite.left_at, Some(left_at));
+    assert_eq!(
+        evaluate_one(pool, &invite, None, &[], left_at + Duration::days(1))
+            .await
+            .expect("qualify from historical membership proof"),
+        Some("qualified")
+    );
+}
+
+#[tokio::test]
+async fn delayed_attribution_keeps_personal_owner_valid_at_join_time() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined_at = at("2026-01-01T12:00:00Z");
+    let revoked_at = joined_at + Duration::days(1);
+    let metadata = json!({
+        "discord_joined_at": joined_at.to_rfc3339(),
+        "invite_code": "ViewerCode"
+    })
+    .to_string();
+
+    sqlx::query(
+        "UPDATE bot.twitch_personal_invites SET revoked_at = $1
+         WHERE streamer_twitch_user_id = '42' AND inviter_twitch_user_id = '43'",
+    )
+    .bind(revoked_at)
+    .execute(pool)
+    .await
+    .expect("revoke after join");
+
+    let mut tx = pool.begin().await.expect("historical join transaction");
+    remember_member_event(
+        &mut tx,
+        9_900_201,
+        1,
+        9_900_201,
+        "join",
+        Some(joined_at),
+        Some(&metadata),
+    )
+    .await
+    .expect("historical membership");
+    sqlx::query(
+        "INSERT INTO activity.member_events (id, user_id, guild_id, event_type, occurred_at, metadata)
+         VALUES (9900201, 9900201, 1, 'join', $1, $2::jsonb)",
+    )
+    .bind(joined_at)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await
+    .expect("historical public join");
+    tx.commit().await.expect("historical join commit");
+
+    reconcile_attribution(pool, 1)
+        .await
+        .expect("late historical attribution");
+    let attribution: (Option<String>, Option<String>, bool) = sqlx::query_as(
+        "SELECT streamer_twitch_user_id, inviter_twitch_user_id, eligible
+         FROM bot.twitch_invite_joins WHERE join_id = 9900201",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("historically valid owner");
+    assert_eq!(attribution, (Some("42".into()), Some("43".into()), true));
+}
+
+#[tokio::test]
+async fn ambiguous_codes_and_case_mismatches_never_attribute() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined = at("2026-01-01T12:00:00Z");
+    join(pool, 15, 113, joined, "viewercode").await;
+    assert!(pending(pool, 1).await.expect("case mismatch").is_empty());
+    sqlx::query("UPDATE bot.twitch_streamer_invites SET invite_code = 'ViewerCode'")
+        .execute(pool)
+        .await
+        .expect("ambiguous owners");
+    join(pool, 16, 114, joined, "ViewerCode").await;
+    assert!(pending(pool, 1)
+        .await
+        .expect("ambiguous mapping")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn personal_owner_names_follow_stable_id_and_preserve_join_snapshots() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined_at = at("2026-01-01T12:00:00Z");
+
+    join(pool, 9_900_101, 9_900_101, joined_at, "ViewerCode").await;
+    sqlx::query(
+        "UPDATE bot.twitch_streamer_invites SET streamer_login = 'new-login'
+         WHERE twitch_user_id = '42'",
+    )
+    .execute(pool)
+    .await
+    .expect("stable owner rename");
+    sqlx::query(
+        "INSERT INTO bot.twitch_streamer_invites
+         (streamer_login, guild_id, channel_id, twitch_user_id, invite_code, invite_url)
+         VALUES ('streamer', 1, 3, '99', 'RecycledCode', 'https://discord.gg/RecycledCode')",
+    )
+    .execute(pool)
+    .await
+    .expect("recycled login owner");
+    join(pool, 9_900_102, 9_900_102, joined_at, "ViewerCode").await;
+
+    let owners: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT join_id, streamer_login, streamer_twitch_user_id
+         FROM bot.twitch_invite_joins WHERE join_id IN (9900101, 9900102)
+         ORDER BY join_id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("attributed owner snapshots");
+    assert_eq!(
+        owners,
+        vec![
+            (9_900_101, "streamer".into(), Some("42".into())),
+            (9_900_102, "new-login".into(), Some("42".into())),
+        ]
+    );
+
+    let page = list_page(
+        pool,
+        1,
+        joined_at - Duration::days(1),
+        None,
+        None,
+        10,
+    )
+    .await
+    .expect("current owner names");
+    assert_eq!(page.invites.len(), 2);
+    assert!(page.invites.iter().all(|invite| invite.streamer_login == "new-login"));
+    let historical_login: String = sqlx::query_scalar(
+        "SELECT streamer_login FROM bot.twitch_personal_invites
+         WHERE streamer_twitch_user_id = '42' AND inviter_twitch_user_id = '43'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("historical link name");
+    assert_eq!(historical_login, "streamer");
+}
+
+#[tokio::test]
+async fn regular_departure_does_not_relabel_the_first_membership_as_prior() {
     let db = database().await;
     let pool = db.pool();
     let joined_at = at("2026-01-01T10:00:00Z");
@@ -541,7 +753,7 @@ async fn regular_departure_marks_prior_membership_without_rewriting_join_time() 
     .fetch_one(pool)
     .await
     .expect("membership boundary");
-    assert_eq!(membership, (true, Some(left_at), None));
+    assert_eq!(membership, (false, Some(left_at), None));
     let first_joined_at: DateTime<Utc> = sqlx::query_scalar(
         "SELECT first_joined_at FROM activity.twitch_invite_members
          WHERE guild_id = 1 AND user_id = 990002",

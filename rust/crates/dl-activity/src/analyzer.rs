@@ -382,7 +382,12 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
     }
 
     let personal: Vec<(String, String)> = sqlx::query_as(
-        "SELECT streamer_login, invite_code FROM bot.twitch_personal_invites WHERE revoked_at IS NULL",
+        "SELECT current.streamer_login, personal.invite_code
+         FROM bot.twitch_personal_invites AS personal
+         JOIN bot.twitch_streamer_invites AS current
+           ON current.twitch_user_id = personal.streamer_twitch_user_id
+          AND current.channel_id IS NOT NULL
+         WHERE personal.revoked_at IS NULL",
     )
             .fetch_all(pool)
             .await
@@ -978,6 +983,33 @@ mod tests {
         .fetch_one(pool)
         .await?;
         Ok(row.count)
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn personal_source_lookup_resolves_current_login_by_owner_id() -> Result<(), Box<dyn std::error::Error>> {
+        let db = test_database::database().await;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO bot.twitch_streamer_invites
+             (streamer_login, guild_id, channel_id, twitch_user_id, invite_code, invite_url)
+             VALUES ('new-login', 1, 2, '918273645042', 'CURRENTLINK', 'https://discord.gg/CURRENTLINK')",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO bot.twitch_personal_invites
+             (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id,
+              channel_id, invite_code, invite_url)
+             VALUES ('918273645042', '918273645043', 'old-login', 1, 2,
+                     'PERSONALLINK', 'https://discord.gg/PERSONALLINK')",
+        )
+        .execute(pool)
+        .await?;
+
+        let (twitch, _) = load_lookups(pool).await;
+        assert_eq!(twitch.get("personallink").map(String::as_str), Some("new-login"));
+        Ok(())
     }
 
     #[tokio::test]
