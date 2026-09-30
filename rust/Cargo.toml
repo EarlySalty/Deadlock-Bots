@@ -36,7 +36,9 @@ members = [
     "bin/dl-central-migrate",
     "bin/dl-central-sync",
     "bin/dl-infisical-env",
+    "bin/dl-unit-failure-notify",
 ]
+exclude = ["vendor/uplink-infisical-transport"]
 
 [workspace.package]
 edition = "2021"

@@ -1,0 +1,24 @@
+[package]
+name = "dl-unit-failure-notify"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+fs2 = "0.4"
+libc = "0.2"
+zeroize = "1"
+uplink-infisical-transport = { path = "../../vendor/uplink-infisical-transport" }
+
+[dev-dependencies]
+tempfile.workspace = true
