@@ -641,7 +641,9 @@ mod tests {
         let reconcile = tokio::spawn(async move {
             dl_activity::qualified_invites::reconcile_attribution(&reader_pool, 1).await
         });
-        probe_reader.send(()).map_err(test_error)?;
+        probe_reader
+            .send(())
+            .map_err(|_| test_error("reconcile probe receiver dropped"))?;
         let reader_is_blocked = reader_waiting_rx.await.map_err(test_error)?;
         release_writer.send(commit_writer).map_err(test_error)?;
         writer.await.map_err(test_error)?.map_err(test_error)?;
