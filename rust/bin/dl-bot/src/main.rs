@@ -1236,7 +1236,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         model: verify_model,
                     },
                 ),
-                env_f64_default("MOD_ANALYZE_FLAG_THRESHOLD", 0.5),
             );
             let policy = dl_moderation::action_policy::ActionPolicy::new(
                 dl_moderation::action_policy::ActionPolicyConfig {
