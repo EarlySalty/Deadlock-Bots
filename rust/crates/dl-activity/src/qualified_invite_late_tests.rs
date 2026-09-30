@@ -310,3 +310,65 @@ async fn evidence_writer_waits_for_expiry_and_leaves_a_fresh_marker_after_commit
         Some("qualified")
     );
 }
+
+#[tokio::test]
+async fn ineligible_rejoin_cannot_consume_original_join_late_evidence() {
+    let db = database().await;
+    let pool = db.pool();
+    let user = 991_400;
+    let joined = at("2026-01-01T12:00:00Z");
+    let deadline = joined + Duration::days(30);
+    join(pool, 991_400, user, joined, "ViewerCode").await;
+    let original = candidate(pool, user).await;
+    let member = MemberProof {
+        joined_at: Some(joined),
+        is_bot: false,
+        checked_at: deadline,
+    };
+    assert_eq!(
+        evaluate_one(pool, &original, Some(&member), &[], deadline)
+            .await
+            .expect("original expires"),
+        Some("expired")
+    );
+    let left = deadline + Duration::days(1);
+    let mut tx = pool.begin().await.expect("later departure");
+    remember_member_event(&mut tx, 991_401, 1, user, "leave", Some(left), None)
+        .await
+        .expect("first departure");
+    tx.commit().await.expect("departure commit");
+    join(pool, 991_402, user, left + Duration::days(1), "ViewerCode").await;
+    let rejoin = candidate(pool, user).await;
+    assert!(!rejoin.eligible);
+    assert_eq!(rejoin.join_id, 991_402);
+    voice(
+        pool,
+        9_914_000,
+        user,
+        20,
+        deadline - Duration::minutes(16),
+        900,
+    )
+    .await;
+    assert_eq!(evidence_queue_count(pool, user).await, 1);
+    let now = deadline + Duration::days(3);
+    assert_eq!(
+        evaluate_one(pool, &rejoin, None, &[], now)
+            .await
+            .expect("captured rejoin candidate"),
+        Some("expired")
+    );
+    assert_eq!(
+        evidence_queue_count(pool, user).await,
+        1,
+        "unrelated rejoin leaves original marker alone"
+    );
+    assert_eq!(candidate(pool, user).await.join_id, original.join_id);
+    assert_eq!(
+        evaluate_one(pool, &original, None, &[], now)
+            .await
+            .expect("original historical qualification"),
+        Some("qualified")
+    );
+    assert_eq!(evidence_queue_count(pool, user).await, 0);
+}

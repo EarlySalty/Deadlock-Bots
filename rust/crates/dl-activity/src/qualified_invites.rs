@@ -333,11 +333,14 @@ pub async fn pending(pool: &PgPool, guild_id: i64) -> Result<Vec<PendingInvite>,
         "SELECT j.join_id, j.guild_id, j.user_id, j.joined_at, j.eligible, m.left_at
          FROM bot.twitch_invite_joins j
          JOIN activity.twitch_invite_members m USING (guild_id, user_id)
-         WHERE j.guild_id = $1 AND (j.status = 'pending' OR
-             (j.status = 'expired' AND j.reason = 'deadline' AND EXISTS (
-                 SELECT 1 FROM activity.twitch_invite_evidence_queue q
-                 WHERE q.guild_id = j.guild_id AND q.user_id = j.user_id)))
-         ORDER BY j.joined_at, j.join_id",
+         WHERE j.guild_id = $1 AND j.status = 'pending'
+         UNION ALL
+         SELECT j.join_id, j.guild_id, j.user_id, j.joined_at, j.eligible, m.left_at
+         FROM activity.twitch_invite_evidence_queue q
+         JOIN bot.twitch_invite_joins j USING (guild_id, user_id)
+         JOIN activity.twitch_invite_members m USING (guild_id, user_id)
+         WHERE q.guild_id = $1 AND j.eligible AND j.status = 'expired' AND j.reason = 'deadline'
+         ORDER BY joined_at, join_id",
     )
     .bind(guild_id)
     .fetch_all(pool)
@@ -453,8 +456,8 @@ pub async fn evaluate_one(
     // Evidence writers take the join SHARE lock before marking this row.
     // A later writer therefore marks a new generation after this transaction.
     let marked: Option<bool> = sqlx::query_scalar(
-        "SELECT TRUE FROM activity.twitch_invite_evidence_queue WHERE guild_id=$1 AND user_id=$2 FOR UPDATE",
-    ).bind(current.guild_id).bind(current.user_id).fetch_optional(&mut *tx).await?;
+        "SELECT TRUE FROM activity.twitch_invite_evidence_queue WHERE guild_id=$1 AND user_id=$2 AND $3 FOR UPDATE",
+    ).bind(current.guild_id).bind(current.user_id).bind(current.eligible).fetch_optional(&mut *tx).await?;
     let opted_out: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out = TRUE)
              OR EXISTS (SELECT 1 FROM activity.twitch_invite_members WHERE guild_id=$2 AND user_id=$1 AND prior_member)",
