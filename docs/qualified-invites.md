@@ -91,7 +91,7 @@ Der Export enthält keine Discord-Mitglieds-ID, keine Discord-Namen und keine Na
 
 ## Zustände und Nachweise
 
-Ein Join startet dauerhaft als `pending`. Er wird genau einmal `qualified` oder `expired`. Datenbank-Trigger protokollieren die Übergänge und verhindern das Löschen, das Überschreiben abgeschlossener Zustände und das spätere Austauschen der Attribution.
+Ein Join startet als `pending`. Datenbank-Trigger protokollieren jeden Statusübergang genau einmal und verhindern das Löschen sowie das spätere Austauschen der Attribution. `qualified` bleibt endgültig. Nur `expired` mit dem Grund `deadline` darf nachträglich `qualified` werden, wenn neu gespeicherte Belege tatsächlich innerhalb der ursprünglichen Beitritts-, Austritts- und 30-Tage-Grenzen entstanden sind. Nachrichten, abgeschlossene Voice-Sitzungen und bestätigte Live-Voice-Belege markieren dafür gezielt das betroffene Mitglied; es gibt keinen dauernden Scan abgelaufener Einladungen. Fehlende oder zu alte Mitgliedschaftsbelege lassen diese Markierung bestehen. Datenschutz, frühere Mitgliedschaft und der früheste Austritt bleiben sperrend; ein späterer erneuter Beitritt darf die Markierung des ursprünglichen Beitritts nicht verbrauchen.
 
 Qualifiziert wird erst, wenn beide Bedingungen spätestens 720 Stunden nach dem tatsächlichen Discord-Beitritt erfüllt waren:
 
