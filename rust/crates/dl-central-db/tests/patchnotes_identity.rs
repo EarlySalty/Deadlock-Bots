@@ -87,7 +87,7 @@ async fn patchnotes_identity_sequences_continue_after_existing_high_ids() {
 async fn reset_patchnotes_tables_to_pre_identity_shape(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
         r#"
-        TRUNCATE patchnotes.changelog_posts, patchnotes.deadlock_changelogs;
+        TRUNCATE patchnotes.guild_dispatch, patchnotes.changelog_posts, patchnotes.deadlock_changelogs;
         ALTER TABLE patchnotes.changelog_posts ALTER COLUMN id DROP IDENTITY IF EXISTS;
         ALTER TABLE patchnotes.deadlock_changelogs ALTER COLUMN id DROP IDENTITY IF EXISTS;
         "#,
