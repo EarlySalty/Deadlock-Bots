@@ -65,6 +65,10 @@ fn should_retry_join_source(has_baseline: bool, kind: &str) -> bool {
     has_baseline && matches!(kind, "server_discovery" | "unknown")
 }
 
+fn has_trusted_join_baseline(snapshot_current: bool, has_cached_snapshot: bool) -> bool {
+    snapshot_current && has_cached_snapshot
+}
+
 fn classify_snapshots(
     meta: &mut Map<String, Value>,
     before_map: Option<&HashMap<String, InviteSnap>>,
@@ -470,8 +474,10 @@ impl InviteTracker {
         meta.insert("join_source_label".into(), Value::from("Unbekannt"));
         meta.insert("join_source_confidence".into(), Value::from("low"));
 
-        let before = self.by_guild.lock().await.get(&guild_id).cloned();
-        let has_baseline = before.is_some();
+        let baseline_current = self.health.is_current(guild_id).await;
+        let cached_before = self.by_guild.lock().await.get(&guild_id).cloned();
+        let has_baseline = has_trusted_join_baseline(baseline_current, cached_before.is_some());
+        let before = has_baseline.then_some(cached_before).flatten();
         let attempts = if has_baseline { 2 } else { 1 };
         let mut latest_after: Option<HashMap<String, InviteSnap>> = None;
         let mut latest_observed_at = chrono::Utc::now();
@@ -721,6 +727,14 @@ mod tests {
         );
         assert!(!tracker.health.is_current(guild_id as u64).await);
         assert_eq!(tracker.by_guild.lock().await[&(guild_id as u64)].len(), 1);
+    }
+
+    #[test]
+    fn stale_cached_snapshot_is_not_used_as_join_baseline() {
+        assert!(has_trusted_join_baseline(true, true));
+        assert!(!has_trusted_join_baseline(false, true));
+        assert!(!has_trusted_join_baseline(true, false));
+        assert!(!has_trusted_join_baseline(false, false));
     }
 
     #[test]
