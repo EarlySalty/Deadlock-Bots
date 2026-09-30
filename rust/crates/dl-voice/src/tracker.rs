@@ -162,6 +162,7 @@ struct GracePeriod {
 #[derive(Default)]
 struct TrackerState {
     generations: HashMap<u64, u64>,
+    observed: HashMap<u64, NaiveDateTime>,
     sessions: HashMap<(u64, u64), Session>,
     grace: HashMap<(u64, u64), GracePeriod>,
     config_cache: HashMap<u64, TrackerConfig>,
@@ -397,7 +398,12 @@ impl VoiceTracker {
         let mut to_finalize: Vec<(Session, NaiveDateTime)> = Vec::new();
         {
             let mut state = self.state.lock().await;
-            if state.generations.get(&guild_id) != Some(&snapshot.generation) {
+            if state.generations.get(&guild_id) != Some(&snapshot.generation)
+                || state
+                    .observed
+                    .get(&guild_id)
+                    .is_some_and(|latest| *latest > now)
+            {
                 return;
             }
 
@@ -991,6 +997,10 @@ mod tests {
             tracker.state.lock().await.sessions[&(100, 1)].start_time,
             new_start
         );
+        let stale = snapshot
+            .guild_voice_snapshot(1)
+            .await
+            .expect("older snapshot");
         snapshot
             .observations
             .lock()
@@ -1000,6 +1010,17 @@ mod tests {
             .sequence = 4;
         tracker.update_channel(1, 10).await;
         assert!(tracker.state.lock().await.sessions[&(100, 1)].start_time >= new_start);
+        let current = tracker.state.lock().await.sessions[&(100, 1)].clone();
+        assert_eq!(
+            tracker
+                .reconcile_snapshot(&stale)
+                .await
+                .expect("stale snapshot"),
+            0
+        );
+        let state = tracker.state.lock().await;
+        assert_eq!(state.sessions[&(100, 1)].sequence, current.sequence);
+        assert_eq!(state.sessions[&(100, 1)].start_time, current.start_time);
     }
 
     #[tokio::test]

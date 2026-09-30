@@ -10,6 +10,13 @@ impl VoiceTracker {
         let observed = snapshot.observed_at.min(Utc::now()).naive_utc();
         let mut state = self.state.lock().await;
         if state
+            .observed
+            .get(&snapshot.guild_id)
+            .is_some_and(|latest| *latest > observed)
+        {
+            return Ok(0);
+        }
+        if state
             .generations
             .get(&snapshot.guild_id)
             .is_some_and(|generation| *generation > snapshot.generation)
@@ -68,6 +75,8 @@ impl VoiceTracker {
             state.grace.remove(&key);
             closed += 1;
         }
+        // Advance only after successful persistence. A failed close remains retryable.
+        state.observed.insert(snapshot.guild_id, observed);
         if closed > 0 {
             tracing::info!(
                 closed,
