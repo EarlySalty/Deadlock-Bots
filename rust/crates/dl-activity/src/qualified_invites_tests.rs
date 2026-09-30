@@ -653,6 +653,99 @@ async fn delayed_message_before_departure_qualifies_but_departure_boundary_is_ex
 }
 
 #[tokio::test]
+async fn delayed_voice_before_departure_survives_rejoin_without_counting_later_voice() {
+    use crate::qualified_invite_voice::record_snapshot;
+    let db = database().await;
+    let pool = db.pool();
+    let joined = at("2026-01-01T12:00:00Z");
+    let left = joined + Duration::days(15);
+    for (user, offset) in [(990_301, -1), (990_302, 0), (990_303, 1)] {
+        join(pool, user, user, joined, "ViewerCode").await;
+        let started = left - Duration::minutes(15) + Duration::microseconds(offset);
+        for minute in 0..=14 {
+            record_snapshot(
+                pool,
+                1,
+                &HashMap::from([(user as u64, 2)]),
+                &[],
+                started + Duration::minutes(minute),
+                Some(user as u64),
+                false,
+            )
+            .await
+            .expect("confirmed first membership voice");
+        }
+        let mut tx = pool.begin().await.expect("membership writer");
+        remember_member_event(&mut tx, user + 10, 1, user, "leave", Some(left), None)
+            .await
+            .expect("departure commits before queued voice");
+        if user == 990_301 {
+            let rejoined = left + Duration::seconds(5);
+            let metadata = json!({"discord_joined_at": rejoined.to_rfc3339()}).to_string();
+            remember_member_event(
+                &mut tx,
+                user + 20,
+                1,
+                user,
+                "join",
+                Some(rejoined),
+                Some(&metadata),
+            )
+            .await
+            .expect("rejoin commits before old voice callback");
+        }
+        tx.commit().await.expect("membership commit");
+        record_snapshot(
+            pool,
+            1,
+            &HashMap::new(),
+            &[],
+            left + Duration::seconds(10),
+            Some(user as u64),
+            true,
+        )
+        .await
+        .expect("historical end closes at original departure");
+        // A later rejoin snapshot must not open another first-membership clock.
+        record_snapshot(
+            pool,
+            1,
+            &HashMap::from([(user as u64, 2)]),
+            &[],
+            left + Duration::minutes(1),
+            Some(user as u64),
+            false,
+        )
+        .await
+        .expect("later snapshot");
+        let row: (Option<DateTime<Utc>>,Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT voice_qualified_at,voice_started_at FROM activity.twitch_invite_members WHERE user_id=$1")
+            .bind(user).fetch_one(pool).await.expect("stored proof and closed clock");
+        assert_eq!(
+            row,
+            (
+                if offset < 0 {
+                    Some(left - Duration::microseconds(1))
+                } else {
+                    None
+                },
+                None
+            )
+        );
+        if offset < 0 {
+            let invite = candidate(pool, user).await;
+            assert_eq!(
+                evaluate_one(pool, &invite, None, &[], left + Duration::hours(1))
+                    .await
+                    .expect("historical voice qualification"),
+                Some("qualified")
+            );
+        }
+    }
+}
+
+
+#[tokio::test]
 async fn delayed_attribution_after_day_15_leave_preserves_day_14_qualification() {
     let db = database().await;
     let pool = db.pool();

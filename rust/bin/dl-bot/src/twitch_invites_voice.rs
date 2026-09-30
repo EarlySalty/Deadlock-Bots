@@ -74,13 +74,27 @@ impl TwitchInvites {
         *self
             .voice_sequences
             .lock()
-            .map_err(|_| "Voice-Sequenzsperre beschädigt")? = snapshot
-            .observations
-            .iter()
-            .map(|(user, value)| (*user, value.sequence))
-            .collect();
+            .map_err(|_| "Voice-Sequenzsperre beschädigt")? = confirmed_sequences(&snapshot);
         Ok(())
     }
+}
+
+fn confirmed_sequences(
+    snapshot: &dl_discord::voice_cache::GuildVoiceSnapshot,
+) -> HashMap<u64, u64> {
+    // A freshly loaded cache has confirmed members but no transitions yet.
+    // Their first mute has sequence 0; their first move/leave has sequence 1.
+    snapshot
+        .members
+        .keys()
+        .map(|user| (*user, 0))
+        .chain(
+            snapshot
+                .observations
+                .iter()
+                .map(|(user, value)| (*user, value.sequence)),
+        )
+        .collect()
 }
 
 async fn write_observed_snapshot(
@@ -165,6 +179,81 @@ mod tests {
     use dl_discord::voice_cache::{GuildVoiceSnapshot, VoiceObservation};
     mod peer_database {
         include!("../../../test-support/peer_database.rs");
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_keeps_first_mute_and_leave_proof() {
+        let db = peer_database::database().await;
+        let start = DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+            .expect("timestamp")
+            - chrono::Duration::minutes(20);
+        sqlx::query(
+            "INSERT INTO activity.twitch_invite_members
+            (guild_id,user_id,first_joined_at,current_joined_at,prior_member)
+            VALUES (1,100,$1,$1,FALSE),(1,101,$1,$1,FALSE)",
+        )
+        .bind(start)
+        .execute(db.pool())
+        .await
+        .expect("members");
+        let mut snapshot = GuildVoiceSnapshot {
+            guild_id: 1,
+            generation: 1,
+            observed_at: start,
+            channels: HashMap::from([(10, None), (20, None)]),
+            members: HashMap::from([(100, 10), (101, 10)]),
+            observations: HashMap::new(),
+        };
+        let mut previous = HashMap::new();
+        for minute in 0..=14 {
+            snapshot.observed_at = start + chrono::Duration::minutes(minute);
+            write_observed_snapshot(db.pool(), 1, &snapshot, &previous, &[])
+                .await
+                .expect("initial cache heartbeat");
+            previous = confirmed_sequences(&snapshot);
+        }
+        assert_eq!(previous, HashMap::from([(100, 0), (101, 0)]));
+        snapshot.observed_at =
+            start + chrono::Duration::minutes(14) + chrono::Duration::seconds(30);
+        snapshot.observations.insert(
+            100,
+            VoiceObservation {
+                sequence: 0,
+                changed_at: snapshot.observed_at,
+                from_channel: Some(10),
+                channel: Some(10),
+                muted_since: Some(snapshot.observed_at),
+            },
+        );
+        write_observed_snapshot(db.pool(), 1, &snapshot, &previous, &[])
+            .await
+            .expect("first mute does not erase clock");
+        previous = confirmed_sequences(&snapshot);
+        let ended = start + chrono::Duration::minutes(15) + chrono::Duration::seconds(1);
+        snapshot.observed_at = ended + chrono::Duration::seconds(10);
+        snapshot.members = HashMap::from([(101, 20)]);
+        for (user, channel) in [(100, None), (101, Some(20))] {
+            snapshot.observations.insert(
+                user,
+                VoiceObservation {
+                    sequence: 1,
+                    changed_at: ended,
+                    from_channel: Some(10),
+                    channel,
+                    muted_since: None,
+                },
+            );
+        }
+        write_observed_snapshot(db.pool(), 1, &snapshot, &previous, &[])
+            .await
+            .expect("first leave and move preserve fifteen minutes");
+        let proofs: Vec<Option<DateTime<Utc>>> = sqlx::query_scalar(
+            "SELECT voice_qualified_at FROM activity.twitch_invite_members ORDER BY user_id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("solo voice proofs");
+        assert_eq!(proofs, vec![Some(start + chrono::Duration::minutes(15)); 2]);
     }
 
     #[tokio::test]

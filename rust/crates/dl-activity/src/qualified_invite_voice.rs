@@ -7,6 +7,7 @@ use sqlx::PgPool;
 struct VoiceClock {
     user_id: i64,
     first_joined_at: DateTime<Utc>,
+    left_at: Option<DateTime<Utc>>,
     voice_channel_id: Option<i64>,
     voice_started_at: Option<DateTime<Utc>>,
     voice_observed_at: Option<DateTime<Utc>>,
@@ -20,6 +21,14 @@ fn observe(
     explicit_transition: bool,
     excluded: &[i64],
 ) {
+    // Membership and voice subscribers can finish in the opposite order.
+    // Close the first membership's existing clock at its actual boundary;
+    // a later rejoin must neither erase that proof nor start a new clock.
+    let departed = clock.left_at.is_some_and(|left| observed_at >= left);
+    let observed_at = clock
+        .left_at
+        .map_or(observed_at, |left| observed_at.min(left));
+    let channel = if departed { None } else { channel };
     if clock
         .voice_observed_at
         .is_some_and(|last| last > observed_at)
@@ -31,7 +40,7 @@ fn observe(
         .is_some_and(|last| observed_at - last <= Duration::seconds(240));
     let same_channel = clock.voice_channel_id.is_some() && channel == clock.voice_channel_id;
     if fresh
-        && (same_channel || explicit_transition)
+        && (same_channel || explicit_transition || departed)
         && clock
             .voice_channel_id
             .is_some_and(|id| !excluded.contains(&id))
@@ -41,7 +50,10 @@ fn observe(
             .filter(|start| *start >= clock.first_joined_at)
         {
             let ready_at = started_at + Duration::minutes(15);
-            if ready_at <= observed_at && ready_at <= clock.first_joined_at + Duration::days(30) {
+            if ready_at <= observed_at
+                && ready_at <= clock.first_joined_at + Duration::days(30)
+                && clock.left_at.is_none_or(|left| ready_at < left)
+            {
                 clock.voice_qualified_at = Some(
                     clock
                         .voice_qualified_at
@@ -79,11 +91,11 @@ pub async fn record_snapshot(
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     let clocks: Vec<VoiceClock> = sqlx::query_as(
-        "SELECT user_id, first_joined_at, voice_channel_id, voice_started_at,
+        "SELECT user_id, first_joined_at, left_at, voice_channel_id, voice_started_at,
                 voice_observed_at, voice_qualified_at
          FROM activity.twitch_invite_members m
-         WHERE guild_id = $1 AND NOT prior_member AND left_at IS NULL
-             AND first_joined_at IS NOT NULL AND current_joined_at = first_joined_at
+         WHERE guild_id = $1 AND NOT prior_member
+             AND first_joined_at IS NOT NULL AND first_joined_at <= $3
              AND voice_qualified_at IS NULL
              AND first_joined_at + INTERVAL '720 hours' >= $3 - INTERVAL '4 minutes'
              AND ($2::bigint IS NULL OR user_id = $2)
@@ -132,6 +144,7 @@ mod tests {
             first_joined_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
                 .expect("fixture")
                 .with_timezone(&Utc),
+            left_at: None,
             voice_channel_id: None,
             voice_started_at: None,
             voice_observed_at: None,
