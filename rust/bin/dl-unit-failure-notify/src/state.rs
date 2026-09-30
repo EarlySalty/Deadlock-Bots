@@ -288,7 +288,7 @@ mod tests {
         assert!(state.eligible(1_000 + WEEK));
     }
     #[test]
-    fn duplicate_invocation_is_counted_once_and_failed_send_does_not_spend_budget() {
+    fn duplicate_invocation_is_counted_once_and_confirmation_preserves_newer_counts() {
         let mut state = State::default();
         state.observe("first");
         state.observe("first");

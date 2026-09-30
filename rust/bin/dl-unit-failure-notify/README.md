@@ -36,7 +36,8 @@ nicht erneut gezählt. Unterdrückte Starts bleiben im Zähler bis
 zur nächsten bestätigten Meldung. Sendebudget: höchstens eine erfolgreiche
 Meldung je rollierenden 24 Stunden und zwei je rollierenden sieben Tagen.
 Uhrsprünge rückwärts eröffnen kein zusätzliches Budget. Beobachtungen und noch
-offene sichere Payloads werden persistiert; Sendebudget und Zählerrücksetzung
+offene sichere Payloads werden persistiert. Unbestätigte HTTP-Versuche reservieren
+Budget bereits vor dem Versand; bestätigte Meldehistorie und Zählerrücksetzung
 werden erst nach `ok=true` plus Nachrichten-ID des Brokers fortgeschrieben.
 
 Beim Wechsel wird ein eigenes privates Rust-Verzeichnis verwendet; der vorhandene
