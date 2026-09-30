@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /home/nathanael/.local/codex-current/node_modules/.bin/codex -c 'preferred_auth_method="apikey"' "$@"
