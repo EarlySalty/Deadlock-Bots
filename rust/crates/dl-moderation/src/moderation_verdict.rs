@@ -125,7 +125,7 @@ fn explicit_scam_reason(reason: &str) -> bool {
     let reason = reason.to_lowercase();
 
     reason
-        .split([';', '.', '!', '?', '\n'])
+        .split([';', '.', '!', '?', ':', '\n'])
         .flat_map(split_assertion_scopes)
         .any(|part| {
             EXPLICIT_SCAM.iter().any(|needle| {
@@ -308,7 +308,7 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
         {
             if !trailing[previous_mention + 1..]
                 .iter()
-                .all(|word| matches!(*word, "und" | "oder" | "sowie"))
+                .all(|word| matches!(*word, "und" | "oder" | "sowie" | "betrugs"))
             {
                 return false;
             }
@@ -377,7 +377,7 @@ fn scam_mention_is_asserted(part: &str, index: usize, length: usize) -> bool {
     }) {
         return false;
     }
-    !after.iter().take(3).enumerate().any(|(position, word)| {
+    !after.iter().enumerate().any(|(position, word)| {
         if *word == "weder" {
             return true;
         }
@@ -552,9 +552,13 @@ mod tests {
         let reasons = [
             "Nur ein harmloses Voting-/Event-Poster mit Pizzen („Who’s next?“, „You have 0 votes“, „Vote for your favorite pizza“); kein sichtbarer Scam-/Phishing-, Gewinn- oder Auszahlungsversprechen.",
             "Keine konkreten Scam-Merkmale im Screenshot.",
+            "Kein sichtbares Scam-/Betrugs-/Phishing-Muster.",
+            "Keine sichtbaren Scam-, Phishing- oder Betrugs-Elemente.",
             "Ohne Anzeichen für einen Betrugsversuch oder Phishing.",
             "Phishing ist nicht sichtbar.",
             "Ein Scam-Muster ist nicht belegt.",
+            "Sichtbarer Scam ist nach Prüfung nicht belegt.",
+            "Sichtbarer Scam ist nach Prüfung nicht eindeutig.",
             "Warnung vor sichtbarem Phishing, keine Werbung.",
             "Der Screenshot zitiert einen sichtbaren Scam als Warnung.",
             "Eine Phishing-Warnung im Bericht.",
@@ -635,6 +639,9 @@ mod tests {
             "Sichtbarer Scam im Bild und Warnung an Moderatoren.",
             "Sichtbarer Scam im Bild, Warnung an Moderatoren.",
             "Kein Zweifel: sichtbarer Scam.",
+            "Ohne Zweifel: sichtbarer Scam.",
+            "Keine Entwarnung: sichtbarer Scam.",
+            "Nicht bloß Werbung: sichtbarer Scam.",
             "Sichtbarer Scam und Phishing ist unbestätigt.",
         ] {
             assert!(
