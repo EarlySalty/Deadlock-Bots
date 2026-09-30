@@ -525,10 +525,17 @@ mod tests {
         Ok(())
     }
 
+    fn test_error(error: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            error.to_string(),
+        ))
+    }
+
     async fn assert_writer_reconcile_serialization(
         commit_writer: bool,
         join_id: i64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = test_database::database().await;
         let pool = db.pool();
         sqlx::query(
@@ -545,6 +552,8 @@ mod tests {
         incoming.guild_id = 2;
         let writer_pool = pool.clone();
         let (writer_ready, writer_ready_rx) = tokio::sync::oneshot::channel();
+        let (probe_reader, probe_reader_rx) = tokio::sync::oneshot::channel();
+        let (reader_waiting, reader_waiting_rx) = tokio::sync::oneshot::channel();
         let (release_writer, release_writer_rx) = tokio::sync::oneshot::channel();
         let writer = tokio::spawn(async move {
             let mut tx = writer_pool.begin().await?;
@@ -568,6 +577,41 @@ mod tests {
             writer_ready
                 .send((writer_pid, interval_end))
                 .map_err(|_| anyhow::anyhow!("serialization test receiver dropped"))?;
+            probe_reader_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("reconcile probe receiver dropped"))?;
+            let reader_waiting_for_writer =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let waiting: bool = sqlx::query_scalar(
+                            "SELECT EXISTS (
+                                 SELECT 1
+                                 FROM pg_locks AS waiting
+                                 JOIN pg_locks AS holding
+                                   ON holding.locktype = waiting.locktype
+                                  AND holding.database IS NOT DISTINCT FROM waiting.database
+                                  AND holding.classid IS NOT DISTINCT FROM waiting.classid
+                                  AND holding.objid IS NOT DISTINCT FROM waiting.objid
+                                  AND holding.objsubid IS NOT DISTINCT FROM waiting.objsubid
+                                 WHERE waiting.locktype = 'advisory'
+                                   AND NOT waiting.granted
+                                   AND waiting.pid <> pg_backend_pid()
+                                   AND holding.pid = pg_backend_pid()
+                                   AND holding.granted
+                             )",
+                        )
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        if waiting {
+                            return Ok::<bool, sqlx::Error>(true);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await??;
+            reader_waiting
+                .send(reader_waiting_for_writer)
+                .map_err(|_| anyhow::anyhow!("reconcile waiting receiver dropped"))?;
             let should_commit = release_writer_rx.await.unwrap_or(false);
             if should_commit {
                 tx.commit().await?;
@@ -576,7 +620,7 @@ mod tests {
             }
             Ok::<(), anyhow::Error>(())
         });
-        let (writer_pid, interval_end) = writer_ready_rx.await?;
+        let (writer_pid, interval_end) = writer_ready_rx.await.map_err(test_error)?;
         let held_advisory_locks: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_locks
              WHERE pid = $1 AND locktype = 'advisory' AND granted",
@@ -584,11 +628,6 @@ mod tests {
         .bind(writer_pid)
         .fetch_one(pool)
         .await?;
-        if held_advisory_locks < 2 {
-            let _ = release_writer.send(false);
-            writer.await??;
-            anyhow::bail!("writer did not lock both old and new Guilds");
-        }
 
         insert_qualified_join(
             pool,
@@ -599,24 +638,23 @@ mod tests {
         )
         .await?;
         let reader_pool = pool.clone();
-        let mut reconcile = tokio::spawn(async move {
+        let reconcile = tokio::spawn(async move {
             dl_activity::qualified_invites::reconcile_attribution(&reader_pool, 1).await
         });
-        tokio::task::yield_now().await;
-        let completed_early =
-            match tokio::time::timeout(std::time::Duration::from_millis(100), &mut reconcile).await
-            {
-                Ok(result) => Some(result??),
-                Err(_) => None,
-            };
-        release_writer
-            .send(commit_writer)
-            .map_err(|_| anyhow::anyhow!("writer task ended before release"))?;
-        writer.await??;
-        if completed_early.is_some() {
-            anyhow::bail!("reconcile completed before the mapping writer released its Guild locks");
+        probe_reader.send(()).map_err(test_error)?;
+        let reader_is_blocked = reader_waiting_rx.await.map_err(test_error)?;
+        release_writer.send(commit_writer).map_err(test_error)?;
+        writer.await.map_err(test_error)?.map_err(test_error)?;
+        let reconciliation_result = reconcile.await.map_err(test_error)?;
+        if held_advisory_locks < 2 {
+            return Err(test_error("writer did not lock both old and new Guilds"));
         }
-        reconcile.await??;
+        if !reader_is_blocked {
+            return Err(test_error(
+                "reconcile did not wait for the mapping writer's Guild locks",
+            ));
+        }
+        reconciliation_result.map_err(test_error)?;
 
         let owner: Option<String> = sqlx::query_scalar(
             "SELECT streamer_twitch_user_id FROM bot.twitch_invite_joins WHERE join_id = $1",
@@ -624,16 +662,13 @@ mod tests {
         .bind(join_id)
         .fetch_optional(pool)
         .await?;
-        if commit_writer {
-            anyhow::ensure!(
-                owner.is_none(),
-                "committed code change attributed the old owner"
-            );
-        } else {
-            anyhow::ensure!(
-                owner.as_deref() == Some("918273645201"),
-                "rolled-back code change did not retain the old owner"
-            );
+        if commit_writer && owner.is_some() {
+            return Err(test_error("committed code change attributed the old owner"));
+        }
+        if !commit_writer && owner.as_deref() != Some("918273645201") {
+            return Err(test_error(
+                "rolled-back code change did not retain the old owner",
+            ));
         }
         Ok(())
     }
@@ -941,9 +976,11 @@ mod tests {
         )
         .fetch_one(pool)
         .await?;
-        let unknown_after_sync: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
-             WHERE guild_id = 1 AND invite_code = 'UNKNOWN_CODE' AND valid_until IS NULL",
+        let unknown_history_end: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_until FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'UNKNOWN_CODE'
+               AND source_login_snapshot = 'legacy-login' AND twitch_user_id IS NULL
+               AND valid_until IS NOT NULL",
         )
         .fetch_one(pool)
         .await?;
@@ -963,14 +1000,7 @@ mod tests {
         insert_qualified_join(pool, 910_005, 920_005, "RECYCLE_A", recycle_a_end).await?;
         insert_qualified_join(pool, 910_006, 920_006, "CODE_B", code_b_start).await?;
         insert_qualified_join(pool, 910_007, 920_007, "RECYCLE_B", recycle_b_start).await?;
-        insert_qualified_join(
-            pool,
-            910_008,
-            920_008,
-            "UNKNOWN_CODE",
-            unknown_after_sync + chrono::Duration::milliseconds(1),
-        )
-        .await?;
+        insert_qualified_join(pool, 910_008, 920_008, "UNKNOWN_CODE", unknown_history_end).await?;
         insert_qualified_join(pool, 910_011, 920_011, "SAME_CODE", same_code_start).await?;
         insert_qualified_join(pool, 910_012, 920_012, "SAME_RECYCLE", same_recycle_start).await?;
 
@@ -1006,12 +1036,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_waits_for_guild_history_writer_commit() -> anyhow::Result<()> {
+    async fn reconcile_waits_for_guild_history_writer_commit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         assert_writer_reconcile_serialization(true, 930_021).await
     }
 
     #[tokio::test]
-    async fn reconcile_waits_for_guild_history_writer_rollback() -> anyhow::Result<()> {
+    async fn reconcile_waits_for_guild_history_writer_rollback(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         assert_writer_reconcile_serialization(false, 930_022).await
     }
 
