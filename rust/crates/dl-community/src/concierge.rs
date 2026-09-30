@@ -1637,6 +1637,12 @@ pub trait ConciergePort: Send + Sync {
         body: Map<String, Value>,
     ) -> Result<(), String>;
     async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
+    async fn pinned_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Option<bool>, String>;
+    async fn existing_pate_request_cards(&self) -> Result<Vec<LegacyPateRequestMessage>, String>;
 }
 
 #[derive(Clone)]
@@ -1894,6 +1900,13 @@ pub struct PatenInventar {
     pub offene_anfragen: i64,
     pub aktive_patenschaften: i64,
     pub leitfaden_gepostet: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyPateRequestMessage {
+    pub user_id: u64,
+    pub message_id: u64,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2394,6 +2407,73 @@ impl ConciergeStore {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    async fn import_legacy_pate_request(
+        &self,
+        guild_id: u64,
+        request: LegacyPateRequestMessage,
+    ) -> CommunityDbResult<bool> {
+        let user_id = u64_to_i64(request.user_id, "concierge_pate_requests.user_id")?;
+        let guild_id = u64_to_i64(guild_id, "concierge_pate_requests.guild_id")?;
+        let channel_id = u64_to_i64(
+            PATE_REQUEST_CHANNEL_ID,
+            "concierge_pate_requests.channel_id",
+        )?;
+        let message_id = u64_to_i64(request.message_id, "concierge_pate_requests.message_id")?;
+        let inserted = sqlx::query(
+            "INSERT INTO bot.concierge_pate_requests(
+                user_id, guild_id, channel_id, message_id, status, created_at, updated_at
+             )
+             SELECT $1, $2, $3, $4, 'open', $5, $5
+              WHERE EXISTS (
+                    SELECT 1 FROM bot.concierge_profiles
+                     WHERE user_id = $1 AND pate_requested
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM bot.concierge_pate_requests WHERE message_id = $4
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM bot.concierge_patenschaften
+                     WHERE user_id = $1 AND released_at IS NULL
+                )
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(request.created_at)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+
+    async fn has_legacy_pate_request(&self) -> CommunityDbResult<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM bot.concierge_profiles AS profile
+                 WHERE profile.pate_requested
+                   AND NOT EXISTS (
+                       SELECT 1 FROM core.user_privacy
+                        WHERE user_id = profile.user_id AND opted_out
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM bot.concierge_patenschaften
+                        WHERE user_id = profile.user_id AND released_at IS NULL
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM bot.concierge_pate_requests
+                        WHERE user_id = profile.user_id AND status = 'open'
+                   )
+            )",
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     async fn begin_privacy_action(
@@ -5641,6 +5721,45 @@ impl Concierge {
         true
     }
 
+    pub async fn import_legacy_pate_requests(&self) {
+        if !self.config.enabled {
+            return;
+        }
+        match self.store.has_legacy_pate_request().await {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Alte Patenanfragen konnten nicht geprüft werden");
+                return;
+            }
+        }
+        let requests = match self.port.existing_pate_request_cards().await {
+            Ok(requests) => requests,
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Alte Patenanfragen konnten nicht übernommen werden");
+                return;
+            }
+        };
+        let mut imported = 0;
+        for request in requests {
+            match self
+                .store
+                .import_legacy_pate_request(self.config.main_guild_id, request)
+                .await
+            {
+                Ok(true) => imported += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(%err, message_id = request.message_id, "Concierge: Alte Patenanfrage konnte nicht gespeichert werden");
+                    return;
+                }
+            }
+        }
+        if imported > 0 {
+            tracing::info!(imported, "Concierge: Alte Patenanfragen übernommen");
+        }
+    }
+
     pub async fn ensure_pate_leitfaden(&self, repo_root: &std::path::Path) {
         if !self.config.enabled {
             return;
@@ -5663,18 +5782,60 @@ impl Concierge {
                 .flatten();
         let message_id = match stored_message_id {
             Some(message_id) => {
-                if stored_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-                    return;
-                }
-                if let Err(err) = self
+                let current = match self
                     .port
-                    .edit_channel_v2(PATE_REQUEST_CHANNEL_ID, message_id, body)
+                    .pinned_message(PATE_REQUEST_CHANNEL_ID, message_id)
                     .await
                 {
-                    tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht aktualisiert werden");
-                    return;
+                    Ok(current) => current,
+                    Err(err) => {
+                        tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht geprüft werden");
+                        return;
+                    }
+                };
+                match current {
+                    Some(true) if stored_fingerprint.as_deref() == Some(fingerprint.as_str()) => {
+                        return;
+                    }
+                    Some(_) => {
+                        if stored_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                            if let Err(err) = self
+                                .port
+                                .edit_channel_v2(PATE_REQUEST_CHANNEL_ID, message_id, body)
+                                .await
+                            {
+                                tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht aktualisiert werden");
+                                return;
+                            }
+                        }
+                        message_id
+                    }
+                    None => {
+                        let message_id = match self
+                            .port
+                            .send_channel_v2(PATE_REQUEST_CHANNEL_ID, body)
+                            .await
+                        {
+                            Ok(message_id) => message_id,
+                            Err(err) => {
+                                tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht neu gepostet werden");
+                                return;
+                            }
+                        };
+                        if let Err(err) = dl_central_db::kv::set(
+                            pool,
+                            CONCIERGE_PATE_LEITFADEN_NS,
+                            "message_id",
+                            &message_id.to_string(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(%err, "Concierge: Neue Leitfaden-Nachrichten-ID konnte nicht gespeichert werden");
+                            return;
+                        }
+                        message_id
+                    }
                 }
-                message_id
             }
             None => {
                 let message_id = match self
@@ -5736,12 +5897,37 @@ impl Concierge {
             .active_patenschaft_count_total()
             .await
             .unwrap_or(-1);
-        let leitfaden_gepostet =
-            dl_central_db::kv::get(self.store.pool(), CONCIERGE_PATE_LEITFADEN_NS, "message_id")
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+        let leitfaden_gepostet = match dl_central_db::kv::get(
+            self.store.pool(),
+            CONCIERGE_PATE_LEITFADEN_NS,
+            "message_id",
+        )
+        .await
+        {
+            Ok(Some(raw)) => match raw.parse::<u64>() {
+                Ok(message_id) => match self
+                    .port
+                    .pinned_message(PATE_REQUEST_CHANNEL_ID, message_id)
+                    .await
+                {
+                    Ok(Some(pinned)) => pinned,
+                    Ok(None) => false,
+                    Err(err) => {
+                        tracing::warn!(%err, "Concierge: Leitfadenstatus konnte nicht geprüft werden");
+                        false
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(%err, "Concierge: Leitfaden-Nachrichten-ID ist ungültig");
+                    false
+                }
+            },
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Leitfadenstatus konnte nicht geladen werden");
+                false
+            }
+        };
         PatenInventar {
             mit_rolle,
             offene_anfragen,
@@ -8483,6 +8669,7 @@ mod tests {
         sent_dm_v2_bodies: std::sync::Mutex<Vec<CapturedDm>>,
         edited_channels: std::sync::Mutex<Vec<CapturedEdit>>,
         pinned_messages: std::sync::Mutex<Vec<(u64, u64)>>,
+        missing_messages: std::sync::Mutex<HashSet<(u64, u64)>>,
         pin_attempts: std::sync::atomic::AtomicUsize,
         pin_failures_remaining: std::sync::atomic::AtomicUsize,
         frischling_members: std::sync::Mutex<Vec<u64>>,
@@ -8496,6 +8683,7 @@ mod tests {
         created_private_channels: std::sync::Mutex<Vec<(u64, u64, Option<u64>)>>,
         sent_channel_ids: std::sync::Mutex<Vec<u64>>,
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
+        existing_pate_request_cards: std::sync::Mutex<Vec<LegacyPateRequestMessage>>,
         sent_channel_text: std::sync::Mutex<Vec<(u64, String)>>,
         replied_messages: std::sync::Mutex<Vec<(u64, u64)>>,
         reply_hangs: std::sync::Mutex<bool>,
@@ -8708,6 +8896,33 @@ mod tests {
                 .unwrap()
                 .push((channel_id, message_id));
             Ok(())
+        }
+
+        async fn pinned_message(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+        ) -> Result<Option<bool>, String> {
+            if self
+                .missing_messages
+                .lock()
+                .unwrap()
+                .contains(&(channel_id, message_id))
+            {
+                return Ok(None);
+            }
+            Ok(Some(
+                self.pinned_messages
+                    .lock()
+                    .unwrap()
+                    .contains(&(channel_id, message_id)),
+            ))
+        }
+
+        async fn existing_pate_request_cards(
+            &self,
+        ) -> Result<Vec<LegacyPateRequestMessage>, String> {
+            Ok(self.existing_pate_request_cards.lock().unwrap().clone())
         }
     }
 
@@ -16215,5 +16430,100 @@ mod tests {
                 .await
                 .expect("kv fingerprint");
         assert!(stored_fingerprint.is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn leitfaden_mit_unveraendertem_fingerprint_wird_nach_gepinnt_und_ersetzt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let repo_root = std::path::Path::new("/nonexistent-paten-leitfaden-root");
+        let content = render_pate_leitfaden_content(&load_pate_leitfaden(repo_root));
+        let fingerprint = leitfaden_fingerprint(&content);
+        dl_central_db::kv::set(&pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id", "9001")
+            .await
+            .expect("message_id");
+        dl_central_db::kv::set(
+            &pool,
+            CONCIERGE_PATE_LEITFADEN_NS,
+            "fingerprint",
+            &fingerprint,
+        )
+        .await
+        .expect("fingerprint");
+
+        concierge.ensure_pate_leitfaden(repo_root).await;
+
+        assert_eq!(port.pin_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(port.edited_channels.lock().unwrap().len(), 0);
+        assert_eq!(
+            port.pinned_messages.lock().unwrap().as_slice(),
+            &[(PATE_REQUEST_CHANNEL_ID, 9001)]
+        );
+
+        port.missing_messages
+            .lock()
+            .unwrap()
+            .insert((PATE_REQUEST_CHANNEL_ID, 9001));
+        concierge.ensure_pate_leitfaden(repo_root).await;
+
+        let replacement_id =
+            dl_central_db::kv::get(&pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id")
+                .await
+                .expect("replacement message_id")
+                .expect("replacement stored")
+                .parse::<u64>()
+                .expect("valid replacement id");
+        assert_ne!(replacement_id, 9001);
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        assert!(port
+            .pinned_messages
+            .lock()
+            .unwrap()
+            .contains(&(PATE_REQUEST_CHANNEL_ID, replacement_id)));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn alte_patenkarte_wird_idempotent_in_eskalation_und_inventar_uebernommen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config.clone());
+        let created_at = Utc::now() - Duration::hours(3);
+        concierge
+            .store
+            .set_pate_requested(770042, config.main_guild_id, created_at)
+            .await
+            .expect("pate requested");
+        port.existing_pate_request_cards
+            .lock()
+            .unwrap()
+            .push(LegacyPateRequestMessage {
+                user_id: 770042,
+                message_id: 770099,
+                created_at,
+            });
+
+        concierge.import_legacy_pate_requests().await;
+        concierge.import_legacy_pate_requests().await;
+
+        assert_eq!(concierge.store.open_pate_request_count().await.unwrap(), 1);
+        assert_eq!(
+            concierge
+                .store
+                .due_pate_escalations(Utc::now())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
