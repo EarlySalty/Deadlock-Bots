@@ -379,6 +379,19 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
             twitch.entry(code).or_insert(login);
         }
     }
+    let personal_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT streamer_login, invite_code FROM bot.twitch_personal_invites",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for (streamer_login, invite_code) in personal_rows {
+        let login = streamer_login.trim().to_lowercase();
+        let code = invite_code.trim().to_lowercase();
+        if !login.is_empty() && !code.is_empty() {
+            twitch.entry(code).or_insert(login);
+        }
+    }
 
     let mut website = HashMap::new();
     let website_rows = sqlx::query!(
@@ -413,6 +426,22 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
         }
     }
     (twitch, website)
+}
+
+async fn load_personal_inviter_lookup(pool: &PgPool) -> HashMap<String, String> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT invite_code, inviter_twitch_user_id FROM bot.twitch_personal_invites",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows.into_iter()
+        .filter_map(|(code, inviter)| {
+            let code = code.trim().to_lowercase();
+            let inviter = inviter.trim().to_string();
+            (!code.is_empty() && !inviter.is_empty()).then_some((code, inviter))
+        })
+        .collect()
 }
 
 /// Verfeinert die rohen Join-Metadaten über `classify` (Twitch-/Website-
@@ -488,8 +517,11 @@ async fn handle_member_event(
                 return Ok(());
             }
             let (tw, web) = load_lookups(pool).await;
+            let personal_inviters = load_personal_inviter_lookup(pool).await;
             let refined = apply_classify(metadata, &tw, &web);
             let meta_str = serde_json::to_string(&refined).unwrap_or_else(|_| "{}".to_string());
+            let joined_at = Utc::now();
+            let invite_attribution = invite_attribution(&refined, &personal_inviters, joined_at);
             let created = DateTime::from_timestamp(account_created_at, 0);
             let join_position = join_position
                 .map(|value| i64_to_i32(value, "join_position"))
@@ -501,11 +533,12 @@ async fn handle_member_event(
                     user_id,
                     event_type: "join".to_string(),
                     display_name: Some(display_name),
-                    occurred_at: Some(Utc::now()),
+                    occurred_at: Some(joined_at),
                     account_created_at: created,
                     join_position,
                     metadata_json: Some(meta_str),
                     skip_if_join_exists: false,
+                    invite_attribution,
                 },
             )
             .await
@@ -567,10 +600,53 @@ async fn insert_simple_event(
             join_position: None,
             metadata_json: None,
             skip_if_join_exists: false,
+            invite_attribution: None,
         },
     )
     .await
     .map(|_| ())
+}
+
+struct InviteAttributionInsert {
+    streamer_login: String,
+    inviter_twitch_user_id: Option<String>,
+    invite_code: Option<String>,
+    joined_at: DateTime<Utc>,
+}
+
+fn invite_attribution(
+    metadata: &serde_json::Value,
+    personal_inviters: &HashMap<String, String>,
+    joined_at: DateTime<Utc>,
+) -> Option<InviteAttributionInsert> {
+    let bucket = metadata.get("join_source_bucket")?.as_str()?.trim();
+    if bucket != "twitch" {
+        return None;
+    }
+    let streamer_login = metadata
+        .get("twitch_streamer_login")?
+        .as_str()?
+        .trim()
+        .to_lowercase();
+    if streamer_login.is_empty() {
+        return None;
+    }
+    let invite_code = metadata
+        .get("invite_code")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let inviter_twitch_user_id = invite_code
+        .as_deref()
+        .and_then(|code| personal_inviters.get(&code.to_lowercase()))
+        .cloned();
+    Some(InviteAttributionInsert {
+        streamer_login,
+        inviter_twitch_user_id,
+        invite_code,
+        joined_at,
+    })
 }
 
 struct MemberEventInsert {
@@ -583,6 +659,7 @@ struct MemberEventInsert {
     join_position: Option<i32>,
     metadata_json: Option<String>,
     skip_if_join_exists: bool,
+    invite_attribution: Option<InviteAttributionInsert>,
 }
 
 async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> ActivityDbResult<bool> {
@@ -654,6 +731,43 @@ async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> Activit
     )
     .execute(&mut *tx)
     .await?;
+
+    if let Some(attribution) = event.invite_attribution {
+        let inserted = sqlx::query(
+            "INSERT INTO activity.twitch_invite_qualifications
+             (join_event_id, user_id, guild_id, streamer_login, inviter_twitch_user_id,
+              invite_code, joined_at, status)
+             SELECT $1, $2, $3, $4, $5, $6, $7, 'pending'
+             WHERE $7 >= (SELECT started_at FROM bot.twitch_invite_program WHERE singleton = TRUE)
+               AND NOT EXISTS (
+                   SELECT 1 FROM activity.member_events
+                   WHERE user_id = $2
+                     AND guild_id = $3
+                     AND event_type = 'join'
+                     AND id <> $1
+               )
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(guild_id)
+        .bind(attribution.streamer_login)
+        .bind(attribution.inviter_twitch_user_id)
+        .bind(attribution.invite_code)
+        .bind(attribution.joined_at)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO activity.twitch_invite_qualification_transitions
+                 (join_event_id, from_status, to_status)
+                 VALUES ($1, NULL, 'pending')",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
 
     tx.commit().await?;
     Ok(true)
@@ -758,6 +872,7 @@ pub async fn backfill_member_joins(
                 join_position: None,
                 metadata_json: Some(metadata),
                 skip_if_join_exists: true,
+                invite_attribution: None,
             },
         )
         .await?;

@@ -25,7 +25,7 @@ use axum::{Json, Router};
 use serde_json::{json, Map, Value};
 
 pub use idempotency::{IdempotencyConfig, IdempotencyStore};
-pub use port::{ChannelInfoPort, DiscordPort, PortError};
+pub use port::{ChannelInfoPort, DiscordPort, PortError, TwitchInvitePort};
 
 pub const TOKEN_HEADER: &str = "X-Internal-Token";
 pub const IDEMPOTENCY_HEADER: &str = "X-Idempotency-Key";
@@ -67,6 +67,7 @@ pub struct BrokerState {
     pub channel_allowlist: Allowlist,
     pub guild_allowlist: Allowlist,
     pub role_allowlist: Allowlist,
+    pub twitch_invites: Option<Arc<dyn TwitchInvitePort>>,
 }
 
 pub type SharedBroker = Arc<BrokerState>;
@@ -98,6 +99,16 @@ impl BrokerState {
     pub fn new_with_channel_info(
         port: Arc<dyn DiscordPort>,
         channel_info: Arc<dyn ChannelInfoPort>,
+        token: String,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<SharedBroker, String> {
+        Self::new_with_channel_info_and_twitch_invites(port, channel_info, None, token, lookup)
+    }
+
+    pub fn new_with_channel_info_and_twitch_invites(
+        port: Arc<dyn DiscordPort>,
+        channel_info: Arc<dyn ChannelInfoPort>,
+        twitch_invites: Option<Arc<dyn TwitchInvitePort>>,
         token: String,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<SharedBroker, String> {
@@ -134,6 +145,7 @@ impl BrokerState {
                     "MASTER_BROKER_ROLE_ALLOWLIST_IDS",
                 ],
             ),
+            twitch_invites,
         }))
     }
 }
@@ -232,6 +244,14 @@ pub fn router(state: SharedBroker) -> Router {
         .route(
             "/internal/master/v1/discord/create-invite",
             post(handlers::create_invite),
+        )
+        .route(
+            "/internal/master/v1/discord/personal-invite",
+            post(handlers::personal_invite),
+        )
+        .route(
+            "/internal/master/v1/twitch/qualified-invites",
+            get(handlers::qualified_invites),
         )
         .route(
             "/internal/master/v1/discord/send-dm",

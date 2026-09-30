@@ -1605,6 +1605,173 @@ pub async fn create_invite(
     .await
 }
 
+pub async fn personal_invite(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (rid, payload, idem) = match begin_action(&state, &peer, &headers, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let streamer_login = payload
+        .get("streamer_login")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_lowercase();
+    let inviter_twitch_user_id = payload
+        .get("inviter_twitch_user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if streamer_login.is_empty()
+        || streamer_login.len() > 64
+        || !streamer_login
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return bad_request(&rid, "streamer_login is invalid");
+    }
+    if inviter_twitch_user_id.is_empty()
+        || inviter_twitch_user_id.len() > 32
+        || !inviter_twitch_user_id.chars().all(|c| c.is_ascii_digit())
+    {
+        return bad_request(&rid, "inviter_twitch_user_id is invalid");
+    }
+    let guild_id = match payload::positive_int(&payload, "guild_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    let channel_id = match payload::positive_int(&payload, "channel_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    if let Err(resp) = allowlist_check(&rid, Some(&idem), "guild", guild_id, &state.guild_allowlist)
+    {
+        return resp;
+    }
+    if let Err(resp) = allowlist_check(
+        &rid,
+        Some(&idem),
+        "channel",
+        channel_id,
+        &state.channel_allowlist,
+    ) {
+        return resp;
+    }
+    let Some(port) = state.twitch_invites.as_ref() else {
+        return respond(
+            503,
+            error_body(
+                &rid,
+                Some(&idem),
+                "unavailable",
+                "twitch invite service unavailable",
+            ),
+        );
+    };
+    let mut op = Map::new();
+    op.insert("streamer_login".into(), json!(streamer_login));
+    op.insert(
+        "inviter_twitch_user_id".into(),
+        json!(inviter_twitch_user_id),
+    );
+    op.insert("guild_id".into(), json!(guild_id));
+    op.insert("channel_id".into(), json!(channel_id));
+    let hash = payload_hash(&op);
+
+    run_idempotent(
+        &state,
+        &rid,
+        "discord.personal_invite",
+        &idem,
+        &hash,
+        || async {
+            match port
+                .personal_invite(
+                    &streamer_login,
+                    &inviter_twitch_user_id,
+                    guild_id,
+                    channel_id,
+                )
+                .await
+            {
+                Ok(result) => (
+                    200,
+                    success_body(
+                        &rid,
+                        Some(&idem),
+                        serde_json::to_value(result).unwrap_or(Value::Null),
+                    ),
+                ),
+                Err(err) => {
+                    tracing::error!(%err, "personal_invite fehlgeschlagen");
+                    (
+                        500,
+                        error_body(
+                            &rid,
+                            Some(&idem),
+                            "backend_error",
+                            "failed to resolve personal invite",
+                        ),
+                    )
+                }
+            }
+        },
+    )
+    .await
+}
+
+pub async fn qualified_invites(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let since = params
+        .get("since")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("1970-01-01T00:00:00Z");
+    let Some(port) = state.twitch_invites.as_ref() else {
+        return respond(
+            503,
+            error_body(
+                &rid,
+                None,
+                "unavailable",
+                "twitch invite service unavailable",
+            ),
+        );
+    };
+    match port.qualified_invites_since(since).await {
+        Ok(items) => respond(
+            200,
+            success_body(
+                &rid,
+                None,
+                json!({
+                    "items": items,
+                }),
+            ),
+        ),
+        Err(err) => {
+            tracing::error!(%err, "qualified_invites fehlgeschlagen");
+            respond(
+                400,
+                error_body(&rid, None, "bad_request", "invalid since timestamp"),
+            )
+        }
+    }
+}
+
 pub async fn send_dm(
     State(state): State<SharedBroker>,
     peer: Peer,
@@ -1778,13 +1945,29 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DiscordPort for UnusedDiscordPort {
-        async fn community_lobbies(&self, _guild_id: u64, user_id: u64) -> Result<Vec<crate::port::CommunityLobby>, PortError> {
-            if user_id == 99 { return Err(PortError::MemberNotFound); }
-            Ok([42_u64,43].into_iter().map(|id| crate::port::CommunityLobby {
-                channel_id: id.to_string(), name: "Visible voice".into(), member_count: 2,
-                user_limit: Some(6), mode: Some("normal".into()), intent: None,
-                rank_average: None, rank_samples: 0, requester_present: false, is_streamer_vc: false,
-            }).collect())
+        async fn community_lobbies(
+            &self,
+            _guild_id: u64,
+            user_id: u64,
+        ) -> Result<Vec<crate::port::CommunityLobby>, PortError> {
+            if user_id == 99 {
+                return Err(PortError::MemberNotFound);
+            }
+            Ok([42_u64, 43]
+                .into_iter()
+                .map(|id| crate::port::CommunityLobby {
+                    channel_id: id.to_string(),
+                    name: "Visible voice".into(),
+                    member_count: 2,
+                    user_limit: Some(6),
+                    mode: Some("normal".into()),
+                    intent: None,
+                    rank_average: None,
+                    rank_samples: 0,
+                    requester_present: false,
+                    is_streamer_vc: false,
+                })
+                .collect())
         }
 
         async fn is_ready(&self) -> bool {
@@ -1991,9 +2174,11 @@ mod tests {
         let state = test_state().unwrap();
         let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
         let body = axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","user_id":"99"}"#);
-        let missing = community_lobbies(State(state.clone()), peer, HeaderMap::new(), body.clone()).await;
+        let missing =
+            community_lobbies(State(state.clone()), peer, HeaderMap::new(), body.clone()).await;
         assert_eq!(missing.status(), 401);
-        let mut headers = HeaderMap::new(); headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Internal-Token", "secret".parse().unwrap());
         let response = community_lobbies(State(state), peer, headers, body).await;
         assert_eq!(response.status(), 403);
     }
@@ -2002,16 +2187,21 @@ mod tests {
     async fn community_directory_respects_channel_allowlist_and_omits_member_identities() {
         let (state, _) = reaction_test_state("42").unwrap();
         let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
-        let mut headers = HeaderMap::new(); headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Internal-Token", "secret".parse().unwrap());
         let body = axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","user_id":"123"}"#);
         let response = community_lobbies(State(state), peer, headers, body).await;
         assert_eq!(response.status(), 200);
-        let bytes = axum::body::to_bytes(response.into_body(), 10000).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 10000)
+            .await
+            .unwrap();
         let data: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(data["result"]["lobbies"].as_array().unwrap().len(), 1);
         assert_eq!(data["result"]["lobbies"][0]["channel_id"], "42");
         assert!(data["result"]["captured_at"].as_u64().unwrap() > 0);
-        assert!(!String::from_utf8(bytes.to_vec()).unwrap().contains("user_id"));
+        assert!(!String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .contains("user_id"));
     }
 
     fn test_state() -> Result<SharedBroker, String> {
@@ -2565,30 +2755,74 @@ mod tests {
 
 /// Authenticated, aggregate-only, member-scoped community directory.
 pub async fn community_lobbies(
-    State(state): State<SharedBroker>, peer: Peer, headers: HeaderMap,
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let rid = request_id(&headers);
-    if let Err(resp) = authorize(&state, &peer, &headers, &rid) { return resp; }
-    let Ok(payload) = json_object(&body) else { return bad_request(&rid, "invalid JSON payload"); };
-    let guild_id = match payload::positive_int(&payload, "guild_id") { Ok(v) => v, Err(msg) => return bad_request(&rid, &msg) };
-    let user_id = match payload::positive_int(&payload, "user_id") { Ok(v) => v, Err(msg) => return bad_request(&rid, &msg) };
-    if guild_id != 1289721245281292288 { return bad_request(&rid, "unsupported community"); }
-    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) { return resp; }
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let Ok(payload) = json_object(&body) else {
+        return bad_request(&rid, "invalid JSON payload");
+    };
+    let guild_id = match payload::positive_int(&payload, "guild_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    let user_id = match payload::positive_int(&payload, "user_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    if guild_id != 1289721245281292288 {
+        return bad_request(&rid, "unsupported community");
+    }
+    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) {
+        return resp;
+    }
     if !state.port.is_ready().await {
-        return respond(503, error_body(&rid, None, "unavailable", "Discord gateway unavailable"));
+        return respond(
+            503,
+            error_body(&rid, None, "unavailable", "Discord gateway unavailable"),
+        );
     }
     match state.port.community_lobbies(guild_id, user_id).await {
         Ok(mut lobbies) => {
-            lobbies.retain(|lobby| lobby.channel_id.parse::<u64>().is_ok_and(|id|
-                allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()));
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-            respond(200, success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})))
+            lobbies.retain(|lobby| {
+                lobby.channel_id.parse::<u64>().is_ok_and(|id| {
+                    allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()
+                })
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            respond(
+                200,
+                success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})),
+            )
         }
-        Err(PortError::MemberNotFound) => respond(403, error_body(&rid, None, "member_required", "Discord membership could not be confirmed")),
+        Err(PortError::MemberNotFound) => respond(
+            403,
+            error_body(
+                &rid,
+                None,
+                "member_required",
+                "Discord membership could not be confirmed",
+            ),
+        ),
         Err(err) => {
             tracing::warn!(%err, "Community lobby directory unavailable");
-            respond(503, error_body(&rid, None, "unavailable", "Discord lobby directory unavailable"))
+            respond(
+                503,
+                error_body(
+                    &rid,
+                    None,
+                    "unavailable",
+                    "Discord lobby directory unavailable",
+                ),
+            )
         }
     }
 }

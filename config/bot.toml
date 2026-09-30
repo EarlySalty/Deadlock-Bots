@@ -31,6 +31,11 @@ enforce = false
 [concierge]
 timeout_seconds = 100
 
+[twitch_invites]
+personal_links_per_channel_max = 800
+qualification_recheck_seconds = 3600
+staging_channel_ids = []
+
 [llm.fireworks]
 # Optionaler ausdrücklich freigegebener Modell-Pin. Keine automatische Auswahl.
 

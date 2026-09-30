@@ -55,6 +55,8 @@ pub struct BotConfig {
     #[serde(default)]
     pub tempvoice: TempVoiceCleanupConfig,
     #[serde(default)]
+    pub twitch_invites: TwitchInviteConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
 }
 
@@ -142,6 +144,24 @@ impl Default for TempVoiceCleanupConfig {
     fn default() -> Self {
         Self {
             empty_lane_grace_seconds: 300,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TwitchInviteConfig {
+    pub personal_links_per_channel_max: u32,
+    pub qualification_recheck_seconds: u64,
+    pub staging_channel_ids: Vec<String>,
+}
+
+impl Default for TwitchInviteConfig {
+    fn default() -> Self {
+        Self {
+            personal_links_per_channel_max: 800,
+            qualification_recheck_seconds: 3600,
+            staging_channel_ids: Vec::new(),
         }
     }
 }
@@ -358,6 +378,26 @@ impl BotConfig {
         if !(1..=86_400).contains(&self.tempvoice.empty_lane_grace_seconds) {
             return Err(invalid(
                 "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen",
+            ));
+        }
+        if !(1..=999).contains(&self.twitch_invites.personal_links_per_channel_max) {
+            return Err(invalid(
+                "twitch_invites.personal_links_per_channel_max muss zwischen 1 und 999 liegen",
+            ));
+        }
+        if !(60..=86_400).contains(&self.twitch_invites.qualification_recheck_seconds) {
+            return Err(invalid(
+                "twitch_invites.qualification_recheck_seconds muss zwischen 60 und 86400 liegen",
+            ));
+        }
+        if self
+            .twitch_invites
+            .staging_channel_ids
+            .iter()
+            .any(|id| !snowflake(id))
+        {
+            return Err(invalid(
+                "twitch_invites.staging_channel_ids müssen positive u64-Dezimalstrings sein",
             ));
         }
         let fireworks = &self.llm.fireworks;

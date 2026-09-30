@@ -54,6 +54,10 @@ const WEBSITE_SLUGS: [&str; 6] = [
 #[derive(Debug, Deserialize)]
 struct InviteEntry {
     streamer_login: String,
+    #[serde(default)]
+    twitch_user_id: Option<String>,
+    #[serde(default)]
+    active_partner: bool,
     guild_id: i64,
     invite_code: String,
     invite_url: String,
@@ -68,6 +72,16 @@ struct SyncSummary {
     flipped: usize,
     from_buckets: Vec<(String, i64)>,
     dry_run: bool,
+}
+
+struct JoinAttribution {
+    join_event_id: i64,
+    user_id: i64,
+    guild_id: i64,
+    streamer_login: String,
+    inviter_twitch_user_id: Option<String>,
+    invite_code: Option<String>,
+    joined_at: DateTime<Utc>,
 }
 
 fn parse_optional_timestamp(raw: Option<&str>) -> anyhow::Result<Option<DateTime<Utc>>> {
@@ -91,6 +105,10 @@ async fn sync_invites_and_reclassify(
     {
         let mut populate_tx = pool.begin().await?;
 
+        sqlx::query("UPDATE bot.twitch_streamer_invites SET active_partner = FALSE")
+            .execute(&mut *populate_tx)
+            .await?;
+
         for entry in &entries {
             let login = entry.streamer_login.trim().to_lowercase();
             if login.is_empty() {
@@ -100,26 +118,29 @@ async fn sync_invites_and_reclassify(
             let invite_url = entry.invite_url.trim().to_string();
             let created_at = parse_optional_timestamp(entry.created_at.as_deref())?;
             let last_sent_at = parse_optional_timestamp(entry.last_sent_at.as_deref())?;
-            sqlx::query!(
-                r#"
-                INSERT INTO bot.twitch_streamer_invites(
-                    streamer_login, guild_id, invite_code, invite_url, created_at, last_sent_at
-                )
-                VALUES($1, $2, $3, $4, $5, $6)
-                ON CONFLICT(streamer_login) DO UPDATE SET
-                    guild_id = EXCLUDED.guild_id,
-                    invite_code = EXCLUDED.invite_code,
-                    invite_url = EXCLUDED.invite_url,
-                    created_at = EXCLUDED.created_at,
-                    last_sent_at = EXCLUDED.last_sent_at
-                "#,
-                login,
-                entry.guild_id,
-                invite_code,
-                invite_url,
-                created_at,
-                last_sent_at,
+            sqlx::query(
+                "INSERT INTO bot.twitch_streamer_invites(
+                     streamer_login, twitch_user_id, active_partner, guild_id, invite_code,
+                     invite_url, created_at, last_sent_at
+                 )
+                 VALUES($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT(streamer_login) DO UPDATE SET
+                     twitch_user_id = EXCLUDED.twitch_user_id,
+                     active_partner = EXCLUDED.active_partner,
+                     guild_id = EXCLUDED.guild_id,
+                     invite_code = EXCLUDED.invite_code,
+                     invite_url = EXCLUDED.invite_url,
+                     created_at = EXCLUDED.created_at,
+                     last_sent_at = EXCLUDED.last_sent_at",
             )
+            .bind(&login)
+            .bind(entry.twitch_user_id.as_deref())
+            .bind(entry.active_partner)
+            .bind(entry.guild_id)
+            .bind(&invite_code)
+            .bind(&invite_url)
+            .bind(created_at)
+            .bind(last_sent_at)
             .execute(&mut *populate_tx)
             .await?;
         }
@@ -147,6 +168,24 @@ async fn sync_invites_and_reclassify(
         let code = row.invite_code.unwrap_or_default().trim().to_lowercase();
         if !login.is_empty() && !code.is_empty() {
             twitch_lookup.entry(code).or_insert(login);
+        }
+    }
+    let personal_rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT streamer_login, invite_code, inviter_twitch_user_id
+         FROM bot.twitch_personal_invites",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut personal_inviters = HashMap::new();
+    for (streamer_login, invite_code, inviter_twitch_user_id) in personal_rows {
+        let login = streamer_login.trim().to_lowercase();
+        let code = invite_code.trim().to_lowercase();
+        let inviter = inviter_twitch_user_id.trim().to_string();
+        if !login.is_empty() && !code.is_empty() {
+            twitch_lookup.entry(code.clone()).or_insert(login);
+            if !inviter.is_empty() {
+                personal_inviters.insert(code, inviter);
+            }
         }
     }
 
@@ -183,20 +222,23 @@ async fn sync_invites_and_reclassify(
         }
     }
 
-    let join_rows = sqlx::query!(
-        r#"
-        SELECT id, metadata::text AS "metadata?"
-          FROM activity.member_events
-         WHERE event_type = 'join'
-        "#
+    let program_started: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT started_at FROM bot.twitch_invite_program WHERE singleton = TRUE",
+    )
+    .fetch_one(pool)
+    .await?;
+    let join_rows = sqlx::query_as::<_, (i64, i64, i64, DateTime<Utc>, Option<String>)>(
+        "SELECT id, user_id, guild_id, occurred_at, metadata::text
+         FROM activity.member_events
+         WHERE event_type = 'join'",
     )
     .fetch_all(pool)
     .await?;
     let mut candidates: Vec<(i64, String)> = Vec::new();
+    let mut attributions: Vec<JoinAttribution> = Vec::new();
     let mut from_counts: HashMap<String, i64> = HashMap::new();
-    for row in join_rows {
-        let mut meta = row
-            .metadata
+    for (id, user_id, guild_id, occurred_at, metadata) in join_rows {
+        let mut meta = metadata
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
             .filter(Value::is_object)
@@ -208,12 +250,35 @@ async fn sync_invites_and_reclassify(
             .unwrap_or("")
             .trim()
             .to_lowercase();
-        if classified.bucket != "twitch" || stored == "twitch" {
+        if classified.bucket != "twitch" {
             continue;
         }
         let Some(login) = classified.twitch_login.clone() else {
             continue;
         };
+        let backfilled = meta
+            .get("backfilled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !backfilled && occurred_at >= program_started {
+            let code = classified.invite_code.clone();
+            let inviter = code
+                .as_deref()
+                .and_then(|value| personal_inviters.get(&value.to_lowercase()))
+                .cloned();
+            attributions.push(JoinAttribution {
+                join_event_id: id,
+                user_id,
+                guild_id,
+                streamer_login: login.clone(),
+                inviter_twitch_user_id: inviter,
+                invite_code: code,
+                joined_at: occurred_at,
+            });
+        }
+        if stored == "twitch" {
+            continue;
+        }
         if let Some(obj) = meta.as_object_mut() {
             obj.insert("join_source_bucket".into(), json!("twitch"));
             obj.insert("join_source_kind".into(), json!("twitch_streamer"));
@@ -225,7 +290,7 @@ async fn sync_invites_and_reclassify(
             if let Some(url) = classified.invite_url.clone() {
                 obj.insert("invite_url".into(), json!(url));
             }
-            candidates.push((row.id, serde_json::to_string(&meta)?));
+            candidates.push((id, serde_json::to_string(&meta)?));
             let key = if stored.is_empty() {
                 "(leer)".to_string()
             } else {
@@ -236,7 +301,7 @@ async fn sync_invites_and_reclassify(
     }
 
     let flipped = candidates.len();
-    if !dry_run && !candidates.is_empty() {
+    if !dry_run && (!candidates.is_empty() || !attributions.is_empty()) {
         let mut reclassify_tx = pool.begin().await?;
         for (id, metadata) in &candidates {
             sqlx::query!(
@@ -251,7 +316,74 @@ async fn sync_invites_and_reclassify(
             .execute(&mut *reclassify_tx)
             .await?;
         }
+        for attribution in &attributions {
+            let inserted = sqlx::query(
+                "INSERT INTO activity.twitch_invite_qualifications
+                 (join_event_id, user_id, guild_id, streamer_login, inviter_twitch_user_id,
+                  invite_code, joined_at, status)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, 'pending'
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM activity.member_events
+                     WHERE user_id = $2
+                       AND guild_id = $3
+                       AND event_type = 'join'
+                       AND id <> $1
+                 )
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(attribution.join_event_id)
+            .bind(attribution.user_id)
+            .bind(attribution.guild_id)
+            .bind(&attribution.streamer_login)
+            .bind(&attribution.inviter_twitch_user_id)
+            .bind(&attribution.invite_code)
+            .bind(attribution.joined_at)
+            .execute(&mut *reclassify_tx)
+            .await?;
+            if inserted.rows_affected() == 1 {
+                sqlx::query(
+                    "INSERT INTO activity.twitch_invite_qualification_transitions
+                     (join_event_id, from_status, to_status)
+                     VALUES ($1, NULL, 'pending')",
+                )
+                .bind(attribution.join_event_id)
+                .execute(&mut *reclassify_tx)
+                .await?;
+            }
+        }
         reclassify_tx.commit().await?;
+    }
+
+    if !dry_run {
+        sqlx::query(
+            "INSERT INTO activity.streamer_referral_credits(
+                 join_event_id, invited_discord_user_id, guild_id, inviter_twitch_user_id,
+                 invited_twitch_user_id, invited_twitch_login
+             )
+             SELECT q.join_event_id,
+                    q.user_id,
+                    q.guild_id,
+                    q.inviter_twitch_user_id,
+                    target.twitch_user_id,
+                    target.streamer_login
+             FROM activity.twitch_invite_qualifications q
+             JOIN bot.streamer_link_intents intent
+               ON intent.discord_id = q.user_id
+              AND intent.status = 'linked'
+              AND intent.linked_login IS NOT NULL
+             JOIN bot.twitch_streamer_invites target
+               ON LOWER(target.streamer_login) = LOWER(intent.linked_login)
+              AND target.active_partner = TRUE
+              AND target.twitch_user_id IS NOT NULL
+             JOIN bot.twitch_streamer_invites inviter
+               ON inviter.twitch_user_id = q.inviter_twitch_user_id
+              AND inviter.active_partner = TRUE
+             WHERE q.inviter_twitch_user_id IS NOT NULL
+               AND target.twitch_user_id <> q.inviter_twitch_user_id
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(pool)
+        .await?;
     }
 
     let mut from_buckets: Vec<(String, i64)> = from_counts.into_iter().collect();

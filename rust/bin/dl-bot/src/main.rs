@@ -17,6 +17,7 @@ mod scrim_adapter;
 mod scrimglue;
 mod serversync;
 mod turnierglue;
+mod twitch_invites;
 mod vanity;
 
 use std::{
@@ -1057,10 +1058,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                             .to_string()
                     }),
                 );
-                let emoji_index = Arc::new(modglue::BrainEmojiIndex::load(
-                    &emoji_catalog,
-                    &emoji_map,
-                ));
+                let emoji_index =
+                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
                 let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
@@ -1314,11 +1313,30 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
         .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
         .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
-    let broker = dl_broker::BrokerState::new_with_channel_info(
+    let twitch_invite_service: Arc<dyn dl_broker::TwitchInvitePort> =
+        Arc::new(twitch_invites::CentralTwitchInvites::new(
+            central_pool.clone(),
+            adapter.clone(),
+            operating.twitch_invites.personal_links_per_channel_max,
+        ));
+    let staging_channel_ids: HashSet<i64> = operating
+        .twitch_invites
+        .staging_channel_ids
+        .iter()
+        .filter_map(|id| id.parse::<u64>().ok())
+        .filter_map(|id| i64::try_from(id).ok())
+        .collect();
+    let _twitch_invite_qualification_worker = twitch_invites::spawn_qualification_worker(
+        central_pool.clone(),
+        staging_channel_ids,
+        std::time::Duration::from_secs(operating.twitch_invites.qualification_recheck_seconds),
+    );
+    let broker = dl_broker::BrokerState::new_with_channel_info_and_twitch_invites(
         adapter.clone(),
         Arc::new(BrokerChannelInfoGlue {
             adapter: adapter.clone(),
         }),
+        Some(twitch_invite_service),
         broker_token.clone(),
         operating_value,
     )

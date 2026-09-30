@@ -31,6 +31,8 @@ pub enum PortError {
     GuildUnavailable,
     #[error("discord error: {0}")]
     Discord(String),
+    #[error("backend error: {0}")]
+    Backend(String),
 }
 
 /// Geparster view_spec (Vertrag wie Python _parse_view_spec).
@@ -103,6 +105,24 @@ pub struct InviteInfo {
     pub invite_url: String,
     pub code: String,
     pub guild_id: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PersonalInviteResult {
+    pub invite_url: Option<String>,
+    pub code: Option<String>,
+    pub guild_id: u64,
+    pub channel_id: u64,
+    pub fallback: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QualifiedInviteInfo {
+    pub streamer_login: String,
+    pub inviter_twitch_user_id: Option<String>,
+    pub joined_at: String,
+    pub status: String,
+    pub qualified_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +288,11 @@ pub trait DiscordPort: Send + Sync {
     async fn voice_members(&self, channel_id: u64) -> Result<Vec<MemberInfo>, PortError>;
     /// Read-only directory for a verified Discord member; implementations must
     /// enforce effective VIEW_CHANNEL + CONNECT permissions, including bans.
-    async fn community_lobbies(&self, _guild_id: u64, _user_id: u64) -> Result<Vec<CommunityLobby>, PortError> {
+    async fn community_lobbies(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Vec<CommunityLobby>, PortError> {
         Err(PortError::GuildUnavailable)
     }
 
@@ -308,6 +332,22 @@ pub trait DiscordPort: Send + Sync {
     /// Live-Kennzahlen einer Gilde (Mitglieder-/Online-/Voice-Zahl, Vanity).
     /// guild_id None = erste Bot-Gilde.
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError>;
+}
+
+#[async_trait::async_trait]
+pub trait TwitchInvitePort: Send + Sync {
+    async fn personal_invite(
+        &self,
+        streamer_login: &str,
+        inviter_twitch_user_id: &str,
+        guild_id: u64,
+        channel_id: u64,
+    ) -> Result<PersonalInviteResult, PortError>;
+
+    async fn qualified_invites_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<QualifiedInviteInfo>, PortError>;
 }
 
 #[async_trait::async_trait]
