@@ -2481,8 +2481,9 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
                     .as_ref()
                     .and_then(|reference| reference.message_id)
                     == Some(MessageId::new(after_message_id))
-                    && serde_json::to_string(&message.components)
-                        .is_ok_and(|body| body.contains("diese Patenanfrage wartet seit zwei Stunden"));
+                    && serde_json::to_string(&message.components).is_ok_and(|body| {
+                        body.contains("diese Patenanfrage wartet seit zwei Stunden")
+                    });
                 if message.id.get() > after_message_id
                     && message.author.id == bot_id
                     && (matches!(&message.nonce, Some(serenity::all::Nonce::String(value)) if value == nonce)
@@ -2496,7 +2497,9 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
                 return Ok(None);
             }
             if before == oldest {
-                return Err("Discord-Verlauf für den Owner-Hinweis bewegt sich nicht weiter".into());
+                return Err(
+                    "Discord-Verlauf für den Owner-Hinweis bewegt sich nicht weiter".into(),
+                );
             }
             before = oldest;
             if messages.len() < 100 {
