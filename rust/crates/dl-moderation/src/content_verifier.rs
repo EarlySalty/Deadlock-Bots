@@ -2,19 +2,8 @@ use std::sync::Arc;
 
 use crate::content_analyzer::ModerationInput;
 use crate::moderation_verdict::{
-    high_confidence_scam_verification_conflict, parse_verification_decision, ContentAnalysis,
-    VerificationDecision,
+    parse_verification_decision, ContentAnalysis, VerificationDecision,
 };
-
-pub const VERIFIER_SYSTEM_PROMPT: &str = r#"Du bist die zweite Moderationsinstanz.
-Widerlege den Verdacht aktiv: Ist die Nachricht wirklich die angegebene Kategorie oder ist sie harmloser Kontext, Reporting, Ironie, Gaming-Trash-Talk oder normales Serverrauschen?
-Ein technischer Heuristik-Treffer, mehrere Bilder oder Posts in mehreren Kanälen sind kein Inhaltsbeweis. Bestätige den Verstoß nur anhand des sichtbaren Text- und Bildinhalts.
-Normale Screenshots, Social-Media-Posts, Memes, News-Grafiken und Gaming-Bilder sind ohne erkennbaren schädlichen Inhalt harmlos.
-Wichtig: Das Screenshot-Format macht schädlichen Inhalt nicht harmlos. Sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind als scam zu klassifizieren, wenn die Nachricht sie selbst bewirbt und kein sichtbarer Reporting-/Warnkontext sie klar einordnet.
-Kategorie, confirmed und Begründung müssen logisch zusammenpassen. Wenn deine Begründung einen tatsächlichen Scam, Betrugsversuch oder Phishing-Inhalt beschreibt, darf category nicht other sein.
-Helden-, Rollen-, Rank- oder Spielergruppen-Spott im Spielkontext ist Trash-Talk/Ragebait, nicht harassment oder hate_speech.
-Antworte ausschließlich als JSON:
-{"confirmed":true|false,"category":"scam|csam|nsfw_explicit|harassment|hate_speech|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
 
 pub const BEHAVIOR_VERIFIER_SYSTEM_PROMPT: &str = r#"Du bist die unabhängige zweite Moderationsinstanz für einen technischen Heuristik-Treffer.
 Die Heuristik darf falsch liegen und ist kein Inhaltsbeweis. Prüfe Text und jedes mitgesendete Bild selbst.
@@ -23,14 +12,6 @@ Setze confirmed=true ausschließlich dann, wenn der sichtbare Inhalt selbst tats
 Ein normaler Gaming-Screenshot, Social-Media-Post, Meme, News-Bild oder sonstiges harmloses Bild ist confirmed=false und category=other.
 Wichtig: Das Screenshot-Format macht schädlichen Inhalt nicht harmlos. Sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind als scam zu klassifizieren, wenn die Nachricht sie selbst bewirbt und kein sichtbarer Reporting-/Warnkontext sie klar einordnet.
 Kategorie, confirmed und Begründung müssen logisch zusammenpassen. Wenn deine Begründung einen tatsächlichen Scam, Betrugsversuch oder Phishing-Inhalt beschreibt, darf category nicht other sein.
-Antworte ausschließlich als JSON:
-{"confirmed":true|false,"category":"scam|csam|nsfw_explicit|harassment|hate_speech|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
-
-pub const CONSISTENCY_SYSTEM_PROMPT: &str = r#"Du prüfst ausschließlich eine widersprüchliche Moderationsentscheidung erneut.
-Die vorherige Antwort hat eine nicht passende Kategorie oder confirmed=false geliefert, obwohl ihre eigene Begründung mit hoher Sicherheit ein konkretes Scam-/Betrugs-/Phishing-Muster beschrieben hat.
-Bewerte den sichtbaren Inhalt neu und löse diesen Widerspruch auf. Das Screenshot-Format ist kein Entlastungsgrund: sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind scam, sofern kein sichtbarer Reporting-/Warnkontext sie klar als Bericht oder Warnung einordnet.
-Ein technischer Heuristik-Treffer ist für sich kein Beweis. Entscheidend bleibt immer der sichtbare Inhalt.
-Kategorie, confirmed und Begründung müssen logisch zusammenpassen.
 Antworte ausschließlich als JSON:
 {"confirmed":true|false,"category":"scam|csam|nsfw_explicit|harassment|hate_speech|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
 
@@ -45,12 +26,6 @@ impl Default for ContentVerifierConfig {
             model: dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct VerificationEvaluation {
-    pub decision: VerificationDecision,
-    pub unresolved_consistency: bool,
 }
 
 pub struct ContentVerifier {
@@ -72,29 +47,12 @@ impl ContentVerifier {
         }
     }
 
-    pub(crate) async fn verify(
-        &self,
-        input: &ModerationInput,
-        analysis: &ContentAnalysis,
-    ) -> VerificationEvaluation {
-        let prompt = build_verifier_prompt(
-            &input.prompt_text(),
-            analysis.category.as_label(),
-            &analysis.reason,
-        );
-        let raw = self.request(input, prompt, VERIFIER_SYSTEM_PROMPT).await;
-        let verification = parse_verification_decision(raw.as_deref(), analysis.category.clone());
-
-        self.resolve_consistency(input, analysis, "content_scan", verification)
-            .await
-    }
-
     pub(crate) async fn verify_behavior_trigger(
         &self,
         input: &ModerationInput,
         analysis: &ContentAnalysis,
         behavior_trigger: &str,
-    ) -> VerificationEvaluation {
+    ) -> VerificationDecision {
         let prompt = build_behavior_verifier_prompt(
             &input.prompt_text(),
             behavior_trigger,
@@ -105,66 +63,7 @@ impl ContentVerifier {
         let raw = self
             .request(input, prompt, BEHAVIOR_VERIFIER_SYSTEM_PROMPT)
             .await;
-        let verification = parse_verification_decision(raw.as_deref(), analysis.category.clone());
-
-        self.resolve_consistency(input, analysis, behavior_trigger, verification)
-            .await
-    }
-
-    async fn resolve_consistency(
-        &self,
-        input: &ModerationInput,
-        analysis: &ContentAnalysis,
-        trigger_context: &str,
-        verification: VerificationDecision,
-    ) -> VerificationEvaluation {
-        if !high_confidence_scam_verification_conflict(&verification) {
-            return VerificationEvaluation {
-                decision: verification,
-                unresolved_consistency: false,
-            };
-        }
-
-        tracing::warn!(
-            trigger_context,
-            category = verification.category.as_label(),
-            confidence = verification.confidence,
-            "Moderation: widersprüchliches Scam-Verifier-Urteil, Konsistenzprüfung wird wiederholt"
-        );
-        let retry_prompt = build_behavior_consistency_prompt(
-            &input.prompt_text(),
-            trigger_context,
-            analysis,
-            &verification,
-        );
-        let retry_raw = self
-            .request(input, retry_prompt, CONSISTENCY_SYSTEM_PROMPT)
-            .await;
-        let retry = parse_verification_decision(retry_raw.as_deref(), analysis.category.clone());
-        let retry_resolved =
-            retry.reason != "parse_error" && !high_confidence_scam_verification_conflict(&retry);
-
-        if retry_resolved {
-            VerificationEvaluation {
-                decision: retry,
-                unresolved_consistency: false,
-            }
-        } else {
-            tracing::warn!(
-                trigger_context,
-                retry_category = retry.category.as_label(),
-                retry_confidence = retry.confidence,
-                "Moderation: Scam-Verifier-Widerspruch blieb nach Konsistenzprüfung offen"
-            );
-            VerificationEvaluation {
-                decision: if retry.reason == "parse_error" {
-                    verification
-                } else {
-                    retry
-                },
-                unresolved_consistency: true,
-            }
-        }
+        parse_verification_decision(raw.as_deref(), analysis.category.clone())
     }
 
     async fn request(
@@ -201,25 +100,6 @@ impl ContentVerifier {
     }
 }
 
-pub fn build_verifier_prompt(message: &str, category: &str, analysis_reason: &str) -> String {
-    serde_json::json!({
-        "task": "Widerlege den Verdacht; bestätige nur, wenn der Verstoß wirklich vorliegt.",
-        "suspected_category": category,
-        "analysis_reason": analysis_reason,
-        "message_or_image_context": message,
-        "safe_alternatives": [
-            "harmlos",
-            "normaler Screenshot oder Social-Media-Post",
-            "News-Grafik oder Meme",
-            "Trash-Talk",
-            "Gaming-Kontext",
-            "Reporting oder Zitat",
-            "Ironie"
-        ],
-    })
-    .to_string()
-}
-
 pub fn build_behavior_verifier_prompt(
     message: &str,
     behavior_trigger: &str,
@@ -241,45 +121,9 @@ pub fn build_behavior_verifier_prompt(
     .to_string()
 }
 
-pub fn build_behavior_consistency_prompt(
-    message: &str,
-    behavior_trigger: &str,
-    analysis: &ContentAnalysis,
-    verification: &VerificationDecision,
-) -> String {
-    serde_json::json!({
-        "task": "Löse den Widerspruch in deiner vorherigen Entscheidung auf und klassifiziere den sichtbaren Inhalt erneut.",
-        "behavior_trigger": behavior_trigger,
-        "analysis": {
-            "category": analysis.category.as_label(),
-            "confidence": analysis.confidence,
-            "reason": analysis.reason,
-        },
-        "previous_verification": {
-            "confirmed": verification.confirmed,
-            "category": verification.category.as_label(),
-            "confidence": verification.confidence,
-            "reason": verification.reason,
-        },
-        "message_or_image_context": message,
-        "instruction": "Wenn die Begründung einen tatsächlichen Scam/Betrug/Phishing-Inhalt beschreibt, müssen category und confirmed dazu passen. Reporting oder Warnkontext darf weiterhin als other/unconfirmed bewertet werden.",
-    })
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verifier_prompt_is_adversarial_refute_prompt() {
-        let prompt = build_verifier_prompt("msg", "scam", "Verdacht");
-
-        assert!(prompt.contains("Widerlege"));
-        assert!(prompt.contains("harmlos"));
-        assert!(prompt.contains("scam"));
-        assert!(prompt.contains("Verdacht"));
-    }
 
     #[test]
     fn behavior_verifier_prompt_marks_heuristic_and_analysis_as_untrusted() {
