@@ -170,7 +170,7 @@ pub async fn record_message(
          AND NOT EXISTS (
              SELECT 1 FROM activity.twitch_invite_members m
              WHERE m.guild_id = $2 AND m.user_id = $3 AND (
-                 m.prior_member OR m.left_at IS NOT NULL
+                 m.prior_member OR (m.left_at IS NOT NULL AND $4 >= m.left_at)
                  OR $4 < m.first_joined_at OR $4 > m.first_joined_at + INTERVAL '720 hours'
              )
          ) AND NOT EXISTS (

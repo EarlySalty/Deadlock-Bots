@@ -519,6 +519,61 @@ async fn private_departure_preserves_membership_boundary_without_activity_event(
 }
 
 #[tokio::test]
+async fn delayed_message_before_departure_qualifies_but_departure_boundary_is_excluded() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined_at = at("2026-01-01T12:00:00Z");
+    let left_at = joined_at + Duration::days(15);
+    let user_id = 990_101;
+    join(pool, 990_101, user_id, joined_at, "ViewerCode").await;
+    messages(pool, user_id as u64, 991_100, &[joined_at + Duration::days(1); 4]).await;
+
+    let mut tx = pool.begin().await.expect("departure transaction");
+    remember_member_event(&mut tx, 990_102, 1, user_id, "leave", Some(left_at), None)
+        .await
+        .expect("departure processed before last message");
+    remember_member_event(&mut tx, 990_104, 1, 990_103, "leave", Some(left_at), None)
+        .await
+        .expect("previously unknown prior member");
+    tx.commit().await.expect("departure committed");
+
+    let invite = candidate(pool, user_id).await;
+    let evaluated_at = left_at + Duration::hours(1);
+    assert_eq!(
+        evaluate_one(pool, &invite, None, &[], evaluated_at)
+            .await
+            .expect("historical evaluation waits for activity"),
+        None
+    );
+    assert_eq!(candidate(pool, user_id).await.join_id, invite.join_id);
+
+    let last_message = left_at - Duration::seconds(1);
+    messages(
+        pool,
+        user_id as u64,
+        991_104,
+        &[last_message, left_at, left_at + Duration::seconds(1)],
+    )
+    .await;
+    record_message(pool, 991_107, 1, 990_103, last_message.timestamp())
+        .await
+        .expect("prior member remains excluded");
+    let stored: Vec<i64> = sqlx::query_scalar(
+        "SELECT message_id FROM activity.twitch_invite_messages ORDER BY message_id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("recorded qualifying message IDs");
+    assert_eq!(stored, vec![991_100, 991_101, 991_102, 991_103, 991_104]);
+    assert_eq!(
+        evaluate_one(pool, &invite, None, &[], evaluated_at)
+            .await
+            .expect("delayed fifth message qualifies using historical membership"),
+        Some("qualified")
+    );
+}
+
+#[tokio::test]
 async fn delayed_attribution_after_day_15_leave_preserves_day_14_qualification() {
     let db = database().await;
     let pool = db.pool();
