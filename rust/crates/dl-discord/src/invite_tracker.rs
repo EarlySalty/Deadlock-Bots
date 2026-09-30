@@ -29,21 +29,40 @@ struct InviteSnap {
 }
 
 #[derive(Default)]
+struct InviteHealthState {
+    generation: u64,
+    current_guilds: HashSet<u64>,
+}
+
+#[derive(Default)]
 pub struct InviteSnapshotHealth {
-    current_guilds: RwLock<HashSet<u64>>,
+    state: RwLock<InviteHealthState>,
 }
 
 impl InviteSnapshotHealth {
     pub async fn is_current(&self, guild_id: u64) -> bool {
-        self.current_guilds.read().await.contains(&guild_id)
+        self.state.read().await.current_guilds.contains(&guild_id)
     }
 
-    async fn mark_current(&self, guild_id: u64) {
-        self.current_guilds.write().await.insert(guild_id);
+    async fn generation(&self) -> u64 {
+        self.state.read().await.generation
+    }
+
+    async fn mark_current(&self, guild_id: u64, generation: u64) {
+        let mut state = self.state.write().await;
+        if state.generation == generation {
+            state.current_guilds.insert(guild_id);
+        }
+    }
+
+    pub(crate) async fn invalidate_all(&self) {
+        let mut state = self.state.write().await;
+        state.generation = state.generation.wrapping_add(1);
+        state.current_guilds.clear();
     }
 
     async fn mark_stale(&self, guild_id: u64) {
-        self.current_guilds.write().await.remove(&guild_id);
+        self.state.write().await.current_guilds.remove(&guild_id);
     }
 }
 
@@ -311,6 +330,19 @@ impl InviteTracker {
         true
     }
 
+    async fn lock_personal_changes(
+        tx: &mut Transaction<'_, Postgres>,
+        guild_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('twitch-invites:' || $1::text, 0))",
+        )
+        .bind(guild_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     async fn reconcile_personal_invites(
         tx: &mut Transaction<'_, Postgres>,
         guild_id: u64,
@@ -319,6 +351,9 @@ impl InviteTracker {
     ) -> Result<(), sqlx::Error> {
         let guild_db_id =
             i64::try_from(guild_id).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        // Same transaction-scoped guild lock held across personal code creation
+        // and mapping INSERT. A revocation must not pass the not-yet-visible row.
+        Self::lock_personal_changes(tx, guild_db_id).await?;
         let present_codes: Vec<String> = snapshot.keys().cloned().collect();
         sqlx::query(
             "UPDATE bot.twitch_personal_invites
@@ -334,26 +369,46 @@ impl InviteTracker {
         Ok(())
     }
 
+    async fn begin_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Result<(Transaction<'_, Postgres>, u64), sqlx::Error> {
+        let guild =
+            i64::try_from(guild_id).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let mut tx = self.pool.begin().await?;
+        Self::lock_personal_changes(&mut tx, guild).await?;
+        Ok((tx, self.health.generation().await))
+    }
+
+    #[cfg(test)]
     async fn persist_complete_snapshot(
         &self,
         guild_id: u64,
         snapshot: &HashMap<String, InviteSnap>,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), sqlx::Error> {
+        let (tx, generation) = self.begin_snapshot(guild_id).await?;
+        self.persist_complete_snapshot_tx(tx, generation, guild_id, snapshot, observed_at)
+            .await
+    }
+
+    async fn persist_complete_snapshot_tx(
+        &self,
+        mut tx: Transaction<'_, Postgres>,
+        generation: u64,
+        guild_id: u64,
+        snapshot: &HashMap<String, InviteSnap>,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error> {
         self.health.mark_stale(guild_id).await;
-        let persist = async {
-            let mut tx = self.pool.begin().await?;
-            Self::reconcile_personal_invites(&mut tx, guild_id, snapshot, observed_at).await?;
-            Self::write_snapshot_tx(&mut tx, guild_id, snapshot).await?;
-            tx.commit().await
-        }
-        .await;
-        persist?;
+        Self::reconcile_personal_invites(&mut tx, guild_id, snapshot, observed_at).await?;
+        Self::write_snapshot_tx(&mut tx, guild_id, snapshot).await?;
+        tx.commit().await?;
         self.by_guild
             .lock()
             .await
             .insert(guild_id, snapshot.clone());
-        self.health.mark_current(guild_id).await;
+        self.health.mark_current(guild_id, generation).await;
         Ok(())
     }
 
@@ -364,19 +419,21 @@ impl InviteTracker {
         if !has_cache {
             self.restore_from_db(guild_id).await;
         }
+        // Serialise the observation itself with create+mapping, not only its UPDATE.
+        let (tx, generation) = self.begin_snapshot(guild_id).await?;
         let observed_at = chrono::Utc::now();
         let Some(map) = Self::fetch(http, guild_id).await else {
             self.health.mark_stale(guild_id).await;
             return Ok(false);
         };
         if let Err(error) = self
-            .persist_complete_snapshot(guild_id, &map, observed_at)
+            .persist_complete_snapshot_tx(tx, generation, guild_id, &map, observed_at)
             .await
         {
             self.health.mark_stale(guild_id).await;
             return Err(error);
         }
-        Ok(true)
+        Ok(self.health.is_current(guild_id).await)
     }
 
     /// Übernimmt einen frisch erstellten Invite in den Cache (uses = 0).
@@ -426,6 +483,7 @@ impl InviteTracker {
         }
         let result = async {
             let mut tx = self.pool.begin().await?;
+            Self::lock_personal_changes(&mut tx, guild_db_id).await?;
             sqlx::query(
                 "UPDATE bot.twitch_personal_invites SET revoked_at = clock_timestamp()
                  WHERE guild_id = $1 AND invite_code = $2 AND revoked_at IS NULL",
@@ -476,6 +534,17 @@ impl InviteTracker {
         meta.insert("join_source_label".into(), Value::from("Unbekannt"));
         meta.insert("join_source_confidence".into(), Value::from("low"));
 
+        let (tx, generation) = match self.begin_snapshot(guild_id).await {
+            Ok(tx) => tx,
+            Err(source) => {
+                self.health.mark_stale(guild_id).await;
+                set_unknown_source(&mut meta, "invite_snapshot_store_failed");
+                return Err(InviteJoinError {
+                    metadata: Value::Object(meta),
+                    source,
+                });
+            }
+        };
         let baseline_current = self.health.is_current(guild_id).await;
         let cached_before = self.by_guild.lock().await.get(&guild_id).cloned();
         let has_baseline = has_trusted_join_baseline(baseline_current, cached_before.is_some());
@@ -510,7 +579,7 @@ impl InviteTracker {
             return Ok(Value::Object(meta));
         };
         if let Err(source) = self
-            .persist_complete_snapshot(guild_id, &after_map, latest_observed_at)
+            .persist_complete_snapshot_tx(tx, generation, guild_id, &after_map, latest_observed_at)
             .await
         {
             self.health.mark_stale(guild_id).await;
@@ -521,6 +590,9 @@ impl InviteTracker {
             });
         }
 
+        if self.health.generation().await != generation {
+            set_unknown_source(&mut meta, "invite_snapshot_interrupted");
+        }
         Ok(Value::Object(meta))
     }
 }
@@ -528,6 +600,7 @@ impl InviteTracker {
 #[cfg(test)]
 mod tests {
     include!("invite_tracker_attribution_tests.rs");
+    include!("invite_tracker_creation_tests.rs");
 
     #[cfg(feature = "testing")]
     mod test_database {
@@ -580,20 +653,16 @@ mod tests {
         let tracker = InviteTracker::new(db.pool().clone());
         let missing_guild_id = 9_876_543_210_u64;
 
-        assert!(
-            tracker
-                .load_snapshot_from_db(missing_guild_id)
-                .await
-                .is_none()
-        );
+        assert!(tracker
+            .load_snapshot_from_db(missing_guild_id)
+            .await
+            .is_none());
         assert!(!tracker.restore_from_db(missing_guild_id).await);
-        assert!(
-            !tracker
-                .by_guild
-                .lock()
-                .await
-                .contains_key(&missing_guild_id)
-        );
+        assert!(!tracker
+            .by_guild
+            .lock()
+            .await
+            .contains_key(&missing_guild_id));
 
         let mut snapshot = HashMap::new();
         snapshot.insert(
@@ -661,30 +730,24 @@ mod tests {
         .await
         .expect("reconciled invite statuses");
         assert_eq!(statuses.len(), 3);
-        assert!(
-            statuses
-                .iter()
-                .find(|(code, _)| code == "missing-old")
-                .expect("missing old invite")
-                .1
-                .is_some()
-        );
-        assert!(
-            statuses
-                .iter()
-                .find(|(code, _)| code == "present-code")
-                .expect("present invite")
-                .1
-                .is_none()
-        );
-        assert!(
-            statuses
-                .iter()
-                .find(|(code, _)| code == "missing-new")
-                .expect("new invite")
-                .1
-                .is_none()
-        );
+        assert!(statuses
+            .iter()
+            .find(|(code, _)| code == "missing-old")
+            .expect("missing old invite")
+            .1
+            .is_some());
+        assert!(statuses
+            .iter()
+            .find(|(code, _)| code == "present-code")
+            .expect("present invite")
+            .1
+            .is_none());
+        assert!(statuses
+            .iter()
+            .find(|(code, _)| code == "missing-new")
+            .expect("new invite")
+            .1
+            .is_none());
     }
 
     #[cfg(feature = "testing")]
@@ -719,7 +782,10 @@ mod tests {
             .lock()
             .await
             .insert(guild_id as u64, baseline);
-        tracker.health.mark_current(guild_id as u64).await;
+        tracker
+            .health
+            .mark_current(guild_id as u64, tracker.health.generation().await)
+            .await;
         let after_missed_join = HashMap::from([("used-link".to_string(), attribution_snapshot(1))]);
         assert!(tracker
             .persist_complete_snapshot(guild_id as u64, &after_missed_join, chrono::Utc::now(),)

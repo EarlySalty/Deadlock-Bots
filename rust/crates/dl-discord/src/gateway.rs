@@ -257,6 +257,7 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
+        self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter.voice_cache_health.ready(
             ctx.shard_id.0,
             ready.guilds.iter().map(|guild| guild.id.get()),
@@ -324,6 +325,7 @@ impl EventHandler for Handler {
             event.new == serenity::gateway::ConnectionStage::Connected,
         );
         if event.new != serenity::gateway::ConnectionStage::Connected {
+            self.adapter.invite_snapshot_health().invalidate_all().await;
             self.adapter
                 .voice_cache_health
                 .disconnected(event.shard_id.0);
@@ -347,6 +349,7 @@ impl EventHandler for Handler {
         guild: serenity::all::UnavailableGuild,
         _full: Option<serenity::all::Guild>,
     ) {
+        self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter
             .voice_cache_health
             .guild_unavailable(guild.id.get());
