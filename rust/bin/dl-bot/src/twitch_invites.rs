@@ -24,28 +24,37 @@ pub struct TwitchInvites {
     adapter: Arc<DiscordAdapter>,
     guild_id: u64,
     config: TwitchInvitesConfig,
-    last_warning: Mutex<VecDeque<Instant>>,
+    warning_state: Arc<Mutex<WarningState>>,
     voice_needs_reset: std::sync::atomic::AtomicBool,
     voice_observation_lock: tokio::sync::Mutex<()>,
 }
 
-fn warning_allowed(warnings: &mut VecDeque<Instant>, now: Instant) -> bool {
+#[derive(Default)]
+struct WarningState {
+    emitted_at: VecDeque<Instant>,
+    suppressed_repeats: u64,
+}
+
+fn warning_allowed(state: &mut WarningState, now: Instant) -> Option<u64> {
     let window = Duration::from_secs(7 * 24 * 60 * 60);
-    while warnings
+    while state
+        .emitted_at
         .front()
         .is_some_and(|warning| now.saturating_duration_since(*warning) >= window)
     {
-        warnings.pop_front();
+        state.emitted_at.pop_front();
     }
-    if warnings.len() >= 2
-        || warnings.back().is_some_and(|warning| {
+    if state.emitted_at.len() >= 2
+        || state.emitted_at.back().is_some_and(|warning| {
             now.saturating_duration_since(*warning) < Duration::from_secs(24 * 60 * 60)
         })
     {
-        return false;
+        state.suppressed_repeats = state.suppressed_repeats.saturating_add(1);
+        return None;
     }
-    warnings.push_back(now);
-    true
+    let suppressed = std::mem::take(&mut state.suppressed_repeats);
+    state.emitted_at.push_back(now);
+    Some(suppressed)
 }
 
 impl TwitchInvites {
@@ -60,7 +69,7 @@ impl TwitchInvites {
                 .and_then(|id| id.parse().ok())
                 .unwrap_or(0),
             config: config.twitch_invites.clone(),
-            last_warning: Mutex::new(VecDeque::new()),
+            warning_state: Arc::new(Mutex::new(WarningState::default())),
             voice_needs_reset: std::sync::atomic::AtomicBool::new(true),
             voice_observation_lock: tokio::sync::Mutex::new(()),
         })
@@ -165,11 +174,11 @@ impl TwitchInvites {
         }
     }
 
-    fn should_warn(&self) -> bool {
-        let Ok(mut warnings) = self.last_warning.lock() else {
-            return false;
+    fn should_warn(&self) -> Option<u64> {
+        let Ok(mut state) = self.warning_state.lock() else {
+            return None;
         };
-        warning_allowed(&mut warnings, Instant::now())
+        warning_allowed(&mut state, Instant::now())
     }
 
     async fn record_qualification_status(&self, succeeded: bool) -> Result<(), String> {
@@ -201,8 +210,12 @@ impl TwitchInvites {
                 }
             };
             if let Some(error) = error {
-                if self.should_warn() {
-                    tracing::warn!(%error, "Einladungsqualifikation wird erneut geprüft");
+                if let Some(suppressed_repeats) = self.should_warn() {
+                    tracing::warn!(
+                        %error,
+                        suppressed_repeats,
+                        "Einladungsqualifikation wird erneut geprüft"
+                    );
                 }
             }
         }
@@ -222,12 +235,18 @@ impl TwitchInvites {
                     None => "missing",
                 };
                 let marker_error = self.record_qualification_status(false).await.err();
-                if self.should_warn() {
+                if let Some(suppressed_repeats) = self.should_warn() {
                     if let Some(error) = marker_error {
-                        tracing::warn!(task_exit = exit, %error, "Einladungsqualifikation wird neu gestartet");
+                        tracing::warn!(
+                            task_exit = exit,
+                            suppressed_repeats,
+                            %error,
+                            "Einladungsqualifikation wird neu gestartet"
+                        );
                     } else {
                         tracing::warn!(
                             task_exit = exit,
+                            suppressed_repeats,
                             "Einladungsqualifikation wird neu gestartet"
                         );
                     }
@@ -317,38 +336,76 @@ impl TwitchInvitePort for TwitchInvites {
 
 #[cfg(test)]
 mod warning_tests {
-    use super::warning_allowed;
+    use super::{warning_allowed, WarningState};
     use std::{
-        collections::VecDeque,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
-    #[test]
-    fn warning_debounce_caps_repeated_messages_at_two_per_week() {
-        let start = Instant::now();
-        let mut warnings = VecDeque::new();
+    fn warn(state: &Arc<Mutex<WarningState>>, now: Instant) -> Option<u64> {
+        let mut state = state.lock().unwrap();
+        warning_allowed(&mut state, now)
+    }
 
-        assert!(warning_allowed(&mut warnings, start));
-        assert!(!warning_allowed(&mut warnings, start));
-        assert!(!warning_allowed(
-            &mut warnings,
-            start + Duration::from_secs(24 * 60 * 60 - 1)
-        ));
-        assert!(warning_allowed(
-            &mut warnings,
-            start + Duration::from_secs(24 * 60 * 60)
-        ));
-        assert!(!warning_allowed(
-            &mut warnings,
-            start + Duration::from_secs(2 * 24 * 60 * 60)
-        ));
-        assert!(warning_allowed(
-            &mut warnings,
-            start + Duration::from_secs(7 * 24 * 60 * 60)
-        ));
-        assert!(!warning_allowed(
-            &mut warnings,
-            start + Duration::from_secs(7 * 24 * 60 * 60 + 1)
-        ));
+    #[test]
+    fn suppressed_repeats_are_reported_on_next_allowed_warning() {
+        let start = Instant::now();
+        let warning_state = Arc::new(Mutex::new(WarningState::default()));
+        let evaluator_state = Arc::clone(&warning_state);
+        let supervisor_state = Arc::clone(&warning_state);
+
+        assert_eq!(warn(&evaluator_state, start), Some(0));
+        assert_eq!(warn(&supervisor_state, start), None);
+        assert_eq!(
+            warn(
+                &evaluator_state,
+                start + Duration::from_secs(24 * 60 * 60 - 1)
+            ),
+            None
+        );
+        assert_eq!(
+            warn(&supervisor_state, start + Duration::from_secs(24 * 60 * 60)),
+            Some(2)
+        );
+        assert_eq!(warning_state.lock().unwrap().suppressed_repeats, 0);
+
+        assert_eq!(
+            warn(
+                &supervisor_state,
+                start + Duration::from_secs(2 * 24 * 60 * 60)
+            ),
+            None
+        );
+        assert_eq!(
+            warn(
+                &evaluator_state,
+                start + Duration::from_secs(6 * 24 * 60 * 60)
+            ),
+            None
+        );
+        assert_eq!(
+            warn(
+                &supervisor_state,
+                start + Duration::from_secs(7 * 24 * 60 * 60)
+            ),
+            Some(2)
+        );
+        assert_eq!(warning_state.lock().unwrap().suppressed_repeats, 0);
+
+        assert_eq!(
+            warn(
+                &evaluator_state,
+                start + Duration::from_secs(7 * 24 * 60 * 60)
+            ),
+            None
+        );
+        assert_eq!(
+            warn(
+                &supervisor_state,
+                start + Duration::from_secs(8 * 24 * 60 * 60)
+            ),
+            Some(1)
+        );
+        assert_eq!(warning_state.lock().unwrap().suppressed_repeats, 0);
     }
 }
