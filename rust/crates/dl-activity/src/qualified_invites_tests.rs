@@ -1,3 +1,10 @@
+mod test_database {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/peer_database.rs"
+    ));
+}
+
 use super::*;
 include!("qualified_invite_live_tests.rs");
 
@@ -8,24 +15,7 @@ fn at(value: &str) -> DateTime<Utc> {
 }
 
 async fn database() -> dl_central_db::TestDb {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-database.json");
-    let db = match std::fs::read(path) {
-        Ok(bytes) => {
-            let config: serde_json::Value =
-                serde_json::from_slice(&bytes).expect("valid local test-database.json");
-            let options = config["database_url"]
-                .as_str()
-                .expect("database_url string")
-                .parse::<sqlx::postgres::PgConnectOptions>()
-                .expect("valid local test database options");
-            dl_central_db::testing::test_pool_with_options(options).await
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            dl_central_db::testing::test_pool().await
-        }
-        Err(_) => panic!("cannot read local test-database.json"),
-    }
-    .expect("isolated database");
+    let db = test_database::database().await;
     sqlx::query("UPDATE activity.twitch_invite_tracking SET started_at = '2025-01-01T00:00:00Z'")
         .execute(db.pool())
         .await

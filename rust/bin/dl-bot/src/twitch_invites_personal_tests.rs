@@ -1,3 +1,10 @@
+mod test_database {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/peer_database.rs"
+    ));
+}
+
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -35,9 +42,7 @@ async fn setup() -> (
     TwitchInvitesConfig,
     Issuer,
 ) {
-    let db = dl_central_db::testing::test_pool()
-        .await
-        .expect("isolated database");
+    let db = test_database::database().await;
     sqlx::query(
         "INSERT INTO bot.twitch_streamer_invites
          (streamer_login, twitch_user_id, guild_id, channel_id, invite_code, invite_url)
