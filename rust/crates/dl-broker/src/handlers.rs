@@ -1758,6 +1758,80 @@ pub async fn add_reaction(
     .await
 }
 
+/// Authenticated, aggregate-only, member-scoped community directory.
+pub async fn community_lobbies(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let Ok(payload) = json_object(&body) else {
+        return bad_request(&rid, "invalid JSON payload");
+    };
+    let guild_id = match payload::positive_int(&payload, "guild_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    let user_id = match payload::positive_int(&payload, "user_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    if guild_id != 1289721245281292288 {
+        return bad_request(&rid, "unsupported community");
+    }
+    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) {
+        return resp;
+    }
+    if !state.port.is_ready().await {
+        return respond(
+            503,
+            error_body(&rid, None, "unavailable", "Discord gateway unavailable"),
+        );
+    }
+    match state.port.community_lobbies(guild_id, user_id).await {
+        Ok(mut lobbies) => {
+            lobbies.retain(|lobby| {
+                lobby.channel_id.parse::<u64>().is_ok_and(|id| {
+                    allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()
+                })
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            respond(
+                200,
+                success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})),
+            )
+        }
+        Err(PortError::MemberNotFound) => respond(
+            403,
+            error_body(
+                &rid,
+                None,
+                "member_required",
+                "Discord membership could not be confirmed",
+            ),
+        ),
+        Err(err) => {
+            tracing::warn!(%err, "Community lobby directory unavailable");
+            respond(
+                503,
+                error_body(
+                    &rid,
+                    None,
+                    "unavailable",
+                    "Discord lobby directory unavailable",
+                ),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2583,79 +2657,5 @@ mod tests {
         assert_eq!(status, 502);
         assert!(!body.to_string().contains(SENTINEL));
         Ok(())
-    }
-}
-
-/// Authenticated, aggregate-only, member-scoped community directory.
-pub async fn community_lobbies(
-    State(state): State<SharedBroker>,
-    peer: Peer,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    let rid = request_id(&headers);
-    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
-        return resp;
-    }
-    let Ok(payload) = json_object(&body) else {
-        return bad_request(&rid, "invalid JSON payload");
-    };
-    let guild_id = match payload::positive_int(&payload, "guild_id") {
-        Ok(v) => v,
-        Err(msg) => return bad_request(&rid, &msg),
-    };
-    let user_id = match payload::positive_int(&payload, "user_id") {
-        Ok(v) => v,
-        Err(msg) => return bad_request(&rid, &msg),
-    };
-    if guild_id != 1289721245281292288 {
-        return bad_request(&rid, "unsupported community");
-    }
-    if let Err(resp) = allowlist_check(&rid, None, "guild", guild_id, &state.guild_allowlist) {
-        return resp;
-    }
-    if !state.port.is_ready().await {
-        return respond(
-            503,
-            error_body(&rid, None, "unavailable", "Discord gateway unavailable"),
-        );
-    }
-    match state.port.community_lobbies(guild_id, user_id).await {
-        Ok(mut lobbies) => {
-            lobbies.retain(|lobby| {
-                lobby.channel_id.parse::<u64>().is_ok_and(|id| {
-                    allowlist_check(&rid, None, "channel", id, &state.channel_allowlist).is_ok()
-                })
-            });
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            respond(
-                200,
-                success_body(&rid, None, json!({"captured_at": now, "lobbies": lobbies})),
-            )
-        }
-        Err(PortError::MemberNotFound) => respond(
-            403,
-            error_body(
-                &rid,
-                None,
-                "member_required",
-                "Discord membership could not be confirmed",
-            ),
-        ),
-        Err(err) => {
-            tracing::warn!(%err, "Community lobby directory unavailable");
-            respond(
-                503,
-                error_body(
-                    &rid,
-                    None,
-                    "unavailable",
-                    "Discord lobby directory unavailable",
-                ),
-            )
-        }
     }
 }

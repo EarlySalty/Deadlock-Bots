@@ -991,8 +991,7 @@ impl Matcher {
                     channel_id,
                     message_id,
                     format!(
-                        "Manuell verknüpft von {} → <@{user_id}>. {role_note}",
-                        moderator
+                        "Manuell verknüpft von {moderator} → <@{user_id}>. {role_note}"
                     ),
                     0x2ECC71,
                 )

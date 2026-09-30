@@ -514,10 +514,7 @@ fn router_emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &s
 
 pub fn voice_guide_detail_text() -> String {
     format!(
-        "**📖 Voice-Lanes im Detail**\n{}\nRouter-VC-Join: erst Modus wählen, dann Verschiebung.\nRanked ist offen für alle. Der Lane-Owner kann per 🔓 Rang-Gate optional nur verifizierte Ränge reinlassen (Steam verknüpfen in <#1398021105339334666>).\n{}\n{}\n**⚙️ Voreinstellungen:** Name, Limit (und Rang-Bereich) jederzeit festlegen, auch ohne in einer Lane zu sein. Gilt danach für jede neue Lane. 💾 Speichern merkt sich Name, Plätze und Rang der Lane, in der du sitzt. Laden legt genau das wieder drauf.\n**Mitspieler finden:** Gesuch per Klick (Modus, Rang, Wann), erscheint in <#1522769149208821881>; 🔔 benachrichtigt dich bei passenden Gesuchen.",
-        ROUTER_PANEL_GUIDE_CREATE,
-        ROUTER_PANEL_GUIDE_OWNER,
-        ROUTER_PANEL_GUIDE_BUTTONS,
+        "**📖 Voice-Lanes im Detail**\n{ROUTER_PANEL_GUIDE_CREATE}\nRouter-VC-Join: erst Modus wählen, dann Verschiebung.\nRanked ist offen für alle. Der Lane-Owner kann per 🔓 Rang-Gate optional nur verifizierte Ränge reinlassen (Steam verknüpfen in <#1398021105339334666>).\n{ROUTER_PANEL_GUIDE_OWNER}\n{ROUTER_PANEL_GUIDE_BUTTONS}\n**⚙️ Voreinstellungen:** Name, Limit (und Rang-Bereich) jederzeit festlegen, auch ohne in einer Lane zu sein. Gilt danach für jede neue Lane. 💾 Speichern merkt sich Name, Plätze und Rang der Lane, in der du sitzt. Laden legt genau das wieder drauf.\n**Mitspieler finden:** Gesuch per Klick (Modus, Rang, Wann), erscheint in <#1522769149208821881>; 🔔 benachrichtigt dich bei passenden Gesuchen.",
     )
 }
 
