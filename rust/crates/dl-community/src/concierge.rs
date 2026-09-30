@@ -2414,7 +2414,9 @@ impl ConciergeStore {
         guild_id: u64,
         request: LegacyPateRequestMessage,
     ) -> CommunityDbResult<bool> {
-        let user_id = u64_to_i64(request.user_id, "concierge_pate_requests.user_id")?;
+        let Some((user_id, mut tx)) = self.begin_privacy_action(request.user_id).await? else {
+            return Ok(false);
+        };
         let guild_id = u64_to_i64(guild_id, "concierge_pate_requests.guild_id")?;
         let channel_id = u64_to_i64(
             PATE_REQUEST_CHANNEL_ID,
@@ -2447,9 +2449,10 @@ impl ConciergeStore {
         .bind(channel_id)
         .bind(message_id)
         .bind(request.created_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+        tx.commit().await?;
         Ok(inserted == 1)
     }
 
@@ -2737,8 +2740,24 @@ impl ConciergeStore {
         }
         sqlx::query(
             "UPDATE bot.concierge_profiles
-                SET opted_out = TRUE, funnel_status = 'opted_out', updated_at = $2
+                SET opted_out = TRUE,
+                    funnel_status = 'opted_out',
+                    pate_requested = FALSE,
+                    pate_request_uncertain = FALSE,
+                    updated_at = $2
               WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET status = 'closed_opted_out',
+                    closed_at = $2,
+                    dm_pending = FALSE,
+                    updated_at = $2
+              WHERE user_id = $1 AND status IN ('open', 'closed_unbesetzt')",
         )
         .bind(user_id)
         .bind(now)
@@ -2956,20 +2975,28 @@ impl ConciergeStore {
         rows.iter().map(pate_request_row_from).collect()
     }
 
-    async fn pate_request_by_id(&self, id: i64) -> CommunityDbResult<Option<PateRequestRow>> {
+    async fn pate_request_by_id_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        user_id: i64,
+    ) -> CommunityDbResult<Option<PateRequestRow>> {
         let row = sqlx::query(
             "SELECT id, status, user_id, channel_id, message_id, created_at,
                     escalated_2h_at, escalated_24h_at, dm_pending, owner_alert_message_id
-               FROM bot.concierge_pate_requests WHERE id = $1",
+               FROM bot.concierge_pate_requests
+              WHERE id = $1 AND user_id = $2",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .bind(user_id)
+        .fetch_optional(&mut **tx)
         .await?;
         row.as_ref().map(pate_request_row_from).transpose()
     }
 
     async fn pate_request_has_newer_resolution(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         id: i64,
         user_id: u64,
     ) -> CommunityDbResult<bool> {
@@ -2985,13 +3012,14 @@ impl ConciergeStore {
         )
         .bind(id)
         .bind(user_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut **tx)
         .await
         .map_err(Into::into)
     }
 
     async fn claim_pate_escalation_stage(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         id: i64,
         stage: PateEscalationStage,
         now: DateTime<Utc>,
@@ -3006,12 +3034,11 @@ impl ConciergeStore {
                 )
                 .bind(id)
                 .bind(now)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut **tx)
                 .await?;
                 Ok(claimed.is_some())
             }
             PateEscalationStage::TwentyFourHours => {
-                let mut tx = self.pool.begin().await?;
                 let claimed = sqlx::query_scalar::<_, i64>(
                     "UPDATE bot.concierge_pate_requests
                         SET status = 'closed_unbesetzt',
@@ -3023,7 +3050,7 @@ impl ConciergeStore {
                 )
                 .bind(id)
                 .bind(now)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?;
                 if let Some(user_id) = claimed {
                     sqlx::query(
@@ -3035,10 +3062,9 @@ impl ConciergeStore {
                     )
                     .bind(user_id)
                     .bind(now)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await?;
                 }
-                tx.commit().await?;
                 Ok(claimed.is_some())
             }
         }
@@ -3046,6 +3072,7 @@ impl ConciergeStore {
 
     async fn mark_pate_24h_card_completed(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         id: i64,
         now: DateTime<Utc>,
     ) -> CommunityDbResult<()> {
@@ -3056,12 +3083,17 @@ impl ConciergeStore {
         )
         .bind(id)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
 
-    async fn mark_pate_24h_dm_done(&self, id: i64, now: DateTime<Utc>) -> CommunityDbResult<()> {
+    async fn mark_pate_24h_dm_done(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
         sqlx::query(
             "UPDATE bot.concierge_pate_requests
                 SET dm_pending = FALSE, updated_at = $2
@@ -3069,13 +3101,14 @@ impl ConciergeStore {
         )
         .bind(id)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
 
     async fn record_pate_owner_alert(
         &self,
+        tx: &mut Transaction<'_, Postgres>,
         id: i64,
         message_id: u64,
         now: DateTime<Utc>,
@@ -3089,7 +3122,7 @@ impl ConciergeStore {
         .bind(id)
         .bind(message_id)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
@@ -5508,26 +5541,59 @@ impl Concierge {
         for due_row in due {
             let action = self.user_action_lock(due_row.user_id);
             let _guard = action.lock().await;
-            let row = match self.store.pate_request_by_id(due_row.id).await {
-                Ok(Some(row)) if row.status != "claimed" => row,
+            let privacy_action = match self.store.begin_privacy_action(due_row.user_id).await {
+                Ok(action) => action,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = due_row.id, "Concierge: Privacy-Status vor Paten-Eskalation nicht prüfbar");
+                    continue;
+                }
+            };
+            let Some((db_user_id, mut privacy_tx)) = privacy_action else {
+                continue;
+            };
+            let row = match self
+                .store
+                .pate_request_by_id_tx(&mut privacy_tx, due_row.id, db_user_id)
+                .await
+            {
+                Ok(Some(row)) if row.status == "open" || row.status == "closed_unbesetzt" => row,
                 Ok(_) => continue,
                 Err(err) => {
                     tracing::warn!(%err, request_id = due_row.id, "Concierge: Patenanfrage vor Eskalation nicht prüfbar");
                     continue;
                 }
             };
+            let profile_state = match sqlx::query_as::<_, (bool, bool)>(
+                "SELECT opted_out, pate_requested
+                   FROM bot.concierge_profiles
+                  WHERE user_id = $1",
+            )
+            .bind(db_user_id)
+            .fetch_optional(&mut *privacy_tx)
+            .await
+            {
+                Ok(Some(state)) => state,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = due_row.id, "Concierge: Patenprofil vor Eskalation nicht prüfbar");
+                    continue;
+                }
+            };
+            if profile_state.0 || (row.status == "open" && !profile_state.1) {
+                continue;
+            }
             let age = now - row.created_at;
             if row.status == "closed_unbesetzt" {
                 if row.dm_pending {
                     match self
                         .store
-                        .pate_request_has_newer_resolution(row.id, row.user_id)
+                        .pate_request_has_newer_resolution(&mut privacy_tx, row.id, row.user_id)
                         .await
                     {
-                        Ok(true) => self.mark_closed_pate_dm(&row, now).await,
+                        Ok(true) => self.mark_closed_pate_dm(&mut privacy_tx, &row, now).await,
                         Ok(false) => {
                             if self.escalate_pate_unbesetzt(&row).await {
-                                self.mark_closed_pate_dm(&row, now).await;
+                                self.mark_closed_pate_dm(&mut privacy_tx, &row, now).await;
                             }
                         }
                         Err(err) => {
@@ -5536,20 +5602,25 @@ impl Concierge {
                     }
                 }
                 if row.escalated_24h_at.is_none() && self.update_closed_pate_card(&row).await {
-                    self.mark_closed_pate_card(&row, now).await;
+                    self.mark_closed_pate_card(&mut privacy_tx, &row, now).await;
                 }
             } else if row.escalated_24h_at.is_none() && age >= Duration::hours(24) {
                 match self
                     .store
-                    .claim_pate_escalation_stage(row.id, PateEscalationStage::TwentyFourHours, now)
+                    .claim_pate_escalation_stage(
+                        &mut privacy_tx,
+                        row.id,
+                        PateEscalationStage::TwentyFourHours,
+                        now,
+                    )
                     .await
                 {
                     Ok(true) => {
                         if self.escalate_pate_unbesetzt(&row).await {
-                            self.mark_closed_pate_dm(&row, now).await;
+                            self.mark_closed_pate_dm(&mut privacy_tx, &row, now).await;
                         }
                         if self.update_closed_pate_card(&row).await {
-                            self.mark_closed_pate_card(&row, now).await;
+                            self.mark_closed_pate_card(&mut privacy_tx, &row, now).await;
                         }
                     }
                     Ok(false) => {}
@@ -5558,33 +5629,59 @@ impl Concierge {
                     }
                 }
             } else if row.escalated_2h_at.is_none() && age >= Duration::hours(2) {
-                if !self.escalate_pate_owner_ping(&row).await {
+                if !self.escalate_pate_owner_ping(&mut privacy_tx, &row).await {
                     continue;
                 }
                 if let Err(err) = self
                     .store
-                    .claim_pate_escalation_stage(row.id, PateEscalationStage::TwoHours, now)
+                    .claim_pate_escalation_stage(
+                        &mut privacy_tx,
+                        row.id,
+                        PateEscalationStage::TwoHours,
+                        now,
+                    )
                     .await
                 {
                     tracing::warn!(%err, request_id = row.id, "Concierge: 2h-Eskalationsstufe konnte nicht bestätigt werden");
                 }
             }
+            if let Err(err) = privacy_tx.commit().await {
+                tracing::warn!(%err, request_id = due_row.id, "Concierge: Privacy-Sperre nach Paten-Eskalation konnte nicht abgeschlossen werden");
+            }
         }
     }
 
-    async fn mark_closed_pate_card(&self, row: &PateRequestRow, now: DateTime<Utc>) {
-        if let Err(err) = self.store.mark_pate_24h_card_completed(row.id, now).await {
+    async fn mark_closed_pate_card(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &PateRequestRow,
+        now: DateTime<Utc>,
+    ) {
+        if let Err(err) = self
+            .store
+            .mark_pate_24h_card_completed(tx, row.id, now)
+            .await
+        {
             tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Kartenupdate konnte nicht bestätigt werden");
         }
     }
 
-    async fn mark_closed_pate_dm(&self, row: &PateRequestRow, now: DateTime<Utc>) {
-        if let Err(err) = self.store.mark_pate_24h_dm_done(row.id, now).await {
+    async fn mark_closed_pate_dm(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &PateRequestRow,
+        now: DateTime<Utc>,
+    ) {
+        if let Err(err) = self.store.mark_pate_24h_dm_done(tx, row.id, now).await {
             tracing::warn!(%err, request_id = row.id, "Concierge: 24h-DM konnte nicht bestätigt werden");
         }
     }
 
-    async fn escalate_pate_owner_ping(&self, row: &PateRequestRow) -> bool {
+    async fn escalate_pate_owner_ping(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &PateRequestRow,
+    ) -> bool {
         let body = v2_body(
             PATE_ESCALATION_2H_TEXT,
             vec![button(
@@ -5650,7 +5747,7 @@ impl Concierge {
             };
             if let Err(err) = self
                 .store
-                .record_pate_owner_alert(row.id, message_id, Utc::now())
+                .record_pate_owner_alert(tx, row.id, message_id, Utc::now())
                 .await
             {
                 tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis konnte nicht gespeichert werden");
@@ -5661,45 +5758,36 @@ impl Concierge {
     }
 
     async fn escalate_pate_unbesetzt(&self, row: &PateRequestRow) -> bool {
-        let opted_out = match u64_to_i64(row.user_id, "concierge_pate_requests.user_id") {
-            Ok(db_user_id) => crate::privacy::is_opted_out(self.store.pool(), db_user_id).await,
-            Err(err) => {
-                tracing::warn!(%err, request_id = row.id, "Concierge: Opt-out-Pruefung fuer 24h-DM fehlgeschlagen; DM wird uebersprungen");
-                true
+        let mut body = v2_body(PATE_UNBESETZT_DM_TEXT, Vec::new());
+        body.insert("nonce".into(), json!(format!("pate24h-{}", row.id)));
+        body.insert("enforce_nonce".into(), json!(true));
+        match tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port.send_dm_v2(row.user_id, body),
+        )
+        .await
+        {
+            Ok(ConciergeDmDelivery::Sent { .. }) => {}
+            Ok(ConciergeDmDelivery::CannotSend50007) => {
+                tracing::warn!(
+                    user_id = row.user_id,
+                    stufe = "24h",
+                    request_id = row.id,
+                    "Concierge: 24h-DM nicht zustellbar, DMs sind gesperrt"
+                );
             }
-        };
-        if !opted_out {
-            let mut body = v2_body(PATE_UNBESETZT_DM_TEXT, Vec::new());
-            body.insert("nonce".into(), json!(format!("pate24h-{}", row.id)));
-            body.insert("enforce_nonce".into(), json!(true));
-            match tokio::time::timeout(
-                CONCIERGE_DISCORD_IO_TIMEOUT,
-                self.port.send_dm_v2(row.user_id, body),
-            )
-            .await
-            {
-                Ok(ConciergeDmDelivery::Sent { .. }) => {}
-                Ok(ConciergeDmDelivery::CannotSend50007) => {
-                    tracing::warn!(
-                        user_id = row.user_id,
-                        stufe = "24h",
-                        request_id = row.id,
-                        "Concierge: 24h-DM nicht zustellbar, DMs sind gesperrt"
-                    );
-                }
-                Ok(ConciergeDmDelivery::Failed(err)) => {
-                    tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-DM fehlgeschlagen");
-                    return false;
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        user_id = row.user_id,
-                        stufe = "24h",
-                        request_id = row.id,
-                        "Concierge: 24h-DM hat Zeitlimit ueberschritten"
-                    );
-                    return false;
-                }
+            Ok(ConciergeDmDelivery::Failed(err)) => {
+                tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-DM fehlgeschlagen");
+                return false;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    user_id = row.user_id,
+                    stufe = "24h",
+                    request_id = row.id,
+                    "Concierge: 24h-DM hat Zeitlimit ueberschritten"
+                );
+                return false;
             }
         }
         true
@@ -15432,12 +15520,7 @@ mod tests {
         let erase_task = tokio::spawn(async move {
             crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
         });
-        wait_for_db_lock(
-            &pool,
-            "DELETE FROM bot.concierge_profiles",
-            Some("transactionid"),
-        )
-        .await;
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
 
         let write_store = store.clone();
         let write_task = tokio::spawn(async move {
@@ -15779,6 +15862,14 @@ mod tests {
         message_id: i64,
         created_at: DateTime<Utc>,
     ) {
+        ConciergeStore::new(pool.clone())
+            .set_pate_requested(
+                u64::try_from(user_id).expect("valid user id"),
+                test_config(true, &[]).main_guild_id,
+                created_at,
+            )
+            .await
+            .expect("Patenwunsch-Profil seeden");
         sqlx::query(
             "INSERT INTO bot.concierge_pate_requests(user_id, guild_id, channel_id, message_id, status, created_at, updated_at)
              VALUES($1, $2, $3, $4, 'open', $5, $5)",
@@ -15916,6 +16007,108 @@ mod tests {
         concierge.run_pate_escalations(now).await;
         assert_eq!(port.edited_channels.lock().unwrap().len(), 1);
         assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn optout_schliesst_offene_patenanfrage_und_verhindert_2h_eskalation() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = ConciergeStore::new(pool.clone());
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 770045, 770046, now - Duration::hours(3)).await;
+
+        assert!(store.set_opted_out(770045, 1, now).await.unwrap());
+        concierge.run_pate_escalations(now).await;
+
+        let (status, dm_pending): (String, bool) = sqlx::query_as(
+            "SELECT status, dm_pending FROM bot.concierge_pate_requests WHERE user_id = 770045",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("geschlossene Anfrage");
+        assert_eq!(status, "closed_opted_out");
+        assert!(!dm_pending);
+        let pate_requested: bool = sqlx::query_scalar(
+            "SELECT pate_requested FROM bot.concierge_profiles WHERE user_id = 770045",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Patenwunsch");
+        assert!(!pate_requested);
+        assert!(port.edited_channels.lock().unwrap().is_empty());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
+        assert!(port.sent_dm_v2.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn optout_gewinnt_privacy_race_vor_24h_dm_und_kartenupdate() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = ConciergeStore::new(pool.clone());
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Arc::new(Concierge::new(
+            pool.clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        ));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 770047, 770048, now - Duration::hours(25)).await;
+
+        let mut blocker = pool.begin().await.expect("privacy blocker tx");
+        crate::privacy::lock_user_privacy(&mut blocker, 770047)
+            .await
+            .expect("hold privacy lock");
+        let optout = tokio::spawn(async move { store.set_opted_out(770047, 1, now).await });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        let scheduler = {
+            let concierge = concierge.clone();
+            tokio::spawn(async move { concierge.run_pate_escalations(now).await })
+        };
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let waiters = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                       FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND state = 'active'
+                        AND wait_event_type = 'Lock'
+                        AND wait_event = 'advisory'
+                        AND query LIKE '%pg_advisory_xact_lock%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("advisory waiters");
+                if waiters >= 2 {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Opt-out und Scheduler warten auf den Privacy-Lock");
+        blocker.commit().await.expect("release privacy lock");
+
+        assert!(optout.await.expect("optout task").expect("optout result"));
+        scheduler.await.expect("scheduler task");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM bot.concierge_pate_requests WHERE user_id = 770047",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("request status");
+        assert_eq!(status, "closed_opted_out");
+        assert!(port.edited_channels.lock().unwrap().is_empty());
+        assert!(port.sent_dm_v2.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "testing")]
@@ -16526,5 +16719,126 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn legacy_patenimport_wartet_hinter_forget_und_legt_keine_anfrage_wieder_an() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let forget_store = ConciergeStore::new(pool.clone());
+        let import_store = ConciergeStore::new(pool.clone());
+        let user_id = 770043;
+        forget_store
+            .set_pate_requested(user_id, 1, Utc::now())
+            .await
+            .expect("pate requested");
+
+        let mut blocker = pool.begin().await.expect("privacy blocker tx");
+        crate::privacy::lock_user_privacy(
+            &mut blocker,
+            u64_to_i64(user_id, "core.user_privacy.user_id").expect("valid user id"),
+        )
+        .await
+        .expect("hold privacy lock");
+
+        let forget = tokio::spawn(async move { forget_store.forget_user(user_id).await });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        let import = tokio::spawn(async move {
+            import_store
+                .import_legacy_pate_request(
+                    1,
+                    LegacyPateRequestMessage {
+                        user_id,
+                        message_id: 770044,
+                        created_at: Utc::now(),
+                    },
+                )
+                .await
+        });
+        blocker.commit().await.expect("release privacy lock");
+
+        forget.await.expect("forget task").expect("forget result");
+        assert!(!import.await.expect("import task").expect("import result"));
+        let requests = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE user_id = $1",
+        )
+        .bind(user_id as i64)
+        .fetch_one(&pool)
+        .await
+        .expect("request count");
+        assert_eq!(requests, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn legacy_patenimport_wartet_hinter_globaler_loeschung() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        ConciergeStore::new(pool.clone())
+            .set_pate_requested(770049, 1, Utc::now())
+            .await
+            .expect("pate requested");
+
+        let mut blocker = pool.begin().await.expect("privacy blocker tx");
+        crate::privacy::lock_user_privacy(&mut blocker, 770049)
+            .await
+            .expect("hold privacy lock");
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            crate::privacy::delete_user_data(&erase_pool, 770049, "test".into(), 1_000).await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        let import_store = ConciergeStore::new(pool.clone());
+        let import = tokio::spawn(async move {
+            import_store
+                .import_legacy_pate_request(
+                    1,
+                    LegacyPateRequestMessage {
+                        user_id: 770049,
+                        message_id: 770050,
+                        created_at: Utc::now(),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let waiters = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                       FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND state = 'active'
+                        AND wait_event_type = 'Lock'
+                        AND wait_event = 'advisory'
+                        AND query LIKE '%pg_advisory_xact_lock%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("advisory waiters");
+                if waiters >= 2 {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("global delete and import wait on the privacy lock");
+        blocker.commit().await.expect("release privacy lock");
+
+        erase.await.expect("erase task").expect("global erasure");
+        assert!(!import.await.expect("import task").expect("import result"));
+        let requests = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE user_id = 770049",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("request count");
+        assert_eq!(requests, 0);
     }
 }
