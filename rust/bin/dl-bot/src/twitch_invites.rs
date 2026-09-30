@@ -37,7 +37,11 @@ fn warning_allowed(warnings: &mut VecDeque<Instant>, now: Instant) -> bool {
     {
         warnings.pop_front();
     }
-    if warnings.len() >= 2 {
+    if warnings.len() >= 2
+        || warnings.back().is_some_and(|warning| {
+            now.saturating_duration_since(*warning) < Duration::from_secs(24 * 60 * 60)
+        })
+    {
         return false;
     }
     warnings.push_back(now);
@@ -325,6 +329,11 @@ mod warning_tests {
         let mut warnings = VecDeque::new();
 
         assert!(warning_allowed(&mut warnings, start));
+        assert!(!warning_allowed(&mut warnings, start));
+        assert!(!warning_allowed(
+            &mut warnings,
+            start + Duration::from_secs(24 * 60 * 60 - 1)
+        ));
         assert!(warning_allowed(
             &mut warnings,
             start + Duration::from_secs(24 * 60 * 60)
