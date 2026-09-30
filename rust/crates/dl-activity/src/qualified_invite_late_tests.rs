@@ -4,6 +4,66 @@ async fn evidence_queue_count(pool: &PgPool, user: i64) -> i64 {
 }
 
 #[tokio::test]
+async fn pre_attribution_evidence_remains_queued_after_deadline_with_rejoin_proof() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined = at("2026-01-01T12:00:00Z");
+    let now = joined + Duration::days(40);
+    let user = 991_600_i64;
+    voice(pool, user, user, 20, joined + Duration::days(14), 900).await;
+    assert_eq!(evidence_queue_count(pool, user).await, 0);
+    join(pool, user, user, joined, "ViewerCode").await;
+    let invite = candidate(pool, user).await;
+    let rejoin = MemberProof {
+        joined_at: Some(joined + Duration::days(32)),
+        is_bot: false,
+        checked_at: now,
+    };
+    assert_eq!(
+        evaluate_one(pool, &invite, Some(&rejoin), &[], now)
+            .await
+            .expect("deadline with unresolved first membership"),
+        Some("expired")
+    );
+    assert_eq!(evidence_queue_count(pool, user).await, 1);
+    assert_eq!(
+        evaluate_one(pool, &invite, None, &[], now)
+            .await
+            .expect("missing membership remains queued"),
+        None
+    );
+    assert_eq!(evidence_queue_count(pool, user).await, 1);
+    let mut tx = pool.begin().await.expect("late original departure");
+    remember_member_event(
+        &mut tx,
+        9_916_001,
+        1,
+        user,
+        "leave",
+        Some(joined + Duration::days(20)),
+        None,
+    )
+    .await
+    .expect("original membership boundary");
+    tx.commit().await.expect("departure commit");
+    assert_eq!(
+        evaluate_one(pool, &invite, Some(&rejoin), &[], now)
+            .await
+            .expect("historical first membership now proven"),
+        Some("qualified")
+    );
+    assert_eq!(evidence_queue_count(pool, user).await, 0);
+    let history: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM bot.twitch_invite_transitions WHERE join_id=$1 ORDER BY id",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await
+    .expect("one transition per state");
+    assert_eq!(history, vec!["pending", "expired", "qualified"]);
+}
+
+#[tokio::test]
 async fn late_qualification_guard_rejects_an_unknown_expiry_reason() {
     let db = database().await;
     let pool = db.pool();

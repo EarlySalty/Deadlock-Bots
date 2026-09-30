@@ -485,6 +485,18 @@ pub async fn evaluate_one(
         && !member.is_some_and(|proof| proof.is_bot)
         && qualified_at.is_none()
         && timely_activity_at(&current, evidence, now).is_some();
+    // Evidence may predate attribution, so its trigger could not yet find this
+    // join. Retain a targeted retry before closing the visible deadline state.
+    if awaiting_membership && marked.is_none() {
+        sqlx::query(
+            "INSERT INTO activity.twitch_invite_evidence_queue (guild_id,user_id)
+             VALUES ($1,$2) ON CONFLICT (guild_id,user_id) DO NOTHING",
+        )
+        .bind(current.guild_id)
+        .bind(current.user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     let result = if qualified_at.is_some() {
         Some(("qualified", "activity_and_membership"))
     } else if !current.eligible || opted_out || member.is_some_and(|proof| proof.is_bot) {
@@ -494,7 +506,7 @@ pub async fn evaluate_one(
         .is_some_and(|left_at| left_at <= current.joined_at + Duration::days(14))
     {
         Some(("expired", "left_before_retention"))
-    } else if now >= current.joined_at + Duration::days(30) && !awaiting_membership {
+    } else if now >= current.joined_at + Duration::days(30) {
         Some(("expired", "deadline"))
     } else {
         None
