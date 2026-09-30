@@ -343,7 +343,9 @@ mod warning_tests {
     };
 
     fn warn(state: &Arc<Mutex<WarningState>>, now: Instant) -> Option<u64> {
-        let mut state = state.lock().unwrap();
+        let mut state = state
+            .lock()
+            .expect("warning state mutex must not be poisoned");
         warning_allowed(&mut state, now)
     }
 
@@ -367,7 +369,13 @@ mod warning_tests {
             warn(&supervisor_state, start + Duration::from_secs(24 * 60 * 60)),
             Some(2)
         );
-        assert_eq!(warning_state.lock().unwrap().suppressed_repeats, 0);
+        assert_eq!(
+            warning_state
+                .lock()
+                .expect("warning state mutex must not be poisoned")
+                .suppressed_repeats,
+            0
+        );
 
         assert_eq!(
             warn(
@@ -390,7 +398,13 @@ mod warning_tests {
             ),
             Some(2)
         );
-        assert_eq!(warning_state.lock().unwrap().suppressed_repeats, 0);
+        assert_eq!(
+            warning_state
+                .lock()
+                .expect("warning state mutex must not be poisoned")
+                .suppressed_repeats,
+            0
+        );
 
         assert_eq!(
             warn(
@@ -406,6 +420,12 @@ mod warning_tests {
             ),
             Some(1)
         );
-        assert_eq!(warning_state.lock().unwrap().suppressed_repeats, 0);
+        assert_eq!(
+            warning_state
+                .lock()
+                .expect("warning state mutex must not be poisoned")
+                .suppressed_repeats,
+            0
+        );
     }
 }
