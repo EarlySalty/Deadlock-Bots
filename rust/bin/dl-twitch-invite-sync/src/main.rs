@@ -13,7 +13,8 @@
 //!
 //! ## Was dieses Bin tut
 //! 1. **Populate:** Holt alle Zuordnungen über `/internal/twitch/v1/streamer-
-//!    invites` und spiegelt sie (UPSERT auf `streamer_login`).
+//!    invites` und spiegelt sie über die Twitch-User-ID; der Login bleibt
+//!    veränderliches Anzeige-Metadatum.
 //! 2. **Reclassify (chirurgisch):** Geht alle Join-Events durch und korrigiert
 //!    *ausschließlich* die, die laut [`dl_activity::join_source::classify`] auf
 //!    `twitch` auflösen, aber einen anderen Bucket gespeichert haben. Nur
@@ -30,7 +31,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dl_activity::join_source::classify;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 
 /// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`). Ein Invite, der
@@ -98,6 +99,37 @@ async fn sync_invites_and_reclassify(
             let invite_url = entry.invite_url.trim().to_string();
             let created_at = parse_optional_timestamp(entry.created_at.as_deref())?;
             let last_sent_at = parse_optional_timestamp(entry.last_sent_at.as_deref())?;
+            if let Some(twitch_user_id) = entry.twitch_user_id.as_deref() {
+                sqlx::query(
+                    "UPDATE bot.twitch_streamer_invites
+                     SET streamer_login = 'retired:' || twitch_user_id,
+                         invite_code = NULL, invite_url = NULL, channel_id = NULL
+                     WHERE streamer_login = $1 AND twitch_user_id IS NOT NULL
+                       AND twitch_user_id <> $2",
+                )
+                .bind(&login)
+                .bind(twitch_user_id)
+                .execute(&mut *populate_tx)
+                .await?;
+
+                sqlx::query(
+                    "UPDATE bot.twitch_streamer_invites
+                     SET streamer_login = $1, guild_id = $2, invite_code = $3, invite_url = $4,
+                         created_at = $5, last_sent_at = $6, channel_id = $8
+                     WHERE twitch_user_id = $7",
+                )
+                .bind(&login)
+                .bind(entry.guild_id)
+                .bind(&invite_code)
+                .bind(&invite_url)
+                .bind(created_at)
+                .bind(last_sent_at)
+                .bind(twitch_user_id)
+                .bind(entry.channel_id)
+                .execute(&mut *populate_tx)
+                .await?;
+            }
+
             sqlx::query(
                 "INSERT INTO bot.twitch_streamer_invites
                      (streamer_login, guild_id, invite_code, invite_url, created_at, last_sent_at, twitch_user_id, channel_id)
@@ -106,10 +138,10 @@ async fn sync_invites_and_reclassify(
                      guild_id = EXCLUDED.guild_id, invite_code = EXCLUDED.invite_code,
                      invite_url = EXCLUDED.invite_url, created_at = EXCLUDED.created_at,
                      last_sent_at = EXCLUDED.last_sent_at,
-                     twitch_user_id = COALESCE(EXCLUDED.twitch_user_id, bot.twitch_streamer_invites.twitch_user_id),
-                     channel_id = COALESCE(EXCLUDED.channel_id, bot.twitch_streamer_invites.channel_id)",
+                     twitch_user_id = EXCLUDED.twitch_user_id,
+                     channel_id = EXCLUDED.channel_id",
             )
-            .bind(login).bind(entry.guild_id).bind(invite_code).bind(invite_url)
+            .bind(&login).bind(entry.guild_id).bind(invite_code).bind(invite_url)
             .bind(created_at).bind(last_sent_at).bind(&entry.twitch_user_id).bind(entry.channel_id)
             .execute(&mut *populate_tx)
             .await?;
@@ -128,6 +160,7 @@ async fn sync_invites_and_reclassify(
         r#"
         SELECT streamer_login, invite_code
           FROM bot.twitch_streamer_invites
+         WHERE twitch_user_id IS NOT NULL AND channel_id IS NOT NULL
         "#
     )
     .fetch_all(pool)
@@ -141,8 +174,9 @@ async fn sync_invites_and_reclassify(
         }
     }
 
-    let personal: Vec<(String, String)> =
-        sqlx::query_as("SELECT streamer_login, invite_code FROM bot.twitch_personal_invites")
+    let personal: Vec<(String, String)> = sqlx::query_as(
+        "SELECT streamer_login, invite_code FROM bot.twitch_personal_invites WHERE revoked_at IS NULL",
+    )
             .fetch_all(pool)
             .await?;
     for (login, code) in personal {
@@ -339,6 +373,13 @@ mod tests {
     use super::*;
     use sqlx::Row as _;
 
+    mod test_database {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-support/peer_database.rs"
+        ));
+    }
+
     fn invite(login: &str, code: &str) -> InviteEntry {
         InviteEntry {
             streamer_login: login.to_string(),
@@ -396,9 +437,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_uses_twitch_ids_and_replaces_incomplete_authority() -> anyhow::Result<()> {
+        let db = test_database::database().await;
+        let pool = db.pool();
+        let mut first = invite("former-login", "FIRSTCODE");
+        first.twitch_user_id = Some("918273645001".into());
+        first.channel_id = Some(111);
+        first.guild_id = 918273;
+        let mut renamed = invite("current-login", "RENAMEDCODE");
+        renamed.twitch_user_id = Some("918273645001".into());
+        renamed.channel_id = Some(222);
+        renamed.guild_id = 918274;
+        let mut recycled = invite("recycled-login", "OLDRECYCLE");
+        recycled.twitch_user_id = Some("918273645002".into());
+        recycled.channel_id = Some(333);
+        recycled.guild_id = 918273;
+        let mut new_owner = invite("recycled-login", "NEWRECYCLE");
+        new_owner.twitch_user_id = Some("918273645003".into());
+        new_owner.channel_id = None;
+        new_owner.guild_id = 918273;
+        let mut complete = invite("incomplete-login", "COMPLETECODE");
+        complete.twitch_user_id = Some("918273645004".into());
+        complete.channel_id = Some(444);
+        complete.guild_id = 918273;
+        let mut incomplete = invite("incomplete-login", "INCOMPLETECODE");
+        incomplete.twitch_user_id = None;
+        incomplete.channel_id = None;
+        incomplete.guild_id = 918273;
+
+        sqlx::query(
+            "INSERT INTO bot.twitch_personal_invites
+             (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id,
+              channel_id, invite_code, invite_url)
+             VALUES ('918273645001', '918273645099', 'former-login', 918273, 111,
+                     'PERSONALID', 'https://discord.gg/PERSONALID')",
+        )
+        .execute(pool)
+        .await?;
+
+        sync_invites_and_reclassify(
+            pool,
+            vec![first, renamed, recycled, new_owner, complete, incomplete],
+            false,
+        )
+        .await?;
+
+        let renamed_row: (String, Option<String>, Option<i64>, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT streamer_login, twitch_user_id, channel_id, invite_code, guild_id
+             FROM bot.twitch_streamer_invites WHERE twitch_user_id = '918273645001'",
+            )
+            .fetch_one(pool)
+            .await?;
+        assert_eq!(
+            renamed_row,
+            (
+                "current-login".into(),
+                Some("918273645001".into()),
+                Some(222),
+                Some("RENAMEDCODE".into()),
+                918274,
+            )
+        );
+
+        let retired_row: (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT streamer_login, invite_code, channel_id FROM bot.twitch_streamer_invites
+             WHERE twitch_user_id = '918273645002'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(retired_row, ("retired:918273645002".into(), None, None));
+
+        let missing_channel: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT twitch_user_id, channel_id FROM bot.twitch_streamer_invites
+             WHERE twitch_user_id = '918273645003'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(missing_channel, (Some("918273645003".into()), None));
+
+        let incomplete_row: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT twitch_user_id, channel_id FROM bot.twitch_streamer_invites
+             WHERE streamer_login = 'incomplete-login'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(incomplete_row, (None, None));
+
+        let personal_owner: (String, String) = sqlx::query_as(
+            "SELECT streamer_twitch_user_id, inviter_twitch_user_id
+             FROM bot.twitch_personal_invites WHERE invite_code = 'PERSONALID'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            personal_owner,
+            ("918273645001".into(), "918273645099".into())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn reclassify_flippt_twitch_und_respektiert_website_filter(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn reclassify_flippt_twitch_und_respektiert_website_filter()
+    -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         insert_join(pool, 9_100_001, "ABC123").await?;
@@ -431,8 +573,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn invite_upsert_bleibt_persistiert_wenn_reclassify_update_scheitert(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn invite_upsert_bleibt_persistiert_wenn_reclassify_update_scheitert()
+    -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         insert_join(pool, 9_100_101, "ABC123").await?;

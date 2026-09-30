@@ -411,10 +411,12 @@ async fn incremental_pages_find_late_transitions_without_discord_identity() {
     )
     .await
     .expect("changed rows");
-    assert!(changes
-        .invites
-        .iter()
-        .any(|row| row.join_id == "13" && row.status == "qualified"));
+    assert!(
+        changes
+            .invites
+            .iter()
+            .any(|row| row.join_id == "13" && row.status == "qualified")
+    );
     let value = serde_json::to_value(&changes.invites[0]).expect("DTO");
     let keys: std::collections::BTreeSet<_> = value
         .as_object()
@@ -437,19 +439,114 @@ async fn incremental_pages_find_late_transitions_without_discord_identity() {
 }
 
 #[tokio::test]
-async fn ambiguous_codes_and_case_mismatches_never_attribute() {
+async fn private_departure_preserves_membership_boundary_without_activity_event() {
     let db = database().await;
     let pool = db.pool();
-    let joined = at("2026-01-01T12:00:00Z");
-    join(pool, 15, 113, joined, "viewercode").await;
-    assert!(pending(pool, 1).await.expect("case mismatch").is_empty());
-    sqlx::query("UPDATE bot.twitch_streamer_invites SET invite_code = 'ViewerCode'")
-        .execute(pool)
+    let departed_at = at("2026-01-01T10:00:00Z");
+    let rejoined_at = at("2026-01-02T10:00:00Z");
+
+    let mut tx = pool.begin().await.expect("private departure transaction");
+    remember_private_departure(&mut tx, 1, 990_001, Some(departed_at))
         .await
-        .expect("ambiguous owners");
-    join(pool, 16, 114, joined, "ViewerCode").await;
-    assert!(pending(pool, 1)
+        .expect("membership-only departure");
+    tx.commit().await.expect("private departure commit");
+
+    let metadata = json!({
+        "discord_joined_at": rejoined_at.to_rfc3339(),
+        "invite_code": "ViewerCode"
+    })
+    .to_string();
+    let mut tx = pool.begin().await.expect("rejoin transaction");
+    remember_member_event(
+        &mut tx,
+        990_001,
+        1,
+        990_001,
+        "join",
+        Some(rejoined_at),
+        Some(&metadata),
+    )
+    .await
+    .expect("rejoin membership");
+    tx.commit().await.expect("rejoin commit");
+    sqlx::query(
+        "INSERT INTO activity.member_events (id, user_id, guild_id, event_type, occurred_at, metadata)
+         VALUES (990001, 990001, 1, 'join', $1, $2::jsonb)",
+    )
+    .bind(rejoined_at)
+    .bind(metadata)
+    .execute(pool)
+    .await
+    .expect("public rejoin event");
+    reconcile_attribution(pool, 1)
         .await
-        .expect("ambiguous mapping")
-        .is_empty());
+        .expect("rejoin attribution");
+
+    let membership: (bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT prior_member, left_at, current_joined_at
+         FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 990001",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("membership boundary");
+    assert_eq!(membership, (true, Some(departed_at), Some(rejoined_at)));
+    let private_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM activity.member_events WHERE guild_id = 1 AND user_id = 990001",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("private event count");
+    assert_eq!(private_events, 0);
+    let eligible: bool =
+        sqlx::query_scalar("SELECT eligible FROM bot.twitch_invite_joins WHERE join_id = 990001")
+            .fetch_one(pool)
+            .await
+            .expect("rejoin qualification status");
+    assert!(
+        !eligible,
+        "an earlier departure must make the rejoin ineligible"
+    );
+}
+
+#[tokio::test]
+async fn regular_departure_marks_prior_membership_without_rewriting_join_time() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined_at = at("2026-01-01T10:00:00Z");
+    let left_at = at("2026-01-10T10:00:00Z");
+    let metadata = json!({"discord_joined_at": joined_at.to_rfc3339()}).to_string();
+
+    let mut tx = pool.begin().await.expect("membership transaction");
+    remember_member_event(
+        &mut tx,
+        990_002,
+        1,
+        990_002,
+        "join",
+        Some(joined_at),
+        Some(&metadata),
+    )
+    .await
+    .expect("join membership");
+    remember_member_event(&mut tx, 990_003, 1, 990_002, "leave", Some(left_at), None)
+        .await
+        .expect("leave membership");
+    tx.commit().await.expect("membership commit");
+
+    let membership: (bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT prior_member, left_at, current_joined_at
+         FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 990002",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("membership boundary");
+    assert_eq!(membership, (true, Some(left_at), None));
+    let first_joined_at: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT first_joined_at FROM activity.twitch_invite_members
+         WHERE guild_id = 1 AND user_id = 990002",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("first join timestamp");
+    assert_eq!(first_joined_at, joined_at);
 }

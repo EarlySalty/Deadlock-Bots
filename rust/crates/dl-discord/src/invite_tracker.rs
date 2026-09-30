@@ -248,14 +248,43 @@ impl InviteTracker {
         true
     }
 
+    async fn reconcile_personal_invites(
+        &self,
+        guild_id: u64,
+        snapshot: &HashMap<String, InviteSnap>,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Ok(guild_db_id) = i64::try_from(guild_id) else {
+            return;
+        };
+        let present_codes: Vec<String> = snapshot.keys().cloned().collect();
+        if let Err(error) = sqlx::query(
+            "UPDATE bot.twitch_personal_invites
+             SET revoked_at = clock_timestamp()
+             WHERE guild_id = $1 AND revoked_at IS NULL AND created_at <= $3
+               AND NOT (invite_code = ANY($2))",
+        )
+        .bind(guild_db_id)
+        .bind(present_codes)
+        .bind(observed_at)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::debug!(%error, guild_id, "Discord-Invite-Snapshot konnte nicht abgeglichen werden");
+        }
+    }
+
     /// Primt den Cache einer Gilde (API-Fetch). Beim Start für alle Gilden.
     pub async fn prime(&self, http: &Http, guild_id: u64) {
         let _guard = self.lock_guild(guild_id).await;
         let has_cache = self.by_guild.lock().await.contains_key(&guild_id);
-        if !has_cache && self.restore_from_db(guild_id).await {
-            return;
+        if !has_cache {
+            self.restore_from_db(guild_id).await;
         }
+        let observed_at = chrono::Utc::now();
         if let Some(map) = Self::fetch(http, guild_id).await {
+            self.reconcile_personal_invites(guild_id, &map, observed_at)
+                .await;
             self.save_snapshot_to_db(guild_id, &map).await;
             self.by_guild.lock().await.insert(guild_id, map);
         }
@@ -346,6 +375,7 @@ impl InviteTracker {
         let has_baseline = before.is_some();
         let attempts = if has_baseline { 2 } else { 1 };
         let mut latest_after: Option<HashMap<String, InviteSnap>> = None;
+        let mut latest_observed_at = chrono::Utc::now();
 
         for attempt in 0..attempts {
             meta.insert("join_source_bucket".into(), Value::from("unknown"));
@@ -354,6 +384,7 @@ impl InviteTracker {
             meta.insert("join_source_confidence".into(), Value::from("low"));
             meta.remove("join_source_reason");
 
+            latest_observed_at = chrono::Utc::now();
             latest_after = Self::fetch(http, guild_id).await;
             let kind = classify_snapshots(&mut meta, before.as_ref(), latest_after.as_ref());
             if !should_retry_join_source(has_baseline, &kind) || attempt + 1 >= attempts {
@@ -363,6 +394,8 @@ impl InviteTracker {
         }
 
         if let Some(after_map) = latest_after {
+            self.reconcile_personal_invites(guild_id, &after_map, latest_observed_at)
+                .await;
             self.save_snapshot_to_db(guild_id, &after_map).await;
             self.by_guild.lock().await.insert(guild_id, after_map);
         }
@@ -374,18 +407,24 @@ impl InviteTracker {
 #[cfg(test)]
 mod tests {
     include!("invite_tracker_attribution_tests.rs");
+
+    #[cfg(feature = "testing")]
+    mod test_database {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-support/peer_database.rs"
+        ));
+    }
+
     use super::*;
 
     #[cfg(feature = "testing")]
     async fn invite_db() -> dl_central_db::TestDb {
-        dl_central_db::testing::test_pool()
-            .await
-            .expect("central test db")
+        test_database::database().await
     }
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn snapshot_cache_roundtrip_in_db() {
         let db = invite_db().await;
         let tracker = InviteTracker::new(db.pool().clone());
@@ -412,22 +451,25 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn snapshot_cache_missing_guild_returns_none_in_db() {
         let db = invite_db().await;
         let tracker = InviteTracker::new(db.pool().clone());
         let missing_guild_id = 9_876_543_210_u64;
 
-        assert!(tracker
-            .load_snapshot_from_db(missing_guild_id)
-            .await
-            .is_none());
+        assert!(
+            tracker
+                .load_snapshot_from_db(missing_guild_id)
+                .await
+                .is_none()
+        );
         assert!(!tracker.restore_from_db(missing_guild_id).await);
-        assert!(!tracker
-            .by_guild
-            .lock()
-            .await
-            .contains_key(&missing_guild_id));
+        assert!(
+            !tracker
+                .by_guild
+                .lock()
+                .await
+                .contains_key(&missing_guild_id)
+        );
 
         let mut snapshot = HashMap::new();
         snapshot.insert(
@@ -454,6 +496,69 @@ mod tests {
         .await
         .expect("snapshot_json type");
         assert_eq!(snapshot_json_type, "object");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn complete_snapshot_revokes_only_older_missing_personal_invites() {
+        let db = invite_db().await;
+        let pool = db.pool();
+        let tracker = InviteTracker::new(pool.clone());
+        let guild_id = 9_876_543_211_i64;
+        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .expect("snapshot time")
+            .with_timezone(&chrono::Utc);
+        sqlx::query(
+            "INSERT INTO bot.twitch_personal_invites
+             (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id,
+              channel_id, invite_code, invite_url, created_at)
+             VALUES
+             ('918273645101', '918273645102', 'snapshot', $1, 22, 'missing-old', 'https://discord.gg/missing-old', '2026-01-01T00:00:00Z'),
+             ('918273645101', '918273645103', 'snapshot', $1, 22, 'present-code', 'https://discord.gg/present-code', '2026-01-01T00:00:00Z'),
+             ('918273645101', '918273645104', 'snapshot', $1, 22, 'missing-new', 'https://discord.gg/missing-new', '2026-01-03T00:00:00Z')",
+        )
+        .bind(guild_id)
+        .execute(pool)
+        .await
+        .expect("personal invite fixture");
+
+        let snapshot = HashMap::from([("present-code".to_string(), attribution_snapshot(0))]);
+        tracker
+            .reconcile_personal_invites(guild_id as u64, &snapshot, observed_at)
+            .await;
+        let statuses: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            "SELECT invite_code, revoked_at FROM bot.twitch_personal_invites
+             WHERE guild_id = $1 ORDER BY invite_code",
+        )
+        .bind(guild_id)
+        .fetch_all(pool)
+        .await
+        .expect("reconciled invite statuses");
+        assert_eq!(statuses.len(), 3);
+        assert!(
+            statuses
+                .iter()
+                .find(|(code, _)| code == "missing-old")
+                .expect("missing old invite")
+                .1
+                .is_some()
+        );
+        assert!(
+            statuses
+                .iter()
+                .find(|(code, _)| code == "present-code")
+                .expect("present invite")
+                .1
+                .is_none()
+        );
+        assert!(
+            statuses
+                .iter()
+                .find(|(code, _)| code == "missing-new")
+                .expect("new invite")
+                .1
+                .is_none()
+        );
     }
 
     #[test]

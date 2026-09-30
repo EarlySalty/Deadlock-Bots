@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::join_source::classify;
@@ -73,6 +73,29 @@ pub async fn remember_prior_member(
     Ok(())
 }
 
+pub async fn remember_private_departure(
+    tx: &mut Transaction<'_, Postgres>,
+    guild_id: i64,
+    user_id: i64,
+    occurred_at: Option<DateTime<Utc>>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO activity.twitch_invite_members
+             (guild_id, user_id, prior_member, left_at)
+         VALUES ($1, $2, TRUE, $3)
+         ON CONFLICT (guild_id, user_id) DO UPDATE SET
+             prior_member = TRUE,
+             left_at = LEAST(activity.twitch_invite_members.left_at, EXCLUDED.left_at),
+             current_joined_at = NULL",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind(occurred_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub async fn remember_member_event(
     tx: &mut Transaction<'_, Postgres>,
     join_id: i64,
@@ -115,6 +138,7 @@ pub async fn remember_member_event(
                  (guild_id, user_id, prior_member, left_at)
              VALUES ($1, $2, TRUE, $3)
              ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                 prior_member = TRUE,
                  left_at = LEAST(activity.twitch_invite_members.left_at, EXCLUDED.left_at),
                  current_joined_at = NULL",
         )
@@ -224,10 +248,13 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
             };
             let owners: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
                 "SELECT streamer_login, streamer_twitch_user_id, inviter_twitch_user_id
-                 FROM bot.twitch_personal_invites WHERE guild_id = $1 AND invite_code = $2
+                 FROM bot.twitch_personal_invites
+                 WHERE guild_id = $1 AND invite_code = $2 AND revoked_at IS NULL
                  UNION ALL
                  SELECT streamer_login, twitch_user_id, NULL::text
-                 FROM bot.twitch_streamer_invites WHERE guild_id = $1 AND invite_code = $2",
+                 FROM bot.twitch_streamer_invites
+                 WHERE guild_id = $1 AND invite_code = $2
+                   AND twitch_user_id IS NOT NULL AND channel_id IS NOT NULL",
             )
             .bind(guild_id)
             .bind(&code)

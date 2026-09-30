@@ -20,8 +20,8 @@ use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use sqlx::PgPool;
 
 use crate::db::{
-    discord_id_to_i64, i64_to_i32, i64_to_u64, lock_member_events, next_member_event_id_in_tx,
-    validate_json_text, ActivityDbResult,
+    ActivityDbResult, discord_id_to_i64, i64_to_i32, i64_to_u64, lock_member_events,
+    next_member_event_id_in_tx, validate_json_text,
 };
 
 pub const ANALYZE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
@@ -367,6 +367,7 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
         r#"
         SELECT streamer_login, invite_code
         FROM bot.twitch_streamer_invites
+        WHERE twitch_user_id IS NOT NULL AND channel_id IS NOT NULL
         "#
     )
     .fetch_all(pool)
@@ -380,8 +381,9 @@ async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String
         }
     }
 
-    let personal: Vec<(String, String)> =
-        sqlx::query_as("SELECT streamer_login, invite_code FROM bot.twitch_personal_invites")
+    let personal: Vec<(String, String)> = sqlx::query_as(
+        "SELECT streamer_login, invite_code FROM bot.twitch_personal_invites WHERE revoked_at IS NULL",
+    )
             .fetch_all(pool)
             .await
             .unwrap_or_default();
@@ -616,7 +618,17 @@ async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> Activit
     .fetch_optional(&mut *tx)
     .await?;
     if opted_out.is_some() {
-        crate::qualified_invites::remember_prior_member(&mut tx, guild_id, user_id).await?;
+        if matches!(event.event_type.as_str(), "leave" | "ban") {
+            crate::qualified_invites::remember_private_departure(
+                &mut tx,
+                guild_id,
+                user_id,
+                event.occurred_at,
+            )
+            .await?;
+        } else {
+            crate::qualified_invites::remember_prior_member(&mut tx, guild_id, user_id).await?;
+        }
         tx.commit().await?;
         return Ok(false);
     }
@@ -914,6 +926,14 @@ mod tests {
     }
 
     #[cfg(feature = "testing")]
+    mod test_database {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-support/peer_database.rs"
+        ));
+    }
+
+    #[cfg(feature = "testing")]
     struct MockVoice {
         groups: StdMutex<Vec<Vec<(u64, String)>>>,
     }
@@ -958,6 +978,53 @@ mod tests {
         .fetch_one(pool)
         .await?;
         Ok(row.count)
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn opt_out_leave_updates_only_qualified_membership_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let db = test_database::database().await;
+        let pool = db.pool();
+        let user_id = 9_876_543_211_i64;
+        let guild_id = 9_876_543_212_u64;
+        let left_at = DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")?.with_timezone(&Utc);
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out) VALUES ($1, TRUE)
+             ON CONFLICT (user_id) DO UPDATE SET opted_out = TRUE",
+        )
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+
+        let changed = insert_member_event(
+            pool,
+            MemberEventInsert {
+                guild_id,
+                user_id: user_id as u64,
+                event_type: "leave".into(),
+                display_name: None,
+                occurred_at: Some(left_at),
+                account_created_at: None,
+                join_position: None,
+                metadata_json: Some("{}".into()),
+                skip_if_join_exists: false,
+            },
+        )
+        .await?;
+        assert!(!changed);
+
+        let membership: (bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT prior_member, left_at, current_joined_at
+             FROM activity.twitch_invite_members WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id as i64)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(membership, (true, Some(left_at), None));
+        assert_eq!(member_event_count(pool, user_id, "leave").await?, 0);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1075,8 +1142,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn opted_out_user_bekommt_keinen_activity_pattern_refill(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn opted_out_user_bekommt_keinen_activity_pattern_refill()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (db, analyzer, _voice) = setup().await?;
         sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(101, TRUE)")
             .execute(db.pool())
@@ -1135,8 +1202,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn opted_out_user_bekommt_keinen_co_player_refill(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn opted_out_user_bekommt_keinen_co_player_refill()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (db, analyzer, _voice) = setup().await?;
         sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(100, TRUE)")
             .execute(db.pool())
@@ -1182,8 +1249,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn leave_event_speichert_display_name_und_skippt_bots(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn leave_event_speichert_display_name_und_skippt_bots()
+    -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         handle_member_event(
@@ -1226,8 +1293,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an()
+    -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         sqlx::query!(
@@ -1325,8 +1392,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind()
+    -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool().clone();
         let port = Arc::new(SequencedBackfillPort {
