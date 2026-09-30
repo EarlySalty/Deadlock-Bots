@@ -93,8 +93,22 @@ pub fn fuse(bm25: &[usize], dense: &[usize], catalog: &Catalog, config: &Config)
                 .cmp(&catalog.records[b.index].chunk_id)
         })
     });
-    ranked.truncate(config.fusion_k);
-    ranked
+    if config.bm25_anchor_k > 0 {
+        let mut anchored = Vec::with_capacity(config.fusion_k);
+        let mut seen = HashSet::new();
+        for index in bm25.iter().copied().take(config.bm25_anchor_k) {
+            if let Some(hit) = ranked.iter().find(|hit| hit.index == index) {
+                anchored.push(hit.clone());
+                seen.insert(index);
+            }
+        }
+        anchored.extend(ranked.into_iter().filter(|hit| seen.insert(hit.index)));
+        anchored.truncate(config.fusion_k);
+        anchored
+    } else {
+        ranked.truncate(config.fusion_k);
+        ranked
+    }
 }
 
 pub fn apply_rerank(

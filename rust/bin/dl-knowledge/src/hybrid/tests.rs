@@ -34,6 +34,7 @@ fn hybrid_default_aus_ignoriert_optionen() -> Result<()> {
     let config = Config::from_values(Some("true"), None)?.expect("Gültiger Testwert erwartet");
     assert_eq!(config.output_k, 6);
     assert_eq!(config.fusion_k, 12);
+    assert_eq!(config.bm25_anchor_k, 0);
     assert!(config.rerank);
     Ok(())
 }
@@ -47,6 +48,9 @@ fn konfiguration_lehnt_tippfehler_und_unbegrenzte_last_ab() {
         r#"{"output_k":25}"#,
         r#"{"rrf_k":0}"#,
         r#"{"bm25_weight":0,"dense_weight":0}"#,
+        r#"{"bm25_anchor_k":7,"rerank":false}"#,
+        r#"{"bm25_anchor_k":1,"bm25_weight":0,"rerank":false}"#,
+        r#"{"bm25_anchor_k":1}"#,
         r#"{"timeout_ms":10001}"#,
         r#"{"rerank_batch_size":0}"#,
         r#"{"rerank_max_tokens":513}"#,
@@ -132,6 +136,24 @@ fn rrf_dedupliziert_und_sortiert_deterministisch() -> Result<()> {
             .iter()
             .map(|hit| (hit.index, hit.score))
             .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn bm25_anker_bleibt_vor_semantischer_ergaenzung() -> Result<()> {
+    let config = Config {
+        bm25_anchor_k: 2,
+        output_k: 3,
+        fusion_k: 3,
+        rerank: false,
+        ..Config::default()
+    };
+    let catalog = rank::Catalog::new(&knowledge(), &config)?;
+    let ranked = rank::fuse(&[0, 1, 2], &[2, 1, 0], &catalog, &config);
+    assert_eq!(
+        ranked.iter().map(|hit| hit.index).collect::<Vec<_>>(),
+        vec![0, 1, 2]
     );
     Ok(())
 }

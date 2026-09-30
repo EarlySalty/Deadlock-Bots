@@ -13,6 +13,7 @@ pub struct Config {
     pub rrf_k: f64,
     pub bm25_weight: f64,
     pub dense_weight: f64,
+    pub bm25_anchor_k: usize,
     pub rerank: bool,
     pub rerank_max_tokens: usize,
     pub rerank_batch_size: usize,
@@ -30,6 +31,7 @@ impl Default for Config {
             rrf_k: 60.0,
             bm25_weight: 1.0,
             dense_weight: 1.0,
+            bm25_anchor_k: 0,
             rerank: true,
             rerank_max_tokens: 256,
             rerank_batch_size: 4,
@@ -64,6 +66,18 @@ impl Config {
         ensure!(
             self.bm25_weight + self.dense_weight > 0.0,
             "Beide Retrieval-Gewichte sind null"
+        );
+        ensure!(
+            self.bm25_anchor_k <= self.bm25_k && self.bm25_anchor_k <= self.output_k,
+            "bm25_anchor_k muss in BM25- und Ausgabegrenze liegen"
+        );
+        ensure!(
+            self.bm25_anchor_k == 0 || self.bm25_weight > 0.0,
+            "BM25-Anker benötigt ein positives BM25-Gewicht"
+        );
+        ensure!(
+            self.bm25_anchor_k == 0 || !self.rerank,
+            "BM25-Anker ist nur ohne Reranker zulässig"
         );
         ensure!(
             (32..=512).contains(&self.rerank_max_tokens),

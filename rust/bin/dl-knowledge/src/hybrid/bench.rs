@@ -48,8 +48,8 @@ pub async fn run(
         "C-Messung nur über scripts/central_test_db.sh"
     );
     ensure!(
-        config.rerank && (1..=5).contains(&plan.rounds),
-        "Messung benötigt Reranker und 1 bis 5 Runden"
+        (1..=5).contains(&plan.rounds),
+        "Messung benötigt 1 bis 5 Runden"
     );
     let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge.index_generations")
         .fetch_one(pool)
