@@ -682,7 +682,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn snapshot_write_failure_rolls_back_revocation_and_keeps_cache_stale() {
+    async fn failed_snapshot_does_not_consume_join_delta_before_successful_reprime() {
         let db = invite_db().await;
         let pool = db.pool();
         let tracker = InviteTracker::new(pool.clone());
@@ -691,13 +691,14 @@ mod tests {
             "INSERT INTO bot.twitch_personal_invites
              (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id,
               channel_id, invite_code, invite_url, created_at)
-             VALUES ('918273645111', '918273645112', 'snapshot-failure', $1, 22,
-                     'missing-after-failure', 'https://discord.gg/missing-after-failure', '2026-01-01T00:00:00Z')",
+             VALUES
+               ('918273645111', '918273645112', 'snapshot-failure', $1, 22, 'used-link', 'https://discord.gg/used-link', '2026-01-01T00:00:00Z'),
+               ('918273645111', '918273645113', 'snapshot-failure', $1, 22, 'gone-link', 'https://discord.gg/gone-link', '2026-01-01T00:00:00Z')",
         )
         .bind(guild_id)
         .execute(pool)
         .await
-        .expect("personal invite fixture");
+        .expect("personal invite fixtures");
         sqlx::query(&format!(
             "ALTER TABLE bot.invite_snapshot_cache ADD CONSTRAINT reject_snapshot_{guild_id} CHECK (guild_id <> {guild_id})"
         ))
@@ -705,28 +706,86 @@ mod tests {
         .await
         .expect("snapshot failure constraint");
 
-        let prior = HashMap::from([("previous".to_string(), attribution_snapshot(2))]);
-        tracker.by_guild.lock().await.insert(guild_id as u64, prior);
+        let baseline = HashMap::from([("used-link".to_string(), attribution_snapshot(0))]);
+        tracker
+            .by_guild
+            .lock()
+            .await
+            .insert(guild_id as u64, baseline);
         tracker.health.mark_current(guild_id as u64).await;
-        let snapshot = HashMap::new();
-        let observed_at = chrono::Utc::now();
+        let after_missed_join = HashMap::from([("used-link".to_string(), attribution_snapshot(1))]);
         assert!(tracker
-            .persist_complete_snapshot(guild_id as u64, &snapshot, observed_at)
+            .persist_complete_snapshot(guild_id as u64, &after_missed_join, chrono::Utc::now(),)
             .await
             .is_err());
 
-        let revoked_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT revoked_at FROM bot.twitch_personal_invites WHERE invite_code = 'missing-after-failure'",
+        let gone_link_revoked: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT revoked_at FROM bot.twitch_personal_invites WHERE invite_code = 'gone-link'",
         )
         .fetch_one(pool)
         .await
-        .expect("invite status");
-        assert!(
-            revoked_at.is_none(),
-            "failed snapshot must roll back revocation"
-        );
+        .expect("rolled back invite status");
+        assert!(gone_link_revoked.is_none());
         assert!(!tracker.health.is_current(guild_id as u64).await);
-        assert_eq!(tracker.by_guild.lock().await[&(guild_id as u64)].len(), 1);
+        assert_eq!(
+            tracker.by_guild.lock().await[&(guild_id as u64)]["used-link"].uses,
+            0
+        );
+
+        let cached_before = tracker
+            .by_guild
+            .lock()
+            .await
+            .get(&(guild_id as u64))
+            .cloned();
+        let has_baseline = has_trusted_join_baseline(
+            tracker.health.is_current(guild_id as u64).await,
+            cached_before.is_some(),
+        );
+        let before = has_baseline.then_some(cached_before).flatten();
+        let mut metadata = Map::new();
+        assert_eq!(
+            classify_snapshots(&mut metadata, before.as_ref(), Some(&after_missed_join)),
+            "unknown"
+        );
+        assert_eq!(metadata["join_source_reason"], "baseline_missing");
+        assert!(!metadata.contains_key("invite_code"));
+
+        sqlx::query(&format!(
+            "ALTER TABLE bot.invite_snapshot_cache DROP CONSTRAINT reject_snapshot_{guild_id}"
+        ))
+        .execute(pool)
+        .await
+        .expect("restore snapshot writes");
+        tracker
+            .persist_complete_snapshot(guild_id as u64, &after_missed_join, chrono::Utc::now())
+            .await
+            .expect("successful full re-prime");
+        assert!(tracker.health.is_current(guild_id as u64).await);
+
+        let cached_before = tracker
+            .by_guild
+            .lock()
+            .await
+            .get(&(guild_id as u64))
+            .cloned();
+        let has_baseline = has_trusted_join_baseline(
+            tracker.health.is_current(guild_id as u64).await,
+            cached_before.is_some(),
+        );
+        let before = has_baseline.then_some(cached_before).flatten();
+        let after_real_join = HashMap::from([("used-link".to_string(), attribution_snapshot(2))]);
+        let mut metadata = Map::new();
+        assert_eq!(
+            classify_snapshots(&mut metadata, before.as_ref(), Some(&after_real_join)),
+            "invite_link"
+        );
+        assert_eq!(metadata["invite_code"], "used-link");
+        assert_eq!(metadata["join_source_bucket"], "personal");
+        tracker
+            .persist_complete_snapshot(guild_id as u64, &after_real_join, chrono::Utc::now())
+            .await
+            .expect("later join snapshot");
     }
 
     #[test]

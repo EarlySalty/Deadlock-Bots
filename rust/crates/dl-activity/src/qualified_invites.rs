@@ -252,31 +252,52 @@ pub async fn reconcile_attribution(pool: &PgPool, guild_id: i64) -> Result<u64, 
             let Some(joined_at) = actual_join.or(source.occurred_at) else {
                 continue;
             };
-            let owners: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT COALESCE(current.streamer_login, personal.streamer_login),
-                        personal.streamer_twitch_user_id, personal.inviter_twitch_user_id
-                 FROM bot.twitch_personal_invites AS personal
-                 LEFT JOIN bot.twitch_streamer_invites AS current
-                   ON current.twitch_user_id = personal.streamer_twitch_user_id
-                  AND current.channel_id IS NOT NULL
-                 WHERE personal.guild_id = $1 AND personal.invite_code = $2
-                   AND personal.created_at <= $3
-                   AND (personal.revoked_at IS NULL OR personal.revoked_at >= $3)
-                 UNION ALL
-                 SELECT streamer_login, twitch_user_id, NULL::text
-                 FROM bot.twitch_streamer_invites
-                 WHERE guild_id = $1 AND invite_code = $2
-                   AND twitch_user_id IS NOT NULL AND channel_id IS NOT NULL",
-            )
-            .bind(guild_id)
-            .bind(&code)
-            .bind(joined_at)
-            .fetch_all(&mut *tx)
-            .await?;
+            let owners: Vec<(Option<String>, Option<String>, Option<String>, bool)> =
+                sqlx::query_as(
+                    "WITH channel_owners AS (
+                         SELECT twitch_user_id,
+                                MAX(source_login_snapshot) AS streamer_login,
+                                BOOL_AND(attribution_safe) AS attribution_safe
+                         FROM bot.twitch_streamer_invite_code_history
+                         WHERE guild_id = $1 AND invite_code = $2
+                           AND (valid_from IS NULL OR valid_from <= $3)
+                           AND (valid_until IS NULL OR valid_until > $3)
+                         GROUP BY twitch_user_id
+                     )
+                     SELECT COALESCE(current.streamer_login, owners.streamer_login),
+                            owners.twitch_user_id, NULL::text,
+                            owners.attribution_safe AND owners.twitch_user_id IS NOT NULL
+                     FROM channel_owners AS owners
+                     LEFT JOIN bot.twitch_streamer_invites AS current
+                       ON current.twitch_user_id = owners.twitch_user_id
+                      AND current.channel_id IS NOT NULL
+                     UNION ALL
+                     SELECT COALESCE(current.streamer_login, personal.streamer_login),
+                            personal.streamer_twitch_user_id,
+                            personal.inviter_twitch_user_id, TRUE
+                     FROM bot.twitch_personal_invites AS personal
+                     LEFT JOIN bot.twitch_streamer_invites AS current
+                       ON current.twitch_user_id = personal.streamer_twitch_user_id
+                      AND current.channel_id IS NOT NULL
+                     WHERE personal.guild_id = $1 AND personal.invite_code = $2
+                       AND personal.created_at <= $3
+                       AND (personal.revoked_at IS NULL OR personal.revoked_at >= $3)",
+                )
+                .bind(guild_id)
+                .bind(&code)
+                .bind(joined_at)
+                .fetch_all(&mut *tx)
+                .await?;
             if owners.len() != 1 {
                 continue;
             }
-            let (login, streamer_id, inviter_id) = &owners[0];
+            let (login, streamer_id, inviter_id, attribution_safe) = &owners[0];
+            if !attribution_safe {
+                continue;
+            }
+            let (Some(login), Some(streamer_id)) = (login.as_ref(), streamer_id.as_ref()) else {
+                continue;
+            };
             metadata["twitch_streamer_login"] = json!(login);
             let lookup = HashMap::from([(code.to_ascii_lowercase(), login.clone())]);
             if classify(&metadata, &lookup, &websites).bucket != "twitch" {

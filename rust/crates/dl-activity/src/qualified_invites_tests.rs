@@ -29,6 +29,15 @@ async fn database() -> dl_central_db::TestDb {
     .await
     .expect("channel mapping");
     sqlx::query(
+        "UPDATE bot.twitch_streamer_invite_code_history
+         SET valid_from = '2025-01-01T00:00:00Z'
+         WHERE guild_id = 1 AND invite_code = 'ChannelCode' AND twitch_user_id = '42'
+           AND valid_until IS NULL",
+    )
+    .execute(db.pool())
+    .await
+    .expect("historical test mapping");
+    sqlx::query(
         "INSERT INTO bot.twitch_personal_invites
          (streamer_twitch_user_id, inviter_twitch_user_id, streamer_login, guild_id, channel_id, invite_code, invite_url, created_at)
          VALUES ('42', '43', 'streamer', 1, 2, 'ViewerCode', 'https://discord.gg/ViewerCode', '2025-01-01T00:00:00Z')",
@@ -652,6 +661,15 @@ async fn ambiguous_codes_and_case_mismatches_never_attribute() {
         .execute(pool)
         .await
         .expect("ambiguous owners");
+    sqlx::query(
+        "UPDATE bot.twitch_streamer_invite_code_history
+         SET valid_from = '2025-01-01T00:00:00Z'
+         WHERE guild_id = 1 AND invite_code = 'ViewerCode' AND twitch_user_id = '42'
+           AND valid_until IS NULL",
+    )
+    .execute(pool)
+    .await
+    .expect("historical ambiguous mapping");
     join(pool, 16, 114, joined, "ViewerCode").await;
     assert!(pending(pool, 1)
         .await

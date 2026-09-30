@@ -433,6 +433,42 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_qualified_join(
+        pool: &PgPool,
+        id: i64,
+        user_id: i64,
+        invite_code: &str,
+        joined_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "INSERT INTO activity.twitch_invite_members
+             (guild_id, user_id, first_join_id, first_joined_at, current_joined_at, prior_member)
+             VALUES (1, $1, $2, $3, $3, FALSE)",
+        )
+        .bind(user_id)
+        .bind(id)
+        .bind(joined_at)
+        .execute(pool)
+        .await?;
+        let metadata = json!({
+            "join_source_bucket": "personal",
+            "join_source_kind": "invite_link",
+            "invite_code": invite_code,
+            "discord_joined_at": joined_at.to_rfc3339(),
+        });
+        sqlx::query(
+            "INSERT INTO activity.member_events(id, user_id, guild_id, event_type, occurred_at, metadata)
+             VALUES ($1, $2, 1, 'join', $3, $4::jsonb)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(joined_at)
+        .bind(metadata.to_string())
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn metadata_bucket(pool: &PgPool, id: i64) -> Result<String, Box<dyn std::error::Error>> {
         let raw: String = sqlx::query_scalar(
             r#"
@@ -579,6 +615,206 @@ mod tests {
         assert_eq!(
             personal_owner,
             ("918273645001".into(), "918273645099".into())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_historical_code_owners_across_rename_recycle_and_legacy_collision(
+    ) -> anyhow::Result<()> {
+        let db = test_database::database().await;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO bot.twitch_streamer_invites
+             (streamer_login, guild_id, invite_code, invite_url, created_at, twitch_user_id, channel_id)
+             VALUES
+               ('old-rename', 1, 'CODE_A', 'https://discord.gg/CODE_A', now(), '918273645101', 101),
+               ('recycled-login', 1, 'RECYCLE_A', 'https://discord.gg/RECYCLE_A', now(), '918273645102', 102),
+               ('legacy-login', 1, 'UNKNOWN_CODE', 'https://discord.gg/UNKNOWN_CODE', now(), NULL, NULL)",
+        )
+        .execute(pool)
+        .await?;
+
+        let code_a_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'CODE_A' AND valid_until IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        let recycle_a_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'RECYCLE_A' AND valid_until IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        let unknown_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'UNKNOWN_CODE' AND valid_until IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_001,
+            920_001,
+            "CODE_A",
+            code_a_start,
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_002,
+            920_002,
+            "RECYCLE_A",
+            recycle_a_start,
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_003,
+            920_003,
+            "UNKNOWN_CODE",
+            unknown_start + chrono::Duration::milliseconds(1),
+        )
+        .await?;
+
+        let mut renamed = invite("new-rename", "CODE_B");
+        renamed.twitch_user_id = Some("918273645101".into());
+        renamed.channel_id = Some(111);
+        let mut recycled_owner = invite("recycled-login", "RECYCLE_B");
+        recycled_owner.twitch_user_id = Some("918273645103".into());
+        recycled_owner.channel_id = Some(103);
+        let mut legacy_replacement = invite("legacy-login", "NEW_CODE");
+        legacy_replacement.twitch_user_id = Some("918273645104".into());
+        legacy_replacement.channel_id = Some(104);
+        sync_invites_and_reclassify(
+            pool,
+            vec![renamed, recycled_owner, legacy_replacement],
+            false,
+        )
+        .await?;
+
+        let code_a_end: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_until FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'CODE_A' AND twitch_user_id = '918273645101'",
+        )
+        .fetch_one(pool)
+        .await?;
+        let code_a_history: (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            bool,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT source_login_snapshot, guild_id, twitch_user_id, channel_id,
+                    attribution_safe, valid_until
+             FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'CODE_A'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            code_a_history,
+            (
+                "old-rename".into(),
+                Some(1),
+                Some("918273645101".into()),
+                Some(101),
+                true,
+                Some(code_a_end.clone()),
+            )
+        );
+        let recycle_a_end: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_until FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'RECYCLE_A' AND twitch_user_id = '918273645102'",
+        )
+        .fetch_one(pool)
+        .await?;
+        let code_b_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'CODE_B' AND valid_until IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        let recycle_b_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'RECYCLE_B' AND valid_until IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        let unknown_after_sync: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT valid_from FROM bot.twitch_streamer_invite_code_history
+             WHERE guild_id = 1 AND invite_code = 'UNKNOWN_CODE' AND valid_until IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_004,
+            920_004,
+            "CODE_A",
+            code_a_end,
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_005,
+            920_005,
+            "RECYCLE_A",
+            recycle_a_end,
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_006,
+            920_006,
+            "CODE_B",
+            code_b_start,
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_007,
+            920_007,
+            "RECYCLE_B",
+            recycle_b_start,
+        )
+        .await?;
+        insert_qualified_join(
+            pool,
+            910_008,
+            920_008,
+            "UNKNOWN_CODE",
+            unknown_after_sync + chrono::Duration::milliseconds(1),
+        )
+        .await?;
+
+        dl_activity::qualified_invites::reconcile_attribution(pool, 1).await?;
+        let owners: Vec<(i64, Option<String>, String)> = sqlx::query_as(
+            "SELECT join_id, streamer_twitch_user_id, streamer_login
+             FROM bot.twitch_invite_joins WHERE join_id BETWEEN 910001 AND 910008
+             ORDER BY join_id",
+        )
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(
+            owners,
+            vec![
+                (910_001, Some("918273645101".into()), "new-rename".into()),
+                (
+                    910_002,
+                    Some("918273645102".into()),
+                    "recycled-login".into()
+                ),
+                (910_006, Some("918273645101".into()), "new-rename".into()),
+                (
+                    910_007,
+                    Some("918273645103".into()),
+                    "recycled-login".into()
+                ),
+            ]
         );
         Ok(())
     }
