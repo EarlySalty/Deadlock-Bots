@@ -1,0 +1,41 @@
+name: Brain Adapter Offline
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: brain-adapter-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  adapter:
+    name: Typed Brain command fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: never
+      SQLX_OFFLINE: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+      - name: Resolve only locked dependencies
+        run: cargo fetch --manifest-path rust/Cargo.toml --locked
+      - name: Test command semantics without application credentials
+        run: bash rust/scripts/check-brain-consumer.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: brain-adapter-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .consumer-ci-reports/*.log
+            .consumer-ci-reports/*.txt
+            .consumer-ci-reports/*.tsv
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
