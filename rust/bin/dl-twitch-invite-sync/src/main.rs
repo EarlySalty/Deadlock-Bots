@@ -621,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_keeps_historical_code_owners_across_rename_recycle_and_legacy_collision(
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = test_database::database().await;
         let pool = db.pool();
         sqlx::query(
