@@ -72,10 +72,10 @@ BEGIN
             RAISE EXCEPTION 'Twitch invite joins must start pending';
         END IF;
     ELSE
-        IF NOT (
+        IF (
             (OLD.status = 'pending' AND NEW.status IN ('qualified', 'expired')) OR
             (OLD.status = 'expired' AND OLD.reason = 'deadline' AND NEW.status = 'qualified')
-        ) THEN
+        ) IS NOT TRUE THEN
             RAISE EXCEPTION 'Twitch invite terminal state is immutable';
         END IF;
         IF (to_jsonb(NEW) - ARRAY['status', 'qualified_at', 'updated_at', 'reason'])

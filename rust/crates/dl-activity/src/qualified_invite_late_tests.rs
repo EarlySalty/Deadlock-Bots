@@ -4,6 +4,43 @@ async fn evidence_queue_count(pool: &PgPool, user: i64) -> i64 {
 }
 
 #[tokio::test]
+async fn late_qualification_guard_rejects_an_unknown_expiry_reason() {
+    let db = database().await;
+    let pool = db.pool();
+    let joined = at("2026-01-01T12:00:00Z");
+    for (user, reason) in [(991_501_i64, None), (991_502, Some("deadline"))] {
+        join(pool, user, user, joined, "ViewerCode").await;
+        sqlx::query(
+            "UPDATE bot.twitch_invite_joins SET status='expired',reason=$2 WHERE join_id=$1",
+        )
+        .bind(user)
+        .bind(reason)
+        .execute(pool)
+        .await
+        .expect("expire with explicit reason");
+        let result = sqlx::query("UPDATE bot.twitch_invite_joins SET status='qualified',qualified_at=$2,reason=NULL WHERE join_id=$1")
+            .bind(user).bind(joined + Duration::days(15)).execute(pool).await;
+        if reason.is_none() {
+            let error = result.expect_err("unknown expiry cannot be reopened");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("P0001")
+            );
+        } else {
+            assert_eq!(
+                result
+                    .expect("known deadline transition remains valid")
+                    .rows_affected(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn late_evidence_reconsiders_deadline_once_for_all_three_sources() {
     let db = database().await;
     let pool = db.pool();
