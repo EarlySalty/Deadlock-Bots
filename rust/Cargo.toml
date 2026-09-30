@@ -37,6 +37,7 @@ members = [
     "bin/dl-central-sync",
     "bin/dl-infisical-env",
     "bin/dl-unit-failure-notify",
+    "bin/dl-corpus-refresh",
 ]
 exclude = ["vendor/uplink-infisical-transport"]
 
