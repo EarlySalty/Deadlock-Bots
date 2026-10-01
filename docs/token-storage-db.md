@@ -43,3 +43,12 @@ kopieren. Er verwirft Zusatzgruppen und Umgebung vor dem exec. Die User-Units
 starten das Rust-Binary direkt darüber, ohne den bisherigen ENV-Wrapper.
 Metadaten für das Kind liegen neben der TOML, root-privilegierte Metadaten
 separat unter `/etc/deadlock-token-launchers/`.
+
+Für Dienste mit bestehender `NoNewPrivileges`-Grenze unterstützt der private
+Launcher zusätzlich `--child-no-new-privileges`, ausschließlich zusammen mit
+`--token-pipe`. Nach dem Gruppen-, GID- und UID-Wechsel setzt er vor dem exec
+`PR_SET_NO_NEW_PRIVS=1`; ein Fehler verhindert den Start. Der Steam-Bot nutzt
+diese Option: Der privilegierte Bootstrap benötigt `NoNewPrivileges=no` in der
+User-Unit, der eigentliche App-Prozess behält dagegen `NoNewPrivs: 1`.
+Dieser tatsächliche Kindstatus, die Dienstidentität und das Beenden der ganzen
+Cgroup müssen vor der Live-Aktivierung gemessen werden.

@@ -11,6 +11,9 @@ struct Cli {
     uid: Option<u32>,
     #[arg(long)]
     gid: Option<u32>,
+    /// Preserve the application's no-new-privileges boundary after bootstrap.
+    #[arg(long, requires = "token_pipe")]
+    child_no_new_privileges: bool,
     /// Stable existing backup key, delivered only through the private pipe.
     #[arg(long)]
     pipe_secret: Option<String>,
@@ -130,6 +133,7 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
     drop(values);
     let (read, write) = pipe2(OFlag::O_CLOEXEC)?;
     let read_fd = read.as_raw_fd();
+    let child_no_new_privileges = cli.child_no_new_privileges;
     let mut command = Command::new(program);
     command.args(cli.command.iter().skip(1)).env_clear();
     // SAFETY: only async-signal-safe fd/credential syscalls execute after fork;
@@ -141,6 +145,9 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
             setgroups(&[])?;
             setgid(Gid::from_raw(gid))?;
             setuid(Uid::from_raw(uid))?;
+            if child_no_new_privileges {
+                nix::sys::prctl::set_no_new_privs()?;
+            }
             Ok(())
         });
     }
@@ -179,4 +186,27 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn child_privilege_boundary_requires_private_bootstrap() {
+        assert!(
+            Cli::try_parse_from(["launcher", "--child-no-new-privileges", "--", "/bin/true"])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "launcher",
+            "--token-pipe",
+            "--child-no-new-privileges",
+            "--",
+            "/bin/true",
+        ])
+        .expect("Private bootstrap accepts the child privilege boundary");
+        assert!(cli.child_no_new_privileges);
+    }
 }

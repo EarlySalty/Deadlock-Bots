@@ -15,5 +15,5 @@ serde_json.workspace = true
 tokio.workspace = true
 url.workspace = true
 dl-token-secrets = { path = "../../crates/dl-token-secrets" }
-nix = { version = "0.29", default-features = false, features = ["fs", "user"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "user", "process"] }
 zeroize = "1"
