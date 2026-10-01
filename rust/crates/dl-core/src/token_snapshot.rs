@@ -31,7 +31,11 @@ pub fn installed() -> bool {
 }
 
 pub fn value(name: &str) -> Option<&'static str> {
-    SNAPSHOT.get()?.get(name).map(|value| value.as_str())
+    SNAPSHOT
+        .get()?
+        .get(name)
+        .map(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -84,6 +88,7 @@ mod tests {
         );
         assert!(crate::runtime_config::secret_value("MASTER_BROKER_TOKEN").is_none());
         assert!(crate::runtime_config::secret_value("RUST_LOG").is_none());
+        assert!(value("MISSING_DSN").is_none());
         assert!(load(&config).is_err());
     }
 }
