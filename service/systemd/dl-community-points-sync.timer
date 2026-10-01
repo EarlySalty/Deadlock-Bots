@@ -1,0 +1,10 @@
+[Unit]
+Description=Deadlock Community-Punkte-Sync alle 10 Minuten
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

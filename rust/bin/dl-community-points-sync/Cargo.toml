@@ -1,0 +1,32 @@
+[package]
+name = "dl-community-points-sync"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+testing = ["dl-central-db/testing"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dl-community-points-sync"
+path = "src/main.rs"
+
+[dependencies]
+dl-central-db.workspace = true
+dl-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+dl-central-db = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

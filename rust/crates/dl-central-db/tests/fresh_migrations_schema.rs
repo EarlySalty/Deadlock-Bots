@@ -1879,6 +1879,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026081301, "discord role connection provider").await;
     let migration_2026100101_signature_after_first =
         migration_row_signature(&pool, 2026100101, "discord platform connections").await;
+    let migration_2026100103_signature_after_first =
+        migration_row_signature(&pool, 2026100103, "community points").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -1994,6 +1996,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_2026100101_signature_after_first,
         "second migrator run must be a no-op for migration version 2026100101"
     );
+    assert_eq!(
+        migration_row_signature(&pool, 2026100103, "community points").await,
+        migration_2026100103_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100103"
+    );
 
     let schema_count = scalar_i64(
         &pool,
@@ -2015,11 +2022,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
               'content',
               'brain',
               'server_config',
-              'community'
+              'community',
+              'community_points'
           )",
     )
     .await;
-    assert_eq!(schema_count, 16);
+    assert_eq!(schema_count, 17);
 
     let timescaledb_count = scalar_i64(
         &pool,
@@ -2043,6 +2051,92 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         primary_key_columns_in_schema(&pool, "core", "discord_platform_connections").await,
         vec!["discord_id", "platform"]
     );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "twitch_viewer_daily").await,
+        vec![
+            "twitch_user_id",
+            "channel_twitch_user_id",
+            "day",
+            "watch_minutes",
+            "chat_messages",
+            "points_watch",
+            "points_chat",
+            "points_discovery",
+            "source_updated_at",
+            "synced_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "community_points", "twitch_viewer_daily").await,
+        vec!["twitch_user_id", "channel_twitch_user_id", "day"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "twitch_streamer_daily").await,
+        vec![
+            "streamer_twitch_user_id",
+            "day",
+            "streamer_login",
+            "discord_user_id",
+            "viewer_minutes",
+            "unique_viewers",
+            "raids_to_partners",
+            "source_updated_at",
+            "synced_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "community_points", "twitch_streamer_daily").await,
+        vec!["streamer_twitch_user_id", "day"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "ledger").await,
+        vec![
+            "id",
+            "discord_id",
+            "streamer_twitch_user_id",
+            "source",
+            "ref",
+            "points",
+            "occurred_at",
+            "meta",
+            "created_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "sync_state").await,
+        vec!["name", "cursor", "updated_at"]
+    );
+    let community_points_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'community_points'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("community points privacy registry rows");
+    assert_eq!(community_points_privacy_rows, 8);
+    let duplicate_ledger_ref = sqlx::query(
+        "INSERT INTO community_points.ledger (discord_id, source, ref, points, occurred_at)
+         VALUES (1, 'clip_vote', 'clip_vote:1:1', 2, now()),
+                (2, 'clip_vote', 'clip_vote:1:1', 2, now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate_ledger_ref.is_err(),
+        "(source, ref) darf nur einmal gebucht werden"
+    );
+    let ledger_without_recipient = sqlx::query(
+        "INSERT INTO community_points.ledger (source, ref, points, occurred_at)
+         VALUES ('clip_vote', 'clip_vote:2:1', 2, now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        ledger_without_recipient.is_err(),
+        "Ledger braucht genau einen Empfaenger"
+    );
+
     let platform_connection_privacy_rows: i64 = sqlx::query_scalar(
         "SELECT count(*)::BIGINT
            FROM core.privacy_field_registry

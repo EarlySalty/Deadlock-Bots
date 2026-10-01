@@ -406,6 +406,24 @@ const USER_TABLES: &[TableSpec] = &[
         "discord_id",
         ColumnType::I64,
     ),
+    // Community-Punkte (Paket C): Ledger-Buchungen eines Mitglieds und
+    // Tageswerte eines Partner-Streamers mit dessen Discord-ID. Ein
+    // Loeschantrag entfernt die Zeilen; der Sync bucht fuer Mitglieder mit
+    // Privacy-Grabstein nichts nach.
+    TableSpec::new(
+        "community_points_ledger",
+        "user_id",
+        "community_points.ledger",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "community_points_twitch_streamer_daily",
+        "user_id",
+        "community_points.twitch_streamer_daily",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
     // Existieren nur, solange ein Rollback von Migration 2026081301 nicht
     // aufgeraeumt ist (rollbacks/2026081301_..._rollback.sql legt sie an). Sie
     // tragen verschluesselte OAuth-Tokens, also muss ein Loeschantrag sie
@@ -4359,6 +4377,23 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
+        // Community-Punkte (Paket C): diese Spalten sind Twitch-User-IDs,
+        // keine Discord-IDs. Einem Mitglied zugerechnet wird nur ueber
+        // `core.discord_platform_connections`, die ein Loeschantrag entfernt.
+        for (relation, column) in [
+            ("community_points.twitch_viewer_daily", "twitch_user_id"),
+            (
+                "community_points.twitch_viewer_daily",
+                "channel_twitch_user_id",
+            ),
+            (
+                "community_points.twitch_streamer_daily",
+                "streamer_twitch_user_id",
+            ),
+            ("community_points.ledger", "streamer_twitch_user_id"),
+        ] {
+            out.insert((relation.to_string(), column.to_string()));
+        }
         // `core.discord_platform_connections.platform_user_id` ist die
         // Twitch-User-ID, keine Discord-ID. Die Zeile faellt ueber `discord_id`
         // (USER_TABLES) als Ganzes, die Twitch-ID geht dabei mit.

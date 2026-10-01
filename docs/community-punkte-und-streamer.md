@@ -15,11 +15,19 @@ Wir bringen die Community und unsere Partner-Streamer zusammen. Wer sein Discord
 
 Der Tag zählt immer nach deutscher Zeit.
 
+### Befehle
+- `!punkte`: deine Punkte in der laufenden Season (Kalendermonat), aufgeteilt nach Voice, Zuschauen, Chat, Entdecken, Clip-Contest und Streamer-Vorschlägen, dazu dein Platz in der Season und insgesamt und deine Punkte dieser Woche. Bist du noch nicht mit Twitch verknüpft, steht dort, wie das geht.
+- `!lb` oder `!leaderboard`: das gemeinsame Leaderboard der laufenden Season. `!lb gesamt` zeigt alle Punkte seit Beginn, `!lb woche` die laufende Woche ab Montag.
+- `!streamerlb`: das Leaderboard der Partner-Streamer, ebenfalls mit `gesamt` oder `woche`.
+- `!vstats` und `!vleaderboard` (`!vlb`, `!voicetop`) zeigen wie bisher nur die Voice-Punkte.
+
+Eine Season ist ein Kalendermonat. Die Befehle haben dieselbe Bremse wie `!vstats`: höchstens 5 Abfragen in 30 Sekunden.
+
 ## Kosten / Premium
 kostenlos. Punkte sind Anerkennung aus der Community, kein Geld und nichts zum Eintauschen.
 
 ## Was passiert technisch (kurz)?
-Der Twitch-Bot zählt Zuschauzeit und Chat in den Kanälen aktiver Partner, solange sie live sind. Zugerechnet wird das erst, wenn ein Twitch-Konto fest mit einer Discord-ID verknüpft ist. Diese Verknüpfung kommt nur aus der Freigabe über Discord, niemals aus einem ähnlichen Namen. Die Punkte werden täglich in die zentrale Datenbank übernommen und dort mit Voice-Punkten, Clip-Contest und Streamer-Vorschlägen zu einem gemeinsamen Leaderboard zusammengeführt. Der Concierge beantwortet die Fragen "Wie bekomme ich Punkte?", "Wie verknüpfe ich Twitch?", "Wie funktioniert der Clip-Contest?", "Wie schlage ich einen Streamer vor?" und "Was bringt mir das als Streamer?" mit festen Antworten, auch wenn kein Sprachmodell erreichbar ist.
+Der Twitch-Bot zählt Zuschauzeit und Chat in den Kanälen aktiver Partner, solange sie live sind. Zugerechnet wird das erst, wenn ein Twitch-Konto fest mit einer Discord-ID verknüpft ist. Diese Verknüpfung kommt nur aus der Freigabe über Discord, niemals aus einem ähnlichen Namen. Die Punkte werden alle 10 Minuten in die zentrale Datenbank übernommen und dort mit Voice-Punkten, Clip-Contest und Streamer-Vorschlägen zu einem gemeinsamen Leaderboard zusammengeführt. Der Concierge beantwortet die Fragen "Wie bekomme ich Punkte?", "Wie verknüpfe ich Twitch?", "Wie funktioniert der Clip-Contest?", "Wie schlage ich einen Streamer vor?" und "Was bringt mir das als Streamer?" mit festen Antworten, auch wenn kein Sprachmodell erreichbar ist.
 
 ## Grenzen & häufige Fragen
 - Ohne Verknüpfung wird dir nichts zugerechnet, und dein Name taucht nirgends auf. Sichtbar sind nur verknüpfte Mitglieder.

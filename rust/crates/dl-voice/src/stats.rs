@@ -1,4 +1,6 @@
-//! Voice-Statistik-Befehle (`!vstats`, `!vleaderboard`/`!vlb`/`!voicetop`).
+//! Voice-Statistik-Befehle (`!vstats`, `!vleaderboard`/`!vlb`/`!voicetop`)
+//! und die Community-Punkte (`!lb`/`!leaderboard`, `!punkte`, `!streamerlb`,
+//! Formatierung in [`crate::community_points`]).
 //!
 //! 1:1-Port der Prefix-Commands aus `cogs/voice_activity_tracker.py`. Bewusst
 //! OHNE Admin-Gate — die Befehle stehen allen offen. Die Aggregat-Daten in
@@ -13,9 +15,11 @@ use dl_discord::{ChannelSender, Dispatcher};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+use crate::community_points as cp_view;
 use crate::db::{i64_to_u64, u64_to_i64};
 use crate::feedback::VoiceFeedback;
 use crate::tracker::{calculate_points, VoiceTracker};
+use dl_central_db::community_points as cp;
 
 pub const VOICE_ADMIN_TEST_TITLE: &str = "🔧 Voice-System-Test (zentrale DB)";
 pub const VOICE_ADMIN_STATUS_TITLE: &str = "🔧 Voice-System Admin-Status (zentrale DB)";
@@ -125,6 +129,15 @@ impl RateLimiter {
         dq.push_back(now);
         Ok(())
     }
+}
+
+pub const COMMUNITY_POINTS_UNAVAILABLE_TEXT: &str =
+    "Die Punkte konnten gerade nicht geladen werden. Versuch es gleich nochmal.";
+
+fn rate_limited(remaining: i64) -> StatsReply {
+    StatsReply::text(format!(
+        "⏰ Langsam! Versuch's in {remaining} Sekunden nochmal."
+    ))
 }
 
 /// Antwort eines Befehls: Klartext oder genau ein Embed.
@@ -282,6 +295,9 @@ impl VoiceStatsCommands {
             "!vleaderboard" | "!vlb" | "!voicetop" => {
                 Some(self.vleaderboard(guild_id, author_id).await)
             }
+            "!lb" | "!leaderboard" => Some(self.community_leaderboard(content, author_id).await),
+            "!punkte" => Some(self.punkte(author_id, author_name).await),
+            "!streamerlb" => Some(self.streamer_leaderboard(content, author_id).await),
             "!vtest" => Some(self.vtest(guild_id).await),
             "!vf1" if author_is_admin => Some(
                 self.feedback_test(content, guild_id, author_id, "first")
@@ -519,6 +535,102 @@ impl VoiceStatsCommands {
         }))
     }
 
+    async fn community_leaderboard(&self, content: &str, author_id: u64) -> StatsReply {
+        if let Err(remaining) = self.limiter.check(author_id) {
+            return rate_limited(remaining);
+        }
+        let period = cp_view::parse_period(content);
+        let today = cp::berlin_day(chrono::Utc::now());
+        let board = match cp::community_board(&self.store.pool, period, today).await {
+            Ok(board) => board,
+            Err(err) => {
+                tracing::warn!(%err, "Community-Leaderboard konnte nicht geladen werden");
+                return StatsReply::text(COMMUNITY_POINTS_UNAVAILABLE_TEXT);
+            }
+        };
+        let ids: Vec<u64> = board
+            .iter()
+            .take(cp_view::BOARD_LIMIT)
+            .filter_map(|row| u64::try_from(row.discord_id).ok())
+            .collect();
+        let names = self.port.resolve_names(&ids).await;
+        let own = u64_to_i64("discord_id", author_id)
+            .ok()
+            .and_then(|id| cp::member_rank(&board, id));
+        StatsReply::embed(cp_view::community_board_embed(
+            &board,
+            &names,
+            &cp_view::period_label(period, today),
+            own,
+        ))
+    }
+
+    async fn punkte(&self, author_id: u64, author_name: &str) -> StatsReply {
+        if let Err(remaining) = self.limiter.check(author_id) {
+            return rate_limited(remaining);
+        }
+        let Ok(discord_id) = u64_to_i64("discord_id", author_id) else {
+            return StatsReply::text(COMMUNITY_POINTS_UNAVAILABLE_TEXT);
+        };
+        let pool = &self.store.pool;
+        if dl_community::privacy::is_opted_out(pool, discord_id).await {
+            return StatsReply::text(cp_view::PUNKTE_OPTED_OUT_TEXT);
+        }
+        let today = cp::berlin_day(chrono::Utc::now());
+        let boards = tokio::try_join!(
+            cp::community_board(pool, cp::Period::Season, today),
+            cp::community_board(pool, cp::Period::Gesamt, today),
+            cp::community_board(pool, cp::Period::Woche, today),
+        );
+        let (season, total, week) = match boards {
+            Ok(boards) => boards,
+            Err(err) => {
+                tracing::warn!(%err, "Community-Punkte konnten nicht geladen werden");
+                return StatsReply::text(COMMUNITY_POINTS_UNAVAILABLE_TEXT);
+            }
+        };
+        let twitch_linked = match dl_central_db::twitch_link_for_discord(pool, discord_id).await {
+            Ok(link) => link.is_some(),
+            Err(err) => {
+                tracing::warn!(%err, "Twitch-Verknüpfung konnte nicht gelesen werden");
+                false
+            }
+        };
+        let season_label = cp_view::period_label(cp::Period::Season, today);
+        let view = cp_view::PunkteView {
+            name: author_name,
+            season_label: &season_label,
+            season: season
+                .iter()
+                .find(|row| row.discord_id == discord_id)
+                .cloned()
+                .unwrap_or_default(),
+            season_rank: cp::member_rank(&season, discord_id),
+            total_rank: cp::member_rank(&total, discord_id),
+            week_points: cp::member_rank(&week, discord_id).map_or(0, |(_, points)| points),
+            twitch_linked,
+        };
+        StatsReply::embed(cp_view::punkte_embed(&view))
+    }
+
+    async fn streamer_leaderboard(&self, content: &str, author_id: u64) -> StatsReply {
+        if let Err(remaining) = self.limiter.check(author_id) {
+            return rate_limited(remaining);
+        }
+        let period = cp_view::parse_period(content);
+        let today = cp::berlin_day(chrono::Utc::now());
+        match cp::streamer_board(&self.store.pool, period, today).await {
+            Ok(board) => StatsReply::embed(cp_view::streamer_board_embed(
+                &board,
+                &cp_view::period_label(period, today),
+            )),
+            Err(err) => {
+                tracing::warn!(%err, "Partner-Leaderboard konnte nicht geladen werden");
+                StatsReply::text(COMMUNITY_POINTS_UNAVAILABLE_TEXT)
+            }
+        }
+    }
+
     async fn resolve_one(&self, user_id: u64) -> String {
         self.port
             .resolve_names(&[user_id])
@@ -708,6 +820,83 @@ mod tests {
             .reply_for("!voice_config", 1, 9, "Admin", false)
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn community_befehle_antworten_und_vleaderboard_bleibt() {
+        let (db, commands, _tracker, _feedback_port) = admin_setup().await;
+        sqlx::query(
+            "INSERT INTO voice.voice_stats (user_id, total_seconds, total_points)
+             VALUES (9, 3600, 120), (10, 7200, 80)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("seed voice");
+
+        let vlb = commands
+            .reply_for("!vlb", 1, 9, "Anna", false)
+            .await
+            .expect("vlb");
+        assert!(vlb.embeds[0]["title"]
+            .as_str()
+            .expect("title")
+            .starts_with("🏆 Voice-Leaderboard"));
+
+        let lb = commands
+            .reply_for("!lb gesamt", 1, 9, "Anna", false)
+            .await
+            .expect("lb");
+        assert_eq!(lb.embeds[0]["title"], "🏆 Community-Leaderboard · Gesamt");
+        assert!(lb.embeds[0]["description"]
+            .as_str()
+            .expect("description")
+            .starts_with("🥇 **User 9** · 120 Punkte (Voice 120)"));
+        assert_eq!(
+            lb.embeds[0]["footer"]["text"],
+            "Du bist auf Platz 1 · 120 Punkte"
+        );
+
+        let punkte = commands
+            .reply_for("!punkte", 1, 10, "Ben", false)
+            .await
+            .expect("punkte");
+        let embed = &punkte.embeds[0];
+        assert_eq!(embed["title"], "⭐ Community-Punkte · Ben");
+        assert!(embed["description"]
+            .as_str()
+            .expect("description")
+            .contains("Twitch verknüpfen"));
+        assert_eq!(embed["fields"][6]["value"], "80 Punkte · Platz 2");
+
+        let streamer = commands
+            .reply_for("!streamerlb", 1, 9, "Anna", false)
+            .await
+            .expect("streamerlb");
+        assert!(streamer.embeds[0]["title"]
+            .as_str()
+            .expect("title")
+            .starts_with("🎥 Partner-Leaderboard · Season"));
+
+        sqlx::query("INSERT INTO core.user_privacy (user_id, opted_out) VALUES (10, TRUE)")
+            .execute(db.pool())
+            .await
+            .expect("opt out");
+        let opted_out = commands
+            .reply_for("!leaderboard gesamt", 1, 10, "Ben", false)
+            .await
+            .expect("lb");
+        assert!(!opted_out.embeds[0]["description"]
+            .as_str()
+            .expect("description")
+            .contains("User 10"));
+        let punkte = commands
+            .reply_for("!punkte", 1, 10, "Ben", false)
+            .await
+            .expect("punkte");
+        assert_eq!(
+            punkte.content.as_deref(),
+            Some(crate::community_points::PUNKTE_OPTED_OUT_TEXT)
+        );
     }
 
     #[tokio::test]
