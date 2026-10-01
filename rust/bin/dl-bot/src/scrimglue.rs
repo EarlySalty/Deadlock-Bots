@@ -3139,22 +3139,17 @@ async fn mark_expired_discord_effect_leases_uncertain(
     .bind(scrim_payload_hash(&json!({"error": "lease_expired"})))
     .fetch_all(&mut *tx)
     .await?;
-    rows.sort_by_key(|row| {
+    let mut batch_ids = Vec::new();
+    for row in &rows {
         let payload = row.get::<Value, _>("payload");
-        let batch_id = parse_match_request_effect_context(&payload)
-            .map(|context| context.batch_id)
-            .unwrap_or(i32::MIN);
-        (batch_id, row.get::<i64, _>("id"))
-    });
-    let mut batch_ids = rows
-        .iter()
-        .filter_map(|row| {
-            let payload = row.get::<Value, _>("payload");
-            parse_match_request_effect_context(&payload)
-                .ok()
-                .map(|context| context.batch_id)
-        })
-        .collect::<Vec<_>>();
+        if let Ok(context) = parse_match_request_effect_context(&payload) {
+            batch_ids.push(context.batch_id);
+        } else if let Ok(context) = parse_match_status_effect_context(&payload) {
+            if let Some(batch_id) = match_request_batch_id_tx(&mut tx, context.request_id).await? {
+                batch_ids.push(batch_id);
+            }
+        }
+    }
     batch_ids.sort_unstable();
     batch_ids.dedup();
     for batch_id in batch_ids {
@@ -3941,6 +3936,28 @@ async fn lock_match_request_batch_tx(
         .is_some())
 }
 
+async fn match_request_batch_id_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request_id: i32,
+) -> anyhow::Result<Option<i32>> {
+    Ok(sqlx::query_scalar::<_, i32>(
+        "SELECT batch_id FROM scrim.match_requests WHERE id = $1",
+    )
+    .bind(request_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn lock_match_request_batch_for_request_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request_id: i32,
+) -> anyhow::Result<bool> {
+    let Some(batch_id) = match_request_batch_id_tx(tx, request_id).await? else {
+        return Ok(false);
+    };
+    lock_match_request_batch_tx(tx, batch_id).await
+}
+
 async fn refresh_match_request_batch_status_tx(
     tx: &mut Transaction<'_, Postgres>,
     batch_id: i32,
@@ -4154,6 +4171,9 @@ async fn mark_match_request_effect_failed_tx(
         let Ok(context) = parse_match_status_effect_context(&payload) else {
             return Ok(());
         };
+        if !lock_match_request_batch_for_request_tx(tx, context.request_id).await? {
+            return Ok(());
+        }
         sqlx::query(
             r#"
             UPDATE scrim.match_requests
@@ -7343,6 +7363,64 @@ mod tests {
             }
         })
         .await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_status_effect_failure_locks_batch_before_request() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        sqlx::query("UPDATE scrim.match_request_batches SET status='posting' WHERE id=30")
+            .execute(pool)
+            .await?;
+        let body = match_status_body("Status ist bereit");
+        let mut payload = discord_effect_payload("match_status", "post", 100, None, &body);
+        payload["context"] = json!({"request_id":"31", "team_id":"1"});
+        insert_discord_effect(pool, "discord:test_status_lock_order", &payload, "pending").await?;
+        let outbox_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM scrim.outbox_effects WHERE idempotency_key='discord:test_status_lock_order'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let mut batch_tx = pool.begin().await?;
+        sqlx::query("SELECT id FROM scrim.match_request_batches WHERE id=30 FOR UPDATE")
+            .fetch_one(&mut *batch_tx)
+            .await?;
+        let pool_for_failure = pool.clone();
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let failure = tokio::spawn(async move {
+            let mut tx = pool_for_failure.begin().await?;
+            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await?;
+            pid_sender
+                .send(backend_pid)
+                .map_err(|_| anyhow!("test lock-wait receiver dropped"))?;
+            mark_match_request_effect_failed_tx(&mut tx, outbox_id).await?;
+            tx.commit().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        wait_for_postgres_lock_wait(pool, pid_receiver.await?).await?;
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *batch_tx)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET updated_at=now() WHERE id=31")
+            .execute(&mut *batch_tx)
+            .await?;
+        batch_tx.commit().await?;
+        failure.await??;
+
+        let status_message_state: String = sqlx::query_scalar(
+            "SELECT status_message_state FROM scrim.match_requests WHERE id=31",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(status_message_state, MATCH_STATUS_MESSAGE_STATE_POST_FAILED);
         Ok(())
     }
 
