@@ -39,7 +39,6 @@ mod tests {
     use super::*;
     use std::{
         io::Write,
-        os::unix::process::CommandExt,
         process::{Command, Stdio},
     };
 
@@ -48,7 +47,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("infisical.json"),
             br#"{"secret_values_fd":3,"project_id":"fixture","environment":"fixture","secret_path":"/","socket_path":"/nonexistent","database_secret":"DEADLOCK_CENTRAL_DSN"}"#).unwrap();
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        // Nur Test-FD-Zuweisung; der produktive Launcher bleibt Rust.
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exec 3<&0; exec \"$@\"", "private-fifo-test"])
+            .arg(std::env::current_exe().unwrap());
         command
             .args([
                 "--ignored",
@@ -57,16 +60,6 @@ mod tests {
             ])
             .current_dir(directory.path())
             .stdin(Stdio::piped());
-        // SAFETY: Command owns the piped stdin FD0 until exec; dup2 is
-        // async-signal-safe and creates the designated inherited private FD3.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::dup2(0, 3) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
         let mut child = command.spawn().unwrap();
         child
             .stdin
