@@ -1909,7 +1909,10 @@ async fn save_match_request_posts(
     }
 
     let mut tx = pool.begin().await?;
-    lock_match_request_batch_tx(&mut tx, i32::try_from(batch_id)?).await?;
+    if !lock_match_request_batch_tx(&mut tx, i32::try_from(batch_id)?).await? {
+        tx.rollback().await?;
+        return Ok(());
+    }
     for (request_id, message_ids) in by_request {
         sqlx::query(
             r#"
@@ -3155,7 +3158,7 @@ async fn mark_expired_discord_effect_leases_uncertain(
     batch_ids.sort_unstable();
     batch_ids.dedup();
     for batch_id in batch_ids {
-        lock_match_request_batch_tx(&mut tx, batch_id).await?;
+        let _ = lock_match_request_batch_tx(&mut tx, batch_id).await?;
     }
     for row in &rows {
         let id = row.get::<i64, _>("id");
@@ -3930,13 +3933,12 @@ impl DiscordDeliveryReceipt {
 async fn lock_match_request_batch_tx(
     tx: &mut Transaction<'_, Postgres>,
     batch_id: i32,
-) -> anyhow::Result<()> {
-    sqlx::query("SELECT id FROM scrim.match_request_batches WHERE id = $1 FOR UPDATE")
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query("SELECT id FROM scrim.match_request_batches WHERE id = $1 FOR UPDATE")
         .bind(batch_id)
         .fetch_optional(&mut **tx)
         .await?
-        .ok_or_else(|| anyhow!("match_request batch {batch_id} fehlt"))?;
-    Ok(())
+        .is_some())
 }
 
 async fn refresh_match_request_batch_status_tx(
@@ -3977,7 +3979,9 @@ async fn record_match_request_effect_delivery_tx(
     channel_id: u64,
     message_id: u64,
 ) -> anyhow::Result<()> {
-    lock_match_request_batch_tx(tx, context.batch_id).await?;
+    if !lock_match_request_batch_tx(tx, context.batch_id).await? {
+        return Err(anyhow!("match_request batch {} fehlt", context.batch_id));
+    }
     let row = sqlx::query(
         r#"
         SELECT batch_id, team_a_id, team_b_id, status, team_query_message_ids
@@ -4174,7 +4178,9 @@ async fn mark_match_request_effect_failed_tx(
     let Ok(context) = parse_match_request_effect_context(&payload) else {
         return Ok(());
     };
-    lock_match_request_batch_tx(tx, context.batch_id).await?;
+    if !lock_match_request_batch_tx(tx, context.batch_id).await? {
+        return Ok(());
+    }
     let updated = sqlx::query(
         r#"
         UPDATE scrim.match_requests
@@ -7404,6 +7410,89 @@ mod tests {
             match_request_batch_status(pool, 30).await?,
             MATCH_REQUEST_STATUS_POST_FAILED
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_outbox_expiry_skips_missing_batch_and_continues() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        insert_match_request_batch(pool, 40).await?;
+        sqlx::query(
+            "UPDATE scrim.match_request_batches SET status='posting' WHERE id IN (30, 40)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='posting' WHERE id IN (31, 41)")
+            .execute(pool)
+            .await?;
+        let slots = json!([{"day":"sat","from":960,"to":1080}]);
+        let payload_missing = match_request_discord_effect_payload(
+            30,
+            31,
+            1,
+            100,
+            &match_request_body(31, 1, "Abfrage A", &slots)?,
+        );
+        let payload_valid = match_request_discord_effect_payload(
+            40,
+            41,
+            1,
+            100,
+            &match_request_body(41, 1, "Abfrage B", &slots)?,
+        );
+        insert_discord_effect(
+            pool,
+            "discord:test_expired_missing_batch",
+            &payload_missing,
+            "pending",
+        )
+        .await?;
+        insert_discord_effect(
+            pool,
+            "discord:test_expired_valid_batch",
+            &payload_valid,
+            "pending",
+        )
+        .await?;
+        sqlx::query("DELETE FROM scrim.match_request_batches WHERE id=30")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            r#"
+            UPDATE scrim.outbox_effects
+               SET state='leased', lease_until=now() - interval '1 second', attempts=1
+             WHERE idempotency_key IN (
+                 'discord:test_expired_missing_batch',
+                 'discord:test_expired_valid_batch'
+             )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        let sender = RecordingDiscordSender::new(false);
+        mark_expired_discord_effect_leases_uncertain(pool, &sender).await?;
+
+        let uncertain_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+              FROM scrim.outbox_effects
+             WHERE idempotency_key IN (
+                 'discord:test_expired_missing_batch',
+                 'discord:test_expired_valid_batch'
+             )
+               AND state='uncertain'
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(uncertain_count, 2);
+        assert_eq!(match_request_status(pool, 41).await?, MATCH_REQUEST_STATUS_POST_FAILED);
+        assert_eq!(match_request_batch_status(pool, 40).await?, MATCH_REQUEST_STATUS_POST_FAILED);
         Ok(())
     }
 
