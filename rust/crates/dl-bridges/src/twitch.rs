@@ -420,6 +420,34 @@ impl TwitchApiClient {
         ))
     }
 
+    /// Streamer-Vorschlag aus der Community weiterreichen
+    /// (`POST /scout/community-suggestion`, Community-Streamer-Brücke Paket F).
+    /// Liefert HTTP-Status und Body unverändert, damit der Aufrufer zwischen
+    /// endgültigen Ablehnungen (4xx) und Fehlern zum erneuten Versuch
+    /// unterscheiden kann. `Err` nur, wenn keine Antwort ankam.
+    pub async fn post_community_suggestion(
+        &self,
+        payload: &Value,
+        idempotency_key: &str,
+    ) -> Result<(u16, Value), TwitchBridgeError> {
+        let url = format!(
+            "{}{TWITCH_INTERNAL_API_BASE_PATH}/scout/community-suggestion",
+            self.base_url
+        );
+        let response = self
+            .http
+            .post(&url)
+            .header("X-Internal-Token", &self.token)
+            .header("Idempotency-Key", idempotency_key)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| TwitchBridgeError::Api(e.to_string()))?;
+        let status = response.status().as_u16();
+        let body: Value = response.json().await.unwrap_or(Value::Null);
+        Ok((status, body))
+    }
+
     pub async fn add_global_ban(
         &self,
         login: &str,
@@ -1578,5 +1606,71 @@ mod tests {
 
         assert!(reply.content.expect("text").contains("nicht mehr aktiv"));
         assert!(reply.components.is_none());
+    }
+
+    #[tokio::test]
+    async fn community_suggestion_reicht_status_body_und_schluessel_durch() {
+        let received: Arc<Mutex<Vec<(String, String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = received.clone();
+        let app = axum::Router::new().route(
+            "/internal/twitch/v1/scout/community-suggestion",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::Json<Value>| {
+                    let rec = rec.clone();
+                    async move {
+                        let header = |name: &str| {
+                            headers
+                                .get(name)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string()
+                        };
+                        let conflict = body.0["twitch_login"] == "konflikt";
+                        rec.lock().expect("lock").push((
+                            header("X-Internal-Token"),
+                            header("Idempotency-Key"),
+                            body.0,
+                        ));
+                        if conflict {
+                            (
+                                axum::http::StatusCode::CONFLICT,
+                                axum::Json(json!({"error": "idempotency_conflict"})),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(json!({"status": "created", "twitch_user_id": "123"})),
+                            )
+                        }
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = TwitchApiClient::new(format!("http://{addr}"), "tok", Duration::from_secs(2));
+        let payload =
+            json!({"twitch_login": "name", "suggested_by_discord_id": "123456789012345678"});
+        let (status, body) = client
+            .post_community_suggestion(&payload, "discord-suggest-7")
+            .await
+            .expect("antwort");
+        assert_eq!(status, 200);
+        assert_eq!(body["status"], "created");
+        let (status, _) = client
+            .post_community_suggestion(&json!({"twitch_login": "konflikt"}), "discord-suggest-8")
+            .await
+            .expect("antwort");
+        assert_eq!(status, 409);
+        let seen = received.lock().expect("lock").clone();
+        assert_eq!(seen[0].0, "tok");
+        assert_eq!(seen[0].1, "discord-suggest-7");
+        assert_eq!(seen[0].2, payload);
+        server.abort();
     }
 }

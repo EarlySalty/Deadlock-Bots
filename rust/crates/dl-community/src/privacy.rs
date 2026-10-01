@@ -1121,6 +1121,15 @@ const USER_TABLES: &[TableSpec] = &[
         "applicant_user_id",
         ColumnType::I64,
     ),
+    // Streamer-Vorschläge (Paket F): ein Löschantrag entfernt die Zeilen
+    // samt Grund; der vorgeschlagene Kanal hängt am Mitglied.
+    TableSpec::new(
+        "community_streamer_suggestions",
+        "discord_id",
+        "community.streamer_suggestions",
+        "discord_id",
+        ColumnType::I64,
+    ),
 ];
 
 const NULLABLE_USER_COLUMNS: &[TableSpec] = &[
@@ -4467,6 +4476,13 @@ mod privacy_contract_tests {
         out.insert((
             "clips.clip_contest_results".to_string(),
             "streamer_twitch_user_id".to_string(),
+        ));
+        // `community.streamer_suggestions.twitch_user_id` ist die Twitch-ID des
+        // vorgeschlagenen (öffentlichen) Kanals, nicht des Mitglieds. Die Zeile
+        // fällt über `discord_id` (USER_TABLES) als Ganzes.
+        out.insert((
+            "community.streamer_suggestions".to_string(),
+            "twitch_user_id".to_string(),
         ));
         out
     }

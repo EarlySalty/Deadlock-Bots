@@ -7120,18 +7120,18 @@ pub fn register_faq_components(router: &mut dl_discord::InteractionRouter) {
 
 /// Button "Twitch verknüpfen" im Verify-Panel: holt den Discord-Link beim
 /// Dashboard (`dashboard_base`, loopback) mit dem internen Token.
+/// Registriert den Verify-Panel-Knopf und liefert dieselbe Link-Quelle für
+/// den Concierge-Knopf "Twitch verknüpfen".
 pub fn register_twitch_link_components(
     router: &mut dl_discord::InteractionRouter,
     dashboard_base: String,
     token: Option<String>,
-) {
-    twitch_link::register(
-        router,
-        Arc::new(twitch_link::DashboardTwitchLinkClient::new(
-            dashboard_base,
-            token,
-        )),
+) -> twitch_link::ConciergeTwitchLink {
+    let source: Arc<dyn twitch_link::TwitchLinkUrlSource> = Arc::new(
+        twitch_link::DashboardTwitchLinkClient::new(dashboard_base, token),
     );
+    twitch_link::register(router, source.clone());
+    twitch_link::ConciergeTwitchLink::new(source)
 }
 
 struct ServerSyncCommand {

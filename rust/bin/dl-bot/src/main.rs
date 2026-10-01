@@ -579,7 +579,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
-    serversync::register_twitch_link_components(
+    let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
         env("MASTER_BROKER_TOKEN")
@@ -1186,6 +1186,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_config.clone(),
         shared_answers.clone(),
     );
+    // Concierge-Knopf "Twitch verknüpfen": derselbe persönliche Link wie im
+    // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
+    concierge.install_twitch_link_source(Arc::new(concierge_twitch_link));
     dl_community::concierge::register(&mut router, concierge.clone());
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
@@ -1213,6 +1216,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
     );
     dl_community::clips::register(&mut router, clips.clone());
+
+    // Streamer vorschlagen (Paket F): Knopf am Clip-Panel, Weitergabe an den
+    // Twitch-Bot über den vorhandenen internen API-Client; ohne Token wird nur
+    // gespeichert und der Retry-Loop holt die Weitergabe später nach.
+    let streamer_suggestions = dl_community::streamer_suggest::StreamerSuggestions::new(
+        central_pool.clone(),
+        twitch_client
+            .clone()
+            .map(|client| client as Arc<dyn dl_community::streamer_suggest::SuggestionForwarder>),
+    );
+    dl_community::streamer_suggest::register(&mut router, streamer_suggestions.clone());
 
     // Leave-Survey (6) — Select/Modal brauchen den Router, Trigger ist gateway-gated
     let leave_survey = dl_community::leave_survey::LeaveSurvey::new(
@@ -1774,6 +1788,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
+        let _streamer_suggest_retry =
+            dl_community::streamer_suggest::spawn(streamer_suggestions.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);

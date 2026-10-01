@@ -20,6 +20,9 @@ pub const VERIFY_CHANNEL_ID: u64 = 1_398_021_105_339_334_666;
 pub const PARTNER_STREAMS_CHANNEL_ID: u64 = 1_304_169_815_505_637_458;
 /// Server- und Bot-Fragen an Menschen.
 pub const SERVER_FRAGEN_CHANNEL_ID: u64 = 1_491_953_161_747_955_853;
+/// Kanal mit dem Knopf "Streamer vorschlagen" (Clip-Panel, Paket F,
+/// `streamer_suggest::PANEL_CHANNEL_ID`; ein Test hält beide gleich).
+pub const STREAMER_SUGGEST_CHANNEL_ID: u64 = 1_425_215_762_460_835_931;
 
 /// Block für die Server-Tour. Kurz gehalten, die Details liefern die Antworten unten.
 pub const TOUR_COMMUNITY_BLOCK: &str = "**Community und Streamer**\nVerknüpf dein Discord mit Twitch, dann sammelst du Punkte, wenn du bei unseren Partner-Streamern zuschaust und mitchattest. Die Punkte landen zusammen mit deinen Voice-Punkten in einem gemeinsamen Leaderboard. Jede Woche gibt es einen Clip-Contest, die Community stimmt ab und die Top 3 laufen im Stream auf dach_lock. Und wenn du einen Streamer kennst, der zu uns passt, kannst du ihn für unser Streamer-Programm vorschlagen. Fragen dazu? Schreib mir einfach, zum Beispiel \"Wie bekomme ich Punkte?\".";
@@ -36,9 +39,9 @@ pub const ANSWER_TWITCH_VERKNUEPFEN: &str = "Das geht in einer Minute. Klick unt
 
 pub const ANSWER_CLIP_CONTEST: &str = "Jede Woche läuft hier ein Clip-Contest. Clips aus den Streams unserer Partner werden eingereicht, und die Community stimmt in Discord ab. Die Top 3 der Woche laufen im Stream auf dach_lock.\n\nPunkte gibt es auch: Platz 1 bringt 100, Platz 2 bringt 60 und Platz 3 bringt 40 Punkte für die Person, die den Clip eingereicht hat. Wer abstimmt, bekommt 2 Punkte, dabei zählt eine Stimme pro Woche. Alles landet im gemeinsamen Leaderboard.";
 
-pub const ANSWER_STREAMER_VORSCHLAGEN: &str = "Du kennst jemanden, der Deadlock streamt und gut zu uns passt? Dann drück auf den Knopf \"Streamer vorschlagen\", gib den Twitch-Kanal an und schreib kurz, warum. Unser Team schaut sich jeden Vorschlag an und entscheidet selbst, wen es anspricht. Wird der Kanal Partner in unserem Streamer-Programm, bekommt die Person, die ihn als Erste vorgeschlagen hat, 150 Punkte. Den Knopf nicht gefunden? Frag kurz in <#1491953161747955853>.";
+pub const ANSWER_STREAMER_VORSCHLAGEN: &str = "Du kennst jemanden, der Deadlock streamt und gut zu uns passt? Dann geh in <#1425215762460835931> und drück dort auf den Knopf \"Streamer vorschlagen\". Gib den Twitch-Kanal oder den Link an und schreib kurz, warum. Unser Team schaut sich jeden Vorschlag an und entscheidet selbst, wen es anspricht. Wird der Kanal Partner in unserem Streamer-Programm, bekommt die Person, die ihn als Erste vorgeschlagen hat, 150 Punkte. Du kannst bis zu 3 Kanäle am Tag vorschlagen.";
 
-pub const ANSWER_STREAMER_VORTEILE: &str = "Als Partner-Streamer bekommst du Zuschauer aus einer Community, die gezielt bei Partnern reinschaut. Wer bei dir zum ersten Mal vorbeikommt, bekommt sogar einen Bonus fürs Entdecken.\n\nDu sammelst auch selbst Punkte für das Streamer-Leaderboard: 1 Punkt für alle 30 Minuten, die verknüpfte Community-Mitglieder bei dir zuschauen, 25 Punkte für jeden Raid an einen anderen Partner und 50 Punkte für jede Person, die über deine Einladung auf den Server kommt und hier wirklich aktiv wird. Im wöchentlichen Clip-Contest gibt es 100, 60 oder 40 Punkte für die Plätze 1 bis 3, und die Top 3 laufen im Stream auf dach_lock.\n\nPunkte sind Anerkennung aus der Community, kein Geld. Follows und Subs werden nicht belohnt. Wenn du Partner werden willst, lass dich über \"Streamer vorschlagen\" vorschlagen oder frag in <#1491953161747955853>.";
+pub const ANSWER_STREAMER_VORTEILE: &str = "Als Partner-Streamer bekommst du Zuschauer aus einer Community, die gezielt bei Partnern reinschaut. Wer bei dir zum ersten Mal vorbeikommt, bekommt sogar einen Bonus fürs Entdecken.\n\nDu sammelst auch selbst Punkte für das Streamer-Leaderboard: 1 Punkt für alle 30 Minuten, die verknüpfte Community-Mitglieder bei dir zuschauen, 25 Punkte für jeden Raid an einen anderen Partner und 50 Punkte für jede Person, die über deine Einladung auf den Server kommt und hier wirklich aktiv wird. Im wöchentlichen Clip-Contest gibt es 100, 60 oder 40 Punkte für die Plätze 1 bis 3, und die Top 3 laufen im Stream auf dach_lock.\n\nPunkte sind Anerkennung aus der Community, kein Geld. Follows und Subs werden nicht belohnt. Wenn du Partner werden willst, lass dich über \"Streamer vorschlagen\" in <#1425215762460835931> vorschlagen oder frag in <#1491953161747955853>.";
 
 /// Themen, die der Concierge ohne Sprachmodell und ohne Wissensdienst beantwortet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +297,9 @@ mod tests {
             assert!(ANSWER_CLIP_CONTEST.contains(fakt), "fehlt: {fakt}");
         }
         assert!(ANSWER_STREAMER_VORSCHLAGEN.contains("150 Punkte"));
+        assert!(ANSWER_STREAMER_VORSCHLAGEN.contains(&format!("<#{STREAMER_SUGGEST_CHANNEL_ID}>")));
+        assert!(ANSWER_STREAMER_VORSCHLAGEN.contains("3 Kanäle am Tag"));
+        assert!(ANSWER_STREAMER_VORTEILE.contains(&format!("<#{STREAMER_SUGGEST_CHANNEL_ID}>")));
         for fakt in ["30 Minuten", "25 Punkte", "50 Punkte", "kein Geld"] {
             assert!(ANSWER_STREAMER_VORTEILE.contains(fakt), "fehlt: {fakt}");
         }

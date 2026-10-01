@@ -138,6 +138,36 @@ impl dl_discord::InteractionHandler for TwitchLinkButtonHandler {
     }
 }
 
+/// Derselbe Link-Weg für den Concierge-Button "Twitch verknüpfen"
+/// (`dl_community::concierge_community::TwitchLinkSource`). `None` bei jedem
+/// Fehler; der Concierge zeigt dann seinen festen Verweis auf den Verify-Kanal.
+pub struct ConciergeTwitchLink {
+    source: Arc<dyn TwitchLinkUrlSource>,
+}
+
+impl ConciergeTwitchLink {
+    pub fn new(source: Arc<dyn TwitchLinkUrlSource>) -> Self {
+        Self { source }
+    }
+}
+
+#[async_trait::async_trait]
+impl dl_community::concierge_community::TwitchLinkSource for ConciergeTwitchLink {
+    async fn twitch_link_url(&self, discord_user_id: u64) -> Option<String> {
+        match self.source.authorize_url().await {
+            Ok(url) => Some(url),
+            Err(error) => {
+                tracing::warn!(
+                    user_id = discord_user_id,
+                    %error,
+                    "Concierge: Twitch-Verknuepfungslink konnte nicht erzeugt werden"
+                );
+                None
+            }
+        }
+    }
+}
+
 pub fn register(router: &mut dl_discord::InteractionRouter, source: Arc<dyn TwitchLinkUrlSource>) {
     router.on_custom_id(
         TWITCH_LINK_OPEN_CUSTOM_ID,
@@ -219,6 +249,20 @@ mod tests {
         assert!(router
             .resolve_component(TWITCH_LINK_OPEN_CUSTOM_ID)
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn concierge_quelle_nutzt_denselben_link_weg() {
+        use dl_community::concierge_community::{twitch_link_reply, TwitchLinkSource};
+        let url = "https://discord.com/oauth2/authorize?client_id=1&scope=identify+connections";
+        let source = ConciergeTwitchLink::new(Arc::new(Fixed(Ok(url.to_string()))));
+        let link = source.twitch_link_url(42).await;
+        assert_eq!(link.as_deref(), Some(url));
+        let (_, buttons) = twitch_link_reply(link.as_deref());
+        assert_eq!(buttons[0]["url"], url);
+
+        let failing = ConciergeTwitchLink::new(Arc::new(Fixed(Err("weg".to_string()))));
+        assert_eq!(failing.twitch_link_url(42).await, None);
     }
 
     #[tokio::test]

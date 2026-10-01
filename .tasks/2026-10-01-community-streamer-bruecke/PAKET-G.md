@@ -78,6 +78,10 @@ Anschließen, genau eine Stelle:
    `concierge.install_twitch_link_source(Arc::new(<PaketA-Quelle>));`
 
 Ohne Schritt 3 funktioniert alles weiter, der Button verweist dann auf den Verify-Kanal.
+
+Erledigt mit Paket F (`PAKET-F-discord.md`): `ConciergeTwitchLink` in
+`rust/bin/dl-bot/src/serversync/twitch_link.rs`, installiert in `main.rs`. Der Knopf
+"Streamer vorschlagen" sitzt im Clip-Panel `<#1425215762460835931>`, die Antworten verlinken ihn.
 Bestätigung nach dem Callback ("Dein Twitch-Konto ... ist verknüpft") und das Speichern
 bleiben vollständig bei Paket A; der Concierge reicht nur den Link weiter.
 
