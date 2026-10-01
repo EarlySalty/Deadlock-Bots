@@ -33,5 +33,6 @@ No code fix or test/build was performed in this review round. The fixer must add
 - Folge-Gate fand einen fehlerhaften Failure-Test und unsynchronisierte Warteprüfungen. Der Test aktualisiert nun ein Request-Feld ohne Statuswechsel und wartet explizit auf den PostgreSQL-Lock-Wait.
 - Gate auf dem korrigierten Branch-Head: `gpt-6.1-sol ALLOW`; der Test-Fund wurde als behoben bewertet.
 - Folge-Gate fand fehlende Batch-Ziele, die den Expiry-Sweep abbrechen konnten. Failure-Bookkeeping überspringt nun fehlende Batches; ein Regressionstest prüft, dass der Sweep weitere Effekte verarbeitet. Gate: `gpt-6.1-sol ALLOW`.
+- Weitere Lock-Order-Lücke bei Status-Effekten geschlossen: Lease-Sweep sammelt und sperrt die betroffenen Request-Batches sortiert; direkter Fehlerpfad sperrt vor dem Request. Concurrency-Test ergänzt. Gate: `gpt-6.1-sol ALLOW`.
 - Tests bleiben unausgeführt: beim Versuch war der Host-Lock frei, aber Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen. `rustfmt` ist nicht installiert.
 - Migrationsvertrag geprüft: keine DDL-Änderung; benötigte Scrim-Tabellen und Statuswerte liegen bereits in `dl-central-db`-Migrationen.
