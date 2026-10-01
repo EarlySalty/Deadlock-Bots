@@ -1,3 +1,4 @@
+pub mod community_points;
 pub mod core_users;
 pub mod kv;
 mod locks;
