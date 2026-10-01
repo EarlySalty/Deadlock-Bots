@@ -1155,7 +1155,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_community::concierge::register(&mut router, concierge.clone());
     if concierge.enabled() {
-        concierge.import_legacy_pate_requests().await;
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
         concierge.ensure_pate_leitfaden(repository_root).await;
         let paten_inventar = concierge.paten_inventar(our_guild_id).await;
         tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));

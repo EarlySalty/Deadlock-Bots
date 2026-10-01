@@ -5813,23 +5813,25 @@ impl Concierge {
         true
     }
 
-    pub async fn import_legacy_pate_requests(&self) {
+    pub async fn import_legacy_pate_requests(&self) -> Result<(), String> {
         if !self.config.enabled {
-            return;
+            return Ok(());
         }
         match self.store.has_legacy_pate_request().await {
-            Ok(false) => return,
+            Ok(false) => return Ok(()),
             Ok(true) => {}
             Err(err) => {
-                tracing::warn!(%err, "Concierge: Alte Patenanfragen konnten nicht geprüft werden");
-                return;
+                return Err(format!(
+                    "Alte Patenanfragen konnten nicht geprüft werden: {err}"
+                ));
             }
         }
         let requests = match self.port.existing_pate_request_cards().await {
             Ok(requests) => requests,
             Err(err) => {
-                tracing::warn!(%err, "Concierge: Alte Patenanfragen konnten nicht übernommen werden");
-                return;
+                return Err(format!(
+                    "Alte Patenanfragen konnten nicht aus Discord gelesen werden: {err}"
+                ));
             }
         };
         let mut imported = 0;
@@ -5842,14 +5844,17 @@ impl Concierge {
                 Ok(true) => imported += 1,
                 Ok(false) => {}
                 Err(err) => {
-                    tracing::warn!(%err, message_id = request.message_id, "Concierge: Alte Patenanfrage konnte nicht gespeichert werden");
-                    return;
+                    return Err(format!(
+                        "Alte Patenanfrage {} konnte nicht gespeichert werden: {err}",
+                        request.message_id
+                    ));
                 }
             }
         }
         if imported > 0 {
             tracing::info!(imported, "Concierge: Alte Patenanfragen übernommen");
         }
+        Ok(())
     }
 
     pub async fn ensure_pate_leitfaden(&self, repo_root: &std::path::Path) {
@@ -8475,6 +8480,31 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn legacy_patenimport_gibt_discord_fehler_an_startpfad_weiter() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config.clone());
+        concierge
+            .store
+            .set_pate_requested(770051, config.main_guild_id, Utc::now())
+            .await
+            .expect("pate requested");
+        *port.existing_pate_request_cards_error.lock().unwrap() =
+            Some("Discord-Verlauf nicht erreichbar".to_string());
+
+        let error = concierge
+            .import_legacy_pate_requests()
+            .await
+            .expect_err("Importfehler muss den Bot-Start verhindern");
+        assert!(error.contains("Discord-Verlauf nicht erreichbar"));
+    }
+
     #[test]
     fn wissensantwort_utf16_budget_passt_in_v2_und_fallback() {
         let text = "🧠".repeat(900);
@@ -8807,6 +8837,7 @@ mod tests {
         sent_channel_ids: std::sync::Mutex<Vec<u64>>,
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
         existing_pate_request_cards: std::sync::Mutex<Vec<LegacyPateRequestMessage>>,
+        existing_pate_request_cards_error: std::sync::Mutex<Option<String>>,
         sent_channel_text: std::sync::Mutex<Vec<(u64, String)>>,
         replied_messages: std::sync::Mutex<Vec<(u64, u64)>>,
         reply_hangs: std::sync::Mutex<bool>,
@@ -9045,6 +9076,14 @@ mod tests {
         async fn existing_pate_request_cards(
             &self,
         ) -> Result<Vec<LegacyPateRequestMessage>, String> {
+            if let Some(error) = self
+                .existing_pate_request_cards_error
+                .lock()
+                .unwrap()
+                .clone()
+            {
+                return Err(error);
+            }
             Ok(self.existing_pate_request_cards.lock().unwrap().clone())
         }
     }
@@ -16741,8 +16780,14 @@ mod tests {
                 created_at,
             });
 
-        concierge.import_legacy_pate_requests().await;
-        concierge.import_legacy_pate_requests().await;
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .expect("Patenanfragenimport succeeds");
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .expect("repeat Patenanfragenimport succeeds");
 
         assert_eq!(concierge.store.open_pate_request_count().await.unwrap(), 1);
         assert_eq!(
