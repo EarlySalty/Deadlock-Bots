@@ -29,6 +29,8 @@ No code fix or test/build was performed in this review round. The fixer must add
 - Zwei Concurrency-Regressionstests hinzugefügt.
 - Verifikation blockiert: Host-Lock war zunächst belegt. Beim späteren Versuch war er frei, aber installiertes Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen; `rustfmt` ist nicht installiert.
 - Zwei Gate-Aufrufe vor dem Fix-Commit prüften den Commit-HEAD `2a00f7cc`, nicht die uncommitteten Änderungen; sie zählen nicht als Patch-Abnahme.
-- Gate nach Sicherung des vollständigen Patches: `gpt-6.1-sol ALLOW`; beide offenen Fix-Funde wurden als behoben bewertet.
-- Tests bleiben blockiert: der Host-Lock war zuerst belegt; beim späteren Versuch war er frei, aber Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen. `rustfmt` ist nicht installiert.
+- Zwischen-Gate nach Sicherung des vollständigen Patches: `gpt-6.1-sol ALLOW`; die zwei ursprünglichen Fix-Funde wurden behoben bewertet.
+- Folge-Gate fand einen fehlerhaften Failure-Test und unsynchronisierte Warteprüfungen. Der Test aktualisiert nun ein Request-Feld ohne Statuswechsel und wartet explizit auf den PostgreSQL-Lock-Wait.
+- Gate auf dem korrigierten Branch-Head: `gpt-6.1-sol ALLOW`; der Test-Fund wurde als behoben bewertet.
+- Tests bleiben unausgeführt: beim Versuch war der Host-Lock frei, aber Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen. `rustfmt` ist nicht installiert.
 - Migrationsvertrag geprüft: keine DDL-Änderung; benötigte Scrim-Tabellen und Statuswerte liegen bereits in `dl-central-db`-Migrationen.
