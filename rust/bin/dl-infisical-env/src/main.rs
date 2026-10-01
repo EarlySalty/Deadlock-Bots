@@ -33,10 +33,13 @@ fn clear_capability_sets() -> std::io::Result<()> {
 }
 
 fn signal_child(
-    child: &std::process::Child,
+    child: &mut std::process::Child,
     signal: nix::sys::signal::Signal,
 ) -> std::io::Result<()> {
     use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
     // The owned, unreaped Child prevents PID reuse while signalling this PID.
     match kill(Pid::from_raw(child.id() as i32), signal) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
@@ -301,10 +304,12 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
             .try_wait()
             .context("Dienstabschluss ist nicht prüfbar.")?
         {
-            if status.success() || stop_deadline.is_some() {
+            if pipe_complete && (status.success() || stop_deadline.is_some()) {
                 return Ok(());
             }
-            bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
+            if !status.success() && stop_deadline.is_none() {
+                bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
+            }
         }
         if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             abort_child(&mut child).await?;
@@ -312,12 +317,12 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         }
         tokio::select! {
             _ = terminate.recv(), if stop_deadline.is_none() => {
-                signal_child(&child, nix::sys::signal::Signal::SIGTERM)
+                signal_child(&mut child, nix::sys::signal::Signal::SIGTERM)
                     .context("Dienststoppsignal konnte nicht weitergegeben werden.")?;
                 stop_deadline = Some(Instant::now() + Duration::from_secs(10));
             }
             _ = interrupt.recv(), if stop_deadline.is_none() => {
-                signal_child(&child, nix::sys::signal::Signal::SIGINT)
+                signal_child(&mut child, nix::sys::signal::Signal::SIGINT)
                     .context("Dienstabbruchsignal konnte nicht weitergegeben werden.")?;
                 stop_deadline = Some(Instant::now() + Duration::from_secs(10));
             }
