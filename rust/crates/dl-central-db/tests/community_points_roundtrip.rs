@@ -223,44 +223,43 @@ async fn seed(pool: &PgPool) {
     .await;
 }
 
-/// Minimaler Ausschnitt der Clip-Contest-Tabellen aus Paket D (nur die
-/// Spalten, die der Import liest).
-async fn fake_clip_tables(pool: &PgPool) {
+/// Clip-Contest-Daten im echten Schema aus Paket D (Migration 2026100102):
+/// Fenster 1 abgeschlossen, Fenster 2 noch offen.
+async fn seed_clip_contest(pool: &PgPool) {
     exec(
         pool,
-        "CREATE TABLE IF NOT EXISTS clips.clip_votings (
-             window_id BIGINT PRIMARY KEY,
-             status TEXT NOT NULL,
-             voting_end_at TIMESTAMPTZ,
-             closed_at TIMESTAMPTZ
-         );
-         CREATE TABLE IF NOT EXISTS clips.clip_votes (
-             window_id BIGINT NOT NULL,
-             voter_user_id BIGINT NOT NULL,
-             submission_id BIGINT NOT NULL,
-             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-             PRIMARY KEY (window_id, voter_user_id)
-         );
-         CREATE TABLE IF NOT EXISTS clips.clip_contest_results (
-             window_id BIGINT NOT NULL,
-             place SMALLINT NOT NULL,
-             submission_id BIGINT,
-             source TEXT NOT NULL,
-             user_id BIGINT,
-             streamer_twitch_user_id TEXT,
-             decided_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-             PRIMARY KEY (window_id, place)
-         );
-         INSERT INTO clips.clip_votings (window_id, status, voting_end_at, closed_at)
-         VALUES (1, 'closed', '2026-10-11T18:00:00Z', '2026-10-11T18:01:00Z'),
-                (2, 'open', '2026-10-18T18:00:00Z', NULL);
+        "INSERT INTO clips.clip_windows (id, guild_id, start_at, end_at, status)
+         VALUES (1, 1, '2026-10-04T22:00:00Z', '2026-10-10T21:00:00Z', 'done'),
+                (2, 1, '2026-10-11T22:00:00Z', '2026-10-17T21:00:00Z', 'running');
+         INSERT INTO clips.clip_submissions (id, guild_id, user_id, link, credit, permission)
+         VALUES (10, 1, 1001, 'https://clips.twitch.tv/a', 'a', 'ja'),
+                (12, 1, 1002, 'https://clips.twitch.tv/c', 'c', 'ja'),
+                (20, 1, 1001, 'https://clips.twitch.tv/d', 'd', 'ja');
+         INSERT INTO clips.clip_submissions
+             (id, guild_id, user_id, link, credit, permission, source,
+              streamer_twitch_user_id, streamer_login, idempotency_key)
+         VALUES (11, 1, NULL, 'https://clips.twitch.tv/b', 'partner_a', 'ja', 'twitch',
+                 '456', 'partner_a', 'twitch-clip-b');
+         INSERT INTO clips.clip_votings
+             (window_id, guild_id, channel_id, status, message_id,
+              voting_start_at, voting_end_at, closed_at)
+         VALUES (1, 1, 5, 'closed', 900, '2026-10-10T21:00:00Z',
+                 '2026-10-11T18:00:00Z', '2026-10-11T18:01:00Z'),
+                (2, 1, 5, 'open', 901, '2026-10-17T21:00:00Z',
+                 '2026-10-19T21:00:00Z', NULL);
+         INSERT INTO clips.clip_voting_entries (window_id, position, submission_id)
+         VALUES (1, 1, 10), (1, 2, 11), (1, 3, 12), (2, 1, 20);
          INSERT INTO clips.clip_votes (window_id, voter_user_id, submission_id)
          VALUES (1, 1003, 10), (1, 1001, 11), (1, 1002, 10), (2, 1003, 20);
          INSERT INTO clips.clip_contest_results
-             (window_id, place, submission_id, source, user_id, streamer_twitch_user_id, decided_at)
-         VALUES (1, 1, 10, 'discord', 1001, NULL, '2026-10-10T18:00:00Z'),
-                (1, 2, 11, 'twitch', NULL, '456', '2026-10-10T18:00:00Z'),
-                (1, 3, 12, 'discord', 1002, NULL, '2026-10-10T18:00:00Z');",
+             (window_id, place, guild_id, week_start_at, week_end_at, submission_id,
+              source, user_id, streamer_twitch_user_id, streamer_login, votes, decided_at)
+         VALUES (1, 1, 1, '2026-10-04T22:00:00Z', '2026-10-10T21:00:00Z', 10,
+                 'discord', 1001, NULL, NULL, 2, '2026-10-10T18:00:00Z'),
+                (1, 2, 1, '2026-10-04T22:00:00Z', '2026-10-10T21:00:00Z', 11,
+                 'twitch', NULL, '456', 'partner_a', 1, '2026-10-10T18:00:00Z'),
+                (1, 3, 1, '2026-10-04T22:00:00Z', '2026-10-10T21:00:00Z', 12,
+                 'discord', 1002, NULL, NULL, 0, '2026-10-10T18:00:00Z');",
     )
     .await;
 }
@@ -279,10 +278,11 @@ async fn leaderboards_je_zeitraum_mit_ledger_und_datenschutz() {
     let pool = db.pool();
     seed(pool).await;
 
-    // Ohne Paket-D-Tabellen passiert nichts.
+    // Ohne abgeschlossenes Voting gibt es nichts zu verbuchen.
     let clips = import_clip_contest_ledger(pool).await.expect("clips");
-    assert!(clips.tables_missing);
-    fake_clip_tables(pool).await;
+    assert!(!clips.tables_missing);
+    assert_eq!((clips.places, clips.votes), (0, 0));
+    seed_clip_contest(pool).await;
     let clips = import_clip_contest_ledger(pool).await.expect("clips");
     assert!(!clips.tables_missing);
     // Platz 3 gehoert einem Mitglied mit Widerspruch, Stimme von 1002 auch.
