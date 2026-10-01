@@ -79,19 +79,15 @@ impl BrainApiAnswerer {
 fn backend_error() -> BrainError {
     BrainError::Backend("Brain API nicht verfügbar oder Vertrag ungültig".into())
 }
+fn validated_answer(text: String) -> Result<BrainOutcome, BrainError> {
+    if text.encode_utf16().count() > 3800 || text.contains("http://") || text.contains("https://") {
+        return Err(backend_error());
+    }
+    Ok(BrainOutcome::Answer(text))
+}
 fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
     match response.status {
-        AnswerStatus::Answered => {
-            // Retain the existing GameOnly text budget and URL-free response convention.
-            if response.text.encode_utf16().count() > 3800
-                || response.text.contains("http://")
-                || response.text.contains("https://")
-            {
-                return Err(backend_error());
-            }
-            Ok(BrainOutcome::Answer(response.text))
-        }
-        AnswerStatus::BuildRejected => Ok(BrainOutcome::Answer(response.text)),
+        AnswerStatus::Answered | AnswerStatus::BuildRejected => validated_answer(response.text),
         AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
         AnswerStatus::UnauthorizedEvidence
         | AnswerStatus::Unavailable
@@ -138,6 +134,13 @@ mod tests {
     const FIXTURE_BEARER: &str = "brain-fixture-bearer";
 
     fn fixture(statuses: Vec<AnswerStatus>) -> (String, thread::JoinHandle<Vec<Query>>) {
+        fixture_with_text(statuses, "Antwort äöü 🧪".into())
+    }
+
+    fn fixture_with_text(
+        statuses: Vec<AnswerStatus>,
+        response_text: String,
+    ) -> (String, thread::JoinHandle<Vec<Query>>) {
         let listener =
             TcpListener::bind("127.0.0.1:0").expect("offline fixture operation must succeed");
         let endpoint = format!(
@@ -194,7 +197,7 @@ mod tests {
                     request_id: query.request_id.clone(),
                     knowledge_release: "fixture-release".into(),
                     status,
-                    text: "Antwort äöü 🧪".into(),
+                    text: response_text.clone(),
                     citations: if matches!(
                         status,
                         AnswerStatus::Answered | AnswerStatus::BuildRejected
@@ -299,6 +302,31 @@ mod tests {
             BrainOutcome::Answer("Antwort äöü 🧪".into())
         );
         assert!(backend.answer("Abrams").await.is_err());
+        server
+            .join()
+            .expect("offline fixture operation must succeed");
+    }
+
+    #[tokio::test]
+    async fn build_rejected_rejects_urls_and_text_over_3800_utf16_units() {
+        let (endpoint, server) = fixture_with_text(
+            vec![AnswerStatus::BuildRejected],
+            "Mehr unter https://example.invalid".into(),
+        );
+        assert!(matches!(
+            adapter(&endpoint).answer("illegaler Build").await,
+            Err(BrainError::Backend(_))
+        ));
+        server
+            .join()
+            .expect("offline fixture operation must succeed");
+
+        let (endpoint, server) =
+            fixture_with_text(vec![AnswerStatus::BuildRejected], "🧪".repeat(1901));
+        assert!(matches!(
+            adapter(&endpoint).answer("illegaler Build").await,
+            Err(BrainError::Backend(_))
+        ));
         server
             .join()
             .expect("offline fixture operation must succeed");
