@@ -52,3 +52,19 @@ diese Option: Der privilegierte Bootstrap benötigt `NoNewPrivileges=no` in der
 User-Unit, der eigentliche App-Prozess behält dagegen `NoNewPrivs: 1`.
 Dieser tatsächliche Kindstatus, die Dienstidentität und das Beenden der ganzen
 Cgroup müssen vor der Live-Aktivierung gemessen werden.
+
+Systemdienste können im privaten Launcher zusätzlich explizite
+`--supplementary-group <GID>` angeben; Standard ist weiterhin die leere Liste.
+Nur positive Gruppen-IDs, maximal16, sind erlaubt. Die normale Unitkonfiguration
+bleibt rootkontrolliert. `--child-clear-capability-bounding-set` erfordert sowohl
+`--token-pipe` als auch `--child-no-new-privileges`: vor dem UID-Wechsel wird
+der BoundingSet vollständig geleert, nach dem Wechsel auch Inheritable,
+Permitted und Effective; Ambient wird ebenfalls explizit geleert.
+Die Twitch-Systemunit behält ihre Sandbox und NNP-Grenze. Ausschließlich der
+Bootstrap benötigt SETUID/SETGID/SETPCAP/KILL; das Appkind erhält keine Caps.
+SIGTERM/SIGINT werden an das eigene noch nicht reapte Kind weitergegeben.
+Pipefehler oder30Sekunden-Pipetimeout brechen ausschließlich dieses Kind ab;
+Reap ist auf5Sekunden begrenzt. Normaler Stop hat10Sekunden Grace, danach ist
+er ausdrücklich ein Fehler. Killfehler werden nicht verschluckt. Unter dem
+tatsächlich eingeschränkten Parent müssen Stop und Pipeabort vor Live geprüft
+werden; reine Compiler-/Quellenabnahme behauptet diese Laufzeitbelege nicht.
