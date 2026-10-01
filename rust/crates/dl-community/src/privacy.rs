@@ -397,6 +397,15 @@ const USER_TABLES: &[TableSpec] = &[
         "discord_id",
         ColumnType::I64,
     ),
+    // Selbst freigegebene Plattform-Verknuepfungen (Twitch) aus dem
+    // Discord-Profil; ein Loeschantrag entfernt die Zeile.
+    TableSpec::new(
+        "discord_platform_connections",
+        "user_id",
+        "core.discord_platform_connections",
+        "discord_id",
+        ColumnType::I64,
+    ),
     // Existieren nur, solange ein Rollback von Migration 2026081301 nicht
     // aufgeraeumt ist (rollbacks/2026081301_..._rollback.sql legt sie an). Sie
     // tragen verschluesselte OAuth-Tokens, also muss ein Loeschantrag sie
@@ -4336,6 +4345,13 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
+        // `core.discord_platform_connections.platform_user_id` ist die
+        // Twitch-User-ID, keine Discord-ID. Die Zeile faellt ueber `discord_id`
+        // (USER_TABLES) als Ganzes, die Twitch-ID geht dabei mit.
+        out.insert((
+            "core.discord_platform_connections".to_string(),
+            "platform_user_id".to_string(),
+        ));
         // Das Discord-Guild-Audit-Log bleibt als unveraenderliche Sicherheits-
         // und Aenderungshistorie vollstaendig erhalten. `user_id` bezeichnet
         // den Actor, `target_id` kann je nach Aktion einen User bezeichnen und
