@@ -4,7 +4,7 @@
 //! Entscheidungslogik getrennt, damit die Slice-Vertraege ohne Gateway laufen.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration as StdDuration, Instant};
 
 use async_trait::async_trait;
@@ -65,6 +65,9 @@ pub const SERVER_BOT_FRAGEN_CHANNEL_ID: u64 = 1491953161747955853;
 pub const ALLGEMEIN_CHANNEL_ID: u64 = 1289721245281292291;
 pub const PATE_ROLE_ID: u64 = 1524047896297738311;
 pub const PATE_REQUEST_CHANNEL_ID: u64 = 1524083665838276860;
+pub const FRESHLING_ROLE_ID: u64 = 1522384961481609236;
+pub const CONCIERGE_OWNER_ID: u64 = 662995601738170389;
+pub const CONCIERGE_PATE_LEITFADEN_NS: &str = "concierge:pate_leitfaden";
 pub const SPRACHKANAL_VERWALTEN_CHANNEL_ID: u64 = 1513468476365209670;
 pub const MITSPILER_SUCHE_CHANNEL_ID: u64 = 1522769149208821881;
 pub const COACHING_CHANNEL_ID: u64 = 1494373349944459355;
@@ -148,6 +151,13 @@ pub const PATE_REQUEST_ERROR_TEXT: &str = "Wir konnten deinen Privatsphäre-Stat
 pub const PATE_CLAIM_ERROR_TEXT: &str = "Die sichere Prüfung und Anlage ist technisch fehlgeschlagen, deshalb wurde hier nichts gestartet. Versuch es später nochmal, sonst gib uns über <#1459628609705738539> per Ticket Bescheid.";
 pub const PATE_REQUEST_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und der interne Hinweis konnte möglicherweise nicht vollständig zurückgenommen werden. Eine Patenschaft ist nicht zuverlässig gestartet; bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
 pub const PATE_CLAIM_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und bereits angelegte Discord-Schritte konnten möglicherweise nicht vollständig zurückgenommen werden. Bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
+pub const FRESHLING_T0_PATE_TEXT: &str = "Und weil du hier ganz neu bist: Ich kann dir direkt einen Paten an die Seite stellen. Das ist ein Mensch aus der Community, der dir alles zeigt und mit dir die ersten Runden dreht. Kein Programm, kein fester Termin, einfach jemand, der dir den Anfang leicht macht. Magst du?";
+pub const PATE_ESCALATION_2H_TEXT: &str =
+    "Seit zwei Stunden wartet diese Anfrage noch auf einen Paten.";
+pub const PATE_ESCALATION_2H_ALERT_TEXT: &str = "<@662995601738170389>, diese Patenanfrage wartet seit zwei Stunden. Magst du schauen, ob jemand Zeit hat?";
+pub const PATE_ESCALATION_24H_CARD_TEXT: &str = "Diese Anfrage haben wir nach 24 Stunden ohne Übernahme geschlossen. Für weitere Hilfe stehen die Community-Kanäle offen.";
+pub const PATE_UNBESETZT_DM_TEXT: &str = "Hey, ich will ehrlich zu dir sein: gerade hat sich noch kein Pate für dich frei gemacht. Das liegt nicht an dir, manchmal ist einfach viel los. Damit du trotzdem sofort weiterkommst, hier die drei Ecken, wo dir direkt geholfen wird. In <#1426220702054355077> stellst du deine Fragen an die ganze Community, in <#1522769149208821881> findest du Mitspieler für eine Runde, und wenn du besser werden willst, melden sich in <#1494373349944459355> unsere Coaches bei dir. Und wenn du magst, schreib mir einfach nochmal, ich bleib dran.";
+pub const PATE_REQUEST_CLOSED_TEXT: &str = "Diese Patenanfrage wurde nach 24 Stunden ohne Übernahme geschlossen. Der Bot hat versucht, die Person zu erreichen. Hier ist gerade nichts mehr zu tun.";
 
 pub const T7_TEXT: &str = "Hey, du bist jetzt eine Woche dabei. Eine Frage hab ich noch, dann bin ich auch still: War irgendwas verwirrend oder hat dich was abgeschreckt? Du kannst mir ehrlich schreiben, das landet direkt beim Team und macht den Server für die Nächsten besser.\n\nUnd wie immer gilt, wenn du mich brauchst, bin ich da.";
 pub const CONGRATS_MESSAGE_TEXT: &str =
@@ -273,6 +283,8 @@ pub struct ConciergeConfig {
     /// Aus per Default: der Concierge schickt nichts von selbst und antwortet nur,
     /// wenn ihn jemand direkt anschreibt.
     pub proactive: bool,
+    pub bot_user_id: Arc<OnceLock<u64>>,
+    pub frischling_lookup_retry: StdDuration,
 }
 
 impl ConciergeConfig {
@@ -311,6 +323,8 @@ impl ConciergeConfig {
             ),
             free_voice: env_bool(&lookup, "CONCIERGE_FREE_VOICE", true),
             proactive: env_bool(&lookup, "DL_CONCIERGE_PROACTIVE", false),
+            bot_user_id: Arc::new(OnceLock::new()),
+            frischling_lookup_retry: StdDuration::from_secs(2),
         }
     }
 
@@ -445,6 +459,7 @@ pub fn cadence_due(profile: &ConciergeProfile, now: DateTime<Utc>) -> Vec<Cadenc
     let null_activity = profile.first_message_at.is_none() && profile.first_voice_at.is_none();
     if profile.unsolicited_contact_count < 3
         && profile.t2_sent_at.is_none()
+        && !profile.pate_offered
         && null_activity
         && now >= t0 + Duration::days(2)
     {
@@ -1229,8 +1244,8 @@ pub fn presence_allows_post(
         .unwrap_or(false)
 }
 
-pub fn t0_body(has_rank: bool) -> Map<String, Value> {
-    let text = if has_rank {
+fn t0_text(has_rank: bool) -> String {
+    if has_rank {
         let mut text = T0_TEXT.to_string();
         if let Some((first, rest)) = text.split_once("\n\n") {
             text = format!("{first}\n\n{T0_RANK_LINE}\n\n{rest}");
@@ -1238,14 +1253,39 @@ pub fn t0_body(has_rank: bool) -> Map<String, Value> {
         text
     } else {
         T0_TEXT.to_string()
-    };
+    }
+}
+
+pub fn t0_body(has_rank: bool) -> Map<String, Value> {
     v2_body(
+        &t0_text(has_rank),
+        vec![
+            button(T0_BUTTON_TOUR, 1, "concierge:tour"),
+            button(T0_BUTTON_PLAY, 1, "concierge:play"),
+            button(T0_BUTTON_LATER, 2, "concierge:later"),
+        ],
+    )
+}
+
+pub fn t0_body_frischling(has_rank: bool) -> Map<String, Value> {
+    let text = format!("{}\n\n{FRESHLING_T0_PATE_TEXT}", t0_text(has_rank));
+    let body = v2_body(
         &text,
         vec![
             button(T0_BUTTON_TOUR, 1, "concierge:tour"),
             button(T0_BUTTON_PLAY, 1, "concierge:play"),
             button(T0_BUTTON_LATER, 2, "concierge:later"),
         ],
+    );
+    with_response_components(
+        body,
+        Some(&json!([{
+            "type": 1,
+            "components": [
+                button(T2_BUTTON_YES, 1, "concierge:pate:yes"),
+                button(T2_BUTTON_NO, 2, "concierge:pate:no"),
+            ]
+        }])),
     )
 }
 
@@ -1573,6 +1613,12 @@ pub trait ConciergePort: Send + Sync {
         channel_id: u64,
         body: Map<String, Value>,
     ) -> Result<u64, String>;
+    async fn find_channel_message_by_nonce(
+        &self,
+        channel_id: u64,
+        after_message_id: u64,
+        nonce: &str,
+    ) -> Result<Option<u64>, String>;
     async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String>;
     async fn delete_channel(&self, channel_id: u64) -> Result<(), String>;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
@@ -1584,6 +1630,19 @@ pub trait ConciergePort: Send + Sync {
         content: &str,
         allowed_role_id: Option<u64>,
     ) -> Result<u64, String>;
+    async fn edit_channel_v2(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String>;
+    async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
+    async fn pinned_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Option<bool>, String>;
+    async fn existing_pate_request_cards(&self) -> Result<Vec<LegacyPateRequestMessage>, String>;
 }
 
 #[derive(Clone)]
@@ -1789,6 +1848,28 @@ async fn set_pate_requested_tx(
     Ok(())
 }
 
+async fn set_pate_offered_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+    now: DateTime<Utc>,
+) -> CommunityDbResult<()> {
+    let updated = sqlx::query(
+        "UPDATE bot.concierge_profiles
+            SET pate_offered = TRUE,
+                updated_at = $2
+          WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(sqlx::Error::RowNotFound.into());
+    }
+    Ok(())
+}
+
 async fn mark_pate_request_uncertain_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
@@ -1811,6 +1892,189 @@ async fn mark_pate_request_uncertain_tx(
         return Err(sqlx::Error::RowNotFound.into());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatenInventar {
+    pub mit_rolle: i64,
+    pub offene_anfragen: i64,
+    pub aktive_patenschaften: i64,
+    pub leitfaden_gepostet: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyPateRequestMessage {
+    pub user_id: u64,
+    pub message_id: u64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PateEscalationStage {
+    TwoHours,
+    TwentyFourHours,
+}
+
+#[derive(Debug, Clone)]
+struct PateRequestRow {
+    id: i64,
+    status: String,
+    user_id: u64,
+    channel_id: u64,
+    message_id: u64,
+    created_at: DateTime<Utc>,
+    escalated_2h_at: Option<DateTime<Utc>>,
+    escalated_24h_at: Option<DateTime<Utc>>,
+    dm_pending: bool,
+    owner_alert_message_id: Option<u64>,
+}
+
+fn pate_request_row_from(row: &sqlx::postgres::PgRow) -> CommunityDbResult<PateRequestRow> {
+    Ok(PateRequestRow {
+        id: row.try_get("id")?,
+        status: row.try_get("status")?,
+        user_id: pg_i64_to_u64(row.try_get("user_id")?, "concierge_pate_requests.user_id")?,
+        channel_id: pg_i64_to_u64(
+            row.try_get("channel_id")?,
+            "concierge_pate_requests.channel_id",
+        )?,
+        message_id: pg_i64_to_u64(
+            row.try_get("message_id")?,
+            "concierge_pate_requests.message_id",
+        )?,
+        created_at: row.try_get("created_at")?,
+        escalated_2h_at: row.try_get("escalated_2h_at")?,
+        escalated_24h_at: row.try_get("escalated_24h_at")?,
+        dm_pending: row.try_get("dm_pending")?,
+        owner_alert_message_id: row
+            .try_get::<Option<i64>, _>("owner_alert_message_id")?
+            .map(|value| pg_i64_to_u64(value, "concierge_pate_requests.owner_alert_message_id"))
+            .transpose()?,
+    })
+}
+
+async fn insert_pate_request_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+    guild_id: i64,
+    channel_id: i64,
+    message_id: i64,
+    now: DateTime<Utc>,
+) -> CommunityDbResult<()> {
+    sqlx::query(
+        "INSERT INTO bot.concierge_pate_requests(user_id, guild_id, channel_id, message_id, status, created_at, updated_at)
+         VALUES($1, $2, $3, $4, 'open', $5, $5)",
+    )
+    .bind(user_id)
+    .bind(guild_id)
+    .bind(channel_id)
+    .bind(message_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn claim_open_pate_request_by_message_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+    message_id: Option<i64>,
+    pate_id: i64,
+    now: DateTime<Utc>,
+) -> CommunityDbResult<bool> {
+    let claimed = sqlx::query_scalar::<_, i64>(
+        "UPDATE bot.concierge_pate_requests
+            SET status = 'claimed', pate_id = $3, claimed_at = $4, updated_at = $4
+          WHERE message_id = $2 AND user_id = $1 AND status = 'open'
+          RETURNING id",
+    )
+    .bind(user_id)
+    .bind(message_id)
+    .bind(pate_id)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(claimed.is_some())
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PateLeitfadenFile {
+    #[serde(default)]
+    leitfaden: PateLeitfadenText,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PateLeitfadenText {
+    #[serde(default)]
+    titel: String,
+    #[serde(default)]
+    was_du_machst: String,
+    #[serde(default)]
+    was_nicht: String,
+    #[serde(default)]
+    so_uebernimmst: String,
+    #[serde(default)]
+    dein_limit: String,
+    #[serde(default)]
+    wenn_du_nicht_weiterkommst: String,
+    #[serde(default)]
+    ecken_titel: String,
+    #[serde(default)]
+    ecken: String,
+    #[serde(default)]
+    eskalation: String,
+    #[serde(default)]
+    datenschutz: String,
+}
+
+fn load_pate_leitfaden(repo_root: &std::path::Path) -> PateLeitfadenText {
+    let runtime_path = repo_root.join("assets/paten_leitfaden.toml");
+    let raw = match std::fs::read_to_string(&runtime_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(%err, path = %runtime_path.display(), "Concierge: Paten-Leitfaden-Datei nicht lesbar; eingebetteter Entwurf wird verwendet");
+            include_str!("../../../../assets/paten_leitfaden.toml").to_string()
+        }
+    };
+    match toml::from_str::<PateLeitfadenFile>(&raw) {
+        Ok(file) => file.leitfaden,
+        Err(err) => {
+            tracing::error!(%err, "Concierge: Paten-Leitfaden-Texte sind ungueltig; eingebetteter Entwurf wird verwendet");
+            toml::from_str::<PateLeitfadenFile>(include_str!(
+                "../../../../assets/paten_leitfaden.toml"
+            ))
+            .map(|file| file.leitfaden)
+            .unwrap_or_default()
+        }
+    }
+}
+
+fn render_pate_leitfaden_content(text: &PateLeitfadenText) -> String {
+    let mut parts = vec![format!("## {}", text.titel)];
+    parts.push(format!("**Was du machst**\n{}", text.was_du_machst));
+    parts.push(format!(
+        "**Was nicht deine Aufgabe ist**\n{}",
+        text.was_nicht
+    ));
+    parts.push(format!("**So übernimmst du**\n{}", text.so_uebernimmst));
+    parts.push(format!("**Dein Limit**\n{}", text.dein_limit));
+    parts.push(format!(
+        "**Wenn du nicht weiterkommst**\n{}",
+        text.wenn_du_nicht_weiterkommst
+    ));
+    parts.push(format!("**{}**\n{}", text.ecken_titel, text.ecken.trim()));
+    parts.push(format!("**Eskalation**\n{}", text.eskalation));
+    parts.push(format!("**Datenschutz**\n{}", text.datenschutz));
+    parts.join("\n\n")
+}
+
+fn leitfaden_fingerprint(content: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 async fn clear_pending_steckbrief_tx(
@@ -2145,6 +2409,76 @@ impl ConciergeStore {
         &self.pool
     }
 
+    async fn import_legacy_pate_request(
+        &self,
+        guild_id: u64,
+        request: LegacyPateRequestMessage,
+    ) -> CommunityDbResult<bool> {
+        let Some((user_id, mut tx)) = self.begin_privacy_action(request.user_id).await? else {
+            return Ok(false);
+        };
+        let guild_id = u64_to_i64(guild_id, "concierge_pate_requests.guild_id")?;
+        let channel_id = u64_to_i64(
+            PATE_REQUEST_CHANNEL_ID,
+            "concierge_pate_requests.channel_id",
+        )?;
+        let message_id = u64_to_i64(request.message_id, "concierge_pate_requests.message_id")?;
+        let inserted = sqlx::query(
+            "INSERT INTO bot.concierge_pate_requests(
+                user_id, guild_id, channel_id, message_id, status, created_at, updated_at
+             )
+             SELECT $1, $2, $3, $4, 'open', $5, $5
+              WHERE EXISTS (
+                    SELECT 1 FROM bot.concierge_profiles
+                     WHERE user_id = $1 AND pate_requested
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM bot.concierge_pate_requests WHERE message_id = $4
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM bot.concierge_patenschaften
+                     WHERE user_id = $1 AND released_at IS NULL
+                )
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(request.created_at)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(inserted == 1)
+    }
+
+    async fn has_legacy_pate_request(&self) -> CommunityDbResult<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM bot.concierge_profiles AS profile
+                 WHERE profile.pate_requested
+                   AND NOT EXISTS (
+                       SELECT 1 FROM core.user_privacy
+                        WHERE user_id = profile.user_id AND opted_out
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM bot.concierge_patenschaften
+                        WHERE user_id = profile.user_id AND released_at IS NULL
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM bot.concierge_pate_requests
+                        WHERE user_id = profile.user_id AND status = 'open'
+                   )
+            )",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     async fn begin_privacy_action(
         &self,
         user_id: u64,
@@ -2406,8 +2740,24 @@ impl ConciergeStore {
         }
         sqlx::query(
             "UPDATE bot.concierge_profiles
-                SET opted_out = TRUE, funnel_status = 'opted_out', updated_at = $2
+                SET opted_out = TRUE,
+                    funnel_status = 'opted_out',
+                    pate_requested = FALSE,
+                    pate_request_uncertain = FALSE,
+                    updated_at = $2
               WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET status = 'closed_opted_out',
+                    closed_at = $2,
+                    dm_pending = FALSE,
+                    updated_at = $2
+              WHERE user_id = $1 AND status IN ('open', 'closed_unbesetzt')",
         )
         .bind(user_id)
         .bind(now)
@@ -2423,6 +2773,10 @@ impl ConciergeStore {
         dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
         crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
         sqlx::query("DELETE FROM bot.concierge_patenschaften WHERE user_id = $1 OR pate_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM bot.concierge_pate_requests WHERE user_id = $1 OR pate_id = $1")
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
@@ -2596,6 +2950,210 @@ impl ConciergeStore {
         set_pate_requested_tx(&mut tx, user_id, guild_id, now).await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    async fn due_pate_escalations(
+        &self,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<Vec<PateRequestRow>> {
+        let two_hours = now - Duration::hours(2);
+        let twenty_four_hours = now - Duration::hours(24);
+        let rows = sqlx::query(
+            "SELECT id, status, user_id, channel_id, message_id, created_at,
+                    escalated_2h_at, escalated_24h_at, dm_pending, owner_alert_message_id
+               FROM bot.concierge_pate_requests
+              WHERE (status = 'open' AND (
+                     (escalated_2h_at IS NULL AND created_at <= $1)
+                  OR (escalated_24h_at IS NULL AND created_at <= $2)
+                )) OR (status = 'closed_unbesetzt' AND (escalated_24h_at IS NULL OR dm_pending))
+              ORDER BY created_at ASC",
+        )
+        .bind(two_hours)
+        .bind(twenty_four_hours)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(pate_request_row_from).collect()
+    }
+
+    async fn pate_request_by_id_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        user_id: i64,
+    ) -> CommunityDbResult<Option<PateRequestRow>> {
+        let row = sqlx::query(
+            "SELECT id, status, user_id, channel_id, message_id, created_at,
+                    escalated_2h_at, escalated_24h_at, dm_pending, owner_alert_message_id
+               FROM bot.concierge_pate_requests
+              WHERE id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        row.as_ref().map(pate_request_row_from).transpose()
+    }
+
+    async fn pate_request_has_newer_resolution(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        user_id: u64,
+    ) -> CommunityDbResult<bool> {
+        let user_id = u64_to_i64(user_id, "concierge_pate_requests.user_id")?;
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM bot.concierge_patenschaften
+                 WHERE user_id = $2 AND released_at IS NULL
+              ) OR EXISTS(
+                SELECT 1 FROM bot.concierge_pate_requests
+                 WHERE user_id = $2 AND id > $1 AND status IN ('open', 'claimed')
+              )",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn claim_pate_escalation_stage(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        stage: PateEscalationStage,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<bool> {
+        match stage {
+            PateEscalationStage::TwoHours => {
+                let claimed = sqlx::query_scalar::<_, i64>(
+                    "UPDATE bot.concierge_pate_requests
+                        SET escalated_2h_at = $2, updated_at = $2
+                      WHERE id = $1 AND status = 'open' AND escalated_2h_at IS NULL
+                      RETURNING id",
+                )
+                .bind(id)
+                .bind(now)
+                .fetch_optional(&mut **tx)
+                .await?;
+                Ok(claimed.is_some())
+            }
+            PateEscalationStage::TwentyFourHours => {
+                let claimed = sqlx::query_scalar::<_, i64>(
+                    "UPDATE bot.concierge_pate_requests
+                        SET status = 'closed_unbesetzt',
+                            closed_at = $2,
+                            dm_pending = TRUE,
+                            updated_at = $2
+                      WHERE id = $1 AND status = 'open' AND escalated_24h_at IS NULL
+                      RETURNING user_id",
+                )
+                .bind(id)
+                .bind(now)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if let Some(user_id) = claimed {
+                    sqlx::query(
+                        "UPDATE bot.concierge_profiles
+                            SET pate_requested = FALSE,
+                                pate_request_uncertain = FALSE,
+                                updated_at = $2
+                          WHERE user_id = $1",
+                    )
+                    .bind(user_id)
+                    .bind(now)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+                Ok(claimed.is_some())
+            }
+        }
+    }
+
+    async fn mark_pate_24h_card_completed(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET escalated_24h_at = $2, updated_at = $2
+              WHERE id = $1 AND status = 'closed_unbesetzt' AND escalated_24h_at IS NULL",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_pate_24h_dm_done(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET dm_pending = FALSE, updated_at = $2
+              WHERE id = $1 AND status = 'closed_unbesetzt' AND dm_pending",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_pate_owner_alert(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: i64,
+        message_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let message_id = u64_to_i64(message_id, "concierge_pate_requests.owner_alert_message_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET owner_alert_message_id = $2, updated_at = $3
+              WHERE id = $1 AND status = 'open' AND owner_alert_message_id IS NULL",
+        )
+        .bind(id)
+        .bind(message_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn open_pate_request_count(&self) -> CommunityDbResult<i64> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE status = 'open'",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn active_patenschaft_count_total(&self) -> CommunityDbResult<i64> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_patenschaften WHERE released_at IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn is_active_patenschaft_channel(&self, channel_id: u64) -> CommunityDbResult<bool> {
+        let channel_id = u64_to_i64(channel_id, "concierge_patenschaften.channel_id")?;
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM bot.concierge_patenschaften
+                  WHERE channel_id = $1 AND released_at IS NULL
+             )",
+        )
+        .bind(channel_id)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     pub async fn active_patenschaft_count(&self, pate_id: u64) -> CommunityDbResult<i64> {
@@ -2829,6 +3387,17 @@ pub struct Concierge {
     user_actions: Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
     steckbrief_revocations: Mutex<HashSet<u64>>,
     start: Instant,
+}
+
+fn extract_bot_mention_question(content: &str, bot_user_id: Option<u64>) -> Option<String> {
+    let bot_id = bot_user_id?;
+    let mention = format!("<@{bot_id}>");
+    let mention_nick = format!("<@!{bot_id}>");
+    if !content.contains(&mention) && !content.contains(&mention_nick) {
+        return None;
+    }
+    let stripped = content.replace(&mention, "").replace(&mention_nick, "");
+    Some(stripped.trim().to_string())
 }
 
 impl Concierge {
@@ -3417,6 +3986,12 @@ impl Concierge {
                 false
             }
         };
+        let is_frischling = self.user_is_frischling(guild_id, user_id).await;
+        let t0 = if is_frischling {
+            t0_body_frischling(has_rank)
+        } else {
+            t0_body(has_rank)
+        };
         let (db_user_id, mut tx) = match self.store.begin_privacy_action(user_id).await {
             Ok(Some(action)) => action,
             Ok(None) => return,
@@ -3452,7 +4027,7 @@ impl Concierge {
         }
         let outcome = match tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
-            self.port.send_dm_v2(user_id, t0_body(has_rank)),
+            self.port.send_dm_v2(user_id, t0.clone()),
         )
         .await
         {
@@ -3464,8 +4039,15 @@ impl Concierge {
                 message_id,
             }),
             Ok(ConciergeDmDelivery::CannotSend50007) => {
-                self.send_t0_fallback_channel(&mut tx, guild_id, user_id, db_user_id, has_rank, now)
-                    .await
+                self.send_t0_fallback_channel(
+                    &mut tx,
+                    guild_id,
+                    user_id,
+                    db_user_id,
+                    t0.clone(),
+                    now,
+                )
+                .await
             }
             Ok(ConciergeDmDelivery::Failed(err)) => {
                 tracing::warn!(%err, user_id, "Concierge: T0-DM-Zustellung unsicher; Wiederholung wird gesperrt");
@@ -3531,6 +4113,14 @@ impl Concierge {
             self.discard_discord_effect(effect, user_id, "T0").await;
             return;
         }
+        if is_frischling {
+            if let Err(err) = set_pate_offered_tx(&mut tx, db_user_id, now).await {
+                tracing::warn!(%err, user_id, "Concierge: Paten-Angebot in T0 konnte nicht gespeichert werden");
+                drop(tx);
+                self.discard_discord_effect(effect, user_id, "T0").await;
+                return;
+            }
+        }
         if let Err(err) = tx.commit().await {
             tracing::warn!(%err, user_id, "Concierge: T0-Transaktion konnte nicht abgeschlossen werden");
             if self.persist_t0_uncertain(user_id, guild_id, now).await {
@@ -3543,6 +4133,36 @@ impl Concierge {
         }
         self.after_unsolicited_sent(user_id, guild_id, ContactKind::T0, now)
             .await;
+        if is_frischling {
+            self.record_journey(
+                user_id,
+                guild_id,
+                dl_activity::journey::JourneyEventType::PateOffered,
+                now,
+                json!({}),
+            )
+            .await;
+        }
+    }
+
+    async fn user_is_frischling(&self, guild_id: u64, user_id: u64) -> bool {
+        const MAX_ATTEMPTS: usize = 5;
+        for attempt in 0..MAX_ATTEMPTS {
+            match self.port.role_member_ids(guild_id, FRESHLING_ROLE_ID).await {
+                Ok(members) => {
+                    if members.contains(&user_id) {
+                        return true;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "Concierge: Frischling-Rollen-Lookup fehlgeschlagen");
+                }
+            }
+            if attempt + 1 < MAX_ATTEMPTS {
+                tokio::time::sleep(self.config.frischling_lookup_retry).await;
+            }
+        }
+        false
     }
 
     async fn send_t0_fallback_channel(
@@ -3551,7 +4171,7 @@ impl Concierge {
         guild_id: u64,
         user_id: u64,
         db_user_id: i64,
-        has_rank: bool,
+        t0: Map<String, Value>,
         now: DateTime<Utc>,
     ) -> DiscordEffectOutcome {
         let key = format!("{guild_id}:{user_id}");
@@ -3605,7 +4225,7 @@ impl Concierge {
         }
         match tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
-            self.port.send_channel_v2(channel_id, t0_body(has_rank)),
+            self.port.send_channel_v2(channel_id, t0),
         )
         .await
         {
@@ -3880,15 +4500,40 @@ impl Concierge {
         let is_direct_dm = guild_id.is_none();
         let is_public_support = guild_id == Some(self.config.main_guild_id)
             && channel_id == SERVER_BOT_FRAGEN_CHANNEL_ID;
+        let control_text = content.trim();
+        let now = Utc::now();
+        if guild_id == Some(self.config.main_guild_id) && !is_public_support {
+            if let Some(question) = self.bot_mention_question(control_text) {
+                if self.is_pate_knowledge_channel(channel_id).await {
+                    let (_, trimmed) = parse_brain_command(&question);
+                    if trimmed.is_empty() {
+                        return false;
+                    }
+                    let _ = self
+                        .answer_dm_question_inner(
+                            channel_id,
+                            self.config.main_guild_id,
+                            user_id,
+                            trimmed,
+                            now,
+                            AnswerOptions {
+                                allow_personal_actions: false,
+                                route: AnswerRoute::Concierge,
+                                response_components: None,
+                            },
+                        )
+                        .await;
+                    return true;
+                }
+            }
+        }
         let Some(effective_guild_id) = self.effective_guild_id(channel_id, guild_id, user_id).await
         else {
             return false;
         };
-        let control_text = content.trim();
         if control_text.is_empty() {
             return true;
         }
-        let now = Utc::now();
         if is_direct_dm
             && self
                 .handle_dm_control(
@@ -4381,6 +5026,19 @@ impl Concierge {
         Some(self.config.main_guild_id)
     }
 
+    async fn is_pate_knowledge_channel(&self, channel_id: u64) -> bool {
+        channel_id == PATE_REQUEST_CHANNEL_ID
+            || self
+                .store
+                .is_active_patenschaft_channel(channel_id)
+                .await
+                .unwrap_or(false)
+    }
+
+    fn bot_mention_question(&self, content: &str) -> Option<String> {
+        extract_bot_mention_question(content, self.config.bot_user_id.get().copied())
+    }
+
     async fn personal_control_allowed(&self, interaction: &BridgeInteraction) -> bool {
         if interaction.guild_id == 0 {
             return true;
@@ -4869,9 +5527,509 @@ impl Concierge {
                 }
             }
         }
+        self.run_pate_escalations(now).await;
         self.flush_pending_steckbriefe(now).await;
         if let Err(err) = self.store.reap_retention(now).await {
             tracing::warn!(%err, "Concierge: Retention-Reaper fehlgeschlagen");
+        }
+    }
+
+    async fn run_pate_escalations(&self, now: DateTime<Utc>) {
+        let due = match self.store.due_pate_escalations(now).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Faellige Paten-Eskalationen konnten nicht geladen werden");
+                return;
+            }
+        };
+        for due_row in due {
+            let action = self.user_action_lock(due_row.user_id);
+            let _guard = action.lock().await;
+            let privacy_action = match self.store.begin_privacy_action(due_row.user_id).await {
+                Ok(action) => action,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = due_row.id, "Concierge: Privacy-Status vor Paten-Eskalation nicht prüfbar");
+                    continue;
+                }
+            };
+            let Some((db_user_id, mut privacy_tx)) = privacy_action else {
+                continue;
+            };
+            let row = match self
+                .store
+                .pate_request_by_id_tx(&mut privacy_tx, due_row.id, db_user_id)
+                .await
+            {
+                Ok(Some(row)) if row.status == "open" || row.status == "closed_unbesetzt" => row,
+                Ok(_) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = due_row.id, "Concierge: Patenanfrage vor Eskalation nicht prüfbar");
+                    continue;
+                }
+            };
+            let profile_state = match sqlx::query_as::<_, (bool, bool)>(
+                "SELECT opted_out, pate_requested
+                   FROM bot.concierge_profiles
+                  WHERE user_id = $1",
+            )
+            .bind(db_user_id)
+            .fetch_optional(&mut *privacy_tx)
+            .await
+            {
+                Ok(Some(state)) => state,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = due_row.id, "Concierge: Patenprofil vor Eskalation nicht prüfbar");
+                    continue;
+                }
+            };
+            if profile_state.0 || (row.status == "open" && !profile_state.1) {
+                continue;
+            }
+            let age = now - row.created_at;
+            if row.status == "closed_unbesetzt" {
+                if row.dm_pending {
+                    match self
+                        .store
+                        .pate_request_has_newer_resolution(&mut privacy_tx, row.id, row.user_id)
+                        .await
+                    {
+                        Ok(true) => self.mark_closed_pate_dm(&mut privacy_tx, &row, now).await,
+                        Ok(false) => {
+                            if self.escalate_pate_unbesetzt(&row).await {
+                                self.mark_closed_pate_dm(&mut privacy_tx, &row, now).await;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, request_id = row.id, "Concierge: neuer Patenstatus vor DM nicht prüfbar");
+                        }
+                    }
+                }
+                if row.escalated_24h_at.is_none() && self.update_closed_pate_card(&row).await {
+                    self.mark_closed_pate_card(&mut privacy_tx, &row, now).await;
+                }
+            } else if row.escalated_24h_at.is_none() && age >= Duration::hours(24) {
+                match self
+                    .store
+                    .claim_pate_escalation_stage(
+                        &mut privacy_tx,
+                        row.id,
+                        PateEscalationStage::TwentyFourHours,
+                        now,
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        if self.escalate_pate_unbesetzt(&row).await {
+                            self.mark_closed_pate_dm(&mut privacy_tx, &row, now).await;
+                        }
+                        if self.update_closed_pate_card(&row).await {
+                            self.mark_closed_pate_card(&mut privacy_tx, &row, now).await;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Eskalationsstufe konnte nicht reserviert werden");
+                    }
+                }
+            } else if row.escalated_2h_at.is_none() && age >= Duration::hours(2) {
+                if !self.escalate_pate_owner_ping(&mut privacy_tx, &row).await {
+                    continue;
+                }
+                if let Err(err) = self
+                    .store
+                    .claim_pate_escalation_stage(
+                        &mut privacy_tx,
+                        row.id,
+                        PateEscalationStage::TwoHours,
+                        now,
+                    )
+                    .await
+                {
+                    tracing::warn!(%err, request_id = row.id, "Concierge: 2h-Eskalationsstufe konnte nicht bestätigt werden");
+                }
+            }
+            if let Err(err) = privacy_tx.commit().await {
+                tracing::warn!(%err, request_id = due_row.id, "Concierge: Privacy-Sperre nach Paten-Eskalation konnte nicht abgeschlossen werden");
+            }
+        }
+    }
+
+    async fn mark_closed_pate_card(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &PateRequestRow,
+        now: DateTime<Utc>,
+    ) {
+        if let Err(err) = self
+            .store
+            .mark_pate_24h_card_completed(tx, row.id, now)
+            .await
+        {
+            tracing::warn!(%err, request_id = row.id, "Concierge: 24h-Kartenupdate konnte nicht bestätigt werden");
+        }
+    }
+
+    async fn mark_closed_pate_dm(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &PateRequestRow,
+        now: DateTime<Utc>,
+    ) {
+        if let Err(err) = self.store.mark_pate_24h_dm_done(tx, row.id, now).await {
+            tracing::warn!(%err, request_id = row.id, "Concierge: 24h-DM konnte nicht bestätigt werden");
+        }
+    }
+
+    async fn escalate_pate_owner_ping(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &PateRequestRow,
+    ) -> bool {
+        let body = v2_body(
+            PATE_ESCALATION_2H_TEXT,
+            vec![button(
+                PATE_CLAIM_BUTTON_LABEL,
+                1,
+                &format!("concierge:pate:claim:{}", row.user_id),
+            )],
+        );
+        if let Err(err) = tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port
+                .edit_channel_v2(row.channel_id, row.message_id, body),
+        )
+        .await
+        .unwrap_or_else(|_| Err("Zeitlimit ueberschritten".to_string()))
+        {
+            tracing::warn!(%err, user_id = row.user_id, stufe = "2h", request_id = row.id, "Concierge: 2h-Kartenupdate fehlgeschlagen");
+            return false;
+        }
+        if row.owner_alert_message_id.is_none() {
+            let nonce = format!("pate2h-{}", row.id);
+            let existing = match tokio::time::timeout(
+                CONCIERGE_DISCORD_IO_TIMEOUT,
+                self.port
+                    .find_channel_message_by_nonce(row.channel_id, row.message_id, &nonce),
+            )
+            .await
+            .unwrap_or_else(|_| Err("Zeitlimit überschritten".to_string()))
+            {
+                Ok(existing) => existing,
+                Err(err) => {
+                    tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis konnte nicht abgeglichen werden");
+                    return false;
+                }
+            };
+            let mut alert = v2_body(PATE_ESCALATION_2H_ALERT_TEXT, Vec::new());
+            alert.insert(
+                "allowed_mentions".into(),
+                json!({ "parse": [], "users": [CONCIERGE_OWNER_ID.to_string()], "replied_user": false }),
+            );
+            alert.insert(
+                "message_reference".into(),
+                json!({ "channel_id": row.channel_id.to_string(), "message_id": row.message_id.to_string(), "fail_if_not_exists": true }),
+            );
+            alert.insert("nonce".into(), json!(nonce));
+            alert.insert("enforce_nonce".into(), json!(true));
+            let message_id = if let Some(message_id) = existing {
+                message_id
+            } else {
+                match tokio::time::timeout(
+                    CONCIERGE_DISCORD_IO_TIMEOUT,
+                    self.port.send_channel_v2(row.channel_id, alert),
+                )
+                .await
+                .unwrap_or_else(|_| Err("Zeitlimit überschritten".to_string()))
+                {
+                    Ok(message_id) => message_id,
+                    Err(err) => {
+                        tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis fehlgeschlagen oder unsicher");
+                        return false;
+                    }
+                }
+            };
+            if let Err(err) = self
+                .store
+                .record_pate_owner_alert(tx, row.id, message_id, Utc::now())
+                .await
+            {
+                tracing::warn!(%err, request_id = row.id, "Concierge: Owner-Hinweis konnte nicht gespeichert werden");
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn escalate_pate_unbesetzt(&self, row: &PateRequestRow) -> bool {
+        let mut body = v2_body(PATE_UNBESETZT_DM_TEXT, Vec::new());
+        body.insert("nonce".into(), json!(format!("pate24h-{}", row.id)));
+        body.insert("enforce_nonce".into(), json!(true));
+        match tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port.send_dm_v2(row.user_id, body),
+        )
+        .await
+        {
+            Ok(ConciergeDmDelivery::Sent { .. }) => {}
+            Ok(ConciergeDmDelivery::CannotSend50007) => {
+                tracing::warn!(
+                    user_id = row.user_id,
+                    stufe = "24h",
+                    request_id = row.id,
+                    "Concierge: 24h-DM nicht zustellbar, DMs sind gesperrt"
+                );
+            }
+            Ok(ConciergeDmDelivery::Failed(err)) => {
+                tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-DM fehlgeschlagen");
+                return false;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    user_id = row.user_id,
+                    stufe = "24h",
+                    request_id = row.id,
+                    "Concierge: 24h-DM hat Zeitlimit ueberschritten"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn update_closed_pate_card(&self, row: &PateRequestRow) -> bool {
+        let closed_card = v2_body(PATE_ESCALATION_24H_CARD_TEXT, Vec::new());
+        if let Err(err) = tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port
+                .edit_channel_v2(row.channel_id, row.message_id, closed_card),
+        )
+        .await
+        .unwrap_or_else(|_| Err("Zeitlimit ueberschritten".to_string()))
+        {
+            tracing::warn!(%err, user_id = row.user_id, stufe = "24h", request_id = row.id, "Concierge: 24h-Kartenmarkierung fehlgeschlagen");
+            return false;
+        }
+        true
+    }
+
+    pub async fn import_legacy_pate_requests(&self) -> Result<(), String> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        match self.store.has_legacy_pate_request().await {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(err) => {
+                return Err(format!(
+                    "Alte Patenanfragen konnten nicht geprüft werden: {err}"
+                ));
+            }
+        }
+        let requests = match self.port.existing_pate_request_cards().await {
+            Ok(requests) => requests,
+            Err(err) => {
+                return Err(format!(
+                    "Alte Patenanfragen konnten nicht aus Discord gelesen werden: {err}"
+                ));
+            }
+        };
+        let mut imported = 0;
+        for request in requests {
+            match self
+                .store
+                .import_legacy_pate_request(self.config.main_guild_id, request)
+                .await
+            {
+                Ok(true) => imported += 1,
+                Ok(false) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "Alte Patenanfrage {} konnte nicht gespeichert werden: {err}",
+                        request.message_id
+                    ));
+                }
+            }
+        }
+        if imported > 0 {
+            tracing::info!(imported, "Concierge: Alte Patenanfragen übernommen");
+        }
+        Ok(())
+    }
+
+    pub async fn ensure_pate_leitfaden(&self, repo_root: &std::path::Path) {
+        if !self.config.enabled {
+            return;
+        }
+        let text = load_pate_leitfaden(repo_root);
+        let content = render_pate_leitfaden_content(&text);
+        let fingerprint = leitfaden_fingerprint(&content);
+        let body = v2_body(&content, Vec::new());
+        let pool = self.store.pool();
+        let stored_message_id =
+            dl_central_db::kv::get(pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|raw| raw.parse::<u64>().ok());
+        let stored_fingerprint =
+            dl_central_db::kv::get(pool, CONCIERGE_PATE_LEITFADEN_NS, "fingerprint")
+                .await
+                .ok()
+                .flatten();
+        let message_id = match stored_message_id {
+            Some(message_id) => {
+                let current = match self
+                    .port
+                    .pinned_message(PATE_REQUEST_CHANNEL_ID, message_id)
+                    .await
+                {
+                    Ok(current) => current,
+                    Err(err) => {
+                        tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht geprüft werden");
+                        return;
+                    }
+                };
+                match current {
+                    Some(true) if stored_fingerprint.as_deref() == Some(fingerprint.as_str()) => {
+                        return;
+                    }
+                    Some(_) => {
+                        if stored_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                            if let Err(err) = self
+                                .port
+                                .edit_channel_v2(PATE_REQUEST_CHANNEL_ID, message_id, body)
+                                .await
+                            {
+                                tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht aktualisiert werden");
+                                return;
+                            }
+                        }
+                        message_id
+                    }
+                    None => {
+                        let message_id = match self
+                            .port
+                            .send_channel_v2(PATE_REQUEST_CHANNEL_ID, body)
+                            .await
+                        {
+                            Ok(message_id) => message_id,
+                            Err(err) => {
+                                tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht neu gepostet werden");
+                                return;
+                            }
+                        };
+                        if let Err(err) = dl_central_db::kv::set(
+                            pool,
+                            CONCIERGE_PATE_LEITFADEN_NS,
+                            "message_id",
+                            &message_id.to_string(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(%err, "Concierge: Neue Leitfaden-Nachrichten-ID konnte nicht gespeichert werden");
+                            return;
+                        }
+                        message_id
+                    }
+                }
+            }
+            None => {
+                let message_id = match self
+                    .port
+                    .send_channel_v2(PATE_REQUEST_CHANNEL_ID, body)
+                    .await
+                {
+                    Ok(message_id) => message_id,
+                    Err(err) => {
+                        tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht gepostet werden");
+                        return;
+                    }
+                };
+                if let Err(err) = dl_central_db::kv::set(
+                    pool,
+                    CONCIERGE_PATE_LEITFADEN_NS,
+                    "message_id",
+                    &message_id.to_string(),
+                )
+                .await
+                {
+                    tracing::warn!(%err, "Concierge: Leitfaden-Nachrichten-ID konnte nicht gespeichert werden");
+                    return;
+                }
+                message_id
+            }
+        };
+        if let Err(err) = self
+            .port
+            .pin_message(PATE_REQUEST_CHANNEL_ID, message_id)
+            .await
+        {
+            tracing::warn!(%err, "Concierge: Paten-Leitfaden konnte nicht angepinnt werden");
+            return;
+        }
+        if let Err(err) = dl_central_db::kv::set(
+            pool,
+            CONCIERGE_PATE_LEITFADEN_NS,
+            "fingerprint",
+            &fingerprint,
+        )
+        .await
+        {
+            tracing::warn!(%err, "Concierge: Leitfaden-Fingerprint konnte nicht gespeichert werden");
+        }
+    }
+
+    pub async fn paten_inventar(&self, guild_id: u64) -> PatenInventar {
+        let mit_rolle = match self.port.role_member_ids(guild_id, PATE_ROLE_ID).await {
+            Ok(members) => members.len() as i64,
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Paten-Rollenzahl konnte nicht ermittelt werden");
+                -1
+            }
+        };
+        let offene_anfragen = self.store.open_pate_request_count().await.unwrap_or(-1);
+        let aktive_patenschaften = self
+            .store
+            .active_patenschaft_count_total()
+            .await
+            .unwrap_or(-1);
+        let leitfaden_gepostet = match dl_central_db::kv::get(
+            self.store.pool(),
+            CONCIERGE_PATE_LEITFADEN_NS,
+            "message_id",
+        )
+        .await
+        {
+            Ok(Some(raw)) => match raw.parse::<u64>() {
+                Ok(message_id) => match self
+                    .port
+                    .pinned_message(PATE_REQUEST_CHANNEL_ID, message_id)
+                    .await
+                {
+                    Ok(Some(pinned)) => pinned,
+                    Ok(None) => false,
+                    Err(err) => {
+                        tracing::warn!(%err, "Concierge: Leitfadenstatus konnte nicht geprüft werden");
+                        false
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(%err, "Concierge: Leitfaden-Nachrichten-ID ist ungültig");
+                    false
+                }
+            },
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Leitfadenstatus konnte nicht geladen werden");
+                false
+            }
+        };
+        PatenInventar {
+            mit_rolle,
+            offene_anfragen,
+            aktive_patenschaften,
+            leitfaden_gepostet,
         }
     }
 
@@ -5547,6 +6705,52 @@ impl Concierge {
                 return text_reply(PATE_REQUEST_UNCERTAIN_TEXT);
             }
         };
+        let db_channel_id = match u64_to_i64(target, "concierge_pate_requests.channel_id") {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(%err, user_id, target, "Concierge: Patenpost-Kanal-ID ungueltig");
+                if !self
+                    .finish_pate_request_uncertain(tx, db_user_id, user_id, guild_id, now)
+                    .await
+                {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer unsicheren Patenwunsch konnte nicht gespeichert werden");
+                }
+                return text_reply(PATE_REQUEST_UNCERTAIN_TEXT);
+            }
+        };
+        let db_message_id = match u64_to_i64(post_message_id, "concierge_pate_requests.message_id")
+        {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(%err, user_id, post_message_id, "Concierge: Patenpost-Nachrichten-ID ungueltig");
+                if !self
+                    .finish_pate_request_uncertain(tx, db_user_id, user_id, guild_id, now)
+                    .await
+                {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer unsicheren Patenwunsch konnte nicht gespeichert werden");
+                }
+                return text_reply(PATE_REQUEST_UNCERTAIN_TEXT);
+            }
+        };
+        if let Err(err) = insert_pate_request_tx(
+            &mut tx,
+            db_user_id,
+            db_guild_id,
+            db_channel_id,
+            db_message_id,
+            now,
+        )
+        .await
+        {
+            tracing::warn!(%err, user_id, "Concierge: Paten-Anfrage konnte nicht persistiert werden");
+            if !self
+                .finish_pate_request_uncertain(tx, db_user_id, user_id, guild_id, now)
+                .await
+            {
+                tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer unsicheren Patenwunsch konnte nicht gespeichert werden");
+            }
+            return text_reply(PATE_REQUEST_UNCERTAIN_TEXT);
+        }
         if let Err(err) = tx.commit().await {
             tracing::warn!(%err, user_id, "Concierge: Patenwunsch-Transaktion konnte nicht abgeschlossen werden");
             let resolution = match reconcile_pate_request_commit(self.store.pool(), db_user_id)
@@ -5729,8 +6933,13 @@ impl Concierge {
         let Ok(user_id) = raw_user_id.parse::<u64>() else {
             return BridgeReply::default();
         };
+        let action = self.user_action_lock(user_id);
+        let _guard = action.lock().await;
         let pate_id = interaction.user_id;
         let guild_id = interaction.guild_id;
+        let request_message_id = interaction
+            .message_id
+            .and_then(|value| u64_to_i64(value, "concierge_pate_requests.message_id").ok());
         let digest = self
             .store
             .profile(user_id)
@@ -5840,6 +7049,26 @@ impl Concierge {
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Claim fehlgeschlagen");
+                return BridgeReply::ephemeral_text(PATE_CLAIM_ERROR_TEXT);
+            }
+        }
+        match claim_open_pate_request_by_message_tx(
+            &mut tx,
+            db_user_id,
+            request_message_id,
+            db_pate_id,
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                drop(tx);
+                return BridgeReply::ephemeral_text(PATE_REQUEST_CLOSED_TEXT);
+            }
+            Err(err) => {
+                tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Anfrage konnte nicht atomar uebernommen werden");
+                drop(tx);
                 return BridgeReply::ephemeral_text(PATE_CLAIM_ERROR_TEXT);
             }
         }
@@ -6830,6 +8059,9 @@ impl InteractionHandler for ConciergeHandler {
         {
             return BridgeReply::default();
         }
+        if interaction.custom_id.starts_with("concierge:pate:claim:") {
+            return self.concierge.claim_pate(interaction).await;
+        }
         let action = self.concierge.user_action_lock(interaction.user_id);
         let _guard = action.lock().await;
         let now = Utc::now();
@@ -7090,9 +8322,6 @@ impl InteractionHandler for ConciergeHandler {
                     .await
             }
             "concierge:pate:no" => text_reply(PATE_NO_TEXT),
-            id if id.starts_with("concierge:pate:claim:") => {
-                self.concierge.claim_pate(interaction).await
-            }
             _ => BridgeReply::default(),
         }
     }
@@ -7220,6 +8449,62 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn bot_mention_nimmt_ready_id_nach_vorher_fehlender_startidentitaet_an() {
+        let bot_user_id = Arc::new(OnceLock::new());
+        let question = "<@123456789012345678> Wie finde ich einen Paten?";
+
+        assert_eq!(
+            extract_bot_mention_question(question, bot_user_id.get().copied()),
+            None
+        );
+        bot_user_id
+            .set(123456789012345678)
+            .expect("READY setzt Bot-ID");
+        assert_eq!(
+            extract_bot_mention_question(question, bot_user_id.get().copied()).as_deref(),
+            Some("Wie finde ich einen Paten?")
+        );
+        assert_eq!(
+            extract_bot_mention_question(
+                "<@!123456789012345678> Hallo",
+                bot_user_id.get().copied()
+            )
+            .as_deref(),
+            Some("Hallo")
+        );
+        assert_eq!(
+            extract_bot_mention_question("<@987654321> Hallo", bot_user_id.get().copied()),
+            None
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn legacy_patenimport_gibt_discord_fehler_an_startpfad_weiter() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config.clone());
+        concierge
+            .store
+            .set_pate_requested(770051, config.main_guild_id, Utc::now())
+            .await
+            .expect("pate requested");
+        *port.existing_pate_request_cards_error.lock().unwrap() =
+            Some("Discord-Verlauf nicht erreichbar".to_string());
+
+        let error = concierge
+            .import_legacy_pate_requests()
+            .await
+            .expect_err("Importfehler muss den Bot-Start verhindern");
+        assert!(error.contains("Discord-Verlauf nicht erreichbar"));
+    }
+
     #[test]
     fn wissensantwort_utf16_budget_passt_in_v2_und_fallback() {
         let text = "🧠".repeat(900);
@@ -7275,11 +8560,13 @@ mod tests {
             .map(u64::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        ConciergeConfig::from_env(|key| match key {
+        let mut config = ConciergeConfig::from_env(|key| match key {
             "DL_CONCIERGE_ENABLED" => Some(if enabled { "1" } else { "0" }.to_string()),
             "DL_CONCIERGE_TEST_USER_ALLOWLIST" => Some(allowlist.clone()),
             _ => None,
-        })
+        });
+        config.frischling_lookup_retry = StdDuration::from_millis(1);
+        config
     }
 
     #[test]
@@ -7450,6 +8737,8 @@ mod tests {
             spawn_without_message_loop;
     }
 
+    const PATE_CLAIM_TEST_MESSAGE_ID: u64 = 900;
+
     fn valid_pate_claim_interaction(user_id: u64, pate_id: u64) -> BridgeInteraction {
         BridgeInteraction {
             custom_id: format!("concierge:pate:claim:{user_id}"),
@@ -7457,6 +8746,7 @@ mod tests {
             channel_id: PATE_REQUEST_CHANNEL_ID,
             user_id: pate_id,
             role_ids: vec![PATE_ROLE_ID],
+            message_id: Some(PATE_CLAIM_TEST_MESSAGE_ID),
             ..BridgeInteraction::default()
         }
     }
@@ -7522,10 +8812,23 @@ mod tests {
         );
     }
 
+    type CapturedDm = (u64, Map<String, Value>);
+    type CapturedEdit = (u64, u64, Map<String, Value>);
+
     #[derive(Default)]
     struct MockConciergePort {
         dm_attempts: std::sync::Mutex<Vec<u64>>,
         sent_dm_v2: std::sync::Mutex<Vec<u64>>,
+        sent_dm_v2_bodies: std::sync::Mutex<Vec<CapturedDm>>,
+        edited_channels: std::sync::Mutex<Vec<CapturedEdit>>,
+        pinned_messages: std::sync::Mutex<Vec<(u64, u64)>>,
+        missing_messages: std::sync::Mutex<HashSet<(u64, u64)>>,
+        pin_attempts: std::sync::atomic::AtomicUsize,
+        pin_failures_remaining: std::sync::atomic::AtomicUsize,
+        frischling_members: std::sync::Mutex<Vec<u64>>,
+        pate_role_members: std::sync::Mutex<Vec<u64>>,
+        frischling_visible_after: std::sync::atomic::AtomicUsize,
+        frischling_lookup_calls: std::sync::atomic::AtomicUsize,
         dm_cannot_send: std::sync::Mutex<bool>,
         dm_fails: std::sync::Mutex<bool>,
         channel_send_fails: std::sync::Mutex<bool>,
@@ -7533,6 +8836,8 @@ mod tests {
         created_private_channels: std::sync::Mutex<Vec<(u64, u64, Option<u64>)>>,
         sent_channel_ids: std::sync::Mutex<Vec<u64>>,
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
+        existing_pate_request_cards: std::sync::Mutex<Vec<LegacyPateRequestMessage>>,
+        existing_pate_request_cards_error: std::sync::Mutex<Option<String>>,
         sent_channel_text: std::sync::Mutex<Vec<(u64, String)>>,
         replied_messages: std::sync::Mutex<Vec<(u64, u64)>>,
         reply_hangs: std::sync::Mutex<bool>,
@@ -7562,8 +8867,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ConciergePort for MockConciergePort {
-        async fn send_dm_v2(&self, user_id: u64, _body: Map<String, Value>) -> ConciergeDmDelivery {
+        async fn send_dm_v2(&self, user_id: u64, body: Map<String, Value>) -> ConciergeDmDelivery {
             self.dm_attempts.lock().unwrap().push(user_id);
+            self.sent_dm_v2_bodies.lock().unwrap().push((user_id, body));
             self.wait_at_port_gate().await;
             if *self.dm_cannot_send.lock().unwrap() {
                 return ConciergeDmDelivery::CannotSend50007;
@@ -7594,7 +8900,17 @@ mod tests {
             Ok(1)
         }
 
-        async fn role_member_ids(&self, _guild_id: u64, _role_id: u64) -> Result<Vec<u64>, String> {
+        async fn role_member_ids(&self, _guild_id: u64, role_id: u64) -> Result<Vec<u64>, String> {
+            if role_id == FRESHLING_ROLE_ID {
+                let calls = self.frischling_lookup_calls.fetch_add(1, Ordering::SeqCst);
+                if calls < self.frischling_visible_after.load(Ordering::SeqCst) {
+                    return Ok(Vec::new());
+                }
+                return Ok(self.frischling_members.lock().unwrap().clone());
+            }
+            if role_id == PATE_ROLE_ID {
+                return Ok(self.pate_role_members.lock().unwrap().clone());
+            }
             Ok(Vec::new())
         }
 
@@ -7635,6 +8951,21 @@ mod tests {
             let mut sent = self.sent_channel_v2.lock().unwrap();
             sent.push(body);
             Ok(sent.len() as u64)
+        }
+
+        async fn find_channel_message_by_nonce(
+            &self,
+            _channel_id: u64,
+            _after_message_id: u64,
+            nonce: &str,
+        ) -> Result<Option<u64>, String> {
+            Ok(self
+                .sent_channel_v2
+                .lock()
+                .unwrap()
+                .iter()
+                .position(|body| body.get("nonce").and_then(Value::as_str) == Some(nonce))
+                .map(|position| position as u64 + 1))
         }
 
         async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
@@ -7685,6 +9016,75 @@ mod tests {
                 .unwrap()
                 .push((channel_id, message_id));
             Ok(MOCK_REPLY_MESSAGE_ID)
+        }
+
+        async fn edit_channel_v2(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            body: Map<String, Value>,
+        ) -> Result<(), String> {
+            if *self.channel_send_fails.lock().unwrap() {
+                return Err("channel edit failed".to_string());
+            }
+            self.edited_channels
+                .lock()
+                .unwrap()
+                .push((channel_id, message_id, body));
+            Ok(())
+        }
+
+        async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+            self.pin_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .pin_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err("pin failed once".to_string());
+            }
+            self.pinned_messages
+                .lock()
+                .unwrap()
+                .push((channel_id, message_id));
+            Ok(())
+        }
+
+        async fn pinned_message(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+        ) -> Result<Option<bool>, String> {
+            if self
+                .missing_messages
+                .lock()
+                .unwrap()
+                .contains(&(channel_id, message_id))
+            {
+                return Ok(None);
+            }
+            Ok(Some(
+                self.pinned_messages
+                    .lock()
+                    .unwrap()
+                    .contains(&(channel_id, message_id)),
+            ))
+        }
+
+        async fn existing_pate_request_cards(
+            &self,
+        ) -> Result<Vec<LegacyPateRequestMessage>, String> {
+            if let Some(error) = self
+                .existing_pate_request_cards_error
+                .lock()
+                .unwrap()
+                .clone()
+            {
+                return Err(error);
+            }
+            Ok(self.existing_pate_request_cards.lock().unwrap().clone())
         }
     }
 
@@ -7805,27 +9205,7 @@ mod tests {
     }
 
     fn mock_port() -> Arc<MockConciergePort> {
-        Arc::new(MockConciergePort {
-            dm_attempts: std::sync::Mutex::new(Vec::new()),
-            sent_dm_v2: std::sync::Mutex::new(Vec::new()),
-            dm_cannot_send: std::sync::Mutex::new(false),
-            dm_fails: std::sync::Mutex::new(false),
-            channel_send_fails: std::sync::Mutex::new(false),
-            channel_send_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
-            created_private_channels: std::sync::Mutex::new(Vec::new()),
-            sent_channel_ids: std::sync::Mutex::new(Vec::new()),
-            sent_channel_v2: std::sync::Mutex::new(Vec::new()),
-            sent_channel_text: std::sync::Mutex::new(Vec::new()),
-            replied_messages: std::sync::Mutex::new(Vec::new()),
-            reply_hangs: std::sync::Mutex::new(false),
-            deleted_channels: std::sync::Mutex::new(Vec::new()),
-            delete_channel_fails: std::sync::Mutex::new(false),
-            deleted_messages: std::sync::Mutex::new(Vec::new()),
-            delete_message_fails: std::sync::Mutex::new(false),
-            private_channel_owners: std::sync::Mutex::new(HashSet::new()),
-            port_started: std::sync::Mutex::new(None),
-            port_release: std::sync::Mutex::new(None),
-        })
+        Arc::new(MockConciergePort::default())
     }
 
     /// Bewusst ohne `cfg(feature = "testing")`: der Geduldshinweis-Test braucht
@@ -8409,7 +9789,7 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: false,
             content: "Hallo".to_string(),
-            message_created_at: 0,
+            message_created_at: chrono::DateTime::from_timestamp(0, 0).expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,
@@ -8631,6 +10011,16 @@ mod tests {
         profile.first_message_at = None;
         profile.unsolicited_contact_count = 3;
         assert!(!cadence_due(&profile, Utc::now()).contains(&CadenceAction::T2));
+    }
+
+    #[test]
+    fn kadenz_t2_entfaellt_wenn_pate_schon_angeboten_wurde() {
+        let t0 = Utc::now() - Duration::days(8);
+        let mut profile = profile_at(t0);
+        profile.pate_offered = true;
+        let actions = cadence_due(&profile, Utc::now());
+        assert!(!actions.contains(&CadenceAction::T2));
+        assert!(actions.contains(&CadenceAction::T7));
     }
 
     #[test]
@@ -13370,6 +14760,7 @@ mod tests {
             .expect("test_pool");
         let pool = db.pool().clone();
         seed_current_pate_request(&pool, 42).await;
+        seed_open_pate_request(&pool, 42, 900, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         let (started, release) = block_next_port_call(&port);
         let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
@@ -13453,6 +14844,7 @@ mod tests {
             .expect("test_pool");
         let pool = db.pool().clone();
         seed_current_pate_request(&pool, 42).await;
+        seed_open_pate_request(&pool, 42, 900, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         let (started, _never_release) = block_next_port_call(&port);
         let mut config = test_config(true, &[]);
@@ -13521,6 +14913,7 @@ mod tests {
             .await
             .expect("test_pool");
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 900, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         *port.dm_fails.lock().unwrap() = true;
         let concierge = Concierge::new(
@@ -13561,6 +14954,7 @@ mod tests {
             .await
             .expect("test_pool");
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 900, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         *port.channel_send_fails.lock().unwrap() = true;
         let concierge = Concierge::new(
@@ -13601,6 +14995,7 @@ mod tests {
             .await
             .expect("test_pool");
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 900, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         *port.dm_cannot_send.lock().unwrap() = true;
         *port.delete_channel_fails.lock().unwrap() = true;
@@ -13654,6 +15049,7 @@ mod tests {
         .await
         .expect("failure trigger");
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 55, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(
             db.pool().clone(),
@@ -13716,6 +15112,7 @@ mod tests {
         .await
         .expect("failure trigger");
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 900, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         *port.delete_channel_fails.lock().unwrap() = true;
         let concierge = Concierge::new(
@@ -13768,6 +15165,7 @@ mod tests {
         .await
         .expect("failure trigger");
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 55, Utc::now()).await;
         let port = Arc::new(MockConciergePort::default());
         *port.reply_hangs.lock().unwrap() = true;
         let concierge = Concierge::new(
@@ -14196,12 +15594,7 @@ mod tests {
         let erase_task = tokio::spawn(async move {
             crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
         });
-        wait_for_db_lock(
-            &pool,
-            "DELETE FROM bot.concierge_profiles",
-            Some("transactionid"),
-        )
-        .await;
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
 
         let write_store = store.clone();
         let write_task = tokio::spawn(async move {
@@ -14467,6 +15860,7 @@ mod tests {
     async fn claim_reihenfolge_reserviert_vergeben_und_load_limit() {
         let db = dl_central_db::testing::test_pool().await.unwrap();
         seed_current_pate_request(db.pool(), 42).await;
+        seed_open_pate_request(db.pool(), 42, 900, Utc::now()).await;
         let concierge = Concierge::new(
             db.pool().clone(),
             Arc::new(MockConciergePort::default()),
@@ -14533,5 +15927,998 @@ mod tests {
         let store = ConciergeStore::new(db.pool().clone());
         store.mark_first_message(4242, 1, Utc::now()).await.unwrap();
         assert!(store.profile(4242).await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "testing")]
+    async fn seed_open_pate_request(
+        pool: &PgPool,
+        user_id: i64,
+        message_id: i64,
+        created_at: DateTime<Utc>,
+    ) {
+        ConciergeStore::new(pool.clone())
+            .set_pate_requested(
+                u64::try_from(user_id).expect("valid user id"),
+                test_config(true, &[]).main_guild_id,
+                created_at,
+            )
+            .await
+            .expect("Patenwunsch-Profil seeden");
+        sqlx::query(
+            "INSERT INTO bot.concierge_pate_requests(user_id, guild_id, channel_id, message_id, status, created_at, updated_at)
+             VALUES($1, $2, $3, $4, 'open', $5, $5)",
+        )
+        .bind(user_id)
+        .bind(i64::try_from(test_config(true, &[]).main_guild_id).unwrap())
+        .bind(i64::try_from(PATE_REQUEST_CHANNEL_ID).unwrap())
+        .bind(message_id)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("Paten-Anfrage seeden");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn frischling_t0_enthaelt_paten_angebot_und_setzt_pate_offered() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        *port.frischling_members.lock().unwrap() = vec![42];
+        let mut config = test_config(true, &[]);
+        config.proactive = true;
+        let guild_id = config.main_guild_id;
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        concierge
+            .handle_native_onboarding_completed(guild_id, 42)
+            .await;
+
+        let raw = {
+            let bodies = port.sent_dm_v2_bodies.lock().unwrap();
+            let (_, body) = bodies
+                .iter()
+                .find(|(uid, _)| *uid == 42)
+                .expect("T0-DM an den Frischling");
+            serde_json::to_string(body).expect("body json")
+        };
+        assert!(raw.contains("concierge:pate:yes"), "{raw}");
+        assert!(raw.contains("concierge:pate:no"), "{raw}");
+
+        let pate_offered = sqlx::query_scalar::<_, bool>(
+            "SELECT pate_offered FROM bot.concierge_profiles WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Profil");
+        assert!(pate_offered);
+
+        let journey = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM activity.journey_events
+              WHERE user_id = 42 AND event_source = 'concierge' AND event_type = 'pate_offered'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Journey");
+        assert_eq!(journey, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn frischling_t0_wartet_bis_die_rolle_beim_dritten_lookup_sichtbar_ist() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        *port.frischling_members.lock().unwrap() = vec![42];
+        port.frischling_visible_after
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let mut config = test_config(true, &[]);
+        config.proactive = true;
+        config.frischling_lookup_retry = StdDuration::from_millis(1);
+        let guild_id = config.main_guild_id;
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        concierge
+            .handle_native_onboarding_completed(guild_id, 42)
+            .await;
+
+        let raw = {
+            let bodies = port.sent_dm_v2_bodies.lock().unwrap();
+            let (_, body) = bodies
+                .iter()
+                .find(|(uid, _)| *uid == 42)
+                .expect("T0-DM an den Frischling");
+            serde_json::to_string(body).expect("body json")
+        };
+        assert!(raw.contains("concierge:pate:yes"), "{raw}");
+        assert!(
+            port.frischling_lookup_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 3
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_anfrage_eskaliert_nach_2h_genau_einmal() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 555, now - Duration::minutes(125)).await;
+
+        concierge.run_pate_escalations(now).await;
+
+        {
+            let edits = port.edited_channels.lock().unwrap();
+            assert_eq!(edits.len(), 1);
+        }
+        {
+            let alerts = port.sent_channel_v2.lock().unwrap();
+            assert_eq!(alerts.len(), 1);
+            let alert = &alerts[0];
+            assert_eq!(alert["message_reference"]["message_id"], "555");
+            assert_eq!(
+                alert["allowed_mentions"]["users"][0],
+                CONCIERGE_OWNER_ID.to_string()
+            );
+            assert_eq!(alert["enforce_nonce"], true);
+        }
+        let escalated: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(escalated.is_some());
+
+        concierge.run_pate_escalations(now).await;
+        assert_eq!(port.edited_channels.lock().unwrap().len(), 1);
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn optout_schliesst_offene_patenanfrage_und_verhindert_2h_eskalation() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = ConciergeStore::new(pool.clone());
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 770045, 770046, now - Duration::hours(3)).await;
+
+        assert!(store.set_opted_out(770045, 1, now).await.unwrap());
+        concierge.run_pate_escalations(now).await;
+
+        let (status, dm_pending): (String, bool) = sqlx::query_as(
+            "SELECT status, dm_pending FROM bot.concierge_pate_requests WHERE user_id = 770045",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("geschlossene Anfrage");
+        assert_eq!(status, "closed_opted_out");
+        assert!(!dm_pending);
+        let pate_requested: bool = sqlx::query_scalar(
+            "SELECT pate_requested FROM bot.concierge_profiles WHERE user_id = 770045",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Patenwunsch");
+        assert!(!pate_requested);
+        assert!(port.edited_channels.lock().unwrap().is_empty());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
+        assert!(port.sent_dm_v2.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn optout_gewinnt_privacy_race_vor_24h_dm_und_kartenupdate() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = ConciergeStore::new(pool.clone());
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Arc::new(Concierge::new(
+            pool.clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        ));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 770047, 770048, now - Duration::hours(25)).await;
+
+        let mut blocker = pool.begin().await.expect("privacy blocker tx");
+        crate::privacy::lock_user_privacy(&mut blocker, 770047)
+            .await
+            .expect("hold privacy lock");
+        let optout = tokio::spawn(async move { store.set_opted_out(770047, 1, now).await });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        let scheduler = {
+            let concierge = concierge.clone();
+            tokio::spawn(async move { concierge.run_pate_escalations(now).await })
+        };
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let waiters = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                       FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND state = 'active'
+                        AND wait_event_type = 'Lock'
+                        AND wait_event = 'advisory'
+                        AND query LIKE '%pg_advisory_xact_lock%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("advisory waiters");
+                if waiters >= 2 {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Opt-out und Scheduler warten auf den Privacy-Lock");
+        blocker.commit().await.expect("release privacy lock");
+
+        assert!(optout.await.expect("optout task").expect("optout result"));
+        scheduler.await.expect("scheduler task");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM bot.concierge_pate_requests WHERE user_id = 770047",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("request status");
+        assert_eq!(status, "closed_opted_out");
+        assert!(port.edited_channels.lock().unwrap().is_empty());
+        assert!(port.sent_dm_v2.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_2h_owner_hinweis_wird_nach_sendefehler_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 555, now - Duration::minutes(125)).await;
+
+        port.channel_send_failures_remaining
+            .store(1, Ordering::SeqCst);
+        concierge.run_pate_escalations(now).await;
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_none());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
+
+        let restarted = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_some());
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_2h_unsicherer_send_wird_ueber_nonce_ohne_doppelpost_abgeglichen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 555, now - Duration::minutes(125)).await;
+        let request_id: i64 =
+            sqlx::query_scalar("SELECT id FROM bot.concierge_pate_requests WHERE user_id = 42")
+                .fetch_one(&pool)
+                .await
+                .expect("Anfrage");
+        let mut bereits_gesendet = v2_body(PATE_ESCALATION_2H_ALERT_TEXT, Vec::new());
+        bereits_gesendet.insert("nonce".into(), json!(format!("pate2h-{request_id}")));
+        port.sent_channel_v2.lock().unwrap().push(bereits_gesendet);
+
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        concierge.run_pate_escalations(now).await;
+
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        let stored: Option<i64> = sqlx::query_scalar(
+            "SELECT owner_alert_message_id FROM bot.concierge_pate_requests WHERE id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert_eq!(stored, Some(1));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_2h_kartenfehler_wird_beim_naechsten_lauf_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 555, now - Duration::minutes(125)).await;
+
+        *port.channel_send_fails.lock().unwrap() = true;
+        concierge.run_pate_escalations(now).await;
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_none());
+
+        *port.channel_send_fails.lock().unwrap() = false;
+        concierge.run_pate_escalations(now).await;
+        assert_eq!(port.edited_channels.lock().unwrap().len(), 1);
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_2h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_anfrage_schliesst_nach_24h_genau_einmal_mit_dm() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 556, now - Duration::minutes(24 * 60 + 5)).await;
+
+        concierge.run_pate_escalations(now).await;
+
+        assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+        {
+            let dm_bodies = port.sent_dm_v2_bodies.lock().unwrap();
+            let dm_body = &dm_bodies[0].1;
+            assert_eq!(dm_body["enforce_nonce"], true);
+            assert!(dm_body["nonce"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("pate24h-")));
+        }
+        {
+            let edits = port.edited_channels.lock().unwrap();
+            assert_eq!(edits.len(), 1);
+        }
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert_eq!(status, "closed_unbesetzt");
+
+        concierge.run_pate_escalations(now).await;
+        assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+        assert_eq!(port.edited_channels.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_24h_kartenfehler_wird_ohne_zweite_dm_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 556, now - Duration::hours(25)).await;
+
+        *port.channel_send_fails.lock().unwrap() = true;
+        concierge.run_pate_escalations(now).await;
+        let (status, marker): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, escalated_24h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert_eq!(status, "closed_unbesetzt");
+        assert!(marker.is_none());
+        assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+
+        *port.channel_send_fails.lock().unwrap() = false;
+        let restarted = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+        {
+            let edits = port.edited_channels.lock().unwrap();
+            assert_eq!(edits.len(), 1);
+            let body = serde_json::to_string(&edits[0].2).expect("Karte");
+            assert!(!body.contains("concierge:pate:claim"));
+        }
+        let marker: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT escalated_24h_at FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(marker.is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_24h_dm_transportfehler_wird_nach_neustart_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 556, now - Duration::hours(25)).await;
+
+        *port.dm_fails.lock().unwrap() = true;
+        concierge.run_pate_escalations(now).await;
+        let pending: bool = sqlx::query_scalar(
+            "SELECT dm_pending FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(pending);
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42]);
+
+        *port.dm_fails.lock().unwrap() = false;
+        let restarted = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        restarted.run_pate_escalations(now).await;
+        let pending: bool = sqlx::query_scalar(
+            "SELECT dm_pending FROM bot.concierge_pate_requests WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert!(!pending);
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42, 42]);
+        assert_eq!(*port.sent_dm_v2.lock().unwrap(), vec![42]);
+
+        restarted.run_pate_escalations(now).await;
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42, 42]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_alte_24h_dm_entfaellt_bei_neuer_anfrage() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let now = Utc::now();
+        seed_open_pate_request(&pool, 42, 556, now - Duration::hours(25)).await;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET status = 'closed_unbesetzt', dm_pending = TRUE,
+                    escalated_24h_at = $1, closed_at = $1
+              WHERE user_id = 42",
+        )
+        .bind(now - Duration::minutes(5))
+        .execute(&pool)
+        .await
+        .expect("alte Anfrage schließen");
+        seed_open_pate_request(&pool, 42, 557, now).await;
+
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        concierge.run_pate_escalations(now).await;
+
+        assert!(port.dm_attempts.lock().unwrap().is_empty());
+        let pending: bool = sqlx::query_scalar(
+            "SELECT dm_pending FROM bot.concierge_pate_requests WHERE message_id = 556",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("alte Anfrage");
+        assert!(!pending);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_eskalation_feuert_nach_neustart_nicht_erneut() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO bot.concierge_pate_requests(user_id, guild_id, channel_id, message_id, status, created_at, escalated_2h_at, escalated_24h_at, updated_at)
+             VALUES(42, $1, $2, 557, 'open', $3, $4, $4, $4)",
+        )
+        .bind(i64::try_from(test_config(true, &[]).main_guild_id).unwrap())
+        .bind(i64::try_from(PATE_REQUEST_CHANNEL_ID).unwrap())
+        .bind(now - Duration::minutes(24 * 60 + 5))
+        .bind(now - Duration::minutes(10))
+        .execute(&pool)
+        .await
+        .expect("Anfrage seeden");
+
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        concierge.run_pate_escalations(now).await;
+
+        assert!(port.edited_channels.lock().unwrap().is_empty());
+        assert!(port.sent_dm_v2.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn uebernehmen_nach_geschlossener_anfrage_bleibt_wirkungslos() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let now = Utc::now();
+        seed_current_pate_request(&pool, 42).await;
+        sqlx::query(
+            "INSERT INTO bot.concierge_pate_requests(user_id, guild_id, channel_id, message_id, status, created_at, closed_at, updated_at)
+             VALUES(42, $1, $2, 558, 'closed_unbesetzt', $3, $3, $3)",
+        )
+        .bind(i64::try_from(test_config(true, &[]).main_guild_id).unwrap())
+        .bind(i64::try_from(PATE_REQUEST_CHANNEL_ID).unwrap())
+        .bind(now - Duration::minutes(24 * 60 + 10))
+        .execute(&pool)
+        .await
+        .expect("geschlossene Anfrage seeden");
+
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let reply = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(PATE_REQUEST_CLOSED_TEXT));
+        let patenschaften = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_patenschaften WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Patenschaften");
+        assert_eq!(patenschaften, 0);
+        assert!(port.created_private_channels.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn reaktiver_wunsch_nach_24h_schliessung_erzeugt_neue_anfrage() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let mut config = test_config(true, &[]);
+        config.pater_channel_id = Some(PATE_REQUEST_CHANNEL_ID);
+        let guild_id = config.main_guild_id;
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let now = Utc::now();
+
+        seed_current_pate_request(&pool, 42).await;
+        seed_open_pate_request(&pool, 42, 559, now - Duration::minutes(24 * 60 + 5)).await;
+        concierge.run_pate_escalations(now).await;
+
+        let closed = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.concierge_pate_requests WHERE user_id = 42 ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Anfrage");
+        assert_eq!(closed, "closed_unbesetzt");
+        assert!(port.sent_channel_ids.lock().unwrap().is_empty());
+
+        let reply = concierge.request_pate(42, guild_id, "Nani").await;
+
+        assert_eq!(bridge_reply_text(&reply), Some(PATE_YES_TEXT));
+        assert_eq!(
+            *port.sent_channel_ids.lock().unwrap(),
+            vec![PATE_REQUEST_CHANNEL_ID]
+        );
+        let offen = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE user_id = 42 AND status = 'open'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("offene Anfragen");
+        assert_eq!(offen, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn uebernehmen_uebernimmt_nur_die_angeklickte_offene_anfrage() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let now = Utc::now();
+        seed_current_pate_request(&pool, 42).await;
+        sqlx::query(
+            "INSERT INTO bot.concierge_pate_requests(user_id, guild_id, channel_id, message_id, status, created_at, closed_at, updated_at)
+             VALUES(42, $1, $2, 700, 'closed_unbesetzt', $3, $3, $3)",
+        )
+        .bind(i64::try_from(test_config(true, &[]).main_guild_id).unwrap())
+        .bind(i64::try_from(PATE_REQUEST_CHANNEL_ID).unwrap())
+        .bind(now - Duration::minutes(48 * 60))
+        .execute(&pool)
+        .await
+        .expect("alte geschlossene Karte seeden");
+        seed_open_pate_request(&pool, 42, 701, now - Duration::minutes(30)).await;
+
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let reply = concierge
+            .claim_pate(BridgeInteraction {
+                message_id: Some(700),
+                ..valid_pate_claim_interaction(42, 77)
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(PATE_REQUEST_CLOSED_TEXT));
+        assert!(port.created_private_channels.lock().unwrap().is_empty());
+        let patenschaften = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_patenschaften WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Patenschaften");
+        assert_eq!(patenschaften, 0);
+        let offen = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE message_id = 701 AND status = 'open'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("offene Anfrage");
+        assert_eq!(offen, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn claim_gegen_direkt_uebernommene_anfrage_erzeugt_keine_zweite_patenschaft() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let now = Utc::now();
+        seed_current_pate_request(&pool, 42).await;
+        seed_open_pate_request(&pool, 42, 710, now - Duration::minutes(30)).await;
+        sqlx::query(
+            "UPDATE bot.concierge_pate_requests
+                SET status = 'claimed', pate_id = 88, claimed_at = $1, updated_at = $1
+              WHERE message_id = 710",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("Anfrage direkt uebernehmen");
+
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let reply = concierge
+            .claim_pate(BridgeInteraction {
+                message_id: Some(710),
+                ..valid_pate_claim_interaction(42, 77)
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(PATE_REQUEST_CLOSED_TEXT));
+        assert!(port.created_private_channels.lock().unwrap().is_empty());
+        let patenschaften =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bot.concierge_patenschaften")
+                .fetch_one(&pool)
+                .await
+                .expect("Patenschaften");
+        assert_eq!(patenschaften, 0);
+        let claim_kv: Option<String> =
+            sqlx::query_scalar("SELECT v FROM bot.kv_store WHERE ns = $1 AND k = '42'")
+                .bind(CONCIERGE_PATE_CLAIM_NS)
+                .fetch_optional(&pool)
+                .await
+                .expect("claim kv");
+        assert!(claim_kv.is_none());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn leitfaden_pin_fehler_wird_beim_naechsten_start_nachgeholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        port.pin_failures_remaining
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let repo_root = std::path::Path::new("/nonexistent-paten-leitfaden-root");
+
+        concierge.ensure_pate_leitfaden(repo_root).await;
+
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        assert_eq!(
+            port.pin_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(port.pinned_messages.lock().unwrap().is_empty());
+        let stored_message_id =
+            dl_central_db::kv::get(&pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id")
+                .await
+                .expect("kv message_id")
+                .expect("message_id gespeichert");
+        assert!(!stored_message_id.is_empty());
+        let stored_fingerprint =
+            dl_central_db::kv::get(&pool, CONCIERGE_PATE_LEITFADEN_NS, "fingerprint")
+                .await
+                .expect("kv fingerprint");
+        assert!(stored_fingerprint.is_none());
+
+        concierge.ensure_pate_leitfaden(repo_root).await;
+
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        assert_eq!(port.edited_channels.lock().unwrap().len(), 1);
+        assert_eq!(
+            port.pin_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(port.pinned_messages.lock().unwrap().len(), 1);
+        let stored_fingerprint =
+            dl_central_db::kv::get(&pool, CONCIERGE_PATE_LEITFADEN_NS, "fingerprint")
+                .await
+                .expect("kv fingerprint");
+        assert!(stored_fingerprint.is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn leitfaden_mit_unveraendertem_fingerprint_wird_nach_gepinnt_und_ersetzt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, test_config(true, &[]));
+        let repo_root = std::path::Path::new("/nonexistent-paten-leitfaden-root");
+        let content = render_pate_leitfaden_content(&load_pate_leitfaden(repo_root));
+        let fingerprint = leitfaden_fingerprint(&content);
+        dl_central_db::kv::set(&pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id", "9001")
+            .await
+            .expect("message_id");
+        dl_central_db::kv::set(
+            &pool,
+            CONCIERGE_PATE_LEITFADEN_NS,
+            "fingerprint",
+            &fingerprint,
+        )
+        .await
+        .expect("fingerprint");
+
+        concierge.ensure_pate_leitfaden(repo_root).await;
+
+        assert_eq!(port.pin_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(port.edited_channels.lock().unwrap().len(), 0);
+        assert_eq!(
+            port.pinned_messages.lock().unwrap().as_slice(),
+            &[(PATE_REQUEST_CHANNEL_ID, 9001)]
+        );
+
+        port.missing_messages
+            .lock()
+            .unwrap()
+            .insert((PATE_REQUEST_CHANNEL_ID, 9001));
+        concierge.ensure_pate_leitfaden(repo_root).await;
+
+        let replacement_id =
+            dl_central_db::kv::get(&pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id")
+                .await
+                .expect("replacement message_id")
+                .expect("replacement stored")
+                .parse::<u64>()
+                .expect("valid replacement id");
+        assert_ne!(replacement_id, 9001);
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        assert!(port
+            .pinned_messages
+            .lock()
+            .unwrap()
+            .contains(&(PATE_REQUEST_CHANNEL_ID, replacement_id)));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn alte_patenkarte_wird_idempotent_in_eskalation_und_inventar_uebernommen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config.clone());
+        let created_at = Utc::now() - Duration::hours(3);
+        concierge
+            .store
+            .set_pate_requested(770042, config.main_guild_id, created_at)
+            .await
+            .expect("pate requested");
+        port.existing_pate_request_cards
+            .lock()
+            .unwrap()
+            .push(LegacyPateRequestMessage {
+                user_id: 770042,
+                message_id: 770099,
+                created_at,
+            });
+
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .expect("Patenanfragenimport succeeds");
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .expect("repeat Patenanfragenimport succeeds");
+
+        assert_eq!(concierge.store.open_pate_request_count().await.unwrap(), 1);
+        assert_eq!(
+            concierge
+                .store
+                .due_pate_escalations(Utc::now())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn legacy_patenimport_wartet_hinter_forget_und_legt_keine_anfrage_wieder_an() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let forget_store = ConciergeStore::new(pool.clone());
+        let import_store = ConciergeStore::new(pool.clone());
+        let user_id = 770043;
+        forget_store
+            .set_pate_requested(user_id, 1, Utc::now())
+            .await
+            .expect("pate requested");
+
+        let mut blocker = pool.begin().await.expect("privacy blocker tx");
+        crate::privacy::lock_user_privacy(
+            &mut blocker,
+            u64_to_i64(user_id, "core.user_privacy.user_id").expect("valid user id"),
+        )
+        .await
+        .expect("hold privacy lock");
+
+        let forget = tokio::spawn(async move { forget_store.forget_user(user_id).await });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        let import = tokio::spawn(async move {
+            import_store
+                .import_legacy_pate_request(
+                    1,
+                    LegacyPateRequestMessage {
+                        user_id,
+                        message_id: 770044,
+                        created_at: Utc::now(),
+                    },
+                )
+                .await
+        });
+        blocker.commit().await.expect("release privacy lock");
+
+        forget.await.expect("forget task").expect("forget result");
+        assert!(!import.await.expect("import task").expect("import result"));
+        let requests = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE user_id = $1",
+        )
+        .bind(user_id as i64)
+        .fetch_one(&pool)
+        .await
+        .expect("request count");
+        assert_eq!(requests, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn legacy_patenimport_wartet_hinter_globaler_loeschung() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        ConciergeStore::new(pool.clone())
+            .set_pate_requested(770049, 1, Utc::now())
+            .await
+            .expect("pate requested");
+
+        let mut blocker = pool.begin().await.expect("privacy blocker tx");
+        crate::privacy::lock_user_privacy(&mut blocker, 770049)
+            .await
+            .expect("hold privacy lock");
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            crate::privacy::delete_user_data(&erase_pool, 770049, "test".into(), 1_000).await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        let import_store = ConciergeStore::new(pool.clone());
+        let import = tokio::spawn(async move {
+            import_store
+                .import_legacy_pate_request(
+                    1,
+                    LegacyPateRequestMessage {
+                        user_id: 770049,
+                        message_id: 770050,
+                        created_at: Utc::now(),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let waiters = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                       FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND state = 'active'
+                        AND wait_event_type = 'Lock'
+                        AND wait_event = 'advisory'
+                        AND query LIKE '%pg_advisory_xact_lock%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("advisory waiters");
+                if waiters >= 2 {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("global delete and import wait on the privacy lock");
+        blocker.commit().await.expect("release privacy lock");
+
+        erase.await.expect("erase task").expect("global erasure");
+        assert!(!import.await.expect("import task").expect("import result"));
+        let requests = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_pate_requests WHERE user_id = 770049",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("request count");
+        assert_eq!(requests, 0);
     }
 }

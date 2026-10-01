@@ -1,0 +1,16 @@
+[Unit]
+Description=Ausfall von %i nach Discord melden
+
+[Service]
+Type=oneshot
+LoadCredential=infisical-token:%h/.config/infisical-tokens/infisical-token-bots
+ExecStart=@BINARY@ --config @CONFIG@ --unit %i --credential %d/infisical-token
+TimeoutStartSec=75
+UMask=0077
+NoNewPrivileges=true
+# Kein Mount-Sandbox/Usernamespace: Die Root-UID des vorhandenen geschützten
+# Infisical-Unixsockets muss als Host-UID 0 sichtbar bleiben.
+PrivateUsers=no
+PrivateTmp=no
+ProtectSystem=no
+ProtectProc=default

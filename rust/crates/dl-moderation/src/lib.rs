@@ -754,7 +754,7 @@ impl AiModerator {
                 event.channel_id,
                 event.message_id,
                 event.author_id,
-                event.message_created_at,
+                event.message_created_at.timestamp(),
                 2,
             )
             .await;
@@ -772,7 +772,7 @@ impl AiModerator {
                 event.channel_id,
                 event.message_id,
                 event.author_id,
-                event.message_created_at,
+                event.message_created_at.timestamp(),
                 CONTEXT_BACKFILL_MESSAGES,
             )
             .await;
@@ -1145,7 +1145,8 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: content.into(),
-            message_created_at: 1_000,
+            message_created_at: chrono::DateTime::from_timestamp(1_000, 0)
+                .expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,
@@ -1254,7 +1255,8 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: "hallo <@123> test".into(),
-            message_created_at: 1_000,
+            message_created_at: chrono::DateTime::from_timestamp(1_000, 0)
+                .expect("fixture timestamp"),
             is_reply: true,
             reply_message_id: Some(9),
             reply_channel_id: Some(2),

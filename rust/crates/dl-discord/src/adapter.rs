@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 use dl_broker::port::{
     DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
     MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers,
@@ -28,11 +29,16 @@ pub struct DiscordAdapter {
     /// via [`Self::link_cache`] an genau diesen serenity-Cache gekoppelt — sonst
     /// läse die gesamte Glue aus einem leeren Cache (alle Lookups None).
     cache: OnceLock<Arc<Cache>>,
+    /// Identität dieses Discord-Bots aus dem Gateway-READY-Ereignis.
+    /// Die ID ist pro Prozess unveränderlich und braucht keinen REST-Fallback.
+    bot_user_id: Arc<OnceLock<u64>>,
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
     pub(crate) community_gateway: crate::community::GatewayFreshness,
     pub(crate) voice_cache_health: crate::voice_cache::VoiceCacheHealth,
     pub(crate) streamer_voice_lock: tokio::sync::Mutex<()>,
+    invite_snapshot_health: Arc<InviteSnapshotHealth>,
+    invite_tracker: OnceLock<Arc<InviteTracker>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +52,13 @@ impl DiscordAdapter {
         Arc::new(Self {
             http: Arc::new(Http::new(token)),
             cache: OnceLock::new(),
+            bot_user_id: Arc::new(OnceLock::new()),
             gateway_ready: Arc::new(AtomicBool::new(false)),
             community_gateway: crate::community::GatewayFreshness::default(),
             voice_cache_health: crate::voice_cache::VoiceCacheHealth::default(),
             streamer_voice_lock: tokio::sync::Mutex::new(()),
+            invite_snapshot_health: Arc::new(InviteSnapshotHealth::default()),
+            invite_tracker: OnceLock::new(),
         })
     }
 
@@ -57,6 +66,42 @@ impl DiscordAdapter {
     /// Einmalig direkt nach dem Client-Build aufzurufen.
     pub fn link_cache(&self, cache: Arc<Cache>) {
         let _ = self.cache.set(cache);
+    }
+
+    pub fn invite_snapshot_health(&self) -> Arc<InviteSnapshotHealth> {
+        self.invite_snapshot_health.clone()
+    }
+
+    pub fn link_invite_tracker(&self, tracker: Arc<InviteTracker>) {
+        let _ = self.invite_tracker.set(tracker);
+    }
+
+    pub async fn ensure_invite_snapshot_current(&self, guild_id: u64) -> Result<bool, sqlx::Error> {
+        if self.invite_snapshot_health.is_current(guild_id).await {
+            return Ok(true);
+        }
+        let Some(tracker) = self.invite_tracker.get() else {
+            return Ok(false);
+        };
+        tracker.prime(&self.http, guild_id).await
+    }
+
+    /// Gemeinsame READY-Identität für Komponenten, die vor Gateway-Start
+    /// gebaut werden.
+    pub fn bot_user_id_cell(&self) -> Arc<OnceLock<u64>> {
+        Arc::clone(&self.bot_user_id)
+    }
+
+    pub(crate) fn record_bot_user_id(&self, user_id: u64) {
+        if let Err(rejected_id) = self.bot_user_id.set(user_id) {
+            if self.bot_user_id.get().copied() != Some(rejected_id) {
+                tracing::error!(
+                    existing_user_id = ?self.bot_user_id.get(),
+                    rejected_id,
+                    "Discord-Gateway meldet eine abweichende Bot-ID"
+                );
+            }
+        }
     }
 
     /// Lädt die Application-ID per REST und setzt sie auf dem Http-Client.
@@ -816,7 +861,7 @@ impl DiscordPort for DiscordAdapter {
             .http
             .create_invite(
                 ChannelId::new(channel_id),
-                &json!({ "max_age": 0, "max_uses": 0, "unique": true }),
+                &json!({ "max_age": 0, "max_uses": 0, "temporary": false, "unique": true }),
                 Some(reason),
             )
             .await
@@ -1222,6 +1267,19 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {
+        let adapter = DiscordAdapter::new("test-token");
+        let shared_id = adapter.bot_user_id_cell();
+        assert_eq!(shared_id.get(), None);
+
+        adapter.record_bot_user_id(42);
+        assert_eq!(shared_id.get(), Some(&42));
+        adapter.record_bot_user_id(42);
+        adapter.record_bot_user_id(43);
+        assert_eq!(shared_id.get(), Some(&42));
+    }
+
     fn twitch_tracking_spec() -> ViewSpec {
         ViewSpec::TwitchLiveTracking {
             streamer_login: "DeadlockTV".to_string(),
@@ -1404,6 +1462,16 @@ mod tests {
             }),
             "party:123"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_snapshot_without_linked_tracker_is_not_current() {
+        let adapter = DiscordAdapter::new("test-token");
+
+        assert!(matches!(
+            adapter.ensure_invite_snapshot_current(42).await,
+            Ok(false)
+        ));
     }
 
     #[test]

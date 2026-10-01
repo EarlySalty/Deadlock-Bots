@@ -4,6 +4,7 @@
 # Zugangsdaten bleiben in Infisical und gehören nicht in diese Datei.
 # Änderungen der angebundenen Startwerte werden beim Prozessneustart wirksam.
 schema_version = 1
+twitch_invites = { personal_links_per_channel = 10, guild_invite_reserve = 50, evaluation_interval_seconds = 300, excluded_voice_channel_ids = [], sync_dry_run = false }
 
 [discord]
 # guild_id vor dem produktiven Cutover inventarisieren.
@@ -21,6 +22,12 @@ changelog_port = 8899
 # bestehenden TWITCH_INTERNAL_API_TOKEN aus Infisical; hier stehen nur Betriebswerte.
 mcp_port = 8890
 
+[runtime.community]
+# Patenangebot im Discord-Onboarding. Für eine begrenzte Live-Probe hier
+# zusätzlich concierge_test_users = [<Discord-User-ID>] eintragen.
+concierge_enabled = true
+concierge_proactive = true
+
 [storage]
 # Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.
 # Relative Pfade beziehen sich auf das WorkingDirectory des Dienstes.
@@ -37,13 +44,13 @@ enforce = false
 timeout_seconds = 100
 
 [llm.fireworks]
-# Optionaler ausdrücklich freigegebener Modell-Pin. Keine automatische Auswahl.
+# Das freigegebene Flash-Modell kommt aus der gemeinsamen täglichen Auswahl.
 
 [llm.use_cases.moderation_verify]
-provider = "openai"
+provider = "fireworks"
 
 [llm.use_cases.turnier_vorschlag]
-provider = "openai"
+provider = "fireworks"
 
 [llm.use_cases.voice_hint]
-provider = "openai"
+provider = "fireworks"

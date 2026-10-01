@@ -1,7 +1,6 @@
 /* Vollständiger Katalog; Anmeldung, Origin und CSRF bleiben im vorhandenen fetchJSON. */
 (() => {
     'use strict';
-    const V41 = 'accounts/fireworks/models/deepseek-v4p1-flash';
     const definitions = [
         { key: 'discord', title: 'Discord', endpoint: '/api/admin/betriebskonfiguration' },
         { key: 'steam', title: 'Steam', endpoint: '/api/admin/steam-betriebskonfiguration' },
@@ -46,20 +45,8 @@
         if (field.kind === 'choice' && !field.choices.includes(value)) throw new Error('Bitte einen angebotenen Wert auswählen.');
         return value;
     }
-    function changesForV41(values, fields) {
-        const changes = { 'llm.fireworks.model': V41 };
-        for (const field of fields) {
-            const match = /^llm\.use_cases\.([a-z_]+)\.model$/.exec(field.path);
-            if (!match || !field.writable) continue;
-            const name = match[1];
-            const fallback = ['moderation_verify', 'turnier_vorschlag', 'voice_hint'].includes(name) ? 'openai' : 'fireworks';
-            const provider = values[`llm.use_cases.${name}.provider`] ?? values['llm.default_provider'] ?? fallback;
-            if (provider === 'fireworks') changes[field.path] = V41;
-        }
-        return changes;
-    }
     // Kleine reine Funktionen sind ohne Browser und ohne API testbar.
-    if (typeof module !== 'undefined' && module.exports) module.exports = { parseValue, changesForV41, equal, V41 };
+    if (typeof module !== 'undefined' && module.exports) module.exports = { parseValue, equal };
     if (typeof document === 'undefined') return;
     function element(tag, text, className) {
         const node = document.createElement(tag);
@@ -100,7 +87,7 @@
         .settings-path {overflow-wrap:anywhere;margin:6px 0 0;font-family:monospace;font-size:11px;}
         .settings-override {display:flex;gap:7px;align-items:center;margin-bottom:7px;font-size:12px;}
         .settings-actions {position:sticky;bottom:0;z-index:2;padding:14px;background:#141414;border:1px solid #6e5b33;border-radius:6px;margin-top:16px;box-shadow:0 -8px 20px #0005;}
-        .settings-actions button,.settings-model-action {padding:10px 16px;min-height:40px;}
+        .settings-actions button {padding:10px 16px;min-height:40px;}
         .settings-diff {margin:16px 0;border-top:1px solid #544731;padding-top:12px;}
         .settings-diff li {margin:10px 0;overflow-wrap:anywhere;}
         .settings-diff code {font-size:12px;white-space:pre-wrap;}
@@ -206,17 +193,11 @@
             count.textContent = `${editable} änderbar · ${data.catalog.fields.length - editable} geschützt`;
             status.replaceChildren(...services.map(item => element('span', `${item.name}: ${item.restart_required === null ? 'Aktiver Stand nicht bestätigt' : item.restart_required ? 'Gespeichert, Neustart noch ausstehend' : 'Gespeicherter Stand ist aktiv'}`)));
             if (definition.key === 'discord') {
-                const preset = button('DeepSeek V4.1 Flash für Fireworks wählen', () => {
-                    try {
-                        const current = Object.fromEntries([...state.entries].map(([path, entry]) => [path, read(entry)]));
-                        for (const [path, value] of Object.entries(changesForV41(current, data.catalog.fields))) {
-                            const entry = state.entries.get(path); if (entry) set(entry, value);
-                        }
-                        draft(); diff.open = true; error.textContent = '';
-                    } catch (problem) { error.textContent = `Zuerst ungültige Eingaben korrigieren: ${problem.message}`; }
-                });
-                preset.className = 'settings-model-action';
-                fieldset.append(preset, element('p', 'Setzt den Fireworks-Standard und die Modell-Pins aller derzeit Fireworks zugeordneten KI-Funktionen. OpenAI-Zuordnungen bleiben unverändert. Erst „Änderungen speichern“ übernimmt die Auswahl in die Betriebsdatei.', 'settings-hint'));
+                const selection = data.llm_selection;
+                const selected = selection?.model;
+                fieldset.append(element('p', selected
+                    ? `Automatisch: neuestes DeepSeek Flash. Aktiv: ${selected}.`
+                    : 'Automatische Modellauswahl momentan nicht verfügbar. KI-Aufrufe bleiben angehalten.', 'settings-hint'));
             }
             const byGroup = new Map();
             for (const field of data.catalog.fields) { if (!byGroup.has(field.group)) byGroup.set(field.group, []); byGroup.get(field.group).push(field); }

@@ -718,10 +718,19 @@ pub fn secret_value(key: &str) -> Option<String> {
         | "GOOGLE_API_KEY"
         | "MINIMAX_API_KEY"
         | "MINMAX"
-        | "MINIMAX_TOKEN_PLAN_KEY" => std::env::var(key)
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
+        | "MINIMAX_TOKEN_PLAN_KEY" => {
+            // Nach dem privaten Start-Snapshot niemals auf ENV zurückfallen,
+            // auch wenn ein erlaubtes Secret darin fehlt.
+            let value = if crate::token_snapshot::installed() {
+                crate::token_snapshot::value(key).map(str::to_owned)
+            } else {
+                // Unbetroffene Legacy-Binaries behalten ihren Startvertrag.
+                std::env::var(key).ok()
+            };
+            value
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        }
         _ => None,
     }
 }

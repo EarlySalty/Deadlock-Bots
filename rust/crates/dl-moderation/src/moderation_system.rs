@@ -262,67 +262,34 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             return;
         }
 
-        let content_input = if self.config.scan_channel_ids.contains(&event.channel_id)
-            || behavior_signal.is_some()
-        {
-            let input = moderation_input_for_event(event, behavior_signal.as_ref());
-            if input.content.trim().is_empty() && input.image_urls.is_empty() {
-                None
-            } else {
-                Some(input)
-            }
-        } else {
-            None
+        let Some(signal) = behavior_signal.as_ref() else {
+            return;
         };
-        let content_evaluation = if let Some(input) = content_input.as_ref() {
-            if let Some(signal) = behavior_signal.as_ref() {
-                Some(
-                    self.pipeline
-                        .evaluate_behavior_trigger(input, signal.trigger_label())
-                        .await,
-                )
-            } else {
-                Some(self.pipeline.evaluate_with_analysis(input).await)
-            }
-        } else {
+        let input = moderation_input_for_event(event, Some(signal));
+        let content_evaluation = if input.content.trim().is_empty() && input.image_urls.is_empty() {
             None
+        } else {
+            Some(
+                self.pipeline
+                    .evaluate_behavior_trigger(&input, signal.trigger_label())
+                    .await,
+            )
         };
         let content_verdict = content_evaluation
             .as_ref()
             .and_then(|evaluation| evaluation.verdict.as_ref());
-        let mut outcome = self
+        let outcome = self
             .policy
             .decide_combined_outcome(content_verdict, behavior_signal.as_ref());
-        if content_evaluation
-            .as_ref()
-            .is_some_and(|evaluation| evaluation.unresolved_consistency)
-        {
-            let timeout_minutes = if behavior_signal.is_some() {
-                self.policy.config().behavior_proposal_timeout_minutes
-            } else {
-                self.policy.config().timeout_minutes
-            };
-            outcome.source = Some(PolicyDecisionSource::Content);
-            outcome.decision = PolicyDecision::Proposal { timeout_minutes };
-            tracing::warn!(
-                guild_id,
-                channel_id = event.channel_id,
-                message_id = event.message_id,
-                user_id = event.author_id,
-                "Moderation: ungelöster KI-Konsistenzkonflikt wird nur zur manuellen Prüfung vorgeschlagen"
-            );
-        }
         let source = outcome.source;
         let decision = outcome.decision;
-        if content_evaluation.is_some() || behavior_signal.is_some() {
-            log_judge_decision(
-                event,
-                &decision,
-                source,
-                content_evaluation.as_ref(),
-                behavior_signal.as_ref(),
-            );
-        }
+        log_judge_decision(
+            event,
+            &decision,
+            source,
+            content_evaluation.as_ref(),
+            behavior_signal.as_ref(),
+        );
         if matches!(decision, PolicyDecision::Ignore) {
             self.persist_non_action_decision(
                 guild_id,
@@ -1083,11 +1050,13 @@ mod tests {
     #[derive(Default)]
     struct StaticText {
         responses: Mutex<Vec<String>>,
+        calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl dl_ai::TextGenerator for StaticText {
         async fn generate_text(&self, _request: dl_ai::GenerateRequest) -> Option<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             self.responses.lock().await.pop()
         }
     }
@@ -1095,6 +1064,7 @@ mod tests {
     #[derive(Default)]
     struct StaticVision {
         responses: Mutex<Vec<String>>,
+        calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -1103,7 +1073,24 @@ mod tests {
             &self,
             _request: dl_ai::GenerateMultimodalRequest,
         ) -> Option<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             self.responses.lock().await.pop()
+        }
+    }
+
+    struct AiProbe {
+        analyzer_text: Arc<StaticText>,
+        analyzer_vision: Arc<StaticVision>,
+        verifier_text: Arc<StaticText>,
+        verifier_vision: Arc<StaticVision>,
+    }
+
+    impl AiProbe {
+        fn calls(&self) -> usize {
+            self.analyzer_text.calls.load(Ordering::Relaxed)
+                + self.analyzer_vision.calls.load(Ordering::Relaxed)
+                + self.verifier_text.calls.load(Ordering::Relaxed)
+                + self.verifier_vision.calls.load(Ordering::Relaxed)
         }
     }
 
@@ -1320,34 +1307,40 @@ mod tests {
     async fn moderator_with_responses(
         analysis: &str,
         verification: &str,
-    ) -> (Arc<ModerationSystem>, Arc<CountingPort>) {
-        let analyzer_text = Arc::new(StaticText::default());
-        analyzer_text
+    ) -> (Arc<ModerationSystem>, Arc<CountingPort>, Arc<StaticVision>) {
+        let analyzer_vision = Arc::new(StaticVision::default());
+        analyzer_vision
             .responses
             .lock()
             .await
             .push(analysis.to_string());
-        let verifier_text = Arc::new(StaticText::default());
-        verifier_text
+        let verifier_vision = Arc::new(StaticVision::default());
+        verifier_vision
             .responses
             .lock()
             .await
             .push(verification.to_string());
         let port = Arc::new(CountingPort::default());
-        let moderator = ModerationSystem::new(
+        let moderator = ModerationSystem::new_with_behavior_detector(
             lazy_pool(),
             ContentModerationPipeline::new(
                 ContentAnalyzer::new(
-                    analyzer_text,
-                    None,
+                    Arc::new(StaticText::default()),
+                    Some(analyzer_vision),
                     ContentAnalyzerConfig {
                         text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                         image_model: "gpt-5.4-nano".to_string(),
                     },
                 ),
-                ContentVerifier::new(verifier_text, None, Default::default()),
-                0.5,
+                ContentVerifier::new(
+                    Arc::new(StaticText::default()),
+                    Some(verifier_vision.clone()),
+                    Default::default(),
+                ),
             ),
+            Some(crate::behavior_detector::BehaviorDetector::new(Arc::new(
+                FakeBehaviorPort,
+            ))),
             ActionPolicy::new(ActionPolicyConfig::default()),
             port.clone(),
             ModerationSystemConfig {
@@ -1356,7 +1349,77 @@ mod tests {
                 enforce: true,
             },
         );
-        (moderator, port)
+        (moderator, port, verifier_vision)
+    }
+
+    async fn probe_moderator(
+        analysis: &str,
+        verification: &str,
+        behavior_detector: Option<Arc<BehaviorDetector>>,
+        scan_channel_ids: Vec<u64>,
+    ) -> (
+        Arc<ModerationSystem<MemoryStore>>,
+        Arc<CountingPort>,
+        AiProbe,
+    ) {
+        let probe = AiProbe {
+            analyzer_text: Arc::new(StaticText::default()),
+            analyzer_vision: Arc::new(StaticVision::default()),
+            verifier_text: Arc::new(StaticText::default()),
+            verifier_vision: Arc::new(StaticVision::default()),
+        };
+        probe
+            .analyzer_text
+            .responses
+            .lock()
+            .await
+            .push(analysis.to_string());
+        probe
+            .analyzer_vision
+            .responses
+            .lock()
+            .await
+            .push(analysis.to_string());
+        probe
+            .verifier_text
+            .responses
+            .lock()
+            .await
+            .push(verification.to_string());
+        probe
+            .verifier_vision
+            .responses
+            .lock()
+            .await
+            .push(verification.to_string());
+        let port = Arc::new(CountingPort::default());
+        let moderator = ModerationSystem::new_with_store(
+            MemoryStore::default(),
+            ContentModerationPipeline::new(
+                ContentAnalyzer::new(
+                    probe.analyzer_text.clone(),
+                    Some(probe.analyzer_vision.clone()),
+                    ContentAnalyzerConfig {
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
+                        image_model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
+                ContentVerifier::new(
+                    probe.verifier_text.clone(),
+                    Some(probe.verifier_vision.clone()),
+                    Default::default(),
+                ),
+            ),
+            behavior_detector,
+            ActionPolicy::new(ActionPolicyConfig::default()),
+            port.clone(),
+            ModerationSystemConfig {
+                scan_channel_ids,
+                moderation_channel_id: 99,
+                enforce: true,
+            },
+        );
+        (moderator, port, probe)
     }
 
     async fn memory_moderator(
@@ -1393,7 +1456,6 @@ mod tests {
                     },
                 ),
                 ContentVerifier::new(verifier_text, None, Default::default()),
-                0.5,
             ),
             behavior_detector,
             ActionPolicy::new(ActionPolicyConfig::default()),
@@ -1449,7 +1511,6 @@ mod tests {
                         model: "gpt-5.4-nano".to_string(),
                     },
                 ),
-                0.5,
             ),
             behavior_detector,
             ActionPolicy::new(ActionPolicyConfig::default()),
@@ -1476,7 +1537,8 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: "free crypto".into(),
-            message_created_at: 1_000,
+            message_created_at: chrono::DateTime::from_timestamp(1_000, 0)
+                .expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,
@@ -1548,7 +1610,7 @@ mod tests {
         let mut event = scanned_text_event(message_id, "lfg wer hat bock auf ranked");
         event.author_id = user_id;
         event.channel_id = channel_id;
-        event.message_created_at = chrono::Utc::now().timestamp();
+        event.message_created_at = chrono::Utc::now();
         event.attachment_count = 1;
         event.image_attachment_count = 0;
         event.image_attachment_urls = Vec::new();
@@ -1639,53 +1701,71 @@ mod tests {
         assert_eq!(config.scan_channel_ids, DEFAULT_SCAN_CHANNEL_IDS);
     }
 
+    async fn send_unpersistable_takeover_wave(moderator: &Arc<ModerationSystem>) {
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+        for (channel_id, message_id) in [(10, 1000), (11, 1001)] {
+            let mut event = image_event(200, channel_id, message_id, created_at, joined_at);
+            event.guild_id = event_with_unpersistable_guild().guild_id;
+            moderator.handle_message(&event).await;
+        }
+    }
+
     #[tokio::test]
     async fn auto_execute_does_not_delete_or_timeout_when_case_persist_fails() {
-        let (moderator, port) = moderator_with_responses(
+        let (moderator, port, verifier) = moderator_with_responses(
             r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#,
             r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#,
         )
         .await;
 
-        moderator
-            .handle_message(&event_with_unpersistable_guild())
-            .await;
+        send_unpersistable_takeover_wave(&moderator).await;
 
+        assert_eq!(verifier.calls.load(Ordering::Relaxed), 1);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
     async fn proposal_does_not_post_review_with_fake_case_when_case_persist_fails() {
-        let (moderator, port) = moderator_with_responses(
-            r#"{"category":"harassment","confidence":0.9,"reason":"Analyzer"}"#,
-            r#"{"confirmed":true,"category":"harassment","confidence":0.9,"reason":"Verifier"}"#,
+        let (moderator, port, verifier) = moderator_with_responses(
+            r#"{"category":"scam","confidence":0.7,"reason":"Analyzer"}"#,
+            r#"{"confirmed":true,"category":"scam","confidence":0.7,"reason":"Verifier"}"#,
         )
         .await;
 
-        moderator
-            .handle_message(&event_with_unpersistable_guild())
-            .await;
+        send_unpersistable_takeover_wave(&moderator).await;
 
+        assert_eq!(verifier.calls.load(Ordering::Relaxed), 1);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
     async fn shadow_mode_persists_and_posts_without_discord_enforcement_actions() {
-        let (moderator, port) = memory_moderator(
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_image_moderator(
             &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
             &[r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#],
-            None,
+            Some(detector),
             vec![42],
             false,
         )
         .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
 
         moderator
-            .handle_message(&scanned_text_event(101, "free crypto"))
+            .handle_message(&image_event(210, 10, 1010, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(210, 11, 1011, created_at, joined_at))
             .await;
 
         assert_eq!(moderator.store.drafts.lock().await.len(), 1);
@@ -1702,13 +1782,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_enforce_mode_executes_auto_action() {
-        let (moderator, port) = memory_moderator(
-            &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
-            &[r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#],
+    async fn scan_channel_text_without_behavior_signal_skips_ai_and_case() {
+        let (moderator, port, probe) = probe_moderator(
+            r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#,
+            r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#,
             None,
             vec![42],
-            true,
         )
         .await;
 
@@ -1716,50 +1795,58 @@ mod tests {
             .handle_message(&scanned_text_event(102, "free crypto"))
             .await;
 
-        assert_eq!(moderator.store.drafts.lock().await.len(), 1);
-        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
-        assert_eq!(port.timeouts.load(Ordering::Relaxed), 1);
-        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
-        assert_eq!(port.timeout_minutes.lock().await.as_slice(), &[1440]);
-    }
-
-    #[tokio::test]
-    async fn weak_hero_player_trash_talk_does_not_create_review_case() {
-        let (moderator, port) = memory_moderator(
-            &[r#"{"category":"harassment","confidence":0.55,"reason":"Analyzer"}"#],
-            &[r#"{"confirmed":true,"category":"harassment","confidence":0.78,"reason":"Verifier"}"#],
-            None,
-            vec![42],
-            true,
-        )
-        .await;
-
-        moderator
-            .handle_message(&scanned_text_event(
-                103,
-                "haze spieler benutzen nicht viel von ihrem gehirn das passt so",
-            ))
-            .await;
-
-        let drafts = moderator.store.drafts.lock().await;
-        assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].action, "ignored");
+        assert_eq!(probe.calls(), 0);
+        assert!(moderator.store.drafts.lock().await.is_empty());
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn scan_channel_image_without_behavior_signal_skips_ai_and_case() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port, probe) = probe_moderator(
+            r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#,
+            r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#,
+            Some(detector),
+            vec![42],
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+
+        moderator
+            .handle_message(&image_event(
+                230,
+                42,
+                1030,
+                now - 100_000 * 3600,
+                Some(now - 3_000 * 3600),
+            ))
+            .await;
+
+        assert_eq!(probe.calls(), 0);
+        assert!(moderator.store.drafts.lock().await.is_empty());
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
     async fn ignored_policy_decision_is_logged_and_persisted_without_discord_action() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_moderator(
             &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
             &[r#"{"confirmed":false,"category":"scam","confidence":0.95,"reason":"Nicht bestaetigt"}"#],
-            None,
+            Some(detector),
             vec![42],
             true,
         )
         .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
@@ -1769,7 +1856,14 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
 
         moderator
-            .handle_message(&scanned_text_event(104, "free crypto"))
+            .handle_message(&burst_text_attachment_event(
+                402, 10, 1040, created_at, joined_at,
+            ))
+            .await;
+        moderator
+            .handle_message(&burst_text_attachment_event(
+                402, 11, 1041, created_at, joined_at,
+            ))
             .await;
         drop(guard);
 
@@ -1781,14 +1875,18 @@ mod tests {
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         let logs = capture.text();
-        assert!(logs.contains("input=free crypto"), "{logs}");
+        assert!(logs.contains("input=lfg wer hat bock auf ranked"), "{logs}");
         assert!(logs.contains("verdict=ignore"), "{logs}");
         assert!(logs.contains("reason=Nicht bestaetigt"), "{logs}");
     }
 
     #[tokio::test]
     async fn missing_content_verdict_is_logged_and_persisted_without_discord_action() {
-        let (moderator, port) = memory_moderator(&[], &[], None, vec![42], true).await;
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![42], true).await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
@@ -1798,7 +1896,14 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
 
         moderator
-            .handle_message(&scanned_text_event(105, "free crypto"))
+            .handle_message(&burst_text_attachment_event(
+                403, 10, 1050, created_at, joined_at,
+            ))
+            .await;
+        moderator
+            .handle_message(&burst_text_attachment_event(
+                403, 11, 1051, created_at, joined_at,
+            ))
             .await;
         drop(guard);
 
@@ -1812,7 +1917,7 @@ mod tests {
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         let logs = capture.text();
         assert!(logs.contains("ERROR"), "{logs}");
-        assert!(logs.contains("input=free crypto"), "{logs}");
+        assert!(logs.contains("input=lfg wer hat bock auf ranked"), "{logs}");
         assert!(logs.contains("verdict=ignore"), "{logs}");
         assert!(logs.contains("reason=parse_error"), "{logs}");
     }
@@ -2099,7 +2204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn takeover_scam_with_unconfirmed_scam_verifier_is_rechecked_and_enforced() {
+    async fn takeover_unconfirmed_scam_verifier_is_not_rechecked_or_enforced() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_image_moderator(
             &[r#"{"category":"scam","confidence":0.92,"reason":"Krypto-Bonus, Promo-Code und Auszahlung als Scam-Muster"}"#],
@@ -2123,26 +2228,21 @@ mod tests {
             .handle_message(&image_event(201, 11, 1101, created_at, joined_at))
             .await;
 
-        assert_eq!(port.bans.load(Ordering::Relaxed), 1);
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
-        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
-        assert_eq!(draft.action, "auto_execute");
-        assert_eq!(draft.category, "scam");
+        assert_eq!(draft.action, "ignored");
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
-        let record = moderator.store.fetch_case("case-1101").await.expect("case");
-        assert_eq!(record.action, "auto_ban");
     }
 
     #[tokio::test]
-    async fn takeover_repeated_scam_verifier_contradiction_routes_to_manual_review() {
+    async fn takeover_negated_scam_hint_in_reason_creates_no_review_card() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_image_moderator(
-            &[r#"{"category":"scam","confidence":0.92,"reason":"Sichtbarer Krypto-Scam"}"#],
-            &[
-                r#"{"confirmed":false,"category":"harassment","confidence":0.91,"reason":"Sichtbarer Scam mit Promo-Code"}"#,
-                r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Typisches Betrugs-/Scam-Muster mit Promo-Code"}"#,
-            ],
+            &[r#"{"category":"other","confidence":0.92,"reason":"Kein Phishing und kein Scam-Muster, normaler Gameplay-Screenshot"}"#],
+            &[r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Kein sichtbarer Scam, kein Phishing, nur Gameplay"}"#],
             Some(detector),
             vec![777],
             true,
@@ -2162,35 +2262,10 @@ mod tests {
         assert_eq!(port.bans.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
-        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
-        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
-        assert_eq!(draft.action, "proposed");
-        assert_eq!(draft.timeout_minutes, Some(60));
-        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
-    }
-
-    #[tokio::test]
-    async fn content_scan_stays_limited_to_scan_channels() {
-        // Ohne Verhaltens-Detektor bleibt nur der Content-Pfad — der darf außerhalb
-        // der scan_channel_ids NICHT feuern (LLM-Scan bleibt gezielt).
-        let (moderator, port) = memory_moderator(
-            &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
-            &[r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#],
-            None,
-            vec![777],
-            true,
-        )
-        .await;
-
-        // scanned_text_event postet in Kanal 42 — nicht in scan_channel_ids [777].
-        moderator
-            .handle_message(&scanned_text_event(500, "free crypto"))
-            .await;
-
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
-        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
-        assert_eq!(moderator.store.drafts.lock().await.len(), 0);
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.action, "ignored");
+        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
     }
 
     #[tokio::test]
@@ -2502,7 +2577,6 @@ mod tests {
                         model: "gpt-5.4-nano".to_string(),
                     },
                 ),
-                0.5,
             ),
             Some(detector.clone()),
             ActionPolicy::new(ActionPolicyConfig::default()),

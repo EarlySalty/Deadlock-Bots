@@ -13,6 +13,7 @@ mod handlers;
 mod idempotency;
 pub mod payload;
 pub mod port;
+pub mod twitch_invites;
 
 use std::collections::HashSet;
 use std::sync::Arc;

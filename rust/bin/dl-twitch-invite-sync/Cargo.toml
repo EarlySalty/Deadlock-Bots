@@ -8,6 +8,7 @@ testing = ["dl-central-db/testing"]
 
 [dependencies]
 dl-central-db.workspace = true
+dl-core.workspace = true
 dl-activity.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
