@@ -1158,6 +1158,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge
             .import_legacy_pate_requests()
             .await
+            .map_err(anyhow::Error::msg)
             .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
         concierge.ensure_pate_leitfaden(repository_root).await;
         let paten_inventar = concierge.paten_inventar(our_guild_id).await;
