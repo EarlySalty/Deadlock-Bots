@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .context("Zentraler DB-Zugang fehlt im privaten Infisical-Snapshot.")?;
     let central_pool = dl_central_db::connect_pool(central_dsn)
         .await
-        .context("zentrale DB verbinden")?;
+        .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?;
 
     let dashboard = DashboardClient::new(
         web_cfg.dashboard_base.clone(),

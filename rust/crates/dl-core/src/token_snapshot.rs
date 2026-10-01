@@ -70,7 +70,7 @@ mod tests {
             .take()
             .unwrap()
             .write_all(
-                br#"{"DEADLOCK_CENTRAL_DSN":"synthetic-dsn","DISCORD_TOKEN":"synthetic-token"}"#,
+                br#"{"DEADLOCK_CENTRAL_DSN":"synthetic-dsn","DISCORD_TOKEN":"synthetic-token","EMPTY_DSN":"  "}"#,
             )
             .unwrap();
         assert!(child.wait().unwrap().success());
@@ -89,6 +89,7 @@ mod tests {
         assert!(crate::runtime_config::secret_value("MASTER_BROKER_TOKEN").is_none());
         assert!(crate::runtime_config::secret_value("RUST_LOG").is_none());
         assert!(value("MISSING_DSN").is_none());
+        assert!(value("EMPTY_DSN").is_none());
         assert!(load(&config).is_err());
     }
 }

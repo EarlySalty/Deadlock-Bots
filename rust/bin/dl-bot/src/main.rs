@@ -475,7 +475,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .context("Zentraler DB-Zugang fehlt im privaten Infisical-Snapshot.")?;
     let central_pool = dl_central_db::connect_pool(central_dsn)
         .await
-        .context("zentrale DB verbinden")?;
+        .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?;
     tracing::info!("Zentrale DB verbunden");
 
     // Discord-Adapter (REST sofort, Cache erst mit Gateway)
