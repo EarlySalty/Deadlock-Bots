@@ -26,8 +26,8 @@ struct Config {
     #[serde(default)]
     credential_path: Option<PathBuf>,
     socket_path: PathBuf,
-    #[serde(default)]
-    database_secret: String,
+    #[serde(default, rename = "database_secret")]
+    _database_secret: String,
 }
 
 #[derive(Deserialize)]
@@ -60,22 +60,6 @@ impl Drop for Entry {
 
 fn default_credential_name() -> String {
     "infisical-token".to_string()
-}
-
-pub async fn database_dsn(path: &Path) -> Result<Zeroizing<String>> {
-    let config = load_config(path)?;
-    let database_secret = config.database_secret.clone();
-    if let Some(fd) = config.secret_values_fd {
-        return pipe_values(fd)?
-            .into_iter()
-            .find(|(name, _)| name == &database_secret)
-            .map(|(_, value)| value)
-            .ok_or_else(|| anyhow!("Datenbankzugang fehlt in Infisical."));
-    }
-    let mut values = fetch_values(config).await?;
-    values
-        .remove(&database_secret)
-        .ok_or_else(|| anyhow!("Datenbankzugang fehlt in Infisical."))
 }
 
 pub async fn values(path: &Path) -> Result<Vec<(String, Zeroizing<String>)>> {
