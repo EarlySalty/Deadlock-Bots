@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use serde::Deserialize;
+use std::io::Read;
+use std::os::unix::fs::FileTypeExt;
 use std::{
     collections::BTreeMap,
     os::unix::fs::FileExt,
@@ -12,6 +14,8 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    #[serde(default)]
+    secret_values_fd: Option<i32>,
     project_id: String,
     environment: String,
     secret_path: String,
@@ -61,6 +65,13 @@ fn default_credential_name() -> String {
 pub async fn database_dsn(path: &Path) -> Result<Zeroizing<String>> {
     let config = load_config(path)?;
     let database_secret = config.database_secret.clone();
+    if let Some(fd) = config.secret_values_fd {
+        return pipe_values(fd)?
+            .into_iter()
+            .find(|(name, _)| name == &database_secret)
+            .map(|(_, value)| value)
+            .ok_or_else(|| anyhow!("Datenbankzugang fehlt in Infisical."));
+    }
     let mut values = fetch_values(config).await?;
     values
         .remove(&database_secret)
@@ -69,8 +80,82 @@ pub async fn database_dsn(path: &Path) -> Result<Zeroizing<String>> {
 
 pub async fn values(path: &Path) -> Result<Vec<(String, Zeroizing<String>)>> {
     let config = load_config(path)?;
+    values_with_config(config).await
+}
+
+/// Trusted launchers parse the already-opened normal config, preventing races.
+pub async fn values_from_config(bytes: &[u8]) -> Result<Vec<(String, Zeroizing<String>)>> {
+    let config: Config = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow!("Infisical Konfiguration ist ungültig."))?;
+    values_with_config(config).await
+}
+
+async fn values_with_config(config: Config) -> Result<Vec<(String, Zeroizing<String>)>> {
+    if let Some(fd) = config.secret_values_fd {
+        return pipe_values(fd);
+    }
     let values = fetch_values(config).await?;
     Ok(values.into_iter().collect())
+}
+
+fn pipe_values(fd: i32) -> Result<Vec<(String, Zeroizing<String>)>> {
+    if fd < 3 {
+        return Err(anyhow!("Private Secret-Pipe fehlt."));
+    }
+    let descriptor = filedescriptor::FileDescriptor::dup(&fd)
+        .map_err(|_| anyhow!("Private Secret-Pipe ist nicht verfügbar."))?;
+    let mut file = descriptor
+        .as_file()
+        .map_err(|_| anyhow!("Private Secret-Pipe ist nicht lesbar."))?;
+    if !file
+        .metadata()
+        .map_err(|_| anyhow!("Private Secret-Pipe ist nicht prüfbar."))?
+        .file_type()
+        .is_fifo()
+    {
+        return Err(anyhow!("Secretquelle muss eine private Pipe sein."));
+    }
+    let flags =
+        fcntl(fd, FcntlArg::F_GETFD).map_err(|_| anyhow!("Secret-Pipe ist nicht verfügbar."))?;
+    fcntl(
+        fd,
+        FcntlArg::F_SETFD(FdFlag::from_bits_retain(flags) | FdFlag::FD_CLOEXEC),
+    )
+    .map_err(|_| anyhow!("Secret-Pipe konnte nicht geschützt werden."))?;
+    let mut body = Zeroizing::new(Vec::new());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        use nix::poll::{poll, PollFd, PollFlags};
+        use std::os::fd::AsFd;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout = u16::try_from(remaining.as_millis()).unwrap_or(u16::MAX);
+        let mut descriptors = [PollFd::new(file.as_fd(), PollFlags::POLLIN)];
+        if timeout == 0
+            || poll(&mut descriptors, timeout)
+                .map_err(|_| anyhow!("Secret-Pipe wurde unterbrochen."))?
+                == 0
+        {
+            return Err(anyhow!("Secret-Pipe antwortet nicht rechtzeitig."));
+        }
+        let mut buffer = Zeroizing::new([0u8; 65536]);
+        let length = file
+            .read(buffer.as_mut())
+            .map_err(|_| anyhow!("Secret-Pipe wurde unterbrochen."))?;
+        if length == 0 {
+            break;
+        }
+        if body.len().saturating_add(length) > 2 * 1024 * 1024 {
+            return Err(anyhow!("Secret-Pipe ist zu groß."));
+        }
+        body.extend_from_slice(&buffer[..length]);
+    }
+    let mut values: BTreeMap<String, String> =
+        serde_json::from_slice(&body).map_err(|_| anyhow!("Secret-Pipe ist ungültig."))?;
+    let result = values
+        .iter_mut()
+        .map(|(name, value)| (name.clone(), Zeroizing::new(std::mem::take(value))))
+        .collect();
+    Ok(result)
 }
 
 fn load_config(path: &Path) -> Result<Config> {
@@ -177,7 +262,7 @@ fn load_credential(config: &Config) -> Result<Zeroizing<Vec<u8>>> {
             let file = descriptor
                 .as_file()
                 .map_err(|_| anyhow!("Infisical Credential FD ist nicht lesbar."))?;
-            return read_credential(file);
+            return read_credential(&file);
         }
     }
 
