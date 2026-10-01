@@ -14,14 +14,14 @@ Master-Key, OAuth-Anwendungssecrets, Datenbankverbindung und Infisical-Bootstrap
 
 Die zusammengehörigen Worktrees liegen als Geschwister unter /home/nathanael/.worktrees/token-db-local-20260930/. Die vorhandenen relativen Abhängigkeiten auf Deadlock-Bots und tb-crypto werden dort wiederverwendet. Quellkopien, ein zweites Kryptopaket und Änderungen an geteilten Checkouts sind nicht nötig. Alle Rust-Prüfungen verwenden den vorhandenen sccache und die gemeinsame Zwischenablage /home/nathanael/.cache/rust-build/{workspace-path-hash}.
 
-Produktive Datenbanken und Konten wurden für diesen Arbeitsstand nicht migriert. Änderungen sind keine Aussage über die laufenden Dienste. Tests dürfen nur explizite Wegwerf-Datenbanken und synthetische Konten verwenden.
+Ein Quellstand allein belegt keinen produktiven Cutover. Migrationen, Neustarts und Wiederaufnahme müssen im Betriebsnachweis zusammen bestätigt sein. Tests dürfen nur explizite Wegwerf-Datenbanken und synthetische Konten verwenden.
 
 ## Späterer koordinierter Cutover
 
 1. Zugehörige neue Leser und Writer gemeinsam bereitstellen, vorhandene verschlüsselte Sicherung und Wiederherstellungsweg prüfen. Keine angewandte Migration ändern.
 2. Alte Writer anhalten. Neue zentrale Schema-Migrationen anwenden. Gehashte Session-IDs nicht mit einem alten Consumer mischen. Bestehende Restore-/ETL-Werkzeuge vor einem Import auf das neue Tokenformat abstimmen; die Constraints lehnen Rohwerte ab.
 3. Bestehende Steam-Guard-Werte ausdrücklich per privater Pipe an das Beispielprogramm import_guard im Steam-Core geben. Es nutzt dieselbe Kontokonfiguration und denselben Secret-Launcher wie der Dienst. Gleiche Freigaben dürfen erneut importiert werden, andere bestehende Werte und Widerrufe werden nicht überschrieben. Keine alten Dateien durch den Agenten öffnen.
-4. VOD-Resume-Werte vor dem Start mit dem Beispiel migrate_resume_sessions im Twitch-VOD-Paket und beim separaten Archiv mit --migrate-token-storage transaktional umstellen. Danach den NOT-VALID-Constraint der Twitch-Tabelle validieren. Ein Fehler lässt den jeweiligen Migrationsbestand unverändert. Abgeschlossene Uploads behalten ihre Video-ID.
+4. VOD-Resume-Werte vor dem Start mit dem auf bereits geladenen Bot-Secrets beruhenden Wartungsmodus tb-bot --config <normale Config> --migrate-token-storage --apply und beim separaten Archiv mit --migrate-token-storage transaktional umstellen. Danach den NOT-VALID-Constraint der Twitch-Tabelle validieren. Ein Fehler lässt den jeweiligen Migrationsbestand unverändert. Abgeschlossene Uploads behalten ihre Video-ID.
 5. Kontozuordnung, Entschlüsselung und Neustart-Wiederaufnahme prüfen. Erst danach alte Credential-Dateien oder Bootstrap-Kontotokens kontrolliert außer Betrieb nehmen. Die vorhandenen Dateien werden hier weder gelöscht noch als Backup verdoppelt.
 
 Ein Code-Rollback allein reicht nach einem irreversiblen Hash-Cutover nicht. Entweder die neuen Lookup-Verträge beibehalten oder gemeinsam auf einen zuvor geprüften Datenbankstand zurückgehen. Ein nicht durchgeführter Restore-Test ist keine bestätigte Rollback-Fähigkeit.
