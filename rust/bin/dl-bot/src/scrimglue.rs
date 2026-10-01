@@ -1909,6 +1909,7 @@ async fn save_match_request_posts(
     }
 
     let mut tx = pool.begin().await?;
+    lock_match_request_batch_tx(&mut tx, i32::try_from(batch_id)?).await?;
     for (request_id, message_ids) in by_request {
         sqlx::query(
             r#"
@@ -3116,7 +3117,7 @@ async fn mark_expired_discord_effect_leases_uncertain(
     sender: &dyn ScrimDiscordEffectSender,
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
         UPDATE scrim.outbox_effects
            SET state = 'uncertain',
@@ -3129,12 +3130,33 @@ async fn mark_expired_discord_effect_leases_uncertain(
            AND state = 'leased'
            AND lease_until <= now()
          RETURNING id, attempts, payload_hash, payload ->> 'message_kind' AS effect_type,
-                   last_error_code
+                   payload, last_error_code
         "#,
     )
     .bind(scrim_payload_hash(&json!({"error": "lease_expired"})))
     .fetch_all(&mut *tx)
     .await?;
+    rows.sort_by_key(|row| {
+        let payload = row.get::<Value, _>("payload");
+        let batch_id = parse_match_request_effect_context(&payload)
+            .map(|context| context.batch_id)
+            .unwrap_or(i32::MIN);
+        (batch_id, row.get::<i64, _>("id"))
+    });
+    let mut batch_ids = rows
+        .iter()
+        .filter_map(|row| {
+            let payload = row.get::<Value, _>("payload");
+            parse_match_request_effect_context(&payload)
+                .ok()
+                .map(|context| context.batch_id)
+        })
+        .collect::<Vec<_>>();
+    batch_ids.sort_unstable();
+    batch_ids.dedup();
+    for batch_id in batch_ids {
+        lock_match_request_batch_tx(&mut tx, batch_id).await?;
+    }
     for row in &rows {
         let id = row.get::<i64, _>("id");
         let attempts = row.get::<i32, _>("attempts");
@@ -3905,12 +3927,57 @@ impl DiscordDeliveryReceipt {
     }
 }
 
+async fn lock_match_request_batch_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    batch_id: i32,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT id FROM scrim.match_request_batches WHERE id = $1 FOR UPDATE")
+        .bind(batch_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| anyhow!("match_request batch {batch_id} fehlt"))?;
+    Ok(())
+}
+
+async fn refresh_match_request_batch_status_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    batch_id: i32,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE scrim.match_request_batches batch
+           SET status = CASE
+                   WHEN batch.status NOT IN ('draft', 'posting', 'post_failed', 'open')
+                       THEN batch.status
+                   WHEN EXISTS (
+                       SELECT 1 FROM scrim.match_requests request
+                        WHERE request.batch_id = batch.id
+                          AND request.status = 'post_failed'
+                   ) THEN 'post_failed'
+                   WHEN NOT EXISTS (
+                       SELECT 1 FROM scrim.match_requests request
+                        WHERE request.batch_id = batch.id
+                          AND request.status <> 'open'
+                   ) THEN 'open'
+                   ELSE 'posting'
+               END,
+               updated_at = now()
+         WHERE batch.id = $1
+        "#,
+    )
+    .bind(batch_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn record_match_request_effect_delivery_tx(
     tx: &mut Transaction<'_, Postgres>,
     context: MatchRequestEffectContext,
     channel_id: u64,
     message_id: u64,
 ) -> anyhow::Result<()> {
+    lock_match_request_batch_tx(tx, context.batch_id).await?;
     let row = sqlx::query(
         r#"
         SELECT batch_id, team_a_id, team_b_id, status, team_query_message_ids
@@ -3988,31 +4055,7 @@ async fn record_match_request_effect_delivery_tx(
     .execute(&mut **tx)
     .await?;
 
-    sqlx::query(
-        r#"
-        UPDATE scrim.match_request_batches batch
-           SET status = CASE
-                   WHEN batch.status NOT IN ('draft', 'posting', 'post_failed', 'open')
-                       THEN batch.status
-                   WHEN EXISTS (
-                       SELECT 1 FROM scrim.match_requests request
-                        WHERE request.batch_id = batch.id
-                          AND request.status = 'post_failed'
-                   ) THEN 'post_failed'
-                   WHEN NOT EXISTS (
-                       SELECT 1 FROM scrim.match_requests request
-                        WHERE request.batch_id = batch.id
-                          AND request.status <> 'open'
-                   ) THEN 'open'
-                   ELSE 'posting'
-               END,
-               updated_at = now()
-         WHERE batch.id = $1
-        "#,
-    )
-    .bind(batch_id)
-    .execute(&mut **tx)
-    .await?;
+    refresh_match_request_batch_status_tx(tx, batch_id).await?;
     Ok(())
 }
 
@@ -4131,6 +4174,7 @@ async fn mark_match_request_effect_failed_tx(
     let Ok(context) = parse_match_request_effect_context(&payload) else {
         return Ok(());
     };
+    lock_match_request_batch_tx(tx, context.batch_id).await?;
     let updated = sqlx::query(
         r#"
         UPDATE scrim.match_requests
@@ -7267,6 +7311,131 @@ mod tests {
                 .await?;
         assert_eq!(request_status, MATCH_REQUEST_STATUS_POST_FAILED);
         assert_eq!(batch_status, MATCH_REQUEST_STATUS_POST_FAILED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_outbox_failure_locks_batch_before_request() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        sqlx::query("UPDATE scrim.match_request_batches SET status='posting' WHERE id=30")
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='posting' WHERE id=31")
+            .execute(pool)
+            .await?;
+        let body = match_request_body(
+            31,
+            1,
+            "Terminabfrage A",
+            &json!([{"day":"sat","from":960,"to":1080}]),
+        )?;
+        let payload = match_request_discord_effect_payload(30, 31, 1, 100, &body);
+        insert_discord_effect(pool, "discord:test_lock_order", &payload, "pending").await?;
+        let outbox_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM scrim.outbox_effects WHERE idempotency_key='discord:test_lock_order'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let mut batch_tx = pool.begin().await?;
+        sqlx::query("SELECT id FROM scrim.match_request_batches WHERE id=30 FOR UPDATE")
+            .fetch_one(&mut *batch_tx)
+            .await?;
+        let pool_for_failure = pool.clone();
+        let mut failure = tokio::spawn(async move {
+            let mut tx = pool_for_failure.begin().await?;
+            mark_match_request_effect_failed_tx(&mut tx, outbox_id).await?;
+            tx.commit().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut failure)
+            .await
+            .is_err());
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *batch_tx)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='open' WHERE id=31")
+            .execute(&mut *batch_tx)
+            .await?;
+        batch_tx.commit().await?;
+        failure.await??;
+
+        assert_eq!(
+            match_request_status(pool, 31).await?,
+            MATCH_REQUEST_STATUS_POST_FAILED
+        );
+        assert_eq!(
+            match_request_batch_status(pool, 30).await?,
+            MATCH_REQUEST_STATUS_POST_FAILED
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_request_outbox_delivery_recomputes_batch_after_lock_wait() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        insert_team(pool, 1, Some(100)).await?;
+        insert_team(pool, 2, Some(200)).await?;
+        insert_match_request_batch(pool, 30).await?;
+        sqlx::query("UPDATE scrim.match_request_batches SET status='posting' WHERE id=30")
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='posting' WHERE id=31")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.match_requests(
+                id, batch_id, team_a_id, team_b_id, status, slot_options, created_at, updated_at
+            )
+            VALUES(
+                32, 30, 1, NULL, 'posting',
+                '[{"day":"sat","from":960,"to":1080}]'::jsonb, now(), now()
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        let mut batch_tx = pool.begin().await?;
+        sqlx::query("SELECT id FROM scrim.match_request_batches WHERE id=30 FOR UPDATE")
+            .fetch_one(&mut *batch_tx)
+            .await?;
+        sqlx::query("UPDATE scrim.match_requests SET status='open' WHERE id=31")
+            .execute(&mut *batch_tx)
+            .await?;
+        let pool_for_delivery = pool.clone();
+        let mut delivery = tokio::spawn(async move {
+            let mut tx = pool_for_delivery.begin().await?;
+            record_match_request_effect_delivery_tx(
+                &mut tx,
+                MatchRequestEffectContext {
+                    batch_id: 30,
+                    request_id: 32,
+                    team_id: 1,
+                },
+                100,
+                9002,
+            )
+            .await?;
+            tx.commit().await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut delivery)
+            .await
+            .is_err());
+        batch_tx.commit().await?;
+        delivery.await??;
+
+        assert_eq!(match_request_status(pool, 32).await?, MATCH_REQUEST_STATUS_OPEN);
+        assert_eq!(match_request_batch_status(pool, 30).await?, MATCH_REQUEST_STATUS_OPEN);
         Ok(())
     }
 
