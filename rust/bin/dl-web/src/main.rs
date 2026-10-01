@@ -12,6 +12,7 @@ use dl_webcore::{DashboardClient, WebConfig};
 async fn main() -> anyhow::Result<()> {
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let operating = dl_core::config::process_bot_config()?;
+    dl_core::token_snapshot::load(operating.source()).map_err(anyhow::Error::msg)?;
     dl_core::observability::init_tracing(
         operating
             .snapshot()
@@ -26,8 +27,9 @@ async fn main() -> anyhow::Result<()> {
         "Betriebskonfiguration geladen"
     );
     let web_cfg = WebConfig::from_env();
-    let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
-    let central_pool = dl_central_db::connect_pool(&central_dsn)
+    let central_dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
+        .context("Zentraler DB-Zugang fehlt im privaten Infisical-Snapshot.")?;
+    let central_pool = dl_central_db::connect_pool(central_dsn)
         .await
         .context("zentrale DB verbinden")?;
 

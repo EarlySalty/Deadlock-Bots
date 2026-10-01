@@ -1513,6 +1513,7 @@ dependencies = [
 name = "dl-core"
 version = "0.1.0"
 dependencies = [
+ "dl-token-secrets",
  "fs2",
  "libc",
  "serde",
@@ -1525,6 +1526,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zeroize",
 ]
 
 [[package]]

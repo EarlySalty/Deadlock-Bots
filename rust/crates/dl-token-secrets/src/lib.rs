@@ -67,6 +67,16 @@ pub async fn values(path: &Path) -> Result<Vec<(String, Zeroizing<String>)>> {
     values_with_config(config).await
 }
 
+/// Betroffene Token-DB-Dienste akzeptieren ausschließlich den privaten FD3-
+/// Snapshot. Fehlende Metadaten dürfen keinen anderen Secrettransport wählen.
+pub fn private_values(path: &Path) -> Result<Vec<(String, Zeroizing<String>)>> {
+    let config = load_config(path)?;
+    if config.secret_values_fd != Some(3) {
+        return Err(anyhow!("Privater Infisical-Snapshot auf FD3 erforderlich."));
+    }
+    pipe_values(3)
+}
+
 /// Trusted launchers parse the already-opened normal config, preventing races.
 pub async fn values_from_config(bytes: &[u8]) -> Result<Vec<(String, Zeroizing<String>)>> {
     let config: Config = serde_json::from_slice(bytes)
@@ -300,6 +310,23 @@ fn read_credential(file: &std::fs::File) -> Result<Zeroizing<Vec<u8>>> {
 mod tests {
     use super::*;
     use std::io::{Seek, Write};
+
+    #[test]
+    fn private_start_refuses_credential_and_other_fd_sources_before_access() {
+        for fd in [None, Some(4)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("infisical.json");
+            let config = serde_json::json!({
+                "secret_values_fd": fd, "project_id":"fixture", "environment":"fixture",
+                "secret_path":"/", "socket_path":"/nonexistent", "credential_path":"/nonexistent"
+            });
+            std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(private_values(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("FD3"));
+        }
+    }
 
     #[test]
     fn credential_reads_preserve_offset_and_allow_repeated_pool_setup() {
