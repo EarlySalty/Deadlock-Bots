@@ -1,18 +1,23 @@
 # Paten-Integration auf aktuellem Bot-Main
 
-Der Paten-Code ist auf den aktuellen Main-Stand portiert. Die produktive
-Betriebskonfiguration wird als TOML geladen; das frühere
-`scripts/run_dl_bot_service.sh` ist kein Startpfad mehr. Die mitgelieferte
-`config/bot.toml` schaltet Concierge und proaktive DMs unter
+Der Paten-Code ist auf den aktuellen Main-Stand portiert. Der gemessene
+produktive Startpfad ist weiterhin das hostlokale
+`scripts/run_dl_bot_service.sh`; es startet `dl-bot` mit
+`--config ~/.config/deadlock-bots/bot.toml`. Das Startskript ist hostlokal und
+nicht Teil dieses Repositories. Die produktive Betriebskonfiguration wird als
+TOML geladen; die mitgelieferte `config/bot.toml` schaltet Concierge und proaktive DMs unter
 `[runtime.community]` ein. Sie ist laut Kopfkommentar nur eine Vorlage; beim
 Release müssen dieselben Werte in der tatsächlichen Betriebs-TOML stehen.
 Der Bot-Release allein belegt noch keine automatische Begrüßung.
 
-Nach unabhängigem Review zuerst die additiven Migrationen
+Nach unabhängigem Review zuerst alle vier additiven Migrationen
 `2026090918_concierge_pate_requests.sql` und
 `2026090919_team_applications_pate_kind.sql` sowie die additive
-`2026090920_concierge_pate_dm_retry.sql` mit dem zentralen Migrator anwenden.
-Erst danach den Bot aus dem geprüften Main bauen. Für eine kontrollierte Probe
+`2026090920_concierge_pate_dm_retry.sql` und
+`2026100101_concierge_pate_optout_close.sql` in dieser Reihenfolge mit dem
+zentralen Migrator anwenden. Keine historische Migration überspringen oder
+ersetzen. Erst nachdem alle vier Migrationen erfolgreich angewandt und
+validiert sind, den Bot aus dem geprüften Main bauen. Für eine kontrollierte Probe
 in der tatsächlichen Betriebs-TOML unter `[runtime.community]`
 `concierge_enabled = true`, `concierge_proactive = true` und eine ausdrücklich
 festgelegte `concierge_test_users`-Liste setzen. Der Wert liegt in der TOML,
@@ -51,7 +56,8 @@ unsicher: Ein erneuter Versuch kann im Grenzfall eine zweite DM erzeugen.
 Eine stabile Discord-Nonce mit `enforce_nonce` vermeidet unmittelbare
 Doppelzustellungen innerhalb des von Discord angebotenen kurzen Fensters.
 
-Validierung dieses Portstands: alle drei Migrationen auf einer Wegwerf-DB
-erfolgreich; `dl-community --features testing` 473 grün, zwei bekannte
-Baseline-Fehler in Coaching-ACK-Timing und Reaction-Roles-Teardown; der
-gezielte `dl-bot`-Test für TOML → `concierge_proactive` ist grün.
+Validierung des Bot-Stands 661cf86b: alle vier Migrationen in der vollständigen
+Reihenfolge auf einer Wegwerf-DB erfolgreich; Paten-Suite 57 grün, Opt-out-
+Suite 59 grün und TOML-Snapshot-Test grün. Die Wiederaufnahme der Bot-ID nach
+READY ist im Folgecommit mit einem gezielten Concierge-Test und einem
+Adaptertest belegt.

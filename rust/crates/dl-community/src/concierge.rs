@@ -4,7 +4,7 @@
 //! Entscheidungslogik getrennt, damit die Slice-Vertraege ohne Gateway laufen.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration as StdDuration, Instant};
 
 use async_trait::async_trait;
@@ -283,7 +283,7 @@ pub struct ConciergeConfig {
     /// Aus per Default: der Concierge schickt nichts von selbst und antwortet nur,
     /// wenn ihn jemand direkt anschreibt.
     pub proactive: bool,
-    pub bot_user_id: Option<u64>,
+    pub bot_user_id: Arc<OnceLock<u64>>,
     pub frischling_lookup_retry: StdDuration,
 }
 
@@ -323,7 +323,7 @@ impl ConciergeConfig {
             ),
             free_voice: env_bool(&lookup, "CONCIERGE_FREE_VOICE", true),
             proactive: env_bool(&lookup, "DL_CONCIERGE_PROACTIVE", false),
-            bot_user_id: None,
+            bot_user_id: Arc::new(OnceLock::new()),
             frischling_lookup_retry: StdDuration::from_secs(2),
         }
     }
@@ -3389,6 +3389,17 @@ pub struct Concierge {
     start: Instant,
 }
 
+fn extract_bot_mention_question(content: &str, bot_user_id: Option<u64>) -> Option<String> {
+    let bot_id = bot_user_id?;
+    let mention = format!("<@{bot_id}>");
+    let mention_nick = format!("<@!{bot_id}>");
+    if !content.contains(&mention) && !content.contains(&mention_nick) {
+        return None;
+    }
+    let stripped = content.replace(&mention, "").replace(&mention_nick, "");
+    Some(stripped.trim().to_string())
+}
+
 impl Concierge {
     pub fn new(
         pool: PgPool,
@@ -5025,14 +5036,7 @@ impl Concierge {
     }
 
     fn bot_mention_question(&self, content: &str) -> Option<String> {
-        let bot_id = self.config.bot_user_id?;
-        let mention = format!("<@{bot_id}>");
-        let mention_nick = format!("<@!{bot_id}>");
-        if !content.contains(&mention) && !content.contains(&mention_nick) {
-            return None;
-        }
-        let stripped = content.replace(&mention, "").replace(&mention_nick, "");
-        Some(stripped.trim().to_string())
+        extract_bot_mention_question(content, self.config.bot_user_id.get().copied())
     }
 
     async fn personal_control_allowed(&self, interaction: &BridgeInteraction) -> bool {
@@ -8440,6 +8444,37 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn bot_mention_nimmt_ready_id_nach_vorher_fehlender_startidentitaet_an() {
+        let bot_user_id = Arc::new(OnceLock::new());
+        let question = "<@123456789012345678> Wie finde ich einen Paten?";
+
+        assert_eq!(
+            extract_bot_mention_question(question, bot_user_id.get().copied()),
+            None
+        );
+        bot_user_id
+            .set(123456789012345678)
+            .expect("READY setzt Bot-ID");
+        assert_eq!(
+            extract_bot_mention_question(question, bot_user_id.get().copied()).as_deref(),
+            Some("Wie finde ich einen Paten?")
+        );
+        assert_eq!(
+            extract_bot_mention_question(
+                "<@!123456789012345678> Hallo",
+                bot_user_id.get().copied()
+            )
+            .as_deref(),
+            Some("Hallo")
+        );
+        assert_eq!(
+            extract_bot_mention_question("<@987654321> Hallo", bot_user_id.get().copied()),
+            None
+        );
+    }
+
     #[test]
     fn wissensantwort_utf16_budget_passt_in_v2_und_fallback() {
         let text = "🧠".repeat(900);
