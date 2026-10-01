@@ -1877,6 +1877,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     // Test. Deshalb steht ihre Zeile hier mit in der Signaturpruefung.
     let migration_2026081301_signature_after_first =
         migration_row_signature(&pool, 2026081301, "discord role connection provider").await;
+    let migration_2026100101_signature_after_first =
+        migration_row_signature(&pool, 2026100101, "discord platform connections").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -1987,6 +1989,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_2026081301_signature_after_first,
         "second migrator run must be a no-op for migration version 2026081301"
     );
+    assert_eq!(
+        migration_row_signature(&pool, 2026100101, "discord platform connections").await,
+        migration_2026100101_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100101"
+    );
 
     let schema_count = scalar_i64(
         &pool,
@@ -2020,6 +2027,45 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(timescaledb_count, 1);
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "core", "discord_platform_connections").await,
+        vec![
+            "discord_id",
+            "platform",
+            "platform_user_id",
+            "platform_login",
+            "verified",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "core", "discord_platform_connections").await,
+        vec!["discord_id", "platform"]
+    );
+    let platform_connection_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'core'
+            AND table_name = 'discord_platform_connections'
+            AND column_name IN ('discord_id', 'platform_user_id', 'platform_login')
+            AND erasure_action = 'delete_row_on_user_delete'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("platform connection privacy registry rows");
+    assert_eq!(platform_connection_privacy_rows, 3);
+    let duplicate_twitch_account = sqlx::query(
+        "INSERT INTO core.discord_platform_connections
+             (discord_id, platform, platform_user_id, platform_login)
+         VALUES (1, 'twitch', '42', 'a'), (2, 'twitch', '42', 'b')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate_twitch_account.is_err(),
+        "ein Twitch-Konto darf nur einer Discord-ID gehoeren"
+    );
 
     assert_eq!(
         table_columns_in_schema(&pool, "community", "team_applications").await,

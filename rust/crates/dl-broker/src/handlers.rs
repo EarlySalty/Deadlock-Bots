@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{ConnectInfo, Query, State};
@@ -384,6 +385,48 @@ pub async fn members(
             respond(200, json!({ "ok": true, "members": members }))
         }
         Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
+    }
+}
+
+/// Twitch-Verknuepfungen der Mitglieder (`GET .../discord/twitch-links`).
+/// Loopback-only, ohne Token (Muster `members`). Antwort
+/// `{ok, links:[{discord_id, twitch_user_id, twitch_login, verified,
+/// updated_at}]}`; Quelle ist `core.discord_platform_connections`
+/// (Plattform `twitch`). Der Twitch-Bot nutzt sie als hartes Signal.
+pub async fn twitch_links(
+    State(source): State<Arc<dyn crate::TwitchLinkSource>>,
+    peer: Peer,
+    headers: HeaderMap,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    match source.twitch_links().await {
+        Ok(list) => {
+            let links: Vec<serde_json::Value> = list
+                .into_iter()
+                .map(|link| {
+                    json!({
+                        "discord_id": link.discord_id.to_string(),
+                        "twitch_user_id": link.twitch_user_id,
+                        "twitch_login": link.twitch_login,
+                        "verified": link.verified,
+                        "updated_at": link
+                            .updated_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    })
+                })
+                .collect();
+            respond(200, json!({ "ok": true, "links": links }))
+        }
+        Err(err) => {
+            tracing::error!(%err, "twitch_links fehlgeschlagen");
+            respond(
+                503,
+                error_body(&rid, None, "unavailable", "twitch links unavailable"),
+            )
+        }
     }
 }
 
@@ -3041,6 +3084,92 @@ pub(crate) mod tests {
         assert_eq!(status, 502);
         assert!(!body.to_string().contains(SENTINEL));
         Ok(())
+    }
+
+    struct FixedTwitchLinks(Result<Vec<crate::TwitchLinkEntry>, String>);
+
+    #[async_trait::async_trait]
+    impl crate::TwitchLinkSource for FixedTwitchLinks {
+        async fn twitch_links(&self) -> Result<Vec<crate::TwitchLinkEntry>, String> {
+            self.0.clone()
+        }
+    }
+
+    fn twitch_link_source(
+        result: Result<Vec<crate::TwitchLinkEntry>, String>,
+    ) -> Arc<dyn crate::TwitchLinkSource> {
+        Arc::new(FixedTwitchLinks(result))
+    }
+
+    #[tokio::test]
+    async fn twitch_links_liefert_liste_nur_ueber_loopback() {
+        use chrono::TimeZone;
+        let updated_at = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 1, 20, 0, 0)
+            .single()
+            .expect("time");
+        let source = twitch_link_source(Ok(vec![crate::TwitchLinkEntry {
+            discord_id: 662995601738170389,
+            twitch_user_id: "123456".to_string(),
+            twitch_login: "streamer".to_string(),
+            verified: true,
+            updated_at,
+        }]));
+
+        let remote = peer("10.0.0.5:4000").expect("peer");
+        let denied = twitch_links(State(source.clone()), remote, HeaderMap::new()).await;
+        assert_eq!(denied.status(), 403);
+
+        // Kein Token noetig (Muster `members`).
+        let local = peer("127.0.0.1:4000").expect("peer");
+        let response = twitch_links(State(source), local, HeaderMap::new()).await;
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 10_000)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(
+            data,
+            json!({
+                "ok": true,
+                "links": [{
+                    "discord_id": "662995601738170389",
+                    "twitch_user_id": "123456",
+                    "twitch_login": "streamer",
+                    "verified": true,
+                    "updated_at": "2026-10-01T20:00:00.000Z",
+                }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn twitch_links_leer_und_fehlerfall() {
+        let local = peer("127.0.0.1:4000").expect("peer");
+        let empty = twitch_links(
+            State(twitch_link_source(Ok(vec![]))),
+            local,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(empty.status(), 200);
+        let bytes = axum::body::to_bytes(empty.into_body(), 10_000)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(data, json!({ "ok": true, "links": [] }));
+
+        let failed = twitch_links(
+            State(twitch_link_source(Err("db down".to_string()))),
+            local,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(failed.status(), 503);
+        let bytes = axum::body::to_bytes(failed.into_body(), 10_000)
+            .await
+            .expect("body");
+        assert!(!String::from_utf8_lossy(&bytes).contains("db down"));
     }
 }
 

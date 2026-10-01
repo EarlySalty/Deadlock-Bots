@@ -298,6 +298,33 @@ async fn wait_for_gateway_cache_ready(
     }
 }
 
+/// Liest `core.discord_platform_connections` fuer den Broker-Endpunkt
+/// `twitch-links`.
+struct CentralTwitchLinks {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl dl_broker::TwitchLinkSource for CentralTwitchLinks {
+    async fn twitch_links(&self) -> Result<Vec<dl_broker::TwitchLinkEntry>, String> {
+        let links = dl_central_db::list_twitch_links(&self.pool)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(links
+            .into_iter()
+            .filter_map(|link| {
+                Some(dl_broker::TwitchLinkEntry {
+                    discord_id: u64::try_from(link.discord_id).ok()?,
+                    twitch_user_id: link.twitch_user_id,
+                    twitch_login: link.twitch_login,
+                    verified: link.verified,
+                    updated_at: link.updated_at,
+                })
+            })
+            .collect())
+    }
+}
+
 struct BrokerChannelInfoGlue {
     adapter: Arc<dl_discord::DiscordAdapter>,
 }
@@ -552,6 +579,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
+    serversync::register_twitch_link_components(
+        &mut router,
+        format!("http://127.0.0.1:{}", cfg.ports.dashboard),
+        env("MASTER_BROKER_TOKEN")
+            .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
+            .or_else(|| env("TWITCH_INTERNAL_API_TOKEN")),
+    );
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
         scrim_adapter::ScrimRuntimeGate::with_default_ttl(central_pool.clone());
@@ -1349,6 +1383,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 broker,
                 twitch_invites.clone(),
             ))
+            .merge(dl_broker::twitch_links_router(Arc::new(
+                CentralTwitchLinks {
+                    pool: central_pool.clone(),
+                },
+            )))
             .merge(turnierglue::publisher_router(
                 turnier_proposals,
                 broker_token,
