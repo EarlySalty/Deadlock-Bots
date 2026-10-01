@@ -606,6 +606,7 @@ pub struct TwitchClipRequest {
 pub enum TwitchSubmitOutcome {
     Accepted(i64),
     Duplicate(i64),
+    ReplayMetadataDrift(i64),
     Rejected(&'static str),
 }
 
@@ -1289,19 +1290,41 @@ impl ClipStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        // Wiederholung desselben Aufrufs → gleiche Antwort wie beim ersten Mal.
-        let replay: Option<(i64, String)> = sqlx::query_as(
-            "SELECT id, link FROM clips.clip_submissions WHERE idempotency_key = $1",
+        let title = request
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(ToString::to_string);
+        let replay: Option<(
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, link, streamer_twitch_user_id, streamer_login,
+                    submitted_by_twitch_user_id, title
+               FROM clips.clip_submissions WHERE idempotency_key = $1",
         )
         .bind(&request.idempotency_key)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some((id, link)) = replay {
+        // Der Producer-Schlüssel bindet die Clip-ID. Metadaten bleiben beim ersten
+        // Submit; Drift wird als Duplicate sichtbar, ohne einen Retry auszulösen.
+        if let Some((id, link, streamer_id, streamer_login, submitted_by, stored_title)) = replay {
             tx.rollback().await?;
-            return Ok(if clip_key(&link) == key {
+            return Ok(if clip_key(&link) != key {
+                TwitchSubmitOutcome::Rejected("idempotency_conflict")
+            } else if streamer_id == request.streamer_twitch_user_id
+                && streamer_login == request.streamer_login
+                && submitted_by == request.submitted_by_twitch_user_id
+                && stored_title == title
+            {
                 TwitchSubmitOutcome::Accepted(id)
             } else {
-                TwitchSubmitOutcome::Rejected("idempotency_conflict")
+                TwitchSubmitOutcome::ReplayMetadataDrift(id)
             });
         }
 
@@ -1319,12 +1342,6 @@ impl ClipStore {
             return Ok(TwitchSubmitOutcome::Duplicate(*id));
         }
 
-        let title = request
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(ToString::to_string);
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO clips.clip_submissions(
                  guild_id, user_id, link, credit, permission, info, created_at, source,

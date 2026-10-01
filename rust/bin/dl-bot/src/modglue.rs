@@ -2118,6 +2118,11 @@ impl dl_broker::clips::ClipSubmitPort for ClipSubmitGlue {
                 submission_id: Some(id),
                 reason: Some("duplicate_clip_this_week".to_string()),
             },
+            TwitchSubmitOutcome::ReplayMetadataDrift(id) => ClipSubmitOutcome {
+                status: ClipSubmitStatus::Duplicate,
+                submission_id: Some(id),
+                reason: Some("idempotency_metadata_drift".to_string()),
+            },
             TwitchSubmitOutcome::Rejected(reason) => ClipSubmitOutcome {
                 status: ClipSubmitStatus::Rejected,
                 submission_id: None,

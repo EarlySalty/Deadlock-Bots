@@ -590,10 +590,43 @@ mod db {
         else {
             panic!("accepted erwartet");
         };
-        // gleicher Aufruf erneut → gleiche Antwort
+        // Identisches Replay bleibt akzeptiert.
         assert_eq!(
             clips.submit_twitch(1, &req).await.expect("replay"),
             TwitchSubmitOutcome::Accepted(id)
+        );
+        // Gleicher Schlüssel und Clip, aber abweichende Metadaten: First-write-wins.
+        let mut changed = req.clone();
+        changed.title = Some("Anderer Titel".into());
+        assert_eq!(
+            clips.submit_twitch(1, &changed).await.expect("title drift"),
+            TwitchSubmitOutcome::ReplayMetadataDrift(id)
+        );
+        changed = req.clone();
+        changed.submitted_by_twitch_user_id = Some("789".into());
+        assert_eq!(
+            clips.submit_twitch(1, &changed).await.expect("submitter drift"),
+            TwitchSubmitOutcome::ReplayMetadataDrift(id)
+        );
+        changed = req.clone();
+        changed.streamer_login = "anderer_login".into();
+        assert_eq!(
+            clips.submit_twitch(1, &changed).await.expect("login drift"),
+            TwitchSubmitOutcome::ReplayMetadataDrift(id)
+        );
+        sqlx::query(
+            "INSERT INTO bot.twitch_streamer_invites(streamer_login, guild_id, twitch_user_id)
+             VALUES ('anderer_login', 1, '789')",
+        )
+        .execute(db.pool())
+        .await
+        .expect("second partner");
+        changed = req.clone();
+        changed.streamer_twitch_user_id = "789".into();
+        changed.streamer_login = "anderer_login".into();
+        assert_eq!(
+            clips.submit_twitch(1, &changed).await.expect("streamer id drift"),
+            TwitchSubmitOutcome::ReplayMetadataDrift(id)
         );
         // anderer Schlüssel, gleicher Clip in anderer URL-Form → Duplikat
         let dup = twitch_request("https://www.twitch.tv/streamer/clip/Wow-1", "anderer-key");
@@ -617,11 +650,14 @@ mod db {
             Option<i64>,
             String,
             String,
+            String,
             Option<String>,
             String,
             Option<String>,
+            Option<String>,
         ) = sqlx::query_as(
-            "SELECT user_id, source, credit, title, link, streamer_twitch_user_id
+            "SELECT user_id, source, credit, streamer_login, title, link,
+                    streamer_twitch_user_id, submitted_by_twitch_user_id
                FROM clips.clip_submissions WHERE id = $1",
         )
         .bind(id)
@@ -634,8 +670,10 @@ mod db {
                 None,
                 "twitch".into(),
                 "streamer".into(),
+                "streamer".into(),
                 Some("Toller Clip".into()),
                 "https://clips.twitch.tv/Wow-1".into(),
+                Some("456".into()),
                 Some("456".into())
             )
         );

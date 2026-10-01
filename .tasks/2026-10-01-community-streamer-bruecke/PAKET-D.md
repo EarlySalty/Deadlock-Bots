@@ -79,8 +79,8 @@ Antwort (Broker-Envelope, HTTP 200):
  "result":{"status":"accepted","submission_id":123,"reason":null},"error":null}
 ```
 
-- `accepted`: gespeichert. Gleicher `idempotency_key` mit gleichem Clip liefert erneut `accepted` mit derselben ID.
-- `duplicate`: derselbe Clip steht schon im Wochenfenster (auch per Discord eingereicht); `submission_id` der vorhandenen Einsendung, `reason` `duplicate_clip_this_week`.
+- `accepted`: gespeichert. Identischer `idempotency_key`, Clip und Metadaten liefern erneut `accepted` mit derselben ID.
+- `duplicate`: derselbe Clip steht schon im Wochenfenster (auch per Discord eingereicht), mit `submission_id` und `reason` `duplicate_clip_this_week`. Beim Replay desselben Schlüssels und Clips mit abweichenden Metadaten bleibt der erste Datensatz unverändert und die bestehende `submission_id` kommt mit `reason` `idempotency_metadata_drift` zurück.
 - `rejected`: `reason` `invalid_clip_url` (nur `https://clips.twitch.tv/<slug>` und `https://(www.|m.)twitch.tv/<kanal>/clip/<slug>`), `not_partner`, `idempotency_conflict` (Schlüssel schon für anderen Clip benutzt).
 - Formfehler 400 `bad_request`, zu groß 413, DB nicht erreichbar 503 `unavailable`, Auth 401/403.
 
