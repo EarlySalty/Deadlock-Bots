@@ -1296,6 +1296,96 @@ async fn link_twitch(
     }
 }
 
+/// Steam-Stand eines Mitglieds beim Twitch-Flow. Die Steam-Verknüpfung selbst
+/// bleibt beim Steam-Bot (OpenID plus Freundescode); hier wird nur gelesen, ob
+/// sie schon besteht, und ob Discord ein Steam-Konto kennt, damit die
+/// Abschlussseite den passenden nächsten Schritt nennt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteamHint {
+    /// Mindestens eine bestätigte Verknüpfung in `core.steam_links`.
+    Linked,
+    /// Discord kennt ein Steam-Konto, bei uns ist aber keins bestätigt.
+    InDiscordOnly,
+    /// Weder noch, oder nicht feststellbar.
+    None,
+}
+
+impl SteamHint {
+    pub fn code(self) -> &'static str {
+        match self {
+            SteamHint::Linked => "linked",
+            SteamHint::InDiscordOnly => "in_discord_only",
+            SteamHint::None => "none",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            "linked" => SteamHint::Linked,
+            "in_discord_only" => SteamHint::InDiscordOnly,
+            _ => SteamHint::None,
+        }
+    }
+
+    fn decide(has_confirmed_link: bool, discord_steam_ids: &[String]) -> Self {
+        if has_confirmed_link {
+            SteamHint::Linked
+        } else if discord_steam_ids.is_empty() {
+            SteamHint::None
+        } else {
+            SteamHint::InDiscordOnly
+        }
+    }
+
+    /// Zusatzsatz für die Abschlussseite (HTML-sicher, ohne Nutzerdaten).
+    fn note(self) -> Option<&'static str> {
+        match self {
+            SteamHint::Linked => Some(
+                "Dein Steam-Konto ist bei uns auch schon verknüpft, dein Rang wird weiter \
+                 automatisch erkannt.",
+            ),
+            SteamHint::InDiscordOnly => Some(
+                "In deinem Discord-Profil ist auch ein Steam-Konto hinterlegt, bei uns ist es \
+                 aber noch nicht verknüpft. Drück im Server auf „Steam verknüpfen“, dann \
+                 erkennt der Server deinen Rang automatisch.",
+            ),
+            SteamHint::None => None,
+        }
+    }
+}
+
+/// Liest den Steam-Stand nur lesend; ein DB-Fehler ergibt `None` statt eines
+/// falschen Hinweises.
+async fn steam_hint(app: &DashboardApp, user_id: u64, connections: Option<&[Value]>) -> SteamHint {
+    let Ok(discord_id) = i64::try_from(user_id) else {
+        return SteamHint::None;
+    };
+    let confirmed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+              FROM core.steam_links
+             WHERE discord_id = $1
+               AND verified = TRUE
+        )
+        "#,
+    )
+    .bind(discord_id)
+    .fetch_one(app.pool())
+    .await;
+    let confirmed = match confirmed {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(discord_id = user_id, %error, "Steam-Stand nicht lesbar");
+            return SteamHint::None;
+        }
+    };
+    let discord_steam_ids = connections
+        .map(extract_steam_connection_ids)
+        .unwrap_or_default();
+    SteamHint::decide(confirmed, &discord_steam_ids)
+}
+
 /// Callback-Ergebnis des Twitch-Flows: verarbeitet die Verbindungen sofort und
 /// legt nur das Ergebnis ab, nie das Token.
 async fn twitch_link_callback_result(
@@ -1314,6 +1404,11 @@ async fn twitch_link_callback_result(
     };
     let connections = app.inner.oauth.fetch_connections(access_token).await;
     let outcome = link_twitch(app, user_id, connections.as_deref()).await;
+    let steam = if outcome == TwitchLinkOutcome::PrivacyOptedOut {
+        SteamHint::None
+    } else {
+        steam_hint(app, user_id, connections.as_deref()).await
+    };
     json!({
         "provider": "discord",
         "status": "success",
@@ -1321,6 +1416,7 @@ async fn twitch_link_callback_result(
         "user": serde_json::to_value(&user).unwrap_or(Value::Null),
         "twitch_link": outcome.code(),
         "twitch_connection": outcome.connection_json(),
+        "steam_hint": steam.code(),
     })
 }
 
@@ -1466,7 +1562,22 @@ impl TwitchLinkPage {
     }
 
     pub fn html(&self) -> String {
-        let (title, body) = self.texts();
+        self.html_with_steam(SteamHint::None)
+    }
+
+    /// Wie [`Self::html`], plus Steam-Zusatzsatz auf den Seiten, auf denen das
+    /// Mitglied wirklich verbunden war (verknüpft oder ohne Twitch-Konto).
+    pub fn html_with_steam(&self, steam: SteamHint) -> String {
+        let (title, mut body) = self.texts();
+        if matches!(
+            self,
+            TwitchLinkPage::Linked(_) | TwitchLinkPage::NoTwitchConnection
+        ) {
+            if let Some(note) = steam.note() {
+                body.push_str("</p><p style=\"margin-top:12px\">");
+                body.push_str(note);
+            }
+        }
         format!(
             "<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -1484,6 +1595,10 @@ impl TwitchLinkPage {
 }
 
 fn twitch_link_page_response(page: TwitchLinkPage) -> Response {
+    twitch_link_page_response_with_steam(page, SteamHint::None)
+}
+
+fn twitch_link_page_response_with_steam(page: TwitchLinkPage, steam: SteamHint) -> Response {
     let status = StatusCode::from_u16(page.status()).unwrap_or(StatusCode::OK);
     (
         status,
@@ -1492,7 +1607,7 @@ fn twitch_link_page_response(page: TwitchLinkPage) -> Response {
             (header::CACHE_CONTROL, "no-store"),
             (header::REFERRER_POLICY, "no-referrer"),
         ],
-        page.html(),
+        page.html_with_steam(steam),
     )
         .into_response()
 }
@@ -1548,7 +1663,12 @@ async fn twitch_link_done(
             .and_then(Value::as_str);
         TwitchLinkPage::from_outcome_code(code, login)
     };
-    twitch_link_page_response(page)
+    let steam = oauth_result
+        .get("steam_hint")
+        .and_then(Value::as_str)
+        .map(SteamHint::from_code)
+        .unwrap_or(SteamHint::None);
+    twitch_link_page_response_with_steam(page, steam)
 }
 
 // ── Interne Routen: authorize-url + session (turnier/twitch) ─────────────────
@@ -2460,6 +2580,10 @@ mod tests {
         );
         let html = body_string(page).await;
         assert!(html.contains("Dein Twitch-Konto <strong>tw_&lt;login&gt;</strong> ist verknüpft"));
+        // Discord kennt ein Steam-Konto, bei uns ist keins bestaetigt: Hinweis,
+        // aber keine Steam-Verknuepfung durch diesen Flow.
+        assert!(html.contains("bei uns ist es aber noch nicht verknüpft"));
+        assert!(html.contains("„Steam verknüpfen“"));
 
         // Der State ist eingeloest: ein zweiter Aufruf zeigt "abgelaufen".
         let again = app
@@ -2469,6 +2593,88 @@ mod tests {
             .expect("again");
         assert_eq!(again.status(), StatusCode::BAD_REQUEST);
         assert!(body_string(again).await.contains("Link abgelaufen"));
+    }
+
+    #[tokio::test]
+    async fn twitch_link_mit_bestehender_steam_verknuepfung_laesst_steam_unveraendert() {
+        let api = mock_discord(json!([
+            {"type": "steam", "id": "76561198000000001", "name": "steamer"},
+            {"type": "twitch", "id": "987654", "name": "twuser", "verified": true},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+        sqlx::query("INSERT INTO core.users (discord_id) VALUES (4242) ON CONFLICT DO NOTHING")
+            .execute(db.pool())
+            .await
+            .expect("user");
+        sqlx::query(
+            "INSERT INTO core.steam_links (discord_id, steam_id, verified, primary_account) \
+             VALUES (4242, '76561198000000001', TRUE, TRUE)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("steam link");
+        let before: String = sqlx::query_scalar(
+            "SELECT row_to_json(s)::text FROM core.steam_links s WHERE discord_id = 4242",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("before");
+
+        let (_state, location) = twitch_link_through_callback(&app, "code=abc").await;
+        let page = app
+            .clone()
+            .oneshot(loopback_get(&done_path(&location)))
+            .await
+            .expect("done");
+        let html = body_string(page).await;
+        assert!(html.contains("Dein Twitch-Konto <strong>twuser</strong> ist verknüpft"));
+        assert!(html.contains("Dein Steam-Konto ist bei uns auch schon verknüpft"));
+        assert!(!html.contains("„Steam verknüpfen“"));
+
+        let after: String = sqlx::query_scalar(
+            "SELECT row_to_json(s)::text FROM core.steam_links s WHERE discord_id = 4242",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("after");
+        assert_eq!(before, after);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM core.steam_links")
+            .fetch_one(db.pool())
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn steam_hinweis_entscheidung_und_seiten() {
+        let ids = vec!["765".to_string()];
+        assert_eq!(SteamHint::decide(true, &ids), SteamHint::Linked);
+        assert_eq!(SteamHint::decide(true, &[]), SteamHint::Linked);
+        assert_eq!(SteamHint::decide(false, &ids), SteamHint::InDiscordOnly);
+        assert_eq!(SteamHint::decide(false, &[]), SteamHint::None);
+        for hint in [SteamHint::Linked, SteamHint::InDiscordOnly, SteamHint::None] {
+            assert_eq!(SteamHint::from_code(hint.code()), hint);
+        }
+        assert_eq!(SteamHint::from_code("unbekannt"), SteamHint::None);
+        // Fehler- und Abbruchseiten bekommen nie einen Steam-Satz.
+        for page in [
+            TwitchLinkPage::Failed,
+            TwitchLinkPage::Expired,
+            TwitchLinkPage::Cancelled,
+            TwitchLinkPage::PrivacyOptedOut,
+        ] {
+            assert!(!page
+                .html_with_steam(SteamHint::InDiscordOnly)
+                .contains("Steam"));
+        }
+        let no_twitch =
+            TwitchLinkPage::NoTwitchConnection.html_with_steam(SteamHint::InDiscordOnly);
+        assert!(no_twitch.contains("„Steam verknüpfen“"));
+        for hint in [SteamHint::Linked, SteamHint::InDiscordOnly] {
+            let note = hint.note().expect("note");
+            assert!(!note.contains('\u{2014}') && !note.contains('\u{2013}'));
+        }
     }
 
     #[tokio::test]
