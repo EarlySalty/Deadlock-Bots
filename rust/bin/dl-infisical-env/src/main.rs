@@ -1,6 +1,69 @@
 use clap::Parser;
 use std::{ffi::OsString, os::unix::process::CommandExt};
 
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+fn clear_capability_sets() -> std::io::Result<()> {
+    let header = CapabilityHeader {
+        version: 0x20080522,
+        pid: 0,
+    };
+    let data = [CapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }; 2];
+    // SAFETY: Linux capability ABI v3 takes this fixed header and two u32 triples;
+    // pointers remain valid for the syscall and no process other than self is selected.
+    if unsafe { nix::libc::syscall(nix::libc::SYS_capset, &header, data.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn signal_child(
+    child: &std::process::Child,
+    signal: nix::sys::signal::Signal,
+) -> std::io::Result<()> {
+    use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+    // The owned, unreaped Child prevents PID reuse while signalling this PID.
+    match kill(Pid::from_raw(child.id() as i32), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::from_raw_os_error(error as i32)),
+    }
+}
+
+async fn abort_child(child: &mut std::process::Child) -> anyhow::Result<()> {
+    use anyhow::Context;
+    signal_child(child, nix::sys::signal::Signal::SIGKILL)
+        .context("Eigener Dienst konnte nicht abgebrochen werden.")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if child
+            .try_wait()
+            .context("Eigener Dienstabschluss ist nicht prüfbar.")?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("Eigener Dienstabschluss überschreitet die Abbruchgrenze.");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[derive(Parser)]
 struct Cli {
     #[arg(long)]
@@ -14,6 +77,12 @@ struct Cli {
     /// Preserve the application's no-new-privileges boundary after bootstrap.
     #[arg(long, requires = "token_pipe")]
     child_no_new_privileges: bool,
+    /// Root-controlled service groups; other consumers keep an empty group list.
+    #[arg(long, requires = "token_pipe")]
+    supplementary_group: Vec<u32>,
+    /// Restricted bootstrap capabilities must not remain in the app's bounding set.
+    #[arg(long, requires_all = ["token_pipe", "child_no_new_privileges"])]
+    child_clear_capability_bounding_set: bool,
     /// Stable existing backup key, delivered only through the private pipe.
     #[arg(long)]
     pipe_secret: Option<String>,
@@ -65,6 +134,23 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         .gid
         .filter(|v| *v > 0)
         .context("Unprivilegierte Dienst-GID fehlt.")?;
+    if cli.supplementary_group.len() > 16 || cli.supplementary_group.contains(&0) {
+        bail!("Ergänzende Dienstgruppen sind ungültig.");
+    }
+    let mut group_ids = cli.supplementary_group;
+    group_ids.sort_unstable();
+    group_ids.dedup();
+    let supplementary_groups: Vec<Gid> = group_ids.into_iter().map(Gid::from_raw).collect();
+    let last_capability = if cli.child_clear_capability_bounding_set {
+        let last = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|value| *value <= 128)
+            .context("Bootstrap-Fähigkeitsgrenze ist nicht prüfbar.")?;
+        Some(last)
+    } else {
+        None
+    };
     let config = cli
         .config
         .context("Normale Infisical-Konfiguration fehlt.")?;
@@ -142,15 +228,46 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         command.pre_exec(move || {
             dup2(read_fd, 3)?;
             fcntl(3, FcntlArg::F_SETFD(FdFlag::empty()))?;
-            setgroups(&[])?;
+            setgroups(&supplementary_groups)?;
             setgid(Gid::from_raw(gid))?;
+            if let Some(last) = last_capability {
+                for capability in 0..=last {
+                    if nix::libc::prctl(
+                        nix::libc::PR_CAPBSET_DROP,
+                        capability as nix::libc::c_ulong,
+                        0,
+                        0,
+                        0,
+                    ) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                if nix::libc::prctl(
+                    nix::libc::PR_CAP_AMBIENT,
+                    nix::libc::PR_CAP_AMBIENT_CLEAR_ALL,
+                    0,
+                    0,
+                    0,
+                ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             setuid(Uid::from_raw(uid))?;
+            if last_capability.is_some() {
+                clear_capability_sets()?;
+            }
             if child_no_new_privileges {
                 nix::sys::prctl::set_no_new_privs()?;
             }
             Ok(())
         });
     }
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("Dienststoppsignal ist nicht verfügbar.")?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("Dienstabbruchsignal ist nicht verfügbar.")?;
     let mut child = command.spawn().map_err(|_| {
         anyhow::anyhow!("Dienst konnte nicht aus dem Secret-Launcher gestartet werden.")
     })?;
@@ -163,29 +280,50 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         let _ = sent.send(result);
     });
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut pipe_complete = false;
+    let mut stop_deadline = None;
     loop {
-        match received.try_recv() {
-            Ok(true) => break,
-            Ok(false) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("Dienst hat die private Secret-Pipe nicht angenommen.");
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("Dienst hat die Secret-Pipe nicht rechtzeitig angenommen.");
+        if !pipe_complete {
+            match received.try_recv() {
+                Ok(true) => pipe_complete = true,
+                Ok(false) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    abort_child(&mut child).await?;
+                    bail!("Dienst hat die private Secret-Pipe nicht angenommen.");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {}
+                Err(_) => {
+                    abort_child(&mut child).await?;
+                    bail!("Dienst hat die Secret-Pipe nicht rechtzeitig angenommen.");
+                }
             }
         }
+        if let Some(status) = child
+            .try_wait()
+            .context("Dienstabschluss ist nicht prüfbar.")?
+        {
+            if status.success() || stop_deadline.is_some() {
+                return Ok(());
+            }
+            bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
+        }
+        if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            abort_child(&mut child).await?;
+            bail!("Dienst hat die normale Stoppgrenze überschritten.");
+        }
+        tokio::select! {
+            _ = terminate.recv(), if stop_deadline.is_none() => {
+                signal_child(&child, nix::sys::signal::Signal::SIGTERM)
+                    .context("Dienststoppsignal konnte nicht weitergegeben werden.")?;
+                stop_deadline = Some(Instant::now() + Duration::from_secs(10));
+            }
+            _ = interrupt.recv(), if stop_deadline.is_none() => {
+                signal_child(&child, nix::sys::signal::Signal::SIGINT)
+                    .context("Dienstabbruchsignal konnte nicht weitergegeben werden.")?;
+                stop_deadline = Some(Instant::now() + Duration::from_secs(10));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
     }
-    let status = child.wait().context("Dienstabschluss ist nicht prüfbar.")?;
-    if !status.success() {
-        bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -208,5 +346,59 @@ mod tests {
         ])
         .expect("Private bootstrap accepts the child privilege boundary");
         assert!(cli.child_no_new_privileges);
+    }
+
+    #[test]
+    fn groups_and_capability_clear_require_private_bootstrap() {
+        assert!(Cli::try_parse_from([
+            "launcher",
+            "--supplementary-group",
+            "985",
+            "--",
+            "/bin/true"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "launcher",
+            "--token-pipe",
+            "--child-clear-capability-bounding-set",
+            "--",
+            "/bin/true"
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from([
+            "launcher",
+            "--token-pipe",
+            "--child-no-new-privileges",
+            "--child-clear-capability-bounding-set",
+            "--supplementary-group",
+            "985",
+            "--",
+            "/bin/true",
+        ])
+        .expect("Restricted private bootstrap fixture");
+        assert_eq!(cli.supplementary_group, [985]);
+        assert!(cli.child_clear_capability_bounding_set);
+        let ordinary = Cli::try_parse_from(["launcher", "--token-pipe", "--", "/bin/true"])
+            .expect("Ordinary private bootstrap fixture");
+        assert!(ordinary.supplementary_group.is_empty());
+        assert!(!ordinary.child_clear_capability_bounding_set);
+    }
+
+    #[tokio::test]
+    async fn failed_pipe_child_abort_is_bounded_and_reaped() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("Owned child fixture");
+        let started = std::time::Instant::now();
+        super::abort_child(&mut child)
+            .await
+            .expect("Owned child abort and reap");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(child
+            .try_wait()
+            .expect("Owned child reap fixture")
+            .is_some());
     }
 }
