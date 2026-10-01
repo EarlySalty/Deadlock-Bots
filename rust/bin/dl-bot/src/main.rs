@@ -640,6 +640,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
     concierge_config.ai_timeout =
         std::time::Duration::from_secs(operating.concierge.timeout_seconds);
+    concierge_config.bot_user_id = adapter.bot_user_id_cell();
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
@@ -1153,6 +1154,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         shared_answers.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
+    if concierge.enabled() {
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
+        concierge.ensure_pate_leitfaden(repository_root).await;
+        let paten_inventar = concierge.paten_inventar(our_guild_id).await;
+        tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));
+    }
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
     dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
@@ -1996,6 +2007,7 @@ schema_version=1
 guild_id="1234"
 [runtime.community]
 concierge_enabled=true
+concierge_proactive=true
 concierge_test_users=[55,66]
 concierge_free_voice=false
 survey_pulse=true
@@ -2015,6 +2027,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         let lookup = |key: &str| config.runtime_value(key);
         let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
         assert!(concierge.enabled);
+        assert!(concierge.proactive);
         assert!(!concierge.free_voice);
         assert_eq!(concierge.main_guild_id, 1234);
         assert_eq!(concierge.test_user_allowlist.len(), 2);
