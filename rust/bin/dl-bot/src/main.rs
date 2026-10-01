@@ -1214,6 +1214,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_community::clips::register(&mut router, clips.clone());
 
+    // Streamer vorschlagen (Paket F): Knopf am Clip-Panel, Weitergabe an den
+    // Twitch-Bot über den vorhandenen internen API-Client; ohne Token wird nur
+    // gespeichert und der Retry-Loop holt die Weitergabe später nach.
+    let streamer_suggestions = dl_community::streamer_suggest::StreamerSuggestions::new(
+        central_pool.clone(),
+        twitch_client
+            .clone()
+            .map(|client| client as Arc<dyn dl_community::streamer_suggest::SuggestionForwarder>),
+    );
+    dl_community::streamer_suggest::register(&mut router, streamer_suggestions.clone());
+
     // Leave-Survey (6) — Select/Modal brauchen den Router, Trigger ist gateway-gated
     let leave_survey = dl_community::leave_survey::LeaveSurvey::new(
         central_pool.clone(),
@@ -1774,6 +1785,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
+        let _streamer_suggest_retry =
+            dl_community::streamer_suggest::spawn(streamer_suggestions.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);

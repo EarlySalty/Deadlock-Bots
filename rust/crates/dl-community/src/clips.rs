@@ -486,7 +486,10 @@ impl ClipSubmission {
         let line = window_line(start_ts, end_ts, chrono::Utc::now().timestamp());
         json!({
             "title": INTERFACE_TITLE,
-            "description": format!("{RULES_TEXT}\n\n{line}"),
+            "description": format!(
+                "{RULES_TEXT}\n\n{line}\n\n{}",
+                crate::streamer_suggest::PANEL_HINT
+            ),
             "color": 0x2ECC71,
             "footer": { "text": "Mit dem Button unten kannst du deinen Clip einreichen." },
         })
@@ -498,9 +501,7 @@ impl ClipSubmission {
             return;
         };
         let existing = self.store.interface_message(guild_id).await;
-        let components = json!([{ "type": 1, "components": [{
-            "type": 2, "style": 1, "label": "Clip einsenden", "custom_id": "clip_submit_btn_v1",
-        }]}]);
+        let components = interface_components();
         match self
             .port
             .upsert_interface(
@@ -546,6 +547,14 @@ impl ClipSubmission {
             self.store.mark_dumped(window_id).await;
         }
     }
+}
+
+/// Knöpfe des Clip-Panels. Der zweite Knopf "Streamer vorschlagen" gehört zu
+/// Paket F (`streamer_suggest.rs`) und nutzt nur den Platz im Panel.
+pub fn interface_components() -> serde_json::Value {
+    json!([{ "type": 1, "components": [{
+        "type": 2, "style": 1, "label": "Clip einsenden", "custom_id": "clip_submit_btn_v1",
+    }, crate::streamer_suggest::panel_button()]}])
 }
 
 // ── Interaction-Handler ────────────────────────────────────────────────────

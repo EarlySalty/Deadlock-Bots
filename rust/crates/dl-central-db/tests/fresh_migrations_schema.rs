@@ -1879,6 +1879,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026081301, "discord role connection provider").await;
     let migration_2026100101_signature_after_first =
         migration_row_signature(&pool, 2026100101, "discord platform connections").await;
+    let migration_2026100104_signature_after_first =
+        migration_row_signature(&pool, 2026100104, "streamer suggestions").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -1994,6 +1996,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_2026100101_signature_after_first,
         "second migrator run must be a no-op for migration version 2026100101"
     );
+    assert_eq!(
+        migration_row_signature(&pool, 2026100104, "streamer suggestions").await,
+        migration_2026100104_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100104"
+    );
 
     let schema_count = scalar_i64(
         &pool,
@@ -2066,6 +2073,71 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         duplicate_twitch_account.is_err(),
         "ein Twitch-Konto darf nur einer Discord-ID gehoeren"
     );
+
+    // Streamer-Vorschläge (2026100104): ein Vorschlag je Mitglied und Kanal,
+    // offene Weitergaben ohne forwarded_at, Registry-Zeilen für den Löschvertrag.
+    assert_eq!(
+        table_columns_in_schema(&pool, "community", "streamer_suggestions").await,
+        vec![
+            "id",
+            "discord_id",
+            "twitch_login",
+            "twitch_user_id",
+            "reason",
+            "status",
+            "forward_attempts",
+            "last_attempt_at",
+            "created_at",
+            "forwarded_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "community", "streamer_suggestions").await,
+        vec!["id"]
+    );
+    let suggestion_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'community'
+            AND table_name = 'streamer_suggestions'
+            AND column_name IN ('discord_id', 'reason', 'twitch_user_id')
+            AND erasure_action = 'delete_row_on_user_delete'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("streamer suggestion privacy registry rows");
+    assert_eq!(suggestion_privacy_rows, 3);
+    sqlx::query(
+        "INSERT INTO community.streamer_suggestions (discord_id, twitch_login, reason)
+         VALUES (1, 'someone', 'passt')",
+    )
+    .execute(&pool)
+    .await
+    .expect("erster Vorschlag");
+    for (sql, why) in [
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login) VALUES (1, 'someone')",
+            "ein Vorschlag je Mitglied und Kanal",
+        ),
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login) VALUES (2, 'Some One')",
+            "Login nur klein, ohne Leerzeichen",
+        ),
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login, status) VALUES (2, 'x', 'created')",
+            "abgeschlossener Stand braucht forwarded_at",
+        ),
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login, status, forwarded_at) VALUES (2, 'x', 'unbekannt', now())",
+            "nur bekannte Stände",
+        ),
+    ] {
+        assert!(sqlx::query(sql).execute(&pool).await.is_err(), "{why}");
+    }
+    sqlx::query("DELETE FROM community.streamer_suggestions")
+        .execute(&pool)
+        .await
+        .expect("aufraeumen");
 
     assert_eq!(
         table_columns_in_schema(&pool, "community", "team_applications").await,
