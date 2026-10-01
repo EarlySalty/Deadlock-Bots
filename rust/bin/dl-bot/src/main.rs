@@ -579,7 +579,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
-    serversync::register_twitch_link_components(
+    let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
         env("MASTER_BROKER_TOKEN")
@@ -1186,6 +1186,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_config.clone(),
         shared_answers.clone(),
     );
+    // Concierge-Knopf "Twitch verknüpfen": derselbe persönliche Link wie im
+    // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
+    concierge.install_twitch_link_source(Arc::new(concierge_twitch_link));
     dl_community::concierge::register(&mut router, concierge.clone());
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
