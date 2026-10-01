@@ -36,3 +36,15 @@ No code fix or test/build was performed in this review round. The fixer must add
 - Weitere Lock-Order-Lücke bei Status-Effekten geschlossen: Lease-Sweep sammelt und sperrt die betroffenen Request-Batches sortiert; direkter Fehlerpfad sperrt vor dem Request. Concurrency-Test ergänzt. Gate: `gpt-6.1-sol ALLOW`.
 - Tests bleiben unausgeführt: beim Versuch war der Host-Lock frei, aber Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen. `rustfmt` ist nicht installiert.
 - Migrationsvertrag geprüft: keine DDL-Änderung; benötigte Scrim-Tabellen und Statuswerte liegen bereits in `dl-central-db`-Migrationen.
+
+## R3, Testdatenkorrektur 2026-10-01
+
+- Der angefragte Pfad `/home/nathanael/Documents/.tasks/2026-10-01-scrim-orga-autopilot/REVIEW.md` existiert nicht. Dieses Worktree-Artefakt war vorhanden.
+- Exaktes Gate auf `3c734ef5c53af6eb7e1f64eaafddec73af2dfb8c` gegen `origin/main` `5ed4cf7d6132d750cf024d6abccf90ebaac4a7ef`: `gpt-6.1-sol ALLOW` mit NIT zu Ein-Slot-Testdaten und unausgeführten DB-Tests.
+- `validate_match_request_effect_body` verlangt mindestens zwei Slot-Buttons und genau einen Kein-Slot-Button. Die betroffenen Failure- und Expiry-Fixtures verwenden jetzt zwei Slots.
+- Der erste DB-Lauf scheiterte zusätzlich an der Outbox-Lease-Constraint: die Expiry-Fixture setzte `state='leased'`, aber keinen `lease_owner`. Die Fixture setzt nun den Produktionswert `dlbots:scrim_discord_outbox`.
+- Rust/Cargo 1.88.0. Ohne `CENTRAL_TEST_DSN` kompilierten die 82 gefilterten Tests, davon liefen 19 ohne DB erfolgreich; 63 DB-Tests scheiterten an der fehlenden Test-DSN. Danach liefen dieselben 82 Tests mit `rust/scripts/central_test_db.sh` auf einer Wegwerf-Postgres-DB: 81 bestanden, nur die fehlende Lease-Owner-Fixture scheiterte. Der gezielte Wiederholungslauf dieser korrigierten Testfunktion bestand.
+- Die Scrim-Fixtures sind damit über die beiden DB-Läufe zusammen 82/82 erfolgreich geprüft. Der aktuelle Gate-Lauf auf dem neuen Freeze steht noch aus.
+- Der Testlauf führte `dl-central-migrate` nur gegen die Wegwerf-DB aus. Der dokumentierte Zentralmigrationsvertrag hat einen einzigen kanonischen Runner; in den aktuellen zentralen Migrationen finden sich keine TokenDB-Referenzen. Keine Produktions-DB, Runtime, DDL, Konfiguration oder Neustarts wurden verändert.
+- Die Läufe erzeugten `rust/target` mit 3,5 GiB Debug-Artefakten. Das temporäre Verzeichnis wurde nach Testende entfernt. Keine fremden Prozesse wurden beendet.
+- `origin/main` steht inzwischen bei `19f9292c403f9f15da06fce06462ebe48bcd1a83`; seit `5ed4cf7d` kam nur `feat(patchnotes): add durable guild delivery schema and recovery constraints` hinzu. Der Gate-Lauf nutzt den aktualisierten Main-Stand.

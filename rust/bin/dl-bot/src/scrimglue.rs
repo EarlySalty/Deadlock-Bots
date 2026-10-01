@@ -7441,7 +7441,10 @@ mod tests {
             31,
             1,
             "Terminabfrage A",
-            &json!([{"day":"sat","from":960,"to":1080}]),
+            &json!([
+                {"day":"sat","from":960,"to":1080},
+                {"day":"sun","from":960,"to":1080}
+            ]),
         )?;
         let payload = match_request_discord_effect_payload(30, 31, 1, 100, &body);
         insert_discord_effect(pool, "discord:test_lock_order", &payload, "pending").await?;
@@ -7507,7 +7510,10 @@ mod tests {
         sqlx::query("UPDATE scrim.match_requests SET status='posting' WHERE id IN (31, 41)")
             .execute(pool)
             .await?;
-        let slots = json!([{"day":"sat","from":960,"to":1080}]);
+        let slots = json!([
+            {"day":"sat","from":960,"to":1080},
+            {"day":"sun","from":960,"to":1080}
+        ]);
         let payload_missing = match_request_discord_effect_payload(
             30,
             31,
@@ -7542,7 +7548,10 @@ mod tests {
         sqlx::query(
             r#"
             UPDATE scrim.outbox_effects
-               SET state='leased', lease_until=now() - interval '1 second', attempts=1
+               SET state='leased',
+                   lease_owner='dlbots:scrim_discord_outbox',
+                   lease_until=now() - interval '1 second',
+                   attempts=1
              WHERE idempotency_key IN (
                  'discord:test_expired_missing_batch',
                  'discord:test_expired_valid_batch'
@@ -7594,7 +7603,8 @@ mod tests {
             )
             VALUES(
                 32, 30, 1, NULL, 'posting',
-                '[{"day":"sat","from":960,"to":1080}]'::jsonb, now(), now()
+                '[{"day":"sat","from":960,"to":1080},
+                  {"day":"sun","from":960,"to":1080}]'::jsonb, now(), now()
             )
             "#,
         )
