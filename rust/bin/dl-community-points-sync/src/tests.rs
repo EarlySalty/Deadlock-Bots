@@ -70,6 +70,7 @@ async fn fake_server(state: Shared) -> reqwest::Url {
     let app = Router::new()
         .route(VIEWERS_PATH, get(page_handler))
         .route(STREAMERS_PATH, get(page_handler))
+        .route(SUGGESTION_OUTCOMES_PATH, get(page_handler))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -374,5 +375,126 @@ async fn ende_zu_ende_in_die_zentrale_db() {
     assert_eq!(
         load_cursor(pool, CURSOR_VIEWERS).await.expect("cursor"),
         Some(stamp(4))
+    );
+}
+
+fn outcome(active: bool, suggested_at: &str, partner_since: Option<&str>) -> SuggestionOutcomeWire {
+    serde_json::from_value(json!({
+        "twitch_user_id": "456",
+        "twitch_login": "partner_a",
+        "suggested_by_discord_id": "1001",
+        "suggested_at": suggested_at,
+        "suggestion_count": 2,
+        "candidate_status": "approved",
+        "is_partner_active": active,
+        "partner_since": partner_since,
+        "updated_at": "2026-10-20T10:00:00Z",
+    }))
+    .expect("vertrags-json")
+}
+
+#[test]
+fn vorschlag_bringt_punkte_nur_als_neuer_aktiver_partner() {
+    let event = suggestion_event(&outcome(
+        true,
+        "2026-10-02T12:00:00Z",
+        Some("2026-10-15T12:00:00Z"),
+    ))
+    .expect("punkte");
+    assert_eq!(event.recipient, LedgerRecipient::Member(1001));
+    assert_eq!(event.source, SOURCE_STREAMER_SUGGESTION);
+    assert_eq!(event.reference, "streamer_suggestion:456");
+    assert_eq!(event.points, 150);
+    assert_eq!(event.occurred_at.to_rfc3339(), "2026-10-15T12:00:00+00:00");
+
+    // Noch kein Partner: keine Punkte.
+    assert!(suggestion_event(&outcome(false, "2026-10-02T12:00:00Z", None)).is_none());
+    // Schon vor dem Vorschlag Partner (Altpartner): keine Punkte.
+    assert!(suggestion_event(&outcome(
+        true,
+        "2026-10-02T12:00:00Z",
+        Some("2026-09-01T12:00:00Z")
+    ))
+    .is_none());
+    // Ohne Partnerzeit zählt der Zeitpunkt der Zeile.
+    let ohne = suggestion_event(&outcome(true, "2026-10-02T12:00:00Z", None)).expect("punkte");
+    assert_eq!(ohne.occurred_at.to_rfc3339(), "2026-10-20T10:00:00+00:00");
+    // Kaputte IDs: keine Punkte.
+    let mut kaputt = outcome(true, "2026-10-02T12:00:00Z", None);
+    kaputt.suggested_by_discord_id = "abc".into();
+    assert!(suggestion_event(&kaputt).is_none());
+    let mut kaputt = outcome(true, "2026-10-02T12:00:00Z", None);
+    kaputt.twitch_user_id = "0".into();
+    assert!(suggestion_event(&kaputt).is_none());
+}
+
+/// Ergebnisse landen genau einmal je Kanal im Ledger, auch wenn eine Zeile
+/// (Partner, Pause, wieder Partner) erneut kommt; Widerspruch bucht nichts.
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn vorschlags_punkte_einmal_je_kanal_in_die_zentrale_db() {
+    if std::env::var("CENTRAL_TEST_DSN").is_err() && std::env::var("DATABASE_URL").is_err() {
+        eprintln!("skipping: CENTRAL_TEST_DSN or DATABASE_URL is required");
+        return;
+    }
+    let db = dl_central_db::testing::test_pool().await.expect("test db");
+    let pool = db.pool();
+    sqlx::query("INSERT INTO core.user_privacy (user_id, opted_out) VALUES (1002, TRUE)")
+        .execute(pool)
+        .await
+        .expect("privacy");
+    let row = |id: &str, discord: &str, stamp: &str, since: &str| {
+        let mut value = serde_json::to_value(json!({
+            "twitch_user_id": id,
+            "twitch_login": "x",
+            "suggested_by_discord_id": discord,
+            "suggested_at": "2026-10-02T12:00:00Z",
+            "suggestion_count": 1,
+            "candidate_status": "approved",
+            "is_partner_active": true,
+            "partner_since": since,
+            "updated_at": stamp,
+        }))
+        .expect("json");
+        value["updated_at"] = json!(stamp);
+        (stamp.to_string(), value)
+    };
+    let state = shared(
+        vec![
+            row("456", "1001", &stamp(0), "2026-10-10T12:00:00Z"),
+            row("789", "1002", &stamp(1), "2026-10-11T12:00:00Z"),
+            row("456", "1001", &stamp(2), "2026-10-18T12:00:00Z"),
+        ],
+        2,
+    );
+    let base = fake_server(state.clone()).await;
+    let url = endpoint(&base, SUGGESTION_OUTCOMES_PATH).expect("url");
+    let client = http_client().expect("client");
+    let summary = sync_source::<SuggestionOutcomeWire, _, _>(
+        &client,
+        &url,
+        TOKEN,
+        &SuggestionLedgerSink(pool),
+        suggestion_event,
+    )
+    .await
+    .expect("sync");
+    assert_eq!((summary.fetched, summary.written), (3, 1));
+    let rows: Vec<(i64, String, i32)> = sqlx::query_as(
+        "SELECT discord_id, ref, points FROM community_points.ledger
+          WHERE source = 'streamer_suggestion'",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("ledger");
+    assert_eq!(
+        rows,
+        vec![(1001, "streamer_suggestion:456".to_string(), 150)]
+    );
+    assert_eq!(
+        load_cursor(pool, CURSOR_SUGGESTION_OUTCOMES)
+            .await
+            .expect("cursor"),
+        Some(stamp(2))
     );
 }

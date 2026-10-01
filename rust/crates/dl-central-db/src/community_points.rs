@@ -45,6 +45,7 @@ pub const SOURCE_STREAMER_QUALIFIED_JOIN: &str = "streamer_qualified_join";
 /// Cursor-Namen in `community_points.sync_state`.
 pub const CURSOR_VIEWERS: &str = "twitch_viewers";
 pub const CURSOR_STREAMERS: &str = "twitch_streamers";
+pub const CURSOR_SUGGESTION_OUTCOMES: &str = "twitch_scout_suggestion_outcomes";
 
 /// Punkte fuer einen Clip-Contest-Platz (1..=3), sonst `None`.
 pub fn clip_place_points(place: i64) -> Option<i32> {
@@ -307,6 +308,14 @@ pub async fn record_ledger_event(
     pool: &PgPool,
     event: &LedgerEvent,
 ) -> Result<bool, CentralDbError> {
+    let mut conn = pool.acquire().await?;
+    insert_ledger_event(&mut conn, event).await
+}
+
+async fn insert_ledger_event(
+    conn: &mut sqlx::PgConnection,
+    event: &LedgerEvent,
+) -> Result<bool, CentralDbError> {
     let (discord_id, streamer) = match &event.recipient {
         LedgerRecipient::Member(id) if *id > 0 => (Some(*id), None),
         LedgerRecipient::Streamer(id) if is_valid_twitch_user_id(id) => (None, Some(id.clone())),
@@ -332,10 +341,32 @@ pub async fn record_ledger_event(
     .bind(&event.reference)
     .bind(event.points)
     .bind(event.occurred_at)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
     Ok(inserted == 1)
+}
+
+/// Bucht eine Seite Streamer-Vorschlags-Ergebnisse (Twitch-Bot,
+/// `scout/community-suggestions/outcomes`) samt Folge-Cursor in einer
+/// Transaktion. Je vorgeschlagenem Kanal gibt es die Punkte genau einmal
+/// (`ref` = `streamer_suggestion:<twitch_user_id>`), auch wenn der Kanal
+/// pausiert und wieder Partner wird. Liefert die Zahl neuer Buchungen.
+pub async fn apply_suggestion_outcome_page(
+    pool: &PgPool,
+    events: &[LedgerEvent],
+    next_cursor: Option<&str>,
+) -> Result<u64, CentralDbError> {
+    let mut tx = pool.begin().await?;
+    let mut written = 0;
+    for event in events {
+        if insert_ledger_event(&mut tx, event).await? {
+            written += 1;
+        }
+    }
+    store_cursor(&mut tx, CURSOR_SUGGESTION_OUTCOMES, next_cursor).await?;
+    tx.commit().await?;
+    Ok(written)
 }
 
 /// Bucht qualifizierte Beitritte ueber Streamer-Einladungen

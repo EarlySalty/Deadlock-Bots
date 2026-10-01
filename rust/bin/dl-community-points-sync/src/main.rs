@@ -4,8 +4,9 @@
 
 use dl_central_db::community_points::{import_clip_contest_ledger, import_qualified_join_ledger};
 use dl_community_points_sync::{
-    endpoint, http_client, streamer_row, sync_source, validate_base_url, viewer_row,
-    StreamerDbSink, StreamerWire, ViewerDbSink, ViewerWire, DEFAULT_TWITCH_API_URL, STREAMERS_PATH,
+    endpoint, http_client, streamer_row, suggestion_event, sync_source, validate_base_url,
+    viewer_row, StreamerDbSink, StreamerWire, SuggestionLedgerSink, SuggestionOutcomeWire,
+    ViewerDbSink, ViewerWire, DEFAULT_TWITCH_API_URL, STREAMERS_PATH, SUGGESTION_OUTCOMES_PATH,
     VIEWERS_PATH,
 };
 
@@ -58,6 +59,24 @@ async fn main() -> anyhow::Result<()> {
         streamers.written,
         streamers.cursor.as_deref().unwrap_or("-")
     );
+
+    // Ein Fehler hier (z. B. Twitch-Bot noch ohne Paket F) stoppt die
+    // übrigen Ledger-Importe nicht.
+    match sync_source::<SuggestionOutcomeWire, _, _>(
+        &client,
+        &endpoint(&base, SUGGESTION_OUTCOMES_PATH)?,
+        &token,
+        &SuggestionLedgerSink(&pool),
+        suggestion_event,
+    )
+    .await
+    {
+        Ok(outcomes) => println!(
+            "Streamer-Vorschläge: {} Seiten, {} Zeilen geholt, {} ohne Punkte, {} neu gebucht",
+            outcomes.pages, outcomes.fetched, outcomes.skipped, outcomes.written
+        ),
+        Err(error) => eprintln!("Streamer-Vorschläge nicht synchronisiert: {error:#}"),
+    }
 
     let joins = import_qualified_join_ledger(&pool).await?;
     println!("Ledger: {joins} neue qualifizierte Beitritte");
