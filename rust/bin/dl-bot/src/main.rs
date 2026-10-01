@@ -1380,7 +1380,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         broker_listener,
         dl_broker::router(broker.clone())
             .merge(dl_broker::twitch_invites::router(
-                broker,
+                broker.clone(),
                 twitch_invites.clone(),
             ))
             .merge(dl_broker::twitch_links_router(Arc::new(
@@ -1388,6 +1388,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     pool: central_pool.clone(),
                 },
             )))
+            .merge(dl_broker::clips::router(
+                broker,
+                Arc::new(modglue::ClipSubmitGlue {
+                    clips: clips.clone(),
+                }),
+            ))
             .merge(turnierglue::publisher_router(
                 turnier_proposals,
                 broker_token,

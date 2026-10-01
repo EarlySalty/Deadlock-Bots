@@ -2125,6 +2125,106 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     .expect("team application privacy registry rows");
     assert_eq!(team_application_privacy_rows, 5);
 
+    // Clip-Contest (2026100102): Voting-Zustand, Stimmzettel, Stimmen,
+    // Ergebnisse und Twitch-Einsendungen in clip_submissions.
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_votings").await,
+        vec![
+            "window_id",
+            "guild_id",
+            "channel_id",
+            "status",
+            "message_id",
+            "publish_claimed_at",
+            "voting_start_at",
+            "voting_end_at",
+            "result_post_claimed_at",
+            "result_message_id",
+            "curator_dm_claimed_at",
+            "curator_dm_sent_at",
+            "closed_at",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_voting_entries").await,
+        vec!["window_id", "position", "submission_id"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_votes").await,
+        vec![
+            "window_id",
+            "voter_user_id",
+            "submission_id",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "clips", "clip_votes").await,
+        vec!["window_id", "voter_user_id"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_contest_results").await,
+        vec![
+            "window_id",
+            "place",
+            "guild_id",
+            "week_start_at",
+            "week_end_at",
+            "submission_id",
+            "source",
+            "user_id",
+            "streamer_twitch_user_id",
+            "streamer_login",
+            "votes",
+            "decided_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "clips", "clip_contest_results").await,
+        vec!["window_id", "place"]
+    );
+    for column in [
+        "source",
+        "streamer_twitch_user_id",
+        "streamer_login",
+        "submitted_by_twitch_user_id",
+        "title",
+        "idempotency_key",
+    ] {
+        assert!(
+            table_columns_in_schema(&pool, "clips", "clip_submissions")
+                .await
+                .iter()
+                .any(|c| c == column),
+            "clips.clip_submissions.{column} fehlt"
+        );
+    }
+    assert_eq!(
+        column_in_schema(&pool, "clips", "clip_submissions", "user_id")
+            .await
+            .is_nullable,
+        "YES"
+    );
+    assert_eq!(
+        column_in_schema(&pool, "clips", "clip_window_submissions", "user_id")
+            .await
+            .is_nullable,
+        "YES"
+    );
+    let twitch_ohne_identitaet = sqlx::query(
+        "INSERT INTO clips.clip_submissions(guild_id, link, credit, permission, source, idempotency_key)
+         VALUES (1, 'https://clips.twitch.tv/X', 'x', 'p', 'twitch', 'k')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        twitch_ohne_identitaet.is_err(),
+        "Twitch-Einsendung ohne Streamer-ID muss scheitern"
+    );
+
     assert_eq!(
         table_columns_in_schema(&pool, "scrim", "match_request_reminder_effects").await,
         vec![
