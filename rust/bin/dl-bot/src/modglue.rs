@@ -30,7 +30,7 @@ const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
-const BRAIN_USAGE: &str = "🧠 Nutze `/brain frage:<deine Frage>`. Build-Fragen erzeugen einen markierten Review-Build für die In-Game-Prüfung.";
+const BRAIN_USAGE: &str = "🧠 Frag mich mit `/brain frage:<deine Frage>`. Einen Build im Spiel veröffentlichst du nur mit `/brain-build`.";
 const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig, eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
 const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅. Pack deine Frage in unter {max} Zeichen.";
@@ -138,10 +138,13 @@ struct BrainReviewBuildSituation {
 #[derive(Debug, serde::Deserialize)]
 struct BrainReviewBuildReceipt {
     status: String,
-    task_id: i64,
+    task_id: Option<i64>,
     hero_build_id: Option<i64>,
     version: Option<i64>,
     hero_name: String,
+    review: bool,
+    #[serde(default)]
+    message: Option<String>,
     core: Vec<BrainReviewBuildItem>,
     situations: Vec<BrainReviewBuildSituation>,
 }
@@ -239,20 +242,18 @@ pub struct ModGlue {
 
 pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
-fn looks_like_build_request(question: &str) -> bool {
-    let lower = question.to_lowercase();
-    ["build", "baue", "bau mir", "kaufreihenfolge"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-}
-
-async fn run_brain_review_build(
+async fn run_brain_requested_build(
     bin: &std::path::Path,
     question: &str,
+    review: bool,
 ) -> Result<BrainReviewBuildReceipt, dl_brain::BrainError> {
     let future = tokio::process::Command::new(bin)
         .kill_on_drop(true)
-        .arg("review-build")
+        .arg(if review {
+            "review-build"
+        } else {
+            "publish-build-query"
+        })
         .arg("--wait-seconds")
         .arg(BRAIN_REVIEW_BUILD_WAIT_SECS.to_string())
         .arg("--")
@@ -273,18 +274,26 @@ async fn run_brain_review_build(
             "Review-Build Ausgabe ist zu groß".into(),
         ));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
+    let receipt: BrainReviewBuildReceipt = serde_json::from_slice(&output.stdout)
+        .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))?;
+    if receipt.review != review {
+        return Err(dl_brain::BrainError::Backend(
+            "Brain-CLI meldet einen anderen Veröffentlichungsmodus".into(),
+        ));
+    }
+    Ok(receipt)
 }
 
 fn format_review_build_receipt(
     receipt: &BrainReviewBuildReceipt,
     emoji_index: &BrainEmojiIndex,
 ) -> String {
-    let published = receipt
-        .hero_build_id
+    let published = dl_brain::build_request::confirmed_build_id(&receipt.status, receipt.hero_build_id)
         .map(|id| format!("✅ Im Spiel veröffentlicht · Build-ID `{id}`"))
-        .unwrap_or_else(|| format!("⏳ Veröffentlichung läuft · Task `{}`", receipt.task_id));
+        .unwrap_or_else(|| match (receipt.status.as_str(), receipt.task_id.filter(|id| *id > 0)) {
+            ("PENDING" | "RUNNING", Some(id)) => format!("⏳ Zur Veröffentlichung eingereiht · Auftrag `{id}`. Noch keine Build-ID bestätigt."),
+            _ => "Die Veröffentlichung ist nicht bestätigt.".to_string(),
+        });
     let core = receipt
         .core
         .iter()
@@ -312,8 +321,13 @@ fn format_review_build_receipt(
         .version
         .map(|version| format!(" · v{version}"))
         .unwrap_or_default();
+    let label = if receipt.review {
+        "Review-Build (experimentell)"
+    } else {
+        "Build"
+    };
     format!(
-        "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
+        "**{} {label}**{version}\n{published}\n\n**Kern:** {core}\n{}",
         emoji_index.decorate_name(&receipt.hero_name),
         situations
     )
@@ -322,25 +336,11 @@ fn format_review_build_receipt(
 pub struct SharedBrainAnswerer {
     pub engine: Arc<dl_answer::AnswerEngine>,
     pub open_test_mode: bool,
-    pub brain_bin: std::path::PathBuf,
-    pub emoji_index: Arc<BrainEmojiIndex>,
 }
 
 #[async_trait::async_trait]
 impl dl_brain::AiAnswerer for SharedBrainAnswerer {
     async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-        if self.open_test_mode && looks_like_build_request(question) {
-            let receipt = run_brain_review_build(&self.brain_bin, question).await?;
-            if matches!(receipt.status.as_str(), "FAILED" | "CANCELLED") {
-                return Err(dl_brain::BrainError::Backend(
-                    "Review-Build konnte nicht veröffentlicht werden".into(),
-                ));
-            }
-            return Ok(dl_brain::BrainOutcome::Answer(format_review_build_receipt(
-                &receipt,
-                self.emoji_index.as_ref(),
-            )));
-        }
         if self.open_test_mode {
             return self
                 .engine
@@ -400,17 +400,190 @@ impl dl_brain::AiAnswerer for ReportOnlyShadowBrainAnswerer {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishClaim {
+    Acquired,
+    Existing(Option<String>),
+}
+
+#[async_trait::async_trait]
+pub trait BuildPublishGate: Send + Sync {
+    async fn claim(&self, request_id: &str, user_id: u64) -> Result<PublishClaim, String>;
+    async fn finish(&self, request_id: &str, result: &str) -> Result<(), String>;
+}
+
+pub struct PgBuildPublishGate {
+    pub pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl BuildPublishGate for PgBuildPublishGate {
+    async fn claim(&self, request_id: &str, user_id: u64) -> Result<PublishClaim, String> {
+        let inserted: Option<String> = sqlx::query_scalar(
+            "INSERT INTO brain.discord_build_publish_requests (request_id, user_id) \
+             VALUES ($1, $2) ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
+        )
+        .bind(request_id)
+        .bind(user_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "Build-Anfrage konnte nicht sicher reserviert werden".to_owned())?;
+        if inserted.is_some() {
+            return Ok(PublishClaim::Acquired);
+        }
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT result_text FROM brain.discord_build_publish_requests WHERE request_id=$1",
+        )
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "Build-Anfrage konnte nicht geprüft werden".to_owned())?
+        .flatten();
+        Ok(PublishClaim::Existing(previous))
+    }
+
+    async fn finish(&self, request_id: &str, result: &str) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE brain.discord_build_publish_requests \
+             SET result_text=$2, finished_at=now() WHERE request_id=$1",
+        )
+        .bind(request_id)
+        .bind(result)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| "Build-Ergebnis konnte nicht gespeichert werden".to_owned())?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+pub trait BuildPublisher: Send + Sync {
+    async fn publish(&self, query: &str) -> Result<String, dl_brain::BrainError>;
+}
+
+pub struct SharedBrainPublisher {
+    pub brain_bin: std::path::PathBuf,
+    pub open_test_mode: bool,
+    pub emoji_index: Arc<BrainEmojiIndex>,
+}
+
+#[async_trait::async_trait]
+impl BuildPublisher for SharedBrainPublisher {
+    async fn publish(&self, query: &str) -> Result<String, dl_brain::BrainError> {
+        let receipt =
+            run_brain_requested_build(&self.brain_bin, query, self.open_test_mode).await?;
+        if receipt.status == "BLOCKED" {
+            return Ok(receipt.message.unwrap_or_else(||
+                "Die aktuellen Daten reichen nicht für einen geprüften Build. Es wurde nichts veröffentlicht.".into()));
+        }
+        if !matches!(receipt.status.as_str(), "DONE" | "PENDING" | "RUNNING")
+            || receipt.task_id.is_none_or(|id| id <= 0)
+            || (receipt.status == "DONE"
+                && dl_brain::build_request::confirmed_build_id(
+                    &receipt.status,
+                    receipt.hero_build_id,
+                )
+                .is_none())
+        {
+            return Err(dl_brain::BrainError::Backend(
+                "Steam hat die Build-Veröffentlichung nicht bestätigt".into(),
+            ));
+        }
+        Ok(format_review_build_receipt(
+            &receipt,
+            self.emoji_index.as_ref(),
+        ))
+    }
+}
+
 pub struct BrainHandler {
     pub adapter: Arc<DiscordAdapter>,
     pub config: Arc<dl_brain::BrainConfig>,
     pub cooldowns: Arc<dl_brain::BrainCooldowns>,
     pub answerer: Arc<dyn dl_brain::AiAnswerer>,
+    pub publisher: Arc<dyn BuildPublisher>,
+    pub publish_gate: Arc<dyn BuildPublishGate>,
     pub channel_allowlist: Option<HashSet<u64>>,
     pub all_guild_channels: bool,
     pub emoji_index: Arc<BrainEmojiIndex>,
 }
 
 impl BrainHandler {
+    async fn handle_publish_interaction(&self, interaction: &BridgeInteraction) -> BridgeReply {
+        if interaction.interaction_id == 0 {
+            return BridgeReply::ephemeral_text(
+                "Die Discord-Anfrage hat keine gültige ID. Es wurde kein Build erstellt.",
+            );
+        }
+        let hero = interaction
+            .options
+            .get("held")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let style = interaction
+            .options
+            .get("spielstil")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(query) = dl_brain::build_request::build_query(hero, style) else {
+            return BridgeReply::ephemeral_text("Bitte wähle einen Helden und einen der angebotenen Spielstile. Es wurde nichts veröffentlicht.");
+        };
+        let request_id = format!("discord:brain-build:v1:{}", interaction.interaction_id);
+        match self
+            .publish_gate
+            .claim(&request_id, interaction.user_id)
+            .await
+        {
+            Ok(PublishClaim::Acquired) => {}
+            Ok(PublishClaim::Existing(Some(result))) => {
+                return BridgeReply::ephemeral_text(&result);
+            }
+            Ok(PublishClaim::Existing(None)) => {
+                return BridgeReply::ephemeral_text("Diese Build-Anfrage wird bereits bearbeitet. Es wird kein zweiter Build gestartet.");
+            }
+            Err(error) => {
+                tracing::warn!(%error, %request_id, "Build-Anfrage konnte nicht sicher reserviert werden");
+                return BridgeReply::ephemeral_text(BRAIN_BACKEND_ERR);
+            }
+        }
+        let cooldown_denial = if self.config.cooldown_secs > 0 {
+            let mut cooldowns = self.cooldowns.lock().await;
+            let now = std::time::Instant::now();
+            let cooldown = Duration::from_secs(self.config.cooldown_secs);
+            cooldowns.retain(|_, last| now.saturating_duration_since(*last) < cooldown);
+            let remaining = cooldowns
+                .get(&interaction.user_id)
+                .map(|last| now.saturating_duration_since(*last))
+                .filter(|elapsed| *elapsed < cooldown)
+                .map(|elapsed| (cooldown - elapsed).as_secs().saturating_add(1));
+            if remaining.is_none() {
+                cooldowns.insert(interaction.user_id, now);
+            }
+            remaining.map(|secs| BRAIN_COOLDOWN.replace("{secs}", &secs.to_string()))
+        } else {
+            None
+        };
+        if let Some(text) = cooldown_denial {
+            if let Err(error) = self.publish_gate.finish(&request_id, &text).await {
+                tracing::warn!(%error, %request_id, "Build-Cooldown konnte nicht gespeichert werden");
+            }
+            return BridgeReply::ephemeral_text(&text);
+        }
+        let text = match self.publisher.publish(&query).await {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(%error, %request_id, "Build-Veröffentlichung fehlgeschlagen");
+                BRAIN_BACKEND_ERR.to_owned()
+            }
+        };
+        if let Err(error) = self.publish_gate.finish(&request_id, &text).await {
+            tracing::warn!(%error, %request_id, "Build-Ergebnis nicht speicherbar");
+        }
+        brain_bridge_reply_from_body(
+            self.public_body_for_outcome(&query, dl_brain::BrainOutcome::Answer(text)),
+        )
+    }
+
     fn channel_allowed(&self, channel_id: u64) -> bool {
         self.all_guild_channels
             || self
@@ -549,6 +722,12 @@ impl InteractionHandler for BrainHandler {
             return BridgeReply::ephemeral_text(
                 "Der Brain-Test ist in diesem Kanal nicht freigeschaltet.",
             );
+        }
+        if interaction.command == "brain-build" {
+            return self.handle_publish_interaction(&interaction).await;
+        }
+        if interaction.command != "brain" {
+            return BridgeReply::ephemeral_text("Unbekannter Brain-Befehl.");
         }
         let question = interaction
             .options
@@ -736,7 +915,7 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
     CommandSpec {
         definition: json!({
             "name": "brain",
-            "description": "Deadlock Brain fragen und Review-Builds fürs Spiel erzeugen",
+            "description": "Deadlock Brain zu Helden, Items und Builds fragen",
             "dm_permission": false,
             "options": [{
                 "type": 3,
@@ -745,6 +924,35 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
                 "required": true,
                 "max_length": max_question_len.min(4000),
             }],
+        }),
+    }
+}
+
+pub fn brain_build_command_spec() -> CommandSpec {
+    CommandSpec {
+        definition: json!({
+            "name": "brain-build",
+            "description": "Einen geprüften Build ausdrücklich im Spiel veröffentlichen",
+            "dm_permission": false,
+            "options": [
+                {
+                    "type": 3,
+                    "name": "held",
+                    "description": "Für welchen Deadlock-Helden soll der Build veröffentlicht werden?",
+                    "required": true,
+                    "max_length": 40
+                },
+                {
+                    "type": 3,
+                    "name": "spielstil",
+                    "description": "Welchen Spielstil soll der Build haben?",
+                    "required": true,
+                    "choices": [
+                        {"name": "Waffen", "value": "gun"},
+                        {"name": "Geist", "value": "spirit"}
+                    ]
+                }
+            ]
         }),
     }
 }
@@ -3938,6 +4146,41 @@ mod tests {
         calls: Arc<AtomicUsize>,
         retrieval_calls: Arc<AtomicUsize>,
     }
+
+    #[derive(Default)]
+    struct FakeBuildGate {
+        requests: Mutex<HashMap<String, Option<String>>>,
+    }
+    #[async_trait::async_trait]
+    impl BuildPublishGate for FakeBuildGate {
+        async fn claim(&self, request_id: &str, _user_id: u64) -> Result<PublishClaim, String> {
+            let mut requests = self.requests.lock().await;
+            if let Some(previous) = requests.get(request_id) {
+                return Ok(PublishClaim::Existing(previous.clone()));
+            }
+            requests.insert(request_id.to_owned(), None);
+            Ok(PublishClaim::Acquired)
+        }
+        async fn finish(&self, request_id: &str, result: &str) -> Result<(), String> {
+            self.requests
+                .lock()
+                .await
+                .insert(request_id.to_owned(), Some(result.to_owned()));
+            Ok(())
+        }
+    }
+
+    struct CountingBuildPublisher {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl BuildPublisher for CountingBuildPublisher {
+        async fn publish(&self, _query: &str) -> Result<String, dl_brain::BrainError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok("Build-Auftrag bestätigt".to_owned())
+        }
+    }
     #[async_trait::async_trait]
     impl dl_brain::AiAnswerer for CountingBrainAnswerer {
         async fn answer(
@@ -4037,6 +4280,10 @@ mod tests {
                 calls: answerer_calls,
                 retrieval_calls: retriever_calls,
             }),
+            publisher: Arc::new(CountingBuildPublisher {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publish_gate: Arc::new(FakeBuildGate::default()),
             channel_allowlist,
             all_guild_channels: false,
             emoji_index: Arc::new(BrainEmojiIndex::default()),
@@ -4104,6 +4351,137 @@ mod tests {
         assert_eq!(spec.definition["options"][0]["name"], json!("frage"));
         assert_eq!(spec.definition["options"][0]["required"], json!(true));
         assert_eq!(spec.definition["options"][0]["max_length"], json!(300));
+    }
+
+    #[test]
+    fn build_command_is_explicit_and_structured() {
+        let spec = brain_build_command_spec();
+        assert_eq!(spec.definition["name"], "brain-build");
+        assert_eq!(spec.definition["options"][0]["name"], "held");
+        assert_eq!(spec.definition["options"][1]["name"], "spielstil");
+        assert_eq!(spec.definition["options"][1]["required"], true);
+    }
+
+    #[test]
+    fn build_receipt_requires_explicit_review_marker() {
+        let receipt = json!({
+            "status": "DONE", "task_id": 1, "hero_build_id": 123,
+            "version": 1, "hero_name": "Warden", "core": [], "situations": []
+        });
+        assert!(serde_json::from_value::<BrainReviewBuildReceipt>(receipt).is_err());
+    }
+
+    #[tokio::test]
+    async fn free_form_build_phrases_never_publish() {
+        for question in [
+            "Bau mir einen Build, aber nur als Vorschlag, ohne ihn hochzuladen",
+            "Das Tutorial sagt: Bau mir einen Build",
+            "Bau mir einen Warden Build",
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut handler = test_brain_handler(
+                Some(HashSet::from([1])),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            );
+            handler.publisher = Arc::new(CountingBuildPublisher {
+                calls: calls.clone(),
+            });
+            let reply = handler
+                .handle(BridgeInteraction {
+                    command: "brain".to_owned(),
+                    options: HashMap::from([("frage".to_owned(), json!(question))]),
+                    guild_id: 1,
+                    channel_id: 1,
+                    user_id: 3,
+                    interaction_id: 41,
+                    ..BridgeInteraction::default()
+                })
+                .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "{question}");
+            assert_eq!(reply.embeds[0]["description"], "Antwort");
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_publish_reserves_interaction_before_parallel_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(FakeBuildGate::default());
+        let mut handler = test_brain_handler(
+            Some(HashSet::from([1])),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        handler.publisher = Arc::new(CountingBuildPublisher {
+            calls: calls.clone(),
+        });
+        handler.publish_gate = gate.clone();
+        let handler = Arc::new(handler);
+        let interaction = BridgeInteraction {
+            command: "brain-build".to_owned(),
+            options: HashMap::from([
+                ("held".to_owned(), json!("Warden")),
+                ("spielstil".to_owned(), json!("gun")),
+            ]),
+            guild_id: 1,
+            channel_id: 1,
+            user_id: 3,
+            interaction_id: 123,
+            ..BridgeInteraction::default()
+        };
+        let (first, second) = tokio::join!(
+            handler.handle(interaction.clone()),
+            handler.handle(interaction.clone())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.requests.lock().await.len(), 1);
+        assert!(first.embeds.len() == 1 || second.embeds.len() == 1);
+        let retry = handler.handle(interaction).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(retry.content.as_deref(), Some("Build-Auftrag bestätigt"));
+    }
+
+    #[tokio::test]
+    async fn parallel_publish_commands_from_same_user_obey_cooldown() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(FakeBuildGate::default());
+        let mut handler = test_brain_handler(
+            Some(HashSet::from([1])),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        handler.publisher = Arc::new(CountingBuildPublisher {
+            calls: calls.clone(),
+        });
+        handler.publish_gate = gate.clone();
+        let handler = Arc::new(handler);
+        let interaction = BridgeInteraction {
+            command: "brain-build".to_owned(),
+            options: HashMap::from([
+                ("held".to_owned(), json!("Warden")),
+                ("spielstil".to_owned(), json!("gun")),
+            ]),
+            guild_id: 1,
+            channel_id: 1,
+            user_id: 3,
+            interaction_id: 123,
+            ..BridgeInteraction::default()
+        };
+        let mut other = interaction.clone();
+        other.interaction_id = 124;
+        let (first, second) = tokio::join!(handler.handle(interaction), handler.handle(other));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.requests.lock().await.len(), 2);
+        assert!(
+            first
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("Ganz ruhig"))
+                || second
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("Ganz ruhig"))
+        );
     }
 
     #[tokio::test]
@@ -4301,9 +4679,11 @@ mod tests {
 
     #[test]
     fn review_build_receipt_bleibt_knapp_und_zeigt_build_id() {
-        let receipt = BrainReviewBuildReceipt {
+        let mut receipt = BrainReviewBuildReceipt {
             status: "DONE".into(),
-            task_id: 42,
+            task_id: Some(42),
+            review: true,
+            message: None,
             hero_build_id: Some(818625),
             version: Some(1),
             hero_name: "Warden".into(),
@@ -4324,6 +4704,61 @@ mod tests {
         assert!(text.contains("Build-ID `818625`"));
         assert!(text.contains("**Kern:** Extended Magazine"));
         assert!(text.contains("**Optional:** Healing Tempo"));
+        assert!(text.contains("experimentell"));
+        for status in ["PENDING", "RUNNING", "FAILED", "CANCELLED", "BLOCKED"] {
+            receipt.status = status.into();
+            let text = format_review_build_receipt(&receipt, &index);
+            assert!(!text.contains("Im Spiel veröffentlicht"), "{status}");
+            assert!(!text.contains("Build-ID `818625`"), "{status}");
+        }
+        receipt.status = "DONE".into();
+        receipt.hero_build_id = Some(0);
+        assert!(!format_review_build_receipt(&receipt, &index).contains("Im Spiel veröffentlicht"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn requested_build_cli_waehlt_guarded_oder_review_ohne_shell_interpolation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("brain-fixture");
+        let args_file = dir.path().join("args");
+        for (review, command) in [(false, "publish-build-query"), (true, "review-build")] {
+            let fixture = format!(
+                "{{\"status\":\"DONE\",\"task_id\":1,\"hero_build_id\":123,\"version\":1,\"hero_name\":\"Held\",\"review\":{review},\"core\":[],\"situations\":[]}}"
+            );
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}'\n",
+                    args_file.display(),
+                    fixture
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = run_brain_requested_build(&bin, "- Bau mir einen Build", review)
+                .await
+                .unwrap();
+            assert_eq!(result.hero_build_id, Some(123));
+            assert_eq!(result.review, review);
+            let args = std::fs::read_to_string(&args_file).unwrap();
+            let lines: Vec<_> = args.lines().collect();
+            assert_eq!(lines[0], command);
+            assert_eq!(lines[1], "--wait-seconds");
+            assert_eq!(lines[3], "--");
+            assert_eq!(lines[4], "- Bau mir einen Build");
+        }
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"BLOCKED\",\"task_id\":null,\"hero_build_id\":null,\"version\":null,\"hero_name\":\"Held\",\"review\":false,\"core\":[],\"situations\":[]}'\n",
+        )
+        .unwrap();
+        let mismatch = run_brain_requested_build(&bin, "Warden", true).await;
+        assert!(
+            mismatch.is_err(),
+            "auch BLOCKED darf keinen fremden Modus akzeptieren"
+        );
     }
 
     #[test]
