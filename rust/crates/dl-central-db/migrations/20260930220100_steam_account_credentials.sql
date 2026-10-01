@@ -14,3 +14,4 @@ CREATE TABLE steam.account_credentials (
     CHECK (guard_token_enc IS NULL OR octet_length(guard_token_enc) >= 32),
     CHECK (refresh_token_enc IS NULL OR octet_length(refresh_token_enc) >= 32)
 );
+GRANT SELECT, INSERT, UPDATE ON steam.account_credentials TO deadlock;

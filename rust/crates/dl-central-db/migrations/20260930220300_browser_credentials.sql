@@ -10,3 +10,4 @@ CREATE TABLE core.browser_credentials (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (provider, account_id)
 );
+GRANT SELECT, INSERT, UPDATE ON core.browser_credentials TO deadlock;
