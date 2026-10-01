@@ -1104,9 +1104,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 );
                 let emoji_index =
                     Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
+                let brain_vision = moderation_image_analyze_client
+                    .as_ref()
+                    .map(|(client, _)| -> Arc<dyn dl_ai::VisionGenerator> { client.clone() });
                 let legacy: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
+                        vision: brain_vision,
                         open_test_mode,
                     });
                 let publisher: Arc<dyn modglue::BuildPublisher> =
@@ -1151,11 +1155,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             modglue::brain_command_spec(handler.config.max_question_len),
             handler.clone(),
         );
-        router.on_command(
-            "brain-build",
-            modglue::brain_build_command_spec(),
-            handler.clone(),
-        );
+        if shared_brain_bin.is_file() {
+            router.on_command(
+                "brain-build",
+                modglue::brain_build_command_spec(),
+                handler.clone(),
+            );
+        } else {
+            tracing::warn!("Brain-Build-Befehl nicht registriert: BRAIN_BIN existiert nicht");
+        }
     }
 
     // Coaching (7): Panel postet nur noch einen Link zur Website. Die frühere

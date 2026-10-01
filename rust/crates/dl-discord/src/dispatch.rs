@@ -69,12 +69,50 @@ pub async fn dispatch(
     }
 }
 
+fn flatten_resolved_command(
+    data: &serenity::all::CommandData,
+) -> (String, std::collections::HashMap<String, Value>) {
+    fn resolve(
+        source: &[CommandDataOption],
+        resolved: &serenity::all::CommandDataResolved,
+        target: &mut std::collections::HashMap<String, Value>,
+    ) {
+        for option in source {
+            match &option.value {
+                CommandDataOptionValue::Attachment(id) => {
+                    let value = resolved
+                        .attachments
+                        .get(id)
+                        .map(|attachment| {
+                            json!({
+                                "url": attachment.url,
+                                "content_type": attachment.content_type,
+                                "size": attachment.size,
+                                "filename": attachment.filename,
+                            })
+                        })
+                        .unwrap_or(Value::Null);
+                    target.insert(option.name.clone(), value);
+                }
+                CommandDataOptionValue::SubCommand(children)
+                | CommandDataOptionValue::SubCommandGroup(children) => {
+                    resolve(children, resolved, target)
+                }
+                _ => {}
+            }
+        }
+    }
+    let (name, mut options) = flatten_command(&data.name, &data.options);
+    resolve(&data.options, &data.resolved, &mut options);
+    (name, options)
+}
+
 async fn dispatch_command(
     adapter: &Arc<DiscordAdapter>,
     router: &Arc<InteractionRouter>,
     cmd: &CommandInteraction,
 ) {
-    let (qualified_name, options) = flatten_command(&cmd.data.name, &cmd.data.options);
+    let (qualified_name, options) = flatten_resolved_command(&cmd.data);
     let Some(handler) = router.resolve_command(&qualified_name) else {
         tracing::warn!(command = %qualified_name, "Kein Handler für Slash-Command");
         return;
@@ -377,6 +415,7 @@ fn option_to_pair(option: &CommandDataOption) -> (String, Value) {
         CommandDataOptionValue::User(id) => json!(id.get()),
         CommandDataOptionValue::Channel(id) => json!(id.get()),
         CommandDataOptionValue::Role(id) => json!(id.get()),
+        CommandDataOptionValue::Attachment(id) => json!(id.get()),
         other => json!(format!("{other:?}")),
     };
     (option.name.to_string(), value)
@@ -745,6 +784,31 @@ pub async fn sync_commands(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attachment_option_is_resolved_from_discord_data() {
+        let data: serenity::all::CommandData = serde_json::from_value(serde_json::json!({
+            "id":"10", "name":"brain", "type":1,
+            "options":[{"name":"frage","type":3,"value":"Was siehst du?"},{"name":"bild","type":11,"value":"20"}],
+            "resolved":{"attachments":{"20":{"id":"20","filename":"screenshot.png","size":1234,"content_type":"image/png","url":"https://cdn.discordapp.com/attachments/1/20/screenshot.png","proxy_url":"https://media.discordapp.net/attachments/1/20/screenshot.png"}}}
+        })).expect("gültige Discord-Testdaten");
+        let (name, options) = super::flatten_resolved_command(&data);
+        assert_eq!(name, "brain");
+        assert_eq!(options["frage"], "Was siehst du?");
+        assert_eq!(options["bild"]["size"], 1234);
+        assert_eq!(options["bild"]["content_type"], "image/png");
+    }
+
+    #[test]
+    fn unresolved_attachment_is_present_but_invalid_not_silently_omitted() {
+        let data: serenity::all::CommandData = serde_json::from_value(serde_json::json!({
+            "id":"10", "name":"brain", "type":1,
+            "options":[{"name":"bild","type":11,"value":"20"}]
+        }))
+        .expect("gültige Discord-Testdaten ohne Auflösung");
+        let (_, options) = super::flatten_resolved_command(&data);
+        assert!(options.contains_key("bild"));
+        assert!(options["bild"].is_null());
+    }
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 

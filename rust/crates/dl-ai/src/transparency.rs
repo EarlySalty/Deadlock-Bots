@@ -202,7 +202,17 @@ impl ChatProvider for TransparencyProvider {
         let result = self.inner.chat(messages, params).await;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        let interaction = match &result {
+        let private_image = messages.iter().any(|message| {
+            message.role == ChatRole::User
+                && serde_json::from_str::<serde_json::Value>(&message.content).is_ok_and(
+                    |payload| {
+                        payload
+                            .get("image_context")
+                            .is_some_and(serde_json::Value::is_string)
+                    },
+                )
+        });
+        let mut interaction = match &result {
             Ok(response) => AiInteraction {
                 use_case: self.use_case,
                 prompt_excerpt,
@@ -242,6 +252,15 @@ impl ChatProvider for TransparencyProvider {
                 conversation_trail,
             },
         };
+        if private_image {
+            interaction.prompt_excerpt = "Brain-Bildfrage (Inhalt nicht protokolliert)".into();
+            interaction.system_excerpt = None;
+            interaction.conversation_trail.clear();
+            interaction.response = interaction
+                .response
+                .map(|_| "Bildantwort (Inhalt nicht protokolliert)".into());
+            interaction.error = result.as_ref().err().map(ToString::to_string);
+        }
         self.sink.record(interaction);
         result
     }
@@ -509,6 +528,33 @@ mod tests {
             model: Some("test-modell".to_string()),
             usage: TokenUsage::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn brain_image_context_and_answer_do_not_enter_content_log() {
+        let inner = Arc::new(FixedProvider(Ok(antwort("PRIVATE_IMAGE_OBSERVATION"))));
+        let sink = RecordingSink::arc();
+        let provider = TransparencyProvider::new(inner, sink.clone(), LlmUseCase::BotPate);
+        let payload = serde_json::json!({"question":"PRIVATE_IMAGE_QUESTION","image_context":"PRIVATE_IMAGE_OBSERVATION"});
+        let response = provider
+            .chat(
+                &[ChatMessage::user(payload.to_string())],
+                ChatParams::default(),
+            )
+            .await
+            .expect("unveränderte Bildantwort");
+        assert_eq!(response.content, "PRIVATE_IMAGE_OBSERVATION");
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].prompt_excerpt.contains("PRIVATE_IMAGE"));
+        assert!(!records[0]
+            .response
+            .as_deref()
+            .expect("inhaltlich ausgeblendete Antwort im Protokoll")
+            .contains("PRIVATE_IMAGE"));
+        assert!(records[0].system_excerpt.is_none());
+        assert!(records[0].conversation_trail.is_empty());
+        assert!(records[0].model.is_some());
     }
 
     #[tokio::test]
