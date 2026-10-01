@@ -8,6 +8,7 @@ pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
 pub mod concierge;
+pub mod concierge_community;
 mod db;
 pub mod faq;
 pub mod feedback_hub;
