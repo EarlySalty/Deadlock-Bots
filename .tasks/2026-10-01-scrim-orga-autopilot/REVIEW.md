@@ -28,5 +28,7 @@ No code fix or test/build was performed in this review round. The fixer must add
 - Batch-Aggregat wird erst nach dem Batch-Lock und den Request-Updates in einem eigenen Statement neu berechnet.
 - Zwei Concurrency-Regressionstests hinzugefügt.
 - Verifikation blockiert: Host-Lock war zunächst belegt. Beim späteren Versuch war er frei, aber installiertes Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen; `rustfmt` ist nicht installiert.
-- Zwei Gate-Aufrufe prüften den Commit-HEAD `2a00f7cc`, nicht die uncommitteten Änderungen. Diese Urteile sind keine Abnahme des Runde-2-Patches; Gate nach Sicherung des vollständigen Patches erneut ausführen.
-- Migrationsvertrag geprüft: keine DDL-Änderung; die benötigten Scrim-Tabellen und Statuswerte liegen bereits in `dl-central-db`-Migrationen.
+- Zwei Gate-Aufrufe vor dem Fix-Commit prüften den Commit-HEAD `2a00f7cc`, nicht die uncommitteten Änderungen; sie zählen nicht als Patch-Abnahme.
+- Gate nach Sicherung des vollständigen Patches: `gpt-6.1-sol ALLOW`; beide offenen Fix-Funde wurden als behoben bewertet.
+- Tests bleiben blockiert: der Host-Lock war zuerst belegt; beim späteren Versuch war er frei, aber Cargo 1.75 kann `Cargo.lock` Version 4 nicht lesen. `rustfmt` ist nicht installiert.
+- Migrationsvertrag geprüft: keine DDL-Änderung; benötigte Scrim-Tabellen und Statuswerte liegen bereits in `dl-central-db`-Migrationen.
