@@ -12,7 +12,8 @@ if [ "${#reports[@]}" -eq 0 ]; then
   exit 1
 fi
 for report in "${reports[@]}"; do
-  if ! jq -e -f "$ROOT/.github/ci/sarif-policy.jq" "$report" >/dev/null; then
+  if ! jq -s -e 'length == 1' "$report" >/dev/null ||
+    ! jq -e -f "$ROOT/.github/ci/sarif-policy.jq" "$report" >/dev/null; then
     printf 'Blocking findings, scanner errors or malformed SARIF: %s\n' "$report" >&2
     exit 1
   fi

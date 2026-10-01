@@ -46,8 +46,13 @@ for expression in "${cases[@]}"; do
 done
 printf 'invalid json' > "$PROBE/results/result.sarif"
 negative 'malformed JSON'
+jq '.runs[0].results = [{"level":"error","ruleId":"probe"}]' "$PROBE/clean.json" > "$PROBE/blocking.json"
+cat "$PROBE/blocking.json" "$PROBE/clean.json" > "$PROBE/results/result.sarif"
+negative 'multiple SARIF documents, blocking then clean'
+cat "$PROBE/clean.json" "$PROBE/blocking.json" > "$PROBE/results/result.sarif"
+negative 'multiple SARIF documents, clean then blocking'
 rm "$PROBE/results/result.sarif"
 negative 'empty results directory'
 rmdir "$PROBE/results"
 negative 'missing results directory'
-printf 'SARIF counterchecks: 2 clean + %s negative cases passed\n' "$((${#cases[@]} + 3))"
+printf 'SARIF counterchecks: 2 clean + %s negative cases passed\n' "$((${#cases[@]} + 5))"
