@@ -7314,6 +7314,32 @@ mod tests {
         Ok(())
     }
 
+    async fn wait_for_postgres_lock_wait(pool: &PgPool, backend_pid: i32) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                          FROM pg_stat_activity
+                         WHERE pid = $1
+                           AND wait_event_type = 'Lock'
+                    )
+                    "#,
+                )
+                .bind(backend_pid)
+                .fetch_one(pool)
+                .await?;
+                if waiting {
+                    return Ok::<(), sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn match_request_outbox_failure_locks_batch_before_request() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
@@ -7346,20 +7372,25 @@ mod tests {
             .fetch_one(&mut *batch_tx)
             .await?;
         let pool_for_failure = pool.clone();
-        let mut failure = tokio::spawn(async move {
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let failure = tokio::spawn(async move {
             let mut tx = pool_for_failure.begin().await?;
+            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await?;
+            pid_sender
+                .send(backend_pid)
+                .map_err(|_| anyhow!("test lock-wait receiver dropped"))?;
             mark_match_request_effect_failed_tx(&mut tx, outbox_id).await?;
             tx.commit().await?;
             Ok::<(), anyhow::Error>(())
         });
 
-        assert!(tokio::time::timeout(Duration::from_millis(100), &mut failure)
-            .await
-            .is_err());
+        wait_for_postgres_lock_wait(pool, pid_receiver.await?).await?;
         sqlx::query("SET LOCAL lock_timeout = '1s'")
             .execute(&mut *batch_tx)
             .await?;
-        sqlx::query("UPDATE scrim.match_requests SET status='open' WHERE id=31")
+        sqlx::query("UPDATE scrim.match_requests SET updated_at=now() WHERE id=31")
             .execute(&mut *batch_tx)
             .await?;
         batch_tx.commit().await?;
@@ -7411,8 +7442,15 @@ mod tests {
             .execute(&mut *batch_tx)
             .await?;
         let pool_for_delivery = pool.clone();
-        let mut delivery = tokio::spawn(async move {
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let delivery = tokio::spawn(async move {
             let mut tx = pool_for_delivery.begin().await?;
+            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await?;
+            pid_sender
+                .send(backend_pid)
+                .map_err(|_| anyhow!("test lock-wait receiver dropped"))?;
             record_match_request_effect_delivery_tx(
                 &mut tx,
                 MatchRequestEffectContext {
@@ -7428,9 +7466,7 @@ mod tests {
             Ok::<(), anyhow::Error>(())
         });
 
-        assert!(tokio::time::timeout(Duration::from_millis(100), &mut delivery)
-            .await
-            .is_err());
+        wait_for_postgres_lock_wait(pool, pid_receiver.await?).await?;
         batch_tx.commit().await?;
         delivery.await??;
 
