@@ -1,6 +1,5 @@
-//! Explizite Betriebs-Pins gelten auch dann, wenn ein älterer Konsument pro
-//! Anfrage noch sein bisheriges Standardmodell mitschickt. Ohne Pin bleibt der
-//! gesamte bisherige Aufrufvertrag erhalten (insbesondere JSON und Denk-Aus).
+//! Bestehende Aufrufparameter bleiben erhalten, insbesondere JSON und Denk-Aus.
+//! Fireworks-Modellpins überlässt dieser Wrapper der gemeinsamen Modellauswahl.
 use crate::chat_provider::{
     ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse, LlmProviderKind,
     LlmUseCase,
@@ -34,7 +33,11 @@ impl Overrides {
             })
             .filter(|value| !value.trim().is_empty());
         Self {
-            model,
+            model: if provider == LlmProviderKind::Fireworks {
+                None
+            } else {
+                model
+            },
             max_tokens: get("DL_LLM_MAX_OUTPUT_TOKENS_").and_then(|value| value.parse().ok()),
             temperature: get("DL_LLM_TEMPERATURE_").and_then(|value| value.parse().ok()),
             reasoning_effort: get("DL_LLM_REASONING_EFFORT_"),
@@ -109,7 +112,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn explicit_config_beats_legacy_request_and_keeps_json_contract() {
+    async fn fireworks_leaves_model_selection_to_shared_wrapper_and_keeps_parameters() {
         let lookup = |key: &str| match key {
             "DL_LLM_MODEL_BOT_PATE" => Some("accounts/fireworks/models/deepseek-v4p1-flash".into()),
             "FIREWORK_MODEL" => Some("accounts/fireworks/models/deepseek-v4-flash-0731".into()),
@@ -131,17 +134,14 @@ mod tests {
         };
         assert_eq!(
             provider.effective_model(&params).as_deref(),
-            Some("accounts/fireworks/models/deepseek-v4p1-flash")
+            Some("legacy-model")
         );
         provider
             .chat(&[ChatMessage::user("synthetischer Test")], params)
             .await
             .expect("Aufruf");
         let observed = spy.0.lock().expect("Spy").clone().expect("Parameter");
-        assert_eq!(
-            observed.model.as_deref(),
-            Some("accounts/fireworks/models/deepseek-v4p1-flash")
-        );
+        assert_eq!(observed.model.as_deref(), Some("legacy-model"));
         assert_eq!(observed.max_tokens, Some(2048));
         assert_eq!(observed.temperature, 0.4);
         assert_eq!(observed.reasoning_effort.as_deref(), Some("none"));
@@ -150,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn provider_default_beats_legacy_request_without_crossing_providers() {
         for (provider, expected) in [
-            (LlmProviderKind::Fireworks, "fireworks-default"),
+            (LlmProviderKind::Fireworks, "legacy-model"),
             (LlmProviderKind::OpenAi, "openai-default"),
         ] {
             let lookup = |key: &str| match key {

@@ -39,7 +39,7 @@ members = [
     "bin/dl-infisical-env",
     "bin/dl-unit-failure-notify",
 ]
-exclude = ["vendor/uplink-infisical-transport"]
+exclude = ["vendor/uplink-infisical-transport", "vendor/fireworks-model-selection"]
 
 [workspace.package]
 edition = "2021"

@@ -187,9 +187,9 @@ pub struct LlmConfig {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UseCaseConfig {
-    /// Modell-Pin und Provider-Override bleiben unabhängig voneinander.
+    /// Altbestand für kompatibles Einlesen. Produktive Textpfade nutzen Fireworks.
     pub provider: Option<Provider>,
-    /// Bewusster Pin für diesen Anwendungsfall, auch vor älteren Aufruf-Pins.
+    /// Altbestand; das produktive Modell kommt aus der gemeinsamen Flash-Auswahl.
     pub model: Option<String>,
     /// Ohne Override bleiben die bisherigen Parameter des Aufrufers erhalten.
     pub max_output_tokens: Option<u32>,
@@ -201,7 +201,7 @@ pub struct UseCaseConfig {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FireworksConfig {
-    /// Ausschließlich ein bewusster Pin; keine automatische Modellwahl.
+    /// Altbestand für kompatibles Einlesen; produktiv gilt die gemeinsame Auswahl.
     pub model: Option<String>,
 }
 

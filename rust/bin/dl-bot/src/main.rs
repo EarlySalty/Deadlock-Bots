@@ -256,20 +256,6 @@ fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
     }
 }
 
-fn openai_client_with_model_from_env(
-    model_env: &str,
-    default_model: &str,
-) -> Option<(Arc<dl_ai::OpenAiClient>, String)> {
-    let api_key = env("OPENAI_API_KEY").or_else(|| env("DEADLOCK_OPENAI_KEY"))?;
-    let base_url =
-        env("OPENAI_BASE_URL").unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    let model = env(model_env).unwrap_or_else(|| default_model.to_string());
-    Some((
-        dl_ai::OpenAiClient::new(base_url, api_key, model.clone()),
-        model,
-    ))
-}
-
 fn default_brain_bin() -> String {
     "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
 }
@@ -930,9 +916,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let moderation_scan_channel_ids =
         dl_moderation::moderation_channel::scan_channel_ids_from_lookup(operating_value);
 
-    // Text-Analyse und Verify-Text laufen ueber das Gate; die Bildpfade haengen
-    // am VisionGenerator, den der ChatProvider (noch) nicht kann, und bleiben
-    // deshalb am OpenAI-Client. Die Modell-Envs gelten unveraendert weiter.
+    // Text und Bildanalyse nutzen dieselbe gemeinsame Flash-Modellauswahl.
+    // Die Vision-Aufrufe behalten ihren Bildvertrag und den separaten Trait.
     let moderation_text_analyze_client =
         chat_text_generator(dl_ai::LlmUseCase::ModerationText, true);
     let moderation_text_analyze_model = model_from_lookup(
@@ -940,10 +925,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         "MOD_TEXT_ANALYZE_MODEL",
         dl_ai::DEFAULT_FIREWORKS_MODEL,
     );
-    let moderation_image_analyze_client =
-        openai_client_with_model_from_env("MOD_IMAGE_ANALYZE_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
-    let moderation_verify_vision_client =
-        openai_client_with_model_from_env("MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
+    let moderation_image_analyze_client = dl_ai::fireworks_vision_from_lookup(env);
+    let moderation_verify_vision_client = dl_ai::fireworks_vision_from_lookup(env);
     let moderation_verify_text_client =
         chat_text_generator(dl_ai::LlmUseCase::ModerationVerify, false);
     tracing::info!(
@@ -2171,15 +2154,14 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         }
         assert!(checked > 1, "es müssen mehrere Quelldateien geprüft werden");
 
-        // Ausnahme mit Grund: der Bildpfad der Moderation haengt am
-        // VisionGenerator, den der ChatProvider nicht anbietet.
         let main_source = include_str!("main.rs");
         let vision_client = ["OpenAiClient::", "new("].concat();
-        assert_eq!(
-            main_source.matches(vision_client.as_str()).count(),
-            1,
-            "nur der Vision-Pfad darf noch einen OpenAI-Client direkt bauen"
+        assert!(
+            !main_source.contains(vision_client.as_str()),
+            "auch Vision muss über den zentralen Connector laufen"
         );
+        let shared_vision = ["dl_ai::fireworks_vision_", "from_lookup(env)"].concat();
+        assert_eq!(main_source.matches(shared_vision.as_str()).count(), 2);
     }
 
     /// Der Kern des Transparenz-Logs lag einmal vollstaendig im Baum, ohne dass
