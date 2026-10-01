@@ -11,7 +11,7 @@ use crate::scrub_snowflakes;
 /// beide Male über dem 60-Sekunden-Limit des HTTP-Clients hängen, der Digest
 /// erschien ohne Plan. Ein Modell, das nie antwortet, ist keine Reasoning-Klasse,
 /// sondern nur eine Rechnung. Flash ist ausserdem der Repo-Default.
-pub const DEFAULT_PLAN_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
+pub const DEFAULT_PLAN_MODEL: &str = dl_ai::DEFAULT_FIREWORKS_MODEL;
 
 pub const PLAN_SYSTEM_PROMPT: &str = r#"Du bist der Betriebsleiter der Deutschen Deadlock Community — einer Discord-Community
 mit angeschlossenem Twitch-Bot, Steam-Bot, Turnier-System und Website. Du bekommst

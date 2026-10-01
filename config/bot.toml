@@ -44,13 +44,13 @@ enforce = false
 timeout_seconds = 100
 
 [llm.fireworks]
-# Optionaler ausdrücklich freigegebener Modell-Pin. Keine automatische Auswahl.
+# Das freigegebene Flash-Modell kommt aus der gemeinsamen täglichen Auswahl.
 
 [llm.use_cases.moderation_verify]
-provider = "openai"
+provider = "fireworks"
 
 [llm.use_cases.turnier_vorschlag]
-provider = "openai"
+provider = "fireworks"
 
 [llm.use_cases.voice_hint]
-provider = "openai"
+provider = "fireworks"
