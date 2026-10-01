@@ -25,3 +25,21 @@ Ein Quellstand allein belegt keinen produktiven Cutover. Migrationen, Neustarts 
 5. Kontozuordnung, Entschlüsselung und Neustart-Wiederaufnahme prüfen. Erst danach alte Credential-Dateien oder Bootstrap-Kontotokens kontrolliert außer Betrieb nehmen. Die vorhandenen Dateien werden hier weder gelöscht noch als Backup verdoppelt.
 
 Ein Code-Rollback allein reicht nach einem irreversiblen Hash-Cutover nicht. Entweder die neuen Lookup-Verträge beibehalten oder gemeinsam auf einen zuvor geprüften Datenbankstand zurückgehen. Ein nicht durchgeführter Restore-Test ist keine bestätigte Rollback-Fähigkeit.
+# Privater Start der Token-DB-Verbraucher
+
+Die normalen Betriebswerte werden zuerst aus der expliziten TOML geprüft.
+Daneben liegt die normale Metadatenkonfiguration `infisical.json` mit
+`secret_values_fd: 3`. Bots (`dl-bot`, `dl-web`) und `turnier-bot` lesen
+diesen privaten Snapshot genau einmal vor Pool, Auth-Konfiguration und Clients.
+Fehlender Snapshot oder DB-Zugang beendet den Start; keine Rückkehr zum alten
+ENV-Loader und kein erneutes Lesen des FD3. Die bisherigen Secret-Aliase und
+alle Betriebs- und Modellentscheidungen bleiben erhalten.
+
+Der vorhandene root-eigene `dl-infisical-env --token-pipe --config … --uid 1000
+--gid 1000 -- <Binary> --config <TOML>` ist der einzige privilegierte Launcher.
+Seine normale Config liegt unter root-geschützten Vorfahren und referenziert
+die vorhandene Bootstrap-Credential, ohne Secretwerte in neue Dateien zu
+kopieren. Er verwirft Zusatzgruppen und Umgebung vor dem exec. Die User-Units
+starten das Rust-Binary direkt darüber, ohne den bisherigen ENV-Wrapper.
+Metadaten für das Kind liegen neben der TOML, root-privilegierte Metadaten
+separat unter `/etc/deadlock-token-launchers/`.
