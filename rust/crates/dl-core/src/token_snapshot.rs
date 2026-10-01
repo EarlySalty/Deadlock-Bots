@@ -48,14 +48,14 @@ mod tests {
 
     #[test]
     fn real_fifo_snapshot_is_single_read_and_missing_values_fail_closed() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().expect("private FIFO test fixture");
         std::fs::write(directory.path().join("infisical.json"),
-            br#"{"secret_values_fd":3,"project_id":"fixture","environment":"fixture","secret_path":"/","socket_path":"/nonexistent","database_secret":"DEADLOCK_CENTRAL_DSN"}"#).unwrap();
+            br#"{"secret_values_fd":3,"project_id":"fixture","environment":"fixture","secret_path":"/","socket_path":"/nonexistent","database_secret":"DEADLOCK_CENTRAL_DSN"}"#).expect("private FIFO test fixture");
         // Nur Test-FD-Zuweisung; der produktive Launcher bleibt Rust.
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", "exec 3<&0; exec \"$@\"", "private-fifo-test"])
-            .arg(std::env::current_exe().unwrap());
+            .arg(std::env::current_exe().expect("private FIFO test fixture"));
         command
             .args([
                 "--ignored",
@@ -64,23 +64,25 @@ mod tests {
             ])
             .current_dir(directory.path())
             .stdin(Stdio::piped());
-        let mut child = command.spawn().unwrap();
+        let mut child = command.spawn().expect("private FIFO test fixture");
         child
             .stdin
             .take()
-            .unwrap()
+            .expect("private FIFO test fixture")
             .write_all(
                 br#"{"DEADLOCK_CENTRAL_DSN":"synthetic-dsn","DISCORD_TOKEN":"synthetic-token","EMPTY_DSN":"  "}"#,
             )
-            .unwrap();
-        assert!(child.wait().unwrap().success());
+            .expect("private FIFO test fixture");
+        assert!(child.wait().expect("private FIFO test fixture").success());
     }
 
     #[test]
     #[ignore = "isolierter Kindprozess mit echter privater FIFO"]
     fn child_fifo_contract() {
-        let config = std::env::current_dir().unwrap().join("bot.toml");
-        load(&config).unwrap();
+        let config = std::env::current_dir()
+            .expect("private FIFO test fixture")
+            .join("bot.toml");
+        load(&config).expect("private FIFO test fixture");
         assert_eq!(value("DEADLOCK_CENTRAL_DSN"), Some("synthetic-dsn"));
         assert_eq!(
             crate::runtime_config::secret_value("DISCORD_TOKEN").as_deref(),
