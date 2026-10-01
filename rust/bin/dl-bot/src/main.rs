@@ -639,12 +639,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
     concierge_config.ai_timeout =
         std::time::Duration::from_secs(operating.concierge.timeout_seconds);
-    concierge_config.bot_user_id = adapter
-        .http
-        .get_current_user()
-        .await
-        .ok()
-        .map(|user| user.id.get());
+    concierge_config.bot_user_id = adapter.bot_user_id_cell();
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
