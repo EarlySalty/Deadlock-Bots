@@ -11,6 +11,9 @@ struct Cli {
     uid: Option<u32>,
     #[arg(long)]
     gid: Option<u32>,
+    /// Stable existing backup key, delivered only through the private pipe.
+    #[arg(long)]
+    pipe_secret: Option<String>,
     #[arg(long, value_enum, default_value = "all")]
     profile: dl_infisical_env::Profile,
     #[arg(last = true, required = true)]
@@ -106,10 +109,20 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect();
-    let body = Zeroizing::new(
-        serde_json::to_vec(&view)
-            .map_err(|_| anyhow::anyhow!("Secret-Pipe konnte nicht vorbereitet werden."))?,
-    );
+    let body = if let Some(name) = cli.pipe_secret {
+        if name != "DB_MASTER_KEY_V1" {
+            bail!("Backup-Pipe darf nur den bestehenden Datenbankschlüssel verwenden.");
+        }
+        let value = view
+            .get(name.as_str())
+            .context("Bestehender Backupschlüssel fehlt in Infisical.")?;
+        Zeroizing::new(value.as_bytes().to_vec())
+    } else {
+        Zeroizing::new(
+            serde_json::to_vec(&view)
+                .map_err(|_| anyhow::anyhow!("Secret-Pipe konnte nicht vorbereitet werden."))?,
+        )
+    };
     if body.len() > 2 * 1024 * 1024 {
         bail!("Secret-Pipe ist zu groß.");
     }
