@@ -13,6 +13,8 @@ Diese Doku bündelt die Community-Helfer außerhalb der reinen Voice-Steuerung: 
 - **Feedback-Hub:** Im <#1465404160005378129> klickst du auf `Anonymes Feedback senden`. Danach beantwortest du bis zu fünf Fragen zu Spielerlebnis, Server, Verbesserungen und Wünschen. Deine Nachricht wird anonym intern weitergereicht.
 - **Clip-Submission:** Im <#1425215762460835931> klickst du auf `Clip einsenden`, bestätigst die Nutzungserlaubnis und füllst dann Link, Credit/Username und optionale Infos aus. Mindestqualität ist 1080p.
 - **Clip-Wochenfenster:** Einsendungen laufen in einem Wochenfenster von Sonntag bis Samstag. Nach Ablauf wird gesammelt ein Wochen-Dump erzeugt.
+- **Clip-Contest:** Nach Ende der Woche (Samstag 23:00) erscheint im <#1425215762460835931> ein Abstimmungs-Post mit allen gültigen Clips der Woche (bis zu 25, nummeriert, mit Credit). Über das Auswahlmenü stimmst du 48 Stunden lang für deinen Lieblingsclip. Du hast eine Stimme pro Woche, kannst sie bis zum Ende ändern und über `Meine Stimme anzeigen` nachsehen. Danach zeigt der Bot die Top 3 im Kanal, und die drei Clips laufen im dach_lock-Stream.
+- **Clips von Partner-Streamern:** Partner-Streamer können Clips direkt aus Twitch einreichen. Diese Clips stehen mit dem Twitch-Kanal als Credit in derselben Wochenabstimmung.
 - **Leave-Survey:** Wenn du den Server verlässt, kann dir der Bot per DM eine kurze Austrittsumfrage schicken. Du wählst zuerst einen Grund aus und bekommst danach eine Folgefrage; für längeres Feedback gibt es zusätzlich einen Web-Link.
 - **Scrims:** Über die Coaching-Website kannst du dich für Scrims anmelden (Details in der Coaching-Doku).
 
@@ -30,11 +32,14 @@ Die Community-Tools speichern nur die nötigen Zustände serverseitig: Tags, Cli
 - Es gibt keinen `/ticket`-Befehl — Tickets laufen über den Button in <#1459628609705738539>.
 - Clip-Einsendungen haben einen 60-Sekunden-Cooldown pro Person und der Link muss wie eine echte URL aussehen.
 - Der Clip-Dump ist ein Sammel-Export, kein sofortiges öffentliches Posting deines Clips.
+- Für deinen eigenen Clip kannst du nicht stimmen. Abstimmen kannst du erst, wenn du mindestens 3 Tage auf dem Server bist.
+- Gleichstand im Clip-Contest: Der früher eingereichte Clip liegt vorne. Ein Platz braucht mindestens eine Stimme.
+- Gleicher Clip mehrfach eingereicht: In der Abstimmung steht er nur einmal, mit der frühesten Einsendung.
 - Leave-Surveys kommen nicht unbegrenzt oft. Nach einem kürzlich gesendeten Survey, bei Bans oder bei geschlossenen DMs wird nichts mehr nachgeschoben.
 - Feedback-Hub ist anonym im Sinne der Weitergabe. Der Bot speichert aber weiterhin die technische Referenz, damit die Nachricht intern zugeordnet und zugestellt werden kann.
 - Wer generell keine Bot-DMs oder Datenspeicherung mehr will: `/datenschutz` (Export/Löschen/Opt-out) und `/retention-optout` (keine Erinnerungs-DMs) sind der Self-Service dafür.
 
 ## Für Devs (knapp)
-- Rust live: `dl-community/src/tags_ui.rs` + `tags.rs` (User-/Mod-Tags), `feedback_hub.rs`, `clips.rs`, `leave_survey.rs`, `faq.rs` (FAQ-Chat + interner Ticket-Shadow), `dm_assistant.rs` (DM-Hilfe), `dl-activity/src/lfg.rs` (Intent, Cooldown, Co-Player, Decision-Log)
+- Rust live: `dl-community/src/tags_ui.rs` + `tags.rs` (User-/Mod-Tags), `feedback_hub.rs`, `clips.rs` + `clip_contest.rs` (Voting, Top 3, Twitch-Einsendungen über `POST /internal/master/v1/clips/submit` in `dl-broker/src/clips.rs`), `leave_survey.rs`, `faq.rs` (FAQ-Chat + interner Ticket-Shadow), `dm_assistant.rs` (DM-Hilfe), `dl-activity/src/lfg.rs` (Intent, Cooldown, Co-Player, Decision-Log)
 - Player-Finder (`dl-activity/src/player_finder.rs`) existiert im Code, ist aber per Default deaktiviert (`PLAYER_FINDER_ENABLED=false`)
 - Bug-Reporter (`cogs/bug_reporter.py`) wurde beim Rust-Cutover bewusst nicht portiert

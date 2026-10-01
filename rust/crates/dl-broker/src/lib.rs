@@ -9,6 +9,7 @@
 // Handler geben frühe HTTP-Fehlerantworten als Err(Response) zurück — axum-idiomatisch.
 #![allow(clippy::result_large_err)]
 
+pub mod clips;
 mod handlers;
 mod idempotency;
 pub mod payload;

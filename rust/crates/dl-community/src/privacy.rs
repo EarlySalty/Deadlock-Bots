@@ -1067,6 +1067,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "clip_votes",
+        "voter_user_id",
+        "clips.clip_votes",
+        "voter_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "coaching_coachees",
         "discord_user_id",
         "coaching.coachees",
@@ -1090,6 +1097,13 @@ const USER_TABLES: &[TableSpec] = &[
 ];
 
 const NULLABLE_USER_COLUMNS: &[TableSpec] = &[
+    TableSpec::new(
+        "clip_contest_results",
+        "user_id",
+        "clips.clip_contest_results",
+        "user_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "clip_contests",
         "winner_user_id",
@@ -4395,6 +4409,14 @@ mod privacy_contract_tests {
         // nicht mitreissen; der Eingeladene selbst wird über `target_discord_id`
         // in USER_TABLES gelöscht, und die Zeile lebt ohnehin nur 24 h.
         out.insert(("steam.invite_requests".to_string(), "admin_id".to_string()));
+        // `clips.clip_contest_results.streamer_twitch_user_id` ist die Twitch-ID
+        // eines Partner-Streamers (öffentlicher Kanal), keine Discord-ID. Der
+        // Discord-Einsender (`user_id`) wird beim Löschen genullt, die
+        // Einsendung selbst über clip_submissions gelöscht (FK setzt NULL).
+        out.insert((
+            "clips.clip_contest_results".to_string(),
+            "streamer_twitch_user_id".to_string(),
+        ));
         out
     }
 
