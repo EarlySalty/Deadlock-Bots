@@ -113,12 +113,19 @@ async fn fetch_bot_fingerprint(url: &str, token: &str) -> Option<(String, u64)> 
 
 async fn output(saved: SavedConfig, active: &str) -> Response {
     let bot = active_bot_fingerprint().await;
+    let selection = match dl_ai::selected_flash_model() {
+        Ok(model) => json!({"mode": "automatic", "provider": "fireworks", "model": model}),
+        Err(error) => {
+            json!({"mode": "automatic", "provider": "fireworks", "model": null, "error": error.to_string()})
+        }
+    };
     no_store(
         Json(json!({
             "revision": saved.revision,
             "saved_fingerprint": saved.fingerprint,
             "options": OperatingOptions::from(&saved.config),
             "catalog": dl_core::admin_settings::catalog(&saved.config),
+            "llm_selection": selection,
             "services": [
                 {"name": "Discord-Web", "restart_required": saved.fingerprint != active, "process_id": std::process::id(), "observed_at": crate::now_unix()},
                 {"name": "Discord-Bot", "restart_required": bot.as_ref().map(|(fingerprint, _)| fingerprint != &saved.fingerprint), "process_id": bot.as_ref().map(|(_, pid)| pid), "observed_at": bot.as_ref().map(|_| crate::now_unix())}

@@ -1877,12 +1877,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     // Test. Deshalb steht ihre Zeile hier mit in der Signaturpruefung.
     let migration_2026081301_signature_after_first =
         migration_row_signature(&pool, 2026081301, "discord role connection provider").await;
-    let migration_2026100101_signature_after_first =
-        migration_row_signature(&pool, 2026100101, "discord platform connections").await;
-    let migration_2026100103_signature_after_first =
-        migration_row_signature(&pool, 2026100103, "community points").await;
-    let migration_2026100104_signature_after_first =
-        migration_row_signature(&pool, 2026100104, "streamer suggestions").await;
+    let migration_2026100111_signature_after_first =
+        migration_row_signature(&pool, 2026100111, "discord platform connections").await;
+    let migration_2026100113_signature_after_first =
+        migration_row_signature(&pool, 2026100113, "community points").await;
+    let migration_2026100114_signature_after_first =
+        migration_row_signature(&pool, 2026100114, "streamer suggestions").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -1994,19 +1994,19 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "second migrator run must be a no-op for migration version 2026081301"
     );
     assert_eq!(
-        migration_row_signature(&pool, 2026100101, "discord platform connections").await,
-        migration_2026100101_signature_after_first,
-        "second migrator run must be a no-op for migration version 2026100101"
+        migration_row_signature(&pool, 2026100111, "discord platform connections").await,
+        migration_2026100111_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100111"
     );
     assert_eq!(
-        migration_row_signature(&pool, 2026100103, "community points").await,
-        migration_2026100103_signature_after_first,
-        "second migrator run must be a no-op for migration version 2026100103"
+        migration_row_signature(&pool, 2026100113, "community points").await,
+        migration_2026100113_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100113"
     );
     assert_eq!(
-        migration_row_signature(&pool, 2026100104, "streamer suggestions").await,
-        migration_2026100104_signature_after_first,
-        "second migrator run must be a no-op for migration version 2026100104"
+        migration_row_signature(&pool, 2026100114, "streamer suggestions").await,
+        migration_2026100114_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100114"
     );
 
     let schema_count = scalar_i64(
@@ -2168,7 +2168,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "ein Twitch-Konto darf nur einer Discord-ID gehoeren"
     );
 
-    // Streamer-Vorschläge (2026100104): ein Vorschlag je Mitglied und Kanal,
+    // Streamer-Vorschläge (2026100114): ein Vorschlag je Mitglied und Kanal,
     // offene Weitergaben ohne forwarded_at, Registry-Zeilen für den Löschvertrag.
     assert_eq!(
         table_columns_in_schema(&pool, "community", "streamer_suggestions").await,
@@ -2291,7 +2291,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     .expect("team application privacy registry rows");
     assert_eq!(team_application_privacy_rows, 5);
 
-    // Clip-Contest (2026100102): Voting-Zustand, Stimmzettel, Stimmen,
+    // Clip-Contest (2026100112): Voting-Zustand, Stimmzettel, Stimmen,
     // Ergebnisse und Twitch-Einsendungen in clip_submissions.
     assert_eq!(
         table_columns_in_schema(&pool, "clips", "clip_votings").await,

@@ -8,7 +8,7 @@ vertrag: `.tasks/2026-09-07-twitch-connection-discord-oauth/CONTRACT.md` (REQ-01
 
 ### REQ-01 Tabelle
 
-- Migration `rust/crates/dl-central-db/migrations/2026100101_discord_platform_connections.sql`
+- Migration `rust/crates/dl-central-db/migrations/2026100111_discord_platform_connections.sql`
 - `core.discord_platform_connections (discord_id, platform, platform_user_id, platform_login, verified, updated_at)`, PK `(discord_id, platform)`.
 - Zusätzlich: Unique-Index `(platform, platform_user_id)`, damit ein Twitch-Konto nie zwei Discord-IDs gleichzeitig zugeordnet ist (wichtig für Punkte in Paket C). Die jüngste Verknüpfung gewinnt; der Schreiber entfernt die alte Zuordnung in derselben Transaktion.
 - CHECKs: Twitch-ID nur Ziffern ohne führende Null, Login nicht leer, Plattformname klein.
@@ -66,7 +66,7 @@ Alle Lesefunktionen blenden Mitglieder mit `core.user_privacy.opted_out` oder `d
 - `cargo test -p dl-broker`: Endpunkt-Tests (Loopback, Inhalt, leer, Fehler ohne interne Details).
 - `central_test_db.sh ... cargo test -p dl-central-db -p dl-dashboard --features ...testing`:
   - `tests/platform_connections_roundtrip.rs`: Upsert idempotent, Kontowechsel, ein Twitch-Konto je Mitglied, Privacy-Grabstein beim Schreiben und Lesen, ungültige Eingaben, DB-CHECK.
-  - `tests/fresh_migrations_schema.rs`: Spalten, PK, Registry-Zeilen, Unique auf Twitch-Konto, Migrator idempotent (Signatur 2026100101).
+  - `tests/fresh_migrations_schema.rs`: Spalten, PK, Registry-Zeilen, Unique auf Twitch-Konto, Migrator idempotent (Signatur 2026100111).
   - dl-dashboard: Extraktion (Twitch und Steam, nur Steam, keine Verbindung, Priorität), Initiate (Token, Scope, Callback, Flow-Typ), kompletter Flow gegen einen Discord-Mock (Speichern ohne Token, Bestätigungsseite, einmalig einlösbar), kein Twitch, Abbruch, fremde States, `consume-result` mit und ohne Twitch, `identify` unverändert, Texte ohne Fachwörter und Gedankenstriche.
 - dl-bot: Panel-Payload (Button, Hinweis, Budgets), Klick-Handler (Link-Antwort ephemer, Fehlerantwort, Registrierung).
 

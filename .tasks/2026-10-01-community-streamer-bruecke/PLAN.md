@@ -93,9 +93,9 @@ Discord-Button "Streamer vorschlagen" mit Modal (Twitch-Kanal, warum). Speicheru
 
 ## Migrationsnamen (Kollisionen vermeiden)
 
-- A: `2026100101_discord_platform_connections.sql`
-- D: `2026100102_clip_contest_voting.sql`
-- C: `2026100103_community_points.sql`
-- F: `2026100104_streamer_suggestions.sql`
+- A: `2026100111_discord_platform_connections.sql`
+- D: `2026100112_clip_contest_voting.sql`
+- C: `2026100113_community_points.sql`
+- F: `2026100114_streamer_suggestions.sql`
 - B (Twitch-DB): `20261001100000_community_points.sql`
 - F (Twitch-DB): `20261001110000_scout_community_source.sql`

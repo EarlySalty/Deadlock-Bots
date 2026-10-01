@@ -5,17 +5,17 @@ datum: 2026-10-01
 
 ## Was gebaut ist
 
-### Migration `2026100103_community_points.sql`
+### Migration `2026100113_community_points.sql`
 
-Neues Schema `community_points`, rein additiv, Registry-Zeilen in `core.privacy_field_registry` und GRANT an `deadlock` (nur falls die Rolle existiert, Muster 2026100101):
+Neues Schema `community_points`, rein additiv, Registry-Zeilen in `core.privacy_field_registry` und GRANT an `deadlock` (nur falls die Rolle existiert, Muster 2026100111):
 
 - `twitch_viewer_daily` (PK `twitch_user_id, channel_twitch_user_id, day`): Tageswerte je Zuschauer und Partnerkanal. Kein Twitch-Login gespeichert (Zuschauer ohne Verknüpfung sollen nirgends mit Namen auftauchen).
 - `twitch_streamer_daily` (PK `streamer_twitch_user_id, day`): Tageswerte je Partner, `discord_user_id` als BIGINT (ungültige Werte aus der Quelle werden `NULL`).
 - `ledger (id, discord_id, streamer_twitch_user_id, source, ref, points, occurred_at, meta, created_at)`, `UNIQUE (source, ref)`. Zusätzlich zur Vorgabe: Spalte `streamer_twitch_user_id`, weil Streamer-Punkte (qualifizierte Beitritte, Twitch-Clip-Plätze) einem Kanal gehören und dessen Discord-ID oft fehlt. CHECK: genau ein Empfänger. Quellen: `clip_place`, `clip_vote`, `streamer_suggestion`, `streamer_qualified_join`.
 - `sync_state (name, cursor, updated_at)`.
-- Kein Rückweg unter `rollbacks/` (rein additiv wie 2026100101). Rückbau: `DROP SCHEMA community_points CASCADE` plus die 8 Registry-Zeilen.
+- Kein Rückweg unter `rollbacks/` (rein additiv wie 2026100111). Rückbau: `DROP SCHEMA community_points CASCADE` plus die 8 Registry-Zeilen.
 
-Mitgezogen: `tests/fresh_migrations_schema.rs` (Spalten, PKs, Schema-Anzahl 17, Registry-Zeilen, `(source, ref)` eindeutig, Empfänger-CHECK, Signatur 2026100103 idempotent) und `dl-community/src/privacy.rs` (Löschantrag entfernt `ledger`-Zeilen über `discord_id` und `twitch_streamer_daily`-Zeilen über `discord_user_id`; Twitch-ID-Spalten stehen mit Begründung in der Allowlist).
+Mitgezogen: `tests/fresh_migrations_schema.rs` (Spalten, PKs, Schema-Anzahl 17, Registry-Zeilen, `(source, ref)` eindeutig, Empfänger-CHECK, Signatur 2026100113 idempotent) und `dl-community/src/privacy.rs` (Löschantrag entfernt `ledger`-Zeilen über `discord_id` und `twitch_streamer_daily`-Zeilen über `discord_user_id`; Twitch-ID-Spalten stehen mit Begründung in der Allowlist).
 
 ### Lese- und Schreibfunktionen `dl_central_db::community_points`
 
@@ -68,9 +68,9 @@ Paket D war beim Bau noch nicht in `wip/leaderboard`. Der Orchestrator hat den M
 - Läuft nur, wenn `clips.clip_contest_results`, `clips.clip_votes` und `clips.clip_votings` existieren (`to_regclass`), sonst meldet der Sync "Clip-Contest-Tabellen fehlen noch".
 - Plätze: `clips.clip_contest_results (window_id, place, source, user_id, streamer_twitch_user_id, submission_id, decided_at)`, Ref `clip_place:<window_id>:<place>`, Punkte 100/60/40, Empfänger `user_id` bei `source = 'discord'`, `streamer_twitch_user_id` bei `source = 'twitch'`.
 - Stimmen: `clips.clip_votes (window_id, voter_user_id, updated_at)` join `clips.clip_votings (window_id, status, closed_at, voting_end_at)` mit `status = 'closed'`, Ref `clip_vote:<window_id>:<voter_user_id>`, 2 Punkte, Zeitpunkt `closed_at`.
-- Spalten nach dem Stand der D-Migration `2026100102_clip_contest_voting.sql` (Worktree `bots-clips`). Getestet gegen einen Spaltenausschnitt dieser Tabellen im Test.
+- Spalten nach dem Stand der D-Migration `2026100112_clip_contest_voting.sql` (Worktree `bots-clips`). Getestet gegen einen Spaltenausschnitt dieser Tabellen im Test.
 
-Nach dem Merge von D zu tun: Abfragen gegen `.tasks/.../PAKET-D.md` abgleichen (konnte ich wegen der Ablehnung nicht mehr lesen), Migrationen per `touch` auffrischen, `community_points_roundtrip` und `fresh_migrations_schema` erneut laufen lassen (D erhöht die Schema-Anzahl nicht, `clips` existiert schon). Beim Merge ist ein Textkonflikt in `fresh_migrations_schema.rs` (Signaturzeilen nach 2026100101) und `privacy.rs` wahrscheinlich; beide Seiten behalten.
+Nach dem Merge von D zu tun: Abfragen gegen `.tasks/.../PAKET-D.md` abgleichen (konnte ich wegen der Ablehnung nicht mehr lesen), Migrationen per `touch` auffrischen, `community_points_roundtrip` und `fresh_migrations_schema` erneut laufen lassen (D erhöht die Schema-Anzahl nicht, `clips` existiert schon). Beim Merge ist ein Textkonflikt in `fresh_migrations_schema.rs` (Signaturzeilen nach 2026100111) und `privacy.rs` wahrscheinlich; beide Seiten behalten.
 
 ## Nicht gebaut (nächste Schritte)
 

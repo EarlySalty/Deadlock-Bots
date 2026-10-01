@@ -22,7 +22,7 @@ Code:
 | `rust/crates/dl-broker/src/clips.rs` (+ `clips_tests.rs`) | Route, Formprüfung, Port-Trait |
 | `rust/bin/dl-bot/src/modglue.rs` | `ClipGlue` (neue Port-Methoden), `ClipSubmitGlue` (Broker-Port) |
 | `rust/bin/dl-bot/src/main.rs` | Broker-Router um `dl_broker::clips::router` ergänzt |
-| `rust/crates/dl-central-db/migrations/2026100102_clip_contest_voting.sql` | Migration |
+| `rust/crates/dl-central-db/migrations/2026100112_clip_contest_voting.sql` | Migration |
 | `rust/crates/dl-community/src/privacy.rs` | Löschvertrag für neue Spalten |
 
 ## Ablauf und Zustände
@@ -38,7 +38,7 @@ Stimmrecht: eine Stimme je Mitglied und Woche (PK `window_id, voter_user_id`), �
 
 Ranking: Stimmen absteigend, Gleichstand frühere Einsendung (`created_at`, dann kleinere ID). Ein Platz braucht mindestens 1 Stimme. Gleicher Clip mehrfach eingereicht: auf dem Stimmzettel nur die früheste Einsendung (Schlüssel: Twitch-Slug bzw. normalisierte URL). Mehr als 25 Clips: die ersten 25 nach Einsendezeit.
 
-## Tabellen (Migration `2026100102_clip_contest_voting.sql`, additiv)
+## Tabellen (Migration `2026100112_clip_contest_voting.sql`, additiv)
 
 - `clips.clip_submissions`: `user_id` jetzt nullable; neu `source` (`discord`|`twitch`, Default `discord`), `streamer_twitch_user_id`, `streamer_login`, `submitted_by_twitch_user_id`, `title`, `idempotency_key` (unique, partiell). CHECK: Twitch-Zeilen haben `user_id IS NULL`, gültige Twitch-ID und einen Schlüssel.
 - `clips.clip_window_submissions.user_id` nullable (Twitch-Einsendungen).

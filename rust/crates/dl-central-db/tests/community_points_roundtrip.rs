@@ -223,7 +223,7 @@ async fn seed(pool: &PgPool) {
     .await;
 }
 
-/// Clip-Contest-Daten im echten Schema aus Paket D (Migration 2026100102):
+/// Clip-Contest-Daten im echten Schema aus Paket D (Migration 2026100112):
 /// Fenster 1 abgeschlossen, Fenster 2 noch offen.
 async fn seed_clip_contest(pool: &PgPool) {
     exec(

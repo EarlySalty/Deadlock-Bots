@@ -15,7 +15,7 @@ gegenstück: Twitch-Seite im Repo Deadlock-Twitch-Bot (`tb-internal-api/src/hand
 - custom_ids: `streamer_suggest_btn_v1` (öffnet das Fenster), `streamer_suggest_modal_v1` (Absenden). Felder `twitch_channel` (Pflicht, bis 100 Zeichen) und `reason` (Pflicht, 3 bis 300 Zeichen).
 - Eingabe: `name`, `@name` oder Link `twitch.tv/name` (mit `https://`, `www.`, `m.`, Pfad und Query werden abgeschnitten). Ergebnis klein, `a-z0-9_`, 1 bis 25 Zeichen, gleiche Regel wie `normalisiere_vorschlag_login` im Twitch-Bot. Fremde Links (YouTube, `clips.twitch.tv`) und twitch.tv-Seiten wie `directory` oder `videos` gelten nicht als Kanal.
 
-### Speicherung (Migration `2026100104_streamer_suggestions.sql`, additiv)
+### Speicherung (Migration `2026100114_streamer_suggestions.sql`, additiv)
 
 `community.streamer_suggestions`:
 
@@ -33,7 +33,7 @@ gegenstück: Twitch-Seite im Repo Deadlock-Twitch-Bot (`tb-internal-api/src/hand
 - Unique `(discord_id, twitch_login)`: ein Vorschlag je Mitglied und Kanal. Andere Mitglieder dürfen denselben Kanal vorschlagen.
 - Tageslimit: höchstens 3 neue Vorschläge je Mitglied in 24 Stunden (rollierend, `DAILY_LIMIT`). Prüfung und Einfügen laufen in einer Transaktion unter `lock_user_privacy_and_is_opted_out`; die Sperre serialisiert auch gleichzeitige Klicks.
 - Widerspruch (`core.user_privacy.opted_out` oder `deleted_at`): nichts wird gespeichert; offene Weitergaben solcher Mitglieder schickt der Retry-Loop nicht mehr.
-- Registry-Zeilen in `core.privacy_field_registry` (`discord_id`, `reason`, `twitch_user_id`, alle `delete_row_on_user_delete`), GRANT an `deadlock` auf Tabelle und Sequenz, Muster wie 2026100101.
+- Registry-Zeilen in `core.privacy_field_registry` (`discord_id`, `reason`, `twitch_user_id`, alle `delete_row_on_user_delete`), GRANT an `deadlock` auf Tabelle und Sequenz, Muster wie 2026100111.
 - `privacy.rs`: `TableSpec` über `discord_id` (Löschantrag löscht die Zeilen), Allowlist für `twitch_user_id` (Twitch-ID des vorgeschlagenen Kanals, nicht des Mitglieds).
 - Kein Rückweg unter `rollbacks/` (rein additiv). Rückbau: `DROP TABLE community.streamer_suggestions` und die drei Registry-Zeilen löschen.
 
@@ -92,7 +92,7 @@ Hinweise für C: Weicht das Ergebnis vom Outcomes-Endpunkt ab (zum Beispiel weil
 | `rust/crates/dl-community/src/concierge_community.rs` | Kanal-Konstante, Texte |
 | `rust/crates/dl-community/src/privacy.rs` | Löschvertrag |
 | `rust/crates/dl-bridges/src/twitch.rs` | `post_community_suggestion` |
-| `rust/crates/dl-central-db/migrations/2026100104_streamer_suggestions.sql` | Migration |
+| `rust/crates/dl-central-db/migrations/2026100114_streamer_suggestions.sql` | Migration |
 | `rust/crates/dl-central-db/tests/fresh_migrations_schema.rs` | Schema, Registry, CHECKs, Migrator idempotent |
 | `rust/bin/dl-bot/src/serversync/twitch_link.rs`, `serversync.rs`, `main.rs` | Concierge-Quelle, Verdrahtung |
 | `docs/community-punkte-und-streamer.md` | Abschnitt Streamer vorschlagen |

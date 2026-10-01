@@ -1,6 +1,6 @@
 [package]
 name = "dl-ai"
-description = "AI-Anbindung: MiniMax-Client (Token-Plan + Standard) für Scoring/Moderation/Chat"
+description = "Zentrale KI-Anbindung für Text und Bilder mit gemeinsamer Flash-Modellauswahl"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,7 @@ testing = []
 async-trait.workspace = true
 base64.workspace = true
 dl-bridges.workspace = true
+fireworks-model-selection = { path = "../../vendor/fireworks-model-selection" }
 reqwest.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true

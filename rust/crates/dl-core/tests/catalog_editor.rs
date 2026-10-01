@@ -19,8 +19,6 @@ fn settings_reach_real_runtime_lookup_and_survive_restart_without_rounding() {
         .save_changes_if_revision(
             &before.revision,
             &changes(json!({
-                "llm.fireworks.model":"accounts/fireworks/models/deepseek-v4p1-flash",
-                "llm.use_cases.bot_pate.model":"accounts/fireworks/models/deepseek-v4p1-flash",
                 "llm.use_cases.bot_pate.max_output_tokens":"2048",
                 "llm.use_cases.bot_pate.temperature":0.4,
                 "llm.use_cases.bot_pate.reasoning_effort":"none",
@@ -46,14 +44,6 @@ fn settings_reach_real_runtime_lookup_and_survive_restart_without_rounding() {
         .snapshot()
         .expect("Snapshot");
     for (key, value) in [
-        (
-            "FIREWORK_MODEL",
-            "accounts/fireworks/models/deepseek-v4p1-flash",
-        ),
-        (
-            "DL_LLM_MODEL_BOT_PATE",
-            "accounts/fireworks/models/deepseek-v4p1-flash",
-        ),
         ("DL_LLM_MAX_OUTPUT_TOKENS_BOT_PATE", "2048"),
         ("DL_LLM_TEMPERATURE_BOT_PATE", "0.4"),
         ("DL_LLM_REASONING_EFFORT_BOT_PATE", "none"),
@@ -159,4 +149,31 @@ fn null_removes_an_override_but_false_is_explicit_and_stale_updates_conflict() {
             .as_deref(),
         Some("0")
     );
+}
+
+#[test]
+fn automatic_model_bindings_reject_manual_writes_without_changing_the_config() {
+    let (_directory, store) = setup();
+    let before = store.read_versioned().expect("Stand");
+    let bytes = fs::read(store.path()).expect("Datei");
+    for path in [
+        "llm.fireworks.model",
+        "llm.default_provider",
+        "llm.use_cases.bot_pate.model",
+        "llm.use_cases.moderation_verify.provider",
+        "runtime.ai.moderation_image_model",
+    ] {
+        let error = store
+            .save_changes_if_revision(
+                &before.revision,
+                &BTreeMap::from([(
+                    path.into(),
+                    json!("accounts/fireworks/models/deepseek-v4p1-flash"),
+                )]),
+            )
+            .err()
+            .expect("automatische Auswahl ist nicht editierbar");
+        assert!(error.to_string().contains("automatisch"));
+        assert_eq!(fs::read(store.path()).expect("Datei"), bytes);
+    }
 }

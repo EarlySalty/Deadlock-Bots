@@ -381,23 +381,9 @@ impl LlmProviderConfig {
     pub fn from_env(
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, LlmProviderConfigError> {
-        let default_override = read_env(&lookup, "DL_LLM_PROVIDER_DEFAULT")
-            .map(|value| value.parse::<LlmProviderKind>())
-            .transpose()?;
-        let mut providers = HashMap::new();
-        for use_case in LlmUseCase::all() {
-            let key = format!("DL_LLM_PROVIDER_{}", use_case.env_suffix());
-            let provider = read_env(&lookup, &key)
-                .map(|value| value.parse::<LlmProviderKind>())
-                .transpose()?
-                .or(default_override)
-                .unwrap_or_else(|| default_provider_for(*use_case));
-            providers.insert(*use_case, provider);
-        }
-        let config = Self {
-            providers,
-            data_classes: default_data_classes(),
-        };
+        // Alte Anbieter-Overrides gelten nicht mehr für produktive Textpfade.
+        // Schlüssel und Aufrufparameter bleiben in ihren bestehenden Speichern.
+        let config = Self::default();
         config.validate_compliance(&lookup)?;
         Ok(config)
     }
@@ -468,7 +454,9 @@ impl LlmProviderConfig {
         use_case: LlmUseCase,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Arc<dyn ChatProvider>, ChatProviderInitError> {
-        let provider = self.provider_for(use_case, &lookup)?;
+        // Sämtliche Textpfade benutzen den freigegebenen zentralen Anbieter.
+        // Bild- und Audioclients werden außerhalb dieser Textfactory gebaut.
+        let provider = LlmProviderKind::Fireworks;
         let overrides = crate::configured_chat::Overrides::from_lookup(use_case, provider, &lookup);
         let lookup = model_key_lookup(use_case, lookup);
         let mut retry = retry_for_use_case(use_case);
@@ -486,6 +474,8 @@ impl LlmProviderConfig {
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Mock => Err(ChatProviderInitError::MockProviderMustBeInjected),
         }?;
+        let built =
+            Arc::new(crate::selected_chat::SelectedChat::new(built)) as Arc<dyn ChatProvider>;
         // Die einzige Fabrik ist auch die einzige Stelle, an der das
         // Transparenz-Log haengt: damit ist jeder der vierzehn
         // Anwendungsfaelle erfasst, ohne dass eine Aufrufstelle etwas tun
@@ -506,7 +496,7 @@ impl LlmProviderConfig {
         LlmUseCase::all()
             .iter()
             .map(|use_case| {
-                let provider = self.provider_for(*use_case, lookup).ok();
+                let provider = Some(LlmProviderKind::Fireworks);
                 let error = self
                     .build_provider_for_env(*use_case, lookup)
                     .err()
@@ -602,25 +592,8 @@ fn model_key_lookup(
 // und Streamer-Matcher liefen dadurch still ohne KI auf ihren Templates
 // weiter. Der Anbieter der uebrigen nutzerzugewandten Texte ist Fireworks
 // (deepseek-v4-flash), dorthin gehoeren sie.
-fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
-    match use_case {
-        LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-        LlmUseCase::Faq | LlmUseCase::LfgFreitext => LlmProviderKind::Fireworks,
-        LlmUseCase::ScrimLagebild => LlmProviderKind::Fireworks,
-        LlmUseCase::VerbinderMatch | LlmUseCase::VerbinderKritik => LlmProviderKind::Fireworks,
-        // Frueher direkt an MiniMax verdrahtet: MiniMax ist fuer User-Content
-        // gesperrt, der Default liegt deshalb auf demselben Anbieter wie die
-        // uebrigen nutzerzugewandten Texte.
-        LlmUseCase::AiOnboarding | LlmUseCase::CoachingAnfrage | LlmUseCase::StreamerMatcher => {
-            LlmProviderKind::Fireworks
-        }
-        LlmUseCase::BrainAntwort | LlmUseCase::ModerationText => LlmProviderKind::Fireworks,
-        // Frueher OpenAI-Clients: Anbieter bleibt, nur der Weg fuehrt jetzt
-        // ueber das Gate.
-        LlmUseCase::ModerationVerify | LlmUseCase::TurnierVorschlag | LlmUseCase::VoiceHint => {
-            LlmProviderKind::OpenAi
-        }
-    }
+fn default_provider_for(_use_case: LlmUseCase) -> LlmProviderKind {
+    LlmProviderKind::Fireworks
 }
 
 /// Anbieter, fuer die im Betrieb ein Zugang hinterlegt ist. Ein Default
@@ -708,11 +681,11 @@ impl OpenAiChatProvider {
         let base_url = read_env(&lookup, "FIREWORK_BASE_URL")
             .or_else(|| read_env(&lookup, "FIREWORKS_BASE_URL"))
             .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.into());
-        let model = read_env(&lookup, PROVIDER_MODEL_LOOKUP_KEY)
-            .or_else(|| read_env(&lookup, "FIREWORK_MODEL"))
-            .or_else(|| read_env(&lookup, "FIREWORKS_MODEL"))
-            .unwrap_or_else(|| crate::DEFAULT_FIREWORKS_MODEL.into());
-        tracing::info!(provider = "fireworks", %model, "LLM-Chat-Provider initialisiert");
+        let model = crate::DEFAULT_FIREWORKS_MODEL;
+        tracing::info!(
+            provider = "fireworks",
+            "LLM-Text-Provider mit gemeinsamer Flash-Auswahl initialisiert"
+        );
         Ok(Self::new_labeled(
             base_url,
             api_key,
@@ -1688,7 +1661,7 @@ mod tests {
         // ist.
         assert_eq!(
             crate::DEFAULT_FIREWORKS_MODEL,
-            "accounts/fireworks/models/deepseek-v4-flash-0731"
+            "accounts/fireworks/models/deepseek-v4p1-flash"
         );
     }
 
@@ -1797,54 +1770,20 @@ mod tests {
     }
 
     #[test]
-    fn config_default_ist_fireworks_fuer_bot_pate_und_env_override_pro_use_case() {
+    fn text_defaults_ignore_previous_provider_overrides() {
         let cfg = LlmProviderConfig::from_env(|key| match key {
-            "DL_LLM_PROVIDER_DEFAULT" => Some("mistral".to_string()),
-            "DL_LLM_PROVIDER_BOT_PATE" => Some("mock".to_string()),
-            "DL_LLM_PROVIDER_FAQ" => Some("mock".to_string()),
+            "DL_LLM_PROVIDER_DEFAULT" => Some("mistral".into()),
+            "DL_LLM_PROVIDER_BOT_PATE" => Some("mock".into()),
+            "DL_LLM_PROVIDER_VOICE_HINT" => Some("openai".into()),
             _ => None,
         })
         .expect("config");
-
-        assert_eq!(
-            cfg.provider_for(LlmUseCase::BotPate, |_| None)
-                .expect("provider"),
-            LlmProviderKind::Mock
-        );
-        assert_eq!(
-            cfg.provider_for(LlmUseCase::LfgFreitext, |_| None)
-                .expect("provider"),
-            LlmProviderKind::Mistral
-        );
-        assert_eq!(
-            cfg.provider_for(LlmUseCase::Faq, |_| None)
-                .expect("provider"),
-            LlmProviderKind::Mock
-        );
-
-        let defaults = LlmProviderConfig::default();
         for use_case in LlmUseCase::all() {
             assert_eq!(
-                defaults
-                    .provider_for(*use_case, |_| None)
-                    .expect("default provider"),
-                erwarteter_default(*use_case)
+                cfg.provider_for(*use_case, |_| None).expect("provider"),
+                LlmProviderKind::Fireworks
             );
-            assert_eq!(
-                defaults.data_class_for(*use_case),
-                LlmDataClass::UserContent
-            );
-        }
-    }
-
-    /// Festgeschriebener Soll-Stand. Eine Aenderung hier ist eine bewusste
-    /// Entscheidung, kein Nebeneffekt eines Umbaus.
-    fn erwarteter_default(use_case: LlmUseCase) -> LlmProviderKind {
-        match use_case {
-            LlmUseCase::ModerationVerify | LlmUseCase::TurnierVorschlag | LlmUseCase::VoiceHint => {
-                LlmProviderKind::OpenAi
-            }
-            _ => LlmProviderKind::Fireworks,
+            assert_eq!(cfg.data_class_for(*use_case), LlmDataClass::UserContent);
         }
     }
 
@@ -1867,39 +1806,18 @@ mod tests {
     }
 
     #[test]
-    fn inventar_meldet_pfade_ohne_zugang_mit_grund() {
+    fn inventory_requires_only_the_existing_fireworks_key_for_all_text_paths() {
         let cfg = LlmProviderConfig::default();
-        // Nur der Fireworks-Schluessel liegt vor: die drei OpenAI-Pfade
-        // muessen als Ausfall auftauchen, nicht stillschweigend fehlen.
-        let inventory =
-            cfg.inventory(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()));
-        assert_eq!(inventory.len(), LlmUseCase::all().len());
-
-        let ohne_zugang: Vec<LlmUseCase> = inventory
+        let ready = cfg.inventory(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".into()));
+        assert!(ready
             .iter()
-            .filter(|status| !status.usable())
-            .map(|status| status.use_case)
-            .collect();
-        assert_eq!(
-            ohne_zugang,
-            vec![
-                LlmUseCase::ModerationVerify,
-                LlmUseCase::TurnierVorschlag,
-                LlmUseCase::VoiceHint
-            ]
-        );
-        for status in &inventory {
-            if !status.usable() {
-                let grund = status.error.clone().unwrap_or_default();
-                assert!(grund.contains("OPENAI_API_KEY"), "{grund}");
-                assert!(status.state_label().contains("OHNE ZUGANG"));
-            }
-        }
-
-        let line =
-            cfg.inventory_line(|key| (key == "FIREWORK_API_KEY").then(|| "fw-key".to_string()));
-        assert!(line.contains("faq=fireworks"), "{line}");
-        assert!(line.contains("voice_hint=openai(OHNE ZUGANG)"), "{line}");
+            .all(|status| status.usable() && status.provider == Some(LlmProviderKind::Fireworks)));
+        let missing = cfg.inventory(|_| None);
+        assert!(missing.iter().all(|status| !status.usable()
+            && status
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("FIREWORK_API_KEY"))));
     }
 
     #[test]
@@ -1929,7 +1847,7 @@ mod tests {
         assert_eq!(
             cfg.provider_for(LlmUseCase::LfgFreitext, |_| None)
                 .expect("provider"),
-            LlmProviderKind::OpenAi
+            LlmProviderKind::Fireworks
         );
         assert_eq!(
             cfg.data_class_for(LlmUseCase::LfgFreitext),
@@ -1965,7 +1883,7 @@ mod tests {
         )
         .expect("fireworks provider");
 
-        assert_eq!(provider.default_model, "bot-pate-model");
+        assert_eq!(provider.default_model, crate::DEFAULT_FIREWORKS_MODEL);
     }
 
     #[test]
@@ -2008,11 +1926,14 @@ mod tests {
 
     #[test]
     fn compliance_blockiert_minimax_fuer_user_content_use_case() {
-        let err = LlmProviderConfig::from_env(|key| match key {
-            "DL_LLM_PROVIDER_DEFAULT" => Some("minimax".to_string()),
-            _ => None,
-        })
-        .expect_err("minimax must be blocked for user content");
+        let cfg = config_for_provider_and_data_class(
+            LlmUseCase::BotPate,
+            LlmProviderKind::MiniMax,
+            LlmDataClass::UserContent,
+        );
+        let err = cfg
+            .validate_compliance(|_| None)
+            .expect_err("minimax must be blocked for user content");
 
         assert_eq!(
             err,
@@ -2058,7 +1979,11 @@ mod tests {
             .without_time()
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
-        let cfg = LlmProviderConfig::from_env(lookup).expect("dev escape config");
+        let cfg = config_for_provider_and_data_class(
+            LlmUseCase::Faq,
+            LlmProviderKind::MiniMax,
+            LlmDataClass::UserContent,
+        );
         assert_eq!(
             cfg.provider_for(LlmUseCase::Faq, lookup)
                 .expect("dev escape provider"),
@@ -2072,14 +1997,12 @@ mod tests {
     }
 
     #[test]
-    fn config_lehnt_unbekannten_provider_ab() {
-        let err = LlmProviderConfig::from_env(|key| {
-            (key == "DL_LLM_PROVIDER_FAQ").then(|| "unknown".to_string())
-        })
-        .expect_err("unknown provider");
+    fn provider_parser_rejects_unknown_names() {
         assert_eq!(
-            err,
-            LlmProviderConfigError::UnknownProvider("unknown".to_string())
+            "unknown"
+                .parse::<LlmProviderKind>()
+                .expect_err("unknown provider"),
+            LlmProviderConfigError::UnknownProvider("unknown".into())
         );
     }
 
@@ -2702,29 +2625,19 @@ mod tests {
     }
 
     #[test]
-    fn factory_liest_env_ohne_mock_auto_build() {
-        let cfg = LlmProviderConfig::from_env(|key| match key {
-            "DL_LLM_PROVIDER_FAQ" => Some("mistral".to_string()),
-            _ => None,
-        })
-        .expect("config");
-        let provider = cfg
-            .build_provider_for_env(LlmUseCase::Faq, |key| match key {
-                "MISTRAL_API_KEY" => Some("secret".to_string()),
-                _ => None,
-            })
-            .expect("mistral provider");
-        drop(provider);
-
-        let missing = match cfg.build_provider_for_env(LlmUseCase::Faq, |_key| None) {
-            Ok(_) => panic!("expected missing api key"),
-            Err(err) => err,
+    fn text_factory_never_uses_a_previous_provider_key() {
+        let cfg = LlmProviderConfig::from_env(|_| Some("mistral".into())).expect("config");
+        let missing = match cfg.build_provider_for_env(LlmUseCase::Faq, |key| {
+            (key == "MISTRAL_API_KEY").then(|| "key".into())
+        }) {
+            Ok(_) => panic!("old provider key must not initialize a text path"),
+            Err(error) => error,
         };
         assert_eq!(
             missing,
             ChatProviderInitError::MissingApiKey {
-                provider: "mistral",
-                env_key: "MISTRAL_API_KEY"
+                provider: "fireworks",
+                env_key: "FIREWORK_API_KEY or FIREWORKS_API_KEY"
             }
         );
     }
