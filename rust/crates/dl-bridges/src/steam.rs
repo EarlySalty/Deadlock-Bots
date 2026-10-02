@@ -42,7 +42,7 @@ const _: () = assert!(
 );
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
-pub const PANEL_CUSTOM_IDS: [&str; 7] = [
+pub const PANEL_CUSTOM_IDS: [&str; 8] = [
     "steam_link_panel:open",
     "steam_link_panel:friend_code",
     "steam_link_panel:rankcheck",
@@ -50,6 +50,7 @@ pub const PANEL_CUSTOM_IDS: [&str; 7] = [
     "linkpanel_rank_check",
     "steam_link_panel:unlink",
     "steam_link_panel:unlink:confirm",
+    "steam_link_panel:refriend",
 ];
 
 /// Präfix aller Plus-Panel-Buttons. Anders als beim Link-Panel steht hier
@@ -1060,6 +1061,60 @@ mod tests {
         assert_eq!(
             received.lock().expect("lock")[0]["interaction"]["custom_id"],
             custom_id
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gerenderter_refriend_button_erreicht_steam_bot_mit_nutzerkontext() {
+        let custom_id = "steam_link_panel:refriend";
+        let (url, received, server) = mock_steam_bot(json!({
+            "reply_text": "Freundschaftsanfrage angefordert",
+            "ephemeral": true,
+            "buttons": [{
+                "custom_id": custom_id,
+                "label": "Freundschaftsanfrage erneut senden",
+                "style": "secondary"
+            }],
+        }))
+        .await;
+        let mut router = InteractionRouter::new();
+        register(&mut router, SteamBotClient::new(url, None));
+
+        let panel = router
+            .resolve_command("steam links")
+            .expect("Steam-Links-Route")
+            .handle(interaction(""))
+            .await;
+        let button_id = panel.components.as_ref().expect("Steam-Knöpfe")[0]["components"][0]
+            ["custom_id"]
+            .as_str()
+            .expect("Knopf-ID");
+        assert_eq!(button_id, custom_id);
+
+        let reply = router
+            .resolve_component(button_id)
+            .expect("Der vom Steam-Bot erzeugte Re-Friend-Knopf braucht eine Route")
+            .handle(interaction(button_id))
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("Freundschaftsanfrage angefordert")
+        );
+        assert_eq!(
+            received.lock().expect("lock")[1],
+            json!({
+                "kind": "interaction",
+                "interaction": {
+                    "custom_id": custom_id,
+                    "user_id": 42,
+                    "guild_id": 7,
+                    "channel_id": 9,
+                    "data": {"discord_name": "Nani"}
+                }
+            })
         );
         server.abort();
     }
