@@ -567,6 +567,15 @@ impl GuideAdapter {
                     let result: GuideReply = self.http.post(format!("{}/v1/guide/action-result", self.config.base_url.trim_end_matches('/'))).bearer_auth(token)
                         .json(&json!({"request_id": format!("{}:delivery", turn.request_id), "guild_id": turn.guild_id, "user_id": turn.user_id, "delivery_id": delivery_id, "success": sent.is_ok(), "sent_message_id": sent.as_ref().ok().map(ToString::to_string), "reply_message_id": null}))
                         .send().await?.error_for_status()?.json().await?;
+                    anyhow::ensure!(
+                        result.contract_version == "guide.v1"
+                            && result.request_id == format!("{}:delivery", turn.request_id)
+                            && !result.contact_proactive
+                            && result.actions.is_empty()
+                            && matches!(result.status.as_str(), "reply" | "silent" | "unavailable")
+                            && (turn.surface == "dm" || result.profile.is_none()),
+                        "Guide-Zustellvertrag wurde verletzt"
+                    );
                     reply.reply = result.reply;
                     reply.status = result.status;
                     reply.privacy_epoch = result.privacy_epoch;
