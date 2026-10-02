@@ -12,7 +12,9 @@ use dl_community_points_sync::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = dl_core::config::process_bot_config()?.snapshot();
+    let operating = dl_core::config::process_bot_config()?;
+    dl_core::token_snapshot::load(operating.source()).map_err(anyhow::Error::msg)?;
+    let config = operating.snapshot();
     let base = config
         .runtime
         .bridges
@@ -22,8 +24,10 @@ async fn main() -> anyhow::Result<()> {
     let token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN")
         .ok_or_else(|| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt im Infisical-Bootstrap"))?;
     let base = validate_base_url(&base)?;
-    let central_dsn = dl_central_db::dsn_from_env()?;
-    let pool = dl_central_db::connect_pool(&central_dsn).await?;
+    let central_dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN").ok_or_else(|| {
+        anyhow::anyhow!("Zentraler DB-Zugang fehlt im privaten Infisical-Snapshot.")
+    })?;
+    let pool = dl_central_db::connect_pool(central_dsn).await?;
     let client = http_client()?;
 
     let viewers = sync_source::<ViewerWire, _, _>(

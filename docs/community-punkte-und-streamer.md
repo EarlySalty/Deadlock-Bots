@@ -31,7 +31,7 @@ Der Twitch-Bot zählt Zuschauzeit und Chat in den Kanälen aktiver Partner, sola
 
 ## Grenzen & häufige Fragen
 - Ohne Verknüpfung wird dir nichts zugerechnet, und dein Name taucht nirgends auf. Sichtbar sind nur verknüpfte Mitglieder.
-- Deine Datenschutz-Einstellungen gelten auch für dieses Leaderboard, so wie für die anderen Ranglisten auf dem Server.
+- Deine Datenschutz-Einstellungen gelten auch für dieses Leaderboard. Bei einem Löschantrag entfernen wir deine importierten Twitch-Tageswerte, deine Punkte und die zugeordneten Clip-Einreichungen. Ein Konto-Hash bleibt ausschließlich erhalten, damit ein späterer Abgleich die Daten nicht erneut speichert. Daten, die Twitch oder der Twitch-Bot unabhängig vom Discord-Konto verarbeitet, fallen unter deren eigenen Löschweg.
 - Follows und Subs bringen keine Punkte. Wir kaufen keine Views und belohnen nichts, was gegen die Regeln von Twitch verstößt.
 - Gezählt wird nur bei Partner-Streamern, während sie live sind. Wer im eigenen Kanal streamt, bekommt dort keine Zuschauerpunkte. Bot-Konten und gesperrte Konten zählen nicht.
 - Wenn nach dem Klick auf `Twitch verknüpfen` nichts gefunden wird: In Discord unter Einstellungen, Verbindungen Twitch hinzufügen und es dann nochmal versuchen.

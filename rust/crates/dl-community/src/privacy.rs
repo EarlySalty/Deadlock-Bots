@@ -4062,6 +4062,32 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     let target_refs = privacy_target_refs(&user_key, &steam_ids);
     let mut tbl = serde_json::Map::new();
 
+    if relations.contains("core.discord_platform_connections") {
+        for (relation, column) in [
+            ("community_points.twitch_viewer_daily", "twitch_user_id"),
+            (
+                "community_points.twitch_streamer_daily",
+                "streamer_twitch_user_id",
+            ),
+            ("community_points.ledger", "streamer_twitch_user_id"),
+        ] {
+            if !relations.contains(relation) {
+                continue;
+            }
+            let query = format!(
+                "SELECT to_jsonb(activity) FROM {relation} activity
+                 WHERE activity.{column} IN (
+                     SELECT platform_user_id FROM core.discord_platform_connections
+                      WHERE discord_id = $1 AND platform = 'twitch')"
+            );
+            let rows: Vec<Value> = sqlx::query_scalar(&query)
+                .bind(user_id)
+                .fetch_all(pool)
+                .await?;
+            tbl.insert(format!("{relation}.{column}"), Value::Array(rows));
+        }
+    }
+
     for &spec in USER_TABLES {
         if !relations.contains(spec.relation) {
             continue;
@@ -4400,9 +4426,9 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
-        // Community-Punkte (Paket C): diese Spalten sind Twitch-User-IDs,
-        // keine Discord-IDs. Einem Mitglied zugerechnet wird nur ueber
-        // `core.discord_platform_connections`, die ein Loeschantrag entfernt.
+        // Twitch-Kontodaten werden über die verknüpfte Plattform-ID exportiert.
+        // Migration 2026100115 löscht sie beim Privacy-Schreibvorgang vor der
+        // Verbindung und verhindert Wiederimporte durch einen Hash-Grabstein.
         for (relation, column) in [
             ("community_points.twitch_viewer_daily", "twitch_user_id"),
             (
@@ -4417,6 +4443,10 @@ mod privacy_contract_tests {
         ] {
             out.insert((relation.to_string(), column.to_string()));
         }
+        out.insert((
+            "community_points.twitch_erasure_tombstones".to_string(),
+            "account_hash".to_string(),
+        ));
         // `core.discord_platform_connections.platform_user_id` ist die
         // Twitch-User-ID, keine Discord-ID. Die Zeile faellt ueber `discord_id`
         // (USER_TABLES) als Ganzes, die Twitch-ID geht dabei mit.

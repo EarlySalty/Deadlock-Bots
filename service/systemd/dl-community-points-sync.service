@@ -5,10 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots
-LoadCredential=infisical-token:/home/naniadm/.config/infisical-tokens/infisical-token-bots
-ExecStartPre=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/wait_for_infisical.sh'
-ExecStart=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/run_dl_community_points_sync.sh'
+WorkingDirectory=/home/nathanael/repos/Deadlock-Bots
+ExecStart=/usr/bin/sudo -n /opt/deadlock/bots/current/dl-infisical-env --token-pipe --child-no-new-privileges --config /etc/deadlock-turniere/infisical-launcher.json --uid 1000 --gid 1000 -- /opt/deadlock/bots/current/dl-community-points-sync --config /home/nathanael/.config/deadlock-bots/bot.toml
 TimeoutStartSec=300
 Nice=10
 
