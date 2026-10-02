@@ -1,0 +1,57 @@
+version = 1
+status = "vorbereitet"
+
+[bot]
+branch = "feat/brain-passive-help-20261002"
+service = "deadlock-bot-rust.service"
+config = "/home/nathanael/.config/deadlock-bots/bot.toml"
+help_channel_id = 1376335502919335936
+brain_retrieval_url = "http://127.0.0.1:8788"
+artifact_template = "/opt/deadlock/bots/releases/{main_commit}/dl-bot"
+
+[prerequisite]
+brain_route = "POST /v1/retrieve"
+brain_contract = "brain.public.v1"
+public_voice_guide = "discord-server/workflows/voice-lane-erstellen-verwalten.html"
+sequence = ["Brain-Route ausliefern", "Echte belegte Hilfsantwort prüfen", "Bot ausliefern"]
+
+[launcher]
+binary = "/opt/deadlock/token-db-probes/tokendb08-role-flags/bin/dl-infisical-env"
+config = "/etc/deadlock-turniere/infisical-launcher.json"
+uid = 1000
+gid = 1000
+flags = ["--token-pipe", "--child-no-new-privileges"]
+metadata_source = "/opt/deadlock/token-db-probes/tokendb08-role-flags/infisical.json"
+metadata_destination = "/home/nathanael/.config/deadlock-bots/infisical.json"
+secret_source = "Bestehender Infisical-Snapshot auf privatem FD3"
+
+[unit]
+drop_in = "/home/nathanael/.config/systemd/user/deadlock-bot-rust.service.d/zzzz-brain-hilfefragen.conf"
+reset_directives = ["Environment", "EnvironmentFile", "LoadCredential", "ExecStartPre", "ExecStart"]
+parent_no_new_privileges = false
+child_no_new_privileges = true
+preserve_host_user_namespace = true
+replace_old_drop_ins = false
+
+[verification]
+checks = [
+  "Isolierter sauberer main-Checkout besteht Deploy-Preflight.",
+  "Höchstens ein Cargo-Release-Build läuft auf dem Host.",
+  "Binary und normale Konfiguration werden gemeinsam dokumentiert.",
+  "Unit startet mit vorhandenem Launcher und privatem FD3, ohne ENV-Konfiguration.",
+  "Neuer Prozess läuft als UID 1000, mit NoNewPrivs=1 und Host-UID-Abbildung.",
+  "Broker und Gateway werden bereit, Brain-Command bleibt registriert.",
+  "Automatische Hilfe ist nur im geprüften Textkanal aktiviert.",
+  "Reale Screenshotfrage liefert eine belegte Voice-Anleitung, Planungsnachrichten bleiben still.",
+]
+
+[rollback]
+keep_old_binary = true
+keep_old_unit_files = true
+keep_old_normal_config = true
+steps = [
+  "Neue Drop-in-Datei entfernen.",
+  "Gesicherte normale Konfiguration und vorherige Binary-Auswahl wiederherstellen.",
+  "systemctl --user daemon-reload ausführen und Dienst neu starten.",
+  "Vorherige Betriebsbereitschaft prüfen.",
+]
