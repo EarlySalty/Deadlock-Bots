@@ -206,6 +206,13 @@ fn uses_subject_projected_export(spec: RedactionSpec) -> bool {
 /// gemappt. Nicht vorhandene Alt-Tabellen werden via `to_regclass` übersprungen.
 const USER_TABLES: &[TableSpec] = &[
     TableSpec::new(
+        "serverguide_feedback_deliveries",
+        "user_id",
+        "bot.serverguide_feedback_deliveries",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "core_users",
         "discord_id",
         "core.users",
