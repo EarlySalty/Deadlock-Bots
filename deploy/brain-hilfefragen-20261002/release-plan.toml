@@ -21,6 +21,7 @@ binary_template = "/opt/deadlock/bots/releases/{main_commit}/dl-infisical-env"
 binary_owner = "root:root"
 binary_mode = "0555"
 verify_identical_sha256 = true
+verify_all_parent_directories_root_owned_and_not_group_or_other_writable = true
 config = "/etc/deadlock-turniere/infisical-launcher.json"
 uid = 1000
 gid = 1000
