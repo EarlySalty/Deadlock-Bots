@@ -223,6 +223,24 @@ mod tests {
         assert!(validate_wire(wire("answered", vec![item("unknown")]), "probe").is_err());
     }
 
+    #[test]
+    fn oeffentliche_vertragsgrenze_akzeptiert_100_und_verwirft_101_belege() {
+        for count in [100, 101] {
+            let evidence = (0..count)
+                .map(|index| {
+                    let mut value = item("fact");
+                    value.citation_id = format!("cite-{index}");
+                    value
+                })
+                .collect();
+            let result = validate_wire(wire("answered", evidence), "probe");
+            assert_eq!(result.is_ok(), count == 100);
+            if let Ok(result) = result {
+                assert_eq!(result.evidence.len(), 100);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn externe_ziele_und_leere_tokens_werden_vor_dem_request_abgewiesen() {
         for (url, token) in [
