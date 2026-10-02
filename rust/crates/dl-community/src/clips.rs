@@ -6,6 +6,7 @@
 //! (Sonntag 00:00 → Samstag 23:00 Europe/Berlin); nach Ablauf geht genau
 //! einmal ein TXT-Dump aller Einsendungen per DM an den Clip-Kurator.
 //! custom_ids (`clip_submit_btn_v1`, `clip_perm_yes_v1`) unverändert.
+//! Voting, Top 3 und Twitch-Einsendungen: siehe `clip_contest.rs`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,12 +24,15 @@ pub const SEND_TO_USER_ID: u64 = 388772056717590539;
 pub const GUILD_ID: u64 = 1289721245281292288;
 pub const VIEW_TYPE: &str = "clip_submission_v1";
 pub const COOLDOWN_SECONDS: u64 = 60;
+/// Verpasste Wochen-Dumps werden höchstens so weit rückwirkend nachgeholt.
+pub const DUMP_CATCHUP_DAYS: i64 = 7;
 
 pub const INTERFACE_TITLE: &str = "🎥 Deadlock Gameplay-Clips einsenden";
 pub const RULES_TEXT: &str = "• Reiche einen Gameplay-Clip in mind. 1080p ein.\n\
 • Füge **Link**, **Credit/Username** (Overlay) und **Kontext/Info** hinzu.\n\
 • Durch das Absenden bestätigst du, dass die Einverständnis des Erstellers vorliegt.\n\
-• Durch das Absenden dürfen wir den Clip frei verwenden; Credits erscheinen im Video.\n";
+• Durch das Absenden dürfen wir den Clip frei verwenden; Credits erscheinen im Video.\n\
+• Nach Ende der Woche stimmt die Community 48 Stunden lang ab. Die Top 3 laufen im dach_lock-Stream.\n";
 
 // ── Pure Logik ─────────────────────────────────────────────────────────────
 
@@ -83,7 +87,8 @@ pub fn is_valid_url(link: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct DumpRow {
     pub id: i64,
-    pub user_id: u64,
+    /// Discord-ID oder `twitch:<login>` bei Twitch-Einsendungen.
+    pub user_id: String,
     pub created_at: String,
     pub credit: String,
     pub link: String,
@@ -250,7 +255,16 @@ impl ClipStore {
         Some(row.id)
     }
 
-    pub async fn dump_rows(&self, guild_id: u64, start_ts: i64, end_ts: i64) -> Vec<DumpRow> {
+    /// Einsendungen eines Fensters: zugeordnete (Discord und Twitch) plus
+    /// alles, was im Zeitraum eingegangen ist.
+    pub async fn dump_rows(
+        &self,
+        guild_id: u64,
+        window_id: i64,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Vec<DumpRow> {
+        use sqlx::Row;
         let Ok(guild_id) = u64_to_i64(guild_id, "guild_id") else {
             return Vec::new();
         };
@@ -260,38 +274,69 @@ impl ClipStore {
         let Ok(end_at) = utc_from_unix(end_ts) else {
             return Vec::new();
         };
-        let rows = sqlx::query!(
-            r#"
-            SELECT id, user_id, link, credit, permission, info, created_at
-              FROM clips.clip_submissions
-             WHERE guild_id = $1
-               AND created_at >= $2
-               AND created_at <= $3
-             ORDER BY created_at ASC
-            "#,
-            guild_id,
-            start_at,
-            end_at,
+        let rows = sqlx::query(
+            "SELECT id, user_id, streamer_login, link, credit, permission, info, created_at
+               FROM clips.clip_submissions
+              WHERE guild_id = $1
+                AND ((created_at >= $2 AND created_at <= $3)
+                     OR id IN (SELECT submission_id FROM clips.clip_window_submissions
+                                WHERE window_id = $4))
+              ORDER BY created_at ASC, id ASC",
         )
+        .bind(guild_id)
+        .bind(start_at)
+        .bind(end_at)
+        .bind(window_id)
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default();
         rows.into_iter()
             .filter_map(|row| {
-                let user_id = i64_to_u64(row.user_id, "user_id")?;
+                let user_id: Option<i64> = row.try_get("user_id").ok()?;
+                let login: Option<String> = row.try_get("streamer_login").ok()?;
+                let submitter = match (user_id, login) {
+                    (Some(user_id), _) => i64_to_u64(user_id, "user_id")?.to_string(),
+                    (None, Some(login)) => format!("twitch:{login}"),
+                    (None, None) => return None,
+                };
+                let created_at: Option<chrono::DateTime<Utc>> = row.try_get("created_at").ok()?;
+                let info: Option<String> = row.try_get("info").ok()?;
                 Some(DumpRow {
-                    id: row.id,
-                    user_id,
-                    link: row.link,
-                    credit: row.credit,
-                    permission: row.permission,
-                    info: row.info.unwrap_or_default(),
-                    created_at: row
-                        .created_at
+                    id: row.try_get("id").ok()?,
+                    user_id: submitter,
+                    link: row.try_get("link").ok()?,
+                    credit: row.try_get("credit").ok()?,
+                    permission: row.try_get("permission").ok()?,
+                    info: info.unwrap_or_default(),
+                    created_at: created_at
                         .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_default(),
                 })
             })
+            .collect()
+    }
+
+    /// Abgelaufene, noch nicht gedumpte Fenster der letzten
+    /// [`DUMP_CATCHUP_DAYS`] Tage → (id, start_ts, end_ts).
+    pub async fn windows_due_for_dump(&self, guild_id: u64) -> Vec<(i64, i64, i64)> {
+        let Ok(guild_id) = u64_to_i64(guild_id, "guild_id") else {
+            return Vec::new();
+        };
+        let now = Utc::now();
+        let rows: Vec<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, start_at, end_at FROM clips.clip_windows
+              WHERE guild_id = $1 AND status = 'running' AND dump_sent_at IS NULL
+                AND end_at < $2 AND end_at > $3
+              ORDER BY end_at",
+        )
+        .bind(guild_id)
+        .bind(now)
+        .bind(now - chrono::Duration::days(DUMP_CATCHUP_DAYS))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .map(|(id, start, end)| (id, unix_from_utc(start), unix_from_utc(end)))
             .collect()
     }
 
@@ -392,6 +437,34 @@ pub trait ClipPort: Send + Sync {
         content: String,
     );
     async fn guild_name(&self, guild_id: u64) -> String;
+    /// Nachricht posten (mit Discord-Nonce gegen Doppelposts) → message_id.
+    async fn post_message(
+        &self,
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+        nonce: String,
+    ) -> Result<u64, String>;
+    async fn edit_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String>;
+    /// Eigene Nachricht der letzten 50 im Kanal mit genau diesem Embed-Footer.
+    async fn find_message_by_footer(
+        &self,
+        channel_id: u64,
+        footer: &str,
+    ) -> Result<Option<u64>, String>;
+    /// Text-DM an den Kurator, gleicher Weg wie der Dump (Fallback: Kanal).
+    async fn send_curator_text(
+        &self,
+        user_id: u64,
+        fallback_channel_id: u64,
+        content: String,
+    ) -> Result<(), String>;
+    /// Beitritt zum Server (Unix-Sekunden), falls bekannt.
+    async fn member_joined_at(&self, guild_id: u64, user_id: u64) -> Option<i64>;
 }
 
 pub struct ClipSubmission {
@@ -413,7 +486,10 @@ impl ClipSubmission {
         let line = window_line(start_ts, end_ts, chrono::Utc::now().timestamp());
         json!({
             "title": INTERFACE_TITLE,
-            "description": format!("{RULES_TEXT}\n\n{line}"),
+            "description": format!(
+                "{RULES_TEXT}\n\n{line}\n\n{}",
+                crate::streamer_suggest::PANEL_HINT
+            ),
             "color": 0x2ECC71,
             "footer": { "text": "Mit dem Button unten kannst du deinen Clip einreichen." },
         })
@@ -425,9 +501,7 @@ impl ClipSubmission {
             return;
         };
         let existing = self.store.interface_message(guild_id).await;
-        let components = json!([{ "type": 1, "components": [{
-            "type": 2, "style": 1, "label": "Clip einsenden", "custom_id": "clip_submit_btn_v1",
-        }]}]);
+        let components = interface_components();
         match self
             .port
             .upsert_interface(
@@ -449,16 +523,16 @@ impl ClipSubmission {
         }
     }
 
-    /// Abgelaufenes Fenster genau einmal dumpen (wie `weekly_window_manager`).
+    /// Abgelaufene Fenster genau einmal dumpen (wie `weekly_window_manager`),
+    /// auch wenn der Bot zum Fensterende nicht lief.
     pub async fn process_window(&self, guild_id: u64) {
-        let Some((window_id, start_ts, end_ts, status, dumped)) =
-            self.store.ensure_window(guild_id).await
-        else {
-            return;
-        };
-        let now_ts = chrono::Utc::now().timestamp();
-        if now_ts > end_ts && dumped.unwrap_or(0) == 0 && status == "running" {
-            let rows = self.store.dump_rows(guild_id, start_ts, end_ts).await;
+        // laufendes Fenster anlegen, damit Einsendungen zugeordnet werden
+        let _ = self.store.ensure_window(guild_id).await;
+        for (window_id, start_ts, end_ts) in self.store.windows_due_for_dump(guild_id).await {
+            let rows = self
+                .store
+                .dump_rows(guild_id, window_id, start_ts, end_ts)
+                .await;
             let guild_name = self.port.guild_name(guild_id).await;
             let content = dump_text(&guild_name, guild_id, start_ts, end_ts, &rows);
             self.port
@@ -473,6 +547,14 @@ impl ClipSubmission {
             self.store.mark_dumped(window_id).await;
         }
     }
+}
+
+/// Knöpfe des Clip-Panels. Der zweite Knopf "Streamer vorschlagen" gehört zu
+/// Paket F (`streamer_suggest.rs`) und nutzt nur den Platz im Panel.
+pub fn interface_components() -> serde_json::Value {
+    json!([{ "type": 1, "components": [{
+        "type": 2, "style": 1, "label": "Clip einsenden", "custom_id": "clip_submit_btn_v1",
+    }, crate::streamer_suggest::panel_button()]}])
 }
 
 // ── Interaction-Handler ────────────────────────────────────────────────────
@@ -593,13 +675,17 @@ impl InteractionHandler for ClipHandler {
 }
 
 pub fn register(router: &mut InteractionRouter, clips: Arc<ClipSubmission>) {
-    let handler = Arc::new(ClipHandler { clips });
+    let handler = Arc::new(ClipHandler {
+        clips: clips.clone(),
+    });
     router.on_custom_id("clip_submit_btn_v1", handler.clone());
     router.on_custom_id("clip_perm_yes_v1", handler.clone());
     router.on_custom_id("clip_submit_modal_v1", handler);
+    crate::clip_contest::register(router, clips);
 }
 
-/// Loops wie das Original: Interface-Refresh 5 min, Fenster-Manager 2 min.
+/// Loops wie das Original: Interface-Refresh 5 min, Fenster-Manager 2 min
+/// (Dump und Clip-Contest).
 pub fn spawn(clips: Arc<ClipSubmission>) -> Vec<tokio::task::JoinHandle<()>> {
     let refresher = {
         let clips = clips.clone();
@@ -618,6 +704,7 @@ pub fn spawn(clips: Arc<ClipSubmission>) -> Vec<tokio::task::JoinHandle<()>> {
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
             clips.process_window(GUILD_ID).await;
+            clips.process_contest(GUILD_ID).await;
             tokio::time::sleep(Duration::from_secs(120)).await;
         }
     });
@@ -669,7 +756,7 @@ mod tests {
         );
         let rows = vec![DumpRow {
             id: 7,
-            user_id: 42,
+            user_id: "42".to_string(),
             created_at: "2026-06-08 18:00:00".to_string(),
             credit: "@Nani".to_string(),
             link: "https://x".to_string(),
@@ -711,10 +798,10 @@ mod tests {
             .await;
         assert!(submission.is_some());
         let rows = store
-            .dump_rows(1, start, chrono::Utc::now().timestamp() + 10)
+            .dump_rows(1, id1, start, chrono::Utc::now().timestamp() + 10)
             .await;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].user_id, 42);
+        assert_eq!(rows[0].user_id, "42");
         store.mark_dumped(id1).await;
         let (_, _, _, status, dumped) = store.ensure_window(1).await.expect("window3");
         assert_eq!(status, "dumped");

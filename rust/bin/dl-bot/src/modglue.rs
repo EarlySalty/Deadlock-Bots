@@ -1999,6 +1999,138 @@ impl dl_community::clips::ClipPort for ClipGlue {
             .map(|g| g.name.to_string())
             .unwrap_or_else(|| guild_id.to_string())
     }
+
+    async fn post_message(
+        &self,
+        channel_id: u64,
+        mut body: Map<String, Value>,
+        nonce: String,
+    ) -> Result<u64, String> {
+        // Discord verwirft einen zweiten Post mit gleicher Nonce kurz danach.
+        body.insert("nonce".into(), json!(nonce));
+        body.insert("enforce_nonce".into(), json!(true));
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn edit_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .edit_raw_public(channel_id, message_id, &body)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_message_by_footer(
+        &self,
+        channel_id: u64,
+        footer: &str,
+    ) -> Result<Option<u64>, String> {
+        let bot_id = self.adapter.cache().current_user().id;
+        let messages = ChannelId::new(channel_id)
+            .messages(&self.adapter.http, GetMessages::new().limit(50))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(messages
+            .iter()
+            .find(|message| {
+                message.author.id == bot_id
+                    && message
+                        .embeds
+                        .iter()
+                        .any(|embed| embed.footer.as_ref().is_some_and(|f| f.text == footer))
+            })
+            .map(|message| message.id.get()))
+    }
+
+    async fn send_curator_text(
+        &self,
+        user_id: u64,
+        fallback_channel_id: u64,
+        content: String,
+    ) -> Result<(), String> {
+        let mut body = Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert("allowed_mentions".into(), json!({ "parse": [] }));
+        match self
+            .adapter
+            .send_raw_dm_public(&user_id.to_string(), &body)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                tracing::warn!(%err, "Clip-Contest-DM fehlgeschlagen, Fallback in den Clip-Kanal");
+                self.adapter
+                    .send_raw_public(fallback_channel_id, &body)
+                    .await
+                    .map(|_| ())
+            }
+        }
+    }
+
+    async fn member_joined_at(&self, guild_id: u64, user_id: u64) -> Option<i64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .members
+            .get(&UserId::new(user_id))?
+            .joined_at
+            .map(|ts| ts.unix_timestamp())
+    }
+}
+
+/// Broker-Port für `POST /internal/master/v1/clips/submit`.
+pub struct ClipSubmitGlue {
+    pub clips: Arc<dl_community::clips::ClipSubmission>,
+}
+
+#[async_trait::async_trait]
+impl dl_broker::clips::ClipSubmitPort for ClipSubmitGlue {
+    async fn submit_twitch_clip(
+        &self,
+        submission: dl_broker::clips::TwitchClipSubmission,
+    ) -> Result<dl_broker::clips::ClipSubmitOutcome, String> {
+        use dl_broker::clips::{ClipSubmitOutcome, ClipSubmitStatus};
+        use dl_community::clip_contest::{TwitchClipRequest, TwitchSubmitOutcome};
+        let request = TwitchClipRequest {
+            clip_url: submission.clip_url,
+            streamer_twitch_user_id: submission.streamer_twitch_user_id,
+            streamer_login: submission.streamer_login,
+            submitted_by_twitch_user_id: submission.submitted_by_twitch_user_id,
+            title: submission.title,
+            idempotency_key: submission.idempotency_key,
+        };
+        let outcome = self
+            .clips
+            .submit_twitch(dl_community::clips::GUILD_ID, &request)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(match outcome {
+            TwitchSubmitOutcome::Accepted(id) => ClipSubmitOutcome {
+                status: ClipSubmitStatus::Accepted,
+                submission_id: Some(id),
+                reason: None,
+            },
+            TwitchSubmitOutcome::Duplicate(id) => ClipSubmitOutcome {
+                status: ClipSubmitStatus::Duplicate,
+                submission_id: Some(id),
+                reason: Some("duplicate_clip_this_week".to_string()),
+            },
+            TwitchSubmitOutcome::ReplayMetadataDrift(id) => ClipSubmitOutcome {
+                status: ClipSubmitStatus::Duplicate,
+                submission_id: Some(id),
+                reason: Some("idempotency_metadata_drift".to_string()),
+            },
+            TwitchSubmitOutcome::Rejected(reason) => ClipSubmitOutcome {
+                status: ClipSubmitStatus::Rejected,
+                submission_id: None,
+                reason: Some(reason.to_string()),
+            },
+        })
+    }
 }
 
 // ── FAQ-Chat-Anbindung ─────────────────────────────────────────────────────

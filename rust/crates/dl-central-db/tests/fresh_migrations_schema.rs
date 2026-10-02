@@ -1877,6 +1877,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     // Test. Deshalb steht ihre Zeile hier mit in der Signaturpruefung.
     let migration_2026081301_signature_after_first =
         migration_row_signature(&pool, 2026081301, "discord role connection provider").await;
+    let migration_2026100111_signature_after_first =
+        migration_row_signature(&pool, 2026100111, "discord platform connections").await;
+    let migration_2026100113_signature_after_first =
+        migration_row_signature(&pool, 2026100113, "community points").await;
+    let migration_2026100114_signature_after_first =
+        migration_row_signature(&pool, 2026100114, "streamer suggestions").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -1987,6 +1993,21 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_2026081301_signature_after_first,
         "second migrator run must be a no-op for migration version 2026081301"
     );
+    assert_eq!(
+        migration_row_signature(&pool, 2026100111, "discord platform connections").await,
+        migration_2026100111_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100111"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026100113, "community points").await,
+        migration_2026100113_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100113"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026100114, "streamer suggestions").await,
+        migration_2026100114_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026100114"
+    );
 
     let schema_count = scalar_i64(
         &pool,
@@ -2008,11 +2029,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
               'content',
               'brain',
               'server_config',
-              'community'
+              'community',
+              'community_points'
           )",
     )
     .await;
-    assert_eq!(schema_count, 16);
+    assert_eq!(schema_count, 17);
 
     let timescaledb_count = scalar_i64(
         &pool,
@@ -2020,6 +2042,196 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(timescaledb_count, 1);
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "core", "discord_platform_connections").await,
+        vec![
+            "discord_id",
+            "platform",
+            "platform_user_id",
+            "platform_login",
+            "verified",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "core", "discord_platform_connections").await,
+        vec!["discord_id", "platform"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "twitch_viewer_daily").await,
+        vec![
+            "twitch_user_id",
+            "channel_twitch_user_id",
+            "day",
+            "watch_minutes",
+            "chat_messages",
+            "points_watch",
+            "points_chat",
+            "points_discovery",
+            "source_updated_at",
+            "synced_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "community_points", "twitch_viewer_daily").await,
+        vec!["twitch_user_id", "channel_twitch_user_id", "day"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "twitch_streamer_daily").await,
+        vec![
+            "streamer_twitch_user_id",
+            "day",
+            "streamer_login",
+            "discord_user_id",
+            "viewer_minutes",
+            "unique_viewers",
+            "raids_to_partners",
+            "source_updated_at",
+            "synced_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "community_points", "twitch_streamer_daily").await,
+        vec!["streamer_twitch_user_id", "day"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "ledger").await,
+        vec![
+            "id",
+            "discord_id",
+            "streamer_twitch_user_id",
+            "source",
+            "ref",
+            "points",
+            "occurred_at",
+            "meta",
+            "created_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "sync_state").await,
+        vec!["name", "cursor", "updated_at"]
+    );
+    let community_points_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'community_points'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("community points privacy registry rows");
+    assert_eq!(community_points_privacy_rows, 8);
+    let duplicate_ledger_ref = sqlx::query(
+        "INSERT INTO community_points.ledger (discord_id, source, ref, points, occurred_at)
+         VALUES (1, 'clip_vote', 'clip_vote:1:1', 2, now()),
+                (2, 'clip_vote', 'clip_vote:1:1', 2, now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate_ledger_ref.is_err(),
+        "(source, ref) darf nur einmal gebucht werden"
+    );
+    let ledger_without_recipient = sqlx::query(
+        "INSERT INTO community_points.ledger (source, ref, points, occurred_at)
+         VALUES ('clip_vote', 'clip_vote:2:1', 2, now())",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        ledger_without_recipient.is_err(),
+        "Ledger braucht genau einen Empfaenger"
+    );
+
+    let platform_connection_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'core'
+            AND table_name = 'discord_platform_connections'
+            AND column_name IN ('discord_id', 'platform_user_id', 'platform_login')
+            AND erasure_action = 'delete_row_on_user_delete'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("platform connection privacy registry rows");
+    assert_eq!(platform_connection_privacy_rows, 3);
+    let duplicate_twitch_account = sqlx::query(
+        "INSERT INTO core.discord_platform_connections
+             (discord_id, platform, platform_user_id, platform_login)
+         VALUES (1, 'twitch', '42', 'a'), (2, 'twitch', '42', 'b')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate_twitch_account.is_err(),
+        "ein Twitch-Konto darf nur einer Discord-ID gehoeren"
+    );
+
+    // Streamer-Vorschläge (2026100114): ein Vorschlag je Mitglied und Kanal,
+    // offene Weitergaben ohne forwarded_at, Registry-Zeilen für den Löschvertrag.
+    assert_eq!(
+        table_columns_in_schema(&pool, "community", "streamer_suggestions").await,
+        vec![
+            "id",
+            "discord_id",
+            "twitch_login",
+            "twitch_user_id",
+            "reason",
+            "status",
+            "forward_attempts",
+            "last_attempt_at",
+            "created_at",
+            "forwarded_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "community", "streamer_suggestions").await,
+        vec!["id"]
+    );
+    let suggestion_privacy_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::BIGINT
+           FROM core.privacy_field_registry
+          WHERE schema_name = 'community'
+            AND table_name = 'streamer_suggestions'
+            AND column_name IN ('discord_id', 'reason', 'twitch_user_id')
+            AND erasure_action = 'delete_row_on_user_delete'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("streamer suggestion privacy registry rows");
+    assert_eq!(suggestion_privacy_rows, 3);
+    sqlx::query(
+        "INSERT INTO community.streamer_suggestions (discord_id, twitch_login, reason)
+         VALUES (1, 'someone', 'passt')",
+    )
+    .execute(&pool)
+    .await
+    .expect("erster Vorschlag");
+    for (sql, why) in [
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login) VALUES (1, 'someone')",
+            "ein Vorschlag je Mitglied und Kanal",
+        ),
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login) VALUES (2, 'Some One')",
+            "Login nur klein, ohne Leerzeichen",
+        ),
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login, status) VALUES (2, 'x', 'created')",
+            "abgeschlossener Stand braucht forwarded_at",
+        ),
+        (
+            "INSERT INTO community.streamer_suggestions (discord_id, twitch_login, status, forwarded_at) VALUES (2, 'x', 'unbekannt', now())",
+            "nur bekannte Stände",
+        ),
+    ] {
+        assert!(sqlx::query(sql).execute(&pool).await.is_err(), "{why}");
+    }
+    sqlx::query("DELETE FROM community.streamer_suggestions")
+        .execute(&pool)
+        .await
+        .expect("aufraeumen");
 
     assert_eq!(
         table_columns_in_schema(&pool, "community", "team_applications").await,
@@ -2078,6 +2290,106 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     .await
     .expect("team application privacy registry rows");
     assert_eq!(team_application_privacy_rows, 5);
+
+    // Clip-Contest (2026100112): Voting-Zustand, Stimmzettel, Stimmen,
+    // Ergebnisse und Twitch-Einsendungen in clip_submissions.
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_votings").await,
+        vec![
+            "window_id",
+            "guild_id",
+            "channel_id",
+            "status",
+            "message_id",
+            "publish_claimed_at",
+            "voting_start_at",
+            "voting_end_at",
+            "result_post_claimed_at",
+            "result_message_id",
+            "curator_dm_claimed_at",
+            "curator_dm_sent_at",
+            "closed_at",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_voting_entries").await,
+        vec!["window_id", "position", "submission_id"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_votes").await,
+        vec![
+            "window_id",
+            "voter_user_id",
+            "submission_id",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "clips", "clip_votes").await,
+        vec!["window_id", "voter_user_id"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "clips", "clip_contest_results").await,
+        vec![
+            "window_id",
+            "place",
+            "guild_id",
+            "week_start_at",
+            "week_end_at",
+            "submission_id",
+            "source",
+            "user_id",
+            "streamer_twitch_user_id",
+            "streamer_login",
+            "votes",
+            "decided_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "clips", "clip_contest_results").await,
+        vec!["window_id", "place"]
+    );
+    for column in [
+        "source",
+        "streamer_twitch_user_id",
+        "streamer_login",
+        "submitted_by_twitch_user_id",
+        "title",
+        "idempotency_key",
+    ] {
+        assert!(
+            table_columns_in_schema(&pool, "clips", "clip_submissions")
+                .await
+                .iter()
+                .any(|c| c == column),
+            "clips.clip_submissions.{column} fehlt"
+        );
+    }
+    assert_eq!(
+        column_in_schema(&pool, "clips", "clip_submissions", "user_id")
+            .await
+            .is_nullable,
+        "YES"
+    );
+    assert_eq!(
+        column_in_schema(&pool, "clips", "clip_window_submissions", "user_id")
+            .await
+            .is_nullable,
+        "YES"
+    );
+    let twitch_ohne_identitaet = sqlx::query(
+        "INSERT INTO clips.clip_submissions(guild_id, link, credit, permission, source, idempotency_key)
+         VALUES (1, 'https://clips.twitch.tv/X', 'x', 'p', 'twitch', 'k')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        twitch_ohne_identitaet.is_err(),
+        "Twitch-Einsendung ohne Streamer-ID muss scheitern"
+    );
 
     assert_eq!(
         table_columns_in_schema(&pool, "scrim", "match_request_reminder_effects").await,

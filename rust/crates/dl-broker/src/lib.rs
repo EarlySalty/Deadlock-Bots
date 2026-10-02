@@ -9,6 +9,7 @@
 // Handler geben frühe HTTP-Fehlerantworten als Err(Response) zurück — axum-idiomatisch.
 #![allow(clippy::result_large_err)]
 
+pub mod clips;
 mod handlers;
 mod idempotency;
 pub mod payload;
@@ -247,6 +248,37 @@ pub fn router(state: SharedBroker) -> Router {
             post(handlers::add_reaction),
         )
         .with_state(state)
+}
+
+// ── Twitch-Verknuepfungen (core.discord_platform_connections) ─────────────
+
+/// Eine gespeicherte Twitch-Verknuepfung, wie `twitch-links` sie ausliefert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwitchLinkEntry {
+    pub discord_id: u64,
+    pub twitch_user_id: String,
+    pub twitch_login: String,
+    pub verified: bool,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Lesequelle fuer `GET /internal/master/v1/discord/twitch-links`. Der Broker
+/// selbst hat keine Datenbank; dl-bot reicht die zentrale DB herein.
+#[async_trait::async_trait]
+pub trait TwitchLinkSource: Send + Sync {
+    async fn twitch_links(&self) -> Result<Vec<TwitchLinkEntry>, String>;
+}
+
+/// Router fuer `GET /internal/master/v1/discord/twitch-links`: loopback-only,
+/// ohne Token wie `members`; Antwort `{ok, links:[{discord_id, twitch_user_id,
+/// twitch_login, verified, updated_at}]}`, nur Plattform `twitch`.
+pub fn twitch_links_router(source: Arc<dyn TwitchLinkSource>) -> Router {
+    Router::new()
+        .route(
+            "/internal/master/v1/discord/twitch-links",
+            get(handlers::twitch_links),
+        )
+        .with_state(source)
 }
 
 // ── Envelope + Auth ────────────────────────────────────────────────────────

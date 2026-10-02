@@ -1415,6 +1415,7 @@ name = "dl-central-db"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "hex",
  "sha2",
  "sqlx",
@@ -1510,6 +1511,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "dl-community-points-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "dl-central-db",
+ "dl-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
