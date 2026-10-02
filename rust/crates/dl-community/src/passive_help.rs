@@ -311,8 +311,25 @@ fn normalize(content: &str) -> String {
 
 pub fn passes_prefilter(content: &str) -> bool {
     let lower = content.to_lowercase();
+    let subject = [
+        "sprachkan",
+        "voice",
+        "router",
+        "discord",
+        "bot",
+        "client",
+        "fähigkeit",
+        "item",
+        "rang-gate",
+    ]
+    .iter()
+    .any(|word| lower.contains(word));
+    let blocked = ["nicht", "kein", "fehl", "kaputt", "verschwund"]
+        .iter()
+        .any(|word| lower.contains(word));
     // Inhaltliche Prüfung folgt im zentralen KI-Connector. Diese Signale sparen nur Aufrufe.
     crate::voice_change_hint::passes_voice_change_prefilter(content)
+        || (subject && blocked)
         || [
             "wie ",
             "wie?",
@@ -482,6 +499,8 @@ mod tests {
             "Wofür ist der Router?",
             "voice channels weg?",
             "sprachkanäle fehlen",
+            "Ich kann dem Sprachkanal nicht beitreten",
+            "Ich kann die Fähigkeit nicht aktivieren",
         ] {
             assert!(passes_prefilter(text), "{text}");
         }
