@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 const UNAVAILABLE: &str = "Der Serverguide ist gerade nicht erreichbar. Du kannst deine Frage in <#1491953161747955853> stellen.";
 const PILOT_CLOSED: &str = "Der Serverguide ist noch im begrenzten Testbetrieb. Für Hilfe erreichst du die Community in <#1426220702054355077>.";
@@ -147,6 +147,14 @@ struct Conversation {
 #[derive(Default)]
 struct Routes {
     conversations: HashMap<(u64, u64, u64), Conversation>,
+    sequence: u64,
+    channel_activity: HashMap<(u64, u64), ChannelActivity>,
+}
+
+struct ChannelActivity {
+    author: u64,
+    sequence: u64,
+    previous_other: u64,
 }
 
 /// Hält die vorhandene Datenschutzsperre bis zur tatsächlichen Interaction-Zustellung.
@@ -164,8 +172,24 @@ impl dl_discord::ResponseMessageHook for PrivacySendHook {
 }
 
 impl Routes {
-    fn observe_human(&mut self, event: &MessageEvent) {
+    fn observe_human(&mut self, event: &MessageEvent) -> u64 {
+        self.sequence = self.sequence.saturating_add(1);
+        let sequence = self.sequence;
         if let Some(guild) = event.guild_id {
+            self.channel_activity
+                .entry((guild, event.channel_id))
+                .and_modify(|activity| {
+                    if activity.author != event.author_id {
+                        activity.previous_other = activity.sequence;
+                    }
+                    activity.author = event.author_id;
+                    activity.sequence = sequence;
+                })
+                .or_insert(ChannelActivity {
+                    author: event.author_id,
+                    sequence,
+                    previous_other: 0,
+                });
             for ((channel_guild, channel, user), conversation) in &mut self.conversations {
                 if *channel_guild == guild
                     && *channel == event.channel_id
@@ -175,6 +199,21 @@ impl Routes {
                 }
             }
         }
+        self.sequence
+    }
+    fn human_after(&self, event: &MessageEvent, received_sequence: u64) -> bool {
+        event.guild_id.is_some_and(|guild| {
+            self.channel_activity
+                .get(&(guild, event.channel_id))
+                .is_some_and(|activity| {
+                    let other = if activity.author == event.author_id {
+                        activity.previous_other
+                    } else {
+                        activity.sequence
+                    };
+                    other > received_sequence
+                })
+        })
     }
     fn addressed(
         &mut self,
@@ -249,6 +288,8 @@ pub struct GuideAdapter {
     privacy_epochs: std::sync::Mutex<HashMap<u64, u64>>,
     routes: Mutex<Routes>,
     turn_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
+    turn_capacity: Arc<Semaphore>,
+    privacy_capacity: Arc<Semaphore>,
 }
 
 impl GuideAdapter {
@@ -296,6 +337,8 @@ impl GuideAdapter {
             privacy_epochs: std::sync::Mutex::new(HashMap::new()),
             routes: Mutex::new(Routes::default()),
             turn_locks: Mutex::new(HashMap::new()),
+            turn_capacity: Arc::new(Semaphore::new(64)),
+            privacy_capacity: Arc::new(Semaphore::new(4)),
         }))
     }
 
@@ -587,7 +630,18 @@ impl GuideAdapter {
         Ok(())
     }
 
-    async fn handle_message(&self, event: MessageEvent) {
+    async fn try_user_turn(&self, user_id: u64) -> Option<OwnedMutexGuard<()>> {
+        self.turn_locks
+            .lock()
+            .await
+            .entry(user_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+            .try_lock_owned()
+            .ok()
+    }
+
+    async fn handle_message(&self, event: MessageEvent, received_sequence: u64) {
         let bot = self.adapter.bot_user_id_cell().get().copied();
         if bot == Some(event.author_id) {
             return;
@@ -595,15 +649,13 @@ impl GuideAdapter {
         if !self.config.allowed(event.author_id) {
             return;
         }
-        let user_lock = self
-            .turn_locks
-            .lock()
-            .await
-            .entry(event.author_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let _user_turn = user_lock.lock().await;
+        let Some(_user_turn) = self.try_user_turn(event.author_id).await else {
+            return;
+        };
         let mut routes = self.routes.lock().await;
+        if routes.human_after(&event, received_sequence) {
+            return;
+        }
         let epoch = match self.privacy_epochs.lock() {
             Ok(epochs) => epochs.get(&event.author_id).copied().unwrap_or(0),
             Err(_) => return,
@@ -611,7 +663,6 @@ impl GuideAdapter {
         routes
             .conversations
             .retain(|(_, _, user), value| *user != event.author_id || value.epoch == epoch);
-        routes.observe_human(&event);
         if !self.config.allowed(event.author_id)
             || event
                 .guild_id
@@ -754,10 +805,11 @@ impl GuideAdapter {
         // Die letzte Prüfung steht unmittelbar vor dem Discordversand, ohne Kern-HTTP unter der Routensperre.
         let mut routes = self.routes.lock().await;
         if event.guild_id.is_some()
-            && routes
-                .conversations
-                .get(&route_key)
-                .is_none_or(|conversation| conversation.interrupted)
+            && (routes.human_after(&event, received_sequence)
+                || routes
+                    .conversations
+                    .get(&route_key)
+                    .is_none_or(|conversation| conversation.interrupted))
         {
             return;
         }
@@ -853,6 +905,36 @@ impl InteractionHandler for GuideAdapter {
                 "Hier kann der Guide keine Inhalte verwenden. Schreib ihm bitte direkt.",
             );
         }
+        let (control, control_error) = profile_control(&interaction);
+        if let Some(error) = control_error {
+            return BridgeReply::ephemeral_text(error);
+        }
+        // Löschen und Erinnerung ausschalten dürfen laufende Antwortturns durch die Epoche verwerfen.
+        let privacy_interrupt = control.as_ref().is_some_and(|control| {
+            control.get("type").and_then(Value::as_str) == Some("forget")
+                || (control.get("type").and_then(Value::as_str) == Some("memory")
+                    && control.get("enabled").and_then(Value::as_bool) == Some(false))
+        });
+        let capacity = if privacy_interrupt {
+            self.privacy_capacity.clone()
+        } else {
+            self.turn_capacity.clone()
+        };
+        let Ok(_permit) = capacity.try_acquire_owned() else {
+            return BridgeReply::ephemeral_text(
+                "Ich bin gerade ausgelastet. Bitte versuch es gleich nochmal.",
+            );
+        };
+        let _user_turn = if privacy_interrupt {
+            None
+        } else {
+            let Some(lock) = self.try_user_turn(interaction.user_id).await else {
+                return BridgeReply::ephemeral_text(
+                    "Deine vorige Anfrage läuft noch. Bitte warte kurz.",
+                );
+            };
+            Some(lock)
+        };
         let request_id = format!("discord:interaction:{}", interaction.interaction_id);
         match self.claim(&request_id).await {
             Ok(true) => {}
@@ -860,10 +942,6 @@ impl InteractionHandler for GuideAdapter {
                 return BridgeReply::ephemeral_text("Diese Aktion wurde bereits verarbeitet.")
             }
             Err(_) => return BridgeReply::ephemeral_text(UNAVAILABLE),
-        }
-        let (control, control_error) = profile_control(&interaction);
-        if let Some(error) = control_error {
-            return BridgeReply::ephemeral_text(error);
         }
         let event = if control.is_some() {
             "profile_control"
@@ -1071,12 +1149,24 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
         loop {
             match messages.recv().await {
                 Ok(event) => {
+                    if guide.adapter.bot_user_id_cell().get().copied() == Some(event.author_id)
+                        || event.guild_id.is_some_and(|guild| {
+                            guild != guide.config.guild_id
+                                || !guide.public_allowed(event.channel_id)
+                        })
+                    {
+                        continue;
+                    }
                     // Metadaten anderer Menschen werden sofort berücksichtigt, ohne Kern- oder Profilzugriff.
-                    guide.routes.lock().await.observe_human(&event);
+                    let received_sequence = guide.routes.lock().await.observe_human(&event);
                     if guide.config.allowed(event.author_id) {
+                        let Ok(permit) = guide.turn_capacity.clone().try_acquire_owned() else {
+                            continue;
+                        };
                         let turn_guide = guide.clone();
                         tokio::spawn(async move {
-                            turn_guide.handle_message(event).await;
+                            let _permit = permit;
+                            turn_guide.handle_message(event, received_sequence).await;
                         });
                     }
                 }
@@ -1092,6 +1182,35 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hilfe_vor_pending_eintrag_bleibt_sichtbar() {
+        let mut routes = Routes::default();
+        let question = message(20, 10, "<@99> Wo finde ich Mitspieler?");
+        let received = routes.observe_human(&question);
+        routes.observe_human(&message(21, 10, "Hier gibt es eine passende Runde."));
+        assert!(routes.conversations.is_empty());
+        assert!(routes.human_after(&question, received));
+        assert!(!routes.human_after(&message(20, 11, "Andere Frage"), received));
+    }
+
+    #[test]
+    fn weitere_eigene_nachricht_verdeckt_keine_zwischenzeitliche_hilfe() {
+        let mut routes = Routes::default();
+        let question = message(20, 10, "<@99> Kannst du helfen?");
+        let received = routes.observe_human(&question);
+        routes.observe_human(&message(21, 10, "Hier findest du die Antwort."));
+        let new_question = message(20, 10, "<@99> Kannst du das ergänzen?");
+        let new_received = routes.observe_human(&new_question);
+        assert!(routes.human_after(&question, received));
+        assert!(!routes.human_after(&new_question, new_received));
+        assert!(!routes.human_after(
+            &MessageEvent {
+                guild_id: None,
+                ..question
+            },
+            received
+        ));
+    }
     #[test]
     fn sichtbarer_text_beachtet_hinweis_und_discord_utf16_limit() {
         let reply = GuideReply {
@@ -1152,6 +1271,7 @@ mod tests {
                     epoch: 0,
                 },
             )]),
+            ..Default::default()
         }
     }
     #[test]
