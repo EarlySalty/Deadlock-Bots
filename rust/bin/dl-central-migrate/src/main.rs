@@ -33,6 +33,8 @@ fn is_transient_scrim_checksum(checksum: &str) -> bool {
 }
 
 fn validate_steam_history(checksum: Option<&str>) -> anyhow::Result<()> {
+    // Kanonische bestehende Historie ist eine Voraussetzung dieses begrenzten
+    // Modus, keine automatisch zu reparierende Eingabe. Siehe README.md.
     anyhow::ensure!(
         !checksum.is_some_and(is_transient_scrim_checksum),
         "Begrenzte Steam-Migration abgebrochen: vorhandene Scrim-Prüfsumme benötigt eine separate Freigabe. In diesem Modus wird keine fremde Migrationshistorie geändert."
