@@ -248,6 +248,7 @@ pub struct GuideAdapter {
     auth_token: Option<String>,
     privacy_epochs: std::sync::Mutex<HashMap<u64, u64>>,
     routes: Mutex<Routes>,
+    turn_locks: Mutex<HashMap<u64, Arc<Mutex<()>>>>,
 }
 
 impl GuideAdapter {
@@ -294,6 +295,7 @@ impl GuideAdapter {
             auth_token,
             privacy_epochs: std::sync::Mutex::new(HashMap::new()),
             routes: Mutex::new(Routes::default()),
+            turn_locks: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -590,6 +592,17 @@ impl GuideAdapter {
         if bot == Some(event.author_id) {
             return;
         }
+        if !self.config.allowed(event.author_id) {
+            return;
+        }
+        let user_lock = self
+            .turn_locks
+            .lock()
+            .await
+            .entry(event.author_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _user_turn = user_lock.lock().await;
         let mut routes = self.routes.lock().await;
         let epoch = match self.privacy_epochs.lock() {
             Ok(epochs) => epochs.get(&event.author_id).copied().unwrap_or(0),
@@ -610,8 +623,7 @@ impl GuideAdapter {
         if event.guild_id.is_some() && !self.public_allowed(event.channel_id) {
             return;
         }
-        // Ein gemeinsamer Lock umfasst Zuordnung, Kernaufruf und Zustellung. Andere Teilnehmer
-        // können dadurch nicht während einer Antwort als Folgefrage übernommen werden.
+        // Die Zuordnung wird kurz gesperrt; menschliche Hilfe bleibt während des Kernaufrufs sichtbar.
         let Some((addressed, content, conversation_id)) =
             routes.addressed(&event, bot, self.config.idle_timeout)
         else {
@@ -626,6 +638,28 @@ impl GuideAdapter {
                 return;
             }
         }
+        let route_key = (
+            event.guild_id.unwrap_or(0),
+            event.channel_id,
+            event.author_id,
+        );
+        routes
+            .conversations
+            .entry(route_key)
+            .and_modify(|conversation| {
+                conversation.interrupted = false;
+                conversation.last_user_message = event.message_id;
+                conversation.updated = Instant::now();
+            })
+            .or_insert_with(|| Conversation {
+                id: conversation_id.clone(),
+                bot_messages: HashSet::new(),
+                last_user_message: event.message_id,
+                updated: Instant::now(),
+                interrupted: false,
+                epoch,
+            });
+        drop(routes);
         let thread_id = event.guild_id.and_then(|guild| {
             self.adapter.cache().guild(guild).and_then(|guild| {
                 guild
@@ -664,6 +698,18 @@ impl GuideAdapter {
                 ..Default::default()
             },
         };
+        if event.guild_id.is_some()
+            && reply.actions.is_empty()
+            && self
+                .routes
+                .lock()
+                .await
+                .conversations
+                .get(&route_key)
+                .is_none_or(|conversation| conversation.interrupted)
+        {
+            return;
+        }
         if self
             .privacy_epochs
             .lock()
@@ -697,25 +743,24 @@ impl GuideAdapter {
             Ok(lock) => lock,
             Err(_) => return,
         };
-        let Some(mut text) = reply.reply.clone() else {
-            return;
-        };
-        if let Some(notice) = reply.memory_notice {
-            text.push_str("\n\n");
-            text.push_str(&notice);
-        }
-        if text.chars().count() > 2000
-            || text.to_lowercase().contains("deadlock brain")
-            || text.to_lowercase().contains("deadlock-brain")
-            || text.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}'))
-        {
+        let Some(text) = visible_reply(&reply) else {
             tracing::warn!("Guide-Antwort verletzt sichtbare Textgrenzen");
             return;
-        }
+        };
         let body = json!({"content": text, "allowed_mentions": {"parse": []}, "message_reference": {"message_id": event.message_id.to_string(), "fail_if_not_exists": false}, "nonce": event.message_id.to_string(), "enforce_nonce": true});
         let Some(body) = body.as_object() else {
             return;
         };
+        // Die letzte Prüfung steht unmittelbar vor dem Discordversand, ohne Kern-HTTP unter der Routensperre.
+        let mut routes = self.routes.lock().await;
+        if event.guild_id.is_some()
+            && routes
+                .conversations
+                .get(&route_key)
+                .is_none_or(|conversation| conversation.interrupted)
+        {
+            return;
+        }
         if let Ok(message_id) = self.adapter.send_raw_public(event.channel_id, body).await {
             if final_lock.commit().await.is_err() {
                 return;
@@ -728,16 +773,7 @@ impl GuideAdapter {
             if is_end(&event.content) {
                 routes.conversations.remove(&key);
             } else {
-                if let Some(conversation_id) = &reply.conversation_id {
-                    if let Some(token) = &self.auth_token {
-                        let ack = self.http.post(format!("{}/v1/guide/action-result", self.config.base_url.trim_end_matches('/'))).bearer_auth(token)
-                            .json(&json!({"request_id": format!("{}:reply", turn.request_id), "guild_id": turn.guild_id, "user_id": turn.user_id, "delivery_id": format!("reply:{conversation_id}"), "success": true, "sent_message_id": null, "reply_message_id": message_id.to_string()})).send().await;
-                        if !ack.is_ok_and(|response| response.status().is_success()) {
-                            tracing::warn!("Guide-Unterhaltungszuordnung wurde nicht bestätigt");
-                            return;
-                        }
-                    }
-                }
+                let conversation_id = reply.conversation_id.clone();
                 routes.conversations.insert(
                     key,
                     Conversation {
@@ -749,6 +785,17 @@ impl GuideAdapter {
                         epoch,
                     },
                 );
+                drop(routes);
+                if let Some(conversation_id) = &conversation_id {
+                    if let Some(token) = &self.auth_token {
+                        let ack = self.http.post(format!("{}/v1/guide/action-result", self.config.base_url.trim_end_matches('/'))).bearer_auth(token)
+                            .json(&json!({"request_id": format!("{}:reply", turn.request_id), "guild_id": turn.guild_id, "user_id": turn.user_id, "delivery_id": format!("reply:{conversation_id}"), "success": true, "sent_message_id": null, "reply_message_id": message_id.to_string()})).send().await;
+                        if !ack.is_ok_and(|response| response.status().is_success()) {
+                            tracing::warn!("Guide-Unterhaltungszuordnung wurde nicht bestätigt");
+                            return;
+                        }
+                    }
+                }
             }
         } else {
             tracing::warn!("Guide-Antwort konnte nicht bestätigt zugestellt werden");
@@ -765,6 +812,22 @@ fn is_end(content: &str) -> bool {
             .trim(),
         "danke" | "dankeschön" | "alles klar" | "passt" | "bis später" | "tschüss" | "das war's"
     )
+}
+
+fn visible_reply(reply: &GuideReply) -> Option<String> {
+    let mut text = reply.reply.clone()?;
+    if let Some(notice) = &reply.memory_notice {
+        text.push_str("\n\n");
+        text.push_str(notice);
+    }
+    if text.encode_utf16().count() > 2000
+        || text.to_lowercase().contains("deadlock brain")
+        || text.to_lowercase().contains("deadlock-brain")
+        || text.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}'))
+    {
+        return None;
+    }
+    Some(text)
 }
 
 #[async_trait::async_trait]
@@ -915,20 +978,10 @@ impl InteractionHandler for GuideAdapter {
                 )
             }
         };
-        if reply.reply.as_deref().is_some_and(|text| {
-            text.chars().count() > 2000
-                || text.to_lowercase().contains("deadlock brain")
-                || text.to_lowercase().contains("deadlock-brain")
-                || text.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}'))
-        }) {
+        let Some(text) = visible_reply(&reply) else {
             return BridgeReply::ephemeral_text(self.public_text(UNAVAILABLE));
-        }
-        let mut response = BridgeReply::ephemeral_text(
-            reply
-                .reply
-                .as_deref()
-                .unwrap_or("Diese Aktion braucht gerade keine weitere Antwort."),
-        );
+        };
+        let mut response = BridgeReply::ephemeral_text(text);
         response.response_message_hook = Some(Arc::new(PrivacySendHook(Mutex::new(Some(lock)))));
         response
     }
@@ -1017,7 +1070,16 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
     tokio::spawn(async move {
         loop {
             match messages.recv().await {
-                Ok(event) => guide.handle_message(event).await,
+                Ok(event) => {
+                    // Metadaten anderer Menschen werden sofort berücksichtigt, ohne Kern- oder Profilzugriff.
+                    guide.routes.lock().await.observe_human(&event);
+                    if guide.config.allowed(event.author_id) {
+                        let turn_guide = guide.clone();
+                        tokio::spawn(async move {
+                            turn_guide.handle_message(event).await;
+                        });
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     tracing::warn!("Guide-Ereignisse wurden übersprungen")
@@ -1030,6 +1092,28 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sichtbarer_text_beachtet_hinweis_und_discord_utf16_limit() {
+        let reply = GuideReply {
+            reply: Some("Gern.".into()),
+            memory_notice: Some("Deine Erinnerung bleibt ausgeschaltet.".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            visible_reply(&reply).as_deref(),
+            Some("Gern.\n\nDeine Erinnerung bleibt ausgeschaltet.")
+        );
+        let reply = GuideReply {
+            reply: Some("🙂".repeat(1001)),
+            ..Default::default()
+        };
+        assert!(visible_reply(&reply).is_none());
+        let reply = GuideReply {
+            reply: Some("Deadlock Brain hilft dir.".into()),
+            ..Default::default()
+        };
+        assert!(visible_reply(&reply).is_none());
+    }
     fn message(user: u64, channel: u64, content: &str) -> MessageEvent {
         MessageEvent {
             guild_id: Some(1),
