@@ -17,6 +17,7 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Europe::Berlin;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 
 use crate::platform_connections::{is_valid_twitch_user_id, PLATFORM_TWITCH};
 use crate::CentralDbError;
@@ -244,8 +245,19 @@ pub async fn apply_streamer_page(
     next_cursor: Option<&str>,
 ) -> Result<u64, CentralDbError> {
     let mut tx = pool.begin().await?;
+    // Einheitliche Reihenfolge verhindert wechselseitiges Warten zweier Seiten.
+    let ids: BTreeSet<i64> = rows.iter().filter_map(|row| row.discord_user_id).collect();
+    let mut blocked = BTreeSet::new();
+    for id in ids {
+        if crate::lock_user_privacy_and_is_opted_out(&mut tx, id).await? {
+            blocked.insert(id);
+        }
+    }
     let mut written = 0;
     for row in rows {
+        if row.discord_user_id.is_some_and(|id| blocked.contains(&id)) {
+            continue;
+        }
         written += sqlx::query(
             "INSERT INTO community_points.twitch_streamer_daily
                  (streamer_twitch_user_id, day, streamer_login, discord_user_id, viewer_minutes,
@@ -308,12 +320,14 @@ pub async fn record_ledger_event(
     pool: &PgPool,
     event: &LedgerEvent,
 ) -> Result<bool, CentralDbError> {
-    let mut conn = pool.acquire().await?;
-    insert_ledger_event(&mut conn, event).await
+    let mut tx = pool.begin().await?;
+    let inserted = insert_ledger_event(&mut tx, event).await?;
+    tx.commit().await?;
+    Ok(inserted)
 }
 
 async fn insert_ledger_event(
-    conn: &mut sqlx::PgConnection,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event: &LedgerEvent,
 ) -> Result<bool, CentralDbError> {
     let (discord_id, streamer) = match &event.recipient {
@@ -325,6 +339,11 @@ async fn insert_ledger_event(
             ))
         }
     };
+    if let Some(id) = discord_id {
+        if crate::lock_user_privacy_and_is_opted_out(tx, id).await? {
+            return Ok(false);
+        }
+    }
     let inserted = sqlx::query(
         "INSERT INTO community_points.ledger
              (discord_id, streamer_twitch_user_id, source, ref, points, occurred_at)
@@ -341,7 +360,7 @@ async fn insert_ledger_event(
     .bind(&event.reference)
     .bind(event.points)
     .bind(event.occurred_at)
-    .execute(&mut *conn)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
     Ok(inserted == 1)
@@ -358,6 +377,16 @@ pub async fn apply_suggestion_outcome_page(
     next_cursor: Option<&str>,
 ) -> Result<u64, CentralDbError> {
     let mut tx = pool.begin().await?;
+    let ids: BTreeSet<i64> = events
+        .iter()
+        .filter_map(|event| match event.recipient {
+            LedgerRecipient::Member(id) => Some(id),
+            LedgerRecipient::Streamer(_) => None,
+        })
+        .collect();
+    for id in ids {
+        crate::lock_user_privacy(&mut tx, id).await?;
+    }
     let mut written = 0;
     for event in events {
         if insert_ledger_event(&mut tx, event).await? {
@@ -425,6 +454,15 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
         });
     }
     let mut tx = pool.begin().await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM clips.clip_contest_results WHERE user_id IS NOT NULL
+         UNION SELECT voter_user_id FROM clips.clip_votes ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for id in ids {
+        crate::lock_user_privacy(&mut tx, id).await?;
+    }
     let places = sqlx::query(
         "INSERT INTO community_points.ledger
              (discord_id, streamer_twitch_user_id, source, ref, points, occurred_at, meta)

@@ -66,6 +66,14 @@ fn clip_schluessel_erkennt_gleichen_clip() {
         clip_key("https://YouTube.com/watch?v=1/"),
         clip_key("https://youtube.com/watch?v=1#t=3")
     );
+    assert_ne!(
+        clip_key("https://youtube.com/watch?v=AbC"),
+        clip_key("https://youtube.com/watch?v=abc")
+    );
+    assert_ne!(
+        clip_key("https://example.com/Clips/AbC"),
+        clip_key("https://example.com/clips/abc")
+    );
 }
 
 #[test]
@@ -559,6 +567,106 @@ mod db {
         assert_eq!(voters, 5);
     }
 
+    #[tokio::test]
+    async fn privacy_grabsteine_verhindern_stimmen_und_ergebnisse() {
+        let (db, clips, _) = setup().await;
+        let (window_id, ids) = ended_window(db.pool()).await;
+        clips.process_contest(1).await;
+        sqlx::raw_sql(
+            "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at)
+                       VALUES (42, TRUE, NULL), (43, FALSE, now()), (11, TRUE, NULL)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("Privacy-Grabsteine");
+        for user in [42, 43] {
+            assert_eq!(
+                clips
+                    .store
+                    .cast_vote(window_id, user, ids[0], Utc::now())
+                    .await
+                    .expect("Stimme"),
+                VoteOutcome::PrivacyOptedOut
+            );
+        }
+        sqlx::query("UPDATE clips.clip_votings SET voting_end_at = now() - interval '1 second' WHERE window_id = $1")
+            .bind(window_id).execute(db.pool()).await.expect("Voting beenden");
+        assert!(clips
+            .store
+            .finalize_voting(window_id, Utc::now())
+            .await
+            .expect("Auszählen"));
+        let users: Vec<i64> = sqlx::query_scalar("SELECT user_id FROM clips.clip_contest_results WHERE window_id = $1 AND user_id IS NOT NULL")
+            .bind(window_id).fetch_all(db.pool()).await.expect("Ergebnisse");
+        assert!(
+            !users.contains(&11),
+            "Widersprechende Einsender dürfen nicht in Ergebnisse kopiert werden."
+        );
+        let votes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM clips.clip_votes WHERE voter_user_id IN (42, 43)",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("Stimmen zählen");
+        assert_eq!(votes, 0);
+    }
+
+    #[tokio::test]
+    async fn lookupfehler_schreibt_keine_stimme() {
+        let (db, clips, _) = setup().await;
+        let (window_id, ids) = ended_window(db.pool()).await;
+        clips.process_contest(1).await;
+        sqlx::query("ALTER TABLE core.discord_platform_connections RENAME TO platform_connections_test_hidden")
+            .execute(db.pool()).await.expect("Lookupfehler vorbereiten");
+        let reply = VoteHandler { clips }
+            .handle(vote(42, window_id, *ids.last().expect("Twitch-Clip")))
+            .await;
+        assert!(reply.content.unwrap_or_default().contains("nicht geprüft"));
+        let votes: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM clips.clip_votes WHERE voter_user_id = 42")
+                .fetch_one(db.pool())
+                .await
+                .expect("Stimmen zählen");
+        assert_eq!(votes, 0);
+    }
+
+    #[tokio::test]
+    async fn abgelaufene_deadline_nach_warten_schreibt_keine_stimme() {
+        let (db, clips, _) = setup().await;
+        let (window_id, ids) = ended_window(db.pool()).await;
+        clips.process_contest(1).await;
+        sqlx::query("UPDATE clips.clip_votings SET voting_end_at = clock_timestamp() + interval '250 milliseconds' WHERE window_id = $1")
+            .bind(window_id).execute(db.pool()).await.expect("Kurze Frist");
+        let mut blocker = db.pool().begin().await.expect("Sperre");
+        sqlx::query("SELECT window_id FROM clips.clip_votings WHERE window_id = $1 FOR UPDATE")
+            .bind(window_id)
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("Voting sperren");
+        let old_now = Utc::now();
+        let mut writer =
+            tokio::spawn(
+                async move { clips.store.cast_vote(window_id, 42, ids[0], old_now).await },
+            );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut writer)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        blocker.commit().await.expect("Sperre lösen");
+        assert_eq!(
+            writer.await.expect("Writer").expect("Stimme"),
+            VoteOutcome::Closed
+        );
+        let votes: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM clips.clip_votes WHERE voter_user_id = 42")
+                .fetch_one(db.pool())
+                .await
+                .expect("Stimmen zählen");
+        assert_eq!(votes, 0);
+    }
+
     fn twitch_request(url: &str, key: &str) -> TwitchClipRequest {
         TwitchClipRequest {
             clip_url: url.to_string(),
@@ -605,7 +713,10 @@ mod db {
         changed = req.clone();
         changed.submitted_by_twitch_user_id = Some("789".into());
         assert_eq!(
-            clips.submit_twitch(1, &changed).await.expect("submitter drift"),
+            clips
+                .submit_twitch(1, &changed)
+                .await
+                .expect("submitter drift"),
             TwitchSubmitOutcome::ReplayMetadataDrift(id)
         );
         changed = req.clone();
@@ -625,7 +736,10 @@ mod db {
         changed.streamer_twitch_user_id = "789".into();
         changed.streamer_login = "anderer_login".into();
         assert_eq!(
-            clips.submit_twitch(1, &changed).await.expect("streamer id drift"),
+            clips
+                .submit_twitch(1, &changed)
+                .await
+                .expect("streamer id drift"),
             TwitchSubmitOutcome::ReplayMetadataDrift(id)
         );
         // anderer Schlüssel, gleicher Clip in anderer URL-Form → Duplikat
@@ -633,6 +747,23 @@ mod db {
         assert_eq!(
             clips.submit_twitch(1, &dup).await.expect("dup"),
             TwitchSubmitOutcome::Duplicate(id)
+        );
+        assert_eq!(
+            clips
+                .store
+                .submit_twitch(1, &dup, Utc::now() + chrono::Duration::days(8))
+                .await
+                .expect("Duplikat in der nächsten Woche"),
+            TwitchSubmitOutcome::Duplicate(id)
+        );
+        let alias_conflict = twitch_request("https://clips.twitch.tv/Other", "anderer-key");
+        assert_eq!(
+            clips
+                .store
+                .submit_twitch(1, &alias_conflict, Utc::now())
+                .await
+                .expect("Konflikt mit Duplikatschlüssel"),
+            TwitchSubmitOutcome::Rejected("idempotency_conflict")
         );
         // gleicher Schlüssel, anderer Clip → Konflikt
         let conflict = twitch_request("https://clips.twitch.tv/Other", "twitch-clip-Wow-1");

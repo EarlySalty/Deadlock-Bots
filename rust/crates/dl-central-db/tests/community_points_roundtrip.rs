@@ -166,6 +166,61 @@ async fn upsert_ist_idempotent_und_cursor_transaktional() {
     );
 }
 
+#[tokio::test]
+async fn streamersync_wartet_auf_loeschung_und_respektiert_den_grabstein() {
+    if !dsn_available() {
+        eprintln!("skipping: CENTRAL_TEST_DSN or DATABASE_URL is required");
+        return;
+    }
+    let db = test_pool().await.expect("test pool");
+    let pool = db.pool();
+    let row = streamer("456", "partner", Some(42), "2026-10-14", 2);
+    apply_streamer_page(pool, std::slice::from_ref(&row), Some("vorher"))
+        .await
+        .expect("erste Seite");
+    let mut erasure = pool.begin().await.expect("Löschtransaktion");
+    dl_central_db::lock_user_privacy(&mut erasure, 42)
+        .await
+        .expect("Privacy-Sperre");
+    sqlx::query(
+        "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at) VALUES (42, FALSE, now())",
+    )
+    .execute(&mut *erasure)
+    .await
+    .expect("Löschgrabstein");
+    sqlx::query("DELETE FROM community_points.twitch_streamer_daily WHERE discord_user_id = 42")
+        .execute(&mut *erasure)
+        .await
+        .expect("bestehende Daten löschen");
+    let writer_pool = pool.clone();
+    let mut writer =
+        tokio::spawn(
+            async move { apply_streamer_page(&writer_pool, &[row], Some("nachher")).await },
+        );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut writer)
+            .await
+            .is_err(),
+        "Der Sync muss hinter der Privacy-Sperre warten."
+    );
+    erasure.commit().await.expect("Löschung abschließen");
+    assert_eq!(writer.await.expect("Writer").expect("Sync"), 0);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM community_points.twitch_streamer_daily WHERE discord_user_id = 42",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("Daten zählen");
+    assert_eq!(count, 0, "Gelöschte Daten dürfen nicht wieder entstehen.");
+    assert_eq!(
+        load_cursor(pool, CURSOR_STREAMERS)
+            .await
+            .expect("Cursor")
+            .as_deref(),
+        Some("nachher")
+    );
+}
+
 async fn seed(pool: &PgPool) {
     // Verknuepfungen: 1001<->111, 1002<->222 (widersprochen), 1004<->444.
     // 333 ist nicht verknuepft.

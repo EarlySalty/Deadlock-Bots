@@ -30,7 +30,7 @@ kostenlos. Punkte sind Anerkennung aus der Community, kein Geld und nichts zum E
 Der Twitch-Bot zählt Zuschauzeit und Chat in den Kanälen aktiver Partner, solange sie live sind. Zugerechnet wird das erst, wenn ein Twitch-Konto fest mit einer Discord-ID verknüpft ist. Diese Verknüpfung kommt nur aus der Freigabe über Discord, niemals aus einem ähnlichen Namen. Die Punkte werden alle 10 Minuten in die zentrale Datenbank übernommen und dort mit Voice-Punkten, Clip-Contest und Streamer-Vorschlägen zu einem gemeinsamen Leaderboard zusammengeführt. Der Concierge beantwortet die Fragen "Wie bekomme ich Punkte?", "Wie verknüpfe ich Twitch?", "Wie funktioniert der Clip-Contest?", "Wie schlage ich einen Streamer vor?" und "Was bringt mir das als Streamer?" mit festen Antworten, auch wenn kein Sprachmodell erreichbar ist.
 
 ## Grenzen & häufige Fragen
-- Ohne Verknüpfung wird dir nichts zugerechnet, und dein Name taucht nirgends auf. Sichtbar sind nur verknüpfte Mitglieder.
+- Twitch-Punkte werden dir erst nach der Verknüpfung zugerechnet. Voice-Punkte, Clip-Contest-Punkte und Punkte für Streamer-Vorschläge können dich auch ohne Twitch-Verknüpfung im gemeinsamen Leaderboard zeigen.
 - Deine Datenschutz-Einstellungen gelten auch für dieses Leaderboard, so wie für die anderen Ranglisten auf dem Server.
 - Follows und Subs bringen keine Punkte. Wir kaufen keine Views und belohnen nichts, was gegen die Regeln von Twitch verstößt.
 - Gezählt wird nur bei Partner-Streamern, während sie live sind. Wer im eigenen Kanal streamt, bekommt dort keine Zuschauerpunkte. Bot-Konten und gesperrte Konten zählen nicht.

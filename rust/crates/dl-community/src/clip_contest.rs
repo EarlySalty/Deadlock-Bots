@@ -140,7 +140,10 @@ pub fn clip_key(link: &str) -> String {
     }
     let trimmed = link.trim();
     let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
-    without_fragment.trim_end_matches('/').to_lowercase()
+    // Url normalisiert Host und Schema, erhält aber Pfad und Querywerte.
+    url::Url::parse(without_fragment.trim_end_matches('/'))
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| without_fragment.trim_end_matches('/').to_string())
 }
 
 /// Stimmzettel: gültige Clips, Duplikate (gleicher Clip) nur einmal mit der
@@ -590,6 +593,7 @@ pub enum VoteOutcome {
     Unchanged,
     Closed,
     NotOnBallot,
+    PrivacyOptedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -902,11 +906,15 @@ impl ClipStore {
         window_id: i64,
         voter_id: u64,
         submission_id: i64,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> Result<VoteOutcome, sqlx::Error> {
         let voter = u64_to_i64(voter_id, "voter_user_id")
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
         let mut tx = self.pool().begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, voter).await? {
+            tx.rollback().await?;
+            return Ok(VoteOutcome::PrivacyOptedOut);
+        }
         let state: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
             "SELECT status, voting_end_at FROM clips.clip_votings
               WHERE window_id = $1 FOR SHARE",
@@ -914,6 +922,9 @@ impl ClipStore {
         .bind(window_id)
         .fetch_optional(&mut *tx)
         .await?;
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *tx)
+            .await?;
         let open = matches!(&state, Some((status, Some(end))) if status == "open" && now < *end);
         if !open {
             tx.rollback().await?;
@@ -939,35 +950,56 @@ impl ClipStore {
         .bind(voter)
         .fetch_optional(&mut *tx)
         .await?;
+        let before_deadline: bool = sqlx::query_scalar(
+            "SELECT clock_timestamp() < voting_end_at FROM clips.clip_votings WHERE window_id = $1",
+        )
+        .bind(window_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !before_deadline {
+            tx.rollback().await?;
+            return Ok(VoteOutcome::Closed);
+        }
         let outcome = match previous {
             Some(prev) if prev == submission_id => VoteOutcome::Unchanged,
             Some(_) => {
-                sqlx::query(
+                let changed = sqlx::query(
                     "UPDATE clips.clip_votes SET submission_id = $3, updated_at = $4
-                      WHERE window_id = $1 AND voter_user_id = $2",
+                      WHERE window_id = $1 AND voter_user_id = $2
+                        AND clock_timestamp() < (SELECT voting_end_at FROM clips.clip_votings WHERE window_id = $1)",
                 )
                 .bind(window_id)
                 .bind(voter)
                 .bind(submission_id)
                 .bind(now)
                 .execute(&mut *tx)
-                .await?;
-                VoteOutcome::Changed
+                .await?.rows_affected();
+                if changed == 0 {
+                    VoteOutcome::Closed
+                } else {
+                    VoteOutcome::Changed
+                }
             }
             None => {
-                sqlx::query(
+                let saved = sqlx::query(
                     "INSERT INTO clips.clip_votes(window_id, voter_user_id, submission_id, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $4)
+                     SELECT $1, $2, $3, $4, $4 FROM clips.clip_votings
+                      WHERE window_id = $1 AND clock_timestamp() < voting_end_at
                      ON CONFLICT (window_id, voter_user_id)
-                     DO UPDATE SET submission_id = excluded.submission_id, updated_at = excluded.updated_at",
+                     DO UPDATE SET submission_id = excluded.submission_id, updated_at = excluded.updated_at
+                     WHERE clock_timestamp() < (SELECT voting_end_at FROM clips.clip_votings WHERE window_id = $1)",
                 )
                 .bind(window_id)
                 .bind(voter)
                 .bind(submission_id)
                 .bind(now)
                 .execute(&mut *tx)
-                .await?;
-                VoteOutcome::Saved
+                .await?.rows_affected();
+                if saved == 0 {
+                    VoteOutcome::Closed
+                } else {
+                    VoteOutcome::Saved
+                }
             }
         };
         tx.commit().await?;
@@ -993,6 +1025,18 @@ impl ClipStore {
         now: DateTime<Utc>,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool().begin().await?;
+        // Privacy-Sperren kommen vor der Voting-Sperre, wie beim Stimmenschreiben.
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT DISTINCT s.user_id FROM clips.clip_voting_entries e
+               JOIN clips.clip_submissions s ON s.id = e.submission_id
+              WHERE e.window_id = $1 AND s.user_id IS NOT NULL ORDER BY s.user_id",
+        )
+        .bind(window_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for id in ids {
+            dl_central_db::lock_user_privacy(&mut tx, id).await?;
+        }
         let state: Option<FinalizeState> = sqlx::query_as(
             "SELECT v.status, v.voting_end_at, v.guild_id, w.start_at, w.end_at
                    FROM clips.clip_votings v JOIN clips.clip_windows w ON w.id = v.window_id
@@ -1014,17 +1058,23 @@ impl ClipStore {
                FROM clips.clip_voting_entries e
                JOIN clips.clip_submissions s ON s.id = e.submission_id
               WHERE e.window_id = $1
+                AND (s.user_id IS NULL OR NOT EXISTS (
+                    SELECT 1 FROM core.user_privacy p WHERE p.user_id = s.user_id
+                     AND (p.opted_out OR p.deleted_at IS NOT NULL)))
               ORDER BY e.position"
         ))
         .bind(window_id)
         .fetch_all(&mut *tx)
         .await?;
         let ballot: Vec<ContestClip> = rows.iter().filter_map(clip_from_row).collect();
-        let votes: Vec<i64> =
-            sqlx::query_scalar("SELECT submission_id FROM clips.clip_votes WHERE window_id = $1")
-                .bind(window_id)
-                .fetch_all(&mut *tx)
-                .await?;
+        let votes: Vec<i64> = sqlx::query_scalar(
+            "SELECT submission_id FROM clips.clip_votes v WHERE window_id = $1
+                 AND NOT EXISTS (SELECT 1 FROM core.user_privacy p WHERE p.user_id = v.voter_user_id
+                                  AND (p.opted_out OR p.deleted_at IS NOT NULL))",
+        )
+        .bind(window_id)
+        .fetch_all(&mut *tx)
+        .await?;
         for placement in rank_top3(&ballot, &votes) {
             let Some(clip) = ballot
                 .iter()
@@ -1271,6 +1321,23 @@ impl ClipStore {
 
         let mut tx = self.pool().begin().await?;
         sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtext('clips.clip_submission_replays'), hashtext($1))",
+        )
+        .bind(&request.idempotency_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        let remembered: Option<(String, i64)> = sqlx::query_as(
+            "SELECT clip_key, submission_id FROM clips.clip_submission_replays WHERE idempotency_key = $1",
+        ).bind(&request.idempotency_key).fetch_optional(&mut *tx).await?;
+        if let Some((stored_key, id)) = remembered {
+            tx.rollback().await?;
+            return Ok(if stored_key == key {
+                TwitchSubmitOutcome::Duplicate(id)
+            } else {
+                TwitchSubmitOutcome::Rejected("idempotency_conflict")
+            });
+        }
+        sqlx::query(
             "INSERT INTO clips.clip_windows(guild_id, start_at, end_at, status)
              VALUES ($1, $2, $3, 'running')
              ON CONFLICT (guild_id, start_at, end_at) DO NOTHING",
@@ -1296,21 +1363,15 @@ impl ClipStore {
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(ToString::to_string);
-        let replay: Option<(
-            i64,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            "SELECT id, link, streamer_twitch_user_id, streamer_login,
+        let replay: Option<(i64, String, String, String, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT id, link, streamer_twitch_user_id, streamer_login,
                     submitted_by_twitch_user_id, title
                FROM clips.clip_submissions WHERE idempotency_key = $1",
-        )
-        .bind(&request.idempotency_key)
-        .fetch_optional(&mut *tx)
-        .await?;
+            )
+            .bind(&request.idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await?;
         // Der Producer-Schlüssel bindet die Clip-ID. Metadaten bleiben beim ersten
         // Submit; Drift wird als Duplicate sichtbar, ohne einen Retry auszulösen.
         if let Some((id, link, streamer_id, streamer_login, submitted_by, stored_title)) = replay {
@@ -1338,7 +1399,10 @@ impl ClipStore {
         .fetch_all(&mut *tx)
         .await?;
         if let Some((id, _)) = existing.iter().find(|(_, link)| clip_key(link) == key) {
-            tx.rollback().await?;
+            sqlx::query("INSERT INTO clips.clip_submission_replays(idempotency_key, clip_key, submission_id) VALUES ($1, $2, $3)")
+                .bind(&request.idempotency_key).bind(&key).bind(id)
+                .execute(&mut *tx).await?;
+            tx.commit().await?;
             return Ok(TwitchSubmitOutcome::Duplicate(*id));
         }
 
@@ -1700,11 +1764,13 @@ impl ClipSubmission {
         else {
             return BridgeReply::ephemeral_text("Diesen Clip gibt es in dieser Abstimmung nicht.");
         };
-        let twitch_ids = self
-            .store
-            .linked_twitch_ids(interaction.user_id)
-            .await
-            .unwrap_or_default();
+        let twitch_ids = match self.store.linked_twitch_ids(interaction.user_id).await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(%err, window_id, "Clip-Contest: Twitch-Zuordnung nicht lesbar");
+                return BridgeReply::ephemeral_text("Dein Stimmrecht konnte gerade nicht geprüft werden. Versuch es gleich nochmal.");
+            }
+        };
         let joined = self
             .port
             .member_joined_at(interaction.guild_id, interaction.user_id)
@@ -1739,6 +1805,9 @@ impl ClipSubmission {
             }
             Ok(VoteOutcome::NotOnBallot) => {
                 BridgeReply::ephemeral_text("Diesen Clip gibt es in dieser Abstimmung nicht.")
+            }
+            Ok(VoteOutcome::PrivacyOptedOut) => {
+                BridgeReply::ephemeral_text("Du hast der Speicherung deiner Daten widersprochen. Deshalb speichern wir keine Stimme von dir.")
             }
             Err(err) => {
                 tracing::warn!(%err, window_id, "Clip-Contest: Stimme nicht gespeichert");

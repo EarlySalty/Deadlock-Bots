@@ -1,6 +1,6 @@
 //! Community-Punkte-Sync (Paket C). Logik in `lib.rs`; hier nur Bootstrap
 //! wie bei `dl-twitch-invite-sync`: TOML-Konfiguration, Token aus dem
-//! Infisical-Bootstrap, zentrale DB aus `DEADLOCK_CENTRAL_DSN`.
+//! privaten Infisical-Snapshot über FD3, wie beim Hauptbot.
 
 use dl_central_db::community_points::{import_clip_contest_ledger, import_qualified_join_ledger};
 use dl_community_points_sync::{
@@ -13,6 +13,8 @@ use dl_community_points_sync::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = dl_core::config::process_bot_config()?.snapshot();
+    dl_core::token_snapshot::load(dl_core::config::process_bot_config()?.source())
+        .map_err(|error| anyhow::anyhow!(error))?;
     let base = config
         .runtime
         .bridges
@@ -22,8 +24,9 @@ async fn main() -> anyhow::Result<()> {
     let token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN")
         .ok_or_else(|| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt im Infisical-Bootstrap"))?;
     let base = validate_base_url(&base)?;
-    let central_dsn = dl_central_db::dsn_from_env()?;
-    let pool = dl_central_db::connect_pool(&central_dsn).await?;
+    let central_dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
+        .ok_or_else(|| anyhow::anyhow!("Zentraler Datenbankzugang fehlt im privaten Snapshot"))?;
+    let pool = dl_central_db::connect_pool(central_dsn).await?;
     let client = http_client()?;
 
     let viewers = sync_source::<ViewerWire, _, _>(

@@ -80,6 +80,10 @@ pub async fn upsert_twitch_connection(
     }
 
     let mut tx = pool.begin().await?;
+    // Kontowechsel verschiedener Mitglieder dürfen nicht auf demselben
+    // Unique-Index konkurrieren. Der Lock gilt auch für getauschte Konten.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('core.discord_platform_connections'), hashtext('twitch_reassignment'))")
+        .fetch_one(&mut *tx).await?;
     if lock_user_privacy_and_is_opted_out(&mut tx, discord_id).await? {
         tx.commit().await?;
         return Ok(TwitchUpsertOutcome::PrivacyOptedOut);

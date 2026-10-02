@@ -165,6 +165,31 @@ async fn privacy_grabstein_verhindert_schreiben_und_lesen() {
 }
 
 #[tokio::test]
+async fn parallele_kontozuordnung_bleibt_eindeutig_und_beide_callbacks_gelingen() {
+    if !dsn_available() {
+        eprintln!("skipping: CENTRAL_TEST_DSN or DATABASE_URL is required");
+        return;
+    }
+    let db = test_pool().await.expect("Testdatenbank");
+    for round in 0..8 {
+        let connection = conn(&format!("8{round}77"), "geteilt", true);
+        upsert_twitch_connection(db.pool(), 1, &connection)
+            .await
+            .expect("Vorheriger Besitzer");
+        let (first, second) = tokio::join!(
+            upsert_twitch_connection(db.pool(), 2, &connection),
+            upsert_twitch_connection(db.pool(), 3, &connection),
+        );
+        first.expect("Erster paralleler Callback");
+        second.expect("Zweiter paralleler Callback");
+        let ids: Vec<i64> = sqlx::query_scalar("SELECT discord_id FROM core.discord_platform_connections WHERE platform = 'twitch' AND platform_user_id = $1")
+            .bind(&connection.twitch_user_id).fetch_all(db.pool()).await.expect("Verknüpfungen");
+        assert_eq!(ids.len(), 1);
+        assert!([2, 3].contains(&ids[0]));
+    }
+}
+
+#[tokio::test]
 async fn ungueltige_eingaben_werden_abgelehnt() {
     if !dsn_available() {
         eprintln!("skipping: CENTRAL_TEST_DSN or DATABASE_URL is required");
