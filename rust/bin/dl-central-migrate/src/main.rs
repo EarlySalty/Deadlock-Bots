@@ -32,6 +32,14 @@ fn is_transient_scrim_checksum(checksum: &str) -> bool {
     checksum == TRANSIENT_SCRIM_1602_SHA384
 }
 
+fn validate_steam_history(checksum: Option<&str>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !checksum.is_some_and(is_transient_scrim_checksum),
+        "Begrenzte Steam-Migration abgebrochen: vorhandene Scrim-Prüfsumme benötigt eine separate Freigabe. In diesem Modus wird keine fremde Migrationshistorie geändert."
+    );
+    Ok(())
+}
+
 async fn reconcile_transient_scrim_1602_checksum(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     let migrations_table_exists: bool =
         sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations') IS NOT NULL")
@@ -88,6 +96,12 @@ async fn main() -> ExitCode {
             connect_pool(&dsn).await?
         };
         if steam_only {
+            // Dieser Modus gilt für die bestehende zentrale Datenbank. Auch die
+            // bekannte alte Scrim-Historie wird hier ausdrücklich nicht repariert.
+            let checksum: Option<String> = sqlx::query_scalar(
+                "SELECT encode(checksum, 'hex') FROM public._sqlx_migrations WHERE version=2026071602 AND success"
+            ).fetch_optional(&pool).await?;
+            validate_steam_history(checksum.as_deref())?;
             // SQLx behält Lock, Ledger und Prüfsummenprüfung. Bereits angewandte
             // fremde Versionen bleiben enthalten; offene fremde Versionen nicht.
             let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM public._sqlx_migrations")
@@ -124,6 +138,15 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_mode_rejects_legacy_checksum_without_modifying_foreign_history() {
+        assert!(validate_steam_history(Some(TRANSIENT_SCRIM_1602_SHA384)).is_err());
+        assert!(validate_steam_history(Some(CANONICAL_SCRIM_1602_SHA384)).is_ok());
+        // Unbekannte Prüfsummen bleiben der unveränderten SQLx-Prüfung überlassen.
+        assert!(validate_steam_history(Some("unknown")).is_ok());
+        assert!(validate_steam_history(None).is_ok());
+    }
 
     #[test]
     fn steam_mode_preserves_history_and_excludes_unrelated_pending_migrations() {
