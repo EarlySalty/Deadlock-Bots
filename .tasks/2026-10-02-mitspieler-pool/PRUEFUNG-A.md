@@ -1,6 +1,6 @@
 # Prüfung Paket A
 
-Stand: 2026-10-02, vor Gate und Merge.
+Stand: 2026-10-02, Gate-Runde 1 BLOCK, vor Merge.
 
 Ausgangspunkt: frisch geholtes `origin/main`, Commit `47ea7994`. Eigenes Worktree `/home/nathanael/.worktrees/Deadlock-Bots-pool-a`, Branch `feat/spielerpool-a`. Fremde Änderungen im geteilten Checkout bleiben erhalten.
 
@@ -46,4 +46,6 @@ Vor dem Gate wurde der Ingest-Leser mit dem Snapshot-Schreiber abgeglichen: ein 
 
 ## Noch offen
 
-Gate-Urteil, Merge, Migration als postgres, Deploy, Dienstneustart und Live-Beweis. Interview, echte API-Daten, Website und Discord-Sessionkanal sind in Paket A noch nicht live prüfbar. Paket A hat keinen Release-Build gestartet und keine zentrale Produktionsmigration angewendet. Beim letzten Host-Check lief ein fremder `dl-bot`-Release-Build mit PID `3597035`; der Delegator ist zur Abstimmung informiert.
+Der vorgeschriebene Gate prüfte den gepushten Code-Stand `f6454e7a` und meldete BLOCK wegen fehlender Steam-Herkunft bei verspäteten Mitspieler-Ergebnissen nach einem Kontowechsel. Der genaue Befund und die Übergabe an einen frischen Fixer stehen in `REVIEW-A.md`. Nach BLOCK wurden keine eigenen Codekorrekturen vorgenommen.
+
+Merge, Migration als postgres, Deploy, Dienstneustart und Live-Beweis stehen aus. Interview, echte API-Daten, Website und Discord-Sessionkanal sind in Paket A noch nicht live prüfbar. Paket A hat keinen Release-Build gestartet und keine zentrale Produktionsmigration angewendet. Der fremde Build mit PID `3597035` ist beendet. Der Repo-Lock bei PID `3643980` bleibt unangetastet. Eigene Locks wurden nicht erworben, der reservierte Release-Slot wurde nicht genutzt.

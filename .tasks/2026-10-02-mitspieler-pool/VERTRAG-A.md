@@ -1,6 +1,6 @@
 # Vertrag A: Spielerpool
 
-Stand: 2026-10-02. Implementierung auf `feat/spielerpool-a`, noch vor Merge-Gate und Live-Prüfung. Der Vertrag beschreibt die tatsächlich angelegte Datenschicht. Änderungen an Signaturen oder Tabellen müssen hier nachgezogen und dem Delegator gemeldet werden.
+Stand: 2026-10-02. Implementierung auf `feat/spielerpool-a`, Gate-Runde 1 BLOCK, noch vor Merge und Live-Prüfung. Der offene Befund zur Steam-Herkunft von Mitspieler-Paaren steht in `REVIEW-A.md`. Der Vertrag beschreibt die tatsächlich angelegte Datenschicht. Änderungen an Signaturen oder Tabellen müssen hier nachgezogen und dem Delegator gemeldet werden.
 
 ## Zugriff und Identitäten
 
