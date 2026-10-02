@@ -16,7 +16,11 @@ public_voice_guide = "discord-server/workflows/voice-lane-erstellen-verwalten.ht
 sequence = ["Brain-Route ausliefern", "Echte belegte Hilfsantwort prüfen", "Bot ausliefern"]
 
 [launcher]
-binary = "/opt/deadlock/token-db-probes/tokendb08-role-flags/bin/dl-infisical-env"
+binary_source = "/opt/deadlock/token-db-probes/tokendb08-role-flags/bin/dl-infisical-env"
+binary_template = "/opt/deadlock/bots/releases/{main_commit}/dl-infisical-env"
+binary_owner = "root:root"
+binary_mode = "0555"
+verify_identical_sha256 = true
 config = "/etc/deadlock-turniere/infisical-launcher.json"
 uid = 1000
 gid = 1000
@@ -40,6 +44,7 @@ checks = [
   "Binary und normale Konfiguration werden gemeinsam dokumentiert.",
   "Unit startet mit vorhandenem Launcher und privatem FD3, ohne ENV-Konfiguration.",
   "Neuer Prozess läuft als UID 1000, mit NoNewPrivs=1 und Host-UID-Abbildung.",
+  "Beim sudo-Elternprozess wird die tatsächliche dl-bot-Kind-PID über den ausführbaren Pfad bestimmt und ihr Binary-Hash geprüft.",
   "Broker und Gateway werden bereit, Brain-Command bleibt registriert.",
   "Automatische Hilfe ist nur im geprüften Textkanal aktiviert.",
   "Reale Screenshotfrage liefert eine belegte Voice-Anleitung, Planungsnachrichten bleiben still.",
@@ -49,9 +54,11 @@ checks = [
 keep_old_binary = true
 keep_old_unit_files = true
 keep_old_normal_config = true
+keep_previous_metadata_state = true
 steps = [
   "Neue Drop-in-Datei entfernen.",
   "Gesicherte normale Konfiguration und vorherige Binary-Auswahl wiederherstellen.",
+  "Vorherige infisical.json wiederherstellen; war die Datei zuvor nicht vorhanden, die neu installierte Datei entfernen.",
   "systemctl --user daemon-reload ausführen und Dienst neu starten.",
   "Vorherige Betriebsbereitschaft prüfen.",
 ]
