@@ -617,13 +617,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
-    let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
-    // Der alte Assistent bleibt unabhängig vom Pilotstatus vollständig stillgelegt.
-    concierge_config.enabled = false;
-    concierge_config.proactive = false;
-    concierge_config.ai_timeout =
-        std::time::Duration::from_secs(operating.concierge.timeout_seconds);
-    concierge_config.bot_user_id = adapter.bot_user_id_cell();
+    let our_guild_id = env("OUR_GUILD_ID")
+        .or_else(|| env("MAIN_GUILD_ID"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(onboardglue::MAIN_GUILD_ID);
+    let guide_config = serverguide::GuideConfig::from_lookup(our_guild_id, operating_value);
 
     // Startinventar: nach dem Hochfahren steht im Journal, welcher Anbieter
     // welchen KI-Pfad bedient und welcher Pfad still ohne Modell weiterlaeuft.
@@ -631,7 +629,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         &dl_ai::LlmProviderConfig::from_env(operating_value),
         operating_value,
         &transparency_config,
-        &concierge_config,
+        &guide_config,
     );
 
     // Steam-Link-Nudge (4c) — standardmäßig deaktiviert. Der Close-Button bleibt
@@ -875,7 +873,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     let _survey_pulse = if survey_pulse_config.enabled {
-        let guild_id = i64::try_from(concierge_config.main_guild_id)
+        let guild_id = i64::try_from(guide_config.guild_id)
             .context("SURVEY_PULSE: Guild-ID außerhalb des BIGINT-Bereichs")?;
         tracing::info!(
             interval_days = survey_pulse_config.interval_days,
@@ -927,10 +925,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .unwrap_or("nicht_verfügbar"),
         "Moderation Bildprüfung konfiguriert"
     );
-    let our_guild_id = env("OUR_GUILD_ID")
-        .or_else(|| env("MAIN_GUILD_ID"))
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(onboardglue::MAIN_GUILD_ID);
     let fallback_invites = env("INVITE_ALLOWLIST_FALLBACK")
         .map(|raw| modglue::parse_invite_allowlist_fallback(&raw))
         .unwrap_or_default();
@@ -1000,7 +994,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     });
     dl_community::feedback_hub::register_form(&mut router, feedback_hub.clone());
     let guide = serverguide::GuideAdapter::new(
-        serverguide::GuideConfig::from_lookup(our_guild_id, operating_value),
+        guide_config,
         adapter.clone(),
         central_pool.clone(),
         feedback_hub.clone(),
@@ -1829,12 +1823,10 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         )
         .expect("synthetische Betriebskonfiguration");
         let lookup = |key: &str| config.runtime_value(key);
-        let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
-        assert!(concierge.enabled);
-        assert!(concierge.proactive);
-        assert!(!concierge.free_voice);
-        assert_eq!(concierge.main_guild_id, 1234);
-        assert_eq!(concierge.test_user_allowlist.len(), 2);
+        let guide = serverguide::GuideConfig::from_lookup(1234, lookup);
+        assert!(!guide.enabled);
+        assert_eq!(guide.guild_id, 1234);
+        assert!(guide.test_users.is_empty());
         let survey = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(lookup);
         assert!(survey.enabled);
         assert_eq!(survey.interval_days, 30);

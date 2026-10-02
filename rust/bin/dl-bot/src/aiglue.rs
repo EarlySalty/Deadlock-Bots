@@ -6,7 +6,7 @@
 //!   Transparenz-Kanal; mehrrundige Gespraeche bekommen einen Thread.
 //! - Das Startinventar schreibt beim Hochfahren in einer Zeile je Aussage,
 //!   welcher Anbieter welchen Anwendungsfall bedient, ob das Transparenz-Log
-//!   laeuft und wie weit der Concierge offen ist. Ein Pfad ohne nutzbaren
+//!   laeuft und wie weit der Serverguide offen ist. Ein Pfad ohne nutzbaren
 //!   Anbieter kommt als Warnung, denn genau der faellt sonst still aus.
 
 use std::sync::Arc;
@@ -95,7 +95,7 @@ pub fn ai_startup_inventory(
     provider_config: &Result<dl_ai::LlmProviderConfig, dl_ai::LlmProviderConfigError>,
     lookup: impl Fn(&str) -> Option<String> + Copy,
     transparency: &dl_ai::TransparencyConfig,
-    concierge: &dl_community::concierge::ConciergeConfig,
+    guide: &crate::serverguide::GuideConfig,
 ) -> Vec<InventoryLine> {
     let mut lines = Vec::new();
     match provider_config {
@@ -126,51 +126,24 @@ pub fn ai_startup_inventory(
                 .to_string(),
         ));
     }
-    lines.push(concierge_line(concierge));
+    lines.push(guide_line(guide));
     lines
 }
 
-fn concierge_line(concierge: &dl_community::concierge::ConciergeConfig) -> InventoryLine {
-    if !concierge.enabled {
-        return InventoryLine::info("Concierge: aus (DL_CONCIERGE_ENABLED)".to_string());
+fn guide_line(guide: &crate::serverguide::GuideConfig) -> InventoryLine {
+    if !guide.enabled || guide.test_users.is_empty() {
+        return InventoryLine::info("Serverguide: aus (DL_GUIDE_ENABLED)".to_string());
     }
     // Bewusst nur die Anzahl: eine User-ID im Journal waere ein Datenleck ohne
     // jeden Nutzen fuer die Frage „ist der Pfad offen oder eingeschraenkt?"
-    let zugang = if concierge.test_user_allowlist.is_empty() {
-        "offen für alle".to_string()
-    } else if concierge.test_user_allowlist.len() == 1 {
+    let zugang = if guide.test_users.len() == 1 {
         "Allowlist mit 1 Eintrag".to_string()
     } else {
-        format!(
-            "Allowlist mit {} Einträgen",
-            concierge.test_user_allowlist.len()
-        )
+        format!("Allowlist mit {} Einträgen", guide.test_users.len())
     };
     InventoryLine::info(format!(
-        "Concierge: an, Zugang: {zugang}, proaktive DMs: {}",
-        if concierge.proactive { "an" } else { "aus" }
+        "Serverguide: an, Zugang: {zugang}, proaktive DMs: aus"
     ))
-}
-
-pub fn paten_inventory_line(counts: &dl_community::concierge::PatenInventar) -> String {
-    let zahl = |wert: i64| {
-        if wert < 0 {
-            "unbekannt".to_string()
-        } else {
-            wert.to_string()
-        }
-    };
-    format!(
-        "Paten: {} mit Rolle, {} offene Anfragen, {} aktive Patenschaften, Leitfaden: {}",
-        zahl(counts.mit_rolle),
-        zahl(counts.offene_anfragen),
-        zahl(counts.aktive_patenschaften),
-        if counts.leitfaden_gepostet {
-            "gepostet"
-        } else {
-            "fehlt"
-        }
-    )
 }
 
 /// Schreibt das Inventar ins Journal — eine Zeile je Aussage.
@@ -178,9 +151,9 @@ pub fn log_ai_startup_inventory(
     provider_config: &Result<dl_ai::LlmProviderConfig, dl_ai::LlmProviderConfigError>,
     lookup: impl Fn(&str) -> Option<String> + Copy,
     transparency: &dl_ai::TransparencyConfig,
-    concierge: &dl_community::concierge::ConciergeConfig,
+    guide: &crate::serverguide::GuideConfig,
 ) {
-    for line in ai_startup_inventory(provider_config, lookup, transparency, concierge) {
+    for line in ai_startup_inventory(provider_config, lookup, transparency, guide) {
         match line.level {
             InventoryLevel::Info => tracing::info!("{}", line.text),
             InventoryLevel::Warn => tracing::warn!("{}", line.text),
@@ -192,10 +165,8 @@ pub fn log_ai_startup_inventory(
 mod tests {
     use super::*;
 
-    fn concierge_config(
-        lookup: impl Fn(&str) -> Option<String>,
-    ) -> dl_community::concierge::ConciergeConfig {
-        dl_community::concierge::ConciergeConfig::from_env(lookup)
+    fn guide_config(lookup: impl Fn(&str) -> Option<String>) -> crate::serverguide::GuideConfig {
+        crate::serverguide::GuideConfig::from_lookup(1, lookup)
     }
 
     fn texte(lines: &[InventoryLine]) -> String {
@@ -207,10 +178,11 @@ mod tests {
     }
 
     #[test]
-    fn inventar_nennt_anbieter_transparenzkanal_und_concierge_zugang() {
+    fn inventar_nennt_anbieter_transparenzkanal_und_guide_zugang() {
         let lookup = |key: &str| match key {
             "FIREWORK_API_KEY" | "OPENAI_API_KEY" => Some("key".to_string()),
-            "DL_CONCIERGE_ENABLED" => Some("1".to_string()),
+            "DL_GUIDE_ENABLED" => Some("1".to_string()),
+            "DL_GUIDE_TEST_USERS" => Some("55".to_string()),
             _ => None,
         };
         let config = dl_ai::LlmProviderConfig::from_env(lookup);
@@ -218,7 +190,7 @@ mod tests {
             &config,
             lookup,
             &dl_ai::TransparencyConfig::default(),
-            &concierge_config(lookup),
+            &guide_config(lookup),
         );
         let text = texte(&lines);
 
@@ -227,8 +199,8 @@ mod tests {
         assert!(text.contains("voice_hint=openai"), "{text}");
         assert!(text.contains("1374364800817303632"), "{text}");
         assert!(text.contains("Moderation gespiegelt: nein"), "{text}");
-        assert!(text.contains("Concierge: an"), "{text}");
-        assert!(text.contains("offen für alle"), "{text}");
+        assert!(text.contains("Serverguide: an"), "{text}");
+        assert!(text.contains("Allowlist mit 1 Eintrag"), "{text}");
         assert!(
             lines.iter().all(|line| line.level == InventoryLevel::Info),
             "mit beiden Schlüsseln darf nichts warnen: {text}"
@@ -244,7 +216,7 @@ mod tests {
             &config,
             lookup,
             &dl_ai::TransparencyConfig::default(),
-            &concierge_config(|_| None),
+            &guide_config(|_| None),
         );
 
         let warnungen: Vec<&InventoryLine> = lines
@@ -266,35 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn paten_inventarzeile_nennt_alle_kennzahlen() {
-        let line = paten_inventory_line(&dl_community::concierge::PatenInventar {
-            mit_rolle: 4,
-            offene_anfragen: 2,
-            aktive_patenschaften: 1,
-            leitfaden_gepostet: true,
-        });
-        assert_eq!(
-            line,
-            "Paten: 4 mit Rolle, 2 offene Anfragen, 1 aktive Patenschaften, Leitfaden: gepostet"
-        );
-        let fehlt = paten_inventory_line(&dl_community::concierge::PatenInventar {
-            mit_rolle: -1,
-            offene_anfragen: 0,
-            aktive_patenschaften: 0,
-            leitfaden_gepostet: false,
-        });
-        assert!(fehlt.contains("unbekannt mit Rolle"));
-        assert!(fehlt.contains("Leitfaden: fehlt"));
-    }
-
-    #[test]
     fn allowlist_erscheint_als_anzahl_und_nie_als_user_id() {
         let lookup = |key: &str| match key {
             "FIREWORK_API_KEY" | "OPENAI_API_KEY" => Some("key".to_string()),
-            "DL_CONCIERGE_ENABLED" => Some("1".to_string()),
-            "DL_CONCIERGE_TEST_USER_ALLOWLIST" => {
-                Some("123456789012345678,987654321098765432".to_string())
-            }
+            "DL_GUIDE_ENABLED" => Some("1".to_string()),
+            "DL_GUIDE_TEST_USERS" => Some("123456789012345678,987654321098765432".to_string()),
             _ => None,
         };
         let config = dl_ai::LlmProviderConfig::from_env(lookup);
@@ -302,7 +250,7 @@ mod tests {
             &config,
             lookup,
             &dl_ai::TransparencyConfig::default(),
-            &concierge_config(lookup),
+            &guide_config(lookup),
         ));
 
         assert!(text.contains("Allowlist mit 2 Einträgen"), "{text}");
@@ -324,8 +272,7 @@ mod tests {
             enabled: false,
             ..dl_ai::TransparencyConfig::default()
         };
-        let lines =
-            ai_startup_inventory(&config, lookup, &transparency, &concierge_config(|_| None));
+        let lines = ai_startup_inventory(&config, lookup, &transparency, &guide_config(|_| None));
         assert!(
             lines.iter().any(|line| line.level == InventoryLevel::Warn
                 && line.text.contains("nirgends mitzulesen")),
@@ -342,7 +289,7 @@ mod tests {
             &config,
             lookup,
             &dl_ai::TransparencyConfig::default(),
-            &concierge_config(|_| None),
+            &guide_config(|_| None),
         );
         assert!(
             lines.iter().any(|line| line.level == InventoryLevel::Warn
