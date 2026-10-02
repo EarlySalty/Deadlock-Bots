@@ -117,7 +117,7 @@ fn validate_wire(wire: RetrievalWire, request_id: &str) -> Result<Retrieved, Ans
     if wire.contract_version != "brain.public.v1"
         || wire.request_id != request_id
         || wire.knowledge_release.trim().is_empty()
-        || wire.evidence.len() > 64
+        || wire.evidence.len() > 100
     {
         return Err(AnswerError::InvalidEvidence);
     }
