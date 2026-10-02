@@ -992,7 +992,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
         pool: central_pool.clone(),
     });
-    dl_community::feedback_hub::register_form(&mut router, feedback_hub.clone());
+    dl_community::feedback_hub::register_form(&mut router);
     let guide = serverguide::GuideAdapter::new(
         guide_config,
         adapter.clone(),

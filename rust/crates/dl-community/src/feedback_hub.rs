@@ -1,11 +1,5 @@
-//! Anonymes Feedback (Port von `cogs/feedback_hub.py`) — Button + Modal.
-//!
-//! Das `!fhub`-Panel-Posten hängt an der noch fehlenden Prefix-Dispatch-Infra
-//! und folgt dort. Der `feedback_hub:open_modal`-Button + der Modal-Submit
-//! funktionieren unabhängig davon — ein bereits gepostetes Panel bleibt nach
-//! dem Cutover nutzbar (persistente custom_ids). Das Feedback geht als DM an
-//! den Empfänger; statt eines Embeds (das `send_dm` nicht kann) als
-//! formatierter Text — der Inhalt ist identisch, die Anonymität bleibt.
+//! Bestehendes Feedbackformular und bestätigter Transport an das Moderatorenteam.
+//! Der gemeinsame Guide-Kern entscheidet über Anliegen und Weitergabe.
 
 use std::sync::Arc;
 
@@ -16,9 +10,6 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-/// Empfänger der anonymen Feedback-DMs (wie `FEEDBACK_RECIPIENT_ID`).
-pub const FEEDBACK_RECIPIENT_ID: u64 = 662995601738170389;
-
 /// Kanal, in dem das `!fhub`-Panel lebt (wie `FEEDBACK_CHANNEL_ID`).
 pub const FEEDBACK_CHANNEL_ID: u64 = 1289721245281292291;
 
@@ -27,11 +18,9 @@ pub const FEEDBACK_CHANNEL_ID: u64 = 1289721245281292291;
 const PANEL_KV_NS: &str = "feedback_hub";
 const PANEL_KV_KEY: &str = "interface_message_id";
 
-/// Minimaler Port: DM (Text) senden sowie eine Panel-Nachricht
-/// (Embed + Button-Komponenten) posten bzw. editieren.
+/// Port für Teamzustellung und das bestehende Formularpanel.
 #[async_trait::async_trait]
 pub trait FeedbackPort: Send + Sync {
-    async fn send_dm_text(&self, user_id: u64, text: String) -> Result<(), String>;
     /// Postet eine Nachricht mit `embeds`/`components` und gibt die ID zurück.
     async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
     /// Editiert eine bestehende Nachricht; `Err`, wenn sie nicht mehr existiert.
@@ -48,9 +37,7 @@ pub struct FeedbackHub {
     pub pool: PgPool,
 }
 
-struct FeedbackHandler {
-    hub: Arc<FeedbackHub>,
-}
+struct FeedbackHandler;
 
 #[async_trait::async_trait]
 impl InteractionHandler for FeedbackHandler {
@@ -86,7 +73,7 @@ impl InteractionHandler for FeedbackHandler {
                         field(
                             "improvements",
                             "Wie können wir den Server verbessern?",
-                            "Jeder Wunsch ist willkommen – egal ob umsetzbar oder nicht.",
+                            "Wünsche und Kritik sind willkommen.",
                             true,
                         ),
                         field("wish", "Hast du sonst noch einen Wunsch?", "", false),
@@ -97,75 +84,29 @@ impl InteractionHandler for FeedbackHandler {
             };
         }
 
-        if interaction.custom_id == "feedback_hub:submit" {
-            let val = |key: &str| -> String {
-                interaction
-                    .options
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "—".to_string())
-            };
-            let text = format!(
-                "**Neues anonymes Feedback** (#{})\nQuelle: <#{}>\n\n\
-                 **Spielerlebnis:** {}\n\
-                 **Server & Möglichkeiten:** {}\n\
-                 **Verbesserungsvorschläge:** {}\n\
-                 **Detaillierter Wunsch:** {}\n\
-                 **Weitere Mitteilungen:** {}",
-                interaction.interaction_id,
-                interaction.channel_id,
-                val("experience"),
-                val("server_usage"),
-                val("improvements"),
-                val("wish"),
-                val("additional"),
-            );
-            if let Err(err) = self
-                .hub
-                .port
-                .send_dm_text(FEEDBACK_RECIPIENT_ID, text)
-                .await
-            {
-                tracing::warn!(%err, "Feedback-DM-Versand fehlgeschlagen");
-            }
-            return BridgeReply::ephemeral_text(
-                "Vielen Dank für dein Feedback! Es wurde anonym weitergeleitet.",
-            );
-        }
-
         BridgeReply::ephemeral_text("Unbekannte Aktion.")
     }
 }
 
-/// Registriert den Feedback-Button und den Modal-Submit.
-pub fn register(router: &mut InteractionRouter, hub: Arc<FeedbackHub>) {
-    let handler = Arc::new(FeedbackHandler { hub });
-    router.on_custom_id("feedback_hub:open_modal", handler.clone());
-    router.on_custom_id("feedback_hub:submit", handler);
-}
-
 /// Das bestehende Formular bleibt erreichbar; der Guide-Kern steuert die Zustellung.
-pub fn register_form(router: &mut InteractionRouter, hub: Arc<FeedbackHub>) {
-    router.on_custom_id("feedback_hub:open_modal", Arc::new(FeedbackHandler { hub }));
+pub fn register_form(router: &mut InteractionRouter) {
+    router.on_custom_id("feedback_hub:open_modal", Arc::new(FeedbackHandler));
 }
 
 /// Baut den Panel-Body (Embed + Button) — identisch zum Python-`FeedbackHubView`.
 fn panel_body() -> Map<String, Value> {
     let embed = json!({
-        "title": "Feedback Hub",
+        "title": "Serverfeedback",
         "description":
-            "Teile uns dein anonymes Feedback zu dem Server mit, zu den Spielern \
-             oder deinem Spielerlebnis. Deine Antworten werden nur intern weitergegeben.",
+            "Teile Wünsche, Kritik oder Verbesserungsvorschläge zum Server. \
+             Dein konkretes Anliegen wird an das Moderatorenteam weitergeleitet.",
         // Discord-Blurple (discord.Colour.blurple())
         "color": 0x5865F2,
         "fields": [{
             "name": "So funktioniert's",
             "value":
                 "Klicke auf den Button, beantworte die Fragen im Formular und bestätige. \
-                 Dein Feedback bleibt anonym und trägt zur Verbesserung des Servers bei.",
+                Nach erfolgreicher Weiterleitung erhältst du eine Bestätigung.",
             "inline": false,
         }],
     });
@@ -174,7 +115,7 @@ fn panel_body() -> Map<String, Value> {
         "components": [{
             "type": 2,        // Button
             "style": 1,       // Primary
-            "label": "Anonymes Feedback senden",
+            "label": "Serverfeedback senden",
             "custom_id": "feedback_hub:open_modal",
         }],
     }]);
