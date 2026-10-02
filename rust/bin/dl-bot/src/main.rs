@@ -284,6 +284,33 @@ async fn wait_for_gateway_cache_ready(
     }
 }
 
+/// Liest `core.discord_platform_connections` fuer den Broker-Endpunkt
+/// `twitch-links`.
+struct CentralTwitchLinks {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait::async_trait]
+impl dl_broker::TwitchLinkSource for CentralTwitchLinks {
+    async fn twitch_links(&self) -> Result<Vec<dl_broker::TwitchLinkEntry>, String> {
+        let links = dl_central_db::list_twitch_links(&self.pool)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(links
+            .into_iter()
+            .filter_map(|link| {
+                Some(dl_broker::TwitchLinkEntry {
+                    discord_id: u64::try_from(link.discord_id).ok()?,
+                    twitch_user_id: link.twitch_user_id,
+                    twitch_login: link.twitch_login,
+                    verified: link.verified,
+                    updated_at: link.updated_at,
+                })
+            })
+            .collect())
+    }
+}
+
 struct BrokerChannelInfoGlue {
     adapter: Arc<dl_discord::DiscordAdapter>,
 }
@@ -541,6 +568,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
+    let concierge_twitch_link = serversync::register_twitch_link_components(
+        &mut router,
+        format!("http://127.0.0.1:{}", cfg.ports.dashboard),
+        env("MASTER_BROKER_TOKEN")
+            .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
+            .or_else(|| env("TWITCH_INTERNAL_API_TOKEN")),
+    );
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
         scrim_adapter::ScrimRuntimeGate::with_default_ttl(central_pool.clone());
@@ -1132,6 +1166,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_config.clone(),
         shared_answers.clone(),
     );
+    // Concierge-Knopf "Twitch verknüpfen": derselbe persönliche Link wie im
+    // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
+    concierge.install_twitch_link_source(Arc::new(concierge_twitch_link));
     dl_community::concierge::register(&mut router, concierge.clone());
     if concierge.enabled() {
         concierge
@@ -1169,6 +1206,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
     );
     dl_community::clips::register(&mut router, clips.clone());
+
+    // Streamer vorschlagen (Paket F): Knopf am Clip-Panel, Weitergabe an den
+    // Twitch-Bot über den vorhandenen internen API-Client; ohne Token wird nur
+    // gespeichert und der Retry-Loop holt die Weitergabe später nach.
+    let streamer_suggestions = dl_community::streamer_suggest::StreamerSuggestions::new(
+        central_pool.clone(),
+        twitch_client
+            .clone()
+            .map(|client| client as Arc<dyn dl_community::streamer_suggest::SuggestionForwarder>),
+    );
+    dl_community::streamer_suggest::register(&mut router, streamer_suggestions.clone());
 
     // Leave-Survey (6) — Select/Modal brauchen den Router, Trigger ist gateway-gated
     let leave_survey = dl_community::leave_survey::LeaveSurvey::new(
@@ -1336,8 +1384,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         broker_listener,
         dl_broker::router(broker.clone())
             .merge(dl_broker::twitch_invites::router(
-                broker,
+                broker.clone(),
                 twitch_invites.clone(),
+            ))
+            .merge(dl_broker::twitch_links_router(Arc::new(
+                CentralTwitchLinks {
+                    pool: central_pool.clone(),
+                },
+            )))
+            .merge(dl_broker::clips::router(
+                broker,
+                Arc::new(modglue::ClipSubmitGlue {
+                    clips: clips.clone(),
+                }),
             ))
             .merge(turnierglue::publisher_router(
                 turnier_proposals,
@@ -1719,6 +1778,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
+        let _streamer_suggest_retry =
+            dl_community::streamer_suggest::spawn(streamer_suggestions.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
         let brain_help_channel_id = operating_value("DL_BRAIN_HELP_CHANNEL_ID")
             .and_then(|value| value.parse::<u64>().ok())

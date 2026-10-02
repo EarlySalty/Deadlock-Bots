@@ -4,10 +4,12 @@
 //!   versorgt TempVoice-Tag-Filter, Moderation (Ragebaiter) und Concierge.
 //! - FAQ, Clips, Leave-Survey, Bug-Reporter folgen.
 
+pub mod clip_contest;
 pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
 pub mod concierge;
+pub mod concierge_community;
 mod db;
 pub mod faq;
 pub mod feedback_hub;
@@ -22,6 +24,7 @@ pub mod privacy_ui;
 pub mod reaction_roles;
 pub mod retention;
 pub mod scrim_signup;
+pub mod streamer_suggest;
 pub mod tags;
 pub mod tags_ui;
 pub mod team_applications;

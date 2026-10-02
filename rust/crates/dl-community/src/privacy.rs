@@ -397,6 +397,33 @@ const USER_TABLES: &[TableSpec] = &[
         "discord_id",
         ColumnType::I64,
     ),
+    // Selbst freigegebene Plattform-Verknuepfungen (Twitch) aus dem
+    // Discord-Profil; ein Loeschantrag entfernt die Zeile.
+    TableSpec::new(
+        "discord_platform_connections",
+        "user_id",
+        "core.discord_platform_connections",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    // Community-Punkte (Paket C): Ledger-Buchungen eines Mitglieds und
+    // Tageswerte eines Partner-Streamers mit dessen Discord-ID. Ein
+    // Loeschantrag entfernt die Zeilen; der Sync bucht fuer Mitglieder mit
+    // Privacy-Grabstein nichts nach.
+    TableSpec::new(
+        "community_points_ledger",
+        "user_id",
+        "community_points.ledger",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "community_points_twitch_streamer_daily",
+        "user_id",
+        "community_points.twitch_streamer_daily",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
     // Existieren nur, solange ein Rollback von Migration 2026081301 nicht
     // aufgeraeumt ist (rollbacks/2026081301_..._rollback.sql legt sie an). Sie
     // tragen verschluesselte OAuth-Tokens, also muss ein Loeschantrag sie
@@ -1081,6 +1108,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "clip_votes",
+        "voter_user_id",
+        "clips.clip_votes",
+        "voter_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "coaching_coachees",
         "discord_user_id",
         "coaching.coachees",
@@ -1101,9 +1135,25 @@ const USER_TABLES: &[TableSpec] = &[
         "applicant_user_id",
         ColumnType::I64,
     ),
+    // Streamer-Vorschläge (Paket F): ein Löschantrag entfernt die Zeilen
+    // samt Grund; der vorgeschlagene Kanal hängt am Mitglied.
+    TableSpec::new(
+        "community_streamer_suggestions",
+        "discord_id",
+        "community.streamer_suggestions",
+        "discord_id",
+        ColumnType::I64,
+    ),
 ];
 
 const NULLABLE_USER_COLUMNS: &[TableSpec] = &[
+    TableSpec::new(
+        "clip_contest_results",
+        "user_id",
+        "clips.clip_contest_results",
+        "user_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "clip_contests",
         "winner_user_id",
@@ -4350,6 +4400,30 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
+        // Community-Punkte (Paket C): diese Spalten sind Twitch-User-IDs,
+        // keine Discord-IDs. Einem Mitglied zugerechnet wird nur ueber
+        // `core.discord_platform_connections`, die ein Loeschantrag entfernt.
+        for (relation, column) in [
+            ("community_points.twitch_viewer_daily", "twitch_user_id"),
+            (
+                "community_points.twitch_viewer_daily",
+                "channel_twitch_user_id",
+            ),
+            (
+                "community_points.twitch_streamer_daily",
+                "streamer_twitch_user_id",
+            ),
+            ("community_points.ledger", "streamer_twitch_user_id"),
+        ] {
+            out.insert((relation.to_string(), column.to_string()));
+        }
+        // `core.discord_platform_connections.platform_user_id` ist die
+        // Twitch-User-ID, keine Discord-ID. Die Zeile faellt ueber `discord_id`
+        // (USER_TABLES) als Ganzes, die Twitch-ID geht dabei mit.
+        out.insert((
+            "core.discord_platform_connections".to_string(),
+            "platform_user_id".to_string(),
+        ));
         // Das Discord-Guild-Audit-Log bleibt als unveraenderliche Sicherheits-
         // und Aenderungshistorie vollstaendig erhalten. `user_id` bezeichnet
         // den Actor, `target_id` kann je nach Aktion einen User bezeichnen und
@@ -4409,6 +4483,21 @@ mod privacy_contract_tests {
         // nicht mitreissen; der Eingeladene selbst wird über `target_discord_id`
         // in USER_TABLES gelöscht, und die Zeile lebt ohnehin nur 24 h.
         out.insert(("steam.invite_requests".to_string(), "admin_id".to_string()));
+        // `clips.clip_contest_results.streamer_twitch_user_id` ist die Twitch-ID
+        // eines Partner-Streamers (öffentlicher Kanal), keine Discord-ID. Der
+        // Discord-Einsender (`user_id`) wird beim Löschen genullt, die
+        // Einsendung selbst über clip_submissions gelöscht (FK setzt NULL).
+        out.insert((
+            "clips.clip_contest_results".to_string(),
+            "streamer_twitch_user_id".to_string(),
+        ));
+        // `community.streamer_suggestions.twitch_user_id` ist die Twitch-ID des
+        // vorgeschlagenen (öffentlichen) Kanals, nicht des Mitglieds. Die Zeile
+        // fällt über `discord_id` (USER_TABLES) als Ganzes.
+        out.insert((
+            "community.streamer_suggestions".to_string(),
+            "twitch_user_id".to_string(),
+        ));
         out
     }
 

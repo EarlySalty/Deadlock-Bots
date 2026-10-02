@@ -29,7 +29,9 @@ use crate::authority::{decide_access, BrokerMemberLookup, MemberLookup};
 use crate::config::{AccessLevel, DashboardConfig};
 use crate::db::DashboardDbError;
 use crate::names::{BrokerNameResolver, NameResolver};
-use crate::oauth::{extract_steam_connection_ids, DiscordUser, OAuthClient};
+use crate::oauth::{
+    extract_steam_connection_ids, extract_twitch_connection, DiscordUser, OAuthClient,
+};
 use crate::oauth_state::{NewOAuthState, OAuthStateStore};
 use crate::session::{NewSession, SessionStore};
 use crate::{now_unix, now_unix_f64};
@@ -39,6 +41,13 @@ pub const SESSION_COOKIE: &str = "master_dash_session";
 const DEFAULT_SCOPE: &str = "identify guilds.members.read";
 const OWN_LOGIN_STATE_TTL: f64 = 21_600.0; // 6 h, wie der OAuth-State
 const ADMIN_LOGIN_URL: &str = "/auth/discord/login";
+/// Scope des Twitch-Verknuepfungs-Flows (Button "Twitch verknüpfen").
+pub const TWITCH_LINK_SCOPE: &str = "identify connections";
+/// `requesting_service` und Flow-Typ des Twitch-Verknuepfungs-Flows.
+pub const TWITCH_LINK_SERVICE: &str = "twitch-link";
+pub const TWITCH_LINK_FLOW_TYPE: &str = "delegated:twitch-link";
+/// Oeffentliche Abschlussseite nach dem Discord-Callback.
+pub const TWITCH_LINK_DONE_PATH: &str = "/twitch-verknuepfen/fertig";
 const AUTH_MISCONFIGURED_MESSAGE: &str = "Dashboard Auth ist nicht korrekt konfiguriert. \
 Discord OAuth Client-ID/Secret fehlen im Windows-Tresor (DeadlockBot).";
 
@@ -338,6 +347,11 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/auth/logout", get(logout).post(logout))
         .route("/internal/v1/discord/initiate", post(initiate))
         .route("/internal/v1/discord/consume-result", post(consume_result))
+        .route(
+            "/internal/v1/discord/twitch-link/initiate",
+            post(twitch_link_initiate),
+        )
+        .route(TWITCH_LINK_DONE_PATH, get(twitch_link_done))
         .route(
             "/internal/turnier/v1/discord/authorize-url",
             post(turnier_authorize_url),
@@ -854,6 +868,13 @@ async fn callback(
     };
 
     let user = app.inner.oauth.fetch_user(&token.access_token).await;
+    if state_data.flow_type == TWITCH_LINK_FLOW_TYPE {
+        // Twitch-Verknuepfung: sofort verarbeiten, das Token wird nie abgelegt.
+        let result =
+            twitch_link_callback_result(&app, &token.access_token, user, completed_at).await;
+        store_oauth_result(&app, state, &metadata, result).await;
+        return delegated_redirect(&redirect_after, is_delegated, state);
+    }
     let mut result = Map::new();
     result.insert("provider".into(), json!("discord"));
     result.insert("status".into(), json!("success"));
@@ -1163,13 +1184,491 @@ async fn consume_result(
         "service_metadata": service_metadata,
     });
 
+    // Bereits im Callback verarbeitete Twitch-Verknuepfung (eigener Flow).
+    if let Some(code) = oauth_result.get("twitch_link") {
+        result["twitch_link"] = code.clone();
+        result["twitch_connection"] = oauth_result
+            .get("twitch_connection")
+            .cloned()
+            .unwrap_or(Value::Null);
+    }
     let scope = metadata.get("scope").and_then(Value::as_str).unwrap_or("");
     if scope.contains("connections") && !access_token.is_empty() {
-        if let Some(connections) = app.inner.oauth.fetch_connections(&access_token).await {
-            result["steam_connection_ids"] = json!(extract_steam_connection_ids(&connections));
+        let connections = app.inner.oauth.fetch_connections(&access_token).await;
+        if let Some(connections) = &connections {
+            result["steam_connection_ids"] = json!(extract_steam_connection_ids(connections));
         }
+        let outcome = link_twitch(&app, user_id, connections.as_deref()).await;
+        result["twitch_link"] = json!(outcome.code());
+        result["twitch_connection"] = outcome.connection_json();
     }
     ok_json(result)
+}
+
+// ── Twitch-Verknuepfung (Button im Verify-Panel) ────────────────────────────
+
+/// Ergebnis einer Twitch-Verknuepfung aus den Discord-Connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TwitchLinkOutcome {
+    Linked(dl_central_db::TwitchConnection),
+    NoTwitchConnection,
+    PrivacyOptedOut,
+    ConnectionsUnavailable,
+    StoreFailed,
+}
+
+impl TwitchLinkOutcome {
+    pub fn code(&self) -> &'static str {
+        match self {
+            TwitchLinkOutcome::Linked(_) => "linked",
+            TwitchLinkOutcome::NoTwitchConnection => "no_twitch_connection",
+            TwitchLinkOutcome::PrivacyOptedOut => "privacy_opted_out",
+            TwitchLinkOutcome::ConnectionsUnavailable => "connections_unavailable",
+            TwitchLinkOutcome::StoreFailed => "store_failed",
+        }
+    }
+
+    fn connection_json(&self) -> Value {
+        match self {
+            TwitchLinkOutcome::Linked(conn) => json!({
+                "twitch_user_id": conn.twitch_user_id,
+                "twitch_login": conn.twitch_login,
+                "verified": conn.verified,
+            }),
+            _ => Value::Null,
+        }
+    }
+}
+
+/// Extrahiert die Twitch-Verbindung und speichert sie per Upsert
+/// (`core.discord_platform_connections`). Ohne Twitch-Verbindung wird nichts
+/// geschrieben. Logs tragen nur IDs, keine Logins.
+async fn link_twitch(
+    app: &DashboardApp,
+    user_id: u64,
+    connections: Option<&[Value]>,
+) -> TwitchLinkOutcome {
+    let Some(connections) = connections else {
+        tracing::warn!(
+            discord_id = user_id,
+            "Twitch-Verknuepfung fehlgeschlagen: Discord-Verbindungen nicht abrufbar"
+        );
+        return TwitchLinkOutcome::ConnectionsUnavailable;
+    };
+    let Some(connection) = extract_twitch_connection(connections) else {
+        tracing::info!(
+            discord_id = user_id,
+            "Twitch-Verknuepfung fehlgeschlagen: keine Twitch-Verbindung im Discord-Profil"
+        );
+        return TwitchLinkOutcome::NoTwitchConnection;
+    };
+    let Ok(discord_id) = i64::try_from(user_id) else {
+        return TwitchLinkOutcome::StoreFailed;
+    };
+    match dl_central_db::upsert_twitch_connection(app.pool(), discord_id, &connection).await {
+        Ok(dl_central_db::TwitchUpsertOutcome::Linked {
+            replaced_discord_ids,
+        }) => {
+            tracing::info!(
+                discord_id = user_id,
+                twitch_user_id = %connection.twitch_user_id,
+                verified = connection.verified,
+                replaced_discord_ids = ?replaced_discord_ids,
+                "Twitch-Verknuepfung gespeichert"
+            );
+            TwitchLinkOutcome::Linked(connection)
+        }
+        Ok(dl_central_db::TwitchUpsertOutcome::PrivacyOptedOut) => {
+            tracing::info!(
+                discord_id = user_id,
+                "Twitch-Verknuepfung nicht gespeichert: Privacy-Widerspruch"
+            );
+            TwitchLinkOutcome::PrivacyOptedOut
+        }
+        Err(error) => {
+            tracing::error!(
+                discord_id = user_id,
+                %error,
+                "Twitch-Verknuepfung konnte nicht gespeichert werden"
+            );
+            TwitchLinkOutcome::StoreFailed
+        }
+    }
+}
+
+/// Steam-Stand eines Mitglieds beim Twitch-Flow. Die Steam-Verknüpfung selbst
+/// bleibt beim Steam-Bot (OpenID plus Freundescode); hier wird nur gelesen, ob
+/// sie schon besteht, und ob Discord ein Steam-Konto kennt, damit die
+/// Abschlussseite den passenden nächsten Schritt nennt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteamHint {
+    /// Mindestens eine bestätigte Verknüpfung in `core.steam_links`.
+    Linked,
+    /// Discord kennt ein Steam-Konto, bei uns ist aber keins bestätigt.
+    InDiscordOnly,
+    /// Weder noch, oder nicht feststellbar.
+    None,
+}
+
+impl SteamHint {
+    pub fn code(self) -> &'static str {
+        match self {
+            SteamHint::Linked => "linked",
+            SteamHint::InDiscordOnly => "in_discord_only",
+            SteamHint::None => "none",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            "linked" => SteamHint::Linked,
+            "in_discord_only" => SteamHint::InDiscordOnly,
+            _ => SteamHint::None,
+        }
+    }
+
+    fn decide(has_confirmed_link: bool, discord_steam_ids: &[String]) -> Self {
+        if has_confirmed_link {
+            SteamHint::Linked
+        } else if discord_steam_ids.is_empty() {
+            SteamHint::None
+        } else {
+            SteamHint::InDiscordOnly
+        }
+    }
+
+    /// Zusatzsatz für die Abschlussseite (HTML-sicher, ohne Nutzerdaten).
+    fn note(self) -> Option<&'static str> {
+        match self {
+            SteamHint::Linked => Some(
+                "Dein Steam-Konto ist bei uns auch schon verknüpft, dein Rang wird weiter \
+                 automatisch erkannt.",
+            ),
+            SteamHint::InDiscordOnly => Some(
+                "In deinem Discord-Profil ist auch ein Steam-Konto hinterlegt, bei uns ist es \
+                 aber noch nicht verknüpft. Drück im Server auf „Steam verknüpfen“, dann \
+                 erkennt der Server deinen Rang automatisch.",
+            ),
+            SteamHint::None => None,
+        }
+    }
+}
+
+/// Liest den Steam-Stand nur lesend; ein DB-Fehler ergibt `None` statt eines
+/// falschen Hinweises.
+async fn steam_hint(app: &DashboardApp, user_id: u64, connections: Option<&[Value]>) -> SteamHint {
+    let Ok(discord_id) = i64::try_from(user_id) else {
+        return SteamHint::None;
+    };
+    let confirmed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+              FROM core.steam_links
+             WHERE discord_id = $1
+               AND verified = TRUE
+        )
+        "#,
+    )
+    .bind(discord_id)
+    .fetch_one(app.pool())
+    .await;
+    let confirmed = match confirmed {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(discord_id = user_id, %error, "Steam-Stand nicht lesbar");
+            return SteamHint::None;
+        }
+    };
+    let discord_steam_ids = connections
+        .map(extract_steam_connection_ids)
+        .unwrap_or_default();
+    SteamHint::decide(confirmed, &discord_steam_ids)
+}
+
+/// Callback-Ergebnis des Twitch-Flows: verarbeitet die Verbindungen sofort und
+/// legt nur das Ergebnis ab, nie das Token.
+async fn twitch_link_callback_result(
+    app: &DashboardApp,
+    access_token: &str,
+    user: Option<DiscordUser>,
+    completed_at: i64,
+) -> Value {
+    let Some((user, user_id)) = user.and_then(|u| u.id_u64().map(|id| (u, id))) else {
+        return json!({
+            "provider": "discord",
+            "status": "error",
+            "completed_at": completed_at,
+            "error": "invalid_discord_user",
+        });
+    };
+    let connections = app.inner.oauth.fetch_connections(access_token).await;
+    let outcome = link_twitch(app, user_id, connections.as_deref()).await;
+    let steam = if outcome == TwitchLinkOutcome::PrivacyOptedOut {
+        SteamHint::None
+    } else {
+        steam_hint(app, user_id, connections.as_deref()).await
+    };
+    json!({
+        "provider": "discord",
+        "status": "success",
+        "completed_at": completed_at,
+        "user": serde_json::to_value(&user).unwrap_or(Value::Null),
+        "twitch_link": outcome.code(),
+        "twitch_connection": outcome.connection_json(),
+        "steam_hint": steam.code(),
+    })
+}
+
+/// Oeffentliche Abschluss-URL des Twitch-Flows, nur wenn sie ein erlaubtes
+/// Weiterleitungsziel ist.
+fn twitch_link_done_url(cfg: &DashboardConfig) -> Option<String> {
+    let base = cfg.public_base_url.as_deref()?.trim().trim_end_matches('/');
+    let url = format!("{base}{TWITCH_LINK_DONE_PATH}");
+    auth::is_allowed_redirect_after(&url).then_some(url)
+}
+
+/// `POST /internal/v1/discord/twitch-link/initiate` — liefert dem Bot den
+/// Discord-Link fuer den Button "Twitch verknüpfen" (Scope
+/// `identify connections`, delegierter Flow, Callback `/callback/discord`).
+async fn twitch_link_initiate(
+    State(app): State<DashboardApp>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = guard_any(&app, &peer, &headers) {
+        return resp;
+    }
+    if !app.cfg().discord_oauth_configured() {
+        return err_json(503, "discord_oauth_not_configured");
+    }
+    let Some(redirect_after) = twitch_link_done_url(app.cfg()) else {
+        return err_json(503, "twitch_link_redirect_not_allowed");
+    };
+    let state = crate::token::session_token();
+    let redirect_uri = app.cfg().discord_redirect_uri.clone();
+    let metadata = json!({
+        "redirect_uri": redirect_uri,
+        "scope": TWITCH_LINK_SCOPE,
+    });
+    let created = app
+        .inner
+        .states
+        .create(
+            NewOAuthState {
+                state: &state,
+                provider: "discord",
+                flow_type: TWITCH_LINK_FLOW_TYPE,
+                redirect_after: &redirect_after,
+                metadata: Some(&metadata),
+                requesting_service: Some(TWITCH_LINK_SERVICE),
+            },
+            now_unix(),
+        )
+        .await;
+    if created.is_err() {
+        return err_json(500, "state_create_failed");
+    }
+    let authorize_url = app
+        .inner
+        .oauth
+        .authorize_url(TWITCH_LINK_SCOPE, &redirect_uri, &state);
+    ok_json(json!({
+        "authorize_url": authorize_url,
+        "expires_in_secs": app.cfg().oauth_state_ttl_secs,
+    }))
+}
+
+/// Was die Abschlussseite dem Mitglied zeigt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TwitchLinkPage {
+    Linked(String),
+    NoTwitchConnection,
+    Cancelled,
+    Expired,
+    PrivacyOptedOut,
+    Failed,
+}
+
+impl TwitchLinkPage {
+    fn from_outcome_code(code: &str, login: Option<&str>) -> Self {
+        match (code, login) {
+            ("linked", Some(login)) if !login.trim().is_empty() => {
+                TwitchLinkPage::Linked(login.trim().to_string())
+            }
+            ("no_twitch_connection", _) => TwitchLinkPage::NoTwitchConnection,
+            ("privacy_opted_out", _) => TwitchLinkPage::PrivacyOptedOut,
+            _ => TwitchLinkPage::Failed,
+        }
+    }
+
+    fn status(&self) -> u16 {
+        match self {
+            TwitchLinkPage::Expired => 400,
+            TwitchLinkPage::Failed => 502,
+            _ => 200,
+        }
+    }
+
+    /// (Titel, Text als HTML). Nutzersprache, keine Fachwoerter.
+    fn texts(&self) -> (&'static str, String) {
+        const AGAIN: &str = "drück im Server noch einmal auf „Twitch verknüpfen“";
+        match self {
+            TwitchLinkPage::Linked(login) => (
+                "Twitch verknüpft",
+                format!(
+                    "Dein Twitch-Konto <strong>{}</strong> ist verknüpft. Ab jetzt erkennt \
+                     dich der Bot, wenn du bei unseren Partnern auf Twitch zuschaust. Du kannst \
+                     dieses Fenster schließen und zurück zu Discord gehen.",
+                    html_escape_attr(login)
+                ),
+            ),
+            TwitchLinkPage::NoTwitchConnection => (
+                "Kein Twitch-Konto gefunden",
+                format!(
+                    "In deinem Discord-Profil ist noch kein Twitch-Konto hinterlegt. So fügst \
+                     du es hinzu: Öffne in Discord deine Benutzereinstellungen, geh auf \
+                     „Verbindungen“ und wähle Twitch aus. Danach {AGAIN}."
+                ),
+            ),
+            TwitchLinkPage::Cancelled => (
+                "Verknüpfung abgebrochen",
+                format!(
+                    "Du hast die Verknüpfung abgebrochen, es wurde nichts gespeichert. Wenn du \
+                     es dir anders überlegst, {AGAIN}."
+                ),
+            ),
+            TwitchLinkPage::Expired => (
+                "Link abgelaufen",
+                format!(
+                    "Dieser Link ist abgelaufen oder wurde schon benutzt. Für einen neuen Link \
+                     {AGAIN}."
+                ),
+            ),
+            TwitchLinkPage::PrivacyOptedOut => (
+                "Nichts gespeichert",
+                "Du hast der Speicherung deiner Daten bei uns widersprochen. Deshalb speichern \
+                 wir auch keine Twitch-Verknüpfung."
+                    .to_string(),
+            ),
+            TwitchLinkPage::Failed => (
+                "Hat nicht geklappt",
+                format!(
+                    "Das hat gerade leider nicht geklappt. Versuch es bitte in ein paar Minuten \
+                     noch einmal: {AGAIN}."
+                ),
+            ),
+        }
+    }
+
+    pub fn html(&self) -> String {
+        self.html_with_steam(SteamHint::None)
+    }
+
+    /// Wie [`Self::html`], plus Steam-Zusatzsatz auf den Seiten, auf denen das
+    /// Mitglied wirklich verbunden war (verknüpft oder ohne Twitch-Konto).
+    pub fn html_with_steam(&self, steam: SteamHint) -> String {
+        let (title, mut body) = self.texts();
+        if matches!(
+            self,
+            TwitchLinkPage::Linked(_) | TwitchLinkPage::NoTwitchConnection
+        ) {
+            if let Some(note) = steam.note() {
+                body.push_str("</p><p style=\"margin-top:12px\">");
+                body.push_str(note);
+            }
+        }
+        format!(
+            "<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <meta name=\"referrer\" content=\"no-referrer\">\
+             <title>{title}</title><style>\
+             body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;\
+             background:#15131a;color:#ece8f4;display:flex;min-height:100vh;\
+             align-items:center;justify-content:center;padding:16px;box-sizing:border-box}}\
+             main{{max-width:480px;background:#211d29;border:1px solid #3a3346;\
+             border-radius:12px;padding:24px 28px;line-height:1.55}}\
+             h1{{font-size:1.3rem;margin:0 0 12px;color:#c8a86b}}p{{margin:0}}\
+             </style></head><body><main><h1>{title}</h1><p>{body}</p></main></body></html>"
+        )
+    }
+}
+
+fn twitch_link_page_response(page: TwitchLinkPage) -> Response {
+    twitch_link_page_response_with_steam(page, SteamHint::None)
+}
+
+fn twitch_link_page_response_with_steam(page: TwitchLinkPage, steam: SteamHint) -> Response {
+    let status = StatusCode::from_u16(page.status()).unwrap_or(StatusCode::OK);
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        page.html_with_steam(steam),
+    )
+        .into_response()
+}
+
+/// `GET /twitch-verknuepfen/fertig?state_id=...` — Abschlussseite nach dem
+/// Discord-Callback. Loest den State genau einmal ein und zeigt das Ergebnis.
+async fn twitch_link_done(
+    State(app): State<DashboardApp>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if !app.rate_ok(&peer.ip().to_string(), 20, 60.0, now_unix_f64()) {
+        return twitch_link_page_response(TwitchLinkPage::Failed);
+    }
+    let state_id = params.get("state_id").map(|s| s.trim()).unwrap_or("");
+    if state_id.is_empty() {
+        return twitch_link_page_response(TwitchLinkPage::Expired);
+    }
+    let now = now_unix();
+    let state_data = match app.inner.states.validate(state_id, now).await {
+        Ok(Some(data)) if data.flow_type == TWITCH_LINK_FLOW_TYPE => data,
+        Ok(_) => return twitch_link_page_response(TwitchLinkPage::Expired),
+        Err(_) => return twitch_link_page_response(TwitchLinkPage::Failed),
+    };
+    let Some(oauth_result) = state_data
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("oauth_result"))
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return twitch_link_page_response(TwitchLinkPage::Expired);
+    };
+    match app.inner.states.consume(state_id, now).await {
+        Ok(true) => {}
+        Ok(false) => return twitch_link_page_response(TwitchLinkPage::Expired),
+        Err(_) => return twitch_link_page_response(TwitchLinkPage::Failed),
+    }
+    let page = if oauth_result.get("status").and_then(Value::as_str) == Some("error") {
+        if oauth_result.get("error").and_then(Value::as_str) == Some("access_denied") {
+            TwitchLinkPage::Cancelled
+        } else {
+            TwitchLinkPage::Failed
+        }
+    } else {
+        let code = oauth_result
+            .get("twitch_link")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let login = oauth_result
+            .get("twitch_connection")
+            .and_then(|c| c.get("twitch_login"))
+            .and_then(Value::as_str);
+        TwitchLinkPage::from_outcome_code(code, login)
+    };
+    let steam = oauth_result
+        .get("steam_hint")
+        .and_then(Value::as_str)
+        .map(SteamHint::from_code)
+        .unwrap_or(SteamHint::None);
+    twitch_link_page_response_with_steam(page, steam)
 }
 
 // ── Interne Routen: authorize-url + session (turnier/twitch) ─────────────────
@@ -1868,6 +2367,564 @@ mod tests {
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 45678))));
         request
+    }
+
+    async fn mock_discord(connections: Value) -> String {
+        let app = Router::new()
+            .route(
+                "/oauth2/token",
+                post(|| async {
+                    Json(json!({
+                        "access_token": "geheimes-test-token",
+                        "token_type": "Bearer",
+                        "scope": "identify connections",
+                    }))
+                }),
+            )
+            .route(
+                "/users/@me",
+                get(|| async { Json(json!({"id": "4242", "username": "tester"})) }),
+            )
+            .route(
+                "/users/@me/connections",
+                get(move || {
+                    let connections = connections.clone();
+                    async move { Json(connections) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn twitch_link_cfg(api_base: &str) -> DashboardConfig {
+        let api_base = api_base.to_string();
+        DashboardConfig::from_lookup(move |key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("client".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            "MASTER_BROKER_TOKEN" => Some("brk".to_string()),
+            "DISCORD_API_BASE" => Some(api_base.clone()),
+            _ => None,
+        })
+    }
+
+    fn loopback_get(uri: &str) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 45679))));
+        request
+    }
+
+    async fn body_string(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        String::from_utf8(bytes.to_vec()).expect("utf8")
+    }
+
+    fn query_param(url: &str, key: &str) -> String {
+        let parsed = url::Url::parse(url).expect("url");
+        parsed
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default()
+    }
+
+    /// initiate (Bot) → Discord-Callback → Location der Abschlussseite.
+    async fn twitch_link_through_callback(app: &Router, callback_query: &str) -> (String, String) {
+        let response = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/twitch-link/initiate",
+                "brk",
+                json!({}),
+            ))
+            .await
+            .expect("initiate");
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = serde_json::from_str(&body_string(response).await).expect("json");
+        let authorize_url = data["authorize_url"].as_str().expect("url").to_string();
+        let state = query_param(&authorize_url, "state");
+        let response = app
+            .clone()
+            .oneshot(loopback_get(&format!(
+                "/callback/discord?state={state}&{callback_query}"
+            )))
+            .await
+            .expect("callback");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("location")
+            .to_string();
+        (state, location)
+    }
+
+    fn done_path(location: &str) -> String {
+        let parsed = url::Url::parse(location).expect("location url");
+        format!(
+            "{}?{}",
+            parsed.path(),
+            parsed.query().expect("query with state_id")
+        )
+    }
+
+    #[tokio::test]
+    async fn twitch_link_initiate_braucht_token_und_liefert_discord_link() {
+        let (_dir, db, app) = test_router(twitch_link_cfg("http://127.0.0.1:9")).await;
+
+        let denied = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/twitch-link/initiate",
+                "falsch",
+                json!({}),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/twitch-link/initiate",
+                "brk",
+                json!({}),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = serde_json::from_str(&body_string(response).await).expect("json");
+        let authorize_url = data["authorize_url"].as_str().expect("url");
+        assert_eq!(query_param(authorize_url, "scope"), TWITCH_LINK_SCOPE);
+        assert_eq!(
+            query_param(authorize_url, "redirect_uri"),
+            "https://deutsche-deadlock-community.de/callback/discord"
+        );
+        let state = query_param(authorize_url, "state");
+        let stored = OAuthStateStore::new(db.pool().clone(), 3600)
+            .validate(&state, now_unix())
+            .await
+            .expect("validate")
+            .expect("state");
+        assert_eq!(stored.flow_type, TWITCH_LINK_FLOW_TYPE);
+        assert_eq!(
+            stored.requesting_service.as_deref(),
+            Some(TWITCH_LINK_SERVICE)
+        );
+        assert_eq!(
+            stored.redirect_after,
+            "https://admin.deutsche-deadlock-community.de/twitch-verknuepfen/fertig"
+        );
+    }
+
+    #[tokio::test]
+    async fn twitch_link_flow_speichert_verknuepfung_ohne_token() {
+        let api = mock_discord(json!([
+            {"type": "steam", "id": "76561198000000001", "name": "steamer"},
+            {"type": "twitch", "id": "987654", "name": "tw_<login>", "verified": true},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+
+        let (state, location) = twitch_link_through_callback(&app, "code=abc").await;
+        assert!(location.starts_with(
+            "https://admin.deutsche-deadlock-community.de/twitch-verknuepfen/fertig?state_id="
+        ));
+        let raw_metadata: Option<String> =
+            sqlx::query_scalar("SELECT metadata::text FROM bot.oauth_states WHERE state = $1")
+                .bind(&state)
+                .fetch_one(db.pool())
+                .await
+                .expect("metadata");
+        let raw_metadata = raw_metadata.unwrap_or_default();
+        assert!(!raw_metadata.contains("geheimes-test-token"));
+        assert!(!raw_metadata.contains("access_token"));
+
+        let link = dl_central_db::twitch_link_for_discord(db.pool(), 4242)
+            .await
+            .expect("read")
+            .expect("link");
+        assert_eq!(link.twitch_user_id, "987654");
+        assert_eq!(link.twitch_login, "tw_<login>");
+        assert!(link.verified);
+        let steam_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM core.steam_links")
+            .fetch_one(db.pool())
+            .await
+            .expect("steam");
+        assert_eq!(steam_rows, 0);
+
+        let page = app
+            .clone()
+            .oneshot(loopback_get(&done_path(&location)))
+            .await
+            .expect("done");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(
+            page.headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let html = body_string(page).await;
+        assert!(html.contains("Dein Twitch-Konto <strong>tw_&lt;login&gt;</strong> ist verknüpft"));
+        // Discord kennt ein Steam-Konto, bei uns ist keins bestaetigt: Hinweis,
+        // aber keine Steam-Verknuepfung durch diesen Flow.
+        assert!(html.contains("bei uns ist es aber noch nicht verknüpft"));
+        assert!(html.contains("„Steam verknüpfen“"));
+
+        // Der State ist eingeloest: ein zweiter Aufruf zeigt "abgelaufen".
+        let again = app
+            .clone()
+            .oneshot(loopback_get(&done_path(&location)))
+            .await
+            .expect("again");
+        assert_eq!(again.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(again).await.contains("Link abgelaufen"));
+    }
+
+    #[tokio::test]
+    async fn twitch_link_mit_bestehender_steam_verknuepfung_laesst_steam_unveraendert() {
+        let api = mock_discord(json!([
+            {"type": "steam", "id": "76561198000000001", "name": "steamer"},
+            {"type": "twitch", "id": "987654", "name": "twuser", "verified": true},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+        sqlx::query("INSERT INTO core.users (discord_id) VALUES (4242) ON CONFLICT DO NOTHING")
+            .execute(db.pool())
+            .await
+            .expect("user");
+        sqlx::query(
+            "INSERT INTO core.steam_links (discord_id, steam_id, verified, primary_account) \
+             VALUES (4242, '76561198000000001', TRUE, TRUE)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("steam link");
+        let before: String = sqlx::query_scalar(
+            "SELECT row_to_json(s)::text FROM core.steam_links s WHERE discord_id = 4242",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("before");
+
+        let (_state, location) = twitch_link_through_callback(&app, "code=abc").await;
+        let page = app
+            .clone()
+            .oneshot(loopback_get(&done_path(&location)))
+            .await
+            .expect("done");
+        let html = body_string(page).await;
+        assert!(html.contains("Dein Twitch-Konto <strong>twuser</strong> ist verknüpft"));
+        assert!(html.contains("Dein Steam-Konto ist bei uns auch schon verknüpft"));
+        assert!(!html.contains("„Steam verknüpfen“"));
+
+        let after: String = sqlx::query_scalar(
+            "SELECT row_to_json(s)::text FROM core.steam_links s WHERE discord_id = 4242",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("after");
+        assert_eq!(before, after);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM core.steam_links")
+            .fetch_one(db.pool())
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn steam_hinweis_entscheidung_und_seiten() {
+        let ids = vec!["765".to_string()];
+        assert_eq!(SteamHint::decide(true, &ids), SteamHint::Linked);
+        assert_eq!(SteamHint::decide(true, &[]), SteamHint::Linked);
+        assert_eq!(SteamHint::decide(false, &ids), SteamHint::InDiscordOnly);
+        assert_eq!(SteamHint::decide(false, &[]), SteamHint::None);
+        for hint in [SteamHint::Linked, SteamHint::InDiscordOnly, SteamHint::None] {
+            assert_eq!(SteamHint::from_code(hint.code()), hint);
+        }
+        assert_eq!(SteamHint::from_code("unbekannt"), SteamHint::None);
+        // Fehler- und Abbruchseiten bekommen nie einen Steam-Satz.
+        for page in [
+            TwitchLinkPage::Failed,
+            TwitchLinkPage::Expired,
+            TwitchLinkPage::Cancelled,
+            TwitchLinkPage::PrivacyOptedOut,
+        ] {
+            assert!(!page
+                .html_with_steam(SteamHint::InDiscordOnly)
+                .contains("Steam"));
+        }
+        let no_twitch =
+            TwitchLinkPage::NoTwitchConnection.html_with_steam(SteamHint::InDiscordOnly);
+        assert!(no_twitch.contains("„Steam verknüpfen“"));
+        for hint in [SteamHint::Linked, SteamHint::InDiscordOnly] {
+            let note = hint.note().expect("note");
+            assert!(!note.contains('\u{2014}') && !note.contains('\u{2013}'));
+        }
+    }
+
+    #[tokio::test]
+    async fn twitch_link_ohne_twitch_verbindung_schreibt_nichts_und_erklaert() {
+        let api = mock_discord(json!([
+            {"type": "steam", "id": "76561198000000001", "name": "steamer"},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+
+        let (_state, location) = twitch_link_through_callback(&app, "code=abc").await;
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM core.discord_platform_connections")
+                .fetch_one(db.pool())
+                .await
+                .expect("count");
+        assert_eq!(rows, 0);
+        let page = app
+            .clone()
+            .oneshot(loopback_get(&done_path(&location)))
+            .await
+            .expect("done");
+        assert_eq!(page.status(), StatusCode::OK);
+        let html = body_string(page).await;
+        assert!(html.contains("Kein Twitch-Konto gefunden"));
+        assert!(html.contains("„Verbindungen“"));
+    }
+
+    #[tokio::test]
+    async fn twitch_link_abbruch_bei_discord_zeigt_abbruchseite() {
+        let (_dir, _db, app) = test_router(twitch_link_cfg("http://127.0.0.1:9")).await;
+        let (_state, location) = twitch_link_through_callback(&app, "error=access_denied").await;
+        let page = app
+            .clone()
+            .oneshot(loopback_get(&done_path(&location)))
+            .await
+            .expect("done");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert!(body_string(page).await.contains("Verknüpfung abgebrochen"));
+    }
+
+    #[tokio::test]
+    async fn twitch_link_abschlussseite_lehnt_fremde_states_ab() {
+        let (_dir, db, app) = test_router(twitch_link_cfg("http://127.0.0.1:9")).await;
+        OAuthStateStore::new(db.pool().clone(), 3600)
+            .create(
+                NewOAuthState {
+                    state: "fremder-state",
+                    provider: "discord",
+                    flow_type: "delegated:turnier",
+                    redirect_after: "https://deutsche-deadlock-community.de/x",
+                    metadata: Some(&json!({"oauth_result": {"status": "success"}})),
+                    requesting_service: Some("turnier"),
+                },
+                now_unix(),
+            )
+            .await
+            .expect("create");
+        let page = app
+            .clone()
+            .oneshot(loopback_get(
+                "/twitch-verknuepfen/fertig?state_id=fremder-state",
+            ))
+            .await
+            .expect("done");
+        assert_eq!(page.status(), StatusCode::BAD_REQUEST);
+        // Fremder State bleibt einloesbar.
+        assert!(OAuthStateStore::new(db.pool().clone(), 3600)
+            .validate("fremder-state", now_unix())
+            .await
+            .expect("validate")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn consume_mit_connections_scope_liefert_steam_und_twitch() {
+        let api = mock_discord(json!([
+            {"type": "steam", "id": "76561198000000001", "name": "76561198000000001"},
+            {"type": "twitch", "id": "555", "name": "zuschauer", "verified": false},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+
+        let response = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/initiate",
+                "brk",
+                json!({
+                    "scope": "identify connections",
+                    "redirect_after": "https://deutsche-deadlock-community.de/fertig",
+                    "requesting_service": "test",
+                }),
+            ))
+            .await
+            .expect("initiate");
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = serde_json::from_str(&body_string(response).await).expect("json");
+        let state_id = data["state_id"].as_str().expect("state").to_string();
+        let callback = app
+            .clone()
+            .oneshot(loopback_get(&format!(
+                "/callback/discord?state={state_id}&code=abc"
+            )))
+            .await
+            .expect("callback");
+        assert_eq!(callback.status(), StatusCode::FOUND);
+
+        let consumed = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/consume-result",
+                "brk",
+                json!({"state_id": state_id}),
+            ))
+            .await
+            .expect("consume");
+        assert_eq!(consumed.status(), StatusCode::OK);
+        let result: Value = serde_json::from_str(&body_string(consumed).await).expect("json");
+        assert_eq!(result["discord_id"], "4242");
+        assert_eq!(result["steam_connection_ids"], json!(["76561198000000001"]));
+        assert_eq!(result["twitch_link"], "linked");
+        assert_eq!(
+            result["twitch_connection"],
+            json!({"twitch_user_id": "555", "twitch_login": "zuschauer", "verified": false})
+        );
+        let link = dl_central_db::twitch_link_for_discord(db.pool(), 4242)
+            .await
+            .expect("read")
+            .expect("link");
+        assert_eq!(link.twitch_user_id, "555");
+    }
+
+    #[tokio::test]
+    async fn consume_mit_connections_scope_ohne_twitch_meldet_das() {
+        let api = mock_discord(json!([
+            {"type": "steam", "id": "76561198000000001"},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+        let response = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/initiate",
+                "brk",
+                json!({
+                    "scope": "identify connections",
+                    "redirect_after": "https://deutsche-deadlock-community.de/fertig",
+                    "requesting_service": "test",
+                }),
+            ))
+            .await
+            .expect("initiate");
+        let data: Value = serde_json::from_str(&body_string(response).await).expect("json");
+        let state_id = data["state_id"].as_str().expect("state").to_string();
+        app.clone()
+            .oneshot(loopback_get(&format!(
+                "/callback/discord?state={state_id}&code=abc"
+            )))
+            .await
+            .expect("callback");
+        let consumed = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/consume-result",
+                "brk",
+                json!({"state_id": state_id}),
+            ))
+            .await
+            .expect("consume");
+        let result: Value = serde_json::from_str(&body_string(consumed).await).expect("json");
+        assert_eq!(result["steam_connection_ids"], json!(["76561198000000001"]));
+        assert_eq!(result["twitch_link"], "no_twitch_connection");
+        assert_eq!(result["twitch_connection"], Value::Null);
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM core.discord_platform_connections")
+                .fetch_one(db.pool())
+                .await
+                .expect("count");
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn consume_nur_identify_bleibt_unveraendert() {
+        let api = mock_discord(json!([
+            {"type": "twitch", "id": "555", "name": "zuschauer"},
+        ]))
+        .await;
+        let (_dir, db, app) = test_router(twitch_link_cfg(&api)).await;
+        let response = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/initiate",
+                "brk",
+                json!({
+                    "scope": "identify",
+                    "redirect_after": "https://deutsche-deadlock-community.de/fertig",
+                    "requesting_service": "test",
+                }),
+            ))
+            .await
+            .expect("initiate");
+        let data: Value = serde_json::from_str(&body_string(response).await).expect("json");
+        let state_id = data["state_id"].as_str().expect("state").to_string();
+        app.clone()
+            .oneshot(loopback_get(&format!(
+                "/callback/discord?state={state_id}&code=abc"
+            )))
+            .await
+            .expect("callback");
+        let consumed = app
+            .clone()
+            .oneshot(internal_post(
+                "/internal/v1/discord/consume-result",
+                "brk",
+                json!({"state_id": state_id}),
+            ))
+            .await
+            .expect("consume");
+        let result: Value = serde_json::from_str(&body_string(consumed).await).expect("json");
+        assert_eq!(result["discord_id"], "4242");
+        assert!(result.get("twitch_link").is_none());
+        assert!(result.get("steam_connection_ids").is_none());
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM core.discord_platform_connections")
+                .fetch_one(db.pool())
+                .await
+                .expect("count");
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn twitch_link_seiten_sind_nutzersprache_ohne_gedankenstriche() {
+        for page in [
+            TwitchLinkPage::Linked("<b>x</b>".to_string()),
+            TwitchLinkPage::NoTwitchConnection,
+            TwitchLinkPage::Cancelled,
+            TwitchLinkPage::Expired,
+            TwitchLinkPage::PrivacyOptedOut,
+            TwitchLinkPage::Failed,
+        ] {
+            let html = page.html();
+            assert!(!html.contains('—') && !html.contains('–'), "{html}");
+            for word in ["OAuth", "Scope", "Connection", "Register", "Token"] {
+                assert!(!html.contains(word), "{word} in {html}");
+            }
+        }
+        let html = TwitchLinkPage::Linked("<b>x</b>".to_string()).html();
+        assert!(html.contains("&lt;b&gt;x&lt;/b&gt;"));
+        assert!(!html.contains("<b>x</b>"));
     }
 
     #[test]

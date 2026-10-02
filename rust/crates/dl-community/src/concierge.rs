@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+use crate::concierge_community as community;
 use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
 use crate::knowledge_client;
 
@@ -117,7 +118,8 @@ pub const T0_BUTTON_LATER: &str = "Später";
 pub const LATER_TEXT: &str =
     "Alles gut, lass dir Zeit. Wenn du mich brauchst, schreib mir einfach, ich bin immer da.";
 
-pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1491953161747955853>\nHier fragst du alles über den Server, Bots und mich als Concierge.\n\n<#1426220702054355077>\nHier stellst du offene Fragen an die Community. Und wenn du das Spiel noch gar nicht hast, fragst du hier nett nach einem Invite.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n<#1513468587195633674>\nDanach joinst du einfach diesen Voice-Kanal, den Deadlock Router. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
+pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1491953161747955853>\nHier fragst du alles über den Server, Bots und mich als Concierge.\n\n<#1426220702054355077>\nHier stellst du offene Fragen an die Community. Und wenn du das Spiel noch gar nicht hast, fragst du hier nett nach einem Invite.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n<#1513468587195633674>\nDanach joinst du einfach diesen Voice-Kanal, den Deadlock Router. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.";
+pub const TOUR_CLOSING_TEXT: &str = "Das war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
 pub const TOUR_BUTTON_DRAFT: &str = "Ja, schreib was vor";
 pub const TOUR_BUTTON_SKIP: &str = "Lieber nicht";
 pub const TOUR_SKIP_TEXT: &str =
@@ -1289,13 +1291,36 @@ pub fn t0_body_frischling(has_rank: bool) -> Map<String, Value> {
     )
 }
 
+/// Server-Tour: Kanäle, dann der Block "Community und Streamer" mit eigenem
+/// Twitch-Button, zuletzt das Steckbrief-Angebot mit seinen beiden Buttons.
 pub fn tour_body() -> Map<String, Value> {
-    v2_body(
-        TOUR_TEXT,
-        vec![
+    let mut body = v2_body(TOUR_TEXT, Vec::new());
+    let extra = [
+        json!({ "type": 10, "content": community::TOUR_COMMUNITY_BLOCK }),
+        json!({ "type": 1, "components": [community::twitch_link_button()] }),
+        json!({ "type": 10, "content": TOUR_CLOSING_TEXT }),
+        json!({ "type": 1, "components": [
             button(TOUR_BUTTON_DRAFT, 1, "concierge:steckbrief:draft"),
             button(TOUR_BUTTON_SKIP, 2, "concierge:steckbrief:skip"),
-        ],
+        ] }),
+    ];
+    if let Some(components) = body
+        .get_mut("components")
+        .and_then(Value::as_array_mut)
+        .and_then(|components| components.first_mut())
+        .and_then(|container| container.get_mut("components"))
+        .and_then(Value::as_array_mut)
+    {
+        components.extend(extra);
+    }
+    body
+}
+
+/// Reiner Text der Tour für Clients ohne Components V2.
+pub fn tour_fallback_text() -> String {
+    format!(
+        "{TOUR_TEXT}\n\n{}\n\n{TOUR_CLOSING_TEXT}",
+        community::TOUR_COMMUNITY_BLOCK
     )
 }
 
@@ -1417,10 +1442,22 @@ fn answer_body(
 ) -> Map<String, Value> {
     let body = if pate_request && allow_personal_actions {
         pate_offer_body(reply)
+    } else if allow_personal_actions && community_answer_offers_twitch_link(reply) {
+        v2_body(reply, vec![community::twitch_link_button()])
     } else {
         v2_body(reply, Vec::new())
     };
     with_response_components(body, response_components)
+}
+
+/// Nur die festen Community-Antworten tragen den Twitch-Button, nie freie Modelltexte.
+fn community_answer_offers_twitch_link(reply: &str) -> bool {
+    [
+        community::CommunityTopic::Punkte,
+        community::CommunityTopic::TwitchVerknuepfen,
+    ]
+    .into_iter()
+    .any(|topic| topic.offers_twitch_link() && topic.answer() == reply)
 }
 
 fn button(label: &str, style: u8, custom_id: &str) -> Value {
@@ -3386,6 +3423,7 @@ pub struct Concierge {
     cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
     user_actions: Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
     steckbrief_revocations: Mutex<HashSet<u64>>,
+    twitch_link: OnceLock<Arc<dyn community::TwitchLinkSource>>,
     start: Instant,
 }
 
@@ -3438,8 +3476,23 @@ impl Concierge {
             cooldowns: Mutex::new(HashMap::new()),
             user_actions: Mutex::new(HashMap::new()),
             steckbrief_revocations: Mutex::new(HashSet::new()),
+            twitch_link: OnceLock::new(),
             start: Instant::now(),
         })
+    }
+
+    /// Schließt den Erzeuger für den persönlichen Twitch-Verknüpfungslink an
+    /// (Paket A). Ohne Aufruf verweist der Button auf den Verify-Kanal.
+    /// Liefert `false`, wenn bereits eine Quelle angeschlossen war.
+    pub fn install_twitch_link_source(&self, source: Arc<dyn community::TwitchLinkSource>) -> bool {
+        self.twitch_link.set(source).is_ok()
+    }
+
+    fn twitch_link_source(&self) -> Arc<dyn community::TwitchLinkSource> {
+        self.twitch_link
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(community::VerifyChannelOnly))
     }
 
     pub fn enabled(&self) -> bool {
@@ -7692,6 +7745,14 @@ fn local_conversational_answer(text: &str, free_voice: bool) -> Option<LlmAnswer
         FAVORITE_TEXT
     } else if !free_voice && contains_any(&lower, &["rezept", "muffin", "blaubeer"]) {
         OFFTOPIC_TEXT
+    } else if let Some(topic) = community::community_question(trimmed) {
+        // Feste Antworten zu Punkten, Twitch, Clip-Contest und Streamer-Programm:
+        // funktionieren ohne Sprachmodell und ohne Wissensdienst.
+        tracing::debug!(
+            topic = topic.log_key(),
+            "Concierge: Community-Frage lokal beantwortet"
+        );
+        topic.answer()
     } else if explicit_pate_request(trimmed) {
         return Some(LlmAnswer {
             reply: Some(PATE_REQUEST_FALLBACK_TEXT.to_string()),
@@ -8084,7 +8145,21 @@ impl InteractionHandler for ConciergeHandler {
                         json!({}),
                     )
                     .await;
-                v2_reply(tour_body(), TOUR_TEXT)
+                v2_reply(tour_body(), &tour_fallback_text())
+            }
+            community::TWITCH_LINK_CUSTOM_ID => {
+                let url = self
+                    .concierge
+                    .twitch_link_source()
+                    .twitch_link_url(interaction.user_id)
+                    .await;
+                tracing::info!(
+                    user_id = interaction.user_id,
+                    link = url.is_some(),
+                    "Concierge: Twitch-Verknüpfung angefragt"
+                );
+                let (text, buttons) = community::twitch_link_reply(url.as_deref());
+                v2_reply(v2_body(text, buttons), text)
             }
             "concierge:play" => text_reply(PLAY_TEXT),
             "concierge:later" => text_reply(LATER_TEXT),
@@ -8331,6 +8406,7 @@ pub fn register(router: &mut InteractionRouter, concierge: Arc<Concierge>) {
     let handler = Arc::new(ConciergeHandler { concierge });
     for id in [
         "concierge:tour",
+        community::TWITCH_LINK_CUSTOM_ID,
         "concierge:play",
         "concierge:later",
         "concierge:steckbrief:draft",
@@ -10078,6 +10154,145 @@ mod tests {
         assert!(TOUR_TEXT.contains("<#1513468587195633674>"));
         assert!(!TOUR_TEXT.contains("**Deadlock Router**"));
         assert!(PLAY_TEXT.contains("<#1513468587195633674>"));
+    }
+
+    #[test]
+    fn tour_enthaelt_community_block_mit_twitch_button_vor_dem_steckbrief() {
+        let body = tour_body();
+        let parts = body["components"][0]["components"]
+            .as_array()
+            .expect("V2 container components");
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0]["content"], json!(TOUR_TEXT));
+        assert_eq!(parts[1]["content"], json!(community::TOUR_COMMUNITY_BLOCK));
+        assert_eq!(
+            parts[2]["components"][0]["custom_id"],
+            json!(community::TWITCH_LINK_CUSTOM_ID)
+        );
+        assert_eq!(parts[3]["content"], json!(TOUR_CLOSING_TEXT));
+        assert_eq!(
+            parts[4]["components"][0]["custom_id"],
+            json!("concierge:steckbrief:draft")
+        );
+        assert_eq!(
+            parts[4]["components"][1]["custom_id"],
+            json!("concierge:steckbrief:skip")
+        );
+        let visible: usize = [
+            TOUR_TEXT,
+            community::TOUR_COMMUNITY_BLOCK,
+            TOUR_CLOSING_TEXT,
+        ]
+        .iter()
+        .map(|text| text.chars().count())
+        .sum();
+        assert!(visible <= 4000, "Components-V2-Textbudget: {visible}");
+        let fallback = tour_fallback_text();
+        assert!(fallback.encode_utf16().count() <= 4000);
+        assert!(fallback.contains("Community und Streamer"));
+        assert!(fallback.ends_with(TOUR_CLOSING_TEXT));
+    }
+
+    #[test]
+    fn community_fragen_werden_lokal_und_ohne_sprachmodell_beantwortet() {
+        for (question, topic) in [
+            ("Wie bekomme ich Punkte?", community::CommunityTopic::Punkte),
+            (
+                "Wie verknüpfe ich Twitch?",
+                community::CommunityTopic::TwitchVerknuepfen,
+            ),
+            (
+                "Wie funktioniert der Clip-Contest?",
+                community::CommunityTopic::ClipContest,
+            ),
+            (
+                "Wie schlage ich einen Streamer vor?",
+                community::CommunityTopic::StreamerVorschlagen,
+            ),
+            (
+                "Was bringt mir das als Streamer?",
+                community::CommunityTopic::StreamerVorteile,
+            ),
+        ] {
+            for free_voice in [true, false] {
+                let answer = local_conversational_answer(question, free_voice)
+                    .unwrap_or_else(|| panic!("keine lokale Antwort: {question}"));
+                assert_eq!(answer.reply.as_deref(), Some(topic.answer()), "{question}");
+                assert!(!answer.pate_request);
+            }
+        }
+        assert!(
+            local_conversational_answer("Wie verknüpfe ich meinen Steam-Account?", true).is_none()
+        );
+    }
+
+    #[test]
+    fn twitch_button_nur_unter_festen_antworten_und_persoenlichen_aktionen() {
+        let has_twitch_button = |body: &Map<String, Value>| {
+            body["components"][0]["components"]
+                .as_array()
+                .expect("V2 container components")
+                .iter()
+                .any(|row| row["components"][0]["custom_id"] == community::TWITCH_LINK_CUSTOM_ID)
+        };
+        let punkte = community::CommunityTopic::Punkte.answer();
+        assert!(has_twitch_button(&answer_body(punkte, false, true, None)));
+        assert!(!has_twitch_button(&answer_body(punkte, false, false, None)));
+        let clip = community::CommunityTopic::ClipContest.answer();
+        assert!(!has_twitch_button(&answer_body(clip, false, true, None)));
+        assert!(!has_twitch_button(&answer_body(
+            "Verknüpf doch Twitch, dann gibt es Punkte.",
+            false,
+            true,
+            None
+        )));
+        let with_tour = answer_body(punkte, false, true, Some(&tour_response_components()));
+        assert!(has_twitch_button(&with_tour));
+        assert_has_tour_components(&with_tour);
+    }
+
+    struct FixedTwitchLink(&'static str);
+
+    #[async_trait]
+    impl community::TwitchLinkSource for FixedTwitchLink {
+        async fn twitch_link_url(&self, _discord_user_id: u64) -> Option<String> {
+            Some(self.0.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn twitch_button_klick_nutzt_angeschlossene_quelle_sonst_verify_kanal() {
+        let concierge = Concierge::new(lazy_pool(), mock_port(), None, test_config(true, &[]));
+        let handler = ConciergeHandler {
+            concierge: concierge.clone(),
+        };
+        let click = || BridgeInteraction {
+            custom_id: community::TWITCH_LINK_CUSTOM_ID.to_string(),
+            user_id: 42,
+            ..BridgeInteraction::default()
+        };
+        let reply = handler.handle(click()).await;
+        let text = reply.components.as_ref().expect("components")[0]["components"][0]["content"]
+            .as_str()
+            .expect("text")
+            .to_string();
+        assert_eq!(text, community::TWITCH_LINK_FALLBACK_TEXT);
+
+        assert!(concierge.install_twitch_link_source(Arc::new(FixedTwitchLink(
+            "https://discord.com/oauth2/authorize?client_id=1&scope=identify+connections&state=s"
+        ))));
+        assert!(!concierge.install_twitch_link_source(Arc::new(community::VerifyChannelOnly)));
+        let reply = handler.handle(click()).await;
+        let container = &reply.components.as_ref().expect("components")[0]["components"];
+        assert_eq!(
+            container[0]["content"],
+            json!(community::TWITCH_LINK_READY_TEXT)
+        );
+        assert_eq!(container[1]["components"][0]["style"], json!(5));
+        assert!(container[1]["components"][0]["url"]
+            .as_str()
+            .expect("url")
+            .starts_with("https://discord.com/oauth2/authorize"));
     }
 
     #[test]
