@@ -2772,6 +2772,7 @@ impl ConciergeStore {
         let mut tx = self.pool.begin().await?;
         dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
         crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
+        crate::privacy::purge_guide_data_tx(&mut tx, user_id).await?;
         sqlx::query("DELETE FROM bot.concierge_patenschaften WHERE user_id = $1 OR pate_id = $1")
             .bind(user_id)
             .execute(&mut *tx)

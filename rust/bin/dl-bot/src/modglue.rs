@@ -88,10 +88,7 @@ impl BrainEmojiIndex {
                 let Some(emoji_id) = emoji_map.get(emoji_name) else {
                     continue;
                 };
-                entries.push((
-                    name.to_string(),
-                    format!("<:{emoji_name}:{emoji_id}>")
-                ));
+                entries.push((name.to_string(), format!("<:{emoji_name}:{emoji_id}>")));
             }
         }
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
@@ -318,7 +315,8 @@ fn format_review_build_receipt(
         .unwrap_or_default();
     format!(
         "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
-        emoji_index.decorate_name(&receipt.hero_name), situations
+        emoji_index.decorate_name(&receipt.hero_name),
+        situations
     )
 }
 
@@ -2179,25 +2177,8 @@ impl dl_community::faq::FaqPort for FaqGlue {
     }
 }
 
-// ── Voice-DM-Anbindung mit Concierge-Gedächtnis ───────────────────────────
-
-async fn record_concierge_system_dm(
-    store: &Option<dl_community::concierge::ConciergeStore>,
-    guild_id: u64,
-    user_id: u64,
-    marker: &str,
-) {
-    if let Some(store) = store {
-        if let Err(err) = store.record_system_dm(user_id, guild_id, marker).await {
-            tracing::warn!(%err, user_id, "Concierge: System-DM-Marker konnte nicht gespeichert werden");
-        }
-    }
-}
-
 pub struct VoiceNudgeGlue {
     pub inner: dl_voice::glue::NudgeGlue,
-    pub concierge_store: Option<dl_community::concierge::ConciergeStore>,
-    pub concierge_guild_id: u64,
 }
 
 #[async_trait::async_trait]
@@ -2218,13 +2199,6 @@ impl dl_voice::nudge::NudgePort for VoiceNudgeGlue {
     ) -> Result<(u64, u64), String> {
         let sent =
             dl_voice::nudge::NudgePort::send_dm(&self.inner, user_id, embeds, components).await?;
-        record_concierge_system_dm(
-            &self.concierge_store,
-            self.concierge_guild_id,
-            user_id,
-            dl_community::concierge::STEAM_NUDGE_MEMORY_MARKER,
-        )
-        .await;
         Ok(sent)
     }
 
@@ -2260,8 +2234,6 @@ impl dl_voice::nudge::NudgePort for VoiceNudgeGlue {
 
 pub struct VoiceFeedbackGlue {
     pub inner: dl_voice::glue::FeedbackGlue,
-    pub concierge_store: Option<dl_community::concierge::ConciergeStore>,
-    pub concierge_guild_id: u64,
 }
 
 #[async_trait::async_trait]
@@ -2269,15 +2241,6 @@ impl dl_voice::feedback::FeedbackPort for VoiceFeedbackGlue {
     async fn send_feedback_dm(&self, user_id: u64, text: String) -> (String, Option<u64>) {
         let sent =
             dl_voice::feedback::FeedbackPort::send_feedback_dm(&self.inner, user_id, text).await;
-        if sent.0 == "sent" {
-            record_concierge_system_dm(
-                &self.concierge_store,
-                self.concierge_guild_id,
-                user_id,
-                dl_community::concierge::VOICE_FEEDBACK_MEMORY_MARKER,
-            )
-            .await;
-        }
         sent
     }
 
@@ -4180,14 +4143,14 @@ mod tests {
     fn brain_emoji_index_dekoriert_build_entitaeten_wie_patchnotes() {
         let index = BrainEmojiIndex {
             entries: vec![
-                ("Extended Magazine".into(), "<:dli_extended_magazine:5>".into()),
+                (
+                    "Extended Magazine".into(),
+                    "<:dli_extended_magazine:5>".into(),
+                ),
                 ("Warden".into(), "<:dlh_warden:7>".into()),
             ],
         };
-        assert_eq!(
-            index.decorate_name("Warden"),
-            "<:dlh_warden:7> Warden"
-        );
+        assert_eq!(index.decorate_name("Warden"), "<:dlh_warden:7> Warden");
         assert_eq!(
             index.annotate_inline("Warden kauft Extended Magazine."),
             "<:dlh_warden:7> Warden kauft <:dli_extended_magazine:5> Extended Magazine."
@@ -4202,10 +4165,14 @@ mod tests {
             hero_build_id: Some(818625),
             version: Some(1),
             hero_name: "Warden".into(),
-            core: vec![BrainReviewBuildItem { name: "Extended Magazine".into() }],
+            core: vec![BrainReviewBuildItem {
+                name: "Extended Magazine".into(),
+            }],
             situations: vec![BrainReviewBuildSituation {
                 label: "Optional".into(),
-                items: vec![BrainReviewBuildItem { name: "Healing Tempo".into() }],
+                items: vec![BrainReviewBuildItem {
+                    name: "Healing Tempo".into(),
+                }],
             }],
         };
         let index = BrainEmojiIndex {
@@ -4220,12 +4187,9 @@ mod tests {
     #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
         let bounded = "🧠".repeat(1900);
-        let payload = brain_answer_embed_body(
-            &"🧠".repeat(300),
-            &bounded,
-            &BrainEmojiIndex::default(),
-        )
-        .expect("embed");
+        let payload =
+            brain_answer_embed_body(&"🧠".repeat(300), &bounded, &BrainEmojiIndex::default())
+                .expect("embed");
         let embed = &payload["embeds"][0];
         assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
         assert!(
@@ -4269,12 +4233,8 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
-        let body = brain_answer_embed_body(
-            "Items?",
-            "- a\n- b\n- c",
-            &BrainEmojiIndex::default(),
-        )
-        .unwrap_or_else(|| panic!("answer should create embed body"));
+        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c", &BrainEmojiIndex::default())
+            .unwrap_or_else(|| panic!("answer should create embed body"));
         let description = body
             .get("embeds")
             .and_then(Value::as_array)

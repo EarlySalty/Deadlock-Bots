@@ -15,6 +15,7 @@ mod modglue;
 mod onboardglue;
 mod scrim_adapter;
 mod scrimglue;
+mod serverguide;
 mod serversync;
 mod turnierglue;
 mod twitch_invites;
@@ -161,12 +162,6 @@ fn env_f64_default(name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn env_usize_default(name: &str, default: usize) -> usize {
-    env(name)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 /// Einziger Weg vom Bot zum Sprachmodell: Anbieterwahl und Compliance-Gate aus
 /// dl-ai, danach die TextGenerator-Bruecke. Jeder Ausgang wird geloggt, damit
 /// ein stiller Ausfall nicht wie "Feature aus" aussieht.
@@ -254,10 +249,6 @@ fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
         Ok(kind) => MatcherProviderChoice::Gate(Some(kind.as_str().to_string())),
         Err(_) => MatcherProviderChoice::Off(raw),
     }
-}
-
-fn default_brain_bin() -> String {
-    "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
 }
 
 fn brain_channel_allowlist_from_value(raw: Option<&str>) -> Option<HashSet<u64>> {
@@ -627,12 +618,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
     let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
+    // Der alte Assistent bleibt unabhängig vom Pilotstatus vollständig stillgelegt.
+    concierge_config.enabled = false;
+    concierge_config.proactive = false;
     concierge_config.ai_timeout =
         std::time::Duration::from_secs(operating.concierge.timeout_seconds);
     concierge_config.bot_user_id = adapter.bot_user_id_cell();
-    let concierge_memory_store = concierge_config
-        .enabled
-        .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
 
     // Startinventar: nach dem Hochfahren steht im Journal, welcher Anbieter
     // welchen KI-Pfad bedient und welcher Pfad still ohne Modell weiterlaeuft.
@@ -654,8 +645,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 steam: dl_bridges::steam::SteamBotClient::from_env(operating_value),
                 log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
             },
-            concierge_store: concierge_memory_store.clone(),
-            concierge_guild_id: concierge_config.main_guild_id,
         }),
     );
     dl_voice::nudge::register(&mut router, nudge.clone());
@@ -862,8 +851,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             inner: dl_voice::glue::FeedbackGlue {
                 adapter: adapter.clone(),
             },
-            concierge_store: concierge_memory_store.clone(),
-            concierge_guild_id: concierge_config.main_guild_id,
         }),
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
@@ -960,119 +947,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
-    let concierge_ai = {
-        match dl_ai::LlmProviderConfig::from_env(operating_value)
-            .map_err(anyhow::Error::from)
-            .and_then(|cfg| {
-                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, operating_value)
-                    .map_err(anyhow::Error::from)
-            }) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!(%err, "Concierge-LLM inaktiv");
-                None
-            }
-        }
-    };
-    // Alle Wissenseingänge nutzen den laufenden Brain-Dienst. Der alte CLI-Start
-    // kann den privaten FD3-Snapshot des Bots nicht an einen Kindprozess weitergeben.
-    let shared_game: Option<Arc<dyn dl_answer::Retriever>> =
-        Some(Arc::new(dl_answer::game_http::HttpRetriever::new(
-            operating_value("DL_BRAIN_RETRIEVAL_URL")
-                .unwrap_or_else(|| "http://127.0.0.1:8788".into()),
-            dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN").unwrap_or_default(),
-        )));
-    let shared_answers = Arc::new(
-        dl_answer::AnswerEngine::new(
-            concierge_ai.clone(),
-            Arc::new(dl_community::knowledge_client::CommunityRetriever {
-                base_url: concierge_config.knowledge_url.clone(),
-                timeout: std::time::Duration::from_secs(20),
-            }),
-            shared_game,
-            concierge_config.ai_timeout,
-        )
-        .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
-    );
-
-    // Brain-RAG: Slash-Command plus bestehender Textcommand über MessageEvent-Subscriber.
-    let brain_handler = {
-        let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
-        let brain_bin_path = std::path::PathBuf::from(&brain_bin);
-        let enabled = env_bool_default("BRAIN_CMD_ENABLED", true);
-        if !enabled {
-            tracing::info!("Brain-Command deaktiviert (BRAIN_CMD_ENABLED)");
-            None
-        } else {
-            let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
-            let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
-            let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
-            let channel_allowlist = if open_test_mode {
-                None
-            } else {
-                brain_channel_allowlist_from_value(
-                    operating_value("BRAIN_CHANNEL_ALLOWLIST").as_deref(),
-                )
-            };
-            if !open_test_mode && channel_allowlist.is_none() {
-                tracing::warn!(
-                    "Brain-Command deaktiviert: BRAIN_CHANNEL_ALLOWLIST fehlt, ist leer oder enthält eine ungültige oder 0 Channel-ID"
-                );
-                None
-            } else {
-                tracing::info!(
-                    cooldown_secs,
-                    max_question_len,
-                    open_test_mode,
-                    all_guild_channels = open_test_mode,
-                    channel_allowlist = channel_allowlist.as_ref().map_or(0, HashSet::len),
-                    "Brain-Command registriert"
-                );
-                let config = Arc::new(dl_brain::BrainConfig {
-                    max_question_len,
-                    cooldown_secs,
-                });
-                let emoji_catalog = std::path::PathBuf::from(
-                    operating_value("BRAIN_EMOJI_CATALOG").unwrap_or_else(|| {
-                        "/home/naniadm/Documents/Deadlock--Patchnotes-Bot/data/deadlock_catalog.json"
-                            .to_string()
-                    }),
-                );
-                let emoji_map = std::path::PathBuf::from(
-                    operating_value("BRAIN_EMOJI_MAP").unwrap_or_else(|| {
-                        "/home/naniadm/Documents/Deadlock--Patchnotes-Bot/data/emoji_map.json"
-                            .to_string()
-                    }),
-                );
-                let emoji_index =
-                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
-                let answerer: Arc<dyn dl_brain::AiAnswerer> =
-                    Arc::new(modglue::SharedBrainAnswerer {
-                        engine: shared_answers.clone(),
-                        open_test_mode,
-                        brain_bin: brain_bin_path.clone(),
-                        emoji_index: emoji_index.clone(),
-                    });
-                Some(Arc::new(modglue::BrainHandler {
-                    adapter: adapter.clone(),
-                    config,
-                    cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                    answerer,
-                    channel_allowlist,
-                    all_guild_channels: open_test_mode,
-                    emoji_index,
-                }))
-            }
-        }
-    };
-    if let Some(handler) = &brain_handler {
-        router.on_command(
-            "brain",
-            modglue::brain_command_spec(handler.config.max_question_len),
-            handler.clone(),
-        );
-    }
-
     // Coaching (7): Panel postet nur noch einen Link zur Website. Die frühere
     // Discord-Anfrageaufnahme samt KI-Analyse/Rollen-/Stale-Recovery bleibt im
     // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
@@ -1112,43 +986,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     team_applications.ensure_panel().await;
     tokio::spawn(team_applications.clone().run_maintenance_loop());
 
-    // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq = dl_community::faq::FaqChat::with_answers(
-        central_pool.clone(),
-        Arc::new(modglue::FaqGlue {
-            adapter: adapter.clone(),
-        }),
-        shared_answers.clone(),
-    );
-    dl_community::faq::register(&mut router, faq.clone());
-
-    // Concierge-Onboarding Slice A: default AUS, T0 nur fuer Test-Allowlist.
-    let concierge = dl_community::concierge::Concierge::with_answers(
-        central_pool.clone(),
-        Arc::new(modglue::ConciergeGlue {
-            adapter: adapter.clone(),
-        }),
-        concierge_ai.clone(),
-        concierge_config.clone(),
-        shared_answers.clone(),
-    );
-    dl_community::concierge::register(&mut router, concierge.clone());
-    if concierge.enabled() {
-        concierge
-            .import_legacy_pate_requests()
-            .await
-            .map_err(anyhow::Error::msg)
-            .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
-        concierge.ensure_pate_leitfaden(repository_root).await;
-        let paten_inventar = concierge.paten_inventar(our_guild_id).await;
-        tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));
-    }
-    // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
-    // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
-    dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
-        let concierge = concierge.clone();
-        Arc::new(move |user_id| concierge.clear_user_runtime(user_id))
-    });
+    // FAQ und Concierge werden nicht mehr instanziiert. Ihre Buttons wechseln zum Kern.
+    // Kein Tickethelfer, Import, Leitfadenpost oder Paten-Digest beim Neustart.
 
     // Anonymes Feedback (6) — Button + Modal; DM an den Empfänger.
     // !fhub-Panel-Post folgt mit der Prefix-Dispatch-Infra; persistente
@@ -1159,7 +998,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
         pool: central_pool.clone(),
     });
-    dl_community::feedback_hub::register(&mut router, feedback_hub.clone());
+    dl_community::feedback_hub::register_form(&mut router, feedback_hub.clone());
+    let guide = serverguide::GuideAdapter::new(
+        serverguide::GuideConfig::from_lookup(our_guild_id, operating_value),
+        adapter.clone(),
+        central_pool.clone(),
+        feedback_hub.clone(),
+        dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN"),
+    )?;
+    serverguide::register(&mut router, guide.clone());
+    dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
+        let guide = guide.clone();
+        Arc::new(move |user_id| guide.clear_user_runtime(user_id))
+    });
 
     // Clip-Einsendungen (6) — Button/Modal brauchen den Router, Loops gateway-gated
     let clips = dl_community::clips::ClipSubmission::new(
@@ -1457,10 +1308,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             owner_id,
             master_action_tx.clone(),
         );
-        if let Some(brain_handler) = &brain_handler {
-            modglue::spawn_brain_command(brain_handler.clone(), &dispatcher);
-        }
-
         // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker
@@ -1680,7 +1527,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             &dispatcher,
             onboardglue::MAIN_GUILD_ID,
         );
-        let _concierge_tasks = dl_community::concierge::spawn(concierge.clone(), &dispatcher);
+        let _guide_task = serverguide::spawn(guide.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(
             central_pool.clone(),
             tag_service.clone(),
@@ -1719,60 +1566,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
-        dl_community::faq::spawn(faq.clone(), &dispatcher);
-        let brain_help_channel_id = operating_value("DL_BRAIN_HELP_CHANNEL_ID")
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|id| *id > 0);
-        let brain_help_active_channel = if let (Some(channel_id), Some(provider)) =
-            (brain_help_channel_id, concierge_ai.clone())
-        {
-            let backend = Arc::new(dl_community::passive_help::GroundedHelpBackend {
-                provider,
-                answers: shared_answers.clone(),
-            });
-            let responder = Arc::new(dl_community::passive_help::PassiveHelpResponder::new(
-                channel_id,
-                operating_value("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
-                backend,
-                adapter.clone(),
-            ));
-            let _passive_help = dl_community::passive_help::spawn(responder, &dispatcher);
-            tracing::info!(
-                channel_id,
-                "Automatische Brain-Hilfe in der Mitspieler-Suche aktiviert"
-            );
-            Some(channel_id)
-        } else {
-            tracing::info!(
-                "Automatische Brain-Hilfe inaktiv: Zielkanal oder zentraler KI-Connector fehlt"
-            );
-            None
-        };
+        // Alte FAQ-/Ticket- und allgemeine Frageerkennung sind stillgelegt.
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
-        let voice_hint_enabled =
-            dl_community::voice_change_hint::enabled_from_lookup(operating_value);
-        let voice_hint_classifier = if voice_hint_enabled {
-            chat_text_generator(dl_ai::LlmUseCase::VoiceHint, false).map(|generator| {
-                Arc::new(dl_community::voice_change_hint::OpenAiVoiceHintClassifier::new(generator))
-                    as Arc<dyn dl_community::voice_change_hint::VoiceHintClassifier>
-            })
-        } else {
-            None
-        };
-        let voice_hint_responder = Arc::new(
-            dl_community::voice_change_hint::VoiceChangeHintResponder::new(
-                voice_hint_enabled,
-                voice_hint_classifier,
-                adapter.clone(),
-            )
-            .excluding_channel(brain_help_active_channel),
-        );
-        let _voice_change_hint_responder =
-            dl_community::voice_change_hint::spawn(voice_hint_responder, &dispatcher);
-        // Freitext-DMs beantwortet der Concierge. Der frühere KI-DM-Assistent
-        // startete nur, wenn der Concierge nicht für alle offen war, und ist
-        // seit DL_CONCIERGE_ENABLED=1 mit leerer Allowlist toter Code gewesen.
         // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
         // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
         // Python Reward-Rolle + Feedback-DM bekommen.
@@ -2130,18 +1926,17 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     #[test]
-    fn alle_drei_wissenseingaenge_teilen_die_gegatete_antwortinstanz() {
+    fn guide_hat_einen_gemeinsamen_kern_ohne_alte_antwortdienste() {
         let source = include_str!("main.rs")
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("Quelldatei enthält Produktionsbereich");
-        assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 1);
-        assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
-        assert!(source.contains("FaqChat::with_answers("));
-        assert!(source.contains("Concierge::with_answers("));
-        assert!(source.contains("SharedBrainAnswerer"));
-        assert_eq!(source.matches("shared_answers.clone()").count(), 4);
-        assert!(source.contains("passive_help::GroundedHelpBackend"));
+        assert!(source.contains("serverguide::GuideAdapter::new("));
+        assert!(source.contains("serverguide::spawn("));
+        assert!(!source.contains("Concierge::with_answers("));
+        assert!(!source.contains("FaqChat::with_answers("));
+        assert!(!source.contains("PassiveHelpResponder"));
+        assert!(!source.contains("spawn_brain_command("));
         assert!(!source.contains("BrainAiGlue"));
         assert!(!source.contains("chat_text_generator(dl_ai::LlmUseCase::Faq"));
     }
