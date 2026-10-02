@@ -569,6 +569,7 @@ impl GuideAdapter {
                         .send().await?.error_for_status()?.json().await?;
                     reply.reply = result.reply;
                     reply.status = result.status;
+                    reply.privacy_epoch = result.privacy_epoch;
                 }
             }
         }

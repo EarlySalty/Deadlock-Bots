@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Row};
 
 pub const COMPONENTS_V2_FLAG: u64 = 1 << 15;
+pub const PATE_ROLE_ID: u64 = 1524047896297738311;
 pub const STREAMER_PARTNER_URL: &str = "https://deutsche-deadlock-community.de/streamer";
 pub const TEAM_PANEL_CHANNEL_NAME: &str = "🤝team-werden";
 pub const TEAM_APPLICATION_NOTIFY_CHANNEL_ID: u64 = 1_315_684_135_175_716_978;
@@ -1396,7 +1397,7 @@ impl TeamApplications {
                 .add_role(
                     self.guild_id,
                     applicant_user_id,
-                    crate::concierge::PATE_ROLE_ID,
+                    PATE_ROLE_ID,
                     "team-bewerbung:pate-angenommen",
                 )
                 .await
@@ -2017,10 +2018,7 @@ mod tests {
 
         let roles = port.added_roles.lock().expect("added_roles lock");
         assert_eq!(roles.len(), 1);
-        assert_eq!(
-            roles[0],
-            (guild_id, applicant, crate::concierge::PATE_ROLE_ID)
-        );
+        assert_eq!(roles[0], (guild_id, applicant, PATE_ROLE_ID));
         drop(roles);
 
         let dms = port.sent_dms.lock().expect("sent_dms lock");
