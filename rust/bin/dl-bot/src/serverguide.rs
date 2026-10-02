@@ -122,6 +122,7 @@ struct GuideReply {
     contact_proactive: bool,
     profile: Option<Value>,
     control_result: Option<String>,
+    privacy_epoch: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +147,20 @@ struct Conversation {
 #[derive(Default)]
 struct Routes {
     conversations: HashMap<(u64, u64, u64), Conversation>,
+}
+
+/// Hält die vorhandene Datenschutzsperre bis zur tatsächlichen Interaction-Zustellung.
+struct PrivacySendHook(Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>);
+
+#[async_trait::async_trait]
+impl dl_discord::ResponseMessageHook for PrivacySendHook {
+    async fn on_response_message(&self, _message_id: u64) {
+        if let Some(tx) = self.0.lock().await.take() {
+            if tx.commit().await.is_err() {
+                tracing::warn!("Datenschutzsperre nach Guide-Zustellung konnte nicht bestätigt freigegeben werden");
+            }
+        }
+    }
 }
 
 impl Routes {
@@ -477,8 +492,46 @@ impl GuideAdapter {
         )
         .await?;
         self.clear_user_runtime(user_id as u64);
+        reply.privacy_epoch = sqlx::query_scalar(
+            "SELECT epoch FROM brain.guide_subjects WHERE guild_id=$1 AND user_id=$2",
+        )
+        .bind(&turn.guild_id)
+        .bind(&turn.user_id)
+        .fetch_optional(&self.pool)
+        .await?;
         reply.reply = Some("Deine gespeicherten Angaben und Verläufe wurden gelöscht. Bereits versendete Discord-Nachrichten werden dadurch nicht entfernt.".into());
         Ok(())
+    }
+
+    async fn final_send_lock(
+        &self,
+        turn: &GuideTurn,
+        reply: &GuideReply,
+    ) -> anyhow::Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let mut tx = self.pool.begin().await?;
+        dl_central_db::lock_user_privacy(&mut tx, turn.user_id.parse::<i64>()?).await?;
+        if let Some(expected) = reply.privacy_epoch {
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT epoch FROM brain.guide_subjects WHERE guild_id=$1 AND user_id=$2",
+            )
+            .bind(&turn.guild_id)
+            .bind(&turn.user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            anyhow::ensure!(
+                current == Some(expected),
+                "Datenschutzstand der Antwort ist überholt"
+            );
+        } else {
+            anyhow::ensure!(
+                reply.conversation_id.is_none()
+                    && reply.profile.is_none()
+                    && reply.control_result.is_none()
+                    && reply.status == "unavailable",
+                "Guide-Antwort ohne Datenschutzstand"
+            );
+        }
+        Ok(tx)
     }
 
     async fn process_actions(
@@ -630,14 +683,19 @@ impl GuideAdapter {
         {
             return;
         }
-        let Some(mut text) = reply.reply else {
+        let final_lock = match self.final_send_lock(&turn, &reply).await {
+            Ok(lock) => lock,
+            Err(_) => return,
+        };
+        let Some(mut text) = reply.reply.clone() else {
             return;
         };
         if let Some(notice) = reply.memory_notice {
             text.push_str("\n\n");
             text.push_str(&notice);
         }
-        if text.to_lowercase().contains("deadlock brain")
+        if text.chars().count() > 2000
+            || text.to_lowercase().contains("deadlock brain")
             || text.to_lowercase().contains("deadlock-brain")
             || text.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}'))
         {
@@ -649,6 +707,9 @@ impl GuideAdapter {
             return;
         };
         if let Ok(message_id) = self.adapter.send_raw_public(event.channel_id, body).await {
+            if final_lock.commit().await.is_err() {
+                return;
+            }
             let key = (
                 event.guild_id.unwrap_or(0),
                 event.channel_id,
@@ -836,12 +897,30 @@ impl InteractionHandler for GuideAdapter {
                 "Diese Antwort wurde nach einer Datenschutzänderung verworfen.",
             );
         }
-        BridgeReply::ephemeral_text(
+        let lock = match self.final_send_lock(&turn, &reply).await {
+            Ok(lock) => lock,
+            Err(_) => {
+                return BridgeReply::ephemeral_text(
+                    "Diese Antwort wurde nach einer Datenschutzänderung verworfen.",
+                )
+            }
+        };
+        if reply.reply.as_deref().is_some_and(|text| {
+            text.chars().count() > 2000
+                || text.to_lowercase().contains("deadlock brain")
+                || text.to_lowercase().contains("deadlock-brain")
+                || text.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}'))
+        }) {
+            return BridgeReply::ephemeral_text(self.public_text(UNAVAILABLE));
+        }
+        let mut response = BridgeReply::ephemeral_text(
             reply
                 .reply
                 .as_deref()
                 .unwrap_or("Diese Aktion braucht gerade keine weitere Antwort."),
-        )
+        );
+        response.response_message_hook = Some(Arc::new(PrivacySendHook(Mutex::new(Some(lock)))));
+        response
     }
 }
 
