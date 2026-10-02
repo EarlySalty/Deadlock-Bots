@@ -999,15 +999,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let brain_handler = {
         let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
         let brain_bin_path = std::path::PathBuf::from(&brain_bin);
-        let enabled = env_bool_default("BRAIN_CMD_ENABLED", brain_bin_path.is_file());
+        let enabled = env_bool_default("BRAIN_CMD_ENABLED", true);
         if !enabled {
             tracing::info!("Brain-Command deaktiviert (BRAIN_CMD_ENABLED)");
-            None
-        } else if !brain_bin_path.is_file() {
-            tracing::warn!(
-                bin = %brain_bin_path.display(),
-                "Brain-Command nicht registriert: BRAIN_BIN existiert nicht"
-            );
             None
         } else {
             let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
@@ -1027,7 +1021,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 None
             } else {
                 tracing::info!(
-                    bin = %brain_bin_path.display(),
                     cooldown_secs,
                     max_question_len,
                     open_test_mode,
