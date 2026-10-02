@@ -22,7 +22,8 @@ run() {
   if ((result != 0)); then FAILED=1; tail -n 60 "$LOGS/$label.log"; fi
 }
 run fmt cargo fmt --manifest-path rust/Cargo.toml -p dl-brain -- --check
-run bot-fmt cargo fmt --manifest-path rust/Cargo.toml -p dl-bot -p dl-core -- --check
+run bot-fmt cargo fmt --manifest-path rust/Cargo.toml -p dl-bot -p dl-core -p dl-token-secrets -- --check
+run token-secrets cargo test --manifest-path rust/Cargo.toml -p dl-token-secrets --all-targets --locked --offline --jobs 2 -- --test-threads=2
 run test cargo test --manifest-path rust/Cargo.toml -p dl-brain --all-targets --locked --offline --jobs 2 -- --include-ignored --test-threads=2
 run bot-brain cargo test --manifest-path rust/Cargo.toml -p dl-bot --bin dl-bot brain_ --locked --offline --jobs 2 -- --include-ignored --test-threads=2
 run bot-mode cargo test --manifest-path rust/Cargo.toml -p dl-bot --bin dl-bot typed_mode --locked --offline --jobs 2 -- --include-ignored --test-threads=2
