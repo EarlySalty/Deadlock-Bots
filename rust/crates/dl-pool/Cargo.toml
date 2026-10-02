@@ -1,0 +1,23 @@
+[package]
+name = "dl-pool"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+chrono-tz.workspace = true
+dl-central-db.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+dl-central-db = { workspace = true, features = ["testing"] }
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

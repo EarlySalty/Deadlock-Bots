@@ -1492,6 +1492,7 @@ dependencies = [
  "dl-bridges",
  "dl-central-db",
  "dl-discord",
+ "dl-pool",
  "dl-squads",
  "dl-stats",
  "rand 0.8.6",
@@ -1658,6 +1659,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "dl-pool"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "dl-central-db",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

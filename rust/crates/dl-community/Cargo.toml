@@ -24,6 +24,7 @@ dl-ai.workspace = true
 dl-activity.workspace = true
 dl-bridges.workspace = true
 dl-central-db.workspace = true
+dl-pool.workspace = true
 dl-discord.workspace = true
 dl-stats.workspace = true
 dl-squads.workspace = true

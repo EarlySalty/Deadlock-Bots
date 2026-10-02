@@ -206,6 +206,83 @@ fn uses_subject_projected_export(spec: RedactionSpec) -> bool {
 /// gemappt. Nicht vorhandene Alt-Tabellen werden via `to_regclass` übersprungen.
 const USER_TABLES: &[TableSpec] = &[
     TableSpec::new(
+        "pool_profiles",
+        "discord_id",
+        "pool.profiles",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_availability",
+        "discord_id",
+        "pool.availability",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_preferred_players",
+        "discord_id",
+        "pool.preferred_players",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_preferred_players",
+        "target_discord_id",
+        "pool.preferred_players",
+        "target_discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_api_snapshots",
+        "discord_id",
+        "pool.api_snapshots",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_matches",
+        "discord_id",
+        "pool.matches",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_co_players",
+        "discord_id",
+        "pool.co_players",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_co_players",
+        "target_discord_id",
+        "pool.co_players",
+        "target_discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_sessions",
+        "initiator_discord_id",
+        "pool.sessions",
+        "initiator_discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_session_participants",
+        "discord_id",
+        "pool.session_participants",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "pool_feedback",
+        "discord_id",
+        "pool.feedback",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "core_users",
         "discord_id",
         "core.users",
@@ -3764,6 +3841,11 @@ pub async fn delete_user_data(
     };
     let target_refs = privacy_target_refs(&user_key, &steam_ids);
 
+    if relations.contains("pool.profiles") {
+        let n = dl_pool::delete_all_for_user_tx(&mut tx, user_id).await?;
+        counts.insert("pool_profiles.deleted".to_string(), rows_to_i64(n));
+    }
+
     if relations.contains(USER_PRIVACY_REL) {
         sqlx::query!(
             r#"
@@ -4016,9 +4098,34 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         if !relations.contains(spec.relation) {
             continue;
         }
+        let rows = select_rows_user(pool, spec, user_id, &user_key).await?;
+        let rows = if spec.relation.starts_with("pool.") {
+            rows.into_iter()
+                .map(|row| project_pool_row(row, user_id))
+                .collect()
+        } else {
+            rows
+        };
+        tbl.insert(spec.count_key(), Value::Array(rows));
+    }
+
+    if relations.contains("pool.sessions") {
+        let rows: Vec<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(s) FROM pool.sessions s WHERE EXISTS (
+                 SELECT 1 FROM pool.session_participants p
+                  WHERE p.guild_id=s.guild_id AND p.session_id=s.session_id AND p.discord_id=$1
+             ) ORDER BY s.session_id",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
         tbl.insert(
-            spec.count_key(),
-            Value::Array(select_rows_user(pool, spec, user_id, &user_key).await?),
+            "pool_sessions.participation".into(),
+            Value::Array(
+                rows.into_iter()
+                    .map(|row| project_pool_row(row, user_id))
+                    .collect(),
+            ),
         );
     }
 
@@ -4285,6 +4392,251 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         "steam_ids": steam_ids.into_iter().map(|sid| sid.text).collect::<Vec<_>>(),
         "user_privacy": user_privacy,
     }))
+}
+
+fn project_pool_row(mut row: Value, user_id: i64) -> Value {
+    if let Value::Object(ref mut object) = row {
+        for column in ["discord_id", "target_discord_id", "initiator_discord_id"] {
+            if let Some(value) = object.get_mut(column) {
+                if coerce_i64(value) != Some(user_id) {
+                    *value = Value::String("redacted".into());
+                }
+            }
+        }
+    }
+    row
+}
+
+#[cfg(test)]
+#[path = "../../../test-support/peer_database.rs"]
+mod pool_privacy_database;
+
+#[cfg(test)]
+mod pool_privacy_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use dl_pool::{Feedback, Mode, PoolError, PoolStore, Preferences, Scope, SessionStatus};
+
+    async fn seed(pool: &PgPool) -> (PoolStore, dl_pool::Session) {
+        let store = PoolStore::new(pool.clone());
+        let preferences = Preferences {
+            modes: vec![Mode::Casual],
+            ..Preferences::default()
+        };
+        for guild_id in [77, 88] {
+            for discord_id in [100, 200] {
+                store
+                    .save_preferences(
+                        Scope {
+                            guild_id,
+                            discord_id,
+                        },
+                        &preferences,
+                        true,
+                    )
+                    .await
+                    .expect("Poolprofil gespeichert");
+            }
+        }
+        let initiator = Scope {
+            guild_id: 77,
+            discord_id: 100,
+        };
+        store
+            .link_verified_steam(initiator, "76561198000000100")
+            .await
+            .expect("Erster Steam-Link");
+        store
+            .link_verified_steam(
+                Scope {
+                    discord_id: 200,
+                    ..initiator
+                },
+                "76561198000000200",
+            )
+            .await
+            .expect("Zweiter Steam-Link");
+        let session = store
+            .create_session(initiator, &[200], Mode::Casual)
+            .await
+            .expect("Session");
+        store
+            .attach_channel(77, session.session_id, 900001)
+            .await
+            .expect("Kanal");
+        store
+            .record_join(
+                initiator,
+                session.session_id,
+                session.created_at + Duration::seconds(1),
+            )
+            .await
+            .expect("Beitritt");
+        store
+            .record_join(
+                Scope {
+                    discord_id: 200,
+                    ..initiator
+                },
+                session.session_id,
+                session.created_at + Duration::seconds(2),
+            )
+            .await
+            .expect("Zweiter Beitritt");
+        store
+            .finish_session(
+                77,
+                session.session_id,
+                SessionStatus::Ended,
+                session.created_at + Duration::minutes(10),
+            )
+            .await
+            .expect("Session beendet");
+        store
+            .save_feedback(initiator, session.session_id, Feedback::default())
+            .await
+            .expect("Feedback");
+        (store, session)
+    }
+
+    #[tokio::test]
+    async fn pool_privacy_loeschung_entfernt_alle_guilds_und_gemeinsame_session() {
+        let db = pool_privacy_database::database().await;
+        let (store, session) = seed(&db).await;
+        let summary = delete_user_data(&db, 200, "pool_test".into(), Utc::now().timestamp())
+            .await
+            .expect("Vollständige Löschung");
+        assert_eq!(summary.counts["pool_profiles.deleted"], 2);
+        assert!(store
+            .participant_session(
+                Scope {
+                    guild_id: 77,
+                    discord_id: 100
+                },
+                session.session_id
+            )
+            .await
+            .expect("Gemeinsame Session")
+            .is_none());
+        for table in ["sessions", "session_participants", "feedback"] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM pool.{table}"))
+                    .fetch_one(&*db)
+                    .await
+                    .expect("Keine Sessiondaten"),
+                0
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pool.profiles WHERE discord_id=200")
+                .fetch_one(&*db)
+                .await
+                .expect("Keine Profile"),
+            0
+        );
+        assert!(is_opted_out(&db, 200).await);
+        let p = Preferences {
+            modes: vec![Mode::Casual],
+            ..Preferences::default()
+        };
+        assert!(matches!(
+            store
+                .save_preferences(
+                    Scope {
+                        guild_id: 77,
+                        discord_id: 200
+                    },
+                    &p,
+                    true
+                )
+                .await,
+            Err(PoolError::OptedOut)
+        ));
+        delete_user_data(&db, 200, "pool_test".into(), Utc::now().timestamp())
+            .await
+            .expect("Idempotent");
+    }
+
+    #[tokio::test]
+    async fn pool_privacy_export_zeigt_eigene_teilnahme_und_redigiert_fremde_ids() {
+        let db = pool_privacy_database::database().await;
+        let (store, session) = seed(&db).await;
+        let now = Utc::now();
+        store
+            .store_co_player(
+                77,
+                &dl_pool::CoPlayer {
+                    discord_id: 100,
+                    target_discord_id: 200,
+                    games_together: 1,
+                    last_played_at: now,
+                    window_start: now - Duration::days(1),
+                    window_end: now,
+                    fetched_at: now,
+                },
+            )
+            .await
+            .expect("Mitspieler-Paar");
+        let export = export_user_data(&db, 200, now.timestamp())
+            .await
+            .expect("Export");
+        let pair = &export["tables"]["pool_co_players.target_discord_id"][0];
+        assert_eq!(pair["discord_id"], serde_json::json!("redacted"));
+        assert_eq!(pair["target_discord_id"], serde_json::json!(200));
+        let participation = &export["tables"]["pool_sessions.participation"][0];
+        assert_eq!(
+            participation["session_id"],
+            serde_json::json!(session.session_id)
+        );
+        assert_eq!(
+            participation["initiator_discord_id"],
+            serde_json::json!("redacted")
+        );
+        assert!(export["tables"]["pool_feedback.discord_id"]
+            .as_array()
+            .expect("Eigene Antworten")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn pool_privacy_spaeter_fehler_rollt_poolloeschung_mit_zurueck() {
+        let db = pool_privacy_database::database().await;
+        let (store, session) = seed(&db).await;
+        sqlx::raw_sql(
+            "CREATE FUNCTION core.pool_test_block_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'Erzwungener später Fehler'; END $$;
+             CREATE TRIGGER pool_test_block_delete BEFORE DELETE ON core.users
+             FOR EACH ROW EXECUTE FUNCTION core.pool_test_block_delete()",
+        )
+        .execute(&*db)
+        .await
+        .expect("Fehlerfixture");
+        assert!(
+            delete_user_data(&db, 200, "pool_test".into(), Utc::now().timestamp())
+                .await
+                .is_err()
+        );
+        assert!(store
+            .own_profile(Scope {
+                guild_id: 77,
+                discord_id: 200
+            })
+            .await
+            .expect("Rollback-Profil")
+            .is_some());
+        assert!(store
+            .participant_session(
+                Scope {
+                    guild_id: 77,
+                    discord_id: 100
+                },
+                session.session_id
+            )
+            .await
+            .expect("Rollback-Session")
+            .is_some());
+        assert!(!is_opted_out(&db, 200).await);
+    }
 }
 
 #[cfg(test)]
