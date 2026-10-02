@@ -5,6 +5,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 pub mod api_ingest;
+pub mod brain_api;
 
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
 
