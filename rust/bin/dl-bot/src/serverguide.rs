@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 const UNAVAILABLE: &str = "Der Serverguide ist gerade nicht erreichbar. Du kannst deine Frage in <#1491953161747955853> stellen.";
 const PILOT_CLOSED: &str = "Der Serverguide ist noch im begrenzten Testbetrieb. Für Hilfe erreichst du die Community in <#1426220702054355077>.";
-const LEGACY_DISABLED: &str = "Diese frühere Aktion ist ausgeschaltet. Wenn du Hilfe oder Mitspieler suchst, schreib dem Serverguide direkt. Eine Server-Tour kannst du weiterhin starten.";
+const LEGACY_DISABLED: &str = "Diese frühere Aktion ist ausgeschaltet. Hilfe bekommst du in <#1426220702054355077>, Mitspieler findest du in <#1376335502919335936>.";
 
 #[derive(Clone)]
 pub struct GuideConfig {
