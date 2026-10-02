@@ -518,16 +518,18 @@ mod tests {
             if let Answer::Grounded { text: value, .. } = &mut answer {
                 *value = text;
             }
-            let (responder, _, port) = responder(answer);
-            responder.handle_message(&event(1, "Wie geht das?")).await;
+            let (responder, backend, port) = responder(answer);
+            responder.handle_message(&event(1, "wie geht das?")).await;
+            assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
             assert!(port.0.lock().unwrap().is_empty());
         }
         let mut answer = grounded();
         if let Answer::Grounded { text, .. } = &mut answer {
             *text = "Das dauert 3–4 Minuten.".into();
         }
-        let (responder, _, port) = responder(answer);
-        responder.handle_message(&event(1, "Wie geht das?")).await;
+        let (responder, backend, port) = responder(answer);
+        responder.handle_message(&event(1, "wie geht das?")).await;
+        assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
         assert_eq!(port.0.lock().unwrap().len(), 1);
     }
 
