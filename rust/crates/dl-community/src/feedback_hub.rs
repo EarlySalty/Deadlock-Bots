@@ -13,6 +13,7 @@ use dl_central_db::kv;
 use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 /// Empfänger der anonymen Feedback-DMs (wie `FEEDBACK_RECIPIENT_ID`).
@@ -146,6 +147,11 @@ pub fn register(router: &mut InteractionRouter, hub: Arc<FeedbackHub>) {
     router.on_custom_id("feedback_hub:submit", handler);
 }
 
+/// Das bestehende Formular bleibt erreichbar; der Guide-Kern steuert die Zustellung.
+pub fn register_form(router: &mut InteractionRouter, hub: Arc<FeedbackHub>) {
+    router.on_custom_id("feedback_hub:open_modal", Arc::new(FeedbackHandler { hub }));
+}
+
 /// Baut den Panel-Body (Embed + Button) — identisch zum Python-`FeedbackHubView`.
 fn panel_body() -> Map<String, Value> {
     let embed = json!({
@@ -179,6 +185,59 @@ fn panel_body() -> Map<String, Value> {
 }
 
 impl FeedbackHub {
+    /// Reservierte Zustellungen werden nach einem unklaren Versand nicht erneut gestartet.
+    pub async fn deliver_guide_feedback(
+        &self,
+        delivery_id: &str,
+        guild_id: &str,
+        user_id: &str,
+        channel_id: u64,
+        text: &str,
+    ) -> Result<u64, String> {
+        if delivery_id.is_empty() || text.trim().is_empty() || text.chars().count() > 1800 {
+            return Err("Feedback ist nicht sicher zustellbar".into());
+        }
+        let db_user = user_id
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or("Ungültiger Feedbackabsender")?;
+        let mut privacy_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "Datenschutzprüfung nicht erreichbar")?;
+        dl_central_db::lock_user_privacy(&mut privacy_tx, db_user)
+            .await
+            .map_err(|_| "Datenschutzprüfung nicht erreichbar")?;
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain.guide_feedback_outbox WHERE guild_id=$1 AND user_id=$2 AND delivery_id=$3 AND text=$4 AND destination_channel_id=$5 AND state='pending')")
+            .bind(guild_id).bind(user_id).bind(delivery_id).bind(text).bind(channel_id.to_string()).fetch_one(&mut *privacy_tx).await.map_err(|_| "Feedbackfreigabe konnte nicht geprüft werden")?;
+        if !pending {
+            return Err("Die Feedbackfreigabe ist nicht mehr gültig".into());
+        }
+        let reserved = sqlx::query("INSERT INTO bot.serverguide_feedback_deliveries(delivery_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
+            .bind(delivery_id).bind(db_user).execute(&self.pool).await.map_err(|_| "Feedbackzustellung konnte nicht reserviert werden")?;
+        if reserved.rows_affected() == 0 {
+            let sent: Option<i64> = sqlx::query_scalar("SELECT sent_message_id FROM bot.serverguide_feedback_deliveries WHERE delivery_id = $1")
+                .bind(delivery_id).fetch_one(&self.pool).await.map_err(|_| "Feedbackzustellung konnte nicht geprüft werden")?;
+            return sent
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| "Die frühere Zustellung ist nicht bestätigt".into());
+        }
+        let nonce = hex::encode(Sha256::digest(delivery_id.as_bytes()));
+        let body = json!({"content": text, "nonce": &nonce[..24], "enforce_nonce": true, "allowed_mentions": {"parse": []}})
+            .as_object().cloned().ok_or("Feedback konnte nicht vorbereitet werden")?;
+        let message_id = self.port.post_rich(channel_id, body).await?;
+        let db_message = i64::try_from(message_id).map_err(|_| "Ungültiger Zustellungsnachweis")?;
+        sqlx::query("UPDATE bot.serverguide_feedback_deliveries SET sent_message_id=$2 WHERE delivery_id=$1")
+            .bind(delivery_id).bind(db_message).execute(&self.pool).await.map_err(|_| "Feedbackzustellung ist noch nicht sicher gespeichert")?;
+        privacy_tx
+            .commit()
+            .await
+            .map_err(|_| "Feedback-Datenschutzprüfung konnte nicht abgeschlossen werden")?;
+        Ok(message_id)
+    }
+
     /// Postet (oder editiert) das Feedback-Panel im `FEEDBACK_CHANNEL_ID`.
     /// Idempotent: ist eine Panel-Nachricht gemerkt, wird sie editiert; nur
     /// wenn das fehlschlägt (z. B. gelöscht), wird eine neue gepostet.

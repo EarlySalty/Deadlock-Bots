@@ -3748,6 +3748,7 @@ pub async fn delete_user_data(
     let mut tx = pool.begin().await?;
     dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
     lock_user_privacy(&mut tx, user_id).await?;
+    purge_guide_data_tx(&mut tx, user_id).await?;
     let expired_rollback_exports = if relations.contains(SERVER_SYNC_ROLLBACK_EXPORTS_REL) {
         purge_expired_server_sync_rollback_exports_tx(&mut tx, now).await?
     } else {
@@ -4005,12 +4006,74 @@ pub async fn delete_user_data(
     })
 }
 
+/// Löscht den Guide-Zustand unter demselben globalen Privacylock wie die übrigen Daten.
+/// Der Sperrmerker bleibt erhalten, damit alte Aufträge keinen Verlauf wiederherstellen.
+pub(crate) async fn purge_guide_data_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<()> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('brain.guide_subjects') IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await?;
+    if exists {
+        sqlx::query("UPDATE brain.guide_subjects SET epoch=epoch+1,memory_enabled=FALSE,contact_enabled=FALSE,globally_opted_out=TRUE,deleted=TRUE,profile_json='{}'::jsonb,history_json='[]'::jsonb,updated_at=now() WHERE user_id=$1")
+            .bind(user_id.to_string()).execute(&mut **tx).await?;
+    }
+    for relation in [
+        "brain.guide_turn_claims",
+        "brain.guide_conversations",
+        "brain.guide_feedback_outbox",
+        "brain.guide_feedback_drafts",
+    ] {
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(relation)
+            .fetch_one(&mut **tx)
+            .await?;
+        if exists {
+            sqlx::query(&format!("DELETE FROM {relation} WHERE user_id=$1"))
+                .bind(user_id.to_string())
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    let deliveries_exist: bool =
+        sqlx::query_scalar("SELECT to_regclass('bot.serverguide_feedback_deliveries') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if deliveries_exist {
+        sqlx::query("DELETE FROM bot.serverguide_feedback_deliveries WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<Value> {
     let relations = existing_relations(pool).await?;
     let user_key = user_id.to_string();
     let steam_ids = steam_ids_for_user(pool, user_id).await?;
     let target_refs = privacy_target_refs(&user_key, &steam_ids);
     let mut tbl = serde_json::Map::new();
+
+    for relation in [
+        "brain.guide_subjects",
+        "brain.guide_conversations",
+        "brain.guide_turn_claims",
+        "brain.guide_feedback_outbox",
+        "brain.guide_feedback_drafts",
+        "brain.guide_legacy_imports",
+    ] {
+        if relations.contains(relation) {
+            let rows: Vec<Value> = sqlx::query_scalar(&format!(
+                "SELECT to_jsonb(t) FROM {relation} t WHERE user_id=$1"
+            ))
+            .bind(&user_key)
+            .fetch_all(pool)
+            .await?;
+            tbl.insert(relation.into(), Value::Array(rows));
+        }
+    }
 
     for &spec in USER_TABLES {
         if !relations.contains(spec.relation) {
