@@ -38,6 +38,6 @@ kanonische SHA384-Prüfsumme:
 ```
 
 Die bekannte transiente Variante lag nicht vor. Der unabhängige DB-Prüfer
-bestätigte diesen Befund sowie Schema- und Rollenrechte. Die beiden additive
+bestätigte diesen Befund sowie Schema- und Rollenrechte. Die beiden additiven
 Steam-Versionen benötigen keine weiteren Migrationen oder Datenübernahme.
 Der Apply und die anschließende Live-Abnahme bleiben getrennte Schritte.
