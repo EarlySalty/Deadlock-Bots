@@ -184,6 +184,7 @@ section!(AiOptions {
     transparency_error_repeat_seconds: u64 => "DL_AI_TRANSPARENCY_ERROR_REPEAT_SECONDS",
     transparency_error_followup_seconds: u64 => "DL_AI_TRANSPARENCY_ERROR_FOLLOWUP_SECONDS",
     brain_bin: PathBuf => "BRAIN_BIN",
+    brain_retrieval_url: String => "DL_BRAIN_RETRIEVAL_URL",
     brain_command_enabled: bool => "BRAIN_CMD_ENABLED",
     brain_open_test_mode: bool => "BRAIN_OPEN_TEST_MODE",
     brain_channels: Vec<u64> => "BRAIN_CHANNEL_ALLOWLIST",

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod game;
+pub mod game_http;
 
 const MAX_EVIDENCE_UNITS: usize = 24_000;
 const MODEL: &str = dl_ai::DEFAULT_FIREWORKS_MODEL;

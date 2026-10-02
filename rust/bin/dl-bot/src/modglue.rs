@@ -240,6 +240,7 @@ pub struct ModGlue {
     pub tags: Arc<dl_community::tags::TagService>,
 }
 
+#[cfg(test)]
 pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
 fn looks_like_build_request(question: &str) -> bool {

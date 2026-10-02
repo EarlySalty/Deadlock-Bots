@@ -974,14 +974,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             }
         }
     };
-    let shared_brain_bin =
-        std::path::PathBuf::from(env("BRAIN_BIN").unwrap_or_else(default_brain_bin));
-    // Keep the configured source even when its binary is temporarily absent:
-    // retrieval failure must become explicit coverage, never silent omission.
+    // Alle Wissenseingänge nutzen den laufenden Brain-Dienst. Der alte CLI-Start
+    // kann den privaten FD3-Snapshot des Bots nicht an einen Kindprozess weitergeben.
     let shared_game: Option<Arc<dyn dl_answer::Retriever>> =
-        Some(Arc::new(modglue::BrainRetrieverGlue {
-            bin: shared_brain_bin.clone(),
-        }));
+        Some(Arc::new(dl_answer::game_http::HttpRetriever::new(
+            operating_value("DL_BRAIN_RETRIEVAL_URL")
+                .unwrap_or_else(|| "http://127.0.0.1:8788".into()),
+            dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN").unwrap_or_default(),
+        )));
     let shared_answers = Arc::new(
         dl_answer::AnswerEngine::new(
             concierge_ai.clone(),
