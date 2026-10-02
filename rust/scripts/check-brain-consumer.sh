@@ -14,7 +14,7 @@ run() {
   local result=0
   if [[ "$1" == cargo ]]; then
     shift
-    set -- cargo --config 'build.build-dir="/home/nathanael/.cache/rust-build/{workspace-path-hash}"' "$@"
+    set -- cargo --config "build.build-dir=\"$HOME/.cache/rust-build/{workspace-path-hash}\"" "$@"
   fi
   (cd "$ROOT" && env -i PATH="$PATH" HOME="$HOME" CARGO_HOME="$CARGO_CACHE" RUSTUP_HOME="$RUSTUP_CACHE" CARGO_BUILD_JOBS=2 CARGO_NET_OFFLINE=true SQLX_OFFLINE=true LC_ALL=C.UTF-8 TZ=UTC "$@") > "$LOGS/$label.log" 2>&1 || result=$?
   printf '%s\t%s\n' "$label" "$result" >> "$LOGS/results.tsv"
