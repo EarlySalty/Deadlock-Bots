@@ -247,8 +247,7 @@ impl PassiveHelpResponder {
             })) if !sources.is_empty()
                 && !text.trim().is_empty()
                 && text.chars().count() <= 650
-                && !text.contains(['—', '–'])
-                && !text.contains(" - ")
+                && !has_forbidden_pause(&text)
                 && unavailable_sources.is_empty() =>
             {
                 text
@@ -260,9 +259,7 @@ impl PassiveHelpResponder {
                     Answer::Grounded { ref text, .. } if text.chars().count() > 650 => {
                         "Antwort überschreitet das Kurzbudget"
                     }
-                    Answer::Grounded { ref text, .. }
-                        if text.contains(['—', '–']) || text.contains(" - ") =>
-                    {
+                    Answer::Grounded { ref text, .. } if has_forbidden_pause(text) => {
                         "Antwort enthält verbotene Gedankenstrichpausen"
                     }
                     _ => "unvollständige oder ungültige Antwort",
@@ -311,6 +308,13 @@ impl PassiveHelpResponder {
             "Automatische Hilfe hat eine belegte Antwort gesendet"
         );
     }
+}
+
+fn has_forbidden_pause(text: &str) -> bool {
+    text.contains('—')
+        || [" – ", " - ", " -- "]
+            .iter()
+            .any(|pause| text.contains(pause))
 }
 
 fn normalize(content: &str) -> String {
@@ -508,6 +512,7 @@ mod tests {
             "Geh hinein – dann klappt es.".into(),
             "Geh hinein — dann klappt es.".into(),
             "Geh hinein - dann klappt es.".into(),
+            "Geh hinein -- dann klappt es.".into(),
         ] {
             let mut answer = grounded();
             if let Answer::Grounded { text: value, .. } = &mut answer {
@@ -517,6 +522,13 @@ mod tests {
             responder.handle_message(&event(1, "Wie geht das?")).await;
             assert!(port.0.lock().unwrap().is_empty());
         }
+        let mut answer = grounded();
+        if let Answer::Grounded { text, .. } = &mut answer {
+            *text = "Das dauert 3–4 Minuten.".into();
+        }
+        let (responder, _, port) = responder(answer);
+        responder.handle_message(&event(1, "Wie geht das?")).await;
+        assert_eq!(port.0.lock().unwrap().len(), 1);
     }
 
     #[test]
