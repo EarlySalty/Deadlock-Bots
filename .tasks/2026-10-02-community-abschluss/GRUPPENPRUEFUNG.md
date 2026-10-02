@@ -7,6 +7,7 @@ Basis ist Bots-Main `1e6cdf64`. Der Community-Anteil aus `c8ab0799` und der bele
 Das historische Gate auf `e55236c6` und das erste frische Gate auf `e2b9656d` melden BLOCK. Die Logs stehen in der zugeordneten Statusakte. Die gemeinsame Fixrunde umfasst:
 
 - Streamersync, Ledger, Stimmen und Ergebnisbildung verwenden die gemeinsamen Privacy-Sperren und beachten Widerspruch beziehungsweise Löschgrabstein.
+- Der Clip-Ledger-Import übernimmt nur Discord-Nutzer, deren Privacy-Sperre die laufende Transaktion hält. Während des Wartens neu hinzugekommene Nutzer werden im nächsten Import geprüft. Eine Regression wartet nachweislich auf die Datenbanksperre und prüft beide Importläufe.
 - Zusätzliche Producer-Schlüssel eines Wochen-Duplikats werden in einer eigenen additiven Migration dauerhaft und transaktional gespeichert. Gleicher Schlüssel und anderer Clip bleibt ein Konflikt. Metadaten des ursprünglichen Clips bleiben erhalten.
 - URL-Host und Schema werden normalisiert. Groß-/Kleinschreibung von Pfad, Query und Twitch-Clip-ID bleibt erhalten.
 - Ein fehlgeschlagener Twitch-ID-Lookup verhindert jede Stimme. Die verbindliche Schreibentscheidung prüft die Datenbankzeit nach dem Warten und noch einmal in der INSERT-/UPDATE-Bedingung; die Voting-Sperre serialisiert sie mit der Finalisierung.

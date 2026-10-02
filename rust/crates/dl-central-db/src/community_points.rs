@@ -460,8 +460,9 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
     )
     .fetch_all(&mut *tx)
     .await?;
-    for id in ids {
-        crate::lock_user_privacy(&mut tx, id).await?;
+    // Später hinzugekommene Nutzer folgen im nächsten Import mit eigener Sperre.
+    for id in &ids {
+        crate::lock_user_privacy(&mut tx, *id).await?;
     }
     let places = sqlx::query(
         "INSERT INTO community_points.ledger
@@ -475,6 +476,7 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
            FROM clips.clip_contest_results r
           WHERE r.place BETWEEN 1 AND 3
             AND ((r.source = 'discord' AND r.user_id > 0
+                  AND r.user_id = ANY($3::bigint[])
                   AND NOT EXISTS (
                       SELECT 1 FROM core.user_privacy p
                        WHERE p.user_id = r.user_id
@@ -485,6 +487,7 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
     )
     .bind(SOURCE_CLIP_PLACE)
     .bind(CLIP_PLACE_POINTS.to_vec())
+    .bind(&ids)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -498,6 +501,7 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
            JOIN clips.clip_votings vt ON vt.window_id = v.window_id
           WHERE vt.status = 'closed'
             AND v.voter_user_id > 0
+            AND v.voter_user_id = ANY($3::bigint[])
             AND NOT EXISTS (
                 SELECT 1 FROM core.user_privacy p
                  WHERE p.user_id = v.voter_user_id
@@ -506,6 +510,7 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
     )
     .bind(SOURCE_CLIP_VOTE)
     .bind(CLIP_VOTE_POINTS)
+    .bind(&ids)
     .execute(&mut *tx)
     .await?
     .rows_affected();

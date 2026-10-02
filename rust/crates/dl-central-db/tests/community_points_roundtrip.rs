@@ -324,6 +324,61 @@ fn find(board: &[MemberPoints], id: i64) -> Option<&MemberPoints> {
 }
 
 #[tokio::test]
+async fn clip_ledger_importiert_nur_nutzer_mit_gehaltener_privacy_sperre() {
+    if !dsn_available() {
+        eprintln!("CENTRAL_TEST_DSN oder DATABASE_URL fehlt.");
+        return;
+    }
+    let db = test_pool().await.expect("Testdatenbank");
+    let pool = db.pool();
+    seed_clip_contest(pool).await;
+    let mut blocker = pool.begin().await.expect("Sperrtransaktion");
+    dl_central_db::lock_user_privacy(&mut blocker, 1001)
+        .await
+        .expect("Privacy-Sperre");
+    let writer_pool = pool.clone();
+    let writer = tokio::spawn(async move { import_clip_contest_ledger(&writer_pool).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                  WHERE datname = current_database() AND wait_event = 'advisory')",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("Sperrwartezeit prüfen");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Import wartet nach der Nutzerauswahl auf Privacy-Sperre");
+    exec(
+        pool,
+        "INSERT INTO clips.clip_votes (window_id, voter_user_id, submission_id) VALUES (1, 99, 10)",
+    )
+    .await;
+    blocker.commit().await.expect("Sperre freigeben");
+    writer.await.expect("Importtask").expect("Import");
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM community_points.ledger WHERE discord_id = 99")
+            .fetch_one(pool)
+            .await
+            .expect("Ledger prüfen");
+    assert_eq!(
+        count, 0,
+        "Ein späterer Nutzer hatte noch keine Privacy-Sperre."
+    );
+    let next = import_clip_contest_ledger(pool).await.expect("Folgeimport");
+    assert_eq!(
+        next.votes, 1,
+        "Die nächste Runde übernimmt die neue Stimme."
+    );
+}
+
+#[tokio::test]
 async fn leaderboards_je_zeitraum_mit_ledger_und_datenschutz() {
     if !dsn_available() {
         eprintln!("skipping: CENTRAL_TEST_DSN or DATABASE_URL is required");
