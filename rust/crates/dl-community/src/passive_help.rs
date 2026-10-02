@@ -305,6 +305,16 @@ pub fn passes_prefilter(content: &str) -> bool {
         "wie ",
         "wie?",
         "wo ",
+        "was ",
+        "welch",
+        "wofür",
+        "wozu",
+        "woran",
+        "womit",
+        "wann ",
+        "kann ich",
+        "darf ich",
+        "können wir",
         "warum",
         "wieso",
         "weshalb",
@@ -453,6 +463,13 @@ mod tests {
         assert!(passes_prefilter(
             "kannst du nen server aufmachen, ka wie man das hier macht XD"
         ));
+        for text in [
+            "Was bedeutet das Rang-Gate?",
+            "Kann ich den Sprachkanal umbenennen?",
+            "Wofür ist der Router?",
+        ] {
+            assert!(passes_prefilter(text), "{text}");
+        }
         for text in [
             "server call?",
             "suchst noch?",
