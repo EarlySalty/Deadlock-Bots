@@ -589,7 +589,7 @@ mod db {
                 VoteOutcome::PrivacyOptedOut
             );
         }
-        sqlx::query("UPDATE clips.clip_votings SET voting_end_at = now() - interval '1 second' WHERE window_id = $1")
+        sqlx::query("UPDATE clips.clip_votings SET voting_end_at = now() - interval '1 second', voting_start_at = now() - interval '2 days' WHERE window_id = $1")
             .bind(window_id).execute(db.pool()).await.expect("Voting beenden");
         assert!(clips
             .store
