@@ -16,6 +16,7 @@ pub mod invites;
 pub mod knowledge_client;
 pub mod leave_survey;
 pub mod onboarding;
+pub mod passive_help;
 pub mod privacy;
 pub mod privacy_ui;
 pub mod reaction_roles;

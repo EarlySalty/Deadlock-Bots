@@ -124,6 +124,7 @@ pub struct VoiceChangeHintResponder {
     classifier: Option<Arc<dyn VoiceHintClassifier>>,
     port: Arc<dyn VoiceHintReplyPort>,
     sent_by_user: Mutex<HashMap<u64, Instant>>,
+    excluded_channel: Option<u64>,
 }
 
 impl VoiceChangeHintResponder {
@@ -143,11 +144,18 @@ impl VoiceChangeHintResponder {
             classifier,
             port,
             sent_by_user: Mutex::new(HashMap::new()),
+            excluded_channel: None,
         }
+    }
+
+    pub fn excluding_channel(mut self, channel_id: Option<u64>) -> Self {
+        self.excluded_channel = channel_id;
+        self
     }
 
     pub async fn handle_message(&self, event: &dl_discord::MessageEvent) {
         if !self.enabled
+            || self.excluded_channel == Some(event.channel_id)
             || event.guild_id.is_none()
             || is_ignored_channel(event.channel_id)
             || !passes_voice_change_prefilter(&event.content)

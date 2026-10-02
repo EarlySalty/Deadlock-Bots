@@ -34,6 +34,7 @@ const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", 
 // Sticker, Anhänge und Weiterleitungen bleiben reguläre Nutzernachrichten.
 fn is_user_message(message: &Message) -> bool {
     !message.author.bot
+        && message.webhook_id.is_none()
         && matches!(
             message.kind,
             MessageType::Regular | MessageType::InlineReply
@@ -885,6 +886,9 @@ mod tests {
             assert!(super::is_user_message(&message));
         }
         message.author.bot = true;
+        assert!(!super::is_user_message(&message));
+        message.author.bot = false;
+        message.webhook_id = Some(serenity::all::WebhookId::new(123));
         assert!(!super::is_user_message(&message));
     }
     use super::*;

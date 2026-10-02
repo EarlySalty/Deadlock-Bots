@@ -1135,7 +1135,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::ConciergeGlue {
             adapter: adapter.clone(),
         }),
-        concierge_ai,
+        concierge_ai.clone(),
         concierge_config.clone(),
         shared_answers.clone(),
     );
@@ -1727,6 +1727,34 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
+        let brain_help_channel_id = operating_value("DL_BRAIN_HELP_CHANNEL_ID")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|id| *id > 0);
+        let brain_help_active_channel = if let (Some(channel_id), Some(provider)) =
+            (brain_help_channel_id, concierge_ai.clone())
+        {
+            let backend = Arc::new(dl_community::passive_help::GroundedHelpBackend {
+                provider,
+                answers: shared_answers.clone(),
+            });
+            let responder = Arc::new(dl_community::passive_help::PassiveHelpResponder::new(
+                channel_id,
+                operating_value("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
+                backend,
+                adapter.clone(),
+            ));
+            let _passive_help = dl_community::passive_help::spawn(responder, &dispatcher);
+            tracing::info!(
+                channel_id,
+                "Automatische Brain-Hilfe in der Mitspieler-Suche aktiviert"
+            );
+            Some(channel_id)
+        } else {
+            tracing::info!(
+                "Automatische Brain-Hilfe inaktiv: Zielkanal oder zentraler KI-Connector fehlt"
+            );
+            None
+        };
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
         let voice_hint_enabled =
@@ -1744,7 +1772,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 voice_hint_enabled,
                 voice_hint_classifier,
                 adapter.clone(),
-            ),
+            )
+            .excluding_channel(brain_help_active_channel),
         );
         let _voice_change_hint_responder =
             dl_community::voice_change_hint::spawn(voice_hint_responder, &dispatcher);
@@ -2118,7 +2147,8 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         assert!(source.contains("FaqChat::with_answers("));
         assert!(source.contains("Concierge::with_answers("));
         assert!(source.contains("SharedBrainAnswerer"));
-        assert_eq!(source.matches("shared_answers.clone()").count(), 3);
+        assert_eq!(source.matches("shared_answers.clone()").count(), 4);
+        assert!(source.contains("passive_help::GroundedHelpBackend"));
         assert!(!source.contains("BrainAiGlue"));
         assert!(!source.contains("chat_text_generator(dl_ai::LlmUseCase::Faq"));
     }
