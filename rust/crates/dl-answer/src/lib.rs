@@ -238,10 +238,22 @@ impl AnswerEngine {
         retrieval_context: &str,
         scope: Scope,
     ) -> Result<Answer, AnswerError> {
+        self.answer_with_context_and_style(question, retrieval_context, scope, "")
+            .await
+    }
+
+    /// Vertraute Stilvorgabe des Dienstes; wird ausschließlich im Systemprompt verwendet.
+    pub async fn answer_with_context_and_style(
+        &self,
+        question: &str,
+        retrieval_context: &str,
+        scope: Scope,
+        style: &str,
+    ) -> Result<Answer, AnswerError> {
         let started = Instant::now();
         let result = tokio::time::timeout(
             self.timeout,
-            self.answer_inner(question, retrieval_context, scope),
+            self.answer_inner(question, retrieval_context, scope, style),
         )
         .await
         .map_err(|_| AnswerError::Timeout)?;
@@ -258,6 +270,7 @@ impl AnswerEngine {
         question: &str,
         retrieval_context: &str,
         scope: Scope,
+        style: &str,
     ) -> Result<Answer, AnswerError> {
         if question.trim().is_empty() || question.chars().count() > 4000 {
             return Ok(Answer::NoEvidence);
@@ -310,7 +323,7 @@ impl AnswerEngine {
         let response = provider
             .chat(
                 &[
-                    ChatMessage::system(format!("{}\n\n{}\nDein answer-Text darf höchstens {answer_budget} UTF-16-Einheiten enthalten. Verdichte in ganzen Sätzen, ohne notwendige Einschränkungen wegzulassen. Bei unavailable_sources erkläre nur den durch vorhandene Belege gedeckten Teil; die Anwendung ergänzt einen sichtbaren Ausfallhinweis.", self.persona, SYSTEM)),
+                    ChatMessage::system(format!("{}\n\n{}\nDein answer-Text darf höchstens {answer_budget} UTF-16-Einheiten enthalten. Verdichte in ganzen Sätzen, ohne notwendige Einschränkungen wegzulassen. Bei unavailable_sources erkläre nur den durch vorhandene Belege gedeckten Teil; die Anwendung ergänzt einen sichtbaren Ausfallhinweis.\n{style}", self.persona, SYSTEM)),
                     ChatMessage::user(payload.to_string()),
                 ],
                 ChatParams {
@@ -606,6 +619,54 @@ mod tests {
             text: "Paten helfen neuen Spielern.".into(),
             observed_at: None,
         }
+    }
+    #[tokio::test]
+    async fn vertrauter_hilfestil_bleibt_im_systemprompt_und_aus_der_belegsuche() {
+        #[derive(Default)]
+        struct Capture(std::sync::Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl Retriever for Capture {
+            async fn retrieve(&self, question: &str) -> Result<Retrieved, AnswerError> {
+                self.0.lock().unwrap().push(question.into());
+                Ok(Retrieved {
+                    evidence: vec![evidence("C1")],
+                    ..Default::default()
+                })
+            }
+        }
+        #[async_trait::async_trait]
+        impl ChatProvider for Capture {
+            async fn chat(
+                &self,
+                messages: &[ChatMessage],
+                _: ChatParams,
+            ) -> Result<dl_ai::ChatResponse, dl_ai::ChatProviderError> {
+                assert!(messages[0].content.contains("VERTRAUTER_KURZSTIL"));
+                assert!(!messages[1].content.contains("VERTRAUTER_KURZSTIL"));
+                Ok(dl_ai::ChatResponse::text(
+                    r#"{"answerable":true,"answer":"Paten helfen neuen Spielern.","source_ids":["C1"]}"#,
+                ))
+            }
+        }
+        let capture = Arc::new(Capture::default());
+        let engine = AnswerEngine::new(
+            Some(capture.clone()),
+            capture.clone(),
+            None,
+            Duration::from_secs(1),
+        );
+        assert!(matches!(
+            engine
+                .answer_with_context_and_style(
+                    "Was ist ein Pate?",
+                    "Was ist ein Pate?",
+                    Scope::CommunityAndGame,
+                    "VERTRAUTER_KURZSTIL"
+                )
+                .await,
+            Ok(Answer::Grounded { .. })
+        ));
+        assert_eq!(*capture.0.lock().unwrap(), vec!["Was ist ein Pate?"]);
     }
     #[tokio::test]
     async fn ein_quellenausfall_erhaelt_andere_belege_mit_unvermeidbarem_hinweis() {
