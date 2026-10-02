@@ -353,6 +353,7 @@ pub fn passes_prefilter(content: &str) -> bool {
             "geht nicht",
             "klappt nicht",
             "keine ahnung",
+            "kein plan",
             "ka ",
             "ka,",
             "weiß",
@@ -502,6 +503,7 @@ mod tests {
             "sprachkanäle fehlen",
             "Ich kann dem Sprachkanal nicht beitreten",
             "Ich kann die Fähigkeit nicht aktivieren",
+            "Kannst du den Server aufmachen? Kein Plan.",
         ] {
             assert!(passes_prefilter(text), "{text}");
         }
