@@ -17,6 +17,16 @@ Das historische Gate auf `e55236c6` und das erste frische Gate auf `e2b9656d` me
 
 Die gezielte Suite muss diese Änderungen gegen eine eigene Wegwerf-Datenbank prüfen. Ein Quellbefund ist kein Testergebnis. Das erneute Gate läuft erst auf dem vollständigen getesteten Fixstand.
 
+## Erste gezielte Suite und Nachprüfung
+
+Die vollständige erste Suite lief auf `5f449720f99ef10b666b644bd95eb2c91a2d9285` mit Cargo 1.98.1 und höchstens zwei Jobs. 100 Tests bestanden, ein Test schlug fehl, keiner wurde ignoriert. Der abschließende Compile-Check für `dl-bot`, `dl-web` und `dl-community-points-sync` bestand. Die eigene Timescale-Wegwerf-Datenbank wurde entfernt; beide Hostsperren wurden nachweislich freigegeben. Der Slot wurde ausdrücklich an Challenges für dessen bestätigten kurzen Debugcheck übergeben.
+
+Die Regression `lookupfehler_schreibt_keine_stimme` deckte einen alten Fallback auf: Eine fehlende Verknüpfungstabelle lieferte eine leere Twitch-Zuordnung statt eines Fehlers. Nach dem vollständigen Suiteende wurde dieser Fallback entfernt. Die unveränderte Regression und die gezielten Clippy-/Schema-Prüfungen folgen im bestätigten Slot nach Patchnotes auf dem neuen vollständigen Fix-SHA. Bis dahin ist dieser Fix ungetestet und R2 nicht freigegeben.
+
+Privacy-Grabsteine in Streamersync, Stimmen und Ergebnisbildung, die frische Schreibdeadline, der dauerhafte Wochen-Duplikatschlüssel und die erhaltene Groß-/Kleinschreibung von URL-Pfad und Query bestanden ihre gezielten Prüfungen. Der konkurrierende Clip-Ledger-Import und acht Runden paralleler Kontozuordnung bestanden ebenfalls. Logpfade, vollständige Ergebnisse und Ressourcenbelege stehen in der zugeordneten Statusdatei.
+
+Die Sichtprüfung bleibt offen. Für den kurzen Folgeslot nach Twitch sind die unveränderten Renderer-, SteamHint- und Escaping-Blöcke aus `web.rs` samt Quell- und Blockhashes außerhalb des Worktrees vorbereitet. Ein HTML-Export allein ist kein Browser- oder Live-Nachweis.
+
 ## Gemeinsamer Vertrag und Folge
 
 Twitch ist Integrationsverantwortlicher der Gruppe `community-1035-472`. Bots-C9 wird zuerst integriert; danach muss der Community-Branch nachziehen und erneut durch das Gruppen-Gate. Der Bots-Consumer muss vor dem Twitch-Producer ausgeliefert werden. Bot und Webdienst `deadlock-web-rust.service` gehören zum gemeinsamen Bots-Release.

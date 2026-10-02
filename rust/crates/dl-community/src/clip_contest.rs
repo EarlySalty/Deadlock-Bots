@@ -1256,17 +1256,9 @@ impl ClipStore {
         Ok(affected == 1)
     }
 
-    /// Mit Discord verknüpfte Twitch-IDs (Paket A). Fehlt die Tabelle noch,
-    /// gibt es keine Verknüpfungen.
+    /// Mit Discord verknüpfte Twitch-IDs (Paket A). Eine fehlende Tabelle oder
+    /// ein Datenbankfehler verhindert die Stimmabgabe.
     pub async fn linked_twitch_ids(&self, user_id: u64) -> Result<Vec<String>, sqlx::Error> {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT to_regclass('core.discord_platform_connections') IS NOT NULL",
-        )
-        .fetch_one(self.pool())
-        .await?;
-        if !exists {
-            return Ok(Vec::new());
-        }
         sqlx::query_scalar(
             "SELECT platform_user_id::text FROM core.discord_platform_connections
               WHERE discord_id::text = $1 AND platform = 'twitch'",
