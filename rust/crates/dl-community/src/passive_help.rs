@@ -116,6 +116,14 @@ impl PassiveHelpResponder {
 
     pub async fn handle_message(&self, event: &MessageEvent) {
         let content = event.content.trim();
+        let age = chrono::Utc::now().signed_duration_since(event.message_created_at);
+        if age.num_seconds() > CONTEXT_AGE.as_secs() as i64 {
+            tracing::debug!(
+                message_id = event.message_id,
+                "Automatische Hilfe überspringt eine veraltete Nachricht"
+            );
+            return;
+        }
         if self.channel_id == 0
             || event.channel_id != self.channel_id
             || event.guild_id.is_none()
@@ -147,9 +155,12 @@ impl PassiveHelpResponder {
                 .map(|(author, _, text)| format!("{author}: {text}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            state
-                .recent
-                .push_back((event.author_id, now, content.chars().take(500).collect()));
+            state.recent.push_back((
+                event.author_id,
+                now.checked_sub(Duration::from_millis(age.num_milliseconds().max(0) as u64))
+                    .unwrap_or(now),
+                content.chars().take(500).collect(),
+            ));
             while state.recent.len() > 6 {
                 state.recent.pop_front();
             }
@@ -301,45 +312,47 @@ fn normalize(content: &str) -> String {
 pub fn passes_prefilter(content: &str) -> bool {
     let lower = content.to_lowercase();
     // Inhaltliche Prüfung folgt im zentralen KI-Connector. Diese Signale sparen nur Aufrufe.
-    [
-        "wie ",
-        "wie?",
-        "wo ",
-        "was ",
-        "welch",
-        "wofür",
-        "wozu",
-        "woran",
-        "womit",
-        "wann ",
-        "kann ich",
-        "darf ich",
-        "können wir",
-        "warum",
-        "wieso",
-        "weshalb",
-        "hilfe",
-        "help",
-        "nicht",
-        "keine ahnung",
-        "ka ",
-        "ka,",
-        "weiß",
-        "weiss",
-        "versteh",
-        "funktioniert",
-        "fehler",
-        "problem",
-        "kann man",
-        "könnte",
-        "geht das",
-        "bekomme",
-        "finde",
-        "how ",
-        "where ",
-    ]
-    .iter()
-    .any(|signal| lower.contains(signal))
+    crate::voice_change_hint::passes_voice_change_prefilter(content)
+        || [
+            "wie ",
+            "wie?",
+            "wo ",
+            "was ",
+            "welch",
+            "wofür",
+            "wozu",
+            "woran",
+            "womit",
+            "wann ",
+            "kann ich",
+            "darf ich",
+            "können wir",
+            "warum",
+            "wieso",
+            "weshalb",
+            "hilfe",
+            "help",
+            "geht nicht",
+            "klappt nicht",
+            "keine ahnung",
+            "ka ",
+            "ka,",
+            "weiß",
+            "weiss",
+            "versteh",
+            "funktioniert",
+            "fehler",
+            "problem",
+            "kann man",
+            "könnte",
+            "geht das",
+            "bekomme",
+            "finde",
+            "how ",
+            "where ",
+        ]
+        .iter()
+        .any(|signal| lower.contains(signal))
 }
 
 pub fn spawn(
@@ -467,6 +480,8 @@ mod tests {
             "Was bedeutet das Rang-Gate?",
             "Kann ich den Sprachkanal umbenennen?",
             "Wofür ist der Router?",
+            "voice channels weg?",
+            "sprachkanäle fehlen",
         ] {
             assert!(passes_prefilter(text), "{text}");
         }
@@ -476,6 +491,10 @@ mod tests {
             "joa",
             "qp? dann Ghosta mitspielen wenn er will",
             "mach mal server auf",
+            "heute nicht",
+            "ich spiele nicht mehr",
+            "nicht ranked",
+            "Ranked hab ich eh nicht frei",
         ] {
             assert!(!passes_prefilter(text), "{text}");
         }
@@ -514,7 +533,7 @@ mod tests {
     async fn negative_klassifizierung_sperrt_anschliessende_hilfe_nicht() {
         let (responder, backend, port) = responder(grounded());
         responder
-            .handle_message(&event(1, "Ranked hab ich eh nicht frei"))
+            .handle_message(&event(1, "warum immer ranked lol"))
             .await;
         responder.handle_message(&event(2, "same")).await;
         responder
@@ -568,7 +587,7 @@ mod tests {
             state.last_reply = None;
         }
         responder
-            .handle_message(&event(2, "Ranked hab ich eh nicht frei"))
+            .handle_message(&event(2, "warum immer ranked lol"))
             .await;
         assert_eq!(port.0.lock().unwrap().len(), 1);
         assert_eq!(backend.questions.lock().unwrap().len(), 2);
