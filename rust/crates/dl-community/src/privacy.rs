@@ -5041,6 +5041,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn twitch_viewer_privacy_additive_migration_schuetzt_bestehende_optouts() {
+        use dl_central_db::community_points::apply_viewer_page;
+        let db = mk_db().await;
+        let pool = db.pool();
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        apply_viewer_page(
+            pool,
+            &[privacy_viewer_row("111"), privacy_viewer_row("222")],
+            None,
+        )
+        .await
+        .expect("Alter Viewerbestand");
+        set_opt_out_for_test(pool, 42).await;
+        // Ausschließlich die eigene Wegwerf-DB auf den Zustand vor der
+        // additiven Migration setzen, ohne veröffentlichte Checksums zu ändern.
+        sqlx::raw_sql(
+            "DROP TABLE community_points.twitch_viewer_privacy_blocks;
+             DELETE FROM core.privacy_field_registry
+              WHERE schema_name = 'community_points' AND table_name = 'twitch_viewer_privacy_blocks';
+             UPDATE core.privacy_field_registry SET erasure_action = 'retain_non_personal'
+              WHERE schema_name = 'community_points' AND table_name = 'twitch_viewer_daily'
+                AND column_name = 'twitch_user_id';",
+        ).execute(pool).await.expect("Migrationsvorzustand");
+        sqlx::raw_sql(include_str!(
+            "../../dl-central-db/migrations/20261003020000_twitch_viewer_privacy.sql"
+        ))
+        .execute(pool)
+        .await
+        .expect("Additive Privacy-Migration");
+        let remaining: Vec<String> = sqlx::query_scalar(
+            "SELECT twitch_user_id FROM community_points.twitch_viewer_daily ORDER BY twitch_user_id",
+        ).fetch_all(pool).await.expect("Migrierter Viewerbestand");
+        assert_eq!(remaining, vec!["222"]);
+        sqlx::query("DELETE FROM core.discord_platform_connections WHERE discord_id = 42")
+            .execute(pool)
+            .await
+            .expect("Verknüpfung entfernen");
+        // Prüft auch, dass der SQL-Backfill und der Rust-Leser denselben Hash bilden.
+        assert_eq!(
+            apply_viewer_page(pool, &[privacy_viewer_row("111")], None)
+                .await
+                .expect("Backfill-Importschutz"),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn twitch_viewer_privacy_delete_first_blockiert_wartenden_import() {
         use dl_central_db::community_points::apply_viewer_page;
         let db = mk_db().await;
