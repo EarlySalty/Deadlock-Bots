@@ -85,3 +85,24 @@ fn dangerous_invalid_or_secret_runtime_fields_fail_before_clients() {
         );
     }
 }
+
+#[test]
+fn typisierter_brain_pfad_weist_offenen_testmodus_beim_laden_ab() {
+    for mode in ["legacy", "typed", "shadow"] {
+        for open in [
+            "",
+            "brain_open_test_mode=false",
+            "brain_open_test_mode=true",
+        ] {
+            let text = format!(
+                "schema_version=1\n[runtime.ai]\nbrain_client_mode='{mode}'\nbrain_api_endpoint='http://127.0.0.1:8788'\nbrain_api_scopes=['bot.public']\n{open}\n"
+            );
+            let allowed = mode != "typed" || open != "brain_open_test_mode=true";
+            assert_eq!(BotConfig::parse(&text).is_ok(), allowed, "{mode}, {open}");
+            let directory = tempfile::tempdir().expect("Testverzeichnis");
+            let path = directory.path().join("bot.toml");
+            std::fs::write(&path, text).expect("Testkonfiguration");
+            assert_eq!(BotConfig::load(&path).is_ok(), allowed, "{mode}, {open}");
+        }
+    }
+}

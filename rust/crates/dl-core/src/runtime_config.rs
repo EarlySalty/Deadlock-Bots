@@ -308,6 +308,13 @@ impl RuntimeConfig {
         {
             return Err(invalid());
         }
+        if self.ai.brain_client_mode() == BrainClientMode::Typed
+            && self.ai.brain_open_test_mode.unwrap_or(false)
+        {
+            return Err(BotConfigError::Validation(
+                "Der typisierte Brain-Antwortpfad erlaubt keinen offenen Testmodus",
+            ));
+        }
         for text in [
             &self.ai.openai_model,
             &self.ai.turnier_model,
