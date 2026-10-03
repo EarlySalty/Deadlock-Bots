@@ -22,6 +22,14 @@ struct Args {
     unit: Option<String>,
     #[arg(long)]
     credential: Option<PathBuf>,
+    /// Meldet einen bereits ausgeschalteten DevFeed nach Discord-Drosselung.
+    #[arg(long, conflicts_with = "install")]
+    devfeed_429: bool,
+    #[arg(long, requires = "devfeed_429")]
+    event_id: Option<String>,
+    /// Einmaliger, klar gekennzeichneter Test ohne Discord-Drosselung.
+    #[arg(long, requires = "devfeed_429")]
+    notification_test: bool,
     /// Installiert ausschließlich die bestehende OnFailure-Template-Unit.
     #[arg(long)]
     install: bool,
@@ -29,6 +37,42 @@ struct Args {
     unit_directory: Option<PathBuf>,
     #[arg(long, requires = "install")]
     binary: Option<PathBuf>,
+}
+
+const DEVFEED_UNIT: &str = "deadlock-devfeed.service";
+const BOTLOGS_CHANNEL: u64 = 1_374_364_800_817_303_632;
+
+fn valid_event_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn validate_devfeed_event<'a>(unit: &str, channel: u64, id: Option<&'a str>) -> Result<&'a str> {
+    if unit != DEVFEED_UNIT || channel != BOTLOGS_CHANNEL {
+        bail!("DevFeed-Meldungen sind ausschließlich für die Feed-Unit und den bestehenden Botlogs-Kanal erlaubt.");
+    }
+    id.filter(|id| valid_event_id(id))
+        .context("DevFeed-Ereignis-ID ist ungültig.")
+}
+
+fn test_attempt_reserved(state: &state::State) -> bool {
+    !state.confirmed.is_empty() || !state.uncertain_attempts.is_empty()
+}
+
+fn devfeed_content(test: bool, repeats: u64) -> String {
+    if test {
+        return "[Test der DevFeed-Meldung] Der Versand in die Botlogs funktioniert. Für diesen Test wurde keine Discord-Drosselung ausgelöst und der Feed nicht ausgeschaltet.".into();
+    }
+    let mut content = "Der DevFeed hat eine Discord-Drosselung (HTTP 429) erkannt und wurde sofort ausgeschaltet. Er startet nicht automatisch wieder. Ein bewusster Neustart ist erforderlich.".to_owned();
+    if repeats > 0 {
+        content.push_str(&format!(
+            " Weitere Wiederholungen seit der letzten Meldung: {repeats}."
+        ));
+    }
+    content
 }
 
 #[derive(Deserialize)]
@@ -226,14 +270,40 @@ async fn run(args: Args) -> Result<()> {
         .as_deref()
         .filter(|unit| valid_unit(unit))
         .context("Auslösende Dienst-Unit ist ungültig.")?;
-    // Nur vom OnFailure-Ereignis gelieferte Laufzeitmetadaten, kein ENV-Config.
+    // OnFailure nutzt seine Dienstinstanz, der 429-Modus seine direkte Ereignis-ID.
     // Kein Fallback auf systemctl show: dort kann schon der nächste Start stehen.
-    let invocation = std::env::var("MONITOR_INVOCATION_ID")
-        .context("Systemd hat keine auslösende Dienstinstanz übergeben.")?;
-    let invocation = journal::validate_invocation(&invocation)?;
-    let store = state::Store::open(&config.state_directory, &key(unit))?;
-    let mut state = store.load_or_import(config.legacy_state_directory.as_deref(), unit)?;
-    state.observe(invocation);
+    let invocation = if args.devfeed_429 {
+        let id = validate_devfeed_event(unit, config.channel_id, args.event_id.as_deref())?;
+        if args.notification_test {
+            "devfeed-429-notification-test"
+        } else {
+            id
+        }
+        .to_owned()
+    } else {
+        let id = std::env::var("MONITOR_INVOCATION_ID")
+            .context("Systemd hat keine auslösende Dienstinstanz übergeben.")?;
+        journal::validate_invocation(&id)?.to_owned()
+    };
+    let state_key = if args.notification_test {
+        format!("{unit}:devfeed-429-test")
+    } else if args.devfeed_429 {
+        format!("{unit}:devfeed-429")
+    } else {
+        unit.to_owned()
+    };
+    let store = state::Store::open(&config.state_directory, &key(&state_key))?;
+    let legacy = if args.devfeed_429 {
+        None
+    } else {
+        config.legacy_state_directory.as_deref()
+    };
+    let mut state = store.load_or_import(legacy, unit)?;
+    if args.notification_test && test_attempt_reserved(&state) {
+        println!("Die einmalige Botlogs-Testmeldung wurde bereits versucht.");
+        return Ok(());
+    }
+    state.observe(&invocation);
     store.save(&state)?;
     if state.unreported == 0 && state.pending.is_none() {
         println!("Diese Dienstinstanz wurde bereits gemeldet.");
@@ -244,18 +314,22 @@ async fn run(args: Args) -> Result<()> {
         return Ok(());
     }
     if state.pending.is_none() {
-        let cause = safe_cause(journal::cause(unit, invocation).await);
         let repeats = state.unreported.saturating_sub(1);
-        let attempts = if state.unreported == 1 {
-            "ein fehlgeschlagener Start".to_owned()
+        let content = if args.devfeed_429 {
+            devfeed_content(args.notification_test, repeats)
         } else {
-            format!("{} fehlgeschlagene Starts", state.unreported)
+            let cause = safe_cause(journal::cause(unit, &invocation).await);
+            let attempts = if state.unreported == 1 {
+                "ein fehlgeschlagener Start".to_owned()
+            } else {
+                format!("{} fehlgeschlagene Starts", state.unreported)
+            };
+            format!("**Dienst ausgefallen: `{unit}`**\nHost: `{}`\n{cause}\nSeit der letzten bestätigten Meldung: {attempts}. Weitere Wiederholungen: {repeats}.\nWeitere Meldungen: höchstens einmal pro Tag und zweimal innerhalb von sieben Tagen.", config.host_label)
         };
-        let content = format!("**Dienst ausgefallen: `{unit}`**\nHost: `{}`\n{cause}\nSeit der letzten bestätigten Meldung: {attempts}. Weitere Wiederholungen: {repeats}.\nWeitere Meldungen: höchstens einmal pro Tag und zweimal innerhalb von sieben Tagen.", config.host_label);
         state.pending = Some(state::Pending {
             key: format!(
                 "unit-failure-{}",
-                key(&format!("{unit}:{invocation}:{}", state.sequence))
+                key(&format!("{state_key}:{invocation}:{}", state.sequence))
             ),
             content,
             included: state.unreported,
@@ -306,6 +380,95 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devfeed_mode_is_confined_to_existing_feed_and_botlogs() {
+        assert_eq!(
+            validate_devfeed_event(DEVFEED_UNIT, BOTLOGS_CHANNEL, Some("429-event-123")).unwrap(),
+            "429-event-123"
+        );
+        for id in ["", "bad\nevent", "@everyone", "bad/event", "ü"] {
+            assert!(validate_devfeed_event(DEVFEED_UNIT, BOTLOGS_CHANNEL, Some(id)).is_err());
+        }
+        assert!(
+            validate_devfeed_event(DEVFEED_UNIT, BOTLOGS_CHANNEL, Some(&"a".repeat(65))).is_err()
+        );
+        assert!(validate_devfeed_event("dl-bot.service", BOTLOGS_CHANNEL, Some("event")).is_err());
+        assert!(validate_devfeed_event(DEVFEED_UNIT, 1, Some("event")).is_err());
+        assert!(validate_devfeed_event(DEVFEED_UNIT, BOTLOGS_CHANNEL, None).is_err());
+    }
+
+    #[test]
+    fn devfeed_event_reuses_daily_weekly_budget_and_deduplication() {
+        let mut state = state::State::default();
+        state.observe("event-1");
+        state.observe("event-1");
+        assert_eq!(state.unreported, 1);
+        assert!(state.eligible(100));
+        state.pending = Some(state::Pending {
+            key: "synthetic-key".into(),
+            content: devfeed_content(false, 0),
+            included: 1,
+        });
+        state.reserve_attempt(100);
+        state.confirm(100);
+        state.observe("event-2");
+        state.observe("event-3");
+        assert!(!state.eligible(86_499));
+        assert!(state.eligible(86_500));
+        assert!(devfeed_content(false, state.unreported.saturating_sub(1))
+            .contains("Wiederholungen seit der letzten Meldung: 1"));
+        state.pending = Some(state::Pending {
+            key: "synthetic-key-2".into(),
+            content: devfeed_content(false, 1),
+            included: 2,
+        });
+        state.reserve_attempt(86_500);
+        state.confirm(86_500);
+        assert!(!state.eligible(172_900));
+    }
+
+    #[test]
+    fn notification_test_is_marked_and_never_retried_after_uncertain_send() {
+        let text = devfeed_content(true, 0);
+        assert!(text.starts_with("[Test der DevFeed-Meldung]"));
+        assert!(text.contains("keine Discord-Drosselung ausgelöst"));
+        let mut state = state::State::default();
+        assert!(!test_attempt_reserved(&state));
+        state.reserve_attempt(100);
+        let restored: state::State =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(test_attempt_reserved(&restored));
+        assert!(restored.eligible(700_000));
+        assert!(test_attempt_reserved(&restored));
+    }
+
+    #[test]
+    fn devfeed_cli_cannot_mix_test_event_with_install_or_ordinary_failure() {
+        assert!(Args::try_parse_from([
+            "notify",
+            "--config",
+            "/config.json",
+            "--notification-test"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from([
+            "notify",
+            "--config",
+            "/config.json",
+            "--event-id",
+            "event"
+        ])
+        .is_err());
+        assert!(Args::try_parse_from([
+            "notify",
+            "--config",
+            "/config.json",
+            "--devfeed-429",
+            "--install"
+        ])
+        .is_err());
+    }
     #[test]
     fn unit_and_invocation_cannot_inject_journal_filters_or_discord_markup() {
         assert!(valid_unit("steam-core-2.service"));
@@ -369,6 +532,9 @@ mod tests {
             config,
             unit: None,
             credential: None,
+            devfeed_429: false,
+            event_id: None,
+            notification_test: false,
             install: true,
             unit_directory: Some(root.path().to_owned()),
             binary: Some(binary),
