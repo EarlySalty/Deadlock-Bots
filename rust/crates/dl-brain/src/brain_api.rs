@@ -149,11 +149,31 @@ mod tests {
                 .local_addr()
                 .expect("Isolierte Testoperation muss gelingen")
         );
+        listener
+            .set_nonblocking(true)
+            .expect("Isolierte Testoperation muss gelingen");
         let thread = thread::spawn(move || {
             let mut queries = Vec::new();
             for status in statuses {
-                let (mut stream, _) = listener
-                    .accept()
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "Testclient verbindet nicht rechtzeitig"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => panic!("Isolierte Testverbindung fehlgeschlagen"),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("Isolierte Testoperation muss gelingen");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
                     .expect("Isolierte Testoperation muss gelingen");
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
