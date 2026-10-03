@@ -17,15 +17,33 @@ use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 fn community_question(content: &str) -> bool {
     let text = content.trim().to_lowercase();
-    if text.is_empty() || text.contains("<@") || text.starts_with('>')
-        || text.starts_with("danke") || text.starts_with("erledigt")
-        || text.starts_with("hat sich") || text.starts_with("alles klar") {
+    if text.is_empty()
+        || text.contains("<@")
+        || text.starts_with('>')
+        || text.starts_with("danke")
+        || text.starts_with("erledigt")
+        || text.starts_with("hat sich")
+        || text.starts_with("alles klar")
+    {
         return false;
     }
-    (text.ends_with('?') && ["wie ","wo ","wer ","was ","warum ","wann ","kann ","könnte ","gibt ","hat ","ist ","sind ","welche ","welcher "]
-        .iter().any(|start|text.starts_with(start))) || ["wie kann ich ", "wo finde ich ", "kann mir jemand ",
-        "ich brauche hilfe", "ich möchte deadlock spielen", "kann mich jemand einladen"]
-        .iter().any(|start| text.starts_with(start))
+    (text.ends_with('?')
+        && [
+            "wie ", "wo ", "wer ", "was ", "warum ", "wann ", "kann ", "könnte ", "gibt ", "hat ",
+            "ist ", "sind ", "welche ", "welcher ",
+        ]
+        .iter()
+        .any(|start| text.starts_with(start)))
+        || [
+            "wie kann ich ",
+            "wo finde ich ",
+            "kann mir jemand ",
+            "ich brauche hilfe",
+            "ich möchte deadlock spielen",
+            "kann mich jemand einladen",
+        ]
+        .iter()
+        .any(|start| text.starts_with(start))
 }
 
 const UNAVAILABLE: &str = "Der Serverguide ist gerade nicht erreichbar. Du kannst deine Frage in <#1491953161747955853> stellen.";
@@ -98,7 +116,9 @@ impl GuideConfig {
     }
 
     fn proactive_question(&self, event: &MessageEvent) -> bool {
-        let age = chrono::Utc::now().signed_duration_since(event.message_created_at).num_seconds();
+        let age = chrono::Utc::now()
+            .signed_duration_since(event.message_created_at)
+            .num_seconds();
         self.guild_id == 1289721245281292288
             && event.guild_id == Some(self.guild_id)
             && event.channel_id == 1426220702054355077
@@ -256,7 +276,13 @@ impl Routes {
         let guild = event.guild_id.unwrap_or(0);
         let key = (guild, event.channel_id, event.author_id);
         if event.guild_id.is_none() {
-            return Some(("dm", event.content.clone(), self.conversations.get(&key).and_then(|conversation|conversation.id.clone())));
+            return Some((
+                "dm",
+                event.content.clone(),
+                self.conversations
+                    .get(&key)
+                    .and_then(|conversation| conversation.id.clone()),
+            ));
         }
         if let Some(bot) = bot {
             for mention in [format!("<@{bot}>"), format!("<@!{bot}>")] {
@@ -726,10 +752,12 @@ impl GuideAdapter {
             return;
         }
         // Die Zuordnung wird kurz gesperrt; menschliche Hilfe bleibt während des Kernaufrufs sichtbar.
-        let Some((addressed, content, conversation_id)) =
-            routes.addressed(&event, bot, self.config.idle_timeout).or_else(|| {
-                self.config.proactive_question(&event).then(||
-                    ("community_question", event.content.clone(), None))
+        let Some((addressed, content, conversation_id)) = routes
+            .addressed(&event, bot, self.config.idle_timeout)
+            .or_else(|| {
+                self.config
+                    .proactive_question(&event)
+                    .then(|| ("community_question", event.content.clone(), None))
             })
         else {
             return;
@@ -1275,38 +1303,60 @@ mod tests {
     use super::*;
     #[test]
     fn dm_behält_eigene_begrenzte_unterhaltung() {
-        let mut routes=ongoing();
-        let conversation=routes.conversations.remove(&(1,10,20)).expect("Testunterhaltung fehlt");
-        routes.conversations.insert((0,10,20),conversation);
-        let mut event=message(20,10,"Mein Freundescode: ABCD");event.guild_id=None;
-        assert_eq!(routes.addressed(&event,Some(99),Duration::from_secs(300)).expect("DM-Zuordnung fehlt").2,Some("conversation".into()));
-        event.author_id=21;
-        assert!(routes.addressed(&event,Some(99),Duration::from_secs(300)).expect("Neue DM fehlt").2.is_none());
+        let mut routes = ongoing();
+        let conversation = routes
+            .conversations
+            .remove(&(1, 10, 20))
+            .expect("Testunterhaltung fehlt");
+        routes.conversations.insert((0, 10, 20), conversation);
+        let mut event = message(20, 10, "Mein Freundescode: ABCD");
+        event.guild_id = None;
+        assert_eq!(
+            routes
+                .addressed(&event, Some(99), Duration::from_secs(300))
+                .expect("DM-Zuordnung fehlt")
+                .2,
+            Some("conversation".into())
+        );
+        event.author_id = 21;
+        assert!(routes
+            .addressed(&event, Some(99), Duration::from_secs(300))
+            .expect("Neue DM fehlt")
+            .2
+            .is_none());
     }
     #[test]
     fn proaktive_frage_braucht_exakten_kanal_frisches_event_und_keinen_reply() {
         let config = GuideConfig::from_lookup(1289721245281292288, |key| match key {
-            "DL_GUIDE_PROACTIVE_CHANNELS" | "DL_GUIDE_PUBLIC_CHANNELS" => Some("1426220702054355077".into()),
+            "DL_GUIDE_PROACTIVE_CHANNELS" | "DL_GUIDE_PUBLIC_CHANNELS" => {
+                Some("1426220702054355077".into())
+            }
             _ => None,
         });
-        let mut event = message(20,1426220702054355077,"Wo finde ich Mitspieler?");
-        event.guild_id=Some(1289721245281292288);
+        let mut event = message(20, 1426220702054355077, "Wo finde ich Mitspieler?");
+        event.guild_id = Some(1289721245281292288);
         assert!(config.proactive_question(&event));
-        event.channel_id=1426220702054355078;
+        event.channel_id = 1426220702054355078;
         assert!(!config.proactive_question(&event));
-        event.channel_id=1426220702054355077;
-        event.is_reply=true;
+        event.channel_id = 1426220702054355077;
+        event.is_reply = true;
         assert!(!config.proactive_question(&event));
-        event.is_reply=false;
-        event.reply_channel_id=Some(event.channel_id);
+        event.is_reply = false;
+        event.reply_channel_id = Some(event.channel_id);
         assert!(!config.proactive_question(&event));
-        event.reply_channel_id=None;
-        event.reply_message_id=Some(1);
+        event.reply_channel_id = None;
+        event.reply_message_id = Some(1);
         assert!(!config.proactive_question(&event));
-        event.reply_message_id=None;
-        event.message_created_at=chrono::Utc::now()-chrono::Duration::seconds(61);
+        event.reply_message_id = None;
+        event.message_created_at = chrono::Utc::now() - chrono::Duration::seconds(61);
         assert!(!config.proactive_question(&event));
-        for text in ["Danke, alles klar?", "<@123> kannst du helfen?", "> Wo finde ich Hilfe?", "Erledigt?", "Nani, kannst du helfen?"] {
+        for text in [
+            "Danke, alles klar?",
+            "<@123> kannst du helfen?",
+            "> Wo finde ich Hilfe?",
+            "Erledigt?",
+            "Nani, kannst du helfen?",
+        ] {
             assert!(!community_question(text));
         }
     }

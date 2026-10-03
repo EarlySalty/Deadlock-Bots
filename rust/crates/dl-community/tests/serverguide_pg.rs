@@ -43,8 +43,10 @@ impl FeedbackPort for Transport {
 #[tokio::test]
 #[ignore = "benötigt eigene isolierte Postgresinstanz und tests/guide-pg.local.json"]
 async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
-    let file = std::fs::File::open("tests/guide-pg.local.json").expect("Eigene Testkonfiguration fehlt");
-    let config: TestConfig = serde_json::from_reader(file).expect("Eigene Testkonfiguration ist ungültig");
+    let file =
+        std::fs::File::open("tests/guide-pg.local.json").expect("Eigene Testkonfiguration fehlt");
+    let config: TestConfig =
+        serde_json::from_reader(file).expect("Eigene Testkonfiguration ist ungültig");
     assert!(config.socket.is_absolute() && config.socket.ends_with(".core-test-pg"));
     assert!(config.database.starts_with("guide_test_") && config.user == "brain_core_test");
     let options = PgConnectOptions::new_without_pgpass()
@@ -78,15 +80,25 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         ALTER TABLE brain.guide_subjects ADD COLUMN turn_sequence BIGINT NOT NULL DEFAULT 0, ADD COLUMN legacy_import_eligible BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE brain.guide_turn_claims ADD COLUMN turn_sequence BIGINT NOT NULL DEFAULT 0, ADD COLUMN subject_epoch BIGINT NOT NULL DEFAULT -1, ADD COLUMN reply_message_id TEXT, ADD COLUMN conversation_id TEXT")
         .execute(&pool).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
-    sqlx::raw_sql(include_str!("../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v4.sql"))
-        .execute(&pool).await.expect("Kanonische synthetische V4-Migration fehlgeschlagen");
-    sqlx::raw_sql(include_str!("../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v5.sql"))
-        .execute(&pool).await.expect("Kanonische synthetische V5-Migration fehlgeschlagen");
+    sqlx::raw_sql(include_str!(
+        "../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v4.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("Kanonische synthetische V4-Migration fehlgeschlagen");
+    sqlx::raw_sql(include_str!(
+        "../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v5.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("Kanonische synthetische V5-Migration fehlgeschlagen");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Systemzeit liegt vor der Unix-Epoche")
         .as_secs() as i64;
-    set_opt_in(&pool, 5, now).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
+    set_opt_in(&pool, 5, now)
+        .await
+        .expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
     sqlx::query("INSERT INTO core.guide_test_consent_boundary SELECT ((floor(extract(epoch from updated_at)*1000)::bigint+1)-1420070400000)*4194304 FROM core.user_privacy WHERE user_id=5")
         .execute(&pool).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
     let first_consent: chrono::DateTime<chrono::Utc> =
@@ -103,7 +115,9 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         .expect("Synthetischer Postgres-Testschritt fehlgeschlagen"),
         0
     );
-    set_opt_in(&pool, 5, 0).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
+    set_opt_in(&pool, 5, 0)
+        .await
+        .expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
     let later_consent: chrono::DateTime<chrono::Utc> =
         sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id=5")
             .fetch_one(&pool)
@@ -132,7 +146,9 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
             .expect("Synthetischer Postgres-Testschritt fehlgeschlagen"),
         1
     );
-    set_opt_in(&pool, 5, now).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
+    set_opt_in(&pool, 5, now)
+        .await
+        .expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT epoch FROM brain.guide_subjects")
             .fetch_one(&pool)

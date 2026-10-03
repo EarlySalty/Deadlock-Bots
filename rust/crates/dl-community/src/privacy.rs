@@ -4008,8 +4008,10 @@ async fn restart_guide_after_opt_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
 ) -> CommunityDbResult<()> {
-    let grants_exist: bool = sqlx::query_scalar("SELECT to_regclass('brain.guide_action_grants') IS NOT NULL")
-        .fetch_one(&mut **tx).await?;
+    let grants_exist: bool =
+        sqlx::query_scalar("SELECT to_regclass('brain.guide_action_grants') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
     if grants_exist {
         sqlx::query("UPDATE brain.guide_action_grants SET revoked_at=COALESCE(revoked_at,clock_timestamp()),steam_id64=NULL,turn_id=NULL,source_channel_id=NULL,source_thread_id=NULL,source_event_type=NULL,status=CASE WHEN status IN ('invite_sent','already_has_access','unknown') THEN status ELSE 'cancelled' END,updated_at=clock_timestamp() WHERE actor_id=$1")
             .bind(user_id).execute(&mut **tx).await?;
@@ -4042,8 +4044,10 @@ pub(crate) async fn purge_guide_data_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
 ) -> CommunityDbResult<()> {
-    let grants_exist: bool = sqlx::query_scalar("SELECT to_regclass('brain.guide_action_grants') IS NOT NULL")
-        .fetch_one(&mut **tx).await?;
+    let grants_exist: bool =
+        sqlx::query_scalar("SELECT to_regclass('brain.guide_action_grants') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
     if grants_exist {
         sqlx::query("UPDATE brain.guide_action_grants SET revoked_at=COALESCE(revoked_at,clock_timestamp()),steam_id64=NULL,turn_id=NULL,source_channel_id=NULL,source_thread_id=NULL,source_event_type=NULL,status=CASE WHEN status IN ('invite_sent','already_has_access','unknown') THEN status ELSE 'cancelled' END,updated_at=clock_timestamp() WHERE actor_id=$1")
             .bind(user_id).execute(&mut **tx).await?;
