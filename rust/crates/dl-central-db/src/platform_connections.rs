@@ -31,7 +31,9 @@ pub async fn lock_twitch_identity(
 }
 
 /// Dieselbe Sperre für Invitewriter, vor Guild-, Nutzer- und Zeilenlocks.
-pub async fn lock_twitch_identity_connection(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+pub async fn lock_twitch_identity_connection(
+    conn: &mut sqlx::PgConnection,
+) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('core.discord_platform_connections'), hashtext('twitch_reassignment'))")
         .fetch_one(conn).await?;
     Ok(())
