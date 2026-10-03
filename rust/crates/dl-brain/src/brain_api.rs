@@ -57,10 +57,19 @@ impl BrainApiAnswerer {
         Ok(candidate)
     }
     fn query(&self, question: &str) -> Result<Query, BrainError> {
-        let sequence = self
-            .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-            .map_err(|_| backend_error())?;
+        let mut current = self.sequence.load(Ordering::Relaxed);
+        let sequence = loop {
+            let next = current.checked_add(1).ok_or_else(backend_error)?;
+            match self.sequence.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => break previous,
+                Err(actual) => current = actual,
+            }
+        };
         let id = format!("{}-{sequence}", self.namespace);
         // Der Antwortport liefert keine authentifizierte Gesprächsidentität.
         // Jede Anfrage bekommt ein eigenes Gespräch, damit kein nutzerübergreifender Cache entsteht.
@@ -389,6 +398,36 @@ mod tests {
         let second_query = second.query("Abrams").expect("query must be valid");
         assert_ne!(first_query.request_id, second_query.request_id);
         assert_ne!(first_query.conversation_id, second_query.conversation_id);
+    }
+
+    #[test]
+    fn sequenznummern_bleiben_parallel_eindeutig_und_ueberlaufen_nicht() {
+        let backend = adapter("http://127.0.0.1:1");
+        let ids = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..16)
+                .map(|_| {
+                    let backend = &backend;
+                    scope.spawn(move || {
+                        let query = backend.query("Synthetische Anfrage").unwrap();
+                        assert_eq!(query.request_id, query.conversation_id);
+                        query.request_id
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<BTreeSet<_>>()
+        });
+        assert_eq!(ids.len(), 16);
+
+        backend.sequence.store(u64::MAX - 1, Ordering::Relaxed);
+        let last = backend.query("Letzte synthetische Anfrage").unwrap();
+        assert!(last.request_id.ends_with(&format!("-{}", u64::MAX - 1)));
+        assert_eq!(last.request_id, last.conversation_id);
+        assert!(backend.query("Überlauf muss scheitern").is_err());
+        assert!(backend.query("Erneuter Überlauf muss scheitern").is_err());
+        assert_eq!(backend.sequence.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]
