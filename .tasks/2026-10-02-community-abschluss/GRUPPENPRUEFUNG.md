@@ -21,11 +21,23 @@ Die gezielte Suite muss diese Änderungen gegen eine eigene Wegwerf-Datenbank pr
 
 Die vollständige erste Suite lief auf `5f449720f99ef10b666b644bd95eb2c91a2d9285` mit Cargo 1.98.1 und höchstens zwei Jobs. 100 Tests bestanden, ein Test schlug fehl, keiner wurde ignoriert. Der abschließende Compile-Check für `dl-bot`, `dl-web` und `dl-community-points-sync` bestand. Die eigene Timescale-Wegwerf-Datenbank wurde entfernt; beide Hostsperren wurden nachweislich freigegeben. Der Slot wurde ausdrücklich an Challenges für dessen bestätigten kurzen Debugcheck übergeben.
 
-Die Regression `lookupfehler_schreibt_keine_stimme` deckte einen alten Fallback auf: Eine fehlende Verknüpfungstabelle lieferte eine leere Twitch-Zuordnung statt eines Fehlers. Nach dem vollständigen Suiteende wurde dieser Fallback entfernt. Die unveränderte Regression und die gezielten Clippy-/Schema-Prüfungen folgen im bestätigten Slot nach Patchnotes auf dem neuen vollständigen Fix-SHA. Bis dahin ist dieser Fix ungetestet und R2 nicht freigegeben.
+Die Regression `lookupfehler_schreibt_keine_stimme` deckte einen alten Fallback auf: Eine fehlende Verknüpfungstabelle lieferte eine leere Twitch-Zuordnung statt eines Fehlers. Nach dem vollständigen Suiteende wurde dieser Fallback entfernt. Die vollständige Nachsuite auf `81f67f3df016262475211dcc3ede3d13805009b0` bestand mit 15 Cliptests einschließlich der unveränderten Lookupfehlerregression und einem Schema-/Idempotenztest. Debug-Migratorbau und betroffene Clippy-Targets endeten mit Exit 0. Clippy warnt an 70 Stellen, davon stehen 68 Quellzeilen unverändert in der Basis und zwei neue Stellen betreffen Typkomplexität. Ein gesonderter Baseline-Clippy-Lauf fand nicht statt. Manifest und Logs stehen in der eigenen Statusakte.
 
 Privacy-Grabsteine in Streamersync, Stimmen und Ergebnisbildung, die frische Schreibdeadline, der dauerhafte Wochen-Duplikatschlüssel und die erhaltene Groß-/Kleinschreibung von URL-Pfad und Query bestanden ihre gezielten Prüfungen. Der konkurrierende Clip-Ledger-Import und acht Runden paralleler Kontozuordnung bestanden ebenfalls. Logpfade, vollständige Ergebnisse und Ressourcenbelege stehen in der zugeordneten Statusdatei.
 
-Die Sichtprüfung bleibt offen. Für den kurzen Folgeslot nach Twitch sind die unveränderten Renderer-, SteamHint- und Escaping-Blöcke aus `web.rs` samt Quell- und Blockhashes außerhalb des Worktrees vorbereitet. Ein HTML-Export allein ist kein Browser- oder Live-Nachweis.
+Die Sichtprüfung bleibt offen. Sieben HTML-Zustände wurden aus unveränderten Renderer-, SteamHint- und Escaping-Blöcken aus `web.rs` exportiert und mit Quell-, Block- und Ausgabehashes außerhalb des Worktrees gesichert. Der ausdrücklich gewählte In-App-Browser meldet weiterhin fehlende Verfügbarkeit. Ein HTML-Export allein ist kein Browser- oder Live-Nachweis.
+
+## Zusätzlicher Viewer-Privacy-BLOCK
+
+Eine unabhängige Abnahme auf `81f67f3` bestätigt eine weitere Lücke: Viewer-Tageswerte stehen nicht im Export-/Löschvertrag, die Twitch-Zuschauer-ID ist fälschlich als nicht personenbezogen klassifiziert, und der Viewer-Sync prüft keinen Privacy-Grabstein. Linklöschung allein verhindert weder gespeicherte Tagesdaten noch ihren Wiederimport. Die früher bestandene Suite belegt diesen neuen Fix nicht.
+
+Die neue Fixrunde ergänzt Viewer-Tagesdaten in `USER_TABLES` und löscht sie über die bestehende Twitch-Verknüpfung vor deren Entfernung. Eine additive Migration korrigiert die Registry und speichert ausschließlich einen domaingetrennten SHA256-Twitch-ID-Hash als dauerhaften Importschutz. Dieser Hash ist weiterhin ein personenbezogenes Sperrmerkmal; er enthält keine Tagesdaten oder Discordzuordnung und wird nicht als Anonymisierung bezeichnet.
+
+Der vorhandene globale Twitch-Reassignment-Lock ist mit C9 und Twitch abgegrenzt. OAuth-Upsert, Viewer-Sync und Privacy-Erasure verwenden denselben unveränderten Key vor den Nutzerlocks. Erasure setzt den Importschutz in derselben Transaktion. Der Sync prüft sowohl den Grabstein eines noch verknüpften Mitglieds als auch den dauerhaften Hash und darf übersprungene Quellzeilen mit dem Cursor abschließen.
+
+Echte DB-Regressionen müssen den persönlichen Export, vollständige Löschung, Erhalt fremder Zeilen, Wiederimport auch nach neuer Discord-Zuordnung und beide Rennrichtungen belegen. Die Rennen warten auf beobachtbare Datenbanksperren. Ergebnisse, vollständiger neuer SHA und reguläres R2 werden in der Statusakte festgehalten. Vor positiver gemeinsamer Privacy-Abnahme wird nicht ausgeliefert.
+
+Seit der ausdrücklichen Nutzerentscheidung vom 03.10.2026 gibt es keine Build-Warteschlange oder Nachrichtenübergabe mehr. Beide Hostlocks werden während des gesamten Prüfschritts blockierend gehalten; nach Erwerb folgt eine frische Compilerprobe, bei Belegung mit Wiederholung nach 30 Sekunden. Höchstens zwei Jobs und die fachlichen Integrationsabhängigkeiten bleiben verbindlich.
 
 ## Gemeinsamer Vertrag und Folge
 

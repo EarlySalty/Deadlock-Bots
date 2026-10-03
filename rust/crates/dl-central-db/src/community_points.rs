@@ -16,10 +16,11 @@
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Europe::Berlin;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 
-use crate::platform_connections::{is_valid_twitch_user_id, PLATFORM_TWITCH};
+use crate::platform_connections::{is_valid_twitch_user_id, lock_twitch_identity, PLATFORM_TWITCH};
 use crate::CentralDbError;
 
 // ─── Punkteregeln (PLAN, Konstanten statt Konfiguration) ────────────────────
@@ -47,6 +48,39 @@ pub const SOURCE_STREAMER_QUALIFIED_JOIN: &str = "streamer_qualified_join";
 pub const CURSOR_VIEWERS: &str = "twitch_viewers";
 pub const CURSOR_STREAMERS: &str = "twitch_streamers";
 pub const CURSOR_SUGGESTION_OUTCOMES: &str = "twitch_scout_suggestion_outcomes";
+
+fn viewer_privacy_key(twitch_user_id: &str) -> Vec<u8> {
+    Sha256::digest(format!("community-points:twitch-viewer-privacy:v1:{twitch_user_id}").as_bytes())
+        .to_vec()
+}
+
+/// Speichert vor der Linklöschung den minimalen Schutz gegen erneuten Import.
+/// Der Aufrufer hält bereits Identitäts- und Nutzerlock in dieser Reihenfolge.
+/// Der Hash ist ein personenbezogenes Sperrmerkmal, keine Anonymisierung.
+pub async fn block_linked_viewer_imports(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    discord_id: i64,
+) -> Result<u64, sqlx::Error> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT platform_user_id FROM core.discord_platform_connections
+          WHERE discord_id = $1 AND platform = 'twitch'",
+    )
+    .bind(discord_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut written = 0;
+    for id in ids {
+        written += sqlx::query(
+            "INSERT INTO community_points.twitch_viewer_privacy_blocks(subject_hash)
+             VALUES ($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(viewer_privacy_key(&id))
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    }
+    Ok(written)
+}
 
 /// Punkte fuer einen Clip-Contest-Platz (1..=3), sonst `None`.
 pub fn clip_place_points(place: i64) -> Option<i32> {
@@ -202,8 +236,44 @@ pub async fn apply_viewer_page(
     next_cursor: Option<&str>,
 ) -> Result<u64, CentralDbError> {
     let mut tx = pool.begin().await?;
+    lock_twitch_identity(&mut tx).await?;
+    // Die Zuordnung bleibt bis zum Commit stabil. Alle Nutzerlocks werden
+    // sortiert nach dem globalen Identitätslock erworben.
+    let twitch_ids: Vec<&str> = rows.iter().map(|row| row.twitch_user_id.as_str()).collect();
+    let linked: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT platform_user_id, discord_id FROM core.discord_platform_connections
+          WHERE platform = 'twitch' AND platform_user_id = ANY($1)",
+    )
+    .bind(&twitch_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let ids: BTreeSet<i64> = linked.iter().map(|(_, id)| *id).collect();
+    let mut blocked_users = BTreeSet::new();
+    for id in ids {
+        if crate::lock_user_privacy_and_is_opted_out(&mut tx, id).await? {
+            blocked_users.insert(id);
+        }
+    }
+    let blocked_twitch_ids: BTreeSet<&str> = linked
+        .iter()
+        .filter(|(_, id)| blocked_users.contains(id))
+        .map(|(twitch_id, _)| twitch_id.as_str())
+        .collect();
     let mut written = 0;
     for row in rows {
+        if blocked_twitch_ids.contains(row.twitch_user_id.as_str()) {
+            continue;
+        }
+        let erased: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_points.twitch_viewer_privacy_blocks
+                            WHERE subject_hash = $1)",
+        )
+        .bind(viewer_privacy_key(&row.twitch_user_id))
+        .fetch_one(&mut *tx)
+        .await?;
+        if erased {
+            continue;
+        }
         written += sqlx::query(
             "INSERT INTO community_points.twitch_viewer_daily
                  (twitch_user_id, channel_twitch_user_id, day, watch_minutes, chat_messages,

@@ -18,6 +18,7 @@ use crate::db::{utc_from_unix, CommunityDbError, CommunityDbResult};
 enum ColumnType {
     I64,
     Text,
+    TwitchUser,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +66,17 @@ impl TableSpec {
 
     fn count_key(self) -> String {
         format!("{}.{}", self.key_table, self.key_col)
+    }
+
+    fn lookup_predicate(self) -> String {
+        match self.col_type {
+            ColumnType::TwitchUser => format!(
+                "{} IN (SELECT platform_user_id FROM core.discord_platform_connections \
+                 WHERE discord_id = $1 AND platform = 'twitch')",
+                self.col
+            ),
+            ColumnType::I64 | ColumnType::Text => format!("{} = $1", self.col),
+        }
     }
 }
 
@@ -396,6 +408,15 @@ const USER_TABLES: &[TableSpec] = &[
         "core.discord_role_connection_sync_state",
         "discord_id",
         ColumnType::I64,
+    ),
+    // Tageswerte müssen vor der Verknüpfung gelöscht werden, über die sie
+    // dem Mitglied zugeordnet sind. Der Export nutzt denselben ID-Vertrag.
+    TableSpec::new(
+        "community_points_twitch_viewer_daily",
+        "twitch_user_id",
+        "community_points.twitch_viewer_daily",
+        "twitch_user_id",
+        ColumnType::TwitchUser,
     ),
     // Selbst freigegebene Plattform-Verknuepfungen (Twitch) aus dem
     // Discord-Profil; ein Loeschantrag entfernt die Zeile.
@@ -1846,6 +1867,7 @@ fn steam_lookup<'a>(sid: &'a SteamId, col_type: ColumnType) -> Option<LookupValu
     match col_type {
         ColumnType::I64 => sid.numeric.map(LookupValue::I64),
         ColumnType::Text => Some(LookupValue::Text(&sid.text)),
+        ColumnType::TwitchUser => None,
     }
 }
 
@@ -1901,7 +1923,11 @@ async fn delete_rows_lookup(
 ) -> Result<i64, sqlx::Error> {
     // Dynamic SQL is unavoidable for the privacy contract; `spec` is a static
     // whitelist entry and all user data is bound as typed parameters.
-    let sql = format!("DELETE FROM {} WHERE {} = $1", spec.relation, spec.col);
+    let sql = format!(
+        "DELETE FROM {} WHERE {}",
+        spec.relation,
+        spec.lookup_predicate()
+    );
     let query = sqlx::query(&sql);
     let result = match value {
         LookupValue::I64(value) => query.bind(value).execute(&mut **tx).await?,
@@ -1917,7 +1943,9 @@ async fn delete_rows_user(
     user_key: &str,
 ) -> Result<i64, sqlx::Error> {
     match spec.col_type {
-        ColumnType::I64 => delete_rows_lookup(tx, spec, LookupValue::I64(user_id)).await,
+        ColumnType::I64 | ColumnType::TwitchUser => {
+            delete_rows_lookup(tx, spec, LookupValue::I64(user_id)).await
+        }
         ColumnType::Text => delete_rows_lookup(tx, spec, LookupValue::Text(user_key)).await,
     }
 }
@@ -1930,8 +1958,10 @@ async fn null_user_column_lookup(
     // Dynamic SQL is unavoidable for the privacy contract; `spec` is a static
     // whitelist entry and all user data is bound as typed parameters.
     let sql = format!(
-        "UPDATE {} SET {} = NULL WHERE {} = $1",
-        spec.relation, spec.col, spec.col
+        "UPDATE {} SET {} = NULL WHERE {}",
+        spec.relation,
+        spec.col,
+        spec.lookup_predicate()
     );
     let query = sqlx::query(&sql);
     let result = match value {
@@ -1948,7 +1978,9 @@ async fn null_user_column(
     user_key: &str,
 ) -> Result<i64, sqlx::Error> {
     match spec.col_type {
-        ColumnType::I64 => null_user_column_lookup(tx, spec, LookupValue::I64(user_id)).await,
+        ColumnType::I64 | ColumnType::TwitchUser => {
+            null_user_column_lookup(tx, spec, LookupValue::I64(user_id)).await
+        }
         ColumnType::Text => null_user_column_lookup(tx, spec, LookupValue::Text(user_key)).await,
     }
 }
@@ -3384,8 +3416,9 @@ async fn select_rows_lookup(
     value: LookupValue<'_>,
 ) -> Result<Vec<Value>, CommunityDbError> {
     let sql = format!(
-        "SELECT row_to_json(t)::text AS row_json FROM (SELECT * FROM {} WHERE {} = $1) t",
-        spec.relation, spec.col
+        "SELECT row_to_json(t)::text AS row_json FROM (SELECT * FROM {} WHERE {}) t",
+        spec.relation,
+        spec.lookup_predicate()
     );
     let query = sqlx::query(&sql);
     let rows = match value {
@@ -3408,7 +3441,9 @@ async fn select_rows_user(
     user_key: &str,
 ) -> Result<Vec<Value>, CommunityDbError> {
     match spec.col_type {
-        ColumnType::I64 => select_rows_lookup(pool, spec, LookupValue::I64(user_id)).await,
+        ColumnType::I64 | ColumnType::TwitchUser => {
+            select_rows_lookup(pool, spec, LookupValue::I64(user_id)).await
+        }
         ColumnType::Text => select_rows_lookup(pool, spec, LookupValue::Text(user_key)).await,
     }
 }
@@ -3797,7 +3832,18 @@ pub async fn delete_user_data(
 
     let mut tx = pool.begin().await?;
     dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
+    if relations.contains("core.discord_platform_connections") {
+        dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
+    }
     lock_user_privacy(&mut tx, user_id).await?;
+    if relations.contains("community_points.twitch_viewer_daily") {
+        let blocked =
+            dl_central_db::community_points::block_linked_viewer_imports(&mut tx, user_id).await?;
+        counts.insert(
+            "community_points_twitch_viewer_privacy_blocks.created".into(),
+            rows_to_i64(blocked),
+        );
+    }
     let expired_rollback_exports = if relations.contains(SERVER_SYNC_ROLLBACK_EXPORTS_REL) {
         purge_expired_server_sync_rollback_exports_tx(&mut tx, now).await?
     } else {
@@ -4400,11 +4446,9 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
-        // Community-Punkte (Paket C): diese Spalten sind Twitch-User-IDs,
-        // keine Discord-IDs. Einem Mitglied zugerechnet wird nur ueber
-        // `core.discord_platform_connections`, die ein Loeschantrag entfernt.
+        // Öffentliche Partnerkanal-Referenzen werden nicht als Zuschauerprofil
+        // geführt. Die personenbezogene Viewer-ID steht dagegen in USER_TABLES.
         for (relation, column) in [
-            ("community_points.twitch_viewer_daily", "twitch_user_id"),
             (
                 "community_points.twitch_viewer_daily",
                 "channel_twitch_user_id",
@@ -4873,6 +4917,194 @@ mod tests {
 
     async fn mk_db() -> TestDb {
         test_pool().await.expect("test_pool")
+    }
+
+    fn privacy_viewer_row(twitch_user_id: &str) -> dl_central_db::community_points::ViewerDailyRow {
+        dl_central_db::community_points::ViewerDailyRow {
+            twitch_user_id: twitch_user_id.into(),
+            channel_twitch_user_id: "456".into(),
+            day: Utc::now().date_naive(),
+            watch_minutes: 5,
+            chat_messages: 1,
+            points_watch: 1,
+            points_chat: 1,
+            points_discovery: 0,
+            source_updated_at: Utc::now(),
+        }
+    }
+
+    async fn seed_privacy_twitch_link(pool: &PgPool, discord_id: i64, twitch_user_id: &str) {
+        use dl_central_db::platform_connections::{
+            upsert_twitch_connection, TwitchConnection, TwitchUpsertOutcome,
+        };
+        let outcome = upsert_twitch_connection(
+            pool,
+            discord_id,
+            &TwitchConnection {
+                twitch_user_id: twitch_user_id.into(),
+                twitch_login: format!("viewer{twitch_user_id}"),
+                verified: true,
+            },
+        )
+        .await
+        .expect("Twitch-Verknüpfung");
+        assert!(matches!(outcome, TwitchUpsertOutcome::Linked { .. }));
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_export_erasure_und_dauerhafter_reimportschutz() {
+        use dl_central_db::community_points::{apply_viewer_page, load_cursor, CURSOR_VIEWERS};
+        let db = mk_db().await;
+        let pool = db.pool();
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        apply_viewer_page(
+            pool,
+            &[privacy_viewer_row("111"), privacy_viewer_row("222")],
+            None,
+        )
+        .await
+        .expect("Viewer-Import");
+        let exported = export_user_data(pool, 42, 1000).await.expect("Export");
+        let own_rows = exported["tables"]["community_points_twitch_viewer_daily.twitch_user_id"]
+            .as_array()
+            .expect("Viewer-Tagesdaten im Export");
+        assert_eq!(own_rows.len(), 1);
+        assert_eq!(own_rows[0]["twitch_user_id"], "111");
+
+        let deleted = delete_user_data(pool, 42, "test".into(), 2000)
+            .await
+            .expect("Löschung");
+        assert_eq!(
+            deleted.counts["community_points_twitch_viewer_daily.twitch_user_id"],
+            1
+        );
+        let remaining: Vec<String> = sqlx::query_scalar(
+            "SELECT twitch_user_id FROM community_points.twitch_viewer_daily ORDER BY twitch_user_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("Übrige Viewer");
+        assert_eq!(remaining, vec!["222"]);
+        let blocks: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT subject_hash FROM community_points.twitch_viewer_privacy_blocks",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("Minimaler Importschutz");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].len(), 32);
+        let registry: (String, String) = sqlx::query_as(
+            "SELECT data_category, erasure_action FROM core.privacy_field_registry
+              WHERE schema_name = 'community_points' AND table_name = 'twitch_viewer_daily'
+                AND column_name = 'twitch_user_id'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("Privacy-Klassifizierung");
+        assert_eq!(
+            registry,
+            ("user_id".into(), "delete_row_on_user_delete".into())
+        );
+        let cursor = "2026-10-03T10:00:00.000001Z";
+        assert_eq!(
+            apply_viewer_page(pool, &[privacy_viewer_row("111")], Some(cursor))
+                .await
+                .expect("Wiederimport"),
+            0
+        );
+        assert_eq!(
+            load_cursor(pool, CURSOR_VIEWERS).await.expect("Cursor"),
+            Some(cursor.into())
+        );
+        // Eine neue Discord-Zuordnung darf den dauerhaften Importschutz nicht umgehen.
+        seed_privacy_twitch_link(pool, 99, "111").await;
+        assert_eq!(
+            apply_viewer_page(pool, &[privacy_viewer_row("111")], None)
+                .await
+                .expect("Wiederimport nach Kontowechsel"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_grabstein_blockiert_import_vor_linkloeschung() {
+        use dl_central_db::community_points::apply_viewer_page;
+        let db = mk_db().await;
+        seed_privacy_twitch_link(db.pool(), 42, "111").await;
+        set_opt_out_for_test(db.pool(), 42).await;
+        assert_eq!(
+            apply_viewer_page(db.pool(), &[privacy_viewer_row("111")], None)
+                .await
+                .expect("Import mit Grabstein"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_delete_first_blockiert_wartenden_import() {
+        use dl_central_db::community_points::apply_viewer_page;
+        let db = mk_db().await;
+        let pool = db.pool();
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        let mut held = pool.begin().await.expect("Sperrtransaktion");
+        lock_user_privacy(&mut held, 42)
+            .await
+            .expect("Nutzersperre");
+        let deleting_pool = pool.clone();
+        let deleting =
+            tokio::spawn(
+                async move { delete_user_data(&deleting_pool, 42, "test".into(), 2000).await },
+            );
+        wait_for_db_lock(pool, "pg_advisory_xact_lock($1)", None).await;
+        let importing_pool = pool.clone();
+        let importing = tokio::spawn(async move {
+            apply_viewer_page(&importing_pool, &[privacy_viewer_row("111")], None).await
+        });
+        wait_for_db_lock_count(pool, 2).await;
+        held.commit().await.expect("Nutzersperre freigeben");
+        deleting.await.expect("Löschaufgabe").expect("Löschung");
+        assert_eq!(importing.await.expect("Importaufgabe").expect("Import"), 0);
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_write_first_wird_danach_vollstaendig_geloescht() {
+        use dl_central_db::community_points::apply_viewer_page;
+        let db = mk_db().await;
+        let pool = db.pool();
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        let mut held = pool.begin().await.expect("Sperrtransaktion");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('core.discord_platform_connections'), hashtext('twitch_reassignment'))")
+            .fetch_one(&mut *held).await.expect("Identitätssperre");
+        let importing_pool = pool.clone();
+        let importing = tokio::spawn(async move {
+            apply_viewer_page(&importing_pool, &[privacy_viewer_row("111")], None).await
+        });
+        wait_for_db_lock(pool, "twitch_reassignment", None).await;
+        let deleting_pool = pool.clone();
+        let deleting =
+            tokio::spawn(
+                async move { delete_user_data(&deleting_pool, 42, "test".into(), 2000).await },
+            );
+        wait_for_db_lock_count(pool, 2).await;
+        held.commit().await.expect("Identitätssperre freigeben");
+        assert_eq!(importing.await.expect("Importaufgabe").expect("Import"), 1);
+        let deleted = deleting.await.expect("Löschaufgabe").expect("Löschung");
+        assert_eq!(
+            deleted.counts["community_points_twitch_viewer_daily.twitch_user_id"],
+            1
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM community_points.twitch_viewer_daily")
+                .fetch_one(pool)
+                .await
+                .expect("Viewer-Zeilen");
+        assert_eq!(count, 0);
+        assert_eq!(
+            apply_viewer_page(pool, &[privacy_viewer_row("111")], None)
+                .await
+                .expect("Wiederimport"),
+            0
+        );
     }
 
     fn scrim_json_contains(value: &Value, target_ref: &str) -> bool {
