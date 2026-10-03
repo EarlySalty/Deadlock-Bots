@@ -4538,6 +4538,9 @@ mod privacy_contract_tests {
                 "streamer_twitch_user_id",
             ),
             ("community_points.ledger", "streamer_twitch_user_id"),
+            // Geprüfter öffentlicher Partnerkanal; der personenbezogene
+            // Einreicher wird separat als submitted_by_twitch_user_id behandelt.
+            ("clips.clip_submissions", "streamer_twitch_user_id"),
         ] {
             out.insert((relation.to_string(), column.to_string()));
         }

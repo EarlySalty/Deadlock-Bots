@@ -412,8 +412,8 @@ async fn evidence_writer_waits_for_expiry_and_leaves_a_fresh_marker_after_commit
     let now = joined + Duration::days(31);
     join(pool, 991_300, 991_300, joined, "ViewerCode").await;
     messages(pool, 991_300, 9_913_000, &[joined + Duration::days(1); 4]).await;
-    // Hold precisely the evaluator's join UPDATE lock while the real message
-    // writer has inserted its event and waits in the evidence SHARE trigger.
+    // Der Evaluator hält Identitäts- und Guildsperre vor dem Join-Zeilenlock.
+    // Der echte Messagewriter muss hinter genau dieser Transaktion warten.
     let mut expiring = pool.begin().await.expect("expiry transaction");
     lock_changes(&mut expiring, 1)
         .await
@@ -422,6 +422,10 @@ async fn evidence_writer_waits_for_expiry_and_leaves_a_fresh_marker_after_commit
         .execute(&mut *expiring)
         .await
         .expect("evaluator join lock");
+    let expiring_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *expiring)
+        .await
+        .expect("Evaluator-Backend");
     let writer_pool = pool.clone();
     let writer = tokio::spawn(async move {
         record_message(
@@ -433,14 +437,25 @@ async fn evidence_writer_waits_for_expiry_and_leaves_a_fresh_marker_after_commit
         )
         .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let waits:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='transactionid' AND NOT granted AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname=current_database()))")
-                .fetch_one(pool).await.expect("real blocked evidence writer");
-            if waits {break;}
+            let waits: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                  WHERE datname=current_database() AND wait_event_type='Lock'
+                    AND $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(expiring_pid)
+            .fetch_one(pool)
+            .await
+            .expect("Evidencewriter wartet hinter dem Evaluator");
+            if waits {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.expect("writer waits for expiry");
+    })
+    .await
+    .expect("writer waits for expiry");
     sqlx::query("UPDATE bot.twitch_invite_joins SET status='expired',reason='deadline' WHERE join_id=991300").execute(&mut *expiring).await.expect("deadline decision");
     sqlx::query(
         "DELETE FROM activity.twitch_invite_evidence_queue WHERE guild_id=1 AND user_id=991300",

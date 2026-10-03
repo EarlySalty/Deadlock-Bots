@@ -15809,7 +15809,12 @@ mod tests {
         let erase_task = tokio::spawn(async move {
             crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
         });
-        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        wait_for_db_lock(
+            &pool,
+            "DELETE FROM bot.concierge_profiles",
+            Some("transactionid"),
+        )
+        .await;
 
         let write_store = store.clone();
         let write_task = tokio::spawn(async move {

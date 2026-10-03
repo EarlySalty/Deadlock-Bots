@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dl_activity::join_source::classify;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::PgPool;
 
 /// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`). Ein Invite, der
@@ -561,6 +561,15 @@ mod tests {
         .execute(pool)
         .await?;
 
+        // Die Vorbereitung darf nicht hinter dem bereits wartenden Writer
+        // dieselbe Identitätssperre anfordern. Das Joinereignis liegt nach
+        // dessen Intervallende; diese Reihenfolge wird unten echt geprüft.
+        let joined_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT clock_timestamp() + interval '1 day'")
+                .fetch_one(pool)
+                .await?;
+        insert_qualified_join(pool, join_id, 930_000 + join_id, "SERIAL_A", joined_at).await?;
+
         let mut incoming = invite("serial-login", "SERIAL_B");
         incoming.twitch_user_id = Some("918273645201".into());
         incoming.channel_id = Some(202);
@@ -637,21 +646,22 @@ mod tests {
         });
         let (writer_pid, interval_end) = writer_ready_rx.await.map_err(test_error)?;
         let held_advisory_locks: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pg_locks
-             WHERE pid = $1 AND locktype = 'advisory' AND granted",
+            "SELECT COUNT(*) FROM pg_locks AS held
+             WHERE held.pid = $1 AND held.locktype = 'advisory' AND held.granted
+               AND held.objsubid = 1
+               AND EXISTS(SELECT 1 FROM unnest(ARRAY[1,2]::bigint[]) AS guild(id)
+                 WHERE held.classid = ((hashtextextended('twitch-invites:' || guild.id::text,0) >> 32) & 4294967295)::oid
+                   AND held.objid = (hashtextextended('twitch-invites:' || guild.id::text,0) & 4294967295)::oid)",
         )
         .bind(writer_pid)
         .fetch_one(pool)
         .await?;
 
-        insert_qualified_join(
-            pool,
-            join_id,
-            930_000 + join_id,
-            "SERIAL_A",
-            interval_end + chrono::Duration::milliseconds(1),
-        )
-        .await?;
+        if joined_at <= interval_end {
+            return Err(test_error(
+                "Joinereignis muss nach dem geschlossenen Intervall liegen",
+            ));
+        }
         let reader_pool = pool.clone();
         let reconcile = tokio::spawn(async move {
             dl_activity::qualified_invites::reconcile_attribution(&reader_pool, 1).await
@@ -1056,19 +1066,29 @@ mod tests {
     #[tokio::test]
     async fn reconcile_waits_for_guild_history_writer_commit(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        assert_writer_reconcile_serialization(true, 930_021).await
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            assert_writer_reconcile_serialization(true, 930_021),
+        )
+        .await
+        .map_err(test_error)?
     }
 
     #[tokio::test]
     async fn reconcile_waits_for_guild_history_writer_rollback(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        assert_writer_reconcile_serialization(false, 930_022).await
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            assert_writer_reconcile_serialization(false, 930_022),
+        )
+        .await
+        .map_err(test_error)?
     }
 
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn reclassify_flippt_twitch_und_respektiert_website_filter()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn reclassify_flippt_twitch_und_respektiert_website_filter(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         insert_join(pool, 9_100_001, "ABC123").await?;
@@ -1101,8 +1121,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn invite_upsert_bleibt_persistiert_wenn_reclassify_update_scheitert()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn invite_upsert_bleibt_persistiert_wenn_reclassify_update_scheitert(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         insert_join(pool, 9_100_101, "ABC123").await?;
