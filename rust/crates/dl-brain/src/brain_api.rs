@@ -2,6 +2,7 @@
 //! Authentifizierung, Kanalfreigaben und Ausgabe bleiben bei den bisherigen Komponenten.
 use crate::{AiAnswerer, BrainError, BrainOutcome};
 use brain_client::{AnswerProfile, AnswerStatus, AsyncBrainClient, PublicAnswerResponse, Query};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     sync::atomic::{AtomicU64, Ordering},
@@ -117,6 +118,16 @@ impl AiAnswerer for BrainApiAnswerer {
                 .await
                 .map_err(|_| backend_error())?;
             let query = self.query(question)?;
+            let request_id = format!(
+                "client-sha256:{:x}",
+                Sha256::digest(query.request_id.as_bytes())
+            );
+            tracing::info!(
+                target: "dl_brain::brain_api",
+                event = "brain_consumer_request",
+                request_id = %request_id,
+                route = "/v1/answer"
+            );
             let response = self
                 .client
                 .answer(&query)
@@ -432,6 +443,57 @@ mod tests {
         assert!(backend.query("Überlauf muss scheitern").is_err());
         assert!(backend.query("Erneuter Überlauf muss scheitern").is_err());
         assert_eq!(backend.sequence.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[derive(Clone, Default)]
+    struct RequestLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for RequestLog {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("Testprotokoll ist zugänglich")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn request_log_correlates_server_hash_without_question_or_raw_ids() {
+        let (endpoint, server) = fixture(vec![AnswerStatus::Answered]);
+        let backend = adapter(&endpoint);
+        let log = RequestLog::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        backend
+            .answer("Synthetische private Testfrage")
+            .await
+            .expect("Testanfrage wird beantwortet");
+        drop(guard);
+        let queries = server.join().expect("Testserver ist beendet");
+        let expected = format!(
+            "client-sha256:{:x}",
+            Sha256::digest(queries[0].request_id.as_bytes())
+        );
+        let output = String::from_utf8(log.0.lock().expect("Testprotokoll ist zugänglich").clone())
+            .expect("Testprotokoll ist UTF-8");
+        assert!(output.contains("brain_consumer_request"));
+        assert!(output.contains(&expected));
+        assert!(output.contains("/v1/answer"));
+        assert!(!output.contains(&queries[0].text));
+        assert!(!output.contains(&queries[0].request_id));
+        assert!(!output.contains(&queries[0].conversation_id));
+        assert!(!output.contains(FIXTURE_BEARER));
     }
 
     #[test]
