@@ -1,6 +1,6 @@
 # Begrenzte Steam-Migration
 
-`dl-central-migrate --steam-credentials-only --config <normale Peer-Config>`
+`dl-central-migrate --steam-credentials-only --config <Bot-TOML>`
 ergänzt in einer bestehenden zentralen Datenbank ausschließlich die beiden
 Versionen `20260930220100` und `20260930220400`. Sie legen die verschlüsselte
 Steam-Zugangsablage und deren Refresh-Revision an.
@@ -18,9 +18,16 @@ Prüfsummen und lehnt unbekannte oder fehlerhafte Historie weiterhin ab.
 führt den historischen manuellen Scrim-Ledgerpatch nicht aus. Der offene
 Tokenhash-Cutover und offene Browsermigrationen werden nicht aufgenommen.
 
-Die Peer-Config enthält nur die lokale Datenbankidentität und den absoluten
-Unix-Socketpfad. Der begrenzte Modus akzeptiert keinen Aufruf ohne diese
-explizite Config und liest keine ENV-Zugänge.
+Beide Modi laden die normale Bot-TOML über den vorhandenen gemeinsamen Lader.
+Der zentrale Datenbankzugang kommt ausschließlich aus dem privaten FD3-Snapshot
+des bestehenden Infisical-Launchers. Der begrenzte Modus verlangt einen
+expliziten TOML-Pfad. Der normale Modus akzeptiert denselben `--config`-Pfad
+oder die bestehende Standarddatei `config/bot.toml`.
+
+Der operative Start erfolgt über denselben Rust-FD3-Launcher wie beim Bot.
+Die bereits vorhandenen Bootstrapmetadaten liegen neben der Bot-TOML;
+es gibt keine zusätzliche Zugangsdatei. Ohne gültige TOML, private FIFO oder
+zentralen Snapshotwert bricht der Start vor der Datenbankverbindung ab.
 
 ## Geprüfter Live-Vertrag am 2. Oktober 2026
 

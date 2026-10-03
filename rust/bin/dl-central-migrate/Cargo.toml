@@ -9,8 +9,9 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 dl-central-db.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+dl-core.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
-url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

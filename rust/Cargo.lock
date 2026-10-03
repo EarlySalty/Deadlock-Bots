@@ -1501,11 +1501,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dl-central-db",
- "serde",
- "serde_json",
+ "dl-core",
  "sqlx",
+ "tempfile",
  "tokio",
- "url",
 ]
 
 [[package]]

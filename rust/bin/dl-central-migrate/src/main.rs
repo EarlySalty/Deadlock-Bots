@@ -1,6 +1,8 @@
 use std::process::ExitCode;
 
-use dl_central_db::{connect_pool, dsn_from_env};
+use dl_central_db::connect_pool;
+#[cfg(test)]
+use dl_central_db::dsn_from_env;
 
 mod peer_config;
 
@@ -82,20 +84,18 @@ async fn main() -> ExitCode {
 
     let result = async {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
-        let steam_only = args.first().is_some_and(|arg| arg == "--steam-credentials-only");
-        let connection_args = if steam_only { &args[1..] } else { &args[..] };
-        anyhow::ensure!(
-            !steam_only || !connection_args.is_empty(),
-            "Begrenzte Steam-Migration benötigt eine explizite lokale Peer-Konfiguration."
-        );
-        let pool = if let Some(options) = peer_config::from_args(connection_args)? {
+        let steam_only = peer_config::steam_only_from_args(&args)?;
+        let dsn = peer_config::central_dsn_from_process()?;
+        let pool = if steam_only {
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(1)
-                .connect_with(options)
-                .await?
+                .connect(dsn)
+                .await
+                .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?
         } else {
-            let dsn = dsn_from_env()?;
-            connect_pool(&dsn).await?
+            connect_pool(dsn)
+                .await
+                .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?
         };
         if steam_only {
             // Dieser Modus gilt für die bestehende zentrale Datenbank. Auch die
