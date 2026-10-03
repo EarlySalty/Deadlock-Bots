@@ -735,4 +735,87 @@ mod db {
         );
         assert!(forwarder.seen().is_empty());
     }
+    #[tokio::test]
+    async fn scout_optin_und_store_binden_frische_herkunft_beide_lockreihenfolgen() {
+        for optin_first in [false, true] {
+            let (db, service) = setup(None).await;
+            crate::privacy::delete_user_data(
+                db.pool(),
+                MEMBER as i64,
+                "test".into(),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+            .expect("Erasure");
+            let mut held = db.pool().begin().await.expect("Sperrtransaktion");
+            crate::privacy::lock_user_privacy(&mut held, MEMBER as i64)
+                .await
+                .expect("Nutzersperre");
+            let optin = || {
+                let pool = db.pool().clone();
+                tokio::spawn(async move {
+                    crate::privacy::set_opt_in(&pool, MEMBER as i64, chrono::Utc::now().timestamp())
+                        .await
+                })
+            };
+            let store = || {
+                let service = service.clone();
+                tokio::spawn(async move {
+                    service
+                        .store(MEMBER as i64, "neuerkanal", "neuer Grund")
+                        .await
+                })
+            };
+            let (opting, writing) = if optin_first {
+                let opting = optin();
+                wait_locked(db.pool(), "pg_advisory_xact_lock($1)").await;
+                (opting, store())
+            } else {
+                let writing = store();
+                wait_locked(db.pool(), "pg_advisory_xact_lock($1)").await;
+                (optin(), writing)
+            };
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%pg_advisory_xact_lock%' AND pid <> pg_backend_pid()")
+                    .fetch_one(db.pool()).await.unwrap();
+                if waiting >= 2 {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Beide Nutzerlock-Wartenden fehlen"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            held.commit().await.expect("Lockfreigabe");
+            opting.await.expect("Optinaufgabe").expect("Optin");
+            let outcome = writing.await.expect("Storeaufgabe").expect("Store");
+            let id = if optin_first {
+                saved_id(&outcome)
+            } else {
+                assert_eq!(outcome, SubmitOutcome::OptedOut);
+                saved_id(
+                    &service
+                        .store(MEMBER as i64, "neuerkanal", "neuer Grund")
+                        .await
+                        .expect("Bewusst neuer Versuch"),
+                )
+            };
+            let request = service
+                .request_by_id(id)
+                .await
+                .expect("Gespeicherte Herkunft")
+                .expect("Vorschlag");
+            let consent: (i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as("SELECT epoch, activity_since FROM community.scout_privacy_outbox WHERE discord_id = $1 AND action = 'consent'")
+                .bind(MEMBER as i64).fetch_one(db.pool()).await.expect("DB-Consentgrenze");
+            assert_eq!(request.privacy_epoch, consent.0);
+            assert!(
+                request.submitted_at >= consent.1,
+                "TXstart vor Consent darf nicht als Herkunft dienen: {} < {}",
+                request.submitted_at,
+                consent.1
+            );
+        }
+    }
 }

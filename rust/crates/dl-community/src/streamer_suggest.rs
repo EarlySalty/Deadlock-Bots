@@ -444,8 +444,8 @@ impl StreamerSuggestions {
         let epoch = crate::scout_privacy::current_epoch(&mut tx, discord_id).await?;
         let id: Option<i64> = sqlx::query_scalar(
             "INSERT INTO community.streamer_suggestions
-                 (discord_id, twitch_login, reason, last_attempt_at, privacy_epoch)
-             VALUES ($1, $2, $3, now(), $4)
+                 (discord_id, twitch_login, reason, last_attempt_at, privacy_epoch, created_at)
+             VALUES ($1, $2, $3, clock_timestamp(), $4, clock_timestamp())
              ON CONFLICT (discord_id, twitch_login) DO NOTHING
              RETURNING id",
         )
