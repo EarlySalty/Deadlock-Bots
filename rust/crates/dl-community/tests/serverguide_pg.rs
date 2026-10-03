@@ -80,6 +80,8 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         .execute(&pool).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
     sqlx::raw_sql(include_str!("../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v4.sql"))
         .execute(&pool).await.expect("Kanonische synthetische V4-Migration fehlgeschlagen");
+    sqlx::raw_sql(include_str!("../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v5.sql"))
+        .execute(&pool).await.expect("Kanonische synthetische V5-Migration fehlgeschlagen");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Systemzeit liegt vor der Unix-Epoche")

@@ -104,7 +104,9 @@ impl GuideConfig {
             && event.channel_id == 1426220702054355077
             && self.proactive_channels.contains(&event.channel_id)
             && self.public_channels.contains(&event.channel_id)
+            && !event.is_reply
             && event.reply_message_id.is_none()
+            && event.reply_channel_id.is_none()
             && !event.content.contains("<@")
             && community_question(&event.content)
             && (0..=60).contains(&age)
@@ -1283,6 +1285,12 @@ mod tests {
         event.channel_id=1426220702054355078;
         assert!(!config.proactive_question(&event));
         event.channel_id=1426220702054355077;
+        event.is_reply=true;
+        assert!(!config.proactive_question(&event));
+        event.is_reply=false;
+        event.reply_channel_id=Some(event.channel_id);
+        assert!(!config.proactive_question(&event));
+        event.reply_channel_id=None;
         event.reply_message_id=Some(1);
         assert!(!config.proactive_question(&event));
         event.reply_message_id=None;
