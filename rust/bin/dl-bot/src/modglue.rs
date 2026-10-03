@@ -88,7 +88,10 @@ impl BrainEmojiIndex {
                 let Some(emoji_id) = emoji_map.get(emoji_name) else {
                     continue;
                 };
-                entries.push((name.to_string(), format!("<:{emoji_name}:{emoji_id}>")));
+                entries.push((
+                    name.to_string(),
+                    format!("<:{emoji_name}:{emoji_id}>")
+                ));
             }
         }
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
@@ -315,8 +318,7 @@ fn format_review_build_receipt(
         .unwrap_or_default();
     format!(
         "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
-        emoji_index.decorate_name(&receipt.hero_name),
-        situations
+        emoji_index.decorate_name(&receipt.hero_name), situations
     )
 }
 
@@ -360,44 +362,6 @@ impl dl_brain::AiAnswerer for SharedBrainAnswerer {
                 dl_answer::Answer::OutOfDomain => dl_brain::BrainOutcome::OutOfDomain,
             })
             .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
-    }
-}
-
-pub struct ReportOnlyShadowBrainAnswerer {
-    pub visible: Arc<dyn dl_brain::AiAnswerer>,
-    pub probe: Arc<dyn dl_brain::AiAnswerer>,
-    pub probe_timeout: Duration,
-}
-
-#[async_trait::async_trait]
-impl dl_brain::AiAnswerer for ReportOnlyShadowBrainAnswerer {
-    async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-        let probe = Arc::clone(&self.probe);
-        let probe_question = question.to_owned();
-        let probe_timeout = self.probe_timeout;
-        tokio::spawn(async move {
-            match timeout(probe_timeout, probe.answer(&probe_question)).await {
-                Ok(Ok(dl_brain::BrainOutcome::Answer(_))) => {
-                    tracing::info!("Brain-Schattenprobe: Antwort");
-                }
-                Ok(Ok(dl_brain::BrainOutcome::NoAnswer)) => {
-                    tracing::info!("Brain-Schattenprobe: keine Antwort");
-                }
-                Ok(Ok(dl_brain::BrainOutcome::OutOfDomain)) => {
-                    tracing::info!("Brain-Schattenprobe: außerhalb des Wissensbereichs");
-                }
-                Ok(Ok(_)) => {
-                    tracing::info!("Brain-Schattenprobe: anderer Status");
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "Brain-Schattenprobe: Backendfehler");
-                }
-                Err(_) => {
-                    tracing::warn!("Brain-Schattenprobe: Zeitlimit erreicht");
-                }
-            }
-        });
-        self.visible.answer(question).await
     }
 }
 
@@ -657,11 +621,14 @@ fn brain_embed_title(question: &str) -> String {
 
 fn truncate_brain_description(description: &str) -> String {
     let description = description.trim();
-    if description.encode_utf16().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
+    if description.chars().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
         return description.to_string();
     }
 
-    let mut truncated = truncate_brain_chars(description, BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT, "");
+    let mut truncated = description
+        .chars()
+        .take(BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT)
+        .collect::<String>();
     let trimmed_len = truncated.trim_end().len();
     truncated.truncate(trimmed_len);
     truncated.push_str(" …");
@@ -3985,13 +3952,11 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
 mod tests {
     use super::*;
     use std::fs;
-    use std::future::pending;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
     use dl_answer::Retriever as _;
-    use dl_brain::AiAnswerer as _;
 
     #[test]
     fn np_lane_in_chill_wird_als_new_player_gelabelt() {
@@ -4082,77 +4047,6 @@ mod tests {
             self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
             Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
         }
-    }
-
-    struct ImmediateBrainAnswerer;
-
-    #[async_trait::async_trait]
-    impl dl_brain::AiAnswerer for ImmediateBrainAnswerer {
-        async fn answer(
-            &self,
-            _question: &str,
-        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-            Ok(dl_brain::BrainOutcome::Answer("legacy-visible".into()))
-        }
-    }
-
-    struct CancellationFlag(Arc<AtomicBool>);
-
-    impl Drop for CancellationFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    struct BlockingBrainProbe {
-        started: Arc<AtomicBool>,
-        cancelled: Arc<AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl dl_brain::AiAnswerer for BlockingBrainProbe {
-        async fn answer(
-            &self,
-            _question: &str,
-        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-            self.started.store(true, Ordering::Release);
-            let _cancelled = CancellationFlag(Arc::clone(&self.cancelled));
-            pending::<()>().await;
-            unreachable!("blocking probe only exits by cancellation");
-        }
-    }
-
-    #[tokio::test]
-    async fn shadow_typed_probe_does_not_delay_visible_legacy_answer() {
-        let started = Arc::new(AtomicBool::new(false));
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let shadow = ReportOnlyShadowBrainAnswerer {
-            visible: Arc::new(ImmediateBrainAnswerer),
-            probe: Arc::new(BlockingBrainProbe {
-                started: Arc::clone(&started),
-                cancelled: Arc::clone(&cancelled),
-            }),
-            probe_timeout: Duration::from_millis(20),
-        };
-
-        let outcome = timeout(Duration::from_millis(100), shadow.answer("Abrams"))
-            .await
-            .expect("report-only probe must never hold up the visible legacy path")
-            .expect("legacy answer must remain unaffected by probe failure");
-        assert_eq!(
-            outcome,
-            dl_brain::BrainOutcome::Answer("legacy-visible".into())
-        );
-
-        timeout(Duration::from_millis(250), async {
-            while !cancelled.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-                sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("probe must be independently bounded and cancelled");
-        assert!(started.load(Ordering::Acquire));
     }
 
     fn test_brain_handler(
@@ -4419,14 +4313,14 @@ mod tests {
     fn brain_emoji_index_dekoriert_build_entitaeten_wie_patchnotes() {
         let index = BrainEmojiIndex {
             entries: vec![
-                (
-                    "Extended Magazine".into(),
-                    "<:dli_extended_magazine:5>".into(),
-                ),
+                ("Extended Magazine".into(), "<:dli_extended_magazine:5>".into()),
                 ("Warden".into(), "<:dlh_warden:7>".into()),
             ],
         };
-        assert_eq!(index.decorate_name("Warden"), "<:dlh_warden:7> Warden");
+        assert_eq!(
+            index.decorate_name("Warden"),
+            "<:dlh_warden:7> Warden"
+        );
         assert_eq!(
             index.annotate_inline("Warden kauft Extended Magazine."),
             "<:dlh_warden:7> Warden kauft <:dli_extended_magazine:5> Extended Magazine."
@@ -4441,14 +4335,10 @@ mod tests {
             hero_build_id: Some(818625),
             version: Some(1),
             hero_name: "Warden".into(),
-            core: vec![BrainReviewBuildItem {
-                name: "Extended Magazine".into(),
-            }],
+            core: vec![BrainReviewBuildItem { name: "Extended Magazine".into() }],
             situations: vec![BrainReviewBuildSituation {
                 label: "Optional".into(),
-                items: vec![BrainReviewBuildItem {
-                    name: "Healing Tempo".into(),
-                }],
+                items: vec![BrainReviewBuildItem { name: "Healing Tempo".into() }],
             }],
         };
         let index = BrainEmojiIndex {
@@ -4463,9 +4353,12 @@ mod tests {
     #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
         let bounded = "🧠".repeat(1900);
-        let payload =
-            brain_answer_embed_body(&"🧠".repeat(300), &bounded, &BrainEmojiIndex::default())
-                .expect("embed");
+        let payload = brain_answer_embed_body(
+            &"🧠".repeat(300),
+            &bounded,
+            &BrainEmojiIndex::default(),
+        )
+        .expect("embed");
         let embed = &payload["embeds"][0];
         assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
         assert!(
@@ -4509,8 +4402,12 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
-        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c", &BrainEmojiIndex::default())
-            .unwrap_or_else(|| panic!("answer should create embed body"));
+        let body = brain_answer_embed_body(
+            "Items?",
+            "- a\n- b\n- c",
+            &BrainEmojiIndex::default(),
+        )
+        .unwrap_or_else(|| panic!("answer should create embed body"));
         let description = body
             .get("embeds")
             .and_then(Value::as_array)
@@ -4551,10 +4448,6 @@ mod tests {
             BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT + " …".chars().count()
         );
         assert!(description.ends_with(" …"));
-        let emoji_description =
-            truncate_brain_description(&"🧠".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT));
-        assert!(emoji_description.encode_utf16().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT);
-        assert!(emoji_description.ends_with(" …"));
     }
 
     #[tokio::test]

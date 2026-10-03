@@ -22,17 +22,14 @@ mod twitch_invites;
 mod vanity;
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     num::NonZeroU64,
     os::unix::fs::PermissionsExt,
     sync::{atomic::AtomicBool, Arc},
-    time::Duration,
 };
 
 use anyhow::Context;
-use dl_core::runtime_config::{
-    lookup as operating_value, secret_value, AiOptions, BrainClientMode as BrainConsumerMode,
-};
+use dl_core::runtime_config::lookup as operating_value;
 use dl_webcore::WebConfig;
 
 fn env(name: &str) -> Option<String> {
@@ -105,47 +102,6 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
     env(name)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
-}
-
-fn validate_brain_open_test_mode(
-    consumer_mode: BrainConsumerMode,
-    open_test_mode: bool,
-) -> anyhow::Result<()> {
-    if consumer_mode == BrainConsumerMode::Typed && open_test_mode {
-        anyhow::bail!(
-            "BRAIN_OPEN_TEST_MODE ist mit BRAIN_CLIENT_MODE=typed nicht kompatibel: der bestehende Review-Build-Testpfad darf nicht still umgangen werden"
-        );
-    }
-    Ok(())
-}
-
-fn brain_api_timeout(options: &AiOptions) -> Duration {
-    Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(8_000))
-}
-
-fn brain_api_answerer(
-    options: &AiOptions,
-    token: Option<String>,
-) -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
-    let endpoint = options
-        .brain_api_endpoint
-        .as_deref()
-        .context("Brain-API-Endpunkt fehlt in der Betriebsdatei")?;
-    let token = token.context("Brain-API-Token fehlt in Infisical")?;
-    let scopes: BTreeSet<String> = options
-        .brain_api_scopes
-        .as_ref()
-        .context("Brain-API-Scopes fehlen in der Betriebsdatei")?
-        .iter()
-        .cloned()
-        .collect();
-    let timeout = brain_api_timeout(options);
-    // Der Adapter ergänzt vor der Sequenz einen zufälligen Instanzbezeichner.
-    let namespace = format!("dl-bot-{}", std::process::id());
-    let answerer =
-        dl_brain::brain_api::BrainApiAnswerer::new(endpoint, &token, timeout, namespace, scopes)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    Ok(Arc::new(answerer))
 }
 
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
@@ -1077,7 +1033,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Brain-RAG: Slash-Command plus bestehender Textcommand über MessageEvent-Subscriber.
     let brain_handler = {
-        let consumer_mode = operating.runtime.ai.brain_client_mode();
         let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
         let brain_bin_path = std::path::PathBuf::from(&brain_bin);
         let enabled = env_bool_default("BRAIN_CMD_ENABLED", true);
@@ -1088,7 +1043,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
             let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
             let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
-            validate_brain_open_test_mode(consumer_mode, open_test_mode)?;
             let channel_allowlist = if open_test_mode {
                 None
             } else {
@@ -1128,28 +1082,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 );
                 let emoji_index =
                     Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
-                let legacy: Arc<dyn dl_brain::AiAnswerer> =
+                let answerer: Arc<dyn dl_brain::AiAnswerer> =
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
                         open_test_mode,
                         brain_bin: brain_bin_path.clone(),
                         emoji_index: emoji_index.clone(),
                     });
-                let answerer: Arc<dyn dl_brain::AiAnswerer> = match consumer_mode {
-                    BrainConsumerMode::Legacy => legacy,
-                    BrainConsumerMode::Typed => brain_api_answerer(
-                        &operating.runtime.ai,
-                        secret_value("TWITCH_INTERNAL_API_TOKEN"),
-                    )?,
-                    BrainConsumerMode::Shadow => Arc::new(modglue::ReportOnlyShadowBrainAnswerer {
-                        visible: legacy,
-                        probe: brain_api_answerer(
-                            &operating.runtime.ai,
-                            secret_value("TWITCH_INTERNAL_API_TOKEN"),
-                        )?,
-                        probe_timeout: brain_api_timeout(&operating.runtime.ai),
-                    }),
-                };
                 Some(Arc::new(modglue::BrainHandler {
                     adapter: adapter.clone(),
                     config,
@@ -2208,11 +2147,10 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     use super::{
-        brain_api_answerer, brain_channel_allowlist_from_value, chat_text_generator_with,
-        legacy_lfg_responder_enabled, lfg_cutover_active, lfg_forum_channel_id_from_value,
-        lfg_panel_channel_id_from_value, matcher_provider_choice, model_from_lookup,
-        moderation_enforce_from_lookup, validate_brain_open_test_mode, validate_voice_worker_token,
-        warn_if_lagebild_token_empty, BrainConsumerMode, MatcherProviderChoice,
+        brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
+        lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
+        matcher_provider_choice, model_from_lookup, moderation_enforce_from_lookup,
+        validate_voice_worker_token, warn_if_lagebild_token_empty, MatcherProviderChoice,
     };
     use std::{
         collections::HashMap,
@@ -2490,140 +2428,6 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
 
         let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
-    }
-
-    #[test]
-    fn brain_client_mode_faellt_in_der_betriebsdatei_geschlossen_aus() {
-        use dl_core::bot_config::BotConfig;
-        let base = "schema_version = 1\n";
-        let default = BotConfig::parse(base).expect("gültige Betriebsdatei");
-        assert_eq!(
-            default.runtime.ai.brain_client_mode(),
-            BrainConsumerMode::Legacy
-        );
-        for (raw, expected) in [
-            ("legacy", BrainConsumerMode::Legacy),
-            ("typed", BrainConsumerMode::Typed),
-            ("shadow", BrainConsumerMode::Shadow),
-        ] {
-            let document = format!(
-                "{base}[runtime.ai]\nbrain_client_mode = '{raw}'\nbrain_api_endpoint = 'http://127.0.0.1:8080'\nbrain_api_scopes = ['bot.public']\n"
-            );
-            assert_eq!(
-                BotConfig::parse(&document)
-                    .expect("gültiger Modus")
-                    .runtime
-                    .ai
-                    .brain_client_mode(),
-                expected
-            );
-        }
-        for raw in ["", "auto", "legac", "typed-shadow", "TYPED"] {
-            let document = format!("{base}[runtime.ai]\nbrain_client_mode = '{raw}'\n");
-            assert!(
-                BotConfig::parse(&document).is_err(),
-                "{raw:?} muss abgewiesen werden"
-            );
-        }
-        for invalid in [
-            "brain_client_mode = 'typed'\n",
-            "brain_client_mode = 'typed'\nbrain_api_endpoint = 'https://example.org'\nbrain_api_scopes = ['bot.public']\n",
-            "brain_client_mode = 'typed'\nbrain_api_endpoint = 'http://127.0.0.1:8080'\nbrain_api_scopes = []\n",
-            "brain_client_mode = 'typed'\nbrain_api_endpoint = 'http://127.0.0.1:8080'\nbrain_api_scopes = ['docs.public']\n",
-            "brain_client_mode = 'typed'\nbrain_api_endpoint = 'http://127.0.0.1:8080'\nbrain_api_scopes = ['second_brain.internal']\n",
-            "brain_client_mode = 'typed'\nbrain_api_endpoint = 'http://127.0.0.1:8080'\nbrain_api_scopes = ['bot.public']\nbrain_api_timeout_ms = 0\n",
-        ] {
-            let document = format!("{base}[runtime.ai]\n{invalid}");
-            assert!(BotConfig::parse(&document).is_err(), "ungültige Brain-Config");
-        }
-    }
-
-    #[tokio::test]
-    async fn brain_startup_liest_toml_und_nutzt_den_typisierten_loopback_client() {
-        use dl_core::bot_config::BotConfig;
-        use std::io::Read;
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("Loopback-Fixture");
-        let endpoint = format!("http://{}", listener.local_addr().expect("Fixture-Adresse"));
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("Brain-Anfrage");
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-                .expect("Fixture-Zeitlimit");
-            let mut bytes = Vec::new();
-            let mut buffer = [0; 4096];
-            let body = loop {
-                let count = stream.read(&mut buffer).expect("Brain-Anfrage lesen");
-                assert!(count > 0);
-                bytes.extend_from_slice(&buffer[..count]);
-                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&bytes[..end]);
-                    assert!(headers.lines().any(|line| {
-                        line.eq_ignore_ascii_case("authorization: Bearer fixture-brain-token")
-                    }));
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|value| value.trim().parse().ok())
-                        })
-                        .expect("Content-Length");
-                    if bytes.len() >= end + 4 + length {
-                        break bytes[end + 4..end + 4 + length].to_vec();
-                    }
-                }
-                assert!(bytes.len() < 70 * 1024);
-            };
-            let query: serde_json::Value = serde_json::from_slice(&body).expect("Query");
-            assert_eq!(query["requested_scopes"], serde_json::json!(["bot.public"]));
-            let response = serde_json::json!({
-                "contract_version": "brain.public.v1",
-                "request_id": query["request_id"],
-                "knowledge_release": "fixture-release",
-                "status": "answered",
-                "text": "Antwort aus dem Brain",
-                "citations": [{"citation_id": "fixture", "label": "Beleg"}]
-            })
-            .to_string();
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).expect("Fixture-Antwort");
-        });
-
-        let directory = tempfile::tempdir().expect("Temporäre Betriebsdatei");
-        let path = directory.path().join("bot.toml");
-        std::fs::write(
-            &path,
-            format!(
-                "schema_version = 1\n[runtime.ai]\nbrain_client_mode = 'typed'\nbrain_api_endpoint = '{endpoint}'\nbrain_api_scopes = ['bot.public']\nbrain_api_timeout_ms = 2000\n"
-            ),
-        )
-        .expect("Betriebsdatei schreiben");
-        let loaded = BotConfig::load(&path).expect("Betriebsdatei laden");
-        assert_eq!(
-            loaded.runtime.ai.brain_client_mode(),
-            BrainConsumerMode::Typed
-        );
-        assert!(brain_api_answerer(&loaded.runtime.ai, None).is_err());
-        let answerer =
-            brain_api_answerer(&loaded.runtime.ai, Some("fixture-brain-token".to_string()))
-                .expect("Startup-Komposition");
-        assert_eq!(
-            answerer
-                .answer("Warden-Build?")
-                .await
-                .expect("Brain-Antwort"),
-            dl_brain::BrainOutcome::Answer("Antwort aus dem Brain".into())
-        );
-        server.join().expect("Fixture beendet");
-    }
-
-    #[test]
-    fn typed_mode_lehnt_legacy_open_test_review_build_semantik_ab() {
-        assert!(validate_brain_open_test_mode(BrainConsumerMode::Typed, true).is_err());
-        assert!(validate_brain_open_test_mode(BrainConsumerMode::Typed, false).is_ok());
-        assert!(validate_brain_open_test_mode(BrainConsumerMode::Legacy, true).is_ok());
-        assert!(validate_brain_open_test_mode(BrainConsumerMode::Shadow, true).is_ok());
     }
 
     #[test]

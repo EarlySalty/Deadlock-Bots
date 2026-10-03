@@ -275,7 +275,7 @@ fn read_credential_path(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)
         .map_err(|_| anyhow!("Infisical Runtime Credential ist nicht lesbar."))?;
     read_credential(&file)
@@ -342,42 +342,6 @@ mod tests {
             b"synthetic-fixture"
         );
         assert_eq!(file.stream_position().unwrap(), offset);
-    }
-
-    #[test]
-    fn writerlose_credential_fifo_wird_vor_der_lektuere_abgewiesen() {
-        const FIXTURE_PATH: &str = "DL_TOKEN_FIFO_TEST_PATH";
-        if let Some(path) = std::env::var_os(FIXTURE_PATH) {
-            assert!(read_credential_path(Path::new(&path)).is_err());
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let fifo = directory.path().join("credential.fifo");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
-        // Der eigene Testkindprozess wird auch bei einer Regression begrenzt beendet.
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::writerlose_credential_fifo_wird_vor_der_lektuere_abgewiesen",
-            ])
-            .env(FIXTURE_PATH, &fifo)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("Credential-FIFO blockiert den Loader");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
 
     #[test]

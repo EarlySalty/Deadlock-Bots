@@ -177,34 +177,3 @@ fn automatic_model_bindings_reject_manual_writes_without_changing_the_config() {
         assert_eq!(fs::read(store.path()).expect("Datei"), bytes);
     }
 }
-
-#[test]
-fn offener_brain_testmodus_wird_im_editor_ohne_teilschreiben_abgewiesen() {
-    let directory = tempfile::tempdir().expect("Testverzeichnis");
-    let path = directory.path().join("bot.toml");
-    fs::write(
-        &path,
-        "schema_version=1\n[runtime.ai]\nbrain_client_mode='typed'\nbrain_api_endpoint='http://127.0.0.1:8788'\nbrain_api_scopes=['bot.public']\nbrain_open_test_mode=false\n",
-    )
-    .expect("Gültige Ausgangskonfiguration");
-    let store = BotConfigStore::open(&path).expect("Konfigurationsspeicher");
-    let before = store.read_versioned().expect("Ausgangsrevision");
-    let bytes = fs::read(&path).expect("Ausgangsdatei");
-    let error = store
-        .save_changes_if_revision(
-            &before.revision,
-            &changes(json!({
-                "runtime.ai.brain_open_test_mode": true,
-                "moderation.enforce": true
-            })),
-        )
-        .err()
-        .expect("Unzulässige Kombination abgewiesen");
-    assert!(error.to_string().contains("offenen Testmodus"));
-    assert_eq!(fs::read(&path).expect("Unveränderte Datei"), bytes);
-    assert_eq!(
-        store.read_versioned().expect("Revision").revision,
-        before.revision
-    );
-    BotConfigStore::open(&path).expect("Weiterhin startfähige Konfiguration");
-}

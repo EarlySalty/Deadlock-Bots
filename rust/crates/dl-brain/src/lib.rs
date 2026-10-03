@@ -5,7 +5,6 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 pub mod api_ingest;
-pub mod brain_api;
 
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
 
@@ -37,8 +36,6 @@ pub enum BrainError {
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
     /// Führt Retrieval und genau eine gemeinsame Generierung aus.
-    // async_trait ergänzt must_use am bereits entsprechend markierten Future.
-    #[allow(clippy::double_must_use)]
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
 }
 
