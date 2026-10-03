@@ -8,4 +8,4 @@ Die normale Konfiguration und diese vier Felder sind gegen Änderungen über Adm
 
 `typed` zusammen mit `brain_open_test_mode=true` blockiert den Start ausdrücklich. Der vorhandene Test- und Reviewpfad bleibt damit wirksam. Für `Answered` und `BuildRejected` gelten dieselben URL- und Längengrenzen. Nicht verfügbare oder unzulässige Antworten werden als Fehler behandelt; fehlende Belege ergeben `NoAnswer`.
 
-`rust/scripts/check-brain-consumer.sh` prüft den Adapter, die Verdrahtung, Shadow-Abbruch und geschützte Konfiguration offline. Der Hostslot und die verbindlichen Sperren müssen vor Cargo erworben werden. Die gemeinsame C9-Abnahme umfasst den heutigen öffentlichen und internen Producervertrag sowie die getrennten Docs- und 2nd-Brain-Releases.
+`bash rust/scripts/check-brain-consumer.sh` prüft den Adapter, die Verdrahtung, Shadow-Abbruch und geschützte Konfiguration offline. Die verbindlichen Hostsperren müssen vor Cargo erworben werden. Die gemeinsame C9-Abnahme umfasst den heutigen öffentlichen und internen Producervertrag sowie die getrennten Docs- und 2nd-Brain-Releases.
