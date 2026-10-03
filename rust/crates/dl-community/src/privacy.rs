@@ -3836,25 +3836,26 @@ pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbRes
     let mut tx = pool.begin().await?;
     dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
     lock_user_privacy(&mut tx, user_id).await?;
-    let now = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>("SELECT clock_timestamp()")
-        .fetch_one(&mut *tx)
-        .await?;
-    sqlx::query!(
-        r#"
-        INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
-        VALUES ($1, FALSE, NULL, 'user_opt_in', $2)
-        ON CONFLICT(user_id) DO UPDATE SET
-          opted_out = FALSE,
-          deleted_at = NULL,
-          reason = excluded.reason,
-          updated_at = excluded.updated_at
-        "#,
-        user_id,
-        now,
+    // Eine bereits aktive Speicherung braucht weder eine neue Herkunftsgrenze
+    // noch eine neue Scout-Epoche. Nur einen tatsächlichen Opt-out aufheben.
+    let changed = sqlx::query(
+        "UPDATE core.user_privacy SET opted_out = FALSE, deleted_at = NULL,
+             reason = 'user_opt_in', updated_at = clock_timestamp()
+          WHERE user_id = $1 AND (opted_out OR deleted_at IS NOT NULL)",
     )
+    .bind(user_id)
     .execute(&mut *tx)
-    .await?;
-    crate::scout_privacy::enqueue(&mut tx, user_id, "consent").await?;
+    .await?
+    .rows_affected()
+        > 0;
+    let unproven_consent: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community.scout_privacy_epochs
+          WHERE subject_hash = sha256(convert_to('scout-community:discord-privacy:v1:' || $1::text, 'UTF8'))
+            AND action = 'consent' AND activity_since IS NULL)",
+    ).bind(user_id).fetch_one(&mut *tx).await?;
+    if changed || unproven_consent {
+        crate::scout_privacy::enqueue(&mut tx, user_id, "consent").await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -8828,6 +8829,121 @@ mod tests {
             assert!(text.contains("4242"));
             assert!(text.contains("user42"));
         }
+    }
+
+    #[tokio::test]
+    async fn opt_in_ohne_opt_out_erhaelt_laufendes_invite_tracking() {
+        for existing_active in [false, true] {
+            let db = mk_db().await;
+            let pool = db.pool();
+            if existing_active {
+                sqlx::query(
+                    "INSERT INTO core.user_privacy(user_id, opted_out, reason, updated_at)
+                    VALUES(42, FALSE, 'user_opt_in', clock_timestamp() - interval '2 days')",
+                )
+                .execute(pool)
+                .await
+                .expect("Bereits aktive Speicherung");
+            }
+            let before: Option<DateTime<Utc>> =
+                sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id = 42")
+                    .fetch_optional(pool)
+                    .await
+                    .expect("Ursprünglicher Privacyzustand");
+            let mut tx = pool.begin().await.expect("Invite-Schreibtransaktion");
+            dl_central_db::platform_connections::lock_twitch_identity(&mut tx)
+                .await
+                .expect("Identitätslock vor Nutzerlock");
+            lock_user_privacy(&mut tx, 42).await.expect("Nutzerlock");
+            sqlx::query("INSERT INTO activity.twitch_invite_members(
+                guild_id, user_id, prior_member, first_joined_at, current_joined_at)
+                VALUES(1, 42, FALSE, clock_timestamp() - interval '1 day', clock_timestamp() - interval '1 day')")
+                .execute(&mut *tx).await.expect("Laufende Mitgliedschaft");
+            tx.commit().await.expect("Invite-Commit");
+            set_opt_in(pool, 42, Utc::now().timestamp())
+                .await
+                .expect("Unnötiger Opt-in");
+            let after: Option<DateTime<Utc>> =
+                sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id = 42")
+                    .fetch_optional(pool)
+                    .await
+                    .expect("Unveränderte Herkunftsgrenze");
+            assert_eq!(after, before);
+            let epochs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM community.scout_privacy_epochs")
+                    .fetch_one(pool)
+                    .await
+                    .expect("Keine neue Scoutbarriere");
+            assert_eq!(epochs, 0);
+            assert_eq!(
+                dl_central_db::community_points::apply_suggestion_outcome_page(
+                    pool,
+                    &[scout_outcome_for_test(42, "456", None, None)],
+                    None,
+                )
+                .await
+                .expect("Ursprünglich gültige Vorschlagszuordnung bleibt berechtigt"),
+                1
+            );
+            let mut tx = pool.begin().await.expect("Voice-Schreibtransaktion");
+            dl_central_db::platform_connections::lock_twitch_identity(&mut tx)
+                .await
+                .expect("Identitätslock vor Nutzerlock");
+            lock_user_privacy(&mut tx, 42).await.expect("Nutzerlock");
+            let updated = sqlx::query(
+                "UPDATE activity.twitch_invite_members
+                SET voice_channel_id = 99, voice_started_at = clock_timestamp(),
+                    voice_observed_at = clock_timestamp(), voice_qualified_at = clock_timestamp()
+                WHERE guild_id = 1 AND user_id = 42",
+            )
+            .execute(&mut *tx)
+            .await
+            .expect("Voice-Update wird nicht verschluckt");
+            assert_eq!(updated.rows_affected(), 1);
+            tx.commit().await.expect("Voice-Commit");
+            assert!(sqlx::query_scalar::<_, bool>(
+                "SELECT voice_qualified_at IS NOT NULL
+                FROM activity.twitch_invite_members WHERE guild_id = 1 AND user_id = 42"
+            )
+            .fetch_one(pool)
+            .await
+            .expect("Qualifikation bleibt möglich"));
+        }
+    }
+
+    #[tokio::test]
+    async fn wiederholter_opt_in_erhaelt_consent_grenze_epoche_und_retryauftrag() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+            .await
+            .expect("Echte Erasure");
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Erneute Einwilligung");
+        let before: DateTime<Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id = 42")
+                .fetch_one(pool)
+                .await
+                .expect("Herkunftsgrenze");
+        let consent = scout_consent_for_test(pool).await;
+        let operations: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT operation_id, epoch FROM community.scout_privacy_outbox WHERE discord_id = 42 ORDER BY epoch",
+        ).fetch_all(pool).await.expect("Originale Aufträge");
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Wiederholter Klick");
+        let after: DateTime<Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id = 42")
+                .fetch_one(pool)
+                .await
+                .expect("Herkunftsgrenze bleibt gleich");
+        assert_eq!(before, after);
+        assert_eq!(consent, scout_consent_for_test(pool).await);
+        let retry: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT operation_id, epoch FROM community.scout_privacy_outbox WHERE discord_id = 42 ORDER BY epoch",
+        ).fetch_all(pool).await.expect("Identische Retryaufträge");
+        assert_eq!(operations, retry);
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ pub const RULES_TEXT: &str = "• Reiche einen Gameplay-Clip in mind. 1080p ein.
 • Füge **Link**, **Credit/Username** (Overlay) und **Kontext/Info** hinzu.\n\
 • Durch das Absenden bestätigst du, dass die Einverständnis des Erstellers vorliegt.\n\
 • Durch das Absenden dürfen wir den Clip frei verwenden; Credits erscheinen im Video.\n\
-• Nach Ende der Woche stimmt die Community 48 Stunden lang ab. Die Top 3 laufen im dach_lock-Stream.\n";
+• Nach Ende der Woche stimmt die Community 48 Stunden lang ab. Die Links und Credits der Top 3 werden dach_lock zur kuratierten Auswahl bereitgestellt.\n";
 
 // ── Pure Logik ─────────────────────────────────────────────────────────────
 

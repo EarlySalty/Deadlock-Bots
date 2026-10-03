@@ -382,7 +382,7 @@ pub fn voting_message(
     let header = format!(
         "Das sind die Clips der Woche vom {} bis {}. Schau sie dir an und wähle unten deinen Favoriten.\n\
          Du hast eine Stimme pro Woche und kannst sie bis zum Ende ändern. Für deinen eigenen Clip kannst du nicht stimmen.\n\
-         Die Abstimmung endet <t:{voting_end_ts}:f> (<t:{voting_end_ts}:R>). Die Top 3 laufen im dach_lock-Stream.\n",
+         Die Abstimmung endet <t:{voting_end_ts}:f> (<t:{voting_end_ts}:R>). Die Links und Credits der Top 3 werden dach_lock zur kuratierten Auswahl bereitgestellt.\n",
         berlin_date(week_start_ts),
         berlin_date(week_end_ts),
     );
@@ -501,7 +501,7 @@ pub fn result_message(
             ));
         }
         lines.push(
-            "\nGlückwunsch! Die Top 3 laufen demnächst im dach_lock-Stream. Danke an alle, die mitgemacht haben."
+            "\nGlückwunsch! Die Links und Credits der Top 3 werden dach_lock zur kuratierten Auswahl bereitgestellt. Danke an alle, die mitgemacht haben."
                 .to_string(),
         );
     }

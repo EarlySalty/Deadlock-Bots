@@ -78,12 +78,22 @@ impl InteractionHandler for PrivacyHandler {
             },
             Action::OptIn => match set_opt_in(&self.pool, uid, now).await {
                 Ok(()) => {
+                    let pending: bool = match sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM community.scout_privacy_outbox WHERE discord_id = $1)",
+                    ).bind(uid).fetch_one(&self.pool).await {
+                        Ok(pending) => pending,
+                        Err(_) => return BridgeReply::ephemeral_text(OPTIN_ERROR_TEXT),
+                    };
+                    if !pending {
+                        return BridgeReply::ephemeral_text(OPTIN_SUCCESS_TEXT);
+                    }
                     match &self.scout_client {
                         Some(client) if crate::scout_privacy::deliver_user(&self.pool, client, uid).await.is_ok() =>
                             BridgeReply::ephemeral_text(OPTIN_SUCCESS_TEXT),
-                        _ => BridgeReply::ephemeral_text("Deine erneute Einwilligung ist lokal gespeichert. Die Twitch-Community-Brücke hat sie noch nicht bestätigt; der gespeicherte Auftrag wird wiederholt. Verknüpfe dein Twitchkonto selbst erneut, damit neue Zuschaueraktivität erfasst werden kann."),
+                        Some(_) => BridgeReply::ephemeral_text("Deine erneute Einwilligung ist lokal gespeichert. Die Twitch-Community-Brücke hat sie noch nicht bestätigt; der gespeicherte Auftrag wird erneut versucht. Verknüpfe dein Twitchkonto selbst erneut, damit neue Zuschaueraktivität erfasst werden kann."),
+                        None => BridgeReply::ephemeral_text("Deine erneute Einwilligung ist lokal gespeichert, aber noch nicht an die Twitch-Community-Brücke zugestellt. Die Brücke ist hier nicht eingerichtet; der gespeicherte Auftrag bleibt offen, bis sie wieder verfügbar ist. Bitte dem Team melden. Verknüpfe dein Twitchkonto selbst erneut, damit neue Zuschaueraktivität erfasst werden kann."),
                     }
-                },
+                }
                 Err(err) => {
                     tracing::warn!(%err, user_id = uid, "Privacy-Opt-in konnte nicht gespeichert werden");
                     BridgeReply::ephemeral_text(OPTIN_ERROR_TEXT)
@@ -109,7 +119,11 @@ impl InteractionHandler for PrivacyHandler {
                             None => false,
                         };
                         if !remote_done {
-                            return BridgeReply::ephemeral_text("Deine lokalen Daten wurden gelöscht und der Opt-out ist aktiv. Die Löschung der Twitch-Community-Vorschlagskopien ist noch nicht bestätigt. Der gespeicherte Löschauftrag wird wiederholt; die vollständige Löschung ist noch offen.");
+                            return BridgeReply::ephemeral_text(if self.scout_client.is_some() {
+                                "Deine lokalen Daten wurden gelöscht und der Opt-out ist aktiv. Die Löschung der Twitch-Community-Vorschlagskopien ist noch nicht bestätigt. Der gespeicherte Löschauftrag wird erneut versucht; die vollständige Löschung ist noch offen."
+                            } else {
+                                "Deine lokalen Daten wurden gelöscht und der Opt-out ist aktiv. Die Twitch-Community-Brücke ist hier nicht eingerichtet; ihr gespeicherter Löschauftrag bleibt offen, bis sie wieder verfügbar ist. Die vollständige Löschung ist noch offen. Bitte dem Team melden."
+                            });
                         }
                         let voice = s.sum(&["voice_session_log.user_id", "voice_stats.user_id"]);
                         let steam = s.steam_ids.len();
@@ -126,39 +140,53 @@ impl InteractionHandler for PrivacyHandler {
                 }
             }
             Action::Export => match export_user_data(&self.pool, uid, now).await {
-                Ok(mut value) => {
+                Ok(value) => {
                     let remote = match &self.scout_client {
                         Some(client) => crate::scout_privacy::export(client, uid).await,
                         None => Err("Twitch-Community-Brücke nicht verfügbar".into()),
                     };
-                    match remote {
-                        Ok(remote) => value["twitch_community_scout"] = remote,
-                        Err(error) => {
-                            tracing::warn!(%error, "Twitch-Community-Export nicht vollständig");
-                            return BridgeReply::ephemeral_text("Der Export der Twitch-Community-Vorschlagskopien ist gerade nicht verfügbar. Ein vollständiger Datenexport konnte deshalb nicht erstellt werden. Bitte später erneut versuchen.");
-                        }
-                    }
-                    let bytes =
-                        serde_json::to_vec_pretty(&value).unwrap_or_else(|_| b"{}".to_vec());
-                    BridgeReply {
-                        content: Some(
-                            "📄 Hier sind die von diesem Ablauf erfassten Daten als JSON-Datei. \
-                             Personenbezogene Fremd-IDs sind dabei geschwärzt."
-                                .to_string(),
-                        ),
-                        ephemeral: true,
-                        attachments: vec![BridgeAttachment {
-                            filename: "deine-daten.json".to_string(),
-                            data: bytes,
-                        }],
-                        ..Default::default()
-                    }
+                    export_reply(value, remote)
                 }
                 Err(_) => BridgeReply::ephemeral_text(
                     "⚠️ Konnte den Datenexport nicht erstellen. Bitte später erneut versuchen.",
                 ),
             },
         }
+    }
+}
+
+fn export_reply(
+    mut value: serde_json::Value,
+    remote: Result<serde_json::Value, String>,
+) -> BridgeReply {
+    let incomplete = remote.is_err();
+    match remote {
+        Ok(remote) => value["twitch_community_scout"] = remote,
+        Err(error) => {
+            tracing::warn!(%error, "Twitch-Community-Export nicht vollständig");
+            value["twitch_community_scout"] = json!({
+                "status": "unavailable", "complete": false,
+                "retry": "Export nach Wiederherstellung der Twitch-Community-Brücke erneut anfordern."
+            });
+        }
+    }
+    let bytes = match serde_json::to_vec_pretty(&value) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return BridgeReply::ephemeral_text(
+                "Konnte den Datenexport nicht erstellen. Bitte später erneut versuchen.",
+            )
+        }
+    };
+    BridgeReply {
+        content: Some(if incomplete {
+            "Hier sind deine lokal erfassten Daten als JSON-Datei. Der Export ist unvollständig: Die Twitch-Community-Vorschlagskopien sind gerade nicht verfügbar. Ihr fehlender Teil ist in der Datei gekennzeichnet. Bitte den Export später erneut anfordern. Personenbezogene Fremd-IDs sind geschwärzt."
+        } else {
+            "Hier sind die von diesem Ablauf erfassten Daten als JSON-Datei. Personenbezogene Fremd-IDs sind geschwärzt."
+        }.to_string()),
+        ephemeral: true,
+        attachments: vec![BridgeAttachment { filename: "deine-daten.json".to_string(), data: bytes }],
+        ..Default::default()
     }
 }
 
@@ -251,6 +279,79 @@ mod tests {
             .connect_lazy_with(options)
     }
 
+    #[test]
+    fn erfolgreicher_export_enthaelt_lokale_und_remote_daten() {
+        let reply = export_reply(
+            json!({"user_id":42,"tables":{"fixture":[{"value":"lokal"}]}}),
+            Ok(json!({"discord_user_id":"42","suggestions":[{"reason":"eigener Grund"}]})),
+        );
+        assert!(!reply
+            .content
+            .as_ref()
+            .expect("Antwort")
+            .contains("unvollständig"));
+        let value: serde_json::Value =
+            serde_json::from_slice(&reply.attachments[0].data).expect("Exportdatei");
+        assert_eq!(value["tables"]["fixture"][0]["value"], "lokal");
+        assert_eq!(
+            value["twitch_community_scout"]["suggestions"][0]["reason"],
+            "eigener Grund"
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn export_behaelt_lokale_datei_bei_fehlender_oder_ausgefallener_scout_bruecke() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("Echte Wegwerf-DB");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Testlistener");
+        let address = listener.local_addr().expect("Adresse");
+        let router =
+            axum::Router::new().fallback(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("Testserver");
+        });
+        let client = dl_bridges::twitch::TwitchApiClient::try_new(
+            format!("http://{address}"),
+            "fixture-token",
+            std::time::Duration::from_secs(2),
+            false,
+        )
+        .expect("Client");
+        for scout_client in [None, Some(client)] {
+            let handler = PrivacyHandler {
+                pool: db.pool().clone(),
+                action: Action::Export,
+                clear_runtime_state: Arc::new(|_| {}),
+                scout_client,
+            };
+            let reply = handler
+                .handle(BridgeInteraction {
+                    user_id: 42,
+                    ..BridgeInteraction::default()
+                })
+                .await;
+            assert!(reply.ephemeral);
+            assert!(reply
+                .content
+                .as_ref()
+                .expect("Antwort")
+                .contains("unvollständig"));
+            assert_eq!(reply.attachments.len(), 1);
+            let value: serde_json::Value =
+                serde_json::from_slice(&reply.attachments[0].data).expect("Lokale Exportdatei");
+            assert_eq!(value["user_id"], 42);
+            assert!(value["tables"].is_object());
+            assert_eq!(value["twitch_community_scout"]["status"], "unavailable");
+            assert_eq!(value["twitch_community_scout"]["complete"], false);
+        }
+        server.abort();
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn optin_db_fehler_bestaetigt_keinen_erfolg() {
         let handler = PrivacyHandler {
@@ -300,7 +401,9 @@ mod tests {
             .await;
 
         let text = reply.content.expect("Antwort");
-        assert!(text.contains("noch nicht bestätigt"));
+        assert!(text.contains("noch nicht an die Twitch-Community-Brücke zugestellt"));
+        assert!(text.contains("nicht eingerichtet"));
+        assert!(!text.contains("wird wiederholt"));
         assert_ne!(text, OPTIN_SUCCESS_TEXT);
         let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM community.scout_privacy_outbox WHERE discord_id = 42 AND action = 'consent'")
             .fetch_one(db.pool()).await.expect("Gespeicherter Retryauftrag");
