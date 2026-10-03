@@ -1821,7 +1821,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         )
         .expect("synthetische Betriebskonfiguration");
         let lookup = |key: &str| config.runtime_value(key);
-        let guide = serverguide::GuideConfig::from_lookup(1234, lookup);
+        let guide = crate::serverguide::GuideConfig::from_lookup(1234, lookup);
         assert!(!guide.enabled);
         assert_eq!(guide.guild_id, 1234);
         assert!(guide.test_users.is_empty());

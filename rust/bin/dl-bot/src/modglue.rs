@@ -10,8 +10,7 @@ use std::time::Duration;
 use dl_discord::{BridgeInteraction, BridgeReply, CommandSpec, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, Permissions, ReactionType,
-    RoleId, UserId,
+    ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, ReactionType, RoleId, UserId,
 };
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
