@@ -3722,6 +3722,8 @@ pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbRes
     let now = utc_from_unix(now)?;
     let mut tx = pool.begin().await?;
     lock_user_privacy(&mut tx, user_id).await?;
+    let restarting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM core.user_privacy WHERE user_id=$1 AND (opted_out OR deleted_at IS NOT NULL))")
+        .bind(user_id).fetch_one(&mut *tx).await?;
     sqlx::query!(
         r#"
         INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
@@ -3737,6 +3739,13 @@ pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbRes
     )
     .execute(&mut *tx)
     .await?;
+    if restarting {
+        sqlx::query("UPDATE core.user_privacy SET updated_at=clock_timestamp() WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        restart_guide_after_opt_in_tx(&mut tx, user_id).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -4015,6 +4024,34 @@ pub async fn delete_user_data(
 
 /// Löscht den Guide-Zustand unter demselben globalen Privacylock wie die übrigen Daten.
 /// Der Sperrmerker bleibt erhalten, damit alte Aufträge keinen Verlauf wiederherstellen.
+async fn restart_guide_after_opt_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<()> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('brain.guide_subjects') IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await?;
+    if !exists {
+        return Ok(());
+    }
+    sqlx::query("INSERT INTO brain.guide_legacy_imports(guild_id,user_id) SELECT guild_id,user_id FROM brain.guide_subjects WHERE user_id=$1 ON CONFLICT DO NOTHING")
+        .bind(user_id.to_string()).execute(&mut **tx).await?;
+    for relation in [
+        "brain.guide_turn_claims",
+        "brain.guide_conversations",
+        "brain.guide_feedback_outbox",
+        "brain.guide_feedback_drafts",
+    ] {
+        sqlx::query(&format!("DELETE FROM {relation} WHERE user_id=$1"))
+            .bind(user_id.to_string())
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query("UPDATE brain.guide_subjects SET epoch=epoch+1,memory_enabled=FALSE,contact_enabled=FALSE,globally_opted_out=FALSE,deleted=FALSE,profile_json='{}'::jsonb,history_json='[]'::jsonb,min_event_id=GREATEST(min_event_id,((floor(extract(epoch from clock_timestamp())*1000)::bigint+1)-1420070400000)*4194304),updated_at=now() WHERE user_id=$1")
+        .bind(user_id.to_string()).execute(&mut **tx).await?;
+    Ok(())
+}
+
 pub(crate) async fn purge_guide_data_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,

@@ -151,7 +151,7 @@ impl FeedbackHub {
         dl_central_db::lock_user_privacy(&mut privacy_tx, db_user)
             .await
             .map_err(|_| "Datenschutzprüfung nicht erreichbar")?;
-        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain.guide_feedback_outbox WHERE guild_id=$1 AND user_id=$2 AND delivery_id=$3 AND text=$4 AND destination_channel_id=$5 AND state='pending')")
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain.guide_feedback_outbox WHERE guild_id=$1 AND user_id=$2 AND delivery_id=$3 AND text=$4 AND destination_channel_id=$5 AND state='pending' AND expires_at>clock_timestamp())")
             .bind(guild_id).bind(user_id).bind(delivery_id).bind(text).bind(channel_id.to_string()).fetch_one(&mut *privacy_tx).await.map_err(|_| "Feedbackfreigabe konnte nicht geprüft werden")?;
         if !pending {
             return Err("Die Feedbackfreigabe ist nicht mehr gültig".into());
@@ -168,6 +168,11 @@ impl FeedbackHub {
         let nonce = hex::encode(Sha256::digest(delivery_id.as_bytes()));
         let body = json!({"content": text, "nonce": &nonce[..24], "enforce_nonce": true, "allowed_mentions": {"parse": []}})
             .as_object().cloned().ok_or("Feedback konnte nicht vorbereitet werden")?;
+        let still_valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM brain.guide_feedback_outbox WHERE guild_id=$1 AND user_id=$2 AND delivery_id=$3 AND state='pending' AND expires_at>clock_timestamp())")
+            .bind(guild_id).bind(user_id).bind(delivery_id).fetch_one(&mut *privacy_tx).await.map_err(|_| "Feedbackfreigabe konnte nicht geprüft werden")?;
+        if !still_valid {
+            return Err("Die Feedbackfreigabe ist abgelaufen".into());
+        }
         let message_id = self.port.post_rich(channel_id, body).await?;
         let db_message = i64::try_from(message_id).map_err(|_| "Ungültiger Zustellungsnachweis")?;
         sqlx::query("UPDATE bot.serverguide_feedback_deliveries SET sent_message_id=$2 WHERE delivery_id=$1")
