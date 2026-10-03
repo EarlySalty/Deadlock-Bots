@@ -579,7 +579,10 @@ async fn consent_rohdaten_bindung_nulltag_fehler_ohne_cursorfortschritt() {
         token: TOKEN,
     };
     let today = berlin_day(Utc::now());
-    let mut old = viewer_row(&viewer_json("111", &Utc::now().to_rfc3339())).unwrap();
+    let old_wire: ViewerWire =
+        serde_json::from_value(viewer_json("111", &Utc::now().to_rfc3339()))
+            .expect("Viewer-Testdaten entsprechen dem Wirevertrag");
+    let mut old = viewer_row(&old_wire).unwrap();
     old.day = today;
     assert_eq!(
         sink.apply(&[old.clone()], Some("bound-cursor"))
