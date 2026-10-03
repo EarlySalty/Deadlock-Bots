@@ -1102,12 +1102,12 @@ mod tests {
         .execute(pool)
         .await?;
 
+        let mut website_streamer = invite("WebStreamer", "WEB999");
+        // Zwei eigenständige Kanäle benötigen unterschiedliche Twitch-Identitäten.
+        website_streamer.twitch_user_id = Some("124".to_string());
         let summary = sync_invites_and_reclassify(
             pool,
-            vec![
-                invite(" CoolStreamer ", " ABC123 "),
-                invite("WebStreamer", "WEB999"),
-            ],
+            vec![invite(" CoolStreamer ", " ABC123 "), website_streamer],
             false,
         )
         .await?;
