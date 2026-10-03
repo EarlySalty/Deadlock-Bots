@@ -85,6 +85,7 @@ Gemini.ps1
 !scripts/run_brain_feeder.sh
 !scripts/run_verbinder.sh
 !scripts/run_dl_insights_sync.sh
+!scripts/run_dl_community_points_sync.sh
 /service/pg_twitch/
 /.github/tmp
 /erinnerungen

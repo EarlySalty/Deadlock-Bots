@@ -10,6 +10,7 @@
 //!   in 4b/4c.
 
 pub mod adaptive;
+pub mod community_points;
 mod db;
 pub mod feedback;
 pub mod glue;

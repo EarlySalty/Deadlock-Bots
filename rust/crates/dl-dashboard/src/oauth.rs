@@ -244,6 +244,55 @@ pub fn extract_steam_connection_ids(connections: &[Value]) -> Vec<String> {
     out
 }
 
+/// Twitch-Verbindung aus den Discord-Connections (`type == "twitch"`).
+///
+/// Discord liefert `id` als Twitch-User-ID und `name` als Login. Nur Eintraege
+/// mit numerischer ID und nicht leerem Login zaehlen; eine verifizierte
+/// Verbindung hat Vorrang vor einer unverifizierten, sonst gilt die
+/// Reihenfolge von Discord.
+pub fn extract_twitch_connection(connections: &[Value]) -> Option<dl_central_db::TwitchConnection> {
+    let mut first_unverified = None;
+    for conn in connections {
+        let is_twitch = conn
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|t| t.trim().eq_ignore_ascii_case("twitch"))
+            .unwrap_or(false);
+        if !is_twitch {
+            continue;
+        }
+        let id = conn
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        let login = conn
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if !dl_central_db::platform_connections::is_valid_twitch_user_id(id) || login.is_empty() {
+            continue;
+        }
+        let verified = conn
+            .get("verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let candidate = dl_central_db::TwitchConnection {
+            twitch_user_id: id.to_string(),
+            twitch_login: login.to_string(),
+            verified,
+        };
+        if verified {
+            return Some(candidate);
+        }
+        if first_unverified.is_none() {
+            first_unverified = Some(candidate);
+        }
+    }
+    first_unverified
+}
+
 /// `application/x-www-form-urlencoded` mit quote_plus-Semantik (Space → `+`),
 /// passend zu Pythons `urllib.parse.urlencode`.
 fn form_urlencode(pairs: &[(&str, &str)]) -> String {
@@ -363,5 +412,52 @@ mod tests {
         ];
         let ids = extract_steam_connection_ids(&connections);
         assert_eq!(ids, vec!["765", "888"]);
+    }
+
+    #[test]
+    fn twitch_und_steam_gleichzeitig_extrahieren() {
+        let connections = vec![
+            json!({"type": "steam", "id": "76561198000000001", "name": "steamname"}),
+            json!({"type": "twitch", "id": "123456", "name": "StreamerName", "verified": true}),
+        ];
+        assert_eq!(
+            extract_steam_connection_ids(&connections),
+            vec!["76561198000000001", "steamname"]
+        );
+        let twitch = extract_twitch_connection(&connections).expect("twitch");
+        assert_eq!(twitch.twitch_user_id, "123456");
+        assert_eq!(twitch.twitch_login, "StreamerName");
+        assert!(twitch.verified);
+    }
+
+    #[test]
+    fn nur_steam_liefert_keine_twitch_verbindung() {
+        let connections = vec![json!({"type": "steam", "id": "765", "name": "765"})];
+        assert_eq!(extract_steam_connection_ids(&connections), vec!["765"]);
+        assert!(extract_twitch_connection(&connections).is_none());
+    }
+
+    #[test]
+    fn keine_verbindung_liefert_nichts() {
+        assert!(extract_steam_connection_ids(&[]).is_empty());
+        assert!(extract_twitch_connection(&[]).is_none());
+    }
+
+    #[test]
+    fn twitch_extraktion_prueft_id_und_bevorzugt_verifiziert() {
+        let connections = vec![
+            json!({"type": "twitch", "id": "abc", "name": "kaputt", "verified": true}),
+            json!({"type": "twitch", "id": "111", "name": "", "verified": true}),
+            json!({"type": "twitch", "id": "222", "name": "erstes"}),
+            json!({"type": "TWITCH", "id": "333", "name": "zweites", "verified": true}),
+        ];
+        let twitch = extract_twitch_connection(&connections).expect("twitch");
+        assert_eq!(twitch.twitch_user_id, "333");
+        assert!(twitch.verified);
+
+        let unverified = vec![json!({"type": "twitch", "id": "222", "name": "erstes"})];
+        let twitch = extract_twitch_connection(&unverified).expect("twitch");
+        assert_eq!(twitch.twitch_user_id, "222");
+        assert!(!twitch.verified);
     }
 }

@@ -4,6 +4,7 @@ mod faq_publish;
 mod rang_guide_publish;
 mod regelwerk_publish;
 mod support_publish;
+mod twitch_link;
 mod voice_ux_publish;
 mod welcome_publish;
 
@@ -7116,6 +7117,22 @@ pub fn register_regelwerk_components(router: &mut dl_discord::InteractionRouter)
 
 pub fn register_faq_components(router: &mut dl_discord::InteractionRouter) {
     faq_publish::register_components(router);
+}
+
+/// Button "Twitch verknüpfen" im Verify-Panel: holt den Discord-Link beim
+/// Dashboard (`dashboard_base`, loopback) mit dem internen Token.
+/// Registriert den Verify-Panel-Knopf und liefert dieselbe Link-Quelle für
+/// den Concierge-Knopf "Twitch verknüpfen".
+pub fn register_twitch_link_components(
+    router: &mut dl_discord::InteractionRouter,
+    dashboard_base: String,
+    token: Option<String>,
+) -> twitch_link::ConciergeTwitchLink {
+    let source: Arc<dyn twitch_link::TwitchLinkUrlSource> = Arc::new(
+        twitch_link::DashboardTwitchLinkClient::new(dashboard_base, token),
+    );
+    twitch_link::register(router, source.clone());
+    twitch_link::ConciergeTwitchLink::new(source)
 }
 
 struct ServerSyncCommand {

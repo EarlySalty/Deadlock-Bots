@@ -43,6 +43,9 @@ pub const RANG_GUIDE_COMPONENT_ID_STEP2_MEDIA: u64 = 31_022;
 pub const RANG_GUIDE_COMPONENT_ID_STEP3_MEDIA: u64 = 31_023;
 pub const RANG_GUIDE_COMPONENT_ID_STEP4_MEDIA: u64 = 31_024;
 pub const RANG_GUIDE_COMPONENT_ID_EXTRAS_MEDIA: u64 = 31_025;
+pub const RANG_GUIDE_COMPONENT_ID_TWITCH_TEXT: u64 = 31_027;
+pub const RANG_GUIDE_COMPONENT_ID_TWITCH_ACTION_ROW: u64 = 31_028;
+pub const RANG_GUIDE_COMPONENT_ID_TWITCH_LINK_BUTTON: u64 = 31_029;
 
 /// Schritt-Banner (divider-Stil) je Abschnitt; fehlende Dateien werden mit
 /// Warnung uebersprungen, der Publish laeuft dann ohne das jeweilige Banner.
@@ -75,6 +78,9 @@ pub const STEAM_LINK_OPEN_CUSTOM_ID: &str = "steam_link_panel:open";
 pub const STEAM_LINK_FRIEND_CODE_CUSTOM_ID: &str = "steam_link_panel:friend_code";
 pub const STEAM_LINK_RANKCHECK_CUSTOM_ID: &str = "steam_link_panel:rankcheck";
 pub const STEAM_LINK_UNLINK_CUSTOM_ID: &str = "steam_link_panel:unlink";
+/// Button "Twitch verknüpfen" (Handler: `serversync::twitch_link`). Eigenes
+/// Präfix, damit die Steam-Bridge den Klick nicht an den Steam-Bot reicht.
+pub const TWITCH_LINK_OPEN_CUSTOM_ID: &str = "twitch_link_panel:open";
 pub const LINKED_ROLE_LOGIN_URL_DEFAULT: &str =
     "https://deutsche-deadlock-community.de/coaching/api/auth/discord/linked-role/login";
 
@@ -92,6 +98,9 @@ pub const RANG_GUIDE_LINKED_ROLE_BUTTON_LABEL: &str = "✅ Discord-Verknüpfung 
 pub const RANG_GUIDE_FRIEND_CODE_BUTTON_LABEL: &str = "🔢 Freundescode eingeben";
 pub const RANG_GUIDE_RANKCHECK_BUTTON_LABEL: &str = "📊 Rang prüfen";
 pub const RANG_GUIDE_UNLINK_BUTTON_LABEL: &str = "🔓 Verknüpfung entfernen";
+/// Optionaler nächster Schritt nach dem Steam-Verify (Abschnitt "Fertig").
+pub const RANG_GUIDE_TWITCH_HINT: &str = "-# Optional: Wenn du auf Twitch zuschaust, verknüpf dein Twitch-Konto, dann erkennt dich der Bot in Partner-Streams.";
+pub const RANG_GUIDE_TWITCH_LINK_BUTTON_LABEL: &str = "🟣 Twitch verknüpfen";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RangGuidePublishOutput {
@@ -195,6 +204,7 @@ struct ResolvedRangGuideTexts {
     step4_body: String,
     extras_title: String,
     extras_body: String,
+    twitch_hint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +214,7 @@ struct ResolvedRangGuideButtons {
     friend_code: String,
     rankcheck: String,
     unlink: String,
+    twitch_link: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +245,7 @@ struct RangGuideBodyTextsToml {
     step4_body: Option<String>,
     extras_title: Option<String>,
     extras_body: Option<String>,
+    twitch_hint: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -244,6 +256,7 @@ struct RangGuideButtonsToml {
     friend_code: Option<String>,
     rankcheck: Option<String>,
     unlink: Option<String>,
+    twitch_link: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -506,6 +519,7 @@ impl ResolvedRangGuideConfig {
                 step4_body: RANG_GUIDE_STEP4_BODY.to_string(),
                 extras_title: RANG_GUIDE_EXTRAS_TITLE.to_string(),
                 extras_body: RANG_GUIDE_EXTRAS_BODY.to_string(),
+                twitch_hint: RANG_GUIDE_TWITCH_HINT.to_string(),
             },
             buttons: ResolvedRangGuideButtons {
                 steam_open: RANG_GUIDE_STEAM_OPEN_BUTTON_LABEL.to_string(),
@@ -513,6 +527,7 @@ impl ResolvedRangGuideConfig {
                 friend_code: RANG_GUIDE_FRIEND_CODE_BUTTON_LABEL.to_string(),
                 rankcheck: RANG_GUIDE_RANKCHECK_BUTTON_LABEL.to_string(),
                 unlink: RANG_GUIDE_UNLINK_BUTTON_LABEL.to_string(),
+                twitch_link: RANG_GUIDE_TWITCH_LINK_BUTTON_LABEL.to_string(),
             },
             urls: ResolvedRangGuideUrls {
                 linked_role_login: LINKED_ROLE_LOGIN_URL_DEFAULT.to_string(),
@@ -530,12 +545,14 @@ impl ResolvedRangGuideConfig {
         apply_optional(&mut self.texts.step4_body, file.texts.step4_body);
         apply_optional(&mut self.texts.extras_title, file.texts.extras_title);
         apply_optional(&mut self.texts.extras_body, file.texts.extras_body);
+        apply_optional(&mut self.texts.twitch_hint, file.texts.twitch_hint);
 
         apply_optional(&mut self.buttons.steam_open, file.buttons.steam_open);
         apply_optional(&mut self.buttons.linked_role, file.buttons.linked_role);
         apply_optional(&mut self.buttons.friend_code, file.buttons.friend_code);
         apply_optional(&mut self.buttons.rankcheck, file.buttons.rankcheck);
         apply_optional(&mut self.buttons.unlink, file.buttons.unlink);
+        apply_optional(&mut self.buttons.twitch_link, file.buttons.twitch_link);
 
         apply_optional(
             &mut self.urls.linked_role_login,
@@ -619,6 +636,22 @@ fn rang_guide_messages(
     step3_children.push(text_display(
         RANG_GUIDE_COMPONENT_ID_STEP3_TEXT,
         config.texts.step3_body.clone(),
+    ));
+    // Optionaler naechster Schritt nach dem Verify: Twitch verknuepfen.
+    if !config.texts.twitch_hint.trim().is_empty() {
+        step3_children.push(text_display(
+            RANG_GUIDE_COMPONENT_ID_TWITCH_TEXT,
+            config.texts.twitch_hint.clone(),
+        ));
+    }
+    step3_children.push(action_row(
+        RANG_GUIDE_COMPONENT_ID_TWITCH_ACTION_ROW,
+        vec![button(
+            RANG_GUIDE_COMPONENT_ID_TWITCH_LINK_BUTTON,
+            &config.buttons.twitch_link,
+            2,
+            TWITCH_LINK_OPEN_CUSTOM_ID,
+        )],
     ));
 
     let mut step4_children = Vec::new();
@@ -1135,6 +1168,7 @@ linked_role_login = "https://example.invalid/linked-role"
             all_custom_ids(&output),
             vec![
                 STEAM_LINK_OPEN_CUSTOM_ID.to_string(),
+                TWITCH_LINK_OPEN_CUSTOM_ID.to_string(),
                 STEAM_LINK_FRIEND_CODE_CUSTOM_ID.to_string(),
                 STEAM_LINK_RANKCHECK_CUSTOM_ID.to_string(),
                 STEAM_LINK_UNLINK_CUSTOM_ID.to_string(),
@@ -1270,6 +1304,35 @@ step3_body = "{long_step3}"
     }
 
     #[test]
+    fn rang_guide_fertig_schritt_bietet_twitch_verknuepfung_optional_an() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output =
+            build_rang_guide_publish_output(temp.path(), &[], None, None, true).expect("output");
+        let payload = &output.messages[0].payload;
+        let step3 = payload
+            .components
+            .iter()
+            .find(|c| c["id"] == json!(RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER))
+            .expect("step3");
+        let children = step3["components"].as_array().expect("children");
+        let hint = children
+            .iter()
+            .find(|c| c["id"] == json!(RANG_GUIDE_COMPONENT_ID_TWITCH_TEXT))
+            .expect("hint");
+        assert_eq!(hint["content"], RANG_GUIDE_TWITCH_HINT);
+        assert!(RANG_GUIDE_TWITCH_HINT.contains(
+            "Wenn du auf Twitch zuschaust, verknüpf dein Twitch-Konto, dann erkennt dich der Bot in Partner-Streams"
+        ));
+        assert!(!RANG_GUIDE_TWITCH_HINT.contains('—') && !RANG_GUIDE_TWITCH_HINT.contains('–'));
+        let row = children.last().expect("row");
+        assert_eq!(row["id"], json!(RANG_GUIDE_COMPONENT_ID_TWITCH_ACTION_ROW));
+        let button = &row["components"][0];
+        assert_eq!(button["custom_id"], TWITCH_LINK_OPEN_CUSTOM_ID);
+        assert_eq!(button["label"], RANG_GUIDE_TWITCH_LINK_BUTTON_LABEL);
+        assert!(!TWITCH_LINK_OPEN_CUSTOM_ID.starts_with("steam_link_panel:"));
+    }
+
+    #[test]
     fn rang_guide_leerer_step4_body_laesst_siegel_abschnitt_weg() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_all_banners(temp.path());
@@ -1287,6 +1350,7 @@ step3_body = "{long_step3}"
             all_custom_ids(&output),
             vec![
                 STEAM_LINK_OPEN_CUSTOM_ID.to_string(),
+                TWITCH_LINK_OPEN_CUSTOM_ID.to_string(),
                 STEAM_LINK_FRIEND_CODE_CUSTOM_ID.to_string(),
                 STEAM_LINK_RANKCHECK_CUSTOM_ID.to_string(),
                 STEAM_LINK_UNLINK_CUSTOM_ID.to_string(),
