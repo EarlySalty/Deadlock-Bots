@@ -38,6 +38,7 @@ struct PrivacyHandler {
     pool: PgPool,
     action: Action,
     clear_runtime_state: RuntimePrivacyCleanup,
+    scout_client: Option<Arc<dl_bridges::twitch::TwitchApiClient>>,
 }
 
 #[async_trait::async_trait]
@@ -76,7 +77,13 @@ impl InteractionHandler for PrivacyHandler {
                 ..Default::default()
             },
             Action::OptIn => match set_opt_in(&self.pool, uid, now).await {
-                Ok(()) => BridgeReply::ephemeral_text(OPTIN_SUCCESS_TEXT),
+                Ok(()) => {
+                    match &self.scout_client {
+                        Some(client) if crate::scout_privacy::deliver_user(&self.pool, client, uid).await.is_ok() =>
+                            BridgeReply::ephemeral_text(OPTIN_SUCCESS_TEXT),
+                        _ => BridgeReply::ephemeral_text("Deine erneute Einwilligung ist lokal gespeichert. Die Twitch-Community-Brücke hat sie noch nicht bestätigt; der gespeicherte Auftrag wird wiederholt. Verknüpfe dein Twitchkonto selbst erneut, damit neue Zuschaueraktivität erfasst werden kann."),
+                    }
+                },
                 Err(err) => {
                     tracing::warn!(%err, user_id = uid, "Privacy-Opt-in konnte nicht gespeichert werden");
                     BridgeReply::ephemeral_text(OPTIN_ERROR_TEXT)
@@ -97,6 +104,13 @@ impl InteractionHandler for PrivacyHandler {
                                 tracing::warn!(%err, user_id = uid, "Journey opt_out-Aggregat konnte nicht geschrieben werden");
                             }
                         }
+                        let remote_done = match &self.scout_client {
+                            Some(client) => crate::scout_privacy::deliver_user(&self.pool, client, uid).await.is_ok(),
+                            None => false,
+                        };
+                        if !remote_done {
+                            return BridgeReply::ephemeral_text("Deine lokalen Daten wurden gelöscht und der Opt-out ist aktiv. Die Löschung der Twitch-Community-Vorschlagskopien ist noch nicht bestätigt. Der gespeicherte Löschauftrag wird wiederholt; die vollständige Löschung ist noch offen.");
+                        }
                         let voice = s.sum(&["voice_session_log.user_id", "voice_stats.user_id"]);
                         let steam = s.steam_ids.len();
                         BridgeReply::ephemeral_text(format!(
@@ -112,7 +126,18 @@ impl InteractionHandler for PrivacyHandler {
                 }
             }
             Action::Export => match export_user_data(&self.pool, uid, now).await {
-                Ok(value) => {
+                Ok(mut value) => {
+                    let remote = match &self.scout_client {
+                        Some(client) => crate::scout_privacy::export(client, uid).await,
+                        None => Err("Twitch-Community-Brücke nicht verfügbar".into()),
+                    };
+                    match remote {
+                        Ok(remote) => value["twitch_community_scout"] = remote,
+                        Err(error) => {
+                            tracing::warn!(%error, "Twitch-Community-Export nicht vollständig");
+                            return BridgeReply::ephemeral_text("Der Export der Twitch-Community-Vorschlagskopien ist gerade nicht verfügbar. Ein vollständiger Datenexport konnte deshalb nicht erstellt werden. Bitte später erneut versuchen.");
+                        }
+                    }
                     let bytes =
                         serde_json::to_vec_pretty(&value).unwrap_or_else(|_| b"{}".to_vec());
                     BridgeReply {
@@ -153,6 +178,15 @@ pub fn register(
     pool: PgPool,
     clear_runtime_state: RuntimePrivacyCleanup,
 ) {
+    register_with_scout(router, pool, clear_runtime_state, None);
+}
+
+pub fn register_with_scout(
+    router: &mut InteractionRouter,
+    pool: PgPool,
+    clear_runtime_state: RuntimePrivacyCleanup,
+    scout_client: Option<Arc<dl_bridges::twitch::TwitchApiClient>>,
+) {
     router.on_command(
         "datenschutz",
         command_spec(
@@ -161,6 +195,7 @@ pub fn register(
         ),
         Arc::new(PrivacyHandler {
             pool: pool.clone(),
+            scout_client: scout_client.clone(),
             action: Action::Datenschutz,
             clear_runtime_state: clear_runtime_state.clone(),
         }),
@@ -173,6 +208,7 @@ pub fn register(
         ),
         Arc::new(PrivacyHandler {
             pool: pool.clone(),
+            scout_client: scout_client.clone(),
             action: Action::OptIn,
             clear_runtime_state: clear_runtime_state.clone(),
         }),
@@ -181,6 +217,7 @@ pub fn register(
         "privacy:confirm",
         Arc::new(PrivacyHandler {
             pool: pool.clone(),
+            scout_client: scout_client.clone(),
             action: Action::Confirm,
             clear_runtime_state: clear_runtime_state.clone(),
         }),
@@ -189,6 +226,7 @@ pub fn register(
         "privacy:export",
         Arc::new(PrivacyHandler {
             pool,
+            scout_client: scout_client.clone(),
             action: Action::Export,
             clear_runtime_state,
         }),
@@ -216,6 +254,7 @@ mod tests {
     #[tokio::test]
     async fn optin_db_fehler_bestaetigt_keinen_erfolg() {
         let handler = PrivacyHandler {
+            scout_client: None,
             pool: unavailable_pool(),
             action: Action::OptIn,
             clear_runtime_state: Arc::new(|_| {}),
@@ -235,7 +274,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn optin_bestaetigt_erst_nach_erfolgreichem_schreiben() {
+    async fn optin_ohne_remote_bestaetigung_meldet_ausstehenden_auftrag() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test pool");
@@ -247,6 +286,7 @@ mod tests {
         .await
         .expect("privacy tombstone");
         let handler = PrivacyHandler {
+            scout_client: None,
             pool: db.pool().clone(),
             action: Action::OptIn,
             clear_runtime_state: Arc::new(|_| {}),
@@ -259,7 +299,12 @@ mod tests {
             })
             .await;
 
-        assert_eq!(reply.content.as_deref(), Some(OPTIN_SUCCESS_TEXT));
+        let text = reply.content.expect("Antwort");
+        assert!(text.contains("noch nicht bestätigt"));
+        assert_ne!(text, OPTIN_SUCCESS_TEXT);
+        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM community.scout_privacy_outbox WHERE discord_id = 42 AND action = 'consent'")
+            .fetch_one(db.pool()).await.expect("Gespeicherter Retryauftrag");
+        assert_eq!(queued, 1);
         assert!(!crate::privacy::is_opted_out(db.pool(), 42).await);
     }
 
@@ -267,6 +312,7 @@ mod tests {
     async fn datenschutz_db_fehler_leert_runtime_zustand_nicht() {
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = PrivacyHandler {
+            scout_client: None,
             pool: unavailable_pool(),
             action: Action::Confirm,
             clear_runtime_state: {
@@ -300,6 +346,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let cleared_user = Arc::new(AtomicU64::new(0));
         let handler = PrivacyHandler {
+            scout_client: None,
             pool: db.pool().clone(),
             action: Action::Confirm,
             clear_runtime_state: {

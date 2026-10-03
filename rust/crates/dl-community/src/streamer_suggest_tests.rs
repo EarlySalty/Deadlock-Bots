@@ -62,6 +62,10 @@ fn idempotency_key_folgt_dem_vertrag() {
         id: 7,
         discord_id: 123_456_789_012_345_678,
         twitch_login: "someone".into(),
+        submitted_at: chrono::DateTime::parse_from_rfc3339("2026-10-03T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        privacy_epoch: 0,
         reason: "passt".into(),
     };
     assert_eq!(
@@ -71,6 +75,8 @@ fn idempotency_key_folgt_dem_vertrag() {
             "suggested_by_discord_id": "123456789012345678",
             "reason": "passt",
             "idempotency_key": "discord-suggest-7",
+            "submitted_at": "2026-10-03T10:00:00+00:00",
+            "privacy_epoch": 0,
         })
     );
 }
@@ -600,5 +606,133 @@ mod db {
         .await
         .expect("first");
         assert_eq!(first, MEMBER as i64);
+    }
+    async fn wait_locked(pool: &PgPool, fragment: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+                 AND wait_event_type = 'Lock' AND query LIKE $1 AND pid <> pg_backend_pid())",
+            )
+            .bind(format!("%{fragment}%"))
+            .fetch_one(pool)
+            .await
+            .expect("Beobachtbare DB-Sperre");
+            if waiting {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Erwartete Sperre fehlt: {fragment}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[derive(Default)]
+    struct HoldingForwarder {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        seen: Mutex<Vec<ForwardRequest>>,
+    }
+    #[async_trait]
+    impl SuggestionForwarder for HoldingForwarder {
+        async fn forward(&self, request: &ForwardRequest) -> ForwardResult {
+            self.seen.lock().unwrap().push(request.clone());
+            self.entered.notify_one();
+            self.release.notified().await;
+            ForwardResult::Answered {
+                status: SuggestionStatus::Created,
+                twitch_user_id: Some("456".into()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scout_schreiben_vor_erasure_wird_geloescht_und_nicht_wiederholt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("Echte Wegwerf-DB");
+        let forwarder = Arc::new(HoldingForwarder::default());
+        let service = StreamerSuggestions::new(db.pool().clone(), Some(forwarder.clone()));
+        let submitting = service.clone();
+        let writer =
+            tokio::spawn(
+                async move { submitting.submit(MEMBER, "someone", "eigener Grund").await },
+            );
+        forwarder.entered.notified().await;
+        let pool = db.pool().clone();
+        let erasing = tokio::spawn(async move {
+            crate::privacy::delete_user_data(
+                &pool,
+                MEMBER as i64,
+                "test".into(),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+        });
+        wait_locked(db.pool(), "pg_advisory_xact_lock($1)").await;
+        forwarder.release.notify_one();
+        let outcome = writer.await.expect("Schreibaufgabe");
+        assert!(matches!(
+            outcome,
+            SubmitOutcome::Saved {
+                status: SuggestionStatus::Created,
+                ..
+            }
+        ));
+        erasing.await.expect("Erasureaufgabe").expect("Erasure");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community.streamer_suggestions WHERE discord_id = $1",
+        )
+        .bind(MEMBER as i64)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+        let request = forwarder.seen.lock().unwrap()[0].clone();
+        assert_eq!(
+            service.forward_one(&request).await,
+            SuggestionStatus::Rejected
+        );
+        assert_eq!(forwarder.seen.lock().unwrap().len(), 1);
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM community.scout_privacy_outbox WHERE discord_id = $1 AND action = 'erase'")
+            .bind(MEMBER as i64).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    #[tokio::test]
+    async fn scout_erasure_vor_schreiben_blockiert_wartenden_vorschlag() {
+        let (db, offline) = setup(None).await;
+        let old = saved_id(&offline.submit(MEMBER, "someone", "eigener Grund").await);
+        let mut held = db.pool().begin().await.expect("Zeilensperre");
+        sqlx::query("SELECT id FROM community.streamer_suggestions WHERE id = $1 FOR UPDATE")
+            .bind(old)
+            .fetch_one(&mut *held)
+            .await
+            .unwrap();
+        let pool = db.pool().clone();
+        let erasing = tokio::spawn(async move {
+            crate::privacy::delete_user_data(
+                &pool,
+                MEMBER as i64,
+                "test".into(),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+        });
+        wait_locked(db.pool(), "DELETE FROM community.streamer_suggestions").await;
+        let forwarder = FakeForwarder::with(Vec::new());
+        let service = StreamerSuggestions::new(db.pool().clone(), Some(forwarder.clone()));
+        let writer =
+            tokio::spawn(async move { service.submit(MEMBER, "neuerkanal", "neuer Grund").await });
+        wait_locked(db.pool(), "pg_advisory_xact_lock($1)").await;
+        held.commit().await.unwrap();
+        erasing.await.expect("Erasureaufgabe").expect("Erasure");
+        assert_eq!(
+            writer.await.expect("Schreibaufgabe"),
+            SubmitOutcome::OptedOut
+        );
+        assert!(forwarder.seen().is_empty());
     }
 }

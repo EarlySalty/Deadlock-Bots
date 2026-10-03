@@ -19,6 +19,7 @@ enum ColumnType {
     I64,
     Text,
     TwitchUser,
+    TwitchHash,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +71,9 @@ impl TableSpec {
 
     fn lookup_predicate(self) -> String {
         match self.col_type {
+            ColumnType::TwitchHash => format!(
+                "{} IN (SELECT sha256(convert_to('community-points:twitch-viewer-privacy:v1:' || platform_user_id, 'UTF8')) FROM core.discord_platform_connections WHERE discord_id = $1 AND platform = 'twitch')", self.col
+            ),
             ColumnType::TwitchUser => format!(
                 "{} IN (SELECT platform_user_id FROM core.discord_platform_connections \
                  WHERE discord_id = $1 AND platform = 'twitch')",
@@ -417,6 +421,20 @@ const USER_TABLES: &[TableSpec] = &[
         "community_points.twitch_viewer_daily",
         "twitch_user_id",
         ColumnType::TwitchUser,
+    ),
+    TableSpec::new(
+        "community_points_twitch_viewer_activity_state",
+        "subject_hash",
+        "community_points.twitch_viewer_activity_state",
+        "subject_hash",
+        ColumnType::TwitchHash,
+    ),
+    TableSpec::new(
+        "community_points_twitch_viewer_consents",
+        "discord_id",
+        "community_points.twitch_viewer_consents",
+        "discord_id",
+        ColumnType::I64,
     ),
     // Selbst freigegebene Plattform-Verknuepfungen (Twitch) aus dem
     // Discord-Profil; ein Loeschantrag entfernt die Zeile.
@@ -1867,7 +1885,7 @@ fn steam_lookup<'a>(sid: &'a SteamId, col_type: ColumnType) -> Option<LookupValu
     match col_type {
         ColumnType::I64 => sid.numeric.map(LookupValue::I64),
         ColumnType::Text => Some(LookupValue::Text(&sid.text)),
-        ColumnType::TwitchUser => None,
+        ColumnType::TwitchUser | ColumnType::TwitchHash => None,
     }
 }
 
@@ -1943,7 +1961,7 @@ async fn delete_rows_user(
     user_key: &str,
 ) -> Result<i64, sqlx::Error> {
     match spec.col_type {
-        ColumnType::I64 | ColumnType::TwitchUser => {
+        ColumnType::I64 | ColumnType::TwitchUser | ColumnType::TwitchHash => {
             delete_rows_lookup(tx, spec, LookupValue::I64(user_id)).await
         }
         ColumnType::Text => delete_rows_lookup(tx, spec, LookupValue::Text(user_key)).await,
@@ -1978,7 +1996,7 @@ async fn null_user_column(
     user_key: &str,
 ) -> Result<i64, sqlx::Error> {
     match spec.col_type {
-        ColumnType::I64 | ColumnType::TwitchUser => {
+        ColumnType::I64 | ColumnType::TwitchUser | ColumnType::TwitchHash => {
             null_user_column_lookup(tx, spec, LookupValue::I64(user_id)).await
         }
         ColumnType::Text => null_user_column_lookup(tx, spec, LookupValue::Text(user_key)).await,
@@ -3441,7 +3459,7 @@ async fn select_rows_user(
     user_key: &str,
 ) -> Result<Vec<Value>, CommunityDbError> {
     match spec.col_type {
-        ColumnType::I64 | ColumnType::TwitchUser => {
+        ColumnType::I64 | ColumnType::TwitchUser | ColumnType::TwitchHash => {
             select_rows_lookup(pool, spec, LookupValue::I64(user_id)).await
         }
         ColumnType::Text => select_rows_lookup(pool, spec, LookupValue::Text(user_key)).await,
@@ -3799,6 +3817,7 @@ async fn scrub_action_outbox_requester(
 pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<()> {
     let now = utc_from_unix(now)?;
     let mut tx = pool.begin().await?;
+    dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
     lock_user_privacy(&mut tx, user_id).await?;
     sqlx::query!(
         r#"
@@ -3815,6 +3834,7 @@ pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbRes
     )
     .execute(&mut *tx)
     .await?;
+    crate::scout_privacy::enqueue(&mut tx, user_id, "consent").await?;
     tx.commit().await?;
     Ok(())
 }
@@ -4093,6 +4113,7 @@ pub async fn delete_user_data(
         counts.insert("kv_concierge_claims".to_string(), deleted_claims);
     }
 
+    crate::scout_privacy::enqueue(&mut tx, user_id, "erase").await?;
     tx.commit().await?;
 
     Ok(DeleteSummary {
@@ -4107,6 +4128,16 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     let steam_ids = steam_ids_for_user(pool, user_id).await?;
     let target_refs = privacy_target_refs(&user_key, &steam_ids);
     let mut tbl = serde_json::Map::new();
+
+    if relations.contains("community.scout_privacy_outbox") {
+        let operations: Vec<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(o) FROM community.scout_privacy_outbox o WHERE discord_id = $1 ORDER BY epoch",
+        ).bind(user_id).fetch_all(pool).await?;
+        tbl.insert(
+            "scout_privacy_outbox.discord_id".into(),
+            Value::Array(operations),
+        );
+    }
 
     for &spec in USER_TABLES {
         if !relations.contains(spec.relation) {
@@ -4437,6 +4468,8 @@ mod privacy_contract_tests {
             "actor_ref".to_string(),
         ));
         out.insert((USER_CO_PLAYERS_REL.to_string(), "user_id".to_string()));
+        // Separater Export und bestätigungsgebundene Löschung in scout_privacy.
+        out.insert(("community.scout_privacy_outbox".into(), "discord_id".into()));
         out
     }
 
@@ -5119,6 +5152,9 @@ mod tests {
         let db = mk_db().await;
         let pool = db.pool();
         seed_privacy_twitch_link(pool, 42, "111").await;
+        apply_viewer_page(pool, &[privacy_viewer_row("111")], None)
+            .await
+            .expect("Bestehende Upsertzeile");
         let mut held = pool.begin().await.expect("Sperrtransaktion");
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('core.discord_platform_connections'), hashtext('twitch_reassignment'))")
             .fetch_one(&mut *held).await.expect("Identitätssperre");
@@ -5152,6 +5188,326 @@ mod tests {
                 .expect("Wiederimport"),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_optin_link_neuaktivitaet_altwerte_und_epochenschutz() {
+        use dl_central_db::community_points::{
+            apply_viewer_page, apply_viewer_page_with_activity, berlin_day, load_viewer_consents,
+            ViewerActivityDay,
+        };
+        let db = mk_db().await;
+        let pool = db.pool();
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        apply_viewer_page(
+            pool,
+            &[privacy_viewer_row("111"), privacy_viewer_row("222")],
+            None,
+        )
+        .await
+        .expect("Altwerte");
+        delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+            .await
+            .expect("Löschung");
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Bewusste Einwilligung");
+        assert!(load_viewer_consents(pool)
+            .await
+            .expect("Noch kein Link")
+            .is_empty());
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        let consents = load_viewer_consents(pool)
+            .await
+            .expect("Aktive Einwilligung");
+        assert_eq!(consents.len(), 1);
+        let consent = &consents[0];
+        assert_eq!(consent.discord_id, 42);
+        assert_eq!(
+            apply_viewer_page(pool, &[privacy_viewer_row("111")], None)
+                .await
+                .expect("Kumulative Altwerte"),
+            0
+        );
+        let mut fresh = privacy_viewer_row("111");
+        fresh.day = berlin_day(consent.activity_since);
+        fresh.watch_minutes = 2;
+        fresh.chat_messages = 1;
+        fresh.points_watch = 0;
+        fresh.points_chat = 1;
+        let result = ViewerActivityDay {
+            twitch_user_id: "111".into(),
+            day: fresh.day,
+            activity_since: consent.activity_since,
+            computed_at: Utc::now(),
+            rows: vec![fresh.clone()],
+        };
+        assert_eq!(
+            apply_viewer_page_with_activity(pool, &[], &[result.clone()], None)
+                .await
+                .expect("Neue Aktivität"),
+            1
+        );
+        use dl_central_db::community_points::{
+            apply_streamer_page, streamer_board, Period, StreamerDailyRow,
+        };
+        apply_streamer_page(
+            pool,
+            &[StreamerDailyRow {
+                streamer_twitch_user_id: "456".into(),
+                streamer_login: "partner".into(),
+                discord_user_id: None,
+                day: result.day,
+                viewer_minutes: 99999,
+                unique_viewers: 100,
+                raids_to_partners: 1,
+                source_updated_at: Utc::now(),
+            }],
+            None,
+        )
+        .await
+        .expect("Streamerstand");
+        let board = streamer_board(pool, Period::Gesamt, result.day)
+            .await
+            .expect("Partnerpunkte");
+        assert_eq!(board[0].community_minutes, 2);
+        assert_eq!(board[0].watch_points, 0);
+        let exported = export_user_data(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Export nach Optin");
+        assert_eq!(
+            exported["tables"]["community_points_twitch_viewer_daily.twitch_user_id"][0]
+                ["watch_minutes"],
+            2
+        );
+        assert_eq!(
+            exported["tables"]["community_points_twitch_viewer_consents.discord_id"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // Ein verspätetes leeres Ergebnis darf neuere Aktivität nicht entfernen.
+        let mut stale_empty = result.clone();
+        stale_empty.rows.clear();
+        stale_empty.computed_at = result.activity_since;
+        assert_eq!(
+            apply_viewer_page_with_activity(pool, &[], &[stale_empty], None)
+                .await
+                .expect("Alter Nullstand"),
+            0
+        );
+        delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+            .await
+            .expect("Erneute Löschung");
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Erneutes Optin");
+        seed_privacy_twitch_link(pool, 42, "111").await;
+        assert_eq!(
+            apply_viewer_page_with_activity(pool, &[], &[result], None)
+                .await
+                .expect("Alte Consentantwort"),
+            0
+        );
+        let remaining: Vec<String> = sqlx::query_scalar(
+            "SELECT twitch_user_id FROM community_points.twitch_viewer_daily ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("Fremdzeilen");
+        assert_eq!(remaining, vec!["222"]);
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_optin_link_import_beide_sperrreihenfolgen() {
+        use dl_central_db::community_points::{apply_viewer_page, load_viewer_consents};
+        for link_first in [false, true] {
+            let db = mk_db().await;
+            let pool = db.pool();
+            seed_privacy_twitch_link(pool, 42, "111").await;
+            delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+                .await
+                .expect("Erasure");
+            set_opt_in(pool, 42, Utc::now().timestamp())
+                .await
+                .expect("Optin");
+            let mut held = pool.begin().await.expect("Sperrtransaktion");
+            dl_central_db::platform_connections::lock_twitch_identity(&mut held)
+                .await
+                .expect("Globale Sperre");
+            let link = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    seed_privacy_twitch_link(&pool, 42, "111").await;
+                })
+            };
+            let import = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    apply_viewer_page(&pool, &[privacy_viewer_row("111")], None).await
+                })
+            };
+            let (linking, importing) = if link_first {
+                let linking = link();
+                wait_for_db_lock(pool, "twitch_reassignment", None).await;
+                (linking, import())
+            } else {
+                let importing = import();
+                wait_for_db_lock(pool, "twitch_reassignment", None).await;
+                (link(), importing)
+            };
+            wait_for_db_lock_count(pool, 2).await;
+            held.commit().await.expect("Freigabe");
+            linking.await.expect("OAuthaufgabe");
+            assert_eq!(
+                importing.await.expect("Importaufgabe").expect("Altimport"),
+                0
+            );
+            assert_eq!(load_viewer_consents(pool).await.expect("Consent").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_optin_und_link_beide_sperrreihenfolgen() {
+        use dl_central_db::community_points::load_viewer_consents;
+        use dl_central_db::platform_connections::{
+            upsert_twitch_connection, TwitchConnection, TwitchUpsertOutcome,
+        };
+        for optin_first in [false, true] {
+            let db = mk_db().await;
+            let pool = db.pool();
+            seed_privacy_twitch_link(pool, 42, "111").await;
+            delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+                .await
+                .expect("Erasure");
+            let mut held = pool.begin().await.expect("Sperrtransaktion");
+            dl_central_db::platform_connections::lock_twitch_identity(&mut held)
+                .await
+                .expect("Globale Sperre");
+            let optin = || {
+                let pool = pool.clone();
+                tokio::spawn(async move { set_opt_in(&pool, 42, Utc::now().timestamp()).await })
+            };
+            let link = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    upsert_twitch_connection(
+                        &pool,
+                        42,
+                        &TwitchConnection {
+                            twitch_user_id: "111".into(),
+                            twitch_login: "viewer".into(),
+                            verified: true,
+                        },
+                    )
+                    .await
+                })
+            };
+            let (opting, linking) = if optin_first {
+                let opting = optin();
+                wait_for_db_lock(pool, "twitch_reassignment", None).await;
+                (opting, link())
+            } else {
+                let linking = link();
+                wait_for_db_lock(pool, "twitch_reassignment", None).await;
+                (optin(), linking)
+            };
+            wait_for_db_lock_count(pool, 2).await;
+            held.commit().await.expect("Freigabe");
+            opting.await.expect("Optinaufgabe").expect("Optin");
+            let result = linking.await.expect("OAuthaufgabe").expect("OAuth");
+            if optin_first {
+                assert!(matches!(result, TwitchUpsertOutcome::Linked { .. }));
+                assert_eq!(load_viewer_consents(pool).await.expect("Consent").len(), 1);
+            } else {
+                assert_eq!(result, TwitchUpsertOutcome::PrivacyOptedOut);
+                assert!(load_viewer_consents(pool)
+                    .await
+                    .expect("Kein vorgezogenes Consent")
+                    .is_empty());
+                seed_privacy_twitch_link(pool, 42, "111").await;
+                assert_eq!(
+                    load_viewer_consents(pool)
+                        .await
+                        .expect("Bewusst neuer OAuthaufruf")
+                        .len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn twitch_viewer_privacy_neuaktivitaet_und_erasure_beide_sperrreihenfolgen() {
+        use dl_central_db::community_points::{
+            apply_viewer_page_with_activity, berlin_day, load_viewer_consents, ViewerActivityDay,
+        };
+        for erase_first in [false, true] {
+            let db = mk_db().await;
+            let pool = db.pool();
+            seed_privacy_twitch_link(pool, 42, "111").await;
+            delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+                .await
+                .expect("Erasure");
+            set_opt_in(pool, 42, Utc::now().timestamp())
+                .await
+                .expect("Optin");
+            seed_privacy_twitch_link(pool, 42, "111").await;
+            let consent = load_viewer_consents(pool).await.expect("Consent").remove(0);
+            let mut row = privacy_viewer_row("111");
+            row.day = berlin_day(consent.activity_since);
+            let mut activity = ViewerActivityDay {
+                twitch_user_id: "111".into(),
+                day: row.day,
+                activity_since: consent.activity_since,
+                computed_at: Utc::now(),
+                rows: vec![row],
+            };
+            apply_viewer_page_with_activity(pool, &[], &[activity.clone()], None)
+                .await
+                .expect("Bestehende Consentzeile");
+            activity.computed_at = Utc::now();
+            let mut held = pool.begin().await.expect("Sperrtransaktion");
+            dl_central_db::platform_connections::lock_twitch_identity(&mut held)
+                .await
+                .expect("Globale Sperre");
+            let erase = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    delete_user_data(&pool, 42, "test".into(), Utc::now().timestamp()).await
+                })
+            };
+            let import = || {
+                let pool = pool.clone();
+                let activity = activity.clone();
+                tokio::spawn(async move {
+                    apply_viewer_page_with_activity(&pool, &[], &[activity], None).await
+                })
+            };
+            let (erasing, importing) = if erase_first {
+                let erasing = erase();
+                wait_for_db_lock(pool, "twitch_reassignment", None).await;
+                (erasing, import())
+            } else {
+                let importing = import();
+                wait_for_db_lock(pool, "twitch_reassignment", None).await;
+                (erase(), importing)
+            };
+            wait_for_db_lock_count(pool, 2).await;
+            held.commit().await.expect("Freigabe");
+            erasing.await.expect("Erasureaufgabe").expect("Erasure");
+            assert_eq!(
+                importing.await.expect("Importaufgabe").expect("Import"),
+                if erase_first { 0 } else { 1 }
+            );
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM community_points.twitch_viewer_daily WHERE twitch_user_id = '111'").fetch_one(pool).await.expect("Leer nach Löschung");
+            assert_eq!(count, 0);
+            assert!(load_viewer_consents(pool)
+                .await
+                .expect("Consent gelöscht")
+                .is_empty());
+        }
     }
 
     fn scrim_json_contains(value: &Value, target_ref: &str) -> bool {

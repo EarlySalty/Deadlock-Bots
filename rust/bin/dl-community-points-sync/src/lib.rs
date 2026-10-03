@@ -15,9 +15,10 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use dl_central_db::community_points::{
-    apply_streamer_page, apply_suggestion_outcome_page, apply_viewer_page, load_cursor,
-    LedgerEvent, LedgerRecipient, StreamerDailyRow, ViewerDailyRow, CURSOR_STREAMERS,
-    CURSOR_SUGGESTION_OUTCOMES, CURSOR_VIEWERS, SOURCE_STREAMER_SUGGESTION,
+    apply_streamer_page, apply_suggestion_outcome_page, apply_viewer_page,
+    apply_viewer_page_with_activity, berlin_day, load_cursor, load_viewer_consents, LedgerEvent,
+    LedgerRecipient, StreamerDailyRow, ViewerActivityDay, ViewerConsent, ViewerDailyRow,
+    CURSOR_STREAMERS, CURSOR_SUGGESTION_OUTCOMES, CURSOR_VIEWERS, SOURCE_STREAMER_SUGGESTION,
     STREAMER_SUGGESTION_POINTS,
 };
 use dl_central_db::platform_connections::is_valid_twitch_user_id;
@@ -32,6 +33,7 @@ pub const PAGE_LIMIT: u32 = 1000;
 pub const MAX_PAGES_PER_RUN: usize = 500;
 
 pub const VIEWERS_PATH: &str = "/internal/twitch/v1/community-points/viewers";
+pub const VIEWER_ACTIVITY_PATH: &str = "/internal/twitch/v1/community-points/viewers/activity";
 pub const STREAMERS_PATH: &str = "/internal/twitch/v1/community-points/streamers";
 pub const SUGGESTION_OUTCOMES_PATH: &str =
     "/internal/twitch/v1/scout/community-suggestions/outcomes";
@@ -213,6 +215,121 @@ pub trait PageSink<R> {
         rows: &[R],
         next_cursor: Option<&str>,
     ) -> impl std::future::Future<Output = anyhow::Result<u64>>;
+}
+
+#[derive(Debug, Deserialize)]
+struct ViewerActivityWire {
+    twitch_user_id: String,
+    day: String,
+    activity_since: String,
+    computed_at: String,
+    rows: Vec<ViewerWire>,
+}
+
+/// Abruf gefilterter Rohaktivität über denselben authentifizierten Bridgeweg.
+pub async fn fetch_viewer_activity(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    token: &str,
+    consent: &ViewerConsent,
+    requested_day: NaiveDate,
+) -> anyhow::Result<ViewerActivityDay> {
+    let wire: ViewerActivityWire = client
+        .get(url.clone())
+        .header("X-Internal-Token", token)
+        .query(&[
+            ("twitch_user_id", consent.twitch_user_id.clone()),
+            ("day", requested_day.to_string()),
+            ("activity_since", consent.activity_since.to_rfc3339()),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if wire.twitch_user_id != consent.twitch_user_id
+        || day(&wire.day) != Some(requested_day)
+        || timestamp(&wire.activity_since) != Some(consent.activity_since)
+    {
+        anyhow::bail!(
+            "Rohdatenantwort bindet Identität, Tag oder Einwilligungsgrenze nicht korrekt"
+        );
+    }
+    let computed_at = timestamp(&wire.computed_at)
+        .filter(|ts| *ts >= consent.activity_since)
+        .ok_or_else(|| anyhow::anyhow!("Ungültiger Berechnungszeitpunkt der Rohaktivität"))?;
+    let rows: Vec<ViewerDailyRow> = wire
+        .rows
+        .iter()
+        .map(|r| {
+            viewer_row(r)
+                .filter(|r| r.twitch_user_id == consent.twitch_user_id && r.day == requested_day)
+                .ok_or_else(|| anyhow::anyhow!("Ungültige Rohaktivitätszeile"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(ViewerActivityDay {
+        twitch_user_id: consent.twitch_user_id.clone(),
+        day: requested_day,
+        activity_since: consent.activity_since,
+        computed_at,
+        rows,
+    })
+}
+
+pub struct ConsentViewerDbSink<'a> {
+    pub pool: &'a PgPool,
+    pub client: &'a reqwest::Client,
+    pub activity_url: reqwest::Url,
+    pub token: &'a str,
+}
+
+impl ConsentViewerDbSink<'_> {
+    /// Aktuellen Berliner Tag auch ohne neuen Tagescursor regelmäßig berechnen.
+    pub async fn refresh_current_day(&self) -> anyhow::Result<u64> {
+        let today = berlin_day(Utc::now());
+        let mut written = 0;
+        for consent in load_viewer_consents(self.pool).await? {
+            let activity =
+                fetch_viewer_activity(self.client, &self.activity_url, self.token, &consent, today)
+                    .await?;
+            written += apply_viewer_page_with_activity(self.pool, &[], &[activity], None).await?;
+        }
+        Ok(written)
+    }
+}
+
+impl PageSink<ViewerDailyRow> for ConsentViewerDbSink<'_> {
+    async fn cursor(&self) -> anyhow::Result<Option<String>> {
+        Ok(load_cursor(self.pool, CURSOR_VIEWERS).await?)
+    }
+    async fn apply(&self, rows: &[ViewerDailyRow], next: Option<&str>) -> anyhow::Result<u64> {
+        let mut activities = Vec::new();
+        for consent in load_viewer_consents(self.pool).await? {
+            let days: std::collections::BTreeSet<NaiveDate> = rows
+                .iter()
+                .filter(|r| {
+                    r.twitch_user_id == consent.twitch_user_id
+                        && r.day >= berlin_day(consent.activity_since)
+                })
+                .map(|r| r.day)
+                .collect();
+            for day in days {
+                activities.push(
+                    fetch_viewer_activity(
+                        self.client,
+                        &self.activity_url,
+                        self.token,
+                        &consent,
+                        day,
+                    )
+                    .await?,
+                );
+            }
+        }
+        // Ein Remoteausfall lässt den Cursor unverändert. Die nächste Ausführung
+        // wiederholt dieselbe Seite; veraltete Einwilligungen prüft die DB im Lock.
+        Ok(apply_viewer_page_with_activity(self.pool, rows, &activities, next).await?)
+    }
 }
 
 /// Zentrale DB als Ziel fuer Zuschauerzeilen.

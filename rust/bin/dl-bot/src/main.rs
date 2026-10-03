@@ -1182,10 +1182,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
-    dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
-        let concierge = concierge.clone();
-        Arc::new(move |user_id| concierge.clear_user_runtime(user_id))
-    });
+    dl_community::privacy_ui::register_with_scout(
+        &mut router,
+        central_pool.clone(),
+        {
+            let concierge = concierge.clone();
+            Arc::new(move |user_id| concierge.clear_user_runtime(user_id))
+        },
+        twitch_client.clone(),
+    );
 
     // Anonymes Feedback (6) — Button + Modal; DM an den Empfänger.
     // !fhub-Panel-Post folgt mit der Prefix-Dispatch-Infra; persistente
@@ -1778,8 +1783,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
-        let _streamer_suggest_retry =
-            dl_community::streamer_suggest::spawn(streamer_suggestions.clone());
+        let _streamer_suggest_retry = dl_community::streamer_suggest::spawn_with_privacy(
+            streamer_suggestions.clone(),
+            twitch_client.clone(),
+        );
         dl_community::faq::spawn(faq.clone(), &dispatcher);
         let brain_help_channel_id = operating_value("DL_BRAIN_HELP_CHANNEL_ID")
             .and_then(|value| value.parse::<u64>().ok())

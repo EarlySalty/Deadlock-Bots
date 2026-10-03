@@ -82,6 +82,103 @@ pub async fn block_linked_viewer_imports(
     Ok(written)
 }
 
+/// Aktiviert gefilterte Rohaktivität nur nach Optin und erneuter OAuthverknüpfung.
+/// Identitäts- und Nutzerlock werden vom Aufrufer gehalten.
+pub async fn consent_after_twitch_link(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    discord_id: i64,
+    twitch_id: &str,
+) -> Result<(), sqlx::Error> {
+    // Ein bewusster Kontowechsel darf die früheren Consentdaten nicht verwaisen lassen.
+    let prior: Vec<Vec<u8>> = sqlx::query_scalar(
+        "DELETE FROM community_points.twitch_viewer_consents WHERE discord_id = $1
+          AND subject_hash <> $2 RETURNING subject_hash",
+    )
+    .bind(discord_id)
+    .bind(viewer_privacy_key(twitch_id))
+    .fetch_all(&mut **tx)
+    .await?;
+    for prior_key in prior {
+        sqlx::query(
+            "DELETE FROM community_points.twitch_viewer_activity_state WHERE subject_hash = $1",
+        )
+        .bind(&prior_key)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM community_points.twitch_viewer_daily WHERE sha256(convert_to('community-points:twitch-viewer-privacy:v1:' || twitch_user_id, 'UTF8')) = $1")
+            .bind(&prior_key).execute(&mut **tx).await?;
+    }
+    let key = viewer_privacy_key(twitch_id);
+    let erased: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_points.twitch_viewer_privacy_blocks WHERE subject_hash = $1)",
+    ).bind(&key).fetch_one(&mut **tx).await?;
+    if !erased {
+        return Ok(());
+    }
+    // Bei Neuzuordnung keine Einwilligung des früheren Kontoinhabers übernehmen.
+    let same_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_points.twitch_viewer_consents
+          WHERE subject_hash = $1 AND discord_id = $2)",
+    )
+    .bind(&key)
+    .bind(discord_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !same_owner {
+        sqlx::query("DELETE FROM community_points.twitch_viewer_consents WHERE subject_hash = $1")
+            .bind(&key)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query(
+            "DELETE FROM community_points.twitch_viewer_activity_state WHERE subject_hash = $1",
+        )
+        .bind(&key)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM community_points.twitch_viewer_daily WHERE twitch_user_id = $1")
+            .bind(twitch_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query(
+        "INSERT INTO community_points.twitch_viewer_consents(subject_hash, discord_id, activity_since)
+         SELECT $1, $2, clock_timestamp() FROM core.user_privacy
+          WHERE user_id = $2 AND NOT opted_out AND deleted_at IS NULL AND reason = 'user_opt_in'
+         ON CONFLICT(subject_hash) DO NOTHING",
+    ).bind(key).bind(discord_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ViewerConsent {
+    pub twitch_user_id: String,
+    pub discord_id: i64,
+    pub activity_since: DateTime<Utc>,
+}
+
+pub async fn load_viewer_consents(pool: &PgPool) -> Result<Vec<ViewerConsent>, CentralDbError> {
+    Ok(sqlx::query_as(
+        "SELECT c.platform_user_id AS twitch_user_id, s.discord_id, s.activity_since
+           FROM community_points.twitch_viewer_consents s
+           JOIN core.discord_platform_connections c ON c.discord_id = s.discord_id
+            AND c.platform = 'twitch'
+            AND s.subject_hash = sha256(convert_to('community-points:twitch-viewer-privacy:v1:' || c.platform_user_id, 'UTF8'))
+          WHERE NOT EXISTS(SELECT 1 FROM core.user_privacy p WHERE p.user_id = s.discord_id
+                            AND (p.opted_out OR p.deleted_at IS NOT NULL))
+          ORDER BY c.platform_user_id",
+    ).fetch_all(pool).await?)
+}
+
+/// Authentifizierter Rohdatenstand, ausdrücklich an Identität und Einwilligung gebunden.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerActivityDay {
+    pub twitch_user_id: String,
+    pub day: NaiveDate,
+    pub activity_since: DateTime<Utc>,
+    pub computed_at: DateTime<Utc>,
+    pub rows: Vec<ViewerDailyRow>,
+}
+
 /// Punkte fuer einen Clip-Contest-Platz (1..=3), sonst `None`.
 pub fn clip_place_points(place: i64) -> Option<i32> {
     usize::try_from(place)
@@ -235,11 +332,50 @@ pub async fn apply_viewer_page(
     rows: &[ViewerDailyRow],
     next_cursor: Option<&str>,
 ) -> Result<u64, CentralDbError> {
+    apply_viewer_page_with_activity(pool, rows, &[], next_cursor).await
+}
+
+pub async fn apply_viewer_page_with_activity(
+    pool: &PgPool,
+    rows: &[ViewerDailyRow],
+    activities: &[ViewerActivityDay],
+    next_cursor: Option<&str>,
+) -> Result<u64, CentralDbError> {
+    for activity in activities {
+        let mut channels = BTreeSet::new();
+        if !is_valid_twitch_user_id(&activity.twitch_user_id)
+            || activity.day < berlin_day(activity.activity_since)
+            || activity.computed_at < activity.activity_since
+            || activity.rows.iter().any(|r| {
+                r.twitch_user_id != activity.twitch_user_id
+                    || r.day != activity.day
+                    || !is_valid_twitch_user_id(&r.channel_twitch_user_id)
+                    || !channels.insert(&r.channel_twitch_user_id)
+                    || [
+                        r.watch_minutes,
+                        r.chat_messages,
+                        r.points_watch,
+                        r.points_chat,
+                        r.points_discovery,
+                    ]
+                    .iter()
+                    .any(|n| *n < 0)
+            })
+        {
+            return Err(CentralDbError::InvalidInput(
+                "Rohaktivität passt nicht zur Einwilligung".into(),
+            ));
+        }
+    }
     let mut tx = pool.begin().await?;
     lock_twitch_identity(&mut tx).await?;
     // Die Zuordnung bleibt bis zum Commit stabil. Alle Nutzerlocks werden
     // sortiert nach dem globalen Identitätslock erworben.
-    let twitch_ids: Vec<&str> = rows.iter().map(|row| row.twitch_user_id.as_str()).collect();
+    let twitch_ids: Vec<&str> = rows
+        .iter()
+        .map(|row| row.twitch_user_id.as_str())
+        .chain(activities.iter().map(|a| a.twitch_user_id.as_str()))
+        .collect();
     let linked: Vec<(String, i64)> = sqlx::query_as(
         "SELECT platform_user_id, discord_id FROM core.discord_platform_connections
           WHERE platform = 'twitch' AND platform_user_id = ANY($1)",
@@ -274,8 +410,59 @@ pub async fn apply_viewer_page(
         if erased {
             continue;
         }
-        written += sqlx::query(
-            "INSERT INTO community_points.twitch_viewer_daily
+        written += write_viewer_row(&mut tx, row).await?;
+    }
+    for activity in activities {
+        if blocked_twitch_ids.contains(activity.twitch_user_id.as_str()) {
+            continue;
+        }
+        let key = viewer_privacy_key(&activity.twitch_user_id);
+        let current: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_points.twitch_viewer_consents s
+               JOIN core.discord_platform_connections c ON c.discord_id = s.discord_id
+                AND c.platform = 'twitch' AND c.platform_user_id = $2
+              WHERE s.subject_hash = $1 AND s.activity_since = $3)",
+        )
+        .bind(&key)
+        .bind(&activity.twitch_user_id)
+        .bind(activity.activity_since)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !current {
+            continue;
+        }
+        let accepted = sqlx::query(
+            "INSERT INTO community_points.twitch_viewer_activity_state(subject_hash, day, activity_since, computed_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT(subject_hash, day) DO UPDATE SET activity_since = EXCLUDED.activity_since,
+                computed_at = EXCLUDED.computed_at
+             WHERE community_points.twitch_viewer_activity_state.activity_since = EXCLUDED.activity_since
+               AND community_points.twitch_viewer_activity_state.computed_at < EXCLUDED.computed_at",
+        ).bind(&key).bind(activity.day).bind(activity.activity_since).bind(activity.computed_at)
+            .execute(&mut *tx).await?.rows_affected();
+        if accepted == 0 {
+            continue;
+        }
+        // Auch ein bestätigter leerer Tag ersetzt den bisherigen Stand.
+        sqlx::query("DELETE FROM community_points.twitch_viewer_daily WHERE twitch_user_id = $1 AND day = $2")
+            .bind(&activity.twitch_user_id).bind(activity.day).execute(&mut *tx).await?;
+        for row in &activity.rows {
+            let mut row = row.clone();
+            row.source_updated_at = activity.computed_at;
+            written += write_viewer_row(&mut tx, &row).await?;
+        }
+    }
+    store_cursor(&mut tx, CURSOR_VIEWERS, next_cursor).await?;
+    tx.commit().await?;
+    Ok(written)
+}
+
+async fn write_viewer_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    row: &ViewerDailyRow,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        "INSERT INTO community_points.twitch_viewer_daily
                  (twitch_user_id, channel_twitch_user_id, day, watch_minutes, chat_messages,
                   points_watch, points_chat, points_discovery, source_updated_at, synced_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
@@ -289,23 +476,19 @@ pub async fn apply_viewer_page(
                  synced_at = now()
              WHERE community_points.twitch_viewer_daily.source_updated_at
                    <= EXCLUDED.source_updated_at",
-        )
-        .bind(&row.twitch_user_id)
-        .bind(&row.channel_twitch_user_id)
-        .bind(row.day)
-        .bind(row.watch_minutes)
-        .bind(row.chat_messages)
-        .bind(row.points_watch)
-        .bind(row.points_chat)
-        .bind(row.points_discovery)
-        .bind(row.source_updated_at)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    }
-    store_cursor(&mut tx, CURSOR_VIEWERS, next_cursor).await?;
-    tx.commit().await?;
-    Ok(written)
+    )
+    .bind(&row.twitch_user_id)
+    .bind(&row.channel_twitch_user_id)
+    .bind(row.day)
+    .bind(row.watch_minutes)
+    .bind(row.chat_messages)
+    .bind(row.points_watch)
+    .bind(row.points_chat)
+    .bind(row.points_discovery)
+    .bind(row.source_updated_at)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
 }
 
 /// Wie [`apply_viewer_page`] fuer Streamer-Tageszeilen.

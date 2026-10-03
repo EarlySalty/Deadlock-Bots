@@ -23,6 +23,7 @@ pub mod privacy;
 pub mod privacy_ui;
 pub mod reaction_roles;
 pub mod retention;
+pub mod scout_privacy;
 pub mod scrim_signup;
 pub mod streamer_suggest;
 pub mod tags;

@@ -498,3 +498,145 @@ async fn vorschlags_punkte_einmal_je_kanal_in_die_zentrale_db() {
         Some(stamp(2))
     );
 }
+
+#[derive(Default)]
+struct ActivityFixture {
+    queries: Vec<HashMap<String, String>>,
+    mismatch: bool,
+    empty: bool,
+    unavailable: bool,
+}
+async fn activity_handler(
+    State(state): State<Arc<Mutex<ActivityFixture>>>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    if headers
+        .get("X-Internal-Token")
+        .and_then(|v| v.to_str().ok())
+        != Some(TOKEN)
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let mut state = state.lock().expect("Fixture");
+    state.queries.push(query.clone());
+    if state.unavailable {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let computed_at = Utc::now().to_rfc3339();
+    let mut row = viewer_json(&query["twitch_user_id"], &computed_at);
+    row["day"] = json!(query["day"]);
+    row["watch_minutes"] = json!(2);
+    row["points_watch"] = json!(0);
+    row["chat_messages"] = json!(1);
+    row["points_chat"] = json!(1);
+    row["points_discovery"] = json!(0);
+    Ok(Json(
+        json!({ "twitch_user_id": if state.mismatch {"999"} else {&query["twitch_user_id"]},
+        "day":query["day"], "activity_since":query["activity_since"], "computed_at":computed_at,
+        "rows":if state.empty {vec![]} else {vec![row]} }),
+    ))
+}
+
+#[tokio::test]
+async fn consent_rohdaten_bindung_nulltag_fehler_ohne_cursorfortschritt() {
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("Echte Wegwerf-DB");
+    let pool = db.pool();
+    sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out, reason, updated_at) VALUES (42, false, 'user_opt_in', now())")
+        .execute(pool).await.expect("Bewusste Einwilligung");
+    sqlx::query("INSERT INTO community_points.twitch_viewer_privacy_blocks(subject_hash) VALUES (sha256(convert_to('community-points:twitch-viewer-privacy:v1:111', 'UTF8')))")
+        .execute(pool).await.expect("Gelöschte Vorgeschichte");
+    dl_central_db::platform_connections::upsert_twitch_connection(
+        pool,
+        42,
+        &dl_central_db::platform_connections::TwitchConnection {
+            twitch_user_id: "111".into(),
+            twitch_login: "viewer".into(),
+            verified: true,
+        },
+    )
+    .await
+    .expect("Bewusste neue Verknüpfung");
+    let fixture = Arc::new(Mutex::new(ActivityFixture::default()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Listener");
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(VIEWER_ACTIVITY_PATH, get(activity_handler))
+        .with_state(fixture.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("Testserver");
+    });
+    let client = http_client().expect("Client");
+    let sink = ConsentViewerDbSink {
+        pool,
+        client: &client,
+        activity_url: reqwest::Url::parse(&format!("http://{address}{VIEWER_ACTIVITY_PATH}"))
+            .unwrap(),
+        token: TOKEN,
+    };
+    let today = berlin_day(Utc::now());
+    let mut old = viewer_row(&viewer_json("111", &Utc::now().to_rfc3339())).unwrap();
+    old.day = today;
+    assert_eq!(
+        sink.apply(&[old.clone()], Some("bound-cursor"))
+            .await
+            .expect("Rohdaten statt Altwerte"),
+        1
+    );
+    let values: (i32, i32) = sqlx::query_as("SELECT watch_minutes, points_discovery FROM community_points.twitch_viewer_daily WHERE twitch_user_id = '111'")
+        .fetch_one(pool).await.expect("Gespeicherte neue Werte");
+    assert_eq!(values, (2, 0));
+    let consent = load_viewer_consents(pool).await.unwrap().remove(0);
+    let queries = fixture.lock().unwrap().queries.clone();
+    assert_eq!(queries[0]["twitch_user_id"], "111");
+    assert_eq!(
+        timestamp(&queries[0]["activity_since"]),
+        Some(consent.activity_since)
+    );
+    fixture.lock().unwrap().mismatch = true;
+    assert!(sink
+        .apply(&[old.clone()], Some("falsche-bindung"))
+        .await
+        .is_err());
+    assert_eq!(
+        load_cursor(pool, CURSOR_VIEWERS).await.unwrap().as_deref(),
+        Some("bound-cursor")
+    );
+    fixture.lock().unwrap().mismatch = false;
+    fixture.lock().unwrap().unavailable = true;
+    assert!(sink.apply(&[old], Some("remoteausfall")).await.is_err());
+    assert_eq!(
+        load_cursor(pool, CURSOR_VIEWERS).await.unwrap().as_deref(),
+        Some("bound-cursor")
+    );
+    fixture.lock().unwrap().unavailable = false;
+    fixture.lock().unwrap().empty = true;
+    // Kein normaler Tagescursor nötig: neuer Nullstand wird unabhängig ersetzt.
+    assert_eq!(
+        sink.refresh_current_day()
+            .await
+            .expect("Bestätigter Nulltag"),
+        0
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM community_points.twitch_viewer_daily WHERE twitch_user_id = '111'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    assert!(fetch_viewer_activity(
+        &client,
+        &sink.activity_url,
+        "falsches-fixture-token",
+        &consent,
+        today
+    )
+    .await
+    .is_err());
+    server.abort();
+}

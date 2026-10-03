@@ -98,6 +98,8 @@ pub async fn upsert_twitch_connection(
         return Ok(TwitchUpsertOutcome::PrivacyOptedOut);
     }
 
+    crate::community_points::consent_after_twitch_link(&mut tx, discord_id, twitch_user_id).await?;
+
     let replaced_discord_ids: Vec<i64> = sqlx::query_scalar(
         "DELETE FROM core.discord_platform_connections
           WHERE platform = $1

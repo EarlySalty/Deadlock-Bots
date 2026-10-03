@@ -126,6 +126,8 @@ impl TwitchApiClient {
         Ok(Arc::new(Self {
             http: reqwest::Client::builder()
                 .timeout(timeout)
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
             base_url,
@@ -446,6 +448,58 @@ impl TwitchApiClient {
         let status = response.status().as_u16();
         let body: Value = response.json().await.unwrap_or(Value::Null);
         Ok((status, body))
+    }
+
+    /// Nur die neuen Community-Scoutkopien des Mitglieds exportieren.
+    pub async fn export_scout_privacy(&self, discord_id: i64) -> Result<Value, TwitchBridgeError> {
+        let response = self
+            .http
+            .get(format!(
+                "{}{TWITCH_INTERNAL_API_BASE_PATH}/scout/community-privacy/export",
+                self.base_url
+            ))
+            .header("X-Internal-Token", &self.token)
+            .query(&[("discord_user_id", discord_id.to_string())])
+            .send()
+            .await
+            .map_err(|e| TwitchBridgeError::Api(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(TwitchBridgeError::Status(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|e| TwitchBridgeError::Api(e.to_string()))
+    }
+
+    pub async fn post_scout_privacy(
+        &self,
+        action: &str,
+        payload: &Value,
+    ) -> Result<Value, TwitchBridgeError> {
+        if !matches!(action, "erase" | "consent") {
+            return Err(TwitchBridgeError::Api(
+                "Ungültige Scout-Privacyoperation".into(),
+            ));
+        }
+        let response = self
+            .http
+            .post(format!(
+                "{}{TWITCH_INTERNAL_API_BASE_PATH}/scout/community-privacy/{action}",
+                self.base_url
+            ))
+            .header("X-Internal-Token", &self.token)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| TwitchBridgeError::Api(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(TwitchBridgeError::Status(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|e| TwitchBridgeError::Api(e.to_string()))
     }
 
     pub async fn add_global_ban(

@@ -5,9 +5,9 @@
 use dl_central_db::community_points::{import_clip_contest_ledger, import_qualified_join_ledger};
 use dl_community_points_sync::{
     endpoint, http_client, streamer_row, suggestion_event, sync_source, validate_base_url,
-    viewer_row, StreamerDbSink, StreamerWire, SuggestionLedgerSink, SuggestionOutcomeWire,
-    ViewerDbSink, ViewerWire, DEFAULT_TWITCH_API_URL, STREAMERS_PATH, SUGGESTION_OUTCOMES_PATH,
-    VIEWERS_PATH,
+    viewer_row, ConsentViewerDbSink, StreamerDbSink, StreamerWire, SuggestionLedgerSink,
+    SuggestionOutcomeWire, ViewerWire, DEFAULT_TWITCH_API_URL, STREAMERS_PATH,
+    SUGGESTION_OUTCOMES_PATH, VIEWERS_PATH, VIEWER_ACTIVITY_PATH,
 };
 
 #[tokio::main]
@@ -29,11 +29,19 @@ async fn main() -> anyhow::Result<()> {
     let pool = dl_central_db::connect_pool(central_dsn).await?;
     let client = http_client()?;
 
+    let viewer_sink = ConsentViewerDbSink {
+        pool: &pool,
+        client: &client,
+        activity_url: endpoint(&base, VIEWER_ACTIVITY_PATH)?,
+        token: &token,
+    };
+    let resumed = viewer_sink.refresh_current_day().await?;
+    println!("Erneute Einwilligung: {resumed} gefilterte Zuschauerzeilen geschrieben");
     let viewers = sync_source::<ViewerWire, _, _>(
         &client,
         &endpoint(&base, VIEWERS_PATH)?,
         &token,
-        &ViewerDbSink(&pool),
+        &viewer_sink,
         viewer_row,
     )
     .await?;
@@ -63,23 +71,18 @@ async fn main() -> anyhow::Result<()> {
         streamers.cursor.as_deref().unwrap_or("-")
     );
 
-    // Ein Fehler hier (z. B. Twitch-Bot noch ohne Paket F) stoppt die
-    // übrigen Ledger-Importe nicht.
-    match sync_source::<SuggestionOutcomeWire, _, _>(
+    let outcomes = sync_source::<SuggestionOutcomeWire, _, _>(
         &client,
         &endpoint(&base, SUGGESTION_OUTCOMES_PATH)?,
         &token,
         &SuggestionLedgerSink(&pool),
         suggestion_event,
     )
-    .await
-    {
-        Ok(outcomes) => println!(
-            "Streamer-Vorschläge: {} Seiten, {} Zeilen geholt, {} ohne Punkte, {} neu gebucht",
-            outcomes.pages, outcomes.fetched, outcomes.skipped, outcomes.written
-        ),
-        Err(error) => eprintln!("Streamer-Vorschläge nicht synchronisiert: {error:#}"),
-    }
+    .await?;
+    println!(
+        "Streamer-Vorschläge: {} Seiten, {} Zeilen geholt, {} ohne Punkte, {} neu gebucht",
+        outcomes.pages, outcomes.fetched, outcomes.skipped, outcomes.written
+    );
 
     let joins = import_qualified_join_ledger(&pool).await?;
     println!("Ledger: {joins} neue qualifizierte Beitritte");

@@ -251,6 +251,8 @@ pub struct ForwardRequest {
     pub discord_id: i64,
     pub twitch_login: String,
     pub reason: String,
+    pub submitted_at: chrono::DateTime<chrono::Utc>,
+    pub privacy_epoch: i64,
 }
 
 impl ForwardRequest {
@@ -260,6 +262,8 @@ impl ForwardRequest {
             "suggested_by_discord_id": self.discord_id.to_string(),
             "reason": (!self.reason.is_empty()).then_some(self.reason.as_str()),
             "idempotency_key": idempotency_key(self.id),
+            "submitted_at": self.submitted_at.to_rfc3339(),
+            "privacy_epoch": self.privacy_epoch,
         })
     }
 }
@@ -375,11 +379,17 @@ impl StreamerSuggestions {
             suggestion_id = id,
             "Streamer-Vorschlag gespeichert"
         );
-        let request = ForwardRequest {
-            id,
-            discord_id,
-            twitch_login: login.clone(),
-            reason,
+        let request = match self.request_by_id(id).await {
+            Ok(Some(request)) => request,
+            Ok(None) => return SubmitOutcome::OptedOut,
+            Err(error) => {
+                tracing::warn!(%error, "Gespeicherter Vorschlag bleibt zur Wiederholung offen");
+                return SubmitOutcome::Saved {
+                    id,
+                    login,
+                    status: SuggestionStatus::Pending,
+                };
+            }
         };
         let status =
             match tokio::time::timeout(INLINE_FORWARD_TIMEOUT, self.forward_one(&request)).await {
@@ -431,16 +441,18 @@ impl StreamerSuggestions {
         if recent >= DAILY_LIMIT {
             return Ok(SubmitOutcome::RateLimited);
         }
+        let epoch = crate::scout_privacy::current_epoch(&mut tx, discord_id).await?;
         let id: Option<i64> = sqlx::query_scalar(
             "INSERT INTO community.streamer_suggestions
-                 (discord_id, twitch_login, reason, last_attempt_at)
-             VALUES ($1, $2, $3, now())
+                 (discord_id, twitch_login, reason, last_attempt_at, privacy_epoch)
+             VALUES ($1, $2, $3, now(), $4)
              ON CONFLICT (discord_id, twitch_login) DO NOTHING
              RETURNING id",
         )
         .bind(discord_id)
         .bind(login)
         .bind(reason)
+        .bind(epoch)
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -457,11 +469,61 @@ impl StreamerSuggestions {
         })
     }
 
+    async fn request_by_id(&self, id: i64) -> Result<Option<ForwardRequest>, sqlx::Error> {
+        let row = sqlx::query("SELECT id, discord_id, twitch_login, reason, created_at, privacy_epoch FROM community.streamer_suggestions WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(|row| {
+            Ok(ForwardRequest {
+                id: row.try_get("id")?,
+                discord_id: row.try_get("discord_id")?,
+                twitch_login: row.try_get("twitch_login")?,
+                reason: row.try_get("reason")?,
+                submitted_at: row.try_get("created_at")?,
+                privacy_epoch: row.try_get("privacy_epoch")?,
+            })
+        })
+        .transpose()
+    }
+
     /// Eine Weitergabe; schreibt das Ergebnis und liefert den neuen Stand.
     async fn forward_one(&self, request: &ForwardRequest) -> SuggestionStatus {
         let Some(forwarder) = &self.forwarder else {
             return SuggestionStatus::Pending;
         };
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::warn!(%error, "Vorschlagsweitergabe wartet auf Datenbank");
+                return SuggestionStatus::Pending;
+            }
+        };
+        match dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, request.discord_id).await {
+            Ok(false) => (),
+            Ok(true) => return SuggestionStatus::Rejected,
+            Err(error) => {
+                tracing::warn!(%error, "Vorschlagsweitergabe bleibt bei Privacyfehler geschlossen");
+                return SuggestionStatus::Pending;
+            }
+        }
+        let can_forward: Result<bool, sqlx::Error> = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community.streamer_suggestions
+              WHERE id = $1 AND discord_id = $2 AND created_at = $3 AND privacy_epoch = $4)
+             AND NOT EXISTS(SELECT 1 FROM community.scout_privacy_outbox WHERE discord_id = $2)",
+        )
+        .bind(request.id)
+        .bind(request.discord_id)
+        .bind(request.submitted_at)
+        .bind(request.privacy_epoch)
+        .fetch_one(&mut *tx)
+        .await;
+        match can_forward {
+            Ok(true) => (),
+            Ok(false) => return SuggestionStatus::Pending,
+            Err(error) => {
+                tracing::warn!(%error, "Scout-Datenschutzstand nicht verfügbar, Weitergabe bleibt geschlossen");
+                return SuggestionStatus::Pending;
+            }
+        }
         let result = forwarder.forward(request).await;
         let (status, twitch_user_id) = match &result {
             ForwardResult::Answered {
@@ -484,7 +546,7 @@ impl StreamerSuggestions {
                   WHERE id = $1 AND forwarded_at IS NULL",
             )
             .bind(request.id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
         } else {
             sqlx::query(
@@ -499,11 +561,15 @@ impl StreamerSuggestions {
             .bind(request.id)
             .bind(status.as_str())
             .bind(twitch_user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
         };
         if let Err(error) = written {
             tracing::warn!(suggestion_id = request.id, %error, "Streamer-Vorschlag: Ergebnis konnte nicht gespeichert werden");
+            return SuggestionStatus::Pending;
+        } else if let Err(error) = tx.commit().await {
+            tracing::warn!(%error, "Vorschlagsergebnis nicht bestätigt, Wiederholung bleibt erforderlich");
+            return SuggestionStatus::Pending;
         } else if status != SuggestionStatus::Pending {
             tracing::info!(
                 suggestion_id = request.id,
@@ -537,7 +603,7 @@ impl StreamerSuggestions {
                      ORDER BY last_attempt_at NULLS FIRST, id
                      LIMIT $3
                      FOR UPDATE SKIP LOCKED)
-            RETURNING s.id, s.discord_id, s.twitch_login, s.reason",
+            RETURNING s.id, s.discord_id, s.twitch_login, s.reason, s.created_at, s.privacy_epoch",
         )
         .bind(RETRY_BASE_MINUTES)
         .bind(RETRY_MAX_MINUTES)
@@ -551,6 +617,8 @@ impl StreamerSuggestions {
                 discord_id: row.try_get("discord_id")?,
                 twitch_login: row.try_get("twitch_login")?,
                 reason: row.try_get("reason")?,
+                submitted_at: row.try_get("created_at")?,
+                privacy_epoch: row.try_get("privacy_epoch")?,
             };
             if self.forward_one(&request).await != SuggestionStatus::Pending {
                 done += 1;
@@ -645,9 +713,23 @@ pub fn register(router: &mut InteractionRouter, service: Arc<StreamerSuggestions
 
 /// Retry-Loop für offene Weitergaben (alle 2 Minuten, Abstand je Vorschlag wächst).
 pub fn spawn(service: Arc<StreamerSuggestions>) -> tokio::task::JoinHandle<()> {
+    spawn_with_privacy(service, None)
+}
+
+pub fn spawn_with_privacy(
+    service: Arc<StreamerSuggestions>,
+    scout_client: Option<Arc<dl_bridges::twitch::TwitchApiClient>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RETRY_TICK).await;
+            if let Some(client) = &scout_client {
+                if let Err(error) =
+                    crate::scout_privacy::deliver_pending(&service.pool, client).await
+                {
+                    tracing::warn!(%error, "Scout-Datenschutzweitergabe bleibt zur Wiederholung gespeichert");
+                }
+            }
             match service.forward_pending().await {
                 Ok(0) => {}
                 Ok(done) => tracing::info!(done, "Streamer-Vorschläge nachträglich weitergegeben"),
