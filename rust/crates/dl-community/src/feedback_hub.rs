@@ -38,45 +38,45 @@ pub struct FeedbackHub {
 }
 
 pub fn feedback_modal() -> BridgeReply {
-            let field = |id: &str, label: &str, placeholder: &str, required: bool| ModalField {
-                custom_id: id.to_string(),
-                label: label.to_string(),
-                placeholder: placeholder.to_string(),
-                value: None,
-                required,
-                min_length: 0,
-                max_length: 1024,
-                paragraph: true,
-            };
-            BridgeReply {
-                modal: Some(ModalSpec {
-                    custom_id: "feedback_hub:submit".to_string(),
-                    title: "Deadlock Feedback".to_string(),
-                    fields: vec![
-                        field(
-                            "experience",
-                            "Wie war dein bisheriges Spielerlebnis?",
-                            "Beschreibe dein Erlebnis so präzise wie möglich.",
-                            true,
-                        ),
-                        field(
-                            "server_usage",
-                            "Wie gut kommst du mit dem Server zurecht?",
-                            "Bots, Kanäle oder Möglichkeiten, die dir helfen oder fehlen?",
-                            false,
-                        ),
-                        field(
-                            "improvements",
-                            "Wie können wir den Server verbessern?",
-                            "Wünsche und Kritik sind willkommen.",
-                            true,
-                        ),
-                        field("wish", "Hast du sonst noch einen Wunsch?", "", false),
-                        field("additional", "Möchtest du noch etwas mitteilen?", "", false),
-                    ],
-                }),
-                ..BridgeReply::default()
-            }
+    let field = |id: &str, label: &str, placeholder: &str, required: bool| ModalField {
+        custom_id: id.to_string(),
+        label: label.to_string(),
+        placeholder: placeholder.to_string(),
+        value: None,
+        required,
+        min_length: 0,
+        max_length: 1024,
+        paragraph: true,
+    };
+    BridgeReply {
+        modal: Some(ModalSpec {
+            custom_id: "feedback_hub:submit".to_string(),
+            title: "Deadlock Feedback".to_string(),
+            fields: vec![
+                field(
+                    "experience",
+                    "Wie war dein bisheriges Spielerlebnis?",
+                    "Beschreibe dein Erlebnis so präzise wie möglich.",
+                    true,
+                ),
+                field(
+                    "server_usage",
+                    "Wie gut kommst du mit dem Server zurecht?",
+                    "Bots, Kanäle oder Möglichkeiten, die dir helfen oder fehlen?",
+                    false,
+                ),
+                field(
+                    "improvements",
+                    "Wie können wir den Server verbessern?",
+                    "Wünsche und Kritik sind willkommen.",
+                    true,
+                ),
+                field("wish", "Hast du sonst noch einen Wunsch?", "", false),
+                field("additional", "Möchtest du noch etwas mitteilen?", "", false),
+            ],
+        }),
+        ..BridgeReply::default()
+    }
 }
 
 fn panel_body() -> Map<String, Value> {
