@@ -16,7 +16,7 @@ use std::{
 use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 const UNAVAILABLE: &str = "Der Serverguide ist gerade nicht erreichbar. Du kannst deine Frage in <#1491953161747955853> stellen.";
-const PILOT_CLOSED: &str = "Der Serverguide ist noch im begrenzten Testbetrieb. Für Hilfe erreichst du die Community in <#1426220702054355077>.";
+const PILOT_CLOSED: &str = "Der Serverguide ist hier noch nicht freigeschaltet. Für Hilfe erreichst du die Community in <#1426220702054355077>.";
 const LEGACY_DISABLED: &str = "Diese frühere Aktion ist ausgeschaltet. Hilfe bekommst du in <#1426220702054355077>, Mitspieler findest du in <#1376335502919335936>.";
 
 #[derive(Clone)]
@@ -471,12 +471,33 @@ impl GuideAdapter {
         else {
             return false;
         };
+        let everyone = guild
+            .roles
+            .get(&serenity::all::RoleId::new(self.config.guild_id))
+            .map(|role| role.permissions);
+        if !public_view_allowed(self.config.guild_id, everyone, channel) {
+            return false;
+        }
         let parent_allowed = matches!(
             channel.kind,
             serenity::all::ChannelType::PublicThread | serenity::all::ChannelType::NewsThread
-        ) && channel
-            .parent_id
-            .is_some_and(|parent| self.config.public_channels.contains(&parent.get()));
+        ) && channel.parent_id.is_some_and(|parent| {
+            self.config.public_channels.contains(&parent.get())
+                && guild.channels.get(&parent).is_some_and(|parent| {
+                    public_view_allowed(self.config.guild_id, everyone, parent)
+                        && !parent.name.starts_with("ticket-")
+                        && !parent.name.starts_with("closed-")
+                        && parent.id.get() != self.config.moderator_channel_id
+                        && parent.parent_id.map(|id| id.get()) != Some(1459628097145147645)
+                })
+        });
+        if matches!(
+            channel.kind,
+            serenity::all::ChannelType::PublicThread | serenity::all::ChannelType::NewsThread
+        ) && !parent_allowed
+        {
+            return false;
+        }
         if !self.config.public_channels.contains(&channel_id) && !parent_allowed {
             return false;
         }
@@ -776,7 +797,7 @@ impl GuideAdapter {
         }
         if self.process_actions(&turn, &mut reply).await.is_err() {
             reply.status = "unavailable".into();
-            reply.reply = Some("Die Weiterleitung lässt sich gerade nicht bestätigen. Bitte versuch es später nochmal.".into());
+            reply.reply = Some("Die Weiterleitung lässt sich gerade nicht sicher bestätigen. Bei Bedarf erreichst du das Team über die vorhandenen Serverwege.".into());
         }
         if reply.status == "silent" {
             return;
@@ -853,6 +874,39 @@ impl GuideAdapter {
             tracing::warn!("Guide-Antwort konnte nicht bestätigt zugestellt werden");
         }
     }
+}
+
+fn public_view_allowed(
+    guild_id: u64,
+    everyone: Option<serenity::all::Permissions>,
+    channel: &serenity::all::GuildChannel,
+) -> bool {
+    use serenity::all::{ChannelType, PermissionOverwriteType, Permissions, RoleId};
+    if !matches!(
+        channel.kind,
+        ChannelType::Text
+            | ChannelType::News
+            | ChannelType::Voice
+            | ChannelType::Stage
+            | ChannelType::Forum
+            | ChannelType::PublicThread
+            | ChannelType::NewsThread
+    ) {
+        return false;
+    }
+    let Some(mut permissions) = everyone else {
+        return false;
+    };
+    if permissions.contains(Permissions::ADMINISTRATOR) {
+        return true;
+    }
+    for overwrite in &channel.permission_overwrites {
+        if overwrite.kind == PermissionOverwriteType::Role(RoleId::new(guild_id)) {
+            permissions.remove(overwrite.deny);
+            permissions.insert(overwrite.allow);
+        }
+    }
+    permissions.contains(Permissions::VIEW_CHANNEL)
 }
 
 fn is_end(content: &str) -> bool {
@@ -1035,7 +1089,7 @@ impl InteractionHandler for GuideAdapter {
         }
         let forget_completed = reply.control_result.as_deref() == Some("forget");
         if self.process_actions(&turn, &mut reply).await.is_err() {
-            return BridgeReply::ephemeral_text("Die Weiterleitung lässt sich gerade nicht bestätigen. Bitte versuch es später nochmal.");
+            return BridgeReply::ephemeral_text("Die Weiterleitung lässt sich gerade nicht sicher bestätigen. Bei Bedarf erreichst du das Team über die vorhandenen Serverwege.");
         }
         if !forget_completed
             && self
@@ -1182,6 +1236,49 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn oeffentliche_leserechte_werden_nach_entzug_gesperrt() {
+        use serenity::all::{
+            ChannelType, PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId,
+        };
+        let mut channel = serenity::all::GuildChannel::default();
+        channel.kind = ChannelType::Text;
+        assert!(!public_view_allowed(1, None, &channel));
+        assert!(public_view_allowed(
+            1,
+            Some(Permissions::VIEW_CHANNEL),
+            &channel
+        ));
+        channel.permission_overwrites.push(PermissionOverwrite {
+            kind: PermissionOverwriteType::Role(RoleId::new(1)),
+            allow: Permissions::empty(),
+            deny: Permissions::VIEW_CHANNEL,
+        });
+        assert!(!public_view_allowed(
+            1,
+            Some(Permissions::VIEW_CHANNEL),
+            &channel
+        ));
+        channel.permission_overwrites.clear();
+        channel.kind = ChannelType::PrivateThread;
+        assert!(!public_view_allowed(
+            1,
+            Some(Permissions::VIEW_CHANNEL),
+            &channel
+        ));
+        channel.kind = ChannelType::PublicThread;
+        assert!(public_view_allowed(
+            1,
+            Some(Permissions::VIEW_CHANNEL),
+            &channel
+        ));
+        channel.kind = ChannelType::Unknown(255);
+        assert!(!public_view_allowed(
+            1,
+            Some(Permissions::VIEW_CHANNEL),
+            &channel
+        ));
+    }
     #[test]
     fn hilfe_vor_pending_eintrag_bleibt_sichtbar() {
         let mut routes = Routes::default();
