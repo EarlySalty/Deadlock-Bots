@@ -286,11 +286,30 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
     let mut pipe_complete = false;
     let mut stop_deadline = None;
     loop {
+        // Ausstehende Stoppsignale vor Pipefehlern und Kindexits verarbeiten.
+        // systemd kann das Kind gleichzeitig mit dem Launcher beenden.
+        tokio::select! {
+            biased;
+            _ = terminate.recv(), if stop_deadline.is_none() => {
+                signal_child(&mut child, nix::sys::signal::Signal::SIGTERM)
+                    .context("Dienststoppsignal konnte nicht weitergegeben werden.")?;
+                stop_deadline = Some(Instant::now() + Duration::from_secs(10));
+            }
+            _ = interrupt.recv(), if stop_deadline.is_none() => {
+                signal_child(&mut child, nix::sys::signal::Signal::SIGINT)
+                    .context("Dienstabbruchsignal konnte nicht weitergegeben werden.")?;
+                stop_deadline = Some(Instant::now() + Duration::from_secs(10));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
         if !pipe_complete {
             match received.try_recv() {
                 Ok(true) => pipe_complete = true,
                 Ok(false) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     abort_child(&mut child).await?;
+                    if stop_deadline.is_some() {
+                        return Ok(());
+                    }
                     bail!("Dienst hat die private Secret-Pipe nicht angenommen.");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {}
@@ -304,7 +323,7 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
             .try_wait()
             .context("Dienstabschluss ist nicht prüfbar.")?
         {
-            if pipe_complete && (status.success() || stop_deadline.is_some()) {
+            if stop_deadline.is_some() || (pipe_complete && status.success()) {
                 return Ok(());
             }
             if !status.success() && stop_deadline.is_none() {
@@ -314,19 +333,6 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
         if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             abort_child(&mut child).await?;
             bail!("Dienst hat die normale Stoppgrenze überschritten.");
-        }
-        tokio::select! {
-            _ = terminate.recv(), if stop_deadline.is_none() => {
-                signal_child(&mut child, nix::sys::signal::Signal::SIGTERM)
-                    .context("Dienststoppsignal konnte nicht weitergegeben werden.")?;
-                stop_deadline = Some(Instant::now() + Duration::from_secs(10));
-            }
-            _ = interrupt.recv(), if stop_deadline.is_none() => {
-                signal_child(&mut child, nix::sys::signal::Signal::SIGINT)
-                    .context("Dienstabbruchsignal konnte nicht weitergegeben werden.")?;
-                stop_deadline = Some(Instant::now() + Duration::from_secs(10));
-            }
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
     }
 }
