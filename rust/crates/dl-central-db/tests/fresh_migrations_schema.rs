@@ -2121,7 +2121,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     .fetch_one(&pool)
     .await
     .expect("community points privacy registry rows");
-    assert_eq!(community_points_privacy_rows, 8);
+    assert_eq!(community_points_privacy_rows, 12);
     let duplicate_ledger_ref = sqlx::query(
         "INSERT INTO community_points.ledger (discord_id, source, ref, points, occurred_at)
          VALUES (1, 'clip_vote', 'clip_vote:1:1', 2, now()),
@@ -2182,7 +2182,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "forward_attempts",
             "last_attempt_at",
             "created_at",
-            "forwarded_at"
+            "forwarded_at",
+            "privacy_epoch"
         ]
     );
     assert_eq!(

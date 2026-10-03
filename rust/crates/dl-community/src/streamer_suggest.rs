@@ -187,8 +187,11 @@ pub fn status_text(status: SuggestionStatus, login: &str) -> String {
         SuggestionStatus::Created => format!(
             "Danke für deinen Vorschlag! Wir schauen uns den Kanal {channel} an. Ob wir ihn ansprechen, entscheidet unser Team. Wird der Kanal Partner in unserem Streamer-Programm, bekommst du 150 Punkte."
         ),
-        SuggestionStatus::Pending | SuggestionStatus::Rejected => format!(
+        SuggestionStatus::Pending => format!(
             "Danke für deinen Vorschlag! Wir schauen uns den Kanal {channel} an. Ob wir ihn ansprechen, entscheidet unser Team."
+        ),
+        SuggestionStatus::Rejected => format!(
+            "Dein Vorschlag für {channel} wurde nicht angenommen. Er wird nicht weitergeleitet und nicht erneut gesendet."
         ),
         SuggestionStatus::AlreadyKnown => format!(
             "Danke! Den Kanal {channel} kennen wir schon, er steht bereits auf unserer Liste."
@@ -234,7 +237,8 @@ pub fn outcome_text(outcome: &SubmitOutcome) -> String {
         SubmitOutcome::AlreadyByYou { login, status } => match status {
             SuggestionStatus::AlreadyPartner
             | SuggestionStatus::NotFound
-            | SuggestionStatus::Blocked => status_text(*status, login),
+            | SuggestionStatus::Blocked
+            | SuggestionStatus::Rejected => status_text(*status, login),
             _ => format!(
                 "Den Kanal {} hast du schon vorgeschlagen, danke! Wir schauen ihn uns an.",
                 shown(login)

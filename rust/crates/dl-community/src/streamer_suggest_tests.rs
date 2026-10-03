@@ -212,6 +212,28 @@ fn jeder_status_hat_seine_antwort() {
 }
 
 #[test]
+fn endgueltige_ablehnung_verspricht_keine_pruefung_oder_wiederholung() {
+    for outcome in [
+        SubmitOutcome::Saved {
+            id: 1,
+            login: "some_one".into(),
+            status: SuggestionStatus::Rejected,
+        },
+        SubmitOutcome::AlreadyByYou {
+            login: "some_one".into(),
+            status: SuggestionStatus::Rejected,
+        },
+    ] {
+        let text = outcome_text(&outcome);
+        assert!(text.contains("nicht angenommen"), "{text}");
+        assert!(text.contains("nicht erneut gesendet"), "{text}");
+        assert!(text.contains("**some\\_one**"), "{text}");
+        assert!(!text.contains("schauen"), "{text}");
+        assert!(!text.contains("Danke"), "{text}");
+    }
+}
+
+#[test]
 fn modal_und_button_halten_discord_grenzen() {
     let spec = modal();
     assert_eq!(spec.custom_id, MODAL_CUSTOM_ID);
@@ -556,14 +578,34 @@ mod db {
 
     #[tokio::test]
     async fn endgueltige_ablehnung_und_ohne_weitergabe() {
-        let forwarder = FakeForwarder::with(vec![ForwardResult::Permanent("HTTP 409".into())]);
-        let (db, service) = setup(Some(forwarder)).await;
-        let id = saved_id(&service.submit(MEMBER, "someone", "passt gut").await);
-        assert_eq!(row(db.pool(), id).await, ("rejected".into(), None, true, 1));
+        let forwarder = FakeForwarder::with(
+            [400, 409, 422]
+                .into_iter()
+                .map(|code| classify_response(code, &json!({"error": "bad_request"})))
+                .collect(),
+        );
+        let (db, service) = setup(Some(forwarder.clone())).await;
+        for login in ["someone", "someone_else", "another"] {
+            let outcome = service.submit(MEMBER, login, "passt gut").await;
+            let id = saved_id(&outcome);
+            assert_eq!(row(db.pool(), id).await, ("rejected".into(), None, true, 1));
+            assert!(outcome_text(&outcome).contains("nicht angenommen"));
+            let duplicate = service.submit(MEMBER, login, "passt gut").await;
+            assert!(matches!(
+                duplicate,
+                SubmitOutcome::AlreadyByYou {
+                    status: SuggestionStatus::Rejected,
+                    ..
+                }
+            ));
+            assert!(outcome_text(&duplicate).contains("nicht erneut gesendet"));
+        }
+        assert_eq!(service.forward_pending().await.expect("kein Retry"), 0);
+        assert_eq!(forwarder.seen().len(), 3);
 
         // Ohne Twitch-Anbindung wird gespeichert und später nachgeholt.
         let offline = StreamerSuggestions::new(db.pool().clone(), None);
-        let outcome = offline.submit(MEMBER, "later", "passt gut").await;
+        let outcome = offline.submit(MEMBER + 1, "later", "passt gut").await;
         let later = saved_id(&outcome);
         assert_eq!(
             row(db.pool(), later).await,
