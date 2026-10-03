@@ -1946,10 +1946,6 @@ impl dl_community::clips::ClipPort for ClipGlue {
     }
 }
 
-// ── FAQ-Chat-Anbindung ─────────────────────────────────────────────────────
-
-/// Gemeinsamer Payload für alle sichtbaren FAQ/Knowledge/Shadow-Nachrichten (rohe Nutzerfrage,
-/// Modelltext, Shadow-Ausgabe). Ein Sendepfad, ein Kontrakt.
 pub struct VoiceNudgeGlue {
     pub inner: dl_voice::glue::NudgeGlue,
 }

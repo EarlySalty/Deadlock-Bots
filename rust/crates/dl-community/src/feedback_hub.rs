@@ -79,7 +79,6 @@ pub fn feedback_modal() -> BridgeReply {
             }
 }
 
-/// Baut den Panel-Body (Embed + Button) — identisch zum Python-`FeedbackHubView`.
 fn panel_body() -> Map<String, Value> {
     let embed = json!({
         "title": "Serverfeedback",
