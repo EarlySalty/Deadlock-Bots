@@ -408,7 +408,9 @@ mod tests {
                 .map(|_| {
                     let backend = &backend;
                     scope.spawn(move || {
-                        let query = backend.query("Synthetische Anfrage").unwrap();
+                        let query = backend
+                            .query("Synthetische Anfrage")
+                            .expect("Parallele synthetische Anfrage innerhalb des Zählerbereichs");
                         assert_eq!(query.request_id, query.conversation_id);
                         query.request_id
                     })
@@ -416,13 +418,15 @@ mod tests {
                 .collect();
             workers
                 .into_iter()
-                .map(|worker| worker.join().unwrap())
+                .map(|worker| worker.join().expect("Parallele Anfrage ohne Threadfehler"))
                 .collect::<BTreeSet<_>>()
         });
         assert_eq!(ids.len(), 16);
 
         backend.sequence.store(u64::MAX - 1, Ordering::Relaxed);
-        let last = backend.query("Letzte synthetische Anfrage").unwrap();
+        let last = backend
+            .query("Letzte synthetische Anfrage")
+            .expect("Letzte Anfrage vor dem Zählerüberlauf");
         assert!(last.request_id.ends_with(&format!("-{}", u64::MAX - 1)));
         assert_eq!(last.request_id, last.conversation_id);
         assert!(backend.query("Überlauf muss scheitern").is_err());
