@@ -1378,6 +1378,17 @@ mod tests {
     #[test]
     fn öffentliche_folgefragen_bleiben_beim_richtigen_nutzer_und_kanal() {
         let mut routes = ongoing();
+        assert_eq!(
+            routes
+                .addressed(
+                    &message(20, 10, "Und dann?"),
+                    Some(99),
+                    Duration::from_secs(300)
+                )
+                .unwrap()
+                .0,
+            "followup"
+        );
         assert!(routes
             .addressed(
                 &message(21, 10, "Und dann?"),
@@ -1392,17 +1403,13 @@ mod tests {
                 Duration::from_secs(300)
             )
             .is_none());
-        assert_eq!(
-            routes
-                .addressed(
-                    &message(20, 10, "Und dann?"),
-                    Some(99),
-                    Duration::from_secs(300)
-                )
-                .unwrap()
-                .0,
-            "followup"
-        );
+        assert!(routes
+            .addressed(
+                &message(20, 10, "Und dann?"),
+                Some(99),
+                Duration::from_secs(300)
+            )
+            .is_none());
     }
     #[test]
     fn menschliche_hilfe_beendet_unadressierte_folgefragen_aber_reply_bleibt_möglich() {
