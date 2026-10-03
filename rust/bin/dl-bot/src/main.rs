@@ -22,7 +22,6 @@ mod twitch_invites;
 mod vanity;
 
 use std::{
-    collections::HashSet,
     num::NonZeroU64,
     os::unix::fs::PermissionsExt,
     sync::{atomic::AtomicBool, Arc},
@@ -249,10 +248,6 @@ fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
         Ok(kind) => MatcherProviderChoice::Gate(Some(kind.as_str().to_string())),
         Err(_) => MatcherProviderChoice::Off(raw),
     }
-}
-
-fn brain_channel_allowlist_from_value(raw: Option<&str>) -> Option<HashSet<u64>> {
-    raw.and_then(modglue::parse_brain_channel_allowlist)
 }
 
 async fn wait_for_gateway_cache_ready(
@@ -2148,20 +2143,6 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
 
         let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
-    }
-
-    #[test]
-    fn brain_startup_aktiviert_nur_nichtleere_gueltige_allowlist() {
-        for raw in [None, Some(""), Some(" \n\t"), Some("nope"), Some("0")] {
-            assert_eq!(brain_channel_allowlist_from_value(raw), None, "{raw:?}");
-        }
-        for raw in [Some("123, nope, 456"), Some("123, 0, 456")] {
-            assert_eq!(brain_channel_allowlist_from_value(raw), None, "{raw:?}");
-        }
-        assert_eq!(
-            brain_channel_allowlist_from_value(Some("123, 456")),
-            Some(std::collections::HashSet::from([123, 456]))
-        );
     }
 
     #[test]

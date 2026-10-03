@@ -3639,21 +3639,6 @@ pub async fn lock_user_privacy(
     Ok(())
 }
 
-pub(crate) async fn erasure_completed_under_lock(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: i64,
-) -> CommunityDbResult<bool> {
-    Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-             SELECT 1 FROM core.user_privacy
-              WHERE user_id = $1 AND deleted_at IS NOT NULL
-         )",
-    )
-    .bind(user_id)
-    .fetch_one(&mut **tx)
-    .await?)
-}
-
 pub(crate) async fn scrub_pate_journey_metadata(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
