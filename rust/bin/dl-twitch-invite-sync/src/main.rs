@@ -86,6 +86,7 @@ async fn lock_invite_sync_guilds(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entries: &[InviteEntry],
 ) -> anyhow::Result<()> {
+    dl_central_db::platform_connections::lock_twitch_identity(tx).await?;
     // Lock existing and incoming Guilds in one order, then reject stale discovery.
     let logins: Vec<String> = entries
         .iter()
@@ -299,7 +300,7 @@ async fn sync_invites_and_reclassify(
     )
     .fetch_all(pool)
     .await?;
-    let mut candidates: Vec<(i64, String)> = Vec::new();
+    let mut candidates: Vec<(i64, Option<String>, String, String)> = Vec::new();
     let mut from_counts: HashMap<String, i64> = HashMap::new();
     for row in join_rows {
         let mut meta = row
@@ -332,31 +333,48 @@ async fn sync_invites_and_reclassify(
             if let Some(url) = classified.invite_url.clone() {
                 obj.insert("invite_url".into(), json!(url));
             }
-            candidates.push((row.id, serde_json::to_string(&meta)?));
             let key = if stored.is_empty() {
                 "(leer)".to_string()
             } else {
                 stored
             };
+            candidates.push((
+                row.id,
+                row.metadata.clone(),
+                serde_json::to_string(&meta)?,
+                key.clone(),
+            ));
             *from_counts.entry(key).or_insert(0) += 1;
         }
     }
 
-    let flipped = candidates.len();
+    let mut flipped = candidates.len();
     if !dry_run && !candidates.is_empty() {
         let mut reclassify_tx = pool.begin().await?;
-        for (id, metadata) in &candidates {
-            sqlx::query!(
+        dl_central_db::platform_connections::lock_twitch_identity(&mut reclassify_tx).await?;
+        flipped = 0;
+        from_counts.clear();
+        for (id, previous_metadata, metadata, bucket) in &candidates {
+            let changed = sqlx::query(
                 r#"
                 UPDATE activity.member_events
                    SET metadata = $1::text::jsonb
-                 WHERE id = $2
+                 WHERE id = $2 AND metadata IS NOT DISTINCT FROM $3::text::jsonb
+                   AND NOT EXISTS (SELECT 1 FROM core.user_privacy p
+                                   WHERE p.user_id = activity.member_events.user_id
+                                     AND (p.opted_out OR p.deleted_at IS NOT NULL))
                 "#,
-                metadata,
-                id,
             )
+            .bind(metadata)
+            .bind(*id)
+            .bind(previous_metadata)
             .execute(&mut *reclassify_tx)
-            .await?;
+            .await?
+            .rows_affected();
+            if changed == 1 {
+                flipped += 1;
+                *from_counts.entry(bucket.clone()).or_insert(0) += 1;
+            }
         }
         reclassify_tx.commit().await?;
     }

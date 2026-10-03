@@ -1802,6 +1802,12 @@ async fn existing_relations(pool: &PgPool) -> Result<HashSet<&'static str>, sqlx
         .chain(REDACTED_TEXT_USER_COLUMNS.iter().map(|spec| spec.relation))
         .chain(TEXT_USER_REF_COLUMNS.iter().map(|spec| spec.relation))
         .chain(JSON_USER_COLUMNS.iter().map(|spec| spec.relation))
+        .chain(
+            crate::invite_privacy::HANDLED_COLUMNS
+                .iter()
+                .map(|(relation, _)| *relation),
+        )
+        .chain(["activity.twitch_invite_member_privacy"])
         .chain([
             "scrim.replacement_needs",
             "scrim.replacement_candidates",
@@ -3815,10 +3821,13 @@ async fn scrub_action_outbox_requester(
 }
 
 pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<()> {
-    let now = utc_from_unix(now)?;
+    utc_from_unix(now)?;
     let mut tx = pool.begin().await?;
     dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
     lock_user_privacy(&mut tx, user_id).await?;
+    let now = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
     sqlx::query!(
         r#"
         INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
@@ -3899,6 +3908,8 @@ pub async fn delete_user_data(
         .await?;
         counts.insert("user_privacy_updated".to_string(), 1);
     }
+
+    counts.extend(crate::invite_privacy::erase(&mut tx, user_id, &relations).await?);
 
     for (key, value) in
         redact_json_user_columns(&mut tx, &relations, &user_key, &target_refs).await?
@@ -4128,6 +4139,7 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     let steam_ids = steam_ids_for_user(pool, user_id).await?;
     let target_refs = privacy_target_refs(&user_key, &steam_ids);
     let mut tbl = serde_json::Map::new();
+    tbl.extend(crate::invite_privacy::export(pool, user_id, &relations).await?);
 
     if relations.contains("community.scout_privacy_outbox") {
         let operations: Vec<Value> = sqlx::query_scalar(
@@ -4468,6 +4480,12 @@ mod privacy_contract_tests {
             "actor_ref".to_string(),
         ));
         out.insert((USER_CO_PLAYERS_REL.to_string(), "user_id".to_string()));
+        // Eigene Export-/Erasurebehandlung mit DB-Regressionen in invite_privacy.
+        out.extend(
+            crate::invite_privacy::HANDLED_COLUMNS
+                .iter()
+                .map(|(relation, column)| (relation.to_string(), column.to_string())),
+        );
         // Separater Export und bestätigungsgebundene Löschung in scout_privacy.
         out.insert(("community.scout_privacy_outbox".into(), "discord_id".into()));
         out

@@ -14,6 +14,7 @@ mod db;
 pub mod faq;
 pub mod feedback_hub;
 pub mod invite_lounge;
+mod invite_privacy;
 pub mod invites;
 pub mod knowledge_client;
 pub mod leave_survey;

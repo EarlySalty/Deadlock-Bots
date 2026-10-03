@@ -70,13 +70,16 @@ fn observe(
 }
 
 pub async fn reset_live_clocks(pool: &PgPool, guild_id: i64) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
     sqlx::query(
         "UPDATE activity.twitch_invite_members SET voice_channel_id = NULL,
          voice_started_at = NULL, voice_observed_at = NULL WHERE guild_id = $1",
     )
     .bind(guild_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -90,6 +93,7 @@ pub async fn record_snapshot(
     explicit_transition: bool,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
     let clocks: Vec<VoiceClock> = sqlx::query_as(
         "SELECT user_id, first_joined_at, left_at, voice_channel_id, voice_started_at,
                 voice_observed_at, voice_qualified_at

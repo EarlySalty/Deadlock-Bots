@@ -682,6 +682,8 @@ impl VoiceTracker {
         let co_player_ids_json = serde_json::to_string(&co_player_ids)?;
 
         let mut tx = self.pool.begin().await?;
+        // Der bestehende Invite-Evidenztrigger schreibt im selben Vorgang.
+        dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
         if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
             tracing::info!(
                 writer = "voice.finalized_session",
@@ -1434,6 +1436,79 @@ mod tests {
             .await;
         // Anna (Opt-out) bekommt keine Session; Ben allein reicht nicht für min_users=2
         assert_eq!(tracker.active_sessions().await, 0);
+    }
+
+    #[tokio::test]
+    async fn invite_evidenz_finalizer_sperrt_identitaet_vor_nutzer_und_erasure() {
+        let (_db, tracker, snapshot) = setup().await;
+        snapshot
+            .states
+            .lock()
+            .expect("Prüfsnapshot")
+            .insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
+        tracker.update_channel(1, 10).await;
+        let mut session = tracker
+            .state
+            .lock()
+            .await
+            .sessions
+            .remove(&(100, 1))
+            .expect("Aktive Prüfsession");
+        session.start_time -= chrono::Duration::minutes(16);
+        let end_time = Utc::now().naive_utc();
+        let seconds = (end_time - session.start_time).num_seconds();
+        let mut held = tracker.pool.begin().await.expect("Erasuretransaktion");
+        dl_central_db::platform_connections::lock_twitch_identity(&mut held)
+            .await
+            .expect("Identitätslock");
+        dl_central_db::lock_user_privacy(&mut held, 100)
+            .await
+            .expect("Nutzerlock");
+        sqlx::query("INSERT INTO core.user_privacy(user_id,opted_out,deleted_at) VALUES(100,TRUE,clock_timestamp())")
+            .execute(&mut *held).await.expect("Erasureentscheidung");
+        let writer_tracker = tracker.clone();
+        let writer = tokio::spawn(async move {
+            writer_tracker
+                .persist_finalized_session(session, end_time, seconds, 1)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks
+                    WHERE locktype='advisory' AND NOT granted
+                    AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                    AND classid=hashtext('core.discord_platform_connections')::OID
+                    AND objid=hashtext('twitch_reassignment')::OID)",
+                )
+                .fetch_one(&tracker.pool)
+                .await
+                .expect("Tatsächliche Sperrprobe");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Finalizer wartet am Identitätslock vor dem Nutzerlock");
+        assert!(!writer.is_finished());
+        held.commit().await.expect("Erasurecommit");
+        tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .expect("Begrenztes Writerende")
+            .expect("Writeraufgabe")
+            .expect("Voicewriter");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT
+            (SELECT count(*) FROM activity.voice_session_log WHERE user_id=100) +
+            (SELECT count(*) FROM voice.voice_stats WHERE user_id=100) +
+            (SELECT count(*) FROM activity.twitch_invite_evidence_queue WHERE user_id=100)",
+        )
+        .fetch_one(&tracker.pool)
+        .await
+        .expect("Keine Wiedererfassung");
+        assert_eq!(rows, 0);
     }
 
     #[tokio::test]

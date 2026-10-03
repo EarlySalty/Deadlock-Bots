@@ -657,6 +657,8 @@ pub async fn apply_suggestion_outcome_page(
 /// Zuschauern zaehlen fuer den Kanal, in dem sie entstanden sind. Ref
 /// `qualified_invite:<join_id>` wie in `docs/qualified-invites.md`.
 pub async fn import_qualified_join_ledger(pool: &PgPool) -> Result<u64, CentralDbError> {
+    let mut tx = pool.begin().await?;
+    lock_twitch_identity(&mut tx).await?;
     let inserted = sqlx::query(
         "INSERT INTO community_points.ledger
              (streamer_twitch_user_id, source, ref, points, occurred_at, meta)
@@ -670,9 +672,10 @@ pub async fn import_qualified_join_ledger(pool: &PgPool) -> Result<u64, CentralD
     )
     .bind(SOURCE_STREAMER_QUALIFIED_JOIN)
     .bind(STREAMER_QUALIFIED_JOIN_POINTS)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    tx.commit().await?;
     Ok(inserted)
 }
 

@@ -76,6 +76,19 @@ pub(super) async fn resolve(
     store::lock_changes(&mut tx, guild_id)
         .await
         .map_err(|error| error.to_string())?;
+    let permitted: bool = sqlx::query_scalar(
+        "SELECT bot.invite_privacy_twitch_allowed($1,clock_timestamp())
+            AND bot.invite_privacy_twitch_allowed($2,clock_timestamp())",
+    )
+    .bind(&destination.streamer_twitch_user_id)
+    .bind(inviter_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    if !permitted {
+        tx.commit().await.map_err(|error| error.to_string())?;
+        return Ok(fallback());
+    }
     let unchanged: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM bot.twitch_streamer_invites
          WHERE twitch_user_id = $1 AND guild_id = $2 AND channel_id = $3

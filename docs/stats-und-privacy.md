@@ -20,6 +20,10 @@ Zusätzlich kann der Server merken, wann du typischerweise aktiv bist und mit we
 
 Für Datenschutz und Kontrolle gibt es zwei Ebenen. `/datenschutz` zeigt dir zwei unabhängige Buttons: `Daten herunterladen` (Datenauszug als Datei, personenbezogene Fremd-IDs darin geschwärzt) und `Endgültig löschen` — du kannst also exportieren, löschen oder beides. Das Löschen setzt zugleich ein globales Opt-out, sodass neue Speicherung blockiert wird, bis du sie mit `/datenschutz-optin` wieder aktivierst.
 
+Bei qualifizierten Twitch-Einladungen löscht der Antrag deine Nachrichten-, Voice- und persönlichen Zuordnungskopien. Ein getrennter Hash deiner Discord-ID mit Guildbezug und dem Merkmal einer früheren Mitgliedschaft bleibt als personenbezogenes Sperrmerkmal erhalten und erscheint im Datenauszug. Er verhindert einen zweiten Erstmitgliedschaftscredit; er enthält keine Namen, Joinzeiten, Voicekanäle oder Invitecodes. `/datenschutz-optin` erlaubt neue Aktivität wieder, hebt diesen Erstcredit-Nachweis aber nicht auf und stellt gelöschte Altwerte nicht wieder her. Für neue Twitchdaten musst du dein Konto anschließend selbst erneut verknüpfen.
+
+Patchnotes-Freigaben und Guild-Einstellungen bleiben erhalten. Der Löschantrag entfernt daraus deine Freigabe- beziehungsweise letzte Änderungsakteur-ID.
+
 Daneben existiert das Retention-System. Wenn du früher regelmäßig im Voice aktiv warst und dann lange wegbleibst, kann der Bot dir eine freundliche „Wir vermissen dich"-DM schicken. Wenn du diese DMs nicht willst, nutze `/retention-optout`. Mit `/retention-optin` kannst du sie später wieder erlauben. In solchen DMs gibt es auch einen Feedback-Button, falls du rückmelden willst, warum du weniger aktiv bist.
 
 ## Kosten / Premium

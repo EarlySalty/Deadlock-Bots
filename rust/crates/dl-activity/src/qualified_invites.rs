@@ -50,6 +50,7 @@ pub struct InvitePage {
 }
 
 pub async fn lock_changes(conn: &mut PgConnection, guild_id: i64) -> Result<(), sqlx::Error> {
+    dl_central_db::platform_connections::lock_twitch_identity_connection(conn).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('twitch-invites:' || $1::text, 0))")
         .bind(guild_id)
         .execute(conn)
@@ -62,6 +63,14 @@ pub async fn remember_prior_member(
     guild_id: i64,
     user_id: i64,
 ) -> Result<(), sqlx::Error> {
+    dl_central_db::platform_connections::lock_twitch_identity(tx).await?;
+    if dl_central_db::lock_user_privacy_and_is_opted_out(tx, user_id).await? {
+        sqlx::query("INSERT INTO activity.twitch_invite_member_privacy(guild_id,subject_hash)
+            VALUES($1,sha256(convert_to('twitch-invites:discord-member-privacy:v1:' || $2::TEXT,'UTF8')))
+            ON CONFLICT DO NOTHING")
+            .bind(guild_id).bind(user_id).execute(&mut **tx).await?;
+        return Ok(());
+    }
     sqlx::query(
         "INSERT INTO activity.twitch_invite_members (guild_id, user_id, prior_member)
          VALUES ($1, $2, TRUE) ON CONFLICT (guild_id, user_id) DO NOTHING",
@@ -79,6 +88,14 @@ pub async fn remember_private_departure(
     user_id: i64,
     occurred_at: Option<DateTime<Utc>>,
 ) -> Result<(), sqlx::Error> {
+    dl_central_db::platform_connections::lock_twitch_identity(tx).await?;
+    if dl_central_db::lock_user_privacy_and_is_opted_out(tx, user_id).await? {
+        sqlx::query("INSERT INTO activity.twitch_invite_member_privacy(guild_id,subject_hash)
+            VALUES($1,sha256(convert_to('twitch-invites:discord-member-privacy:v1:' || $2::TEXT,'UTF8')))
+            ON CONFLICT DO NOTHING")
+            .bind(guild_id).bind(user_id).execute(&mut **tx).await?;
+        return Ok(());
+    }
     sqlx::query(
         "INSERT INTO activity.twitch_invite_members
              (guild_id, user_id, prior_member, left_at)
@@ -104,6 +121,14 @@ pub async fn remember_member_event(
     occurred_at: Option<DateTime<Utc>>,
     metadata: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    dl_central_db::platform_connections::lock_twitch_identity(tx).await?;
+    if dl_central_db::lock_user_privacy_and_is_opted_out(tx, user_id).await? {
+        sqlx::query("INSERT INTO activity.twitch_invite_member_privacy(guild_id,subject_hash)
+            VALUES($1,sha256(convert_to('twitch-invites:discord-member-privacy:v1:' || $2::TEXT,'UTF8')))
+            ON CONFLICT DO NOTHING")
+            .bind(guild_id).bind(user_id).execute(&mut **tx).await?;
+        return Ok(());
+    }
     if event_type == "join" {
         let metadata: Value = metadata
             .and_then(|value| serde_json::from_str(value).ok())
@@ -160,6 +185,9 @@ pub async fn record_message(
         i64::try_from(id)
             .map_err(|_| sqlx::Error::Protocol("Discord-ID außerhalb von BIGINT".into()))
     };
+    let mut tx = pool.begin().await?;
+    dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
+    dl_central_db::lock_user_privacy(&mut tx, convert(user_id)?).await?;
     sqlx::query(
         "INSERT INTO activity.twitch_invite_messages (message_id, guild_id, user_id, occurred_at)
          SELECT $1, $2, $3, $4
@@ -179,8 +207,9 @@ pub async fn record_message(
     .bind(convert(guild_id)?)
     .bind(convert(user_id)?)
     .bind(occurred_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 

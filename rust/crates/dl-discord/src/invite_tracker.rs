@@ -334,6 +334,7 @@ impl InviteTracker {
         tx: &mut Transaction<'_, Postgres>,
         guild_id: i64,
     ) -> Result<(), sqlx::Error> {
+        dl_central_db::platform_connections::lock_twitch_identity(tx).await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtextextended('twitch-invites:' || $1::text, 0))",
         )

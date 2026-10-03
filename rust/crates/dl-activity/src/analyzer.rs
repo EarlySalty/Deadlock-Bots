@@ -609,6 +609,7 @@ async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> Activit
         .transpose()?;
 
     let mut tx = pool.begin().await?;
+    dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
     lock_member_events(&mut tx).await?;
 
     let opted_out = sqlx::query!(
