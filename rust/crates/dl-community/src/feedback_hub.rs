@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use dl_central_db::kv;
 use dl_discord::interactions::{ModalField, ModalSpec};
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::BridgeReply;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -37,12 +37,7 @@ pub struct FeedbackHub {
     pub pool: PgPool,
 }
 
-struct FeedbackHandler;
-
-#[async_trait::async_trait]
-impl InteractionHandler for FeedbackHandler {
-    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
-        if interaction.custom_id == "feedback_hub:open_modal" {
+pub fn feedback_modal() -> BridgeReply {
             let field = |id: &str, label: &str, placeholder: &str, required: bool| ModalField {
                 custom_id: id.to_string(),
                 label: label.to_string(),
@@ -53,7 +48,7 @@ impl InteractionHandler for FeedbackHandler {
                 max_length: 1024,
                 paragraph: true,
             };
-            return BridgeReply {
+            BridgeReply {
                 modal: Some(ModalSpec {
                     custom_id: "feedback_hub:submit".to_string(),
                     title: "Deadlock Feedback".to_string(),
@@ -81,16 +76,7 @@ impl InteractionHandler for FeedbackHandler {
                     ],
                 }),
                 ..BridgeReply::default()
-            };
-        }
-
-        BridgeReply::ephemeral_text("Unbekannte Aktion.")
-    }
-}
-
-/// Das bestehende Formular bleibt erreichbar; der Guide-Kern steuert die Zustellung.
-pub fn register_form(router: &mut InteractionRouter) {
-    router.on_custom_id("feedback_hub:open_modal", Arc::new(FeedbackHandler));
+            }
 }
 
 /// Baut den Panel-Body (Embed + Button) — identisch zum Python-`FeedbackHubView`.

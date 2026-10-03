@@ -983,7 +983,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // FAQ und Concierge werden nicht mehr instanziiert. Ihre Buttons wechseln zum Kern.
     // Kein Tickethelfer, Import, Leitfadenpost oder Paten-Digest beim Neustart.
 
-    // Anonymes Feedback (6) — Button + Modal; DM an den Empfänger.
     // !fhub-Panel-Post folgt mit der Prefix-Dispatch-Infra; persistente
     // custom_ids halten ein bereits gepostetes Panel über den Cutover hinweg.
     let feedback_hub = Arc::new(dl_community::feedback_hub::FeedbackHub {
@@ -992,7 +991,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
         pool: central_pool.clone(),
     });
-    dl_community::feedback_hub::register_form(&mut router);
     let guide = serverguide::GuideAdapter::new(
         guide_config,
         adapter.clone(),

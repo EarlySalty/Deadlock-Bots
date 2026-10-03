@@ -74,7 +74,9 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         INSERT INTO brain.guide_conversations VALUES('5');
         INSERT INTO brain.guide_feedback_drafts VALUES('5');
         INSERT INTO brain.guide_feedback_outbox VALUES('100','5','old','500','Altes synthetisches Anliegen','pending',now()+interval '10 minutes');
-        INSERT INTO bot.serverguide_feedback_deliveries VALUES('old',5,NULL)")
+        INSERT INTO bot.serverguide_feedback_deliveries VALUES('old',5,NULL);
+        ALTER TABLE brain.guide_subjects ADD COLUMN turn_sequence BIGINT NOT NULL DEFAULT 0, ADD COLUMN legacy_import_eligible BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE brain.guide_turn_claims ADD COLUMN turn_sequence BIGINT NOT NULL DEFAULT 0, ADD COLUMN subject_epoch BIGINT NOT NULL DEFAULT -1, ADD COLUMN reply_message_id TEXT, ADD COLUMN conversation_id TEXT")
         .execute(&pool).await.unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

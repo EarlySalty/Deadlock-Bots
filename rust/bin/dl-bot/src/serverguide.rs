@@ -959,6 +959,9 @@ impl InteractionHandler for GuideAdapter {
                 "Hier kann der Guide keine Inhalte verwenden. Schreib ihm bitte direkt.",
             );
         }
+        if interaction.custom_id == "feedback_hub:open_modal" {
+            return dl_community::feedback_hub::feedback_modal();
+        }
         let (control, control_error) = profile_control(&interaction);
         if let Some(error) = control_error {
             return BridgeReply::ephemeral_text(error);
@@ -1123,6 +1126,7 @@ pub fn register(router: &mut InteractionRouter, guide: Arc<GuideAdapter>) {
     for prefix in ["concierge:", "faq_chat:", "tour:v1:", "serverguide:"] {
         router.on_prefix(prefix, guide.clone());
     }
+    router.on_custom_id("feedback_hub:open_modal", guide.clone());
     router.on_custom_id("feedback_hub:submit", guide.clone());
     for command in ["brain", "serverguide", "faq"] {
         router.on_command(command, CommandSpec { definition: json!({"name": command, "description": "Eine Frage an den Serverguide stellen", "type": 1, "options": [{"name": "frage", "description": "Deine Frage", "type": 3, "required": command != "faq"}]}) }, guide.clone());
