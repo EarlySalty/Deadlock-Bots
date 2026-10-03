@@ -302,39 +302,61 @@ async fn token_pipe(cli: Cli) -> anyhow::Result<()> {
             }
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
-        if !pipe_complete {
-            match received.try_recv() {
-                Ok(true) => pipe_complete = true,
-                Ok(false) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    abort_child(&mut child).await?;
-                    if stop_deadline.is_some() {
-                        return Ok(());
-                    }
-                    bail!("Dienst hat die private Secret-Pipe nicht angenommen.");
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {}
-                Err(_) => {
-                    abort_child(&mut child).await?;
-                    bail!("Dienst hat die Secret-Pipe nicht rechtzeitig angenommen.");
-                }
-            }
-        }
-        if let Some(status) = child
-            .try_wait()
-            .context("Dienstabschluss ist nicht prüfbar.")?
+        if poll_child(
+            &mut child,
+            &received,
+            &mut pipe_complete,
+            deadline,
+            stop_deadline,
+        )
+        .await?
         {
-            if stop_deadline.is_some() || (pipe_complete && status.success()) {
-                return Ok(());
-            }
-            if !status.success() && stop_deadline.is_none() {
-                bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
-            }
-        }
-        if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            abort_child(&mut child).await?;
-            bail!("Dienst hat die normale Stoppgrenze überschritten.");
+            return Ok(());
         }
     }
+}
+
+async fn poll_child(
+    child: &mut std::process::Child,
+    received: &std::sync::mpsc::Receiver<bool>,
+    pipe_complete: &mut bool,
+    deadline: std::time::Instant,
+    stop_deadline: Option<std::time::Instant>,
+) -> anyhow::Result<bool> {
+    use anyhow::{bail, Context};
+    use std::time::Instant;
+    // Nach angefordertem Stopp erhält das Kind seine vollständige Stoppfrist.
+    // Eine ausstehende Pipebestätigung darf diese Frist nicht abschneiden.
+    if stop_deadline.is_none() && !*pipe_complete {
+        match received.try_recv() {
+            Ok(true) => *pipe_complete = true,
+            Ok(false) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                abort_child(child).await?;
+                bail!("Dienst hat die private Secret-Pipe nicht angenommen.");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {}
+            Err(_) => {
+                abort_child(child).await?;
+                bail!("Dienst hat die Secret-Pipe nicht rechtzeitig angenommen.");
+            }
+        }
+    }
+    if let Some(status) = child
+        .try_wait()
+        .context("Dienstabschluss ist nicht prüfbar.")?
+    {
+        if stop_deadline.is_some() || (*pipe_complete && status.success()) {
+            return Ok(true);
+        }
+        if !status.success() && stop_deadline.is_none() {
+            bail!("Dienst wurde ohne erfolgreichen Abschluss beendet.");
+        }
+    }
+    if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        abort_child(child).await?;
+        bail!("Dienst hat die normale Stoppgrenze überschritten.");
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -411,5 +433,90 @@ mod tests {
             .try_wait()
             .expect("Owned child reap fixture")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn requested_stop_outlives_pipe_deadline_with_pending_confirmation() {
+        use std::{
+            io::Read,
+            process::Stdio,
+            time::{Duration, Instant},
+        };
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; printf r; exec /bin/sleep 0.2"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("Eigenes verzögert endendes Kind");
+        let mut ready = [0];
+        child
+            .stdout
+            .take()
+            .expect("Bereitschaftspipe")
+            .read_exact(&mut ready)
+            .expect("Kind hat seinen Signalhandler eingerichtet");
+        super::signal_child(&mut child, nix::sys::signal::Signal::SIGTERM)
+            .expect("Stopp an eigenes Kind weitergeben");
+        let started = Instant::now();
+        let pipe_deadline = started + Duration::from_millis(10);
+        let stop_deadline = Some(started + Duration::from_secs(10));
+        let (_sender, received) = std::sync::mpsc::channel();
+        let mut complete = false;
+        loop {
+            if super::poll_child(
+                &mut child,
+                &received,
+                &mut complete,
+                pipe_deadline,
+                stop_deadline,
+            )
+            .await
+            .expect("Stopp bleibt auch nach Pipefrist normal")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(Instant::now() > pipe_deadline);
+        assert!(!complete);
+        assert!(child
+            .try_wait()
+            .expect("Kind eingesammelt")
+            .unwrap()
+            .success());
+    }
+
+    #[tokio::test]
+    async fn unrequested_stop_keeps_pipe_deadline_failure() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("Eigenes wartendes Kind");
+        let (_sender, received) = std::sync::mpsc::channel();
+        let error = super::poll_child(
+            &mut child,
+            &received,
+            &mut false,
+            std::time::Instant::now(),
+            None,
+        )
+        .await
+        .expect_err("Pipefrist bleibt verbindlich");
+        assert!(error.to_string().contains("nicht rechtzeitig angenommen"));
+        assert!(child.try_wait().expect("Kind eingesammelt").is_some());
+    }
+
+    #[tokio::test]
+    async fn requested_stop_keeps_stop_deadline_failure() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("Eigenes wartendes Kind");
+        let (_sender, received) = std::sync::mpsc::channel();
+        let now = std::time::Instant::now();
+        let error = super::poll_child(&mut child, &received, &mut false, now, Some(now))
+            .await
+            .expect_err("Stoppfrist bleibt verbindlich");
+        assert!(error.to_string().contains("Stoppgrenze überschritten"));
+        assert!(child.try_wait().expect("Kind eingesammelt").is_some());
     }
 }
