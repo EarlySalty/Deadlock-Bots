@@ -1863,7 +1863,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     use super::{
-        brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
+        chat_text_generator_with, legacy_lfg_responder_enabled,
         lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
         matcher_provider_choice, model_from_lookup, moderation_enforce_from_lookup,
         validate_voice_worker_token, warn_if_lagebild_token_empty, MatcherProviderChoice,
