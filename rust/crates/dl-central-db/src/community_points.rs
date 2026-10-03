@@ -711,9 +711,19 @@ pub async fn import_clip_contest_ledger(pool: &PgPool) -> Result<ClipImport, Cen
     }
     let mut tx = pool.begin().await?;
     let ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT user_id FROM clips.clip_contest_results WHERE user_id IS NOT NULL
-         UNION SELECT voter_user_id FROM clips.clip_votes ORDER BY 1",
+        "SELECT r.user_id FROM clips.clip_contest_results r
+          WHERE r.source='discord' AND r.user_id > 0 AND r.place BETWEEN 1 AND 3
+            AND NOT EXISTS (SELECT 1 FROM community_points.ledger l
+                WHERE l.source=$1 AND l.ref='clip_place:' || r.window_id || ':' || r.place)
+         UNION SELECT v.voter_user_id FROM clips.clip_votes v
+          JOIN clips.clip_votings vt ON vt.window_id=v.window_id
+          WHERE vt.status='closed' AND v.voter_user_id > 0
+            AND NOT EXISTS (SELECT 1 FROM community_points.ledger l
+                WHERE l.source=$2 AND l.ref='clip_vote:' || v.window_id || ':' || v.voter_user_id)
+         ORDER BY 1",
     )
+    .bind(SOURCE_CLIP_PLACE)
+    .bind(SOURCE_CLIP_VOTE)
     .fetch_all(&mut *tx)
     .await?;
     // Später hinzugekommene Nutzer folgen im nächsten Import mit eigener Sperre.

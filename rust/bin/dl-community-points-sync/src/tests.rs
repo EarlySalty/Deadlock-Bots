@@ -499,6 +499,7 @@ async fn vorschlags_punkte_einmal_je_kanal_in_die_zentrale_db() {
     );
 }
 
+#[cfg(feature = "testing")]
 #[derive(Default)]
 struct ActivityFixture {
     queries: Vec<HashMap<String, String>>,
@@ -506,6 +507,7 @@ struct ActivityFixture {
     empty: bool,
     unavailable: bool,
 }
+#[cfg(feature = "testing")]
 async fn activity_handler(
     State(state): State<Arc<Mutex<ActivityFixture>>>,
     headers: HeaderMap,
@@ -538,6 +540,7 @@ async fn activity_handler(
     ))
 }
 
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn consent_rohdaten_bindung_nulltag_fehler_ohne_cursorfortschritt() {
     let db = dl_central_db::testing::test_pool()
@@ -579,9 +582,8 @@ async fn consent_rohdaten_bindung_nulltag_fehler_ohne_cursorfortschritt() {
         token: TOKEN,
     };
     let today = berlin_day(Utc::now());
-    let old_wire: ViewerWire =
-        serde_json::from_value(viewer_json("111", &Utc::now().to_rfc3339()))
-            .expect("Viewer-Testdaten entsprechen dem Wirevertrag");
+    let old_wire: ViewerWire = serde_json::from_value(viewer_json("111", &Utc::now().to_rfc3339()))
+        .expect("Viewer-Testdaten entsprechen dem Wirevertrag");
     let mut old = viewer_row(&old_wire).unwrap();
     old.day = today;
     assert_eq!(

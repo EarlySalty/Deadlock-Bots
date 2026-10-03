@@ -673,6 +673,7 @@ mod db {
             streamer_twitch_user_id: "456".into(),
             streamer_login: "streamer".into(),
             submitted_by_twitch_user_id: Some("456".into()),
+            submitted_at: Some(Utc::now()),
             title: Some("  Toller Clip ".into()),
             idempotency_key: key.to_string(),
         }
@@ -906,5 +907,345 @@ mod db {
                 .expect("statuses");
         assert_eq!(statuses, vec!["skipped".to_string()]);
         assert!(port.posts.lock().expect("lock").is_empty());
+    }
+
+    async fn clip_privacy_link(pool: &PgPool) {
+        dl_central_db::platform_connections::upsert_twitch_connection(
+            pool,
+            42,
+            &dl_central_db::platform_connections::TwitchConnection {
+                twitch_user_id: "789".into(),
+                twitch_login: "zuschauer".into(),
+                verified: true,
+            },
+        )
+        .await
+        .expect("Eigenes Twitchkonto");
+        sqlx::query("INSERT INTO bot.twitch_streamer_invites(streamer_login,guild_id,twitch_user_id,invite_code) VALUES('streamer',1,'456','PartnerCode') ON CONFLICT DO NOTHING")
+            .execute(pool).await.expect("Öffentlicher Partner");
+    }
+
+    async fn clip_privacy_identity_state(pool: &PgPool, granted: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let found: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted=$1
+                    AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                    AND classid=hashtext('core.discord_platform_connections')::OID
+                    AND objid=hashtext('twitch_reassignment')::OID)",
+                )
+                .bind(granted)
+                .fetch_one(pool)
+                .await
+                .expect("Tatsächliche Identitätssperre");
+                if found {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Begrenzte Sperrwartezeit");
+    }
+
+    fn viewer_clip(slug: &str) -> TwitchClipRequest {
+        let mut request = twitch_request(
+            &format!("https://clips.twitch.tv/{slug}"),
+            &format!("twitch-clip-{slug}"),
+        );
+        request.submitted_by_twitch_user_id = Some("789".into());
+        request
+    }
+
+    #[tokio::test]
+    async fn twitch_submitter_privacy_export_erasure_und_replay_erhalten_contest() {
+        let (db, clips, _) = setup().await;
+        clip_privacy_link(db.pool()).await;
+        let request = viewer_clip("ViewerPrivacy");
+        let TwitchSubmitOutcome::Accepted(id) = clips
+            .submit_twitch(1, &request)
+            .await
+            .expect("Echte Twitcheinsendung")
+        else {
+            panic!("Einsendung erwartet")
+        };
+        let before:Value=sqlx::query_scalar("SELECT to_jsonb(s)-'submitted_by_twitch_user_id' FROM clips.clip_submissions s WHERE id=$1")
+            .bind(id).fetch_one(db.pool()).await.expect("Contestnachweis");
+        let window: i64 = sqlx::query_scalar(
+            "SELECT window_id FROM clips.clip_window_submissions WHERE submission_id=$1",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .expect("Wochenfenster");
+        sqlx::query("INSERT INTO clips.clip_contest_results(window_id,place,guild_id,week_start_at,week_end_at,submission_id,source,streamer_twitch_user_id,streamer_login,votes,decided_at)
+            SELECT id,1,guild_id,start_at,end_at,$1,'twitch','456','streamer',3,clock_timestamp() FROM clips.clip_windows WHERE id=$2")
+            .bind(id).bind(window).execute(db.pool()).await.expect("Unveränderter Contestcredit");
+        let result_before: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(r) FROM clips.clip_contest_results r WHERE window_id=$1",
+        )
+        .bind(window)
+        .fetch_one(db.pool())
+        .await
+        .expect("Ergebnisnachweis");
+        let exported = crate::privacy::export_user_data(db.pool(), 42, Utc::now().timestamp())
+            .await
+            .expect("Export");
+        let rows = exported["tables"]["clip_submissions.submitted_by_twitch_user_id"]
+            .as_array()
+            .expect("Einreicherexport");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["submitted_by_twitch_user_id"], "789");
+        assert!(rows[0]["user_id"].is_null());
+        crate::privacy::delete_user_data(
+            db.pool(),
+            42,
+            "user_request".into(),
+            Utc::now().timestamp(),
+        )
+        .await
+        .expect("Echte zentrale Erasure");
+        let erased: Option<String> = sqlx::query_scalar(
+            "SELECT submitted_by_twitch_user_id FROM clips.clip_submissions WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .expect("Anonymisierter Einreicher");
+        assert!(erased.is_none());
+        let after:Value=sqlx::query_scalar("SELECT to_jsonb(s)-'submitted_by_twitch_user_id' FROM clips.clip_submissions s WHERE id=$1")
+            .bind(id).fetch_one(db.pool()).await.expect("Clip bleibt");
+        assert_eq!(before, after);
+        assert_eq!(
+            result_before,
+            sqlx::query_scalar::<_, Value>(
+                "SELECT to_jsonb(r) FROM clips.clip_contest_results r WHERE window_id=$1"
+            )
+            .bind(window)
+            .fetch_one(db.pool())
+            .await
+            .expect("Contest bleibt")
+        );
+        assert_eq!(
+            clips
+                .submit_twitch(1, &request)
+                .await
+                .expect("Alter Replay"),
+            TwitchSubmitOutcome::ReplayMetadataDrift(id)
+        );
+        crate::privacy::set_opt_in(db.pool(), 42, Utc::now().timestamp())
+            .await
+            .expect("Neues Optin");
+        clip_privacy_link(db.pool()).await;
+        assert_eq!(
+            clips
+                .submit_twitch(1, &request)
+                .await
+                .expect("Alter Replay nach Optin"),
+            TwitchSubmitOutcome::ReplayMetadataDrift(id)
+        );
+        sqlx::query(
+            "UPDATE clips.clip_submissions SET submitted_by_twitch_user_id='789' WHERE id=$1",
+        )
+        .bind(id)
+        .execute(db.pool())
+        .await
+        .expect("Direkter verspäteter Writer");
+        let retained: Option<String> = sqlx::query_scalar(
+            "SELECT submitted_by_twitch_user_id FROM clips.clip_submissions WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .expect("Schreibschutz");
+        assert!(retained.is_none());
+        let origin_change = sqlx::query("UPDATE clips.clip_submissions SET submitted_at=clock_timestamp(),submitted_by_twitch_user_id='789' WHERE id=$1")
+            .bind(id).execute(db.pool()).await;
+        assert!(
+            origin_change.is_err(),
+            "Alter Clip darf keine neue Herkunft erhalten"
+        );
+        let exported = crate::privacy::export_user_data(db.pool(), 42, Utc::now().timestamp())
+            .await
+            .expect("Export nach Löschung");
+        assert!(
+            exported["tables"]["clip_submissions.submitted_by_twitch_user_id"]
+                .as_array()
+                .expect("Exportliste")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn twitch_submitter_privacy_optin_alte_unbekannte_und_neue_herkunft() {
+        let (db, clips, _) = setup().await;
+        clip_privacy_link(db.pool()).await;
+        let old = Utc::now() - chrono::Duration::seconds(2);
+        crate::privacy::delete_user_data(
+            db.pool(),
+            42,
+            "user_request".into(),
+            Utc::now().timestamp(),
+        )
+        .await
+        .expect("Erasure");
+        crate::privacy::set_opt_in(db.pool(), 42, Utc::now().timestamp())
+            .await
+            .expect("Bewusstes Optin");
+        let TwitchSubmitOutcome::Accepted(no_link_id) = clips
+            .submit_twitch(1, &viewer_clip("OptinWithoutLink"))
+            .await
+            .expect("Clip ohne erneuten Link")
+        else {
+            panic!("Contestbeleg erwartet")
+        };
+        let no_link: Option<String> = sqlx::query_scalar(
+            "SELECT submitted_by_twitch_user_id FROM clips.clip_submissions WHERE id=$1",
+        )
+        .bind(no_link_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("Optin allein genügt nicht");
+        assert!(no_link.is_none());
+        clip_privacy_link(db.pool()).await;
+        for (slug, origin, identified) in [
+            ("OldOrigin", Some(old), false),
+            ("UnknownOrigin", None, false),
+            ("NewOrigin", Some(Utc::now()), true),
+            (
+                "FutureOrigin",
+                Some(Utc::now() + chrono::Duration::hours(1)),
+                false,
+            ),
+        ] {
+            let mut request = viewer_clip(slug);
+            request.submitted_at = origin;
+            let TwitchSubmitOutcome::Accepted(id) = clips
+                .submit_twitch(1, &request)
+                .await
+                .expect("Contestbeleg")
+            else {
+                panic!("Einsendung erwartet")
+            };
+            let submitter: Option<String> = sqlx::query_scalar(
+                "SELECT submitted_by_twitch_user_id FROM clips.clip_submissions WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(db.pool())
+            .await
+            .expect("Einreichervertrag");
+            assert_eq!(submitter.is_some(), identified, "{slug}");
+        }
+        let exported = crate::privacy::export_user_data(db.pool(), 42, Utc::now().timestamp())
+            .await
+            .expect("Neuer Export");
+        let rows = exported["tables"]["clip_submissions.submitted_by_twitch_user_id"]
+            .as_array()
+            .expect("Neue Aktivität");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["link"], "https://clips.twitch.tv/NewOrigin");
+    }
+
+    #[tokio::test]
+    async fn twitch_submitter_privacy_writer_vor_erasure() {
+        let (db, clips, _) = setup().await;
+        clip_privacy_link(db.pool()).await;
+        let (start, end) = twitch_target_window(Utc::now());
+        let mut blocker = db.pool().begin().await.expect("Fenstersperre");
+        sqlx::query("INSERT INTO clips.clip_windows(guild_id,start_at,end_at) VALUES(1,$1,$2) ON CONFLICT DO NOTHING")
+            .bind(utc_from_unix(start).expect("Start")).bind(utc_from_unix(end).expect("Ende"))
+            .execute(&mut *blocker).await.expect("Fenster");
+        // Vor dem Zeilenlock sichtbar machen, damit der Writer am FOR UPDATE wartet.
+        blocker.commit().await.expect("Fenster bereit");
+        let mut blocker = db.pool().begin().await.expect("Fenster halten");
+        sqlx::query(
+            "SELECT id FROM clips.clip_windows WHERE guild_id=1 AND start_at=$1 FOR UPDATE",
+        )
+        .bind(utc_from_unix(start).expect("Start"))
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("Fenster gesperrt");
+        let writer =
+            tokio::spawn(async move { clips.submit_twitch(1, &viewer_clip("WriterFirst")).await });
+        clip_privacy_identity_state(db.pool(), true).await;
+        let pool = db.pool().clone();
+        let erasure = tokio::spawn(async move {
+            crate::privacy::delete_user_data(
+                &pool,
+                42,
+                "user_request".into(),
+                Utc::now().timestamp(),
+            )
+            .await
+        });
+        clip_privacy_identity_state(db.pool(), false).await;
+        blocker.commit().await.expect("Writer fortsetzen");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .expect("Writer beendet")
+            .expect("Writer task")
+            .expect("Einsendung");
+        let TwitchSubmitOutcome::Accepted(id) = outcome else {
+            panic!("Einsendung erwartet")
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), erasure)
+            .await
+            .expect("Erasure beendet")
+            .expect("Erasure task")
+            .expect("Erasure");
+        let submitter: Option<String> = sqlx::query_scalar(
+            "SELECT submitted_by_twitch_user_id FROM clips.clip_submissions WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .expect("Writer danach anonymisiert");
+        assert!(submitter.is_none());
+    }
+
+    #[tokio::test]
+    async fn twitch_submitter_privacy_erasure_vor_writer() {
+        let (db, clips, _) = setup().await;
+        clip_privacy_link(db.pool()).await;
+        let mut blocker = db.pool().begin().await.expect("Nutzersperre");
+        dl_central_db::lock_user_privacy(&mut blocker, 42)
+            .await
+            .expect("Nutzer halten");
+        let pool = db.pool().clone();
+        let erasure = tokio::spawn(async move {
+            crate::privacy::delete_user_data(
+                &pool,
+                42,
+                "user_request".into(),
+                Utc::now().timestamp(),
+            )
+            .await
+        });
+        clip_privacy_identity_state(db.pool(), true).await;
+        let writer =
+            tokio::spawn(async move { clips.submit_twitch(1, &viewer_clip("ErasureFirst")).await });
+        clip_privacy_identity_state(db.pool(), false).await;
+        blocker.commit().await.expect("Erasure fortsetzen");
+        tokio::time::timeout(std::time::Duration::from_secs(10), erasure)
+            .await
+            .expect("Erasure beendet")
+            .expect("Erasure task")
+            .expect("Erasure");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .expect("Writer beendet")
+            .expect("Writer task")
+            .expect("Einsendung");
+        let TwitchSubmitOutcome::Accepted(id) = outcome else {
+            panic!("Contestbeleg erwartet")
+        };
+        let submitter: Option<String> = sqlx::query_scalar(
+            "SELECT submitted_by_twitch_user_id FROM clips.clip_submissions WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .expect("Kein späterer Personenimport");
+        assert!(submitter.is_none());
     }
 }

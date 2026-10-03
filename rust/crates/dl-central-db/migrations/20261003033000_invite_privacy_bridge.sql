@@ -49,6 +49,12 @@ BEGIN
             RAISE EXCEPTION 'Twitch invite privacy blocks personal attribution' USING ERRCODE='23514';
         END IF;
     ELSIF TG_TABLE_NAME = 'twitch_streamer_invite_code_history' THEN
+        -- Bestehende Zuordnung nur schließen, ohne Personenfelder zu erneuern.
+        IF TG_OP = 'UPDATE' AND OLD.valid_until IS NULL AND NEW.valid_until IS NOT NULL
+           AND (OLD.valid_from IS NULL OR NEW.valid_until >= OLD.valid_from)
+           AND (to_jsonb(NEW) - 'valid_until') IS NOT DISTINCT FROM (to_jsonb(OLD) - 'valid_until') THEN
+            RETURN NEW;
+        END IF;
         IF NOT bot.invite_privacy_twitch_allowed(NEW.twitch_user_id, NEW.valid_from) THEN
             RETURN NULL;
         END IF;

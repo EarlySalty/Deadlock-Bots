@@ -1187,6 +1187,13 @@ const USER_TABLES: &[TableSpec] = &[
 
 const NULLABLE_USER_COLUMNS: &[TableSpec] = &[
     TableSpec::new(
+        "clip_submissions",
+        "submitted_by_twitch_user_id",
+        "clips.clip_submissions",
+        "submitted_by_twitch_user_id",
+        ColumnType::TwitchUser,
+    ),
+    TableSpec::new(
         "clip_contest_results",
         "user_id",
         "clips.clip_contest_results",
@@ -3976,6 +3983,14 @@ pub async fn delete_user_data(
         );
     }
 
+    // Twitch-IDs vor dem Entfernen ihrer Discord-Verknüpfung anonymisieren.
+    for &spec in NULLABLE_USER_COLUMNS {
+        if matches!(spec.col_type, ColumnType::TwitchUser) && relations.contains(spec.relation) {
+            let n = null_user_column(&mut tx, spec, user_id, &user_key).await?;
+            counts.insert(spec.count_key(), n);
+        }
+    }
+
     for &spec in USER_TABLES {
         if spec.relation == "activity.message_metadata_events" {
             let (journey_events, journey_states) =
@@ -4009,7 +4024,7 @@ pub async fn delete_user_data(
     }
 
     for &spec in NULLABLE_USER_COLUMNS {
-        if !relations.contains(spec.relation) {
+        if matches!(spec.col_type, ColumnType::TwitchUser) || !relations.contains(spec.relation) {
             continue;
         }
         let n = null_user_column(&mut tx, spec, user_id, &user_key).await?;
@@ -4512,6 +4527,12 @@ mod privacy_contract_tests {
         ] {
             out.insert((relation.to_string(), column.to_string()));
         }
+        // Vom Hauptthread bestätigte aktive öffentliche Partner-/Einladungskanal-
+        // zuordnung. Historische Einreicher und Attributionen fallen nicht darunter.
+        out.insert((
+            "bot.twitch_streamer_invites".into(),
+            "twitch_user_id".into(),
+        ));
         // `core.discord_platform_connections.platform_user_id` ist die
         // Twitch-User-ID, keine Discord-ID. Die Zeile faellt ueber `discord_id`
         // (USER_TABLES) als Ganzes, die Twitch-ID geht dabei mit.
@@ -4650,11 +4671,8 @@ mod privacy_contract_tests {
         columns
     }
 
-    fn table_columns_from_sql(raw: &str, relation: &str) -> BTreeSet<String> {
-        let mut columns = create_table_columns_from_sql(raw)
-            .into_iter()
-            .filter_map(|(table, column)| table.eq_ignore_ascii_case(relation).then_some(column))
-            .collect::<BTreeSet<_>>();
+    fn all_table_columns_from_sql(raw: &str) -> BTreeSet<(String, String)> {
+        let mut columns = create_table_columns_from_sql(raw);
 
         let without_line_comments = raw
             .lines()
@@ -4675,25 +4693,30 @@ mod privacy_contract_tests {
                 .chars()
                 .filter(|ch| !ch.is_whitespace())
                 .collect::<String>();
-            if table.eq_ignore_ascii_case(relation) {
-                columns.extend(add_column.captures_iter(&captures[2]).filter_map(|added| {
-                    let column = normalize_sql_ident(&added[1]);
-                    (![
-                        "CHECK",
-                        "CONSTRAINT",
-                        "EXCLUDE",
-                        "FOREIGN",
-                        "PRIMARY",
-                        "UNIQUE",
-                    ]
-                    .iter()
-                    .any(|keyword| column.eq_ignore_ascii_case(keyword)))
-                    .then_some(column)
-                }));
-            }
+            columns.extend(add_column.captures_iter(&captures[2]).filter_map(|added| {
+                let column = normalize_sql_ident(&added[1]);
+                (![
+                    "CHECK",
+                    "CONSTRAINT",
+                    "EXCLUDE",
+                    "FOREIGN",
+                    "PRIMARY",
+                    "UNIQUE",
+                ]
+                .iter()
+                .any(|keyword| column.eq_ignore_ascii_case(keyword)))
+                .then_some((table.clone(), column))
+            }));
         }
 
         columns
+    }
+
+    fn table_columns_from_sql(raw: &str, relation: &str) -> BTreeSet<String> {
+        all_table_columns_from_sql(raw)
+            .into_iter()
+            .filter_map(|(table, column)| table.eq_ignore_ascii_case(relation).then_some(column))
+            .collect()
     }
 
     fn migration_columns_for_relation(relation: &str) -> BTreeSet<String> {
@@ -4736,7 +4759,7 @@ mod privacy_contract_tests {
             let raw = fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
             out.extend(
-                create_table_columns_from_sql(&raw)
+                all_table_columns_from_sql(&raw)
                     .into_iter()
                     .filter(|(_, column)| is_user_id_like_column(column)),
             );
@@ -4821,6 +4844,40 @@ mod privacy_contract_tests {
             table_columns_from_sql(sql, "core.guarded_events"),
             BTreeSet::from(["id".to_string(), "owner_id".to_string()])
         );
+    }
+
+    #[test]
+    fn migrationsscanner_erkennt_personenbezogene_alter_add_spalten() {
+        let sql = r#"
+            CREATE TABLE clips.clip_submissions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT
+            );
+            ALTER TABLE clips.clip_submissions
+                ADD COLUMN submitted_by_twitch_user_id TEXT,
+                ADD COLUMN IF NOT EXISTS info TEXT;
+            ALTER TABLE IF EXISTS "core"."actor_events" ADD "actor_user_id" BIGINT;
+            ALTER TABLE ONLY core.actor_events ADD CHECK (id > 0);
+        "#;
+        let columns = all_table_columns_from_sql(sql)
+            .into_iter()
+            .filter(|(_, column)| is_user_id_like_column(column))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            columns,
+            BTreeSet::from([
+                ("clips.clip_submissions".into(), "user_id".into()),
+                (
+                    "clips.clip_submissions".into(),
+                    "submitted_by_twitch_user_id".into()
+                ),
+                ("core.actor_events".into(), "actor_user_id".into()),
+            ])
+        );
+        assert!(migration_user_id_columns().contains(&(
+            "clips.clip_submissions".into(),
+            "submitted_by_twitch_user_id".into()
+        )));
     }
 
     #[test]

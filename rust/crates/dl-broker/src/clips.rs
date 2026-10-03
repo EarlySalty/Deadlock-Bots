@@ -36,6 +36,7 @@ pub struct TwitchClipSubmission {
     pub streamer_twitch_user_id: String,
     pub streamer_login: String,
     pub submitted_by_twitch_user_id: Option<String>,
+    pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub title: Option<String>,
     pub idempotency_key: String,
 }
@@ -84,6 +85,8 @@ struct SubmitRequest {
     streamer_login: String,
     #[serde(default)]
     submitted_by_twitch_user_id: Option<String>,
+    #[serde(default)]
+    submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     title: Option<String>,
     idempotency_key: String,
@@ -139,6 +142,7 @@ fn validate(request: SubmitRequest) -> Option<TwitchClipSubmission> {
         streamer_twitch_user_id: request.streamer_twitch_user_id,
         streamer_login,
         submitted_by_twitch_user_id: submitted_by,
+        submitted_at: request.submitted_at,
         title,
         idempotency_key: request.idempotency_key,
     })

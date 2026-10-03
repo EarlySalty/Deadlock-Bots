@@ -602,6 +602,7 @@ pub struct TwitchClipRequest {
     pub streamer_twitch_user_id: String,
     pub streamer_login: String,
     pub submitted_by_twitch_user_id: Option<String>,
+    pub submitted_at: Option<DateTime<Utc>>,
     pub title: Option<String>,
     pub idempotency_key: String,
 }
@@ -1312,6 +1313,9 @@ impl ClipStore {
         let end_at = utc_from_unix(end_ts).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
         let mut tx = self.pool().begin().await?;
+        // Gleiche globale Identitätssperre wie Erasure, Optin und OAuthlink,
+        // vor Replay-/Fenster- und Zeilensperren.
+        dl_central_db::platform_connections::lock_twitch_identity(&mut tx).await?;
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtext('clips.clip_submission_replays'), hashtext($1))",
         )
@@ -1402,8 +1406,8 @@ impl ClipStore {
             "INSERT INTO clips.clip_submissions(
                  guild_id, user_id, link, credit, permission, info, created_at, source,
                  streamer_twitch_user_id, streamer_login, submitted_by_twitch_user_id, title,
-                 idempotency_key)
-             VALUES ($1, NULL, $2, $3, $4, $5, $6, 'twitch', $7, $8, $9, $5, $10)
+                 idempotency_key, submitted_at)
+             VALUES ($1, NULL, $2, $3, $4, $5, $6, 'twitch', $7, $8, $9, $5, $10, $11)
              RETURNING id",
         )
         .bind(guild)
@@ -1416,6 +1420,7 @@ impl ClipStore {
         .bind(&request.streamer_login)
         .bind(&request.submitted_by_twitch_user_id)
         .bind(&request.idempotency_key)
+        .bind(request.submitted_at)
         .fetch_one(&mut *tx)
         .await?;
         sqlx::query(

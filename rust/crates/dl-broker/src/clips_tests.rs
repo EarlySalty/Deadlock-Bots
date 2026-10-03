@@ -210,3 +210,61 @@ fn rejected_serialisiert_mit_grund() {
         json!({"status": "rejected", "submission_id": null, "reason": "not_partner"})
     );
 }
+
+#[tokio::test]
+async fn authentifizierte_clip_herkunft_bleibt_mikrosekundengenau_und_optional() {
+    let (state, port, headers) = fixture(false);
+    let mut body = plan_payload();
+    body["submitted_by_twitch_user_id"] = json!("789");
+    body["submitted_at"] = json!("2026-10-03T07:12:34.123456Z");
+    let response = submit(
+        State(state.clone()),
+        peer("127.0.0.1:1"),
+        headers.clone(),
+        payload(body.clone()),
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 200);
+    {
+        let calls = port.calls.lock().expect("Portaufruf");
+        assert_eq!(calls[0].submitted_by_twitch_user_id.as_deref(), Some("789"));
+        assert_eq!(
+            calls[0]
+                .submitted_at
+                .expect("Herkunft")
+                .timestamp_subsec_micros(),
+            123456
+        );
+        assert_eq!(
+            calls[0]
+                .submitted_at
+                .expect("Herkunft")
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+            "2026-10-03T07:12:34.123456Z"
+        );
+    }
+    body["submitted_at"] = json!("nicht-RFC3339");
+    let response = submit(
+        State(state.clone()),
+        peer("127.0.0.1:1"),
+        headers.clone(),
+        payload(body),
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 400);
+    assert_eq!(
+        port.calls.lock().expect("Keine ungültige Herkunft").len(),
+        1
+    );
+    let response = submit(
+        State(state),
+        peer("127.0.0.1:1"),
+        headers,
+        payload(plan_payload()),
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert!(port.calls.lock().expect("Altbestand")[1]
+        .submitted_at
+        .is_none());
+}

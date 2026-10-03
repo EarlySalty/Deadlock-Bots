@@ -737,3 +737,34 @@ async fn patchnotes_direktwriter_mehrzeilen_und_funktionsrechte(
     tx.commit().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn gesperrte_history_darf_nur_geschlossen_werden() -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_pool().await?;
+    let pool = db.pool();
+    sqlx::query("INSERT INTO bot.twitch_streamer_invites(streamer_login,guild_id,invite_code,twitch_user_id,channel_id) VALUES('partner',1,'OldCode','111',99)")
+        .execute(pool).await?;
+    let old:i64=sqlx::query_scalar("SELECT history_id FROM bot.twitch_streamer_invite_code_history WHERE twitch_user_id='111' AND invite_code='OldCode' AND valid_until IS NULL")
+        .fetch_one(pool).await?;
+    sqlx::query("INSERT INTO community_points.twitch_viewer_privacy_blocks(subject_hash) VALUES(sha256(convert_to('community-points:twitch-viewer-privacy:v1:111','UTF8')))")
+        .execute(pool).await?;
+    sqlx::query(
+        "UPDATE bot.twitch_streamer_invites SET invite_code='NewCode' WHERE twitch_user_id='111'",
+    )
+    .execute(pool)
+    .await?;
+    let closed:bool=sqlx::query_scalar("SELECT valid_until IS NOT NULL FROM bot.twitch_streamer_invite_code_history WHERE history_id=$1")
+        .bind(old).fetch_one(pool).await?;
+    assert!(closed, "Capture beendet Altzuordnung trotz Sperre");
+    let open:i64=sqlx::query_scalar("SELECT count(*) FROM bot.twitch_streamer_invite_code_history WHERE twitch_user_id='111' AND valid_until IS NULL")
+        .fetch_one(pool).await?;
+    assert_eq!(open, 0, "Kein erneuter historischer Personenimport");
+    let changed=sqlx::query("UPDATE bot.twitch_streamer_invite_code_history SET source_login_snapshot='restored',valid_until=NULL WHERE history_id=$1")
+        .bind(old).execute(pool).await?;
+    assert_eq!(
+        changed.rows_affected(),
+        0,
+        "Kein Wiederöffnen oder Wiederherstellen"
+    );
+    Ok(())
+}

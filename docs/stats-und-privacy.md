@@ -22,6 +22,8 @@ Für Datenschutz und Kontrolle gibt es zwei Ebenen. `/datenschutz` zeigt dir zwe
 
 Bei qualifizierten Twitch-Einladungen löscht der Antrag deine Nachrichten-, Voice- und persönlichen Zuordnungskopien. Ein getrennter Hash deiner Discord-ID mit Guildbezug und dem Merkmal einer früheren Mitgliedschaft bleibt als personenbezogenes Sperrmerkmal erhalten und erscheint im Datenauszug. Er verhindert einen zweiten Erstmitgliedschaftscredit; er enthält keine Namen, Joinzeiten, Voicekanäle oder Invitecodes. `/datenschutz-optin` erlaubt neue Aktivität wieder, hebt diesen Erstcredit-Nachweis aber nicht auf und stellt gelöschte Altwerte nicht wieder her. Für neue Twitchdaten musst du dein Konto anschließend selbst erneut verknüpfen.
 
+Wenn du einen Twitchclip als Zuschauer oder Moderator einreichst, gehört deine Einreicher-ID ebenfalls zum Datenauszug. Beim Löschantrag wird diese ID anonymisiert; der Clip, die öffentliche Kanalzuordnung und die Contestnachweise bleiben erhalten. Alte Wiederholungen stellen die Einreicher-ID nicht wieder her. Nach Opt-in und erneuter Twitch-Verknüpfung kann eine neue Einreichung deine ID wieder speichern.
+
 Patchnotes-Freigaben und Guild-Einstellungen bleiben erhalten. Der Löschantrag entfernt daraus deine Freigabe- beziehungsweise letzte Änderungsakteur-ID.
 
 Daneben existiert das Retention-System. Wenn du früher regelmäßig im Voice aktiv warst und dann lange wegbleibst, kann der Bot dir eine freundliche „Wir vermissen dich"-DM schicken. Wenn du diese DMs nicht willst, nutze `/retention-optout`. Mit `/retention-optin` kannst du sie später wieder erlauben. In solchen DMs gibt es auch einen Feedback-Button, falls du rückmelden willst, warum du weniger aktiv bist.

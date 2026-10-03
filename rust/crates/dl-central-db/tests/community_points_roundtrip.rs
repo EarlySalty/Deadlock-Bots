@@ -518,3 +518,27 @@ async fn leaderboards_je_zeitraum_mit_ledger_und_datenschutz() {
         (160, 5)
     );
 }
+
+#[tokio::test]
+async fn gebuchte_clip_historie_erwirbt_keine_erneuten_nutzersperren() {
+    let db = test_pool().await.expect("Echte Testdatenbank");
+    let pool = db.pool();
+    seed_clip_contest(pool).await;
+    import_clip_contest_ledger(pool)
+        .await
+        .expect("Erster Import");
+    let mut blocker = pool.begin().await.expect("Historischen Nutzer sperren");
+    dl_central_db::lock_user_privacy(&mut blocker, 1001)
+        .await
+        .expect("Nutzersperre");
+    let again = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        import_clip_contest_ledger(pool),
+    )
+    .await
+    .expect("Gebuchte Historie braucht keine erneuten Locks")
+    .expect("Idempotenter Import");
+    assert_eq!(again.places, 0);
+    assert_eq!(again.votes, 0);
+    blocker.rollback().await.expect("Testsperre freigeben");
+}

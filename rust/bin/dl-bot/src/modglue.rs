@@ -2100,6 +2100,7 @@ impl dl_broker::clips::ClipSubmitPort for ClipSubmitGlue {
             streamer_twitch_user_id: submission.streamer_twitch_user_id,
             streamer_login: submission.streamer_login,
             submitted_by_twitch_user_id: submission.submitted_by_twitch_user_id,
+            submitted_at: submission.submitted_at,
             title: submission.title,
             idempotency_key: submission.idempotency_key,
         };

@@ -2353,6 +2353,14 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         primary_key_columns_in_schema(&pool, "clips", "clip_contest_results").await,
         vec!["window_id", "place"]
     );
+    let submitter_registry: (String,String) = sqlx::query_as(
+        "SELECT data_category,erasure_action FROM core.privacy_field_registry
+         WHERE schema_name='clips' AND table_name='clip_submissions' AND column_name='submitted_by_twitch_user_id'"
+    ).fetch_one(&pool).await.expect("Einreicher-Privacyregistry");
+    assert_eq!(
+        submitter_registry,
+        ("user_id".into(), "redact_on_user_delete".into())
+    );
     for column in [
         "source",
         "streamer_twitch_user_id",
@@ -2360,6 +2368,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "submitted_by_twitch_user_id",
         "title",
         "idempotency_key",
+        "submitted_at",
     ] {
         assert!(
             table_columns_in_schema(&pool, "clips", "clip_submissions")
