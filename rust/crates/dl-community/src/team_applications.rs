@@ -167,6 +167,20 @@ struct LoadedPanelText {
     pate: PateText,
 }
 
+/// Prüft die revisionsgebundene Release-Datei mit dem bestehenden Textschema.
+pub fn validate_runtime_texts(repo_root: &Path) -> Result<(), String> {
+    let path = repo_root.join(PANEL_TEXT_FILE);
+    let raw = std::fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "Team-Bewerbungstexte fehlen oder sind unlesbar: {}",
+            path.display()
+        )
+    })?;
+    toml::from_str::<TextFile>(&raw)
+        .map_err(|_| format!("Team-Bewerbungstexte sind ungültig: {}", path.display()))?;
+    Ok(())
+}
+
 fn load_panel_text(repo_root: &Path) -> LoadedPanelText {
     let runtime_path = repo_root.join(PANEL_TEXT_FILE);
     match std::fs::read_to_string(&runtime_path) {
@@ -186,6 +200,20 @@ fn load_panel_text(repo_root: &Path) -> LoadedPanelText {
             embedded_disabled_panel()
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn release_asset_erhaelt_die_bestehende_panelfreigabe() {
+    let root = tempfile::tempdir().expect("Isolierter Release-Texttest");
+    std::fs::create_dir(root.path().join("assets")).expect("Assetverzeichnis");
+    std::fs::write(
+        root.path().join(PANEL_TEXT_FILE),
+        include_str!("../../../../assets/team_application_texts.toml"),
+    )
+    .expect("Revisionsgebundene Teamtexte");
+    validate_runtime_texts(root.path()).expect("Bestehendes Textschema");
+    assert!(load_panel_text(root.path()).enabled);
 }
 
 fn embedded_disabled_panel() -> LoadedPanelText {

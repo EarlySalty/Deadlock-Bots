@@ -601,8 +601,29 @@ pub struct WelcomePayloadAttachment {
     pub relative_path: String,
 }
 
+#[cfg(test)]
+#[test]
+#[ignore = "separate Releaseprobe mit kopiertem Testbinary und unsichtbarem Quellworktree"]
+fn release_root_probe_child() {
+    let root =
+        crate::runtime_assets::validated_release_root().expect("Assets neben dem kopierten Binary");
+    assert_eq!(
+        root,
+        std::env::current_exe()
+            .expect("Testbinary")
+            .parent()
+            .expect("Releasewurzel")
+    );
+    assert_eq!(welcome_repo_root(), root);
+    assert_eq!(super::rang_guide_publish::rang_guide_repo_root(), root);
+    assert!(root.join(WELCOME_TEXTS_FILE).is_file());
+    assert!(root
+        .join(super::rang_guide_publish::RANG_GUIDE_TEXTS_FILE)
+        .is_file());
+}
+
 pub fn welcome_repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    crate::runtime_assets::release_root().expect("Releasewurzel des laufenden Bot-Binarys fehlt")
 }
 
 pub fn welcome_sections() -> &'static [WelcomeSectionDefinition] {
@@ -2016,9 +2037,10 @@ mod tests {
 
     #[test]
     fn welcome_texts_seed_toml_parst_zu_compile_defaults() {
-        let raw =
-            fs::read_to_string(welcome_repo_root().join(WELCOME_TEXTS_FILE)).expect("seed toml");
-        let parsed = toml::from_str::<WelcomeTextsToml>(&raw).expect("seed parses");
+        let root = tempfile::tempdir().expect("Isolierte Welcome-Seeddatei");
+        let raw = include_str!("../../../../../assets/welcome_texts.toml");
+        write_welcome_texts_file(root.path(), raw);
+        let parsed = toml::from_str::<WelcomeTextsToml>(raw).expect("seed parses");
         let channels = parsed.channel.expect("seed channels");
         assert!(
             !channels.is_empty(),
@@ -2034,8 +2056,8 @@ mod tests {
         }
 
         let mut warnings = Vec::new();
-        let config = load_welcome_runtime_config(&welcome_repo_root(), &mut warnings)
-            .expect("welcome texts seed");
+        let config =
+            load_welcome_runtime_config(root.path(), &mut warnings).expect("welcome texts seed");
 
         assert!(warnings.is_empty(), "unerwartete Warnungen: {warnings:?}");
         assert_eq!(

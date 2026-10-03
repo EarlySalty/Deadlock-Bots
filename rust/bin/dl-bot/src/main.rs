@@ -13,6 +13,7 @@ mod master;
 mod mcp;
 mod modglue;
 mod onboardglue;
+mod runtime_assets;
 mod scrim_adapter;
 mod scrimglue;
 mod serversync;
@@ -509,6 +510,7 @@ impl dl_discord::InteractionHandler for ChangelogPostCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
+    let repository_root = runtime_assets::validated_release_root()?;
     let operating = dl_core::config::process_bot_config()?.snapshot();
     dl_core::token_snapshot::load(dl_core::config::process_bot_config()?.source())
         .map_err(anyhow::Error::msg)?;
@@ -1190,18 +1192,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Team-Bewerbungen: öffentliches Components-V2-Panel, Modal-Aufnahme und
     // interne Beiträge in moderator-only. Der Streamer-Weg bleibt ein Website-Link.
-    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .and_then(std::path::Path::parent)
-        .context("Repository-Wurzel für Team-Bewerbungstexte fehlt")?;
     let team_applications = dl_community::team_applications::TeamApplications::new(
         central_pool.clone(),
         Arc::new(modglue::TeamApplicationGlue {
             adapter: adapter.clone(),
         }),
         our_guild_id,
-        repository_root,
+        &repository_root,
     );
     dl_community::team_applications::register(&mut router, team_applications.clone());
     team_applications.ensure_panel().await;
@@ -1237,7 +1234,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .await
             .map_err(anyhow::Error::msg)
             .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
-        concierge.ensure_pate_leitfaden(repository_root).await;
+        concierge.ensure_pate_leitfaden(&repository_root).await;
         let paten_inventar = concierge.paten_inventar(our_guild_id).await;
         tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));
     }

@@ -272,7 +272,7 @@ struct RangGuideBuiltMessage {
 }
 
 pub fn rang_guide_repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    crate::runtime_assets::release_root().expect("Releasewurzel des laufenden Bot-Binarys fehlt")
 }
 
 pub fn rang_guide_message_id_key(message_index: usize) -> String {

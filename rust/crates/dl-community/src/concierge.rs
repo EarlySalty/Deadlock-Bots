@@ -2066,6 +2066,20 @@ struct PateLeitfadenText {
     datenschutz: String,
 }
 
+/// Prüft den Release-Leitfaden ohne den eingebetteten Entwurf als Ersatzquelle.
+pub fn validate_pate_leitfaden(repo_root: &std::path::Path) -> Result<(), String> {
+    let path = repo_root.join("assets/paten_leitfaden.toml");
+    let raw = std::fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "Paten-Leitfaden fehlt oder ist unlesbar: {}",
+            path.display()
+        )
+    })?;
+    toml::from_str::<PateLeitfadenFile>(&raw)
+        .map_err(|_| format!("Paten-Leitfaden ist ungültig: {}", path.display()))?;
+    Ok(())
+}
+
 fn load_pate_leitfaden(repo_root: &std::path::Path) -> PateLeitfadenText {
     let runtime_path = repo_root.join("assets/paten_leitfaden.toml");
     let raw = match std::fs::read_to_string(&runtime_path) {
