@@ -78,6 +78,8 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         ALTER TABLE brain.guide_subjects ADD COLUMN turn_sequence BIGINT NOT NULL DEFAULT 0, ADD COLUMN legacy_import_eligible BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE brain.guide_turn_claims ADD COLUMN turn_sequence BIGINT NOT NULL DEFAULT 0, ADD COLUMN subject_epoch BIGINT NOT NULL DEFAULT -1, ADD COLUMN reply_message_id TEXT, ADD COLUMN conversation_id TEXT")
         .execute(&pool).await.expect("Synthetischer Postgres-Testschritt fehlgeschlagen");
+    sqlx::raw_sql(include_str!("../../../../../Deadlock-Brain/scripts/migrations/2026-10-03-serverguide-v4.sql"))
+        .execute(&pool).await.expect("Kanonische synthetische V4-Migration fehlgeschlagen");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Systemzeit liegt vor der Unix-Epoche")

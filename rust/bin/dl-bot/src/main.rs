@@ -1554,8 +1554,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         // Alte FAQ-/Ticket- und allgemeine Frageerkennung sind stillgelegt.
-        let _invite_lounge_watcher =
-            dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
+        // Spieleinladungen laufen ausschließlich über den gemeinsamen Guide-Aktionspfad.
         // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
         // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
         // Python Reward-Rolle + Feedback-DM bekommen.

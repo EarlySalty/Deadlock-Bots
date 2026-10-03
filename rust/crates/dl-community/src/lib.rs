@@ -9,7 +9,6 @@ pub mod coaching;
 pub mod coaching_requests;
 mod db;
 pub mod feedback_hub;
-pub mod invite_lounge;
 pub mod invites;
 pub mod leave_survey;
 pub mod onboarding;

@@ -15,6 +15,19 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
+fn community_question(content: &str) -> bool {
+    let text = content.trim().to_lowercase();
+    if text.is_empty() || text.contains("<@") || text.starts_with('>')
+        || text.starts_with("danke") || text.starts_with("erledigt")
+        || text.starts_with("hat sich") || text.starts_with("alles klar") {
+        return false;
+    }
+    (text.ends_with('?') && ["wie ","wo ","wer ","was ","warum ","wann ","kann ","könnte ","gibt ","hat ","ist ","sind ","welche ","welcher "]
+        .iter().any(|start|text.starts_with(start))) || ["wie kann ich ", "wo finde ich ", "kann mir jemand ",
+        "ich brauche hilfe", "ich möchte deadlock spielen", "kann mich jemand einladen"]
+        .iter().any(|start| text.starts_with(start))
+}
+
 const UNAVAILABLE: &str = "Der Serverguide ist gerade nicht erreichbar. Du kannst deine Frage in <#1491953161747955853> stellen.";
 const PILOT_CLOSED: &str = "Der Serverguide ist hier noch nicht freigeschaltet. Für Hilfe erreichst du die Community in <#1426220702054355077>.";
 const LEGACY_DISABLED: &str = "Diese frühere Aktion ist ausgeschaltet. Hilfe bekommst du in <#1426220702054355077>, Mitspieler findest du in <#1376335502919335936>.";
@@ -25,6 +38,7 @@ pub struct GuideConfig {
     pub guild_id: u64,
     pub test_users: HashSet<u64>,
     pub public_channels: HashSet<u64>,
+    pub proactive_channels: HashSet<u64>,
     pub base_url: String,
     pub timeout: Duration,
     pub idle_timeout: Duration,
@@ -58,6 +72,7 @@ impl GuideConfig {
             guild_id,
             test_users: ids("DL_GUIDE_TEST_USERS"),
             public_channels: ids("DL_GUIDE_PUBLIC_CHANNELS"),
+            proactive_channels: ids("DL_GUIDE_PROACTIVE_CHANNELS"),
             base_url: lookup("DL_GUIDE_URL").unwrap_or_else(|| "http://127.0.0.1:8788".into()),
             timeout: Duration::from_secs(seconds("DL_GUIDE_TIMEOUT_SECONDS", 100)),
             idle_timeout: Duration::from_secs(seconds("DL_GUIDE_IDLE_SECONDS", 300)),
@@ -80,6 +95,19 @@ impl GuideConfig {
                 seconds("DL_GUIDE_SOURCE_INTERVAL_SECONDS", 60).max(60),
             ),
         }
+    }
+
+    fn proactive_question(&self, event: &MessageEvent) -> bool {
+        let age = chrono::Utc::now().signed_duration_since(event.message_created_at).num_seconds();
+        self.guild_id == 1289721245281292288
+            && event.guild_id == Some(self.guild_id)
+            && event.channel_id == 1426220702054355077
+            && self.proactive_channels.contains(&event.channel_id)
+            && self.public_channels.contains(&event.channel_id)
+            && event.reply_message_id.is_none()
+            && !event.content.contains("<@")
+            && community_question(&event.content)
+            && (0..=60).contains(&age)
     }
 
     fn allowed(&self, user_id: u64) -> bool {
@@ -697,7 +725,10 @@ impl GuideAdapter {
         }
         // Die Zuordnung wird kurz gesperrt; menschliche Hilfe bleibt während des Kernaufrufs sichtbar.
         let Some((addressed, content, conversation_id)) =
-            routes.addressed(&event, bot, self.config.idle_timeout)
+            routes.addressed(&event, bot, self.config.idle_timeout).or_else(|| {
+                self.config.proactive_question(&event).then(||
+                    ("community_question", event.content.clone(), None))
+            })
         else {
             return;
         };
@@ -1240,6 +1271,27 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proaktive_frage_braucht_exakten_kanal_frisches_event_und_keinen_reply() {
+        let config = GuideConfig::from_lookup(1289721245281292288, |key| match key {
+            "DL_GUIDE_PROACTIVE_CHANNELS" | "DL_GUIDE_PUBLIC_CHANNELS" => Some("1426220702054355077".into()),
+            _ => None,
+        });
+        let mut event = message(20,1426220702054355077,"Wo finde ich Mitspieler?");
+        event.guild_id=Some(1289721245281292288);
+        assert!(config.proactive_question(&event));
+        event.channel_id=1426220702054355078;
+        assert!(!config.proactive_question(&event));
+        event.channel_id=1426220702054355077;
+        event.reply_message_id=Some(1);
+        assert!(!config.proactive_question(&event));
+        event.reply_message_id=None;
+        event.message_created_at=chrono::Utc::now()-chrono::Duration::seconds(61);
+        assert!(!config.proactive_question(&event));
+        for text in ["Danke, alles klar?", "<@123> kannst du helfen?", "> Wo finde ich Hilfe?", "Erledigt?", "Nani, kannst du helfen?"] {
+            assert!(!community_question(text));
+        }
+    }
     #[test]
     fn oeffentliche_leserechte_werden_nach_entzug_gesperrt() {
         use serenity::all::{
