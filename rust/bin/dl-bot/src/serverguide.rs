@@ -256,7 +256,7 @@ impl Routes {
         let guild = event.guild_id.unwrap_or(0);
         let key = (guild, event.channel_id, event.author_id);
         if event.guild_id.is_none() {
-            return Some(("dm", event.content.clone(), None));
+            return Some(("dm", event.content.clone(), self.conversations.get(&key).and_then(|conversation|conversation.id.clone())));
         }
         if let Some(bot) = bot {
             for mention in [format!("<@{bot}>"), format!("<@!{bot}>")] {
@@ -1273,6 +1273,16 @@ pub fn spawn(guide: Arc<GuideAdapter>, dispatcher: &Dispatcher) -> tokio::task::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dm_behält_eigene_begrenzte_unterhaltung() {
+        let mut routes=ongoing();
+        let conversation=routes.conversations.remove(&(1,10,20)).expect("Testunterhaltung fehlt");
+        routes.conversations.insert((0,10,20),conversation);
+        let mut event=message(20,10,"Mein Freundescode: ABCD");event.guild_id=None;
+        assert_eq!(routes.addressed(&event,Some(99),Duration::from_secs(300)).expect("DM-Zuordnung fehlt").2,Some("conversation".into()));
+        event.author_id=21;
+        assert!(routes.addressed(&event,Some(99),Duration::from_secs(300)).expect("Neue DM fehlt").2.is_none());
+    }
     #[test]
     fn proaktive_frage_braucht_exakten_kanal_frisches_event_und_keinen_reply() {
         let config = GuideConfig::from_lookup(1289721245281292288, |key| match key {
