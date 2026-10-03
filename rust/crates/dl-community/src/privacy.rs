@@ -1814,7 +1814,11 @@ async fn existing_relations(pool: &PgPool) -> Result<HashSet<&'static str>, sqlx
                 .iter()
                 .map(|(relation, _)| *relation),
         )
-        .chain(["activity.twitch_invite_member_privacy"])
+        .chain([
+            "activity.twitch_invite_member_privacy",
+            "community.scout_privacy_epochs",
+            "community.scout_privacy_outbox",
+        ])
         .chain([
             "scrim.replacement_needs",
             "scrim.replacement_candidates",
@@ -4156,6 +4160,16 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     let mut tbl = serde_json::Map::new();
     tbl.extend(crate::invite_privacy::export(pool, user_id, &relations).await?);
 
+    if relations.contains("community.scout_privacy_epochs") {
+        let epochs: Vec<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(e) FROM community.scout_privacy_epochs e
+              WHERE subject_hash = sha256(convert_to('scout-community:discord-privacy:v1:' || $1::bigint::text, 'UTF8'))",
+        ).bind(user_id).fetch_all(pool).await?;
+        tbl.insert(
+            "scout_privacy_epochs.subject_hash".into(),
+            Value::Array(epochs),
+        );
+    }
     if relations.contains("community.scout_privacy_outbox") {
         let operations: Vec<Value> = sqlx::query_scalar(
             "SELECT to_jsonb(o) FROM community.scout_privacy_outbox o WHERE discord_id = $1 ORDER BY epoch",
@@ -5016,7 +5030,7 @@ mod runtime_gate_privacy_tests {
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use dl_activity::journey::compact_raw_events;
     use dl_central_db::testing::{test_pool, TestDb};
     use std::collections::BTreeSet;
@@ -5582,6 +5596,362 @@ mod tests {
                 .await
                 .expect("Consent gelöscht")
                 .is_empty());
+        }
+    }
+
+    fn scout_outcome_for_test(
+        discord_id: i64,
+        channel: &str,
+        epoch: Option<i64>,
+        submitted_at: Option<DateTime<Utc>>,
+    ) -> dl_central_db::community_points::SuggestionOutcomeEvent {
+        use dl_central_db::community_points::{
+            LedgerEvent, LedgerRecipient, SuggestionOutcomeEvent, SOURCE_STREAMER_SUGGESTION,
+        };
+        SuggestionOutcomeEvent {
+            event: LedgerEvent {
+                recipient: LedgerRecipient::Member(discord_id),
+                source: SOURCE_STREAMER_SUGGESTION,
+                reference: format!("streamer_suggestion:{channel}"),
+                points: 150,
+                occurred_at: Utc::now(),
+            },
+            submitted_at,
+            privacy_epoch: epoch,
+        }
+    }
+
+    async fn scout_consent_for_test(pool: &PgPool) -> (i64, DateTime<Utc>) {
+        sqlx::query_as("SELECT epoch, activity_since FROM community.scout_privacy_epochs
+            WHERE subject_hash = sha256(convert_to('scout-community:discord-privacy:v1:42', 'UTF8'))")
+            .fetch_one(pool).await.expect("Persistierte Consentgrenze")
+    }
+
+    #[tokio::test]
+    async fn scout_outcome_privacy_export_erasure_epochengrenze_und_keine_zweite_kanalvergabe() {
+        use dl_central_db::community_points::apply_suggestion_outcome_page;
+        let db = mk_db().await;
+        let pool = db.pool();
+        let old = scout_outcome_for_test(42, "456", None, None);
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &[old.clone()], None)
+                .await
+                .expect("Erstcredit"),
+            1
+        );
+        let exported = export_user_data(pool, 42, 1000).await.expect("Export");
+        assert!(exported["tables"]
+            .as_object()
+            .expect("Tabellen")
+            .values()
+            .any(|v| {
+                v.as_array()
+                    .is_some_and(|a| a.iter().any(|row| row["ref"] == "streamer_suggestion:456"))
+            }));
+        delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+            .await
+            .expect("Erasure");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_points.ledger WHERE discord_id = 42",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("Persönliches Ledger gelöscht");
+        assert_eq!(count, 0);
+        let marker: Value = sqlx::query_scalar("SELECT to_jsonb(c) FROM community_points.streamer_suggestion_credits c WHERE channel_id = '456'")
+            .fetch_one(pool).await.expect("Nur öffentlicher Kanalnachweis");
+        assert_eq!(
+            marker,
+            serde_json::json!({"channel_id":"456", "awarded":true})
+        );
+        let foreign = scout_outcome_for_test(43, "456", None, None);
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &[foreign], None)
+                .await
+                .expect("Keine Ersatzvergabe"),
+            0
+        );
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &[old.clone()], None)
+                .await
+                .expect("Altreplay"),
+            0
+        );
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Bewusste Einwilligung");
+        let (epoch, since) = scout_consent_for_test(pool).await;
+        let outbox_since: DateTime<Utc> = sqlx::query_scalar("SELECT activity_since FROM community.scout_privacy_outbox WHERE discord_id = 42 AND epoch = $1")
+            .bind(epoch).fetch_one(pool).await.expect("Originale Outboxgrenze");
+        assert_eq!(since, outbox_since);
+        sqlx::query("DELETE FROM community.scout_privacy_outbox WHERE discord_id = 42")
+            .execute(pool)
+            .await
+            .expect("Erfolgreichen ACK simulieren");
+        assert_eq!(scout_consent_for_test(pool).await, (epoch, since));
+        let exported = export_user_data(pool, 42, 2000)
+            .await
+            .expect("Sperrmerkmalexport");
+        assert_eq!(
+            exported["tables"]["scout_privacy_epochs.subject_hash"][0]["epoch"],
+            epoch
+        );
+        let fresh_stamp: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(pool)
+            .await
+            .expect("Neue Herkunft");
+        let invalid = [
+            scout_outcome_for_test(42, "789", Some(epoch - 1), Some(fresh_stamp)),
+            scout_outcome_for_test(
+                42,
+                "789",
+                Some(epoch),
+                Some(since - Duration::microseconds(1)),
+            ),
+            scout_outcome_for_test(42, "789", Some(epoch), None),
+            scout_outcome_for_test(42, "789", None, Some(fresh_stamp)),
+            scout_outcome_for_test(
+                42,
+                "789",
+                Some(epoch),
+                Some(Utc::now() + Duration::hours(1)),
+            ),
+        ];
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &invalid, None)
+                .await
+                .expect("Alte/unbekannte Herkunft"),
+            0
+        );
+        let new = scout_outcome_for_test(42, "789", Some(epoch), Some(fresh_stamp));
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &[new.clone()], None)
+                .await
+                .expect("Neue zulässige Zuordnung"),
+            1
+        );
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &[new], None)
+                .await
+                .expect("Idempotent"),
+            0
+        );
+        let same_channel = scout_outcome_for_test(42, "456", Some(epoch), Some(fresh_stamp));
+        assert_eq!(
+            apply_suggestion_outcome_page(pool, &[same_channel], None)
+                .await
+                .expect("Erstcredit bleibt vergeben"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_outcome_privacy_upgrade_sichert_credit_ohne_autor_und_erneuert_unbelegten_consent(
+    ) {
+        use dl_central_db::community_points::apply_suggestion_outcome_page;
+        let db = mk_db().await;
+        let pool = db.pool();
+        sqlx::raw_sql(
+            "DROP TABLE community_points.streamer_suggestion_credits;
+          ALTER TABLE community.scout_privacy_epochs DROP COLUMN activity_since;
+          DELETE FROM core.privacy_field_registry WHERE schema_name = 'community_points'
+            AND table_name = 'streamer_suggestion_credits';
+          INSERT INTO community_points.ledger(discord_id, source, ref, points, occurred_at)
+            VALUES (42, 'streamer_suggestion', 'streamer_suggestion:456', 150, clock_timestamp());",
+        )
+        .execute(pool)
+        .await
+        .expect("Echte Vor-Migrationsfixture");
+        sqlx::raw_sql(include_str!(
+            "../../dl-central-db/migrations/20261003035000_scout_outcome_credit.sql"
+        ))
+        .execute(pool)
+        .await
+        .expect("Additives Upgrade");
+        delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+            .await
+            .expect("Erasure");
+        assert_eq!(
+            apply_suggestion_outcome_page(
+                pool,
+                &[scout_outcome_for_test(43, "456", None, None)],
+                None
+            )
+            .await
+            .expect("Historisch vergebener Kanal"),
+            0
+        );
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Optin");
+        let (old_epoch, _) = scout_consent_for_test(pool).await;
+        sqlx::raw_sql("DELETE FROM community.scout_privacy_outbox WHERE discord_id = 42;
+            UPDATE community.scout_privacy_epochs SET activity_since = NULL WHERE action = 'consent';")
+            .execute(pool).await.expect("Unbelegte alte Consentgrenze");
+        assert_eq!(
+            apply_suggestion_outcome_page(
+                pool,
+                &[scout_outcome_for_test(
+                    42,
+                    "789",
+                    Some(old_epoch),
+                    Some(Utc::now())
+                )],
+                None
+            )
+            .await
+            .expect("Keine erfundene Herkunftsgrenze"),
+            0
+        );
+        set_opt_in(pool, 42, Utc::now().timestamp())
+            .await
+            .expect("Bewusst erneuerte Einwilligung");
+        let (epoch, _) = scout_consent_for_test(pool).await;
+        assert_eq!(epoch, old_epoch + 1);
+        let stamp: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(pool)
+            .await
+            .expect("Neue Herkunft");
+        assert_eq!(
+            apply_suggestion_outcome_page(
+                pool,
+                &[scout_outcome_for_test(42, "789", Some(epoch), Some(stamp))],
+                None
+            )
+            .await
+            .expect("Neue Aktivität wieder zulässig"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_outcome_privacy_erasure_import_beide_sperrreihenfolgen() {
+        use dl_central_db::community_points::apply_suggestion_outcome_page;
+        for erase_first in [true, false] {
+            let db = mk_db().await;
+            let pool = db.pool();
+            let mut held = pool.begin().await.expect("Blocker");
+            lock_user_privacy(&mut held, 42).await.expect("Nutzerlock");
+            let erase = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    delete_user_data(&pool, 42, "test".into(), Utc::now().timestamp()).await
+                })
+            };
+            let import = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    apply_suggestion_outcome_page(
+                        &pool,
+                        &[scout_outcome_for_test(42, "456", None, None)],
+                        None,
+                    )
+                    .await
+                })
+            };
+            let (erasing, importing) = if erase_first {
+                let erasing = erase();
+                wait_for_db_lock(pool, "pg_advisory_xact_lock", Some("advisory")).await;
+                (erasing, import())
+            } else {
+                let importing = import();
+                wait_for_db_lock(pool, "pg_advisory_xact_lock", Some("advisory")).await;
+                (erase(), importing)
+            };
+            wait_for_db_lock_count(pool, 2).await;
+            held.commit().await.expect("Freigabe");
+            tokio::time::timeout(StdDuration::from_secs(10), erasing)
+                .await
+                .expect("Erasurefrist")
+                .expect("Erasureaufgabe")
+                .expect("Erasure");
+            assert_eq!(
+                tokio::time::timeout(StdDuration::from_secs(10), importing)
+                    .await
+                    .expect("Importfrist")
+                    .expect("Importaufgabe")
+                    .expect("Import"),
+                if erase_first { 0 } else { 1 }
+            );
+            let ledger: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM community_points.ledger WHERE discord_id = 42",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("Ledger nach Erasure");
+            assert_eq!(ledger, 0);
+            let markers: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM community_points.streamer_suggestion_credits",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("Einmalnachweis");
+            assert_eq!(markers, if erase_first { 0 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn scout_outcome_privacy_optin_import_beide_sperrreihenfolgen() {
+        use dl_central_db::community_points::apply_suggestion_outcome_page;
+        for optin_first in [true, false] {
+            let db = mk_db().await;
+            let pool = db.pool();
+            delete_user_data(pool, 42, "test".into(), Utc::now().timestamp())
+                .await
+                .expect("Erasure");
+            let mut held = pool.begin().await.expect("Blocker");
+            lock_user_privacy(&mut held, 42).await.expect("Nutzerlock");
+            let optin = || {
+                let pool = pool.clone();
+                tokio::spawn(async move { set_opt_in(&pool, 42, Utc::now().timestamp()).await })
+            };
+            let import = || {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    apply_suggestion_outcome_page(
+                        &pool,
+                        &[scout_outcome_for_test(42, "456", None, None)],
+                        None,
+                    )
+                    .await
+                })
+            };
+            let (opting, importing) = if optin_first {
+                let opting = optin();
+                wait_for_db_lock(pool, "pg_advisory_xact_lock", Some("advisory")).await;
+                (opting, import())
+            } else {
+                let importing = import();
+                wait_for_db_lock(pool, "pg_advisory_xact_lock", Some("advisory")).await;
+                (optin(), importing)
+            };
+            wait_for_db_lock_count(pool, 2).await;
+            held.commit().await.expect("Freigabe");
+            tokio::time::timeout(StdDuration::from_secs(10), opting)
+                .await
+                .expect("Optinfrist")
+                .expect("Optinaufgabe")
+                .expect("Optin");
+            assert_eq!(
+                tokio::time::timeout(StdDuration::from_secs(10), importing)
+                    .await
+                    .expect("Importfrist")
+                    .expect("Importaufgabe")
+                    .expect("Alte Herkunft bleibt gesperrt"),
+                0
+            );
+            let (epoch, _) = scout_consent_for_test(pool).await;
+            let stamp: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(pool)
+                .await
+                .expect("Neue Herkunft");
+            let new = scout_outcome_for_test(42, "456", Some(epoch), Some(stamp));
+            assert_eq!(
+                apply_suggestion_outcome_page(pool, &[new], None)
+                    .await
+                    .expect("Neue Aktivität"),
+                1
+            );
         }
     }
 

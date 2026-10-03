@@ -597,6 +597,30 @@ async fn insert_ledger_event(
             return Ok(false);
         }
     }
+    if event.source == SOURCE_STREAMER_SUGGESTION {
+        let channel = event
+            .reference
+            .strip_prefix("streamer_suggestion:")
+            .filter(|id| is_valid_twitch_user_id(id))
+            .ok_or_else(|| CentralDbError::InvalidInput("Ungültiger Vorschlagskanal".into()))?;
+        if discord_id.is_none() || event.points != STREAMER_SUGGESTION_POINTS {
+            return Err(CentralDbError::InvalidInput(
+                "Ungültiger Vorschlagscredit".into(),
+            ));
+        }
+        // Der personenbezogene Ledger darf gelöscht werden, dieser Kanalnachweis bleibt.
+        let first = sqlx::query(
+            "INSERT INTO community_points.streamer_suggestion_credits(channel_id)
+             VALUES ($1) ON CONFLICT(channel_id) DO NOTHING",
+        )
+        .bind(channel)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        if first == 0 {
+            return Ok(false);
+        }
+    }
     let inserted = sqlx::query(
         "INSERT INTO community_points.ledger
              (discord_id, streamer_twitch_user_id, source, ref, points, occurred_at)
@@ -619,6 +643,14 @@ async fn insert_ledger_event(
     Ok(inserted == 1)
 }
 
+/// Individueller Vorschlagscredit mit unveränderter Herkunft und Privacyepoche.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionOutcomeEvent {
+    pub event: LedgerEvent,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub privacy_epoch: Option<i64>,
+}
+
 /// Bucht eine Seite Streamer-Vorschlags-Ergebnisse (Twitch-Bot,
 /// `scout/community-suggestions/outcomes`) samt Folge-Cursor in einer
 /// Transaktion. Je vorgeschlagenem Kanal gibt es die Punkte genau einmal
@@ -626,13 +658,13 @@ async fn insert_ledger_event(
 /// pausiert und wieder Partner wird. Liefert die Zahl neuer Buchungen.
 pub async fn apply_suggestion_outcome_page(
     pool: &PgPool,
-    events: &[LedgerEvent],
+    outcomes: &[SuggestionOutcomeEvent],
     next_cursor: Option<&str>,
 ) -> Result<u64, CentralDbError> {
     let mut tx = pool.begin().await?;
-    let ids: BTreeSet<i64> = events
+    let ids: BTreeSet<i64> = outcomes
         .iter()
-        .filter_map(|event| match event.recipient {
+        .filter_map(|outcome| match outcome.event.recipient {
             LedgerRecipient::Member(id) => Some(id),
             LedgerRecipient::Streamer(_) => None,
         })
@@ -640,9 +672,41 @@ pub async fn apply_suggestion_outcome_page(
     for id in ids {
         crate::lock_user_privacy(&mut tx, id).await?;
     }
+    // Einheitliche Kanalreihenfolge verhindert gegenläufige Mehrzeilenbuchungen.
+    let mut ordered: Vec<_> = outcomes.iter().collect();
+    ordered.sort_by(|a, b| a.event.reference.cmp(&b.event.reference));
     let mut written = 0;
-    for event in events {
-        if insert_ledger_event(&mut tx, event).await? {
+    for outcome in ordered {
+        let LedgerRecipient::Member(id) = outcome.event.recipient else {
+            return Err(CentralDbError::InvalidInput(
+                "Vorschlag ohne Mitglied".into(),
+            ));
+        };
+        let privacy: Option<(i64, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT epoch, action, activity_since FROM community.scout_privacy_epochs
+              WHERE subject_hash = sha256(convert_to('scout-community:discord-privacy:v1:' || $1::bigint::text, 'UTF8'))",
+        ).bind(id).fetch_optional(&mut *tx).await?;
+        let allowed = match privacy {
+            None => outcome.privacy_epoch.unwrap_or(0) == 0,
+            Some((epoch, action, Some(since))) => {
+                action == "consent"
+                    && outcome.privacy_epoch == Some(epoch)
+                    && outcome.submitted_at.is_some_and(|stamp| stamp >= since)
+            }
+            Some(_) => false,
+        };
+        if !allowed {
+            continue;
+        }
+        if let Some(stamp) = outcome.submitted_at {
+            let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *tx)
+                .await?;
+            if stamp > now {
+                continue;
+            }
+        }
+        if insert_ledger_event(&mut tx, &outcome.event).await? {
             written += 1;
         }
     }

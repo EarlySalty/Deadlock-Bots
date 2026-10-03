@@ -17,9 +17,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use dl_central_db::community_points::{
     apply_streamer_page, apply_suggestion_outcome_page, apply_viewer_page,
     apply_viewer_page_with_activity, berlin_day, load_cursor, load_viewer_consents, LedgerEvent,
-    LedgerRecipient, StreamerDailyRow, ViewerActivityDay, ViewerConsent, ViewerDailyRow,
-    CURSOR_STREAMERS, CURSOR_SUGGESTION_OUTCOMES, CURSOR_VIEWERS, SOURCE_STREAMER_SUGGESTION,
-    STREAMER_SUGGESTION_POINTS,
+    LedgerRecipient, StreamerDailyRow, SuggestionOutcomeEvent, ViewerActivityDay, ViewerConsent,
+    ViewerDailyRow, CURSOR_STREAMERS, CURSOR_SUGGESTION_OUTCOMES, CURSOR_VIEWERS,
+    SOURCE_STREAMER_SUGGESTION, STREAMER_SUGGESTION_POINTS,
 };
 use dl_central_db::platform_connections::is_valid_twitch_user_id;
 use serde::Deserialize;
@@ -112,6 +112,11 @@ pub struct SuggestionOutcomeWire {
     pub suggested_by_discord_id: String,
     #[serde(default)]
     pub suggested_at: Option<String>,
+    #[serde(default)]
+    pub submitted_at: Option<String>,
+    #[serde(default)]
+    pub privacy_epoch: Option<i64>,
+    pub is_first_eligible: bool,
     pub is_partner_active: bool,
     #[serde(default)]
     pub partner_since: Option<String>,
@@ -121,8 +126,8 @@ pub struct SuggestionOutcomeWire {
 /// 150 Punkte fuer den ersten Vorschlagenden, sobald der Kanal aktiver
 /// Partner ist. War der Kanal schon vor dem Vorschlag Partner (reaktivierter
 /// Altpartner), gibt es keine Punkte. Einmal je Kanal fuer immer.
-pub fn suggestion_event(wire: &SuggestionOutcomeWire) -> Option<LedgerEvent> {
-    if !wire.is_partner_active {
+pub fn suggestion_event(wire: &SuggestionOutcomeWire) -> Option<SuggestionOutcomeEvent> {
+    if !wire.is_partner_active || !wire.is_first_eligible {
         return None;
     }
     let channel = twitch_id(&wire.twitch_user_id)?;
@@ -139,12 +144,23 @@ pub fn suggestion_event(wire: &SuggestionOutcomeWire) -> Option<LedgerEvent> {
             return None;
         }
     }
-    Some(LedgerEvent {
-        recipient: LedgerRecipient::Member(discord_id),
-        source: SOURCE_STREAMER_SUGGESTION,
-        reference: format!("streamer_suggestion:{channel}"),
-        points: STREAMER_SUGGESTION_POINTS,
-        occurred_at: partner_since.or_else(|| timestamp(&wire.updated_at))?,
+    let submitted_at = match wire.submitted_at.as_deref() {
+        Some(value) => Some(timestamp(value)?),
+        None => None,
+    };
+    if wire.privacy_epoch.is_some_and(|epoch| epoch < 0) {
+        return None;
+    }
+    Some(SuggestionOutcomeEvent {
+        submitted_at,
+        privacy_epoch: wire.privacy_epoch,
+        event: LedgerEvent {
+            recipient: LedgerRecipient::Member(discord_id),
+            source: SOURCE_STREAMER_SUGGESTION,
+            reference: format!("streamer_suggestion:{channel}"),
+            points: STREAMER_SUGGESTION_POINTS,
+            occurred_at: partner_since.or_else(|| timestamp(&wire.updated_at))?,
+        },
     })
 }
 
@@ -358,11 +374,15 @@ impl PageSink<StreamerDailyRow> for StreamerDbSink<'_> {
 /// Zentrale DB als Ziel fuer Vorschlags-Ergebnisse (Ledger statt Tageszeilen).
 pub struct SuggestionLedgerSink<'a>(pub &'a PgPool);
 
-impl PageSink<LedgerEvent> for SuggestionLedgerSink<'_> {
+impl PageSink<SuggestionOutcomeEvent> for SuggestionLedgerSink<'_> {
     async fn cursor(&self) -> anyhow::Result<Option<String>> {
         Ok(load_cursor(self.0, CURSOR_SUGGESTION_OUTCOMES).await?)
     }
-    async fn apply(&self, rows: &[LedgerEvent], next: Option<&str>) -> anyhow::Result<u64> {
+    async fn apply(
+        &self,
+        rows: &[SuggestionOutcomeEvent],
+        next: Option<&str>,
+    ) -> anyhow::Result<u64> {
         Ok(apply_suggestion_outcome_page(self.0, rows, next).await?)
     }
 }

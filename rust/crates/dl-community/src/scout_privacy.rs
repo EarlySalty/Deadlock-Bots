@@ -17,10 +17,11 @@ pub async fn enqueue(
     discord_id: i64,
     action: &str,
 ) -> Result<(), sqlx::Error> {
-    // Derselbe Nutzerwunsch erzeugt keine neue Epoche oder Consentgrenze.
+    // Mit belegter Consentgrenze erzeugt derselbe Wunsch keine neue Epoche.
     let same_action: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM community.scout_privacy_epochs
-          WHERE subject_hash = sha256(convert_to($1 || $2::text, 'UTF8')) AND action = $3)",
+          WHERE subject_hash = sha256(convert_to($1 || $2::text, 'UTF8')) AND action = $3
+            AND ($3 <> 'consent' OR activity_since IS NOT NULL))",
     )
     .bind(SUBJECT_SQL)
     .bind(discord_id)
@@ -30,11 +31,13 @@ pub async fn enqueue(
     if same_action {
         return Ok(());
     }
-    let epoch: i64 = sqlx::query_scalar(
-        "INSERT INTO community.scout_privacy_epochs(subject_hash, epoch, action)
-         VALUES (sha256(convert_to($1 || $2::text, 'UTF8')), 1, $3)
+    let (epoch, activity_since): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+        "INSERT INTO community.scout_privacy_epochs(subject_hash, epoch, action, activity_since)
+         VALUES (sha256(convert_to($1 || $2::text, 'UTF8')), 1, $3,
+                 CASE WHEN $3 = 'consent' THEN clock_timestamp() ELSE NULL END)
          ON CONFLICT(subject_hash) DO UPDATE SET epoch = community.scout_privacy_epochs.epoch + 1,
-            action = EXCLUDED.action RETURNING epoch",
+            action = EXCLUDED.action, activity_since = EXCLUDED.activity_since
+         RETURNING epoch, activity_since",
     )
     .bind(SUBJECT_SQL)
     .bind(discord_id)
@@ -43,9 +46,8 @@ pub async fn enqueue(
     .await?;
     sqlx::query(
         "INSERT INTO community.scout_privacy_outbox(operation_id, discord_id, epoch, action, activity_since)
-         VALUES (gen_random_uuid()::text, $1, $2, $3,
-                 CASE WHEN $3 = 'consent' THEN clock_timestamp() ELSE NULL END)",
-    ).bind(discord_id).bind(epoch).bind(action).execute(&mut **tx).await?;
+         VALUES (gen_random_uuid()::text, $1, $2, $3, $4)",
+    ).bind(discord_id).bind(epoch).bind(action).bind(activity_since).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -319,6 +321,15 @@ mod tests {
         assert_eq!(requests[0], requests[1]);
         assert_eq!(requests[1], requests[2]);
         assert_eq!(requests.last().unwrap()["epoch"], 2);
+        let (epoch, since): (i64, DateTime<Utc>) = sqlx::query_as(
+            "SELECT epoch, activity_since FROM community.scout_privacy_epochs
+              WHERE subject_hash = sha256(convert_to('scout-community:discord-privacy:v1:42', 'UTF8'))",
+        ).fetch_one(pool).await.expect("Consent bleibt nach echtem Remote-ACK");
+        assert_eq!(epoch, 2);
+        assert_eq!(
+            requests.last().unwrap()["activity_since"],
+            since.to_rfc3339()
+        );
         let old = &requests[0];
         let stale = client
             .post_scout_privacy("erase", old)

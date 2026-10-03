@@ -2121,7 +2121,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     .fetch_one(&pool)
     .await
     .expect("community points privacy registry rows");
-    assert_eq!(community_points_privacy_rows, 12);
+    assert_eq!(community_points_privacy_rows, 13);
     let duplicate_ledger_ref = sqlx::query(
         "INSERT INTO community_points.ledger (discord_id, source, ref, points, occurred_at)
          VALUES (1, 'clip_vote', 'clip_vote:1:1', 2, now()),
@@ -2166,6 +2166,27 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     assert!(
         duplicate_twitch_account.is_err(),
         "ein Twitch-Konto darf nur einer Discord-ID gehoeren"
+    );
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "community_points", "streamer_suggestion_credits").await,
+        vec!["channel_id", "awarded"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "community", "scout_privacy_epochs").await,
+        vec!["subject_hash", "epoch", "action", "activity_since"]
+    );
+    let channel_credit_registry: (String, String) = sqlx::query_as(
+        "SELECT data_category, erasure_action FROM core.privacy_field_registry
+          WHERE schema_name = 'community_points' AND table_name = 'streamer_suggestion_credits'
+            AND column_name = 'channel_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("Kanalnachweis ohne Autorbezug");
+    assert_eq!(
+        channel_credit_registry,
+        ("domain_id".into(), "retain_non_personal".into())
     );
 
     // Streamer-Vorschläge (2026100114): ein Vorschlag je Mitglied und Kanal,

@@ -385,12 +385,45 @@ fn outcome(active: bool, suggested_at: &str, partner_since: Option<&str>) -> Sug
         "suggested_by_discord_id": "1001",
         "suggested_at": suggested_at,
         "suggestion_count": 2,
+        "is_first_eligible": true,
         "candidate_status": "approved",
         "is_partner_active": active,
         "partner_since": partner_since,
         "updated_at": "2026-10-20T10:00:00Z",
     }))
     .expect("vertrags-json")
+}
+
+#[test]
+fn outcome_berechtigung_und_urspruengliche_privacyfelder_bleiben_gebunden() {
+    let mut wire = outcome(true, "2026-10-02T12:00:00Z", None);
+    wire.is_first_eligible = false;
+    assert!(suggestion_event(&wire).is_none());
+    wire.is_first_eligible = true;
+    wire.submitted_at = Some("2026-10-02T12:00:00.123456Z".into());
+    wire.privacy_epoch = Some(4);
+    let event = suggestion_event(&wire).expect("Eigene Zuordnung");
+    assert_eq!(event.privacy_epoch, Some(4));
+    assert_eq!(
+        event
+            .submitted_at
+            .expect("Herkunft")
+            .timestamp_subsec_micros(),
+        123456
+    );
+    wire.submitted_at = Some("keine Zeit".into());
+    assert!(suggestion_event(&wire).is_none());
+    wire.submitted_at = None;
+    wire.privacy_epoch = Some(-1);
+    assert!(suggestion_event(&wire).is_none());
+    let mut value = serde_json::to_value(json!({
+        "twitch_user_id":"456", "suggested_by_discord_id":"42",
+        "is_partner_active":true, "updated_at":"2026-10-02T12:00:00Z"
+    }))
+    .expect("JSON");
+    assert!(serde_json::from_value::<SuggestionOutcomeWire>(value.clone()).is_err());
+    value["is_first_eligible"] = json!(true);
+    assert!(serde_json::from_value::<SuggestionOutcomeWire>(value).is_ok());
 }
 
 #[test]
@@ -401,11 +434,14 @@ fn vorschlag_bringt_punkte_nur_als_neuer_aktiver_partner() {
         Some("2026-10-15T12:00:00Z"),
     ))
     .expect("punkte");
-    assert_eq!(event.recipient, LedgerRecipient::Member(1001));
-    assert_eq!(event.source, SOURCE_STREAMER_SUGGESTION);
-    assert_eq!(event.reference, "streamer_suggestion:456");
-    assert_eq!(event.points, 150);
-    assert_eq!(event.occurred_at.to_rfc3339(), "2026-10-15T12:00:00+00:00");
+    assert_eq!(event.event.recipient, LedgerRecipient::Member(1001));
+    assert_eq!(event.event.source, SOURCE_STREAMER_SUGGESTION);
+    assert_eq!(event.event.reference, "streamer_suggestion:456");
+    assert_eq!(event.event.points, 150);
+    assert_eq!(
+        event.event.occurred_at.to_rfc3339(),
+        "2026-10-15T12:00:00+00:00"
+    );
 
     // Noch kein Partner: keine Punkte.
     assert!(suggestion_event(&outcome(false, "2026-10-02T12:00:00Z", None)).is_none());
@@ -418,7 +454,10 @@ fn vorschlag_bringt_punkte_nur_als_neuer_aktiver_partner() {
     .is_none());
     // Ohne Partnerzeit zählt der Zeitpunkt der Zeile.
     let ohne = suggestion_event(&outcome(true, "2026-10-02T12:00:00Z", None)).expect("punkte");
-    assert_eq!(ohne.occurred_at.to_rfc3339(), "2026-10-20T10:00:00+00:00");
+    assert_eq!(
+        ohne.event.occurred_at.to_rfc3339(),
+        "2026-10-20T10:00:00+00:00"
+    );
     // Kaputte IDs: keine Punkte.
     let mut kaputt = outcome(true, "2026-10-02T12:00:00Z", None);
     kaputt.suggested_by_discord_id = "abc".into();
@@ -450,6 +489,7 @@ async fn vorschlags_punkte_einmal_je_kanal_in_die_zentrale_db() {
             "suggested_by_discord_id": discord,
             "suggested_at": "2026-10-02T12:00:00Z",
             "suggestion_count": 1,
+            "is_first_eligible": true,
             "candidate_status": "approved",
             "is_partner_active": true,
             "partner_since": since,

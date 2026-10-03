@@ -24,6 +24,8 @@ Bei qualifizierten Twitch-Einladungen löscht der Antrag deine Nachrichten-, Voi
 
 Wenn du einen Twitchclip als Zuschauer oder Moderator einreichst, gehört deine Einreicher-ID ebenfalls zum Datenauszug. Beim Löschantrag wird diese ID anonymisiert; der Clip, die öffentliche Kanalzuordnung und die Contestnachweise bleiben erhalten. Alte Wiederholungen stellen die Einreicher-ID nicht wieder her. Nach Opt-in und erneuter Twitch-Verknüpfung kann eine neue Einreichung deine ID wieder speichern.
 
+Für neue Scoutvorschläge bleibt die eigene Einwilligungsepoche mit ihrer Herkunftsgrenze als personenbezogenes Sperrmerkmal erhalten und erscheint im Datenauszug. Nach Löschung werden alte Vorschläge nicht erneut importiert. Ein rein kanalbezogener Nachweis ohne Autor, Zeitpunkt oder Ledgerverweis verhindert eine zweite Vergabe der einmaligen 150 Vorschlagspunkte, auch wenn persönliche Punkte gelöscht wurden.
+
 Patchnotes-Freigaben und Guild-Einstellungen bleiben erhalten. Der Löschantrag entfernt daraus deine Freigabe- beziehungsweise letzte Änderungsakteur-ID.
 
 Daneben existiert das Retention-System. Wenn du früher regelmäßig im Voice aktiv warst und dann lange wegbleibst, kann der Bot dir eine freundliche „Wir vermissen dich"-DM schicken. Wenn du diese DMs nicht willst, nutze `/retention-optout`. Mit `/retention-optin` kannst du sie später wieder erlauben. In solchen DMs gibt es auch einen Feedback-Button, falls du rückmelden willst, warum du weniger aktiv bist.
