@@ -1,0 +1,11 @@
+# Direkte Build-Erstellung: Discord-Abnahme
+
+Stand: 26. September 2026. PR #451, Branch `feat/brain-direct-build-publish-20260924`. Kein Produktiv-Deploy.
+
+Nur der ausdrücklich gewählte, strukturierte Befehl `/brain-build held:<Held> spielstil:<Waffen|Geist>` kann einen Build im Spiel veröffentlichen. `/brain` und `!brain` bleiben lesend, auch wenn der Freitext eine Bitte zitiert oder eine Veröffentlichung ausdrücklich verneint. Für jede Discord-Interaktion wird vor dem CLI-Aufruf dauerhaft ein eigener Schlüssel in `brain.discord_build_publish_requests` reserviert. Parallele Wiederholungen derselben Interaktion starten keine zweite Veröffentlichung. Auch unterschiedliche Build-Interaktionen desselben Nutzers unterliegen dem atomar gesetzten Cooldown.
+
+Der reguläre Modus nutzt `publish-build-query`, der offene Testmodus `review-build`. Der Brain-CLI-Branch `feat/direct-build-publish-20260924` und die neue zentrale Migration müssen vor dem Bot bereitstehen. Der CLI-Beleg muss den Review-Modus ausdrücklich ausweisen; nur ein abgeschlossener Steam-Auftrag mit positiver Build-ID wird als veröffentlicht bezeichnet. Wartende Aufträge bleiben als solche gekennzeichnet. Unbestätigte Zustände erhalten keine Erfolgsmeldung.
+
+Geprüft im eigenen Worktree mit Rust/Cargo 1.97.1: `cargo check --locked -p dl-bot -j 2`; `cargo test --locked -p dl-brain build_request -j 2` (2 Tests); `cargo test --locked -p dl-bot --bin dl-bot brain_ -j 2` (15 Tests); gezielte Bot-Tests für Freitext, strukturierten Befehl, parallele Zustellungen und CLI-Modusbeleg (grün). Ein zu breiter Testfilter `publish` erfasste zusätzlich zehn bestehende datenbankgebundene Tests; diese benötigen die separate `CENTRAL_TEST_DSN`-Testinstanz und wurden in dieser Shell nicht ausgeführt. Das unabhängige Gate `gate_hook.py --review --model gpt-6-sol --effort medium` meldete erst zwei Nits und danach einen Modusbeleg-Blocker. Alle drei Funde wurden behoben; das Gate wird auf dem Abschluss-Commit wiederholt.
+
+GitHub-Actions und ein echter In-Game-Funktionsbeweis stehen noch aus. Beim zugehörigen Steam-PR wurden zuvor GitHub-Jobs wegen eines Abrechnungs-/Ausgabenlimits nicht gestartet. Keine Produktionsverbindung, Veröffentlichung, Merge oder Dienstneustart in dieser Fixrunde.

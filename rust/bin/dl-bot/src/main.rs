@@ -1050,7 +1050,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     Arc::new(modglue::SharedBrainAnswerer {
                         engine: shared_answers.clone(),
                         open_test_mode,
+                    });
+                let publisher: Arc<dyn modglue::BuildPublisher> =
+                    Arc::new(modglue::SharedBrainPublisher {
                         brain_bin: brain_bin_path.clone(),
+                        open_test_mode,
                         emoji_index: emoji_index.clone(),
                     });
                 Some(Arc::new(modglue::BrainHandler {
@@ -1058,6 +1062,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     config,
                     cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
                     answerer,
+                    publisher,
+                    publish_gate: Arc::new(modglue::PgBuildPublishGate {
+                        pool: central_pool.clone(),
+                    }),
                     channel_allowlist,
                     all_guild_channels: open_test_mode,
                     emoji_index,
@@ -1069,6 +1077,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         router.on_command(
             "brain",
             modglue::brain_command_spec(handler.config.max_question_len),
+            handler.clone(),
+        );
+        router.on_command(
+            "brain-build",
+            modglue::brain_build_command_spec(),
             handler.clone(),
         );
     }
