@@ -3719,31 +3719,26 @@ async fn scrub_action_outbox_requester(
 }
 
 pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<()> {
-    let now = utc_from_unix(now)?;
+    utc_from_unix(now)?;
     let mut tx = pool.begin().await?;
     lock_user_privacy(&mut tx, user_id).await?;
     let restarting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM core.user_privacy WHERE user_id=$1 AND (opted_out OR deleted_at IS NOT NULL))")
         .bind(user_id).fetch_one(&mut *tx).await?;
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
-        VALUES ($1, FALSE, NULL, 'user_opt_in', $2)
+        VALUES ($1, FALSE, NULL, 'user_opt_in', clock_timestamp())
         ON CONFLICT(user_id) DO UPDATE SET
           opted_out = FALSE,
           deleted_at = NULL,
           reason = excluded.reason,
-          updated_at = excluded.updated_at
+          updated_at = GREATEST(core.user_privacy.updated_at, excluded.updated_at)
         "#,
-        user_id,
-        now,
     )
+    .bind(user_id)
     .execute(&mut *tx)
     .await?;
     if restarting {
-        sqlx::query("UPDATE core.user_privacy SET updated_at=clock_timestamp() WHERE user_id=$1")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
         restart_guide_after_opt_in_tx(&mut tx, user_id).await?;
     }
     tx.commit().await?;

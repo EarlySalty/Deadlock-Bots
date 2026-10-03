@@ -60,16 +60,17 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         .unwrap();
     sqlx::raw_sql("CREATE SCHEMA core; CREATE SCHEMA brain; CREATE SCHEMA bot;
         CREATE TABLE core.user_privacy(user_id BIGINT PRIMARY KEY,opted_out BOOLEAN NOT NULL,deleted_at TIMESTAMPTZ,reason TEXT,updated_at TIMESTAMPTZ NOT NULL);
-        CREATE TABLE brain.guide_subjects(guild_id TEXT,user_id TEXT,epoch BIGINT,memory_enabled BOOLEAN,contact_enabled BOOLEAN,globally_opted_out BOOLEAN,deleted BOOLEAN,profile_json JSONB,history_json JSONB,min_event_id BIGINT DEFAULT 0,updated_at TIMESTAMPTZ,PRIMARY KEY(guild_id,user_id));
+        CREATE TABLE brain.guide_subjects(guild_id TEXT,user_id TEXT,epoch BIGINT DEFAULT 0,memory_enabled BOOLEAN DEFAULT false,contact_enabled BOOLEAN DEFAULT false,globally_opted_out BOOLEAN DEFAULT false,deleted BOOLEAN DEFAULT false,profile_json JSONB DEFAULT '{}',history_json JSONB DEFAULT '[]',min_event_id BIGINT DEFAULT 0,updated_at TIMESTAMPTZ DEFAULT now(),PRIMARY KEY(guild_id,user_id));
         CREATE TABLE brain.guide_legacy_imports(guild_id TEXT,user_id TEXT,PRIMARY KEY(guild_id,user_id));
-        CREATE TABLE brain.guide_turn_claims(user_id TEXT);
+        CREATE TABLE brain.guide_turn_claims(guild_id TEXT,user_id TEXT,request_id TEXT,state TEXT,PRIMARY KEY(guild_id,user_id,request_id));
+        CREATE TABLE core.guide_test_consent_boundary(first_min_event_id BIGINT NOT NULL);
         CREATE TABLE brain.guide_conversations(user_id TEXT);
         CREATE TABLE brain.guide_feedback_drafts(user_id TEXT);
         CREATE TABLE brain.guide_feedback_outbox(guild_id TEXT,user_id TEXT,delivery_id TEXT,destination_channel_id TEXT,text TEXT,state TEXT,expires_at TIMESTAMPTZ);
         CREATE TABLE bot.serverguide_feedback_deliveries(delivery_id TEXT PRIMARY KEY,user_id BIGINT,sent_message_id BIGINT);
         INSERT INTO core.user_privacy VALUES(5,true,now(),'delete',now());
         INSERT INTO brain.guide_subjects VALUES('100','5',7,false,false,true,true,'{}','[]',0,now());
-        INSERT INTO brain.guide_turn_claims VALUES('5');
+        INSERT INTO brain.guide_turn_claims VALUES('100','5','old-request','claimed');
         INSERT INTO brain.guide_conversations VALUES('5');
         INSERT INTO brain.guide_feedback_drafts VALUES('5');
         INSERT INTO brain.guide_feedback_outbox VALUES('100','5','old','500','Altes synthetisches Anliegen','pending',now()+interval '10 minutes');
@@ -80,6 +81,29 @@ async fn wiedereinwilligung_ablauf_und_zustellfehler_im_echten_pg_pfad() {
         .unwrap()
         .as_secs() as i64;
     set_opt_in(&pool, 5, now).await.unwrap();
+    sqlx::query("INSERT INTO core.guide_test_consent_boundary SELECT ((floor(extract(epoch from updated_at)*1000)::bigint+1)-1420070400000)*4194304 FROM core.user_privacy WHERE user_id=5")
+        .execute(&pool).await.unwrap();
+    let first_consent: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id=5")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM brain.guide_subjects WHERE guild_id='101' AND user_id='5'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    set_opt_in(&pool, 5, 0).await.unwrap();
+    let later_consent: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT updated_at FROM core.user_privacy WHERE user_id=5")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(later_consent >= first_consent);
     let state:(i64,bool,bool,bool,bool,Value,Value,i64)=sqlx::query_as("SELECT epoch,memory_enabled,contact_enabled,globally_opted_out,deleted,profile_json,history_json,min_event_id FROM brain.guide_subjects WHERE user_id='5'").fetch_one(&pool).await.unwrap();
     assert_eq!(state.0, 8);
     assert!(!state.1 && !state.2 && !state.3 && !state.4);
