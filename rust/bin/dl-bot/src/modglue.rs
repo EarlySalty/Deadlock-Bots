@@ -398,6 +398,12 @@ impl BrainDirectReplyPort for DiscordAdapter {
         let Some(member) = guild.members.get(&UserId::new(event.author_id)) else {
             return false;
         };
+        if member
+            .communication_disabled_until
+            .is_some_and(|until| until > serenity::all::Timestamp::now())
+        {
+            return false;
+        }
         guild.user_permissions_in(channel, member).contains(
             Permissions::VIEW_CHANNEL
                 | Permissions::READ_MESSAGE_HISTORY
@@ -4321,6 +4327,49 @@ mod tests {
         );
         handler.answerer = answerer.clone();
         (handler, answerer)
+    }
+
+    #[tokio::test]
+    async fn direkter_zustellpfad_prueft_personenrechte_und_aktiven_timeout() {
+        for (timeout_offset, permissions, allowed) in [
+            (None, Permissions::all(), true),
+            (Some(3600), Permissions::all(), false),
+            (Some(-3600), Permissions::all(), true),
+            (None, Permissions::VIEW_CHANNEL, false),
+        ] {
+            let adapter = DiscordAdapter::new("test-token");
+            let cache = Arc::new(serenity::all::Cache::new());
+            let mut guild = serenity::all::Guild::default();
+            guild.id = GuildId::new(1);
+            guild.owner_id = UserId::new(99);
+            let mut channel = serenity::all::GuildChannel::default();
+            channel.id = ChannelId::new(1);
+            channel.guild_id = guild.id;
+            guild.channels.insert(channel.id, channel);
+            let mut role = serenity::all::Role::default();
+            role.id = RoleId::new(1);
+            role.permissions = permissions;
+            guild.roles.insert(role.id, role);
+            let mut member = serenity::all::Member::default();
+            member.user.id = UserId::new(3);
+            member.communication_disabled_until = timeout_offset.map(|offset| {
+                serenity::all::Timestamp::from_unix_timestamp(
+                    serenity::all::Timestamp::now().unix_timestamp() + offset,
+                )
+                .expect("Testzeitpunkt")
+            });
+            guild.members.insert(member.user.id, member);
+            let mut update: serenity::all::GuildCreateEvent =
+                serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
+                    .expect("Testcacheereignis");
+            cache.update(&mut update);
+            adapter.link_cache(cache);
+            let event = test_message_event(Some(1), "<@42> Frage");
+            assert_eq!(adapter.can_reply(&event).await, allowed);
+            let mut unknown = event;
+            unknown.author_id = 4;
+            assert!(!adapter.can_reply(&unknown).await);
+        }
     }
 
     #[tokio::test]
