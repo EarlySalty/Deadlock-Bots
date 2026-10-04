@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::time::Instant;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -25,7 +25,60 @@ pub struct BrainConfig {
     pub cooldown_secs: u64,
 }
 
-pub type BrainCooldowns = Mutex<HashMap<u64, Instant>>;
+#[derive(Default)]
+pub struct BrainCooldowns {
+    legacy: Mutex<HashMap<u64, Instant>>,
+    discord: Mutex<DiscordRateState>,
+}
+
+impl BrainCooldowns {
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, HashMap<u64, Instant>> {
+        self.legacy.lock().await
+    }
+}
+
+#[derive(Default)]
+struct DiscordRateState {
+    users: HashMap<u64, Instant>,
+    channels: HashMap<u64, VecDeque<Instant>>,
+    day: u64,
+    daily_count: usize,
+}
+
+impl DiscordRateState {
+    fn reserve(&mut self, user_id: u64, channel_id: u64, now: Instant, utc: Duration) -> bool {
+        self.users
+            .retain(|_, last| now.saturating_duration_since(*last) < Duration::from_secs(60));
+        self.channels.retain(|_, times| {
+            while times.front().is_some_and(|last| {
+                now.saturating_duration_since(*last) >= Duration::from_secs(3600)
+            }) {
+                times.pop_front();
+            }
+            !times.is_empty()
+        });
+        let day = utc.as_secs() / 86400;
+        if self.day != day {
+            self.day = day;
+            self.daily_count = 0;
+        }
+        if user_id == 0
+            || channel_id == 0
+            || self.users.contains_key(&user_id)
+            || self
+                .channels
+                .get(&channel_id)
+                .is_some_and(|times| times.len() >= 20)
+            || self.daily_count >= 500
+        {
+            return false;
+        }
+        self.users.insert(user_id, now);
+        self.channels.entry(channel_id).or_default().push_back(now);
+        self.daily_count += 1;
+        true
+    }
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum BrainError {
@@ -37,6 +90,52 @@ pub enum BrainError {
 pub trait AiAnswerer: Send + Sync {
     /// Führt Retrieval und genau eine gemeinsame Generierung aus.
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
+
+    async fn answer_for_discord(
+        &self,
+        _question: &str,
+        _user_id: u64,
+    ) -> Result<BrainOutcome, BrainError> {
+        Err(BrainError::Backend(
+            "Discord-Kontext für diesen Consumer nicht verfügbar".into(),
+        ))
+    }
+}
+
+pub async fn handle_discord_query(
+    question: &str,
+    user_id: u64,
+    channel_id: u64,
+    max_question_len: usize,
+    cooldowns: &BrainCooldowns,
+    answerer: &dyn AiAnswerer,
+) -> Option<BrainOutcome> {
+    let Ok(utc) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return None;
+    };
+    if !cooldowns
+        .discord
+        .lock()
+        .await
+        .reserve(user_id, channel_id, Instant::now(), utc)
+    {
+        return None;
+    }
+    let question = question.trim();
+    if question.is_empty() {
+        return Some(BrainOutcome::Usage);
+    }
+    let len = question.chars().count();
+    if len > max_question_len {
+        return Some(BrainOutcome::TooLong { len });
+    }
+    Some(match answerer.answer_for_discord(question, user_id).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::warn!("Discord-Brain-Anfrage fehlgeschlagen");
+            BrainOutcome::BackendError
+        }
+    })
 }
 
 pub async fn handle_brain_query(
@@ -167,6 +266,101 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn discord_limits_reservieren_nutzer_vor_dem_aufruf_auch_kanaluebergreifend() {
+        let mut state = DiscordRateState::default();
+        let now = Instant::now();
+        let utc = Duration::from_secs(86400);
+        assert!(state.reserve(1, 1, now, utc));
+        assert!(!state.reserve(1, 2, now, utc));
+        assert!(state.reserve(1, 2, now + Duration::from_secs(60), utc));
+        assert_eq!(state.daily_count, 2);
+    }
+
+    #[test]
+    fn discord_limits_zaehlen_zwanzig_pro_kanal_und_stunde() {
+        let mut state = DiscordRateState::default();
+        let now = Instant::now();
+        let utc = Duration::from_secs(86400);
+        for user in 1..=20 {
+            assert!(state.reserve(user, 1, now, utc));
+        }
+        assert!(!state.reserve(21, 1, now, utc));
+        assert!(state.reserve(21, 2, now, utc));
+        assert!(state.reserve(22, 1, now + Duration::from_secs(3600), utc));
+    }
+
+    #[test]
+    fn discord_limits_zaehlen_fuenfhundert_pro_utc_tag() {
+        let mut state = DiscordRateState::default();
+        let now = Instant::now();
+        let utc = Duration::from_secs(86400);
+        for user in 1..=500 {
+            assert!(state.reserve(user, user, now, utc));
+        }
+        assert!(!state.reserve(501, 501, now, utc));
+        assert!(state.reserve(501, 501, now, utc + Duration::from_secs(86400)));
+    }
+
+    #[tokio::test]
+    async fn discord_verwendet_keinen_alten_antwortweg_als_ersatz() {
+        let answerer = CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        let cooldowns = BrainCooldowns::default();
+        assert_eq!(
+            handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer).await,
+            Some(BrainOutcome::BackendError)
+        );
+        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn parallele_discord_frage_wird_vor_der_ersten_antwort_begrenzt() {
+        struct WaitingAnswerer {
+            started: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl AiAnswerer for WaitingAnswerer {
+            async fn answer(&self, _question: &str) -> Result<BrainOutcome, BrainError> {
+                Err(BrainError::Backend("Altweg unzulässig".into()))
+            }
+            async fn answer_for_discord(
+                &self,
+                _question: &str,
+                _user_id: u64,
+            ) -> Result<BrainOutcome, BrainError> {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(BrainOutcome::Answer("Antwort".into()))
+            }
+        }
+        let answerer = WaitingAnswerer {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        };
+        let limits = BrainCooldowns::default();
+        let (first, second) = tokio::join!(
+            handle_discord_query("Erste Frage", 3, 4, 300, &limits, &answerer),
+            async {
+                answerer.started.notified().await;
+                let result =
+                    handle_discord_query("Zweite Frage", 3, 5, 300, &limits, &answerer).await;
+                answerer.release.notify_one();
+                result
+            }
+        );
+        assert_eq!(first, Some(BrainOutcome::Answer("Antwort".into())));
+        assert!(second.is_none());
+    }
 
     struct CountingAnswerer {
         calls: AtomicUsize,
