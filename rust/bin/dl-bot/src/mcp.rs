@@ -41,7 +41,7 @@ pub struct McpState {
     auth_token: String,
     default_guild: Option<String>,
     export_dir: PathBuf,
-    public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool)>,
+    public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool, u64)>,
     public_cache: tokio::sync::Mutex<Option<public::CachedFacts>>,
 }
 
@@ -73,8 +73,13 @@ impl McpState {
         })
     }
 
-    pub fn with_public_source(mut self, adapter: Arc<dl_discord::DiscordAdapter>, pool: sqlx::PgPool) -> Self {
-        self.public_source = Some((adapter, pool));
+    pub fn with_public_source(
+        mut self,
+        adapter: Arc<dl_discord::DiscordAdapter>,
+        pool: sqlx::PgPool,
+        guild_id: u64,
+    ) -> Self {
+        self.public_source = Some((adapter, pool, guild_id));
         self
     }
 

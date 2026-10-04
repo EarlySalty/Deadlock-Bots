@@ -1457,7 +1457,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mcp_state = Arc::new(
         mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?
-            .with_public_source(adapter.clone(), central_pool.clone()),
+            .with_public_source(adapter.clone(), central_pool.clone(), our_guild_id),
     );
     let mcp_addr = mcp::McpState::bind_addr(&operating.runtime.start);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
