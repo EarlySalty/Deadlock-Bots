@@ -715,6 +715,29 @@ mod discord_brain_secret_tests {
     use std::process::{Command, Stdio};
 
     #[test]
+    fn discord_brain_betriebsfelder_bleiben_geschuetzt_und_ohne_werteexport() {
+        let config = crate::bot_config::BotConfig::parse(
+            "schema_version=1\n[runtime.ai]\nbrain_api_endpoint='http://127.0.0.1:12345'\nbrain_api_timeout_ms=65000\nbrain_retrieval_url='http://127.0.0.1:12345'\n[runtime.community]\nbrain_help_channel_id=456\n[runtime.start]\nmcp_verified_role_id=123\n",
+        ).expect("Normale Testkonfiguration");
+        let catalog = crate::admin_settings::catalog(&config);
+        for path in [
+            "runtime.ai.brain_api_endpoint",
+            "runtime.ai.brain_api_timeout_ms",
+            "runtime.ai.brain_retrieval_url",
+            "runtime.community.brain_help_channel_id",
+            "runtime.start.mcp_verified_role_id",
+        ] {
+            let field = catalog
+                .fields
+                .iter()
+                .find(|field| field.path == path)
+                .expect("Vollständiger Katalog");
+            assert!(!field.writable, "{path}");
+            assert!(!catalog.values.contains_key(path), "{path}");
+        }
+    }
+
+    #[test]
     fn beide_discord_zugaenge_stammen_getrennt_aus_dem_privaten_snapshot() {
         let directory = tempfile::tempdir().expect("Privater Testordner");
         std::fs::write(directory.path().join("infisical.json"),
