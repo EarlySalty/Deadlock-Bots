@@ -378,6 +378,23 @@ fn public_channels(channels: &[Value], access: &Access) -> Vec<Value> {
     result
 }
 
+fn join_channel_ids(
+    channels: &[Value],
+    config: &dl_voice::tempvoice::TempVoiceConfig,
+) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for channel in channels {
+        let id = channel["id"]
+            .as_str()
+            .context("Kanal-ID fehlt")?
+            .parse::<u64>()?;
+        if config.staging_channels.contains(&id) || id == dl_voice::router::ROUTER_VC_ID {
+            ids.push(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
 fn info_key(key: &str) -> bool {
     matches!(
         key,
@@ -626,6 +643,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
     }
     let mut tempvoice = TempVoice::default();
     if let Some(engine) = &st.public_tempvoice {
+        tempvoice.join_channel_ids = join_channel_ids(&channels, &engine.config)?;
         for channel in &channels {
             let id = channel["id"]
                 .as_str()
@@ -633,9 +651,6 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
                 .parse::<u64>()?;
             if engine.config.tempvoice_categories.contains(&id) {
                 tempvoice.category_ids.push(id.to_string());
-            }
-            if engine.config.staging_channels.contains(&id) {
-                tempvoice.join_channel_ids.push(id.to_string());
             }
             if let Some(mode) = engine.lane_mode(id).await {
                 let count = voice
@@ -668,6 +683,44 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_und_staging_einstiege_verlangen_erlaubte_sicht() {
+        let config = dl_voice::tempvoice::TempVoiceConfig::production();
+        let staging = *config.staging_channels.iter().min().expect("Staging-ID");
+        let router = dl_voice::router::ROUTER_VC_ID;
+        let channels = vec![
+            json!({"id":router.to_string(),"type":2,"position":0,"permission_overwrites":[{"id":"1","type":0,"deny":VIEW.to_string(),"allow":"0"},{"id":"3","type":0,"deny":"0","allow":VIEW.to_string()}]}),
+            json!({"id":staging.to_string(),"type":2,"position":1,"permission_overwrites":[{"id":"1","type":0,"deny":VIEW.to_string(),"allow":"0"},{"id":"3","type":0,"deny":"0","allow":VIEW.to_string()}]}),
+            json!({"id":"20","type":2,"position":2,"permission_overwrites":[{"id":"3","type":0,"deny":"0","allow":VIEW.to_string()}]}),
+        ];
+        for user_id in [None, Some(42)] {
+            let access = Access {
+                user_id,
+                guild: "1".into(),
+                roles: vec!["3".into()],
+                base: HISTORY,
+                timed_out: false,
+            };
+            assert_eq!(
+                join_channel_ids(&public_channels(&channels, &access), &config)
+                    .expect("Erlaubte Einstiege"),
+                [router.to_string(), staging.to_string()]
+            );
+            assert!(join_channel_ids(
+                &public_channels(
+                    &channels,
+                    &Access {
+                        roles: Vec::new(),
+                        ..access
+                    }
+                ),
+                &config
+            )
+            .expect("Fehlende Sicht")
+            .is_empty());
+        }
+    }
 
     #[test]
     fn oeffentlicher_filter_schliesst_ticket_mod_und_private_kategorie_aus() {
