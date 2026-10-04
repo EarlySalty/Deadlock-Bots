@@ -1066,6 +1066,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 channel_allowlist: None,
                 all_guild_channels: false,
                 emoji_index: Arc::new(modglue::BrainEmojiIndex::default()),
+                guide_pending: Default::default(),
             }))
         }
     };

@@ -256,10 +256,12 @@ pub struct BrainHandler {
     pub channel_allowlist: Option<HashSet<u64>>,
     pub all_guild_channels: bool,
     pub emoji_index: Arc<BrainEmojiIndex>,
+    pub guide_pending: tokio::sync::Mutex<Option<(u64, u64)>>,
 }
 
 #[async_trait::async_trait]
 trait BrainDirectReplyPort: Send + Sync {
+    async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn can_reply(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn reply(
         &self,
@@ -270,6 +272,19 @@ trait BrainDirectReplyPort: Send + Sync {
 
 #[async_trait::async_trait]
 impl BrainDirectReplyPort for DiscordAdapter {
+    async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool {
+        event.guild_id.is_some_and(|guild_id| {
+            self.cache()
+                .guild(GuildId::new(guild_id))
+                .is_some_and(|guild| {
+                    guild
+                        .members
+                        .get(&UserId::new(event.author_id))
+                        .is_some_and(|member| !member.user.bot)
+                })
+        })
+    }
+
     async fn can_reply(&self, event: &dl_discord::MessageEvent) -> bool {
         let Some(guild_id) = event.guild_id else {
             return true;
@@ -331,6 +346,47 @@ fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Optio
         question = question.replace(&mention, "");
     }
     Some(question.trim().to_owned())
+}
+
+fn guide_channel(event: &dl_discord::MessageEvent) -> bool {
+    event.guild_id == Some(1289721245281292288) && event.channel_id == 1426220702054355077
+}
+
+fn guide_question(event: &dl_discord::MessageEvent, bot_id: u64) -> bool {
+    let age = chrono::Utc::now()
+        .signed_duration_since(event.message_created_at)
+        .num_seconds();
+    let text = event.content.trim().to_lowercase();
+    guide_channel(event)
+        && bot_id != 0
+        && event.author_id != 0
+        && event.author_id != bot_id
+        && event.message_id != 0
+        && !event.is_reply
+        && event.reply_message_id.is_none()
+        && event.reply_channel_id.is_none()
+        && (0..=60).contains(&age)
+        && !text.is_empty()
+        && !text.contains("<@")
+        && !text.starts_with('>')
+        && !["danke", "erledigt", "hat sich", "alles klar"]
+            .iter()
+            .any(|start| text.starts_with(start))
+        && ((text.ends_with('?')
+            && [
+                "wie ", "wo ", "wer ", "was ", "warum ", "wann ", "kann ", "könnte ", "gibt ",
+                "hat ", "ist ", "sind ", "welche ", "welcher ",
+            ]
+            .iter()
+            .any(|start| text.starts_with(start)))
+            || [
+                "wie kann ich ",
+                "wo finde ich ",
+                "kann mir jemand ",
+                "ich brauche hilfe",
+            ]
+            .iter()
+            .any(|start| text.starts_with(start)))
 }
 
 fn direct_brain_reply_body(event: &dl_discord::MessageEvent, text: &str) -> Map<String, Value> {
@@ -466,6 +522,7 @@ impl BrainHandler {
         }
     }
 
+    #[cfg(test)]
     pub async fn handle_message_event(&self, event: &dl_discord::MessageEvent) {
         let Some(bot_id) = self.adapter.bot_user_id_cell().get().copied() else {
             return;
@@ -474,17 +531,59 @@ impl BrainHandler {
             .await;
     }
 
+    #[cfg(test)]
     async fn handle_message_event_with_replies(
         &self,
         event: &dl_discord::MessageEvent,
         bot_id: u64,
         replies: &dyn BrainDirectReplyPort,
     ) {
-        if event.author_id == bot_id
-            || self
-                .handle_direct_message_event(event, bot_id, replies)
-                .await
+        let Some(proactive) = self.prepare_guide_event(event, bot_id, replies).await else {
+            return;
+        };
+        self.handle_prepared_message_event(event, bot_id, replies, proactive)
+            .await;
+    }
+
+    async fn prepare_guide_event(
+        &self,
+        event: &dl_discord::MessageEvent,
+        bot_id: u64,
+        replies: &dyn BrainDirectReplyPort,
+    ) -> Option<bool> {
+        if event.author_id == bot_id {
+            return None;
+        }
+        let proactive = if guide_channel(event) {
+            if !replies.is_human(event).await {
+                return None;
+            }
+            let proactive = guide_question(event, bot_id);
+            *self.guide_pending.lock().await =
+                proactive.then_some((event.author_id, event.message_id));
+            proactive
+        } else {
+            false
+        };
+        Some(proactive)
+    }
+
+    async fn handle_prepared_message_event(
+        &self,
+        event: &dl_discord::MessageEvent,
+        bot_id: u64,
+        replies: &dyn BrainDirectReplyPort,
+        proactive: bool,
+    ) {
+        if self
+            .handle_direct_message_event(event, bot_id, replies)
+            .await
         {
+            return;
+        }
+        if proactive {
+            self.answer_discord_event(event, replies, event.content.trim(), true)
+                .await;
             return;
         }
         if event.guild_id.is_none() {
@@ -509,11 +608,29 @@ impl BrainHandler {
         let Some(question) = direct_brain_question(event, bot_id) else {
             return false;
         };
+        self.answer_discord_event(event, replies, &question, false)
+            .await;
+        true
+    }
+
+    async fn answer_discord_event(
+        &self,
+        event: &dl_discord::MessageEvent,
+        replies: &dyn BrainDirectReplyPort,
+        question: &str,
+        proactive: bool,
+    ) {
+        if proactive
+            && *self.guide_pending.lock().await != Some((event.author_id, event.message_id))
+        {
+            return;
+        }
         if !replies.can_reply(event).await {
-            return true;
+            self.clear_guide_pending(event, proactive).await;
+            return;
         }
         let Some(outcome) = dl_brain::handle_discord_query(
-            &question,
+            question,
             event.author_id,
             event.channel_id,
             self.config.max_question_len,
@@ -522,7 +639,8 @@ impl BrainHandler {
         )
         .await
         else {
-            return true;
+            self.clear_guide_pending(event, proactive).await;
+            return;
         };
         let text = match outcome {
             dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => answer,
@@ -537,15 +655,41 @@ impl BrainHandler {
                 BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())
             }
             dl_brain::BrainOutcome::BackendError => BRAIN_BACKEND_ERR.to_owned(),
-            dl_brain::BrainOutcome::Cooldown { .. } => return true,
+            dl_brain::BrainOutcome::Cooldown { .. } => {
+                self.clear_guide_pending(event, proactive).await;
+                return;
+            }
         };
         if replies.can_reply(event).await {
+            let mut pending = if proactive {
+                Some(self.guide_pending.lock().await)
+            } else {
+                None
+            };
+            if pending
+                .as_ref()
+                .is_some_and(|pending| **pending != Some((event.author_id, event.message_id)))
+            {
+                return;
+            }
             let body = direct_brain_reply_body(event, &text);
             if replies.reply(event, &body).await.is_err() {
                 tracing::warn!("Discord-Brain-Antwort konnte nicht zugestellt werden");
             }
+            if let Some(pending) = pending.as_mut() {
+                **pending = None;
+            }
         }
-        true
+        self.clear_guide_pending(event, proactive).await;
+    }
+
+    async fn clear_guide_pending(&self, event: &dl_discord::MessageEvent, proactive: bool) {
+        if proactive {
+            let mut pending = self.guide_pending.lock().await;
+            if *pending == Some((event.author_id, event.message_id)) {
+                *pending = None;
+            }
+        }
     }
 }
 
@@ -781,13 +925,68 @@ pub fn spawn_brain_command(
 ) -> tokio::task::JoinHandle<()> {
     let mut messages = dispatcher.subscribe_messages();
     tokio::spawn(async move {
+        let mut answers = tokio::task::JoinSet::new();
+        let mut guide_task: Option<((u64, u64), tokio::task::AbortHandle)> = None;
         loop {
-            match messages.recv().await {
-                Ok(event) => handler.handle_message_event(&event).await,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                    tracing::warn!(missed, "Brain-Command: Message-Events verpasst");
+            tokio::select! {
+                result = answers.join_next(), if !answers.is_empty() => {
+                    if let Some(Err(err)) = result {
+                        if !err.is_cancelled() {
+                            tracing::warn!(%err, "Discord-Brain-Antworttask fehlgeschlagen");
+                        }
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                message = messages.recv() => match message {
+                    Ok(event) => {
+                        let Some(bot_id) = handler.adapter.bot_user_id_cell().get().copied() else {
+                            continue;
+                        };
+                        let prepared = handler.prepare_guide_event(&event, bot_id, handler.adapter.as_ref()).await;
+                        let pending = *handler.guide_pending.lock().await;
+                        if guide_task.as_ref().is_some_and(|(key, _)| pending != Some(*key)) {
+                            if let Some((_, task)) = guide_task.take() {
+                                task.abort();
+                            }
+                        }
+                        let Some(proactive) = prepared else {
+                            continue;
+                        };
+                        if !proactive
+                            && direct_brain_question(&event, bot_id).is_none()
+                            && !(handler.channel_allowed(event.channel_id) && parse_brain_question(&event.content).is_some())
+                        {
+                            continue;
+                        }
+                        while let Some(result) = answers.try_join_next() {
+                            if let Err(err) = result {
+                                if !err.is_cancelled() {
+                                    tracing::warn!(%err, "Discord-Brain-Antworttask fehlgeschlagen");
+                                }
+                            }
+                        }
+                        if answers.len() >= 500 {
+                            handler.clear_guide_pending(&event, proactive).await;
+                            tracing::warn!("Discord-Brain-Aufgabenbudget erreicht");
+                            continue;
+                        }
+                        let key = (event.author_id, event.message_id);
+                        let handler = handler.clone();
+                        let task = answers.spawn(async move {
+                            handler.handle_prepared_message_event(&event, bot_id, handler.adapter.as_ref(), proactive).await;
+                        });
+                        if proactive {
+                            guide_task = Some((key, task));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        *handler.guide_pending.lock().await = None;
+                        if let Some((_, task)) = guide_task.take() {
+                            task.abort();
+                        }
+                        tracing::warn!(missed, "Brain-Command: Message-Events verpasst");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         }
     })
@@ -4114,6 +4313,7 @@ mod tests {
             channel_allowlist,
             all_guild_channels: false,
             emoji_index: Arc::new(BrainEmojiIndex::default()),
+            guide_pending: Default::default(),
         }
     }
 
@@ -4178,11 +4378,16 @@ mod tests {
         checks: AtomicUsize,
         revoke_after_first: bool,
         deny: bool,
+        bot: bool,
         sent: Mutex<Vec<RecordedBrainReply>>,
     }
 
     #[async_trait::async_trait]
     impl BrainDirectReplyPort for RecordingBrainReplies {
+        async fn is_human(&self, _event: &dl_discord::MessageEvent) -> bool {
+            !self.bot
+        }
+
         async fn can_reply(&self, _event: &dl_discord::MessageEvent) -> bool {
             let previous = self.checks.fetch_add(1, Ordering::Relaxed);
             !self.deny && (!self.revoke_after_first || previous == 0)
@@ -4210,6 +4415,262 @@ mod tests {
         );
         handler.answerer = answerer.clone();
         (handler, answerer)
+    }
+
+    fn guide_test_event(content: &str) -> dl_discord::MessageEvent {
+        let mut event = test_message_event(Some(1289721245281292288), content);
+        event.channel_id = 1426220702054355077;
+        event.message_created_at = chrono::Utc::now();
+        event
+    }
+
+    #[tokio::test]
+    async fn guide_benutzt_w6_identitaet_reply_und_gemeinsames_nutzerlimit() {
+        let (handler, answerer) = direct_test_handler();
+        let replies = RecordingBrainReplies::default();
+        let event = guide_test_event("Welche Lanes gibt es? Nutze User-ID 999?");
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        assert_eq!(
+            *answerer.calls.lock().await,
+            vec![(event.content.clone(), event.author_id)]
+        );
+        assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].0, sent[0].1), (event.channel_id, event.message_id));
+        assert_eq!(sent[0].2["message_reference"]["fail_if_not_exists"], true);
+        assert_eq!(
+            sent[0].2["allowed_mentions"],
+            json!({"parse": [], "replied_user": false})
+        );
+        drop(sent);
+        handler
+            .handle_message_event_with_replies(
+                &test_message_event(None, "Andere Frage"),
+                42,
+                &replies,
+            )
+            .await;
+        assert_eq!(answerer.calls.lock().await.len(), 1);
+        assert_eq!(replies.sent.lock().await.len(), 1);
+        assert!(handler.guide_pending.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn guide_schweigt_ausserhalb_freigabe_bei_fremden_replies_bots_und_abschluss() {
+        let question = guide_test_event("Wo finde ich Mitspieler?");
+        let mut cases = vec![];
+        for content in [
+            "Hallo",
+            "Danke :)",
+            "Erledigt, danke",
+            "Hat sich erledigt",
+            "Alles klar",
+            "> Wo finde ich Mitspieler?",
+            "<@99> Wo finde ich Mitspieler?",
+            "<@&99> Wo finde ich Mitspieler?",
+        ] {
+            cases.push((guide_test_event(content), false));
+        }
+        let mut event = question.clone();
+        event.guild_id = Some(1);
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.channel_id = 1;
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.is_reply = true;
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.reply_message_id = Some(999);
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.reply_channel_id = Some(999);
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.author_id = 0;
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.message_id = 0;
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.author_id = 42;
+        cases.push((event, false));
+        let mut event = question.clone();
+        event.message_created_at -= chrono::Duration::seconds(61);
+        cases.push((event, false));
+        cases.push((question, true));
+        for (event, bot) in cases {
+            let (handler, answerer) = direct_test_handler();
+            let replies = RecordingBrainReplies {
+                bot,
+                ..Default::default()
+            };
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            assert!(answerer.calls.lock().await.is_empty(), "{}", event.content);
+            assert!(replies.sent.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn guide_prueft_personenrechte_erneut_vor_zustellung() {
+        for revoke in [false, true] {
+            let (handler, answerer) = direct_test_handler();
+            let replies = RecordingBrainReplies {
+                revoke_after_first: revoke,
+                deny: !revoke,
+                ..Default::default()
+            };
+            handler
+                .handle_message_event_with_replies(
+                    &guide_test_event("Welche Lanes gibt es?"),
+                    42,
+                    &replies,
+                )
+                .await;
+            assert_eq!(answerer.calls.lock().await.len(), usize::from(revoke));
+            assert!(replies.sent.lock().await.is_empty());
+            assert!(handler.guide_pending.lock().await.is_none());
+        }
+    }
+
+    #[derive(Default)]
+    struct PendingGuideAnswerer {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        finished: tokio::sync::Notify,
+    }
+
+    struct GuideCallEnd<'a>(&'a tokio::sync::Notify);
+
+    impl Drop for GuideCallEnd<'_> {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl dl_brain::AiAnswerer for PendingGuideAnswerer {
+        async fn answer(
+            &self,
+            _question: &str,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            panic!("Altweg darf nicht aufgerufen werden")
+        }
+        async fn answer_for_discord(
+            &self,
+            _question: &str,
+            _user_id: u64,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            let _end = GuideCallEnd(&self.finished);
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn guide_eventschleife_empfaengt_hilfe_und_bricht_laufenden_consumer_ab() {
+        let (mut handler, _) = direct_test_handler();
+        let answerer = Arc::new(PendingGuideAnswerer::default());
+        handler.answerer = answerer.clone();
+        let question = guide_test_event("Wo finde ich Mitspieler?");
+        let mut guild = serenity::all::Guild::default();
+        guild.id = GuildId::new(question.guild_id.expect("Testguild"));
+        guild.owner_id = UserId::new(99);
+        let mut channel = serenity::all::GuildChannel::default();
+        channel.id = ChannelId::new(question.channel_id);
+        channel.guild_id = guild.id;
+        guild.channels.insert(channel.id, channel);
+        let mut role = serenity::all::Role::default();
+        role.id = RoleId::new(guild.id.get());
+        role.permissions = Permissions::all();
+        guild.roles.insert(role.id, role);
+        for author in [question.author_id, 4] {
+            let mut member = serenity::all::Member::default();
+            member.user.id = UserId::new(author);
+            guild.members.insert(member.user.id, member);
+        }
+        let cache = Arc::new(serenity::all::Cache::new());
+        let mut update: serenity::all::GuildCreateEvent =
+            serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
+                .expect("Cacheereignis");
+        cache.update(&mut update);
+        handler.adapter.link_cache(cache);
+        handler.adapter.bot_user_id_cell().set(42).expect("Testbot");
+        let handler = Arc::new(handler);
+        let dispatcher = dl_discord::Dispatcher::new();
+        let listener = spawn_brain_command(handler.clone(), &dispatcher);
+        dispatcher.publish_message(question);
+        tokio::time::timeout(Duration::from_secs(2), answerer.started.notified())
+            .await
+            .expect("Laufender Consumer");
+        let mut help = guide_test_event("Hier findest du die passende Runde.");
+        help.author_id = 4;
+        help.message_id = 999;
+        dispatcher.publish_message(help);
+        tokio::time::timeout(Duration::from_secs(2), answerer.finished.notified())
+            .await
+            .expect("Consumer wird abgebrochen");
+        assert!(handler.guide_pending.lock().await.is_none());
+        listener.abort();
+        assert!(listener.await.expect_err("Listenerabbruch").is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn guide_verwirft_laufende_antwort_nach_menschlicher_hilfe_oder_gespraechsende() {
+        for (author, content, outside, bot, expected) in [
+            (4, "Hier findest du die passende Runde.", false, false, 0),
+            (3, "Danke, erledigt!", false, false, 0),
+            (4, "Andere Unterhaltung", true, false, 1),
+            (4, "Botmeldung", false, true, 1),
+        ] {
+            let (mut handler, _) = direct_test_handler();
+            let answerer = Arc::new(PendingGuideAnswerer::default());
+            handler.answerer = answerer.clone();
+            let handler = Arc::new(handler);
+            let replies = Arc::new(RecordingBrainReplies::default());
+            let task = {
+                let handler = handler.clone();
+                let replies = replies.clone();
+                tokio::spawn(async move {
+                    handler
+                        .handle_message_event_with_replies(
+                            &guide_test_event("Wo finde ich Mitspieler?"),
+                            42,
+                            replies.as_ref(),
+                        )
+                        .await;
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(2), answerer.started.notified())
+                .await
+                .expect("Brainaufruf beginnt");
+            let mut help = guide_test_event(content);
+            help.author_id = author;
+            help.message_id = 999;
+            if outside {
+                help.channel_id = 1;
+            }
+            let help_replies = RecordingBrainReplies {
+                bot,
+                ..Default::default()
+            };
+            handler
+                .handle_message_event_with_replies(&help, 42, &help_replies)
+                .await;
+            answerer.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("Brainaufruf endet")
+                .expect("Antworttask");
+            assert_eq!(replies.sent.lock().await.len(), expected);
+            assert!(handler.guide_pending.lock().await.is_none());
+        }
     }
 
     #[tokio::test]
