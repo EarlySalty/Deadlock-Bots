@@ -26,6 +26,8 @@ use dl_core::runtime_config::StartOptions;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+mod public;
+
 const DISCORD_API: &str = "https://discord.com/api/v10";
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
 const PAGE_DELAY_MS: u64 = 450;
@@ -39,6 +41,8 @@ pub struct McpState {
     auth_token: String,
     default_guild: Option<String>,
     export_dir: PathBuf,
+    public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool)>,
+    public_cache: tokio::sync::Mutex<Option<public::CachedFacts>>,
 }
 
 impl McpState {
@@ -64,7 +68,14 @@ impl McpState {
                 .mcp_export_dir
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("data/mcp_exports")),
+            public_source: None,
+            public_cache: tokio::sync::Mutex::new(None),
         })
+    }
+
+    pub fn with_public_source(mut self, adapter: Arc<dl_discord::DiscordAdapter>, pool: sqlx::PgPool) -> Self {
+        self.public_source = Some((adapter, pool));
+        self
     }
 
     pub fn bind_addr(config: &StartOptions) -> String {
@@ -234,6 +245,7 @@ async fn tools_call(st: &Arc<McpState>, params: &Value) -> Result<Value> {
         .unwrap_or_else(|| json!({}));
 
     let outcome = match name {
+        "public_server_facts" => public::facts(st, &args).await,
         "server_overview" => tool_server_overview(st, &args).await,
         "list_channels" => tool_list_channels(st, &args).await,
         "read_messages" => tool_read_messages(st, &args).await,
@@ -268,6 +280,11 @@ async fn tools_call(st: &Arc<McpState>, params: &Value) -> Result<Value> {
 
 fn tool_definitions() -> Value {
     json!([
+        {
+            "name": "public_server_facts",
+            "description": "Aktuelle öffentliche Kanalstruktur, Topics, Voice-Anzahlen ohne Namen und registrierte Infotexte unseres Bots. Sichtbarkeit wird für everyone geprüft; Cache 60 Sekunden.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
         {
             "name": "server_overview",
             "description": "Überblick über den Server: Guild-Infos, Rollen, Kategorien mit Channels, Member-Zahl.",
