@@ -1342,6 +1342,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         operating_value,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+    let coaching_wake = broker.coaching_wake.clone();
     let broker_host =
         operating_value("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let broker_addr = format!("{broker_host}:{}", cfg.ports.master_broker);
@@ -1664,7 +1665,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     }),
                     request_sink: Some(coaching_requests.clone()),
                 });
-                dl_community::coaching::spawn(sync, &dispatcher);
+                dl_community::coaching::spawn(sync, &dispatcher, coaching_wake.clone());
             }
             None => tracing::info!("Coaching-Sync inaktiv (kein interner Token)"),
         }
