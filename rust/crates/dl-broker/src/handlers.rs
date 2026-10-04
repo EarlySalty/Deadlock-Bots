@@ -2544,13 +2544,20 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn coaching_nudge_requires_token_and_notifies_wake() {
-        let state = test_state().unwrap();
-        let peer = ConnectInfo("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let state = test_state().expect("Broker-Testzustand");
+        let peer = ConnectInfo(
+            "127.0.0.1:12345"
+                .parse::<SocketAddr>()
+                .expect("Lokale Testadresse"),
+        );
         let missing =
             coaching_notifications_nudge(State(state.clone()), peer, HeaderMap::new()).await;
         assert_eq!(missing.status(), 401);
         let mut headers = HeaderMap::new();
-        headers.insert("X-Internal-Token", "wrong".parse().unwrap());
+        headers.insert(
+            "X-Internal-Token",
+            "wrong".parse().expect("Abgelehnter Testtoken"),
+        );
         let rejected = coaching_notifications_nudge(State(state.clone()), peer, headers).await;
         assert_eq!(rejected.status(), 401);
         assert!(tokio::time::timeout(
@@ -2560,13 +2567,16 @@ pub(crate) mod tests {
         .await
         .is_err());
         let mut headers = HeaderMap::new();
-        headers.insert("X-Internal-Token", "secret".parse().unwrap());
+        headers.insert(
+            "X-Internal-Token",
+            "secret".parse().expect("Gültiger Testtoken"),
+        );
         let response = coaching_notifications_nudge(State(state.clone()), peer, headers).await;
         assert_eq!(response.status(), 200);
         let bytes = axum::body::to_bytes(response.into_body(), 10000)
             .await
-            .unwrap();
-        let data: Value = serde_json::from_slice(&bytes).unwrap();
+            .expect("Broker-Antwort lesen");
+        let data: Value = serde_json::from_slice(&bytes).expect("Broker-Antwort als JSON");
         assert_eq!(data, json!({ "ok": true }));
         tokio::time::timeout(
             std::time::Duration::from_millis(1000),
@@ -2574,6 +2584,65 @@ pub(crate) mod tests {
         )
         .await
         .expect("Nudge weckt den Benachrichtigungslauf");
+    }
+
+    #[test]
+    #[ignore = "Echter Coaching-Aufruf über den vorhandenen privaten Launcher"]
+    fn coaching_nudge_live_ueber_privaten_launcher() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        dl_core::token_snapshot::load(std::path::Path::new(
+            "/home/nathanael/.config/deadlock-bots/bot.toml",
+        ))
+        .expect("Privater Betriebs-Snapshot");
+        let token = [
+            "MASTER_BROKER_TOKEN",
+            "MAIN_BOT_INTERNAL_TOKEN",
+            "TWITCH_INTERNAL_API_TOKEN",
+        ]
+        .into_iter()
+        .find_map(dl_core::token_snapshot::value)
+        .expect("Vorhandener Broker-Token");
+        assert!(!token.contains(['\r', '\n']), "Gültiger Broker-Header");
+        for authorized in [false, true] {
+            let mut stream = TcpStream::connect_timeout(
+                &"127.0.0.1:8770".parse().expect("Lokaler Broker"),
+                Duration::from_secs(5),
+            )
+            .expect("Laufenden Broker verbinden");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("Antwortfrist setzen");
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .expect("Anfragefrist setzen");
+            let authorization = if authorized {
+                format!("X-Internal-Token: {token}\r\n")
+            } else {
+                String::new()
+            };
+            let request = format!(
+                "POST /internal/master/v1/coaching/notifications-nudge HTTP/1.0\r\nHost: 127.0.0.1:8770\r\n{authorization}Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(request.as_bytes())
+                .expect("Broker aufrufen");
+            let mut bytes = Vec::new();
+            stream
+                .take(65536)
+                .read_to_end(&mut bytes)
+                .expect("Antwort lesen");
+            let response = std::str::from_utf8(&bytes).expect("HTTP-Antwort");
+            let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP-Grenze");
+            let status = headers.lines().next().expect("HTTP-Status");
+            assert!(status.contains(if authorized { " 200 " } else { " 401 " }));
+            if authorized {
+                let data: Value = serde_json::from_str(body).expect("Nudge-Antwort");
+                assert_eq!(data, json!({ "ok": true }));
+            }
+        }
     }
 
     pub(crate) fn test_state() -> Result<SharedBroker, String> {
