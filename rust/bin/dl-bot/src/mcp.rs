@@ -1310,21 +1310,41 @@ mod tests {
                 .expect("Testereignis");
         cache.update(&mut event);
         adapter.link_cache(cache);
-        let mock = Router::new().fallback(|request: axum::extract::Request| async move {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock_sends = sends.clone();
+        let mock = Router::new().fallback(move |request: axum::extract::Request| {
+            let sends = mock_sends.clone();
+            async move {
             let path = request.uri().path();
             if path.ends_with("/members/42") {
                 axum::Json(json!({"user":{"id":"42"},"roles":["3","4"]})).into_response()
             } else if path.ends_with("/members/43") {
                 axum::Json(json!({"user":{"id":"43"},"roles":["3"]})).into_response()
+            } else if matches!(path, "/guilds/1/members/44" | "/guilds/1/members/45" | "/guilds/1/members/46" | "/guilds/1/members/47") {
+                let user = path.rsplit('/').next().expect("Testmitglied");
+                let mut member = json!({"user":{"id":user},"roles":["3"]});
+                match user {
+                    "44" => member["communication_disabled_until"] = json!((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                    "45" => member["communication_disabled_until"] = json!((chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339()),
+                    "46" => member["communication_disabled_until"] = Value::Null,
+                    _ => {},
+                }
+                axum::Json(member).into_response()
             } else if path.contains("/members/") {
                 StatusCode::NOT_FOUND.into_response()
             } else if path.ends_with("/roles") {
                 axum::Json(json!([{"id":"1","permissions":"65536"},{"id":"3","permissions":"65536"},{"id":"4","permissions":"65536"}])).into_response()
+            } else if path == "/channels/13" {
+                axum::Json(json!({"guild_id":"1","type":0,"permission_overwrites":[{"id":"3","type":0,"deny":"0","allow":"3072"}]})).into_response()
             } else if matches!(path, "/channels/10" | "/channels/11" | "/channels/12") {
                 let (id, kind) = match path { "/channels/10" => ("3",0), "/channels/11" => ("4",0), _ => ("42",1) };
                 axum::Json(json!({"guild_id":"1","type":0,"permission_overwrites":[{"id":id,"type":kind,"deny":"0","allow":"1024"}]})).into_response()
+            } else if request.method() == axum::http::Method::POST && path == "/channels/13/messages" {
+                sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::Json(json!({"id":"101"})).into_response()
             } else {
                 axum::Json(json!([{"id":"100","content":"Nur für diese Antwort"}])).into_response()
+            }
             }
         });
         let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1353,6 +1373,26 @@ mod tests {
                 .expect("Testserver");
         });
         let client = reqwest::Client::new();
+        for (user, tool, status, send_count) in [
+            ("44", "send_message", 403, 0),
+            ("44", "read_messages", 200, 0),
+            ("45", "send_message", 200, 1),
+            ("46", "send_message", 200, 2),
+            ("47", "send_message", 200, 3),
+        ] {
+            let arguments = if tool == "send_message" {
+                json!({"channel_id":13,"content":"Test"})
+            } else {
+                json!({"channel_id":13})
+            };
+            let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id",user).header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).send().await.expect("HTTP-Antwort");
+            assert_eq!(response.status().as_u16(), status, "{user} {tool}");
+            assert_eq!(
+                sends.load(std::sync::atomic::Ordering::SeqCst),
+                send_count,
+                "{user} {tool}"
+            );
+        }
         for route in ["/mcp", "/mcp/public"] {
             for tool in [
                 "api_call",

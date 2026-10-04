@@ -85,6 +85,7 @@ pub(super) struct Access {
     guild: String,
     roles: Vec<String>,
     base: u64,
+    timed_out: bool,
 }
 
 pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result<Access> {
@@ -94,7 +95,7 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
         .mcp_verified_role_id
         .filter(|id| *id != 0 && *id != *guild_id)
         .context("Mitgliederrolle ist nicht konfiguriert")?;
-    let member_roles = if let Some(user) = requested_user {
+    let member = if let Some(user) = requested_user {
         discord_call(
             st,
             "GET",
@@ -106,16 +107,18 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
         .await
         .ok()
         .filter(|member| member["user"]["id"].as_str() == Some(user.to_string().as_str()))
-        .and_then(|member| member["roles"].as_array().cloned())
+    } else {
+        None
+    };
+    let member_roles = member
+        .as_ref()
+        .and_then(|member| member["roles"].as_array())
         .and_then(|roles| {
             roles
                 .iter()
                 .map(|role| role.as_str().map(str::to_owned))
                 .collect::<Option<Vec<_>>>()
-        })
-    } else {
-        None
-    };
+        });
     let raw_roles = discord_call(
         st,
         "GET",
@@ -146,6 +149,20 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
         bail!("Mitgliederrolle ist nicht eindeutig zulässig");
     }
     let user_id = member_roles.as_ref().and(requested_user);
+    let timed_out = match member
+        .as_ref()
+        .filter(|_| user_id.is_some())
+        .and_then(|member| member.get("communication_disabled_until"))
+    {
+        None | Some(Value::Null) => false,
+        Some(until) => {
+            chrono::DateTime::parse_from_rfc3339(
+                until.as_str().context("Timeout-Zeitpunkt ist ungültig")?,
+            )
+            .context("Timeout-Zeitpunkt ist ungültig")?
+                > chrono::Utc::now()
+        }
+    };
     let roles = member_roles.unwrap_or_else(|| vec![verified.to_string()]);
     let mut base = everyone;
     for role in &roles {
@@ -159,6 +176,7 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
         guild: guild_id.to_string(),
         roles,
         base,
+        timed_out,
     })
 }
 
@@ -194,6 +212,9 @@ fn effective_permissions(channel: &Value, access: &Access) -> Option<u64> {
     permissions = (permissions & !role_deny) | role_allow;
     if let Some((deny, allow)) = member {
         permissions = (permissions & !deny) | allow;
+    }
+    if access.timed_out {
+        permissions &= VIEW | HISTORY;
     }
     Some(permissions)
 }
@@ -664,6 +685,7 @@ mod tests {
             guild: "1".into(),
             roles: vec!["3".into()],
             base: VIEW | HISTORY,
+            timed_out: false,
         };
         let result = public_channels(&channels, &access);
         assert_eq!(
