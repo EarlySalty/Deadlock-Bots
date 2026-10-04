@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use serenity::all::{GuildId, RoleId};
 use sqlx::Row;
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     time::{Duration, Instant},
 };
 
@@ -79,6 +79,58 @@ fn info_key(key: &str) -> bool {
     })
 }
 
+struct StaticSource {
+    channel_id: u64,
+    prefix: String,
+    format_key: String,
+    format: &'static str,
+}
+
+impl StaticSource {
+    fn message_id(&self, key: &str, value: &str) -> Option<String> {
+        let suffix = key.strip_prefix(&self.prefix)?;
+        let index = suffix.parse::<usize>().ok()?;
+        let id = value.parse::<u64>().ok()?;
+        (suffix == index.to_string() && id != 0).then(|| id.to_string())
+    }
+}
+
+fn static_sources(guild: u64) -> Vec<StaticSource> {
+    use crate::serversync::{faq_publish, rang_guide_publish, regelwerk_publish, voice_ux_publish};
+    if guild != crate::serversync::GUILD_ID {
+        return Vec::new();
+    }
+    let mut sources = vec![
+        StaticSource {
+            channel_id: regelwerk_publish::REGELWERK_CHANNEL_ID,
+            prefix: regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX.into(),
+            format_key: regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY.into(),
+            format: regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+        },
+        StaticSource {
+            channel_id: faq_publish::FAQ_CHANNEL_ID,
+            prefix: faq_publish::FAQ_MESSAGE_ID_PREFIX.into(),
+            format_key: faq_publish::FAQ_PAYLOAD_FORMAT_KEY.into(),
+            format: faq_publish::FAQ_PAYLOAD_FORMAT,
+        },
+        StaticSource {
+            channel_id: rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+            prefix: rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX.into(),
+            format_key: rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY.into(),
+            format: rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+        },
+    ];
+    sources.extend(
+        voice_ux_publish::VOICE_UX_TARGET_CHANNEL_IDS.map(|channel_id| StaticSource {
+            channel_id,
+            prefix: voice_ux_publish::voice_ux_message_id_prefix(channel_id),
+            format_key: voice_ux_publish::voice_ux_payload_format_key(channel_id),
+            format: voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+        }),
+    );
+    sources
+}
+
 fn component_text(components: &Value, out: &mut Vec<String>) {
     if let Some(items) = components.as_array() {
         for item in items {
@@ -114,6 +166,13 @@ fn own_info(message: &Value, bot_id: &str) -> Option<String> {
         return None;
     }
     Some(text)
+}
+
+fn registered_info(message: &Value, bot_id: &str, channel: &str, id: &str) -> Option<String> {
+    if message["id"].as_str() != Some(id) || message["channel_id"].as_str() != Some(channel) {
+        return None;
+    }
+    own_info(message, bot_id)
 }
 
 pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
@@ -187,7 +246,7 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
     if refs.len() > 64 {
         bail!("Zu viele registrierte Bot-Infotexte für den begrenzten Live-Aufruf");
     }
-    let mut infos = Vec::new();
+    let mut references = BTreeSet::new();
     for reference in refs {
         let key: String = reference.try_get("message_key")?;
         if !info_key(&key) {
@@ -197,13 +256,40 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
         if !channels.iter().any(|c| c["id"].as_str() == Some(&id)) {
             continue;
         }
-        let Some(channel) = raw.iter().find(|c| c["id"].as_str() == Some(&id)) else {
-            continue;
-        };
-        if !everyone_permissions(channel, &guild_id, base).is_some_and(|p| p & HISTORY != 0) {
+        if !readable.iter().any(|c| c.as_str() == Some(&id)) {
             continue;
         }
         let message_id = reference.try_get::<i64, _>("message_id")?.to_string();
+        references.insert((id, message_id));
+    }
+    for source in static_sources(guild_number) {
+        let id = source.channel_id.to_string();
+        if !readable.iter().any(|c| c.as_str() == Some(&id)) {
+            continue;
+        }
+        if dl_central_db::kv::get(pool, "serversync", &source.format_key)
+            .await?
+            .as_deref()
+            != Some(source.format)
+        {
+            continue;
+        }
+        let stored = sqlx::query("SELECT k, v FROM bot.kv_store WHERE ns = 'serversync' AND starts_with(k, $1) ORDER BY k LIMIT 65")
+            .bind(&source.prefix).fetch_all(pool).await?;
+        if stored.len() > 64 {
+            bail!("Zu viele publizierte statische Bot-Infotexte");
+        }
+        for row in stored {
+            if let Some(message_id) = source.message_id(row.try_get("k")?, row.try_get("v")?) {
+                references.insert((id.clone(), message_id));
+            }
+        }
+    }
+    if references.len() > 64 {
+        bail!("Zu viele zugelassene Bot-Infotexte für den begrenzten Live-Aufruf");
+    }
+    let mut infos = Vec::new();
+    for (id, message_id) in references {
         let message = discord_call(
             st,
             "GET",
@@ -213,7 +299,7 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
             None,
         )
         .await?;
-        if let Some(text) = own_info(&message, &bot_id) {
+        if let Some(text) = registered_info(&message, &bot_id, &id, &message_id) {
             infos.push(json!({"channel_id": id, "message_id": message_id, "text": text}));
         }
     }
@@ -265,5 +351,43 @@ mod tests {
         assert!(own_info(&message, "2").is_none());
         assert!(!info_key("welcome:team"));
         assert!(!info_key("ticket"));
+    }
+
+    #[test]
+    fn statische_kv_ids_sind_an_publisher_guild_und_kanal_gebunden() {
+        let sources = static_sources(crate::serversync::GUILD_ID);
+        assert_eq!(sources.len(), 5);
+        assert!(static_sources(1).is_empty());
+        let source = sources
+            .iter()
+            .find(|s| s.prefix == "regelwerk_v2_message_id_")
+            .unwrap();
+        assert_eq!(
+            source.channel_id,
+            crate::serversync::regelwerk_publish::REGELWERK_CHANNEL_ID
+        );
+        assert_eq!(
+            source.message_id("regelwerk_v2_message_id_0", "12"),
+            Some("12".into())
+        );
+        for key in [
+            "regelwerk_v2_message_id_antwort",
+            "regelwerk_v2_message_id_0_user",
+            "welcome_message_id_0",
+            "regelwerk_v2_message_id_01",
+        ] {
+            assert_eq!(source.message_id(key, "12"), None);
+        }
+        assert_eq!(source.message_id("regelwerk_v2_message_id_0", "0"), None);
+        assert_eq!(
+            source.message_id("regelwerk_v2_message_id_0", "Nutzertext"),
+            None
+        );
+        let mut message = json!({"id":"12","channel_id":source.channel_id.to_string(),"author":{"id":"2","bot":true},"type":0,"mentions":[],"content":"Öffentliches Regelwerk"});
+        assert!(registered_info(&message, "2", &source.channel_id.to_string(), "12").is_some());
+        assert!(registered_info(&message, "2", "99", "12").is_none());
+        assert!(registered_info(&message, "2", &source.channel_id.to_string(), "13").is_none());
+        message["message_reference"] = json!({"message_id":"privat"});
+        assert!(registered_info(&message, "2", &source.channel_id.to_string(), "12").is_none());
     }
 }

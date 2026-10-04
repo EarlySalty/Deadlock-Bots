@@ -1,11 +1,11 @@
 #![allow(clippy::result_large_err)]
 
-mod faq_publish;
-mod rang_guide_publish;
-mod regelwerk_publish;
+pub(crate) mod faq_publish;
+pub(crate) mod rang_guide_publish;
+pub(crate) mod regelwerk_publish;
 mod support_publish;
 mod twitch_link;
-mod voice_ux_publish;
+pub(crate) mod voice_ux_publish;
 mod welcome_publish;
 
 use std::collections::BTreeMap;
