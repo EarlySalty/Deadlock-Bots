@@ -191,6 +191,8 @@ section!(AiOptions {
     brain_channels: Vec<u64> => "BRAIN_CHANNEL_ALLOWLIST",
     brain_cooldown_seconds: u64 => "BRAIN_COOLDOWN_SECS",
     brain_max_question_len: usize => "BRAIN_MAX_QUESTION_LEN",
+    brain_api_endpoint: String => "BRAIN_API_ENDPOINT",
+    brain_api_timeout_ms: u64 => "BRAIN_API_TIMEOUT_MS",
 });
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -258,6 +260,19 @@ impl RuntimeConfig {
             .ai
             .brain_max_question_len
             .is_some_and(|length| length == 0 || length > 65_536)
+        {
+            return Err(invalid());
+        }
+        if self
+            .ai
+            .brain_api_timeout_ms
+            .is_some_and(|ms| ms == 0 || ms > 120_000)
+            || (self.ai.brain_command_enabled == Some(true)
+                && self
+                    .ai
+                    .brain_api_endpoint
+                    .as_deref()
+                    .is_none_or(str::is_empty))
         {
             return Err(invalid());
         }
@@ -638,6 +653,12 @@ impl BotConfig {
 /// Unbekannte Namen sind keine heimlichen Betriebs-ENV-Overrides.
 pub fn secret_value(key: &str) -> Option<String> {
     match key {
+        "DISCORD_BRAIN_CLIENT_TOKEN" | "DISCORD_PUBLIC_FACTS_TOKEN" => {
+            crate::token_snapshot::value(key)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        }
         "DISCORD_TOKEN"
         | "DISCORD_TOKEN_RANKED"
         | "CHANGELOG_API_TOKEN"
@@ -686,4 +707,50 @@ pub fn lookup(key: &str) -> Option<String> {
             .snapshot()
             .runtime_value(key)
     })
+}
+
+#[cfg(test)]
+mod discord_brain_secret_tests {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn beide_discord_zugaenge_stammen_getrennt_aus_dem_privaten_snapshot() {
+        let directory = tempfile::tempdir().expect("Privater Testordner");
+        std::fs::write(directory.path().join("infisical.json"),
+            br#"{"secret_values_fd":3,"project_id":"fixture","environment":"fixture","secret_path":"/","socket_path":"/nonexistent","database_secret":"DEADLOCK_CENTRAL_DSN"}"#
+        ).expect("Private Testkonfiguration");
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exec 3<&0; exec \"$@\"", "private-fifo-test"])
+            .arg(std::env::current_exe().expect("Testbinary"))
+            .args(["--ignored", "--exact", "runtime_config::discord_brain_secret_tests::privater_discord_snapshot_im_kindprozess"])
+            .current_dir(directory.path())
+            .stdin(Stdio::piped())
+            .spawn().expect("Isolierter Testprozess");
+        child.stdin.take().expect("Testpipe").write_all(
+            br#"{"DEADLOCK_CENTRAL_DSN":"synthetic-dsn","DISCORD_BRAIN_CLIENT_TOKEN":"fixture-consumer","DISCORD_PUBLIC_FACTS_TOKEN":"fixture-public-facts","TWITCH_INTERNAL_API_TOKEN":"fixture-general"}"#
+        ).expect("Privater Testsnapshot");
+        assert!(child.wait().expect("Testprozess").success());
+    }
+
+    #[test]
+    #[ignore = "isolierter Kindprozess mit privater Testpipe"]
+    fn privater_discord_snapshot_im_kindprozess() {
+        for key in ["DISCORD_BRAIN_CLIENT_TOKEN", "DISCORD_PUBLIC_FACTS_TOKEN"] {
+            assert!(super::secret_value(key).is_none());
+        }
+        let path = std::env::current_dir()
+            .expect("Testordner")
+            .join("bot.toml");
+        crate::token_snapshot::load(&path).expect("Privater Testsnapshot");
+        assert_eq!(
+            super::secret_value("DISCORD_BRAIN_CLIENT_TOKEN").as_deref(),
+            Some("fixture-consumer")
+        );
+        assert_eq!(
+            super::secret_value("DISCORD_PUBLIC_FACTS_TOKEN").as_deref(),
+            Some("fixture-public-facts")
+        );
+        assert!(super::secret_value("RUST_LOG").is_none());
+    }
 }

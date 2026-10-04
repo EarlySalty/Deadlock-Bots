@@ -21,8 +21,9 @@ mod turnierglue;
 mod twitch_invites;
 mod vanity;
 
+#[cfg(test)]
+use std::collections::HashSet;
 use std::{
-    collections::HashSet,
     num::NonZeroU64,
     os::unix::fs::PermissionsExt,
     sync::{atomic::AtomicBool, Arc},
@@ -162,12 +163,6 @@ fn env_f64_default(name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn env_usize_default(name: &str, default: usize) -> usize {
-    env(name)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 /// Einziger Weg vom Bot zum Sprachmodell: Anbieterwahl und Compliance-Gate aus
 /// dl-ai, danach die TextGenerator-Bruecke. Jeder Ausgang wird geloggt, damit
 /// ein stiller Ausfall nicht wie "Feature aus" aussieht.
@@ -257,12 +252,29 @@ fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
     }
 }
 
-fn default_brain_bin() -> String {
-    "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
-}
-
+#[cfg(test)]
 fn brain_channel_allowlist_from_value(raw: Option<&str>) -> Option<HashSet<u64>> {
     raw.and_then(modglue::parse_brain_channel_allowlist)
+}
+
+fn discord_brain_answerer(
+    options: &dl_core::runtime_config::AiOptions,
+    token: Option<String>,
+) -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
+    let endpoint = options
+        .brain_api_endpoint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Brain-Endpunkt für direkte Discord-Antworten fehlt"))?;
+    let token = token
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Eigener Discord-Brain-Zugang fehlt"))?;
+    Ok(Arc::new(dl_brain::brain_api::BrainApiAnswerer::new(
+        endpoint,
+        &token,
+        std::time::Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(65_000)),
+        "dl-bot-discord".into(),
+        std::collections::BTreeSet::from(["bot.public".into()]),
+    )?))
 }
 
 async fn wait_for_gateway_cache_ready(
@@ -1031,74 +1043,30 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
-    // Brain-RAG: Slash-Command plus bestehender Textcommand über MessageEvent-Subscriber.
     let brain_handler = {
-        let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
-        let brain_bin_path = std::path::PathBuf::from(&brain_bin);
-        let enabled = env_bool_default("BRAIN_CMD_ENABLED", true);
+        let options = &operating.runtime.ai;
+        let enabled = options.brain_command_enabled.unwrap_or(false);
         if !enabled {
-            tracing::info!("Brain-Command deaktiviert (BRAIN_CMD_ENABLED)");
+            tracing::info!("Direkte Discord-Brain-Antworten deaktiviert");
             None
         } else {
-            let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
-            let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
-            let open_test_mode = env_bool_default("BRAIN_OPEN_TEST_MODE", false);
-            let channel_allowlist = if open_test_mode {
-                None
-            } else {
-                brain_channel_allowlist_from_value(
-                    operating_value("BRAIN_CHANNEL_ALLOWLIST").as_deref(),
-                )
-            };
-            if !open_test_mode && channel_allowlist.is_none() {
-                tracing::warn!(
-                    "Brain-Command deaktiviert: BRAIN_CHANNEL_ALLOWLIST fehlt, ist leer oder enthält eine ungültige oder 0 Channel-ID"
-                );
-                None
-            } else {
-                tracing::info!(
-                    cooldown_secs,
-                    max_question_len,
-                    open_test_mode,
-                    all_guild_channels = open_test_mode,
-                    channel_allowlist = channel_allowlist.as_ref().map_or(0, HashSet::len),
-                    "Brain-Command registriert"
-                );
-                let config = Arc::new(dl_brain::BrainConfig {
-                    max_question_len,
-                    cooldown_secs,
-                });
-                let emoji_catalog = std::path::PathBuf::from(
-                    operating_value("BRAIN_EMOJI_CATALOG").unwrap_or_else(|| {
-                        "/home/naniadm/Documents/Deadlock--Patchnotes-Bot/data/deadlock_catalog.json"
-                            .to_string()
-                    }),
-                );
-                let emoji_map = std::path::PathBuf::from(
-                    operating_value("BRAIN_EMOJI_MAP").unwrap_or_else(|| {
-                        "/home/naniadm/Documents/Deadlock--Patchnotes-Bot/data/emoji_map.json"
-                            .to_string()
-                    }),
-                );
-                let emoji_index =
-                    Arc::new(modglue::BrainEmojiIndex::load(&emoji_catalog, &emoji_map));
-                let answerer: Arc<dyn dl_brain::AiAnswerer> =
-                    Arc::new(modglue::SharedBrainAnswerer {
-                        engine: shared_answers.clone(),
-                        open_test_mode,
-                        brain_bin: brain_bin_path.clone(),
-                        emoji_index: emoji_index.clone(),
-                    });
-                Some(Arc::new(modglue::BrainHandler {
-                    adapter: adapter.clone(),
-                    config,
-                    cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                    answerer,
-                    channel_allowlist,
-                    all_guild_channels: open_test_mode,
-                    emoji_index,
-                }))
-            }
+            let answerer = discord_brain_answerer(
+                options,
+                dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN"),
+            )?;
+            tracing::info!("Direkte Discord-Brain-Antworten angeschlossen");
+            Some(Arc::new(modglue::BrainHandler {
+                adapter: adapter.clone(),
+                config: Arc::new(dl_brain::BrainConfig {
+                    max_question_len: options.brain_max_question_len.unwrap_or(300),
+                    cooldown_secs: 60,
+                }),
+                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                answerer,
+                channel_allowlist: None,
+                all_guild_channels: false,
+                emoji_index: Arc::new(modglue::BrainEmojiIndex::default()),
+            }))
         }
     };
     if let Some(handler) = &brain_handler {
@@ -2200,7 +2168,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     #[test]
-    fn alle_drei_wissenseingaenge_teilen_die_gegatete_antwortinstanz() {
+    fn direkte_discord_antworten_nutzen_den_eigenen_brain_consumer() {
         let source = include_str!("main.rs")
             .split("#[cfg(test)]\nmod tests")
             .next()
@@ -2209,8 +2177,10 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
         assert!(source.contains("FaqChat::with_answers("));
         assert!(source.contains("Concierge::with_answers("));
-        assert!(source.contains("SharedBrainAnswerer"));
-        assert_eq!(source.matches("shared_answers.clone()").count(), 4);
+        assert!(source.contains("discord_brain_answerer("));
+        assert!(source.contains("secret_value(\"DISCORD_BRAIN_CLIENT_TOKEN\")"));
+        assert!(!source.contains("SharedBrainAnswerer"));
+        assert_eq!(source.matches("shared_answers.clone()").count(), 3);
         assert!(source.contains("passive_help::GroundedHelpBackend"));
         assert!(!source.contains("BrainAiGlue"));
         assert!(!source.contains("chat_text_generator(dl_ai::LlmUseCase::Faq"));

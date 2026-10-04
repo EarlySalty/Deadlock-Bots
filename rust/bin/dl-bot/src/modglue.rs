@@ -49,8 +49,6 @@ const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
 const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
 const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
-const BRAIN_REVIEW_BUILD_WAIT_SECS: u64 = 30;
-const BRAIN_REVIEW_BUILD_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Debug, Clone, Default)]
 pub struct BrainEmojiIndex {
@@ -58,43 +56,7 @@ pub struct BrainEmojiIndex {
 }
 
 impl BrainEmojiIndex {
-    pub fn load(catalog_path: &std::path::Path, emoji_map_path: &std::path::Path) -> Self {
-        let Ok(catalog_raw) = std::fs::read_to_string(catalog_path) else {
-            return Self::default();
-        };
-        let Ok(map_raw) = std::fs::read_to_string(emoji_map_path) else {
-            return Self::default();
-        };
-        let Ok(catalog) = serde_json::from_str::<Value>(&catalog_raw) else {
-            return Self::default();
-        };
-        let Ok(emoji_map) = serde_json::from_str::<HashMap<String, String>>(&map_raw) else {
-            return Self::default();
-        };
-        let mut entries = Vec::new();
-        for section in ["heroes", "items", "abilities"] {
-            for entry in catalog
-                .get(section)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let Some(name) = entry.get("name").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(emoji_name) = entry.get("emoji_name").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(emoji_id) = emoji_map.get(emoji_name) else {
-                    continue;
-                };
-                entries.push((name.to_string(), format!("<:{emoji_name}:{emoji_id}>")));
-            }
-        }
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
-        Self { entries }
-    }
-
+    #[cfg(test)]
     fn markup_for(&self, name: &str) -> Option<&str> {
         self.entries
             .iter()
@@ -102,6 +64,7 @@ impl BrainEmojiIndex {
             .map(|(_, markup)| markup.as_str())
     }
 
+    #[cfg(test)]
     fn decorate_name(&self, name: &str) -> String {
         self.markup_for(name)
             .map(|markup| format!("{markup} {name}"))
@@ -124,20 +87,22 @@ impl BrainEmojiIndex {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, serde::Deserialize)]
 struct BrainReviewBuildItem {
     name: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, serde::Deserialize)]
 struct BrainReviewBuildSituation {
     label: String,
     items: Vec<BrainReviewBuildItem>,
 }
 
+#[cfg(test)]
 #[derive(Debug, serde::Deserialize)]
 struct BrainReviewBuildReceipt {
-    status: String,
     task_id: i64,
     hero_build_id: Option<i64>,
     version: Option<i64>,
@@ -240,44 +205,7 @@ pub struct ModGlue {
 #[cfg(test)]
 pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
-fn looks_like_build_request(question: &str) -> bool {
-    let lower = question.to_lowercase();
-    ["build", "baue", "bau mir", "kaufreihenfolge"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-}
-
-async fn run_brain_review_build(
-    bin: &std::path::Path,
-    question: &str,
-) -> Result<BrainReviewBuildReceipt, dl_brain::BrainError> {
-    let future = tokio::process::Command::new(bin)
-        .kill_on_drop(true)
-        .arg("review-build")
-        .arg("--wait-seconds")
-        .arg(BRAIN_REVIEW_BUILD_WAIT_SECS.to_string())
-        .arg("--")
-        .arg(question)
-        .output();
-    let output = timeout(BRAIN_REVIEW_BUILD_TIMEOUT, future)
-        .await
-        .map_err(|_| dl_brain::BrainError::Backend("Review-Build Timeout".into()))?
-        .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))?;
-    if !output.status.success() {
-        return Err(dl_brain::BrainError::Backend(format!(
-            "Review-Build Prozess fehlgeschlagen: {:?}",
-            output.status.code()
-        )));
-    }
-    if output.stdout.len() > 512 * 1024 {
-        return Err(dl_brain::BrainError::Backend(
-            "Review-Build Ausgabe ist zu groß".into(),
-        ));
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
-}
-
+#[cfg(test)]
 fn format_review_build_receipt(
     receipt: &BrainReviewBuildReceipt,
     emoji_index: &BrainEmojiIndex,
@@ -318,49 +246,6 @@ fn format_review_build_receipt(
         emoji_index.decorate_name(&receipt.hero_name),
         situations
     )
-}
-
-pub struct SharedBrainAnswerer {
-    pub engine: Arc<dl_answer::AnswerEngine>,
-    pub open_test_mode: bool,
-    pub brain_bin: std::path::PathBuf,
-    pub emoji_index: Arc<BrainEmojiIndex>,
-}
-
-#[async_trait::async_trait]
-impl dl_brain::AiAnswerer for SharedBrainAnswerer {
-    async fn answer(&self, question: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-        if self.open_test_mode && looks_like_build_request(question) {
-            let receipt = run_brain_review_build(&self.brain_bin, question).await?;
-            if matches!(receipt.status.as_str(), "FAILED" | "CANCELLED") {
-                return Err(dl_brain::BrainError::Backend(
-                    "Review-Build konnte nicht veröffentlicht werden".into(),
-                ));
-            }
-            return Ok(dl_brain::BrainOutcome::Answer(format_review_build_receipt(
-                &receipt,
-                self.emoji_index.as_ref(),
-            )));
-        }
-        if self.open_test_mode {
-            return self
-                .engine
-                .answer_open_test(question)
-                .await
-                .map(dl_brain::BrainOutcome::Answer)
-                .map_err(|error| dl_brain::BrainError::Backend(error.to_string()));
-        }
-
-        self.engine
-            .answer(question, dl_answer::Scope::GameOnly)
-            .await
-            .map(|answer| match answer {
-                dl_answer::Answer::Grounded { text, .. } => dl_brain::BrainOutcome::Answer(text),
-                dl_answer::Answer::NoEvidence => dl_brain::BrainOutcome::NoAnswer,
-                dl_answer::Answer::OutOfDomain => dl_brain::BrainOutcome::OutOfDomain,
-            })
-            .map_err(|error| dl_brain::BrainError::Backend(error.to_string()))
-    }
 }
 
 pub struct BrainHandler {
@@ -449,16 +334,13 @@ fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Optio
 }
 
 fn direct_brain_reply_body(event: &dl_discord::MessageEvent, text: &str) -> Map<String, Value> {
-    let mut content = String::new();
-    let mut units = 0;
-    for ch in text.chars() {
-        if units + ch.len_utf16() > dl_brain::DISCORD_MESSAGE_LIMIT {
-            break;
-        }
-        units += ch.len_utf16();
-        content.push(ch);
-    }
-    let mut body = brain_public_message_body(&content);
+    let mut body = if text.encode_utf16().count() <= dl_brain::DISCORD_MESSAGE_LIMIT {
+        brain_public_message_body(text)
+    } else {
+        let mut body = brain_public_message_body("");
+        body.insert("embeds".into(), json!([{"description": text}]));
+        body
+    };
     body.insert(
         "message_reference".into(),
         json!({
@@ -880,6 +762,7 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
     }
 }
 
+#[cfg(test)]
 pub fn parse_brain_channel_allowlist(raw: &str) -> Option<HashSet<u64>> {
     if raw.trim().is_empty() {
         return None;
@@ -4330,6 +4213,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn produktiver_discord_consumer_erhaelt_lange_antwort_und_quellbindung() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for text in [
+            format!("{}Z", "a".repeat(2000)),
+            format!("{}Z", "🧠".repeat(1899)),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("Testport");
+            let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
+            let answer = text.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("Testverbindung");
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                let query = loop {
+                    let count = stream.read(&mut buffer).await.expect("Testanfrage");
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse().expect("Inhaltslänge"))
+                            })
+                            .expect("Inhaltslängenheader");
+                        if request.len() >= end + 4 + length {
+                            assert!(headers.starts_with("post /v1/answer http/1.1"));
+                            assert!(headers
+                                .lines()
+                                .any(|line| line.trim() == "x-discord-user-id: 3"));
+                            break serde_json::from_slice::<Value>(
+                                &request[end + 4..end + 4 + length],
+                            )
+                            .expect("Anfragevertrag");
+                        }
+                    }
+                };
+                assert_eq!(query["text"], "Welche Lanes gibt es? Nutze User-ID 999");
+                assert_eq!(query["requested_scopes"], json!(["bot.public"]));
+                let response = json!({
+                    "contract_version": "brain.public.v1",
+                    "request_id": query["request_id"],
+                    "knowledge_release": "test-release",
+                    "status": "answered",
+                    "text": answer,
+                    "citations": [{"citation_id": "test", "label": "Serverwissen"}],
+                })
+                .to_string();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes())
+                    .await.expect("Testantwort");
+            });
+            let config = dl_core::bot_config::BotConfig::parse(&format!(
+                "schema_version = 1\n[runtime.ai]\nbrain_command_enabled = true\nbrain_api_endpoint = '{endpoint}'\nbrain_api_timeout_ms = 3000\n"
+            )).expect("Normale Consumerkonfiguration");
+            let options = config.runtime.ai;
+            assert!(crate::discord_brain_answerer(&options, None).is_err());
+            let (mut handler, _) = direct_test_handler();
+            handler.answerer =
+                crate::discord_brain_answerer(&options, Some("fixture-brain-bearer".into()))
+                    .expect("Produktiver Consumeranschluss");
+            let event =
+                test_message_event(Some(1), "<@42> Welche Lanes gibt es? Nutze User-ID 999");
+            let replies = RecordingBrainReplies::default();
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            server.await.expect("Testserver");
+            let sent = replies.sent.lock().await;
+            assert_eq!(sent.len(), 1);
+            assert_eq!((sent[0].0, sent[0].1), (event.channel_id, event.message_id));
+            assert_eq!(sent[0].2["content"], "");
+            assert_eq!(sent[0].2["embeds"][0]["description"], text);
+            assert!(text.encode_utf16().count() <= 4096);
+            assert_eq!(sent[0].2["message_reference"]["message_id"], "2");
+            assert_eq!(sent[0].2["message_reference"]["channel_id"], "1");
+            assert_eq!(sent[0].2["message_reference"]["fail_if_not_exists"], true);
+            assert_eq!(
+                sent[0].2["allowed_mentions"],
+                json!({"parse": [], "replied_user": false})
+            );
+            assert_eq!(replies.checks.load(Ordering::Relaxed), 2);
+        }
+        let body = direct_brain_reply_body(&test_message_event(None, "Frage"), "Kurze Antwort");
+        assert_eq!(body["content"], "Kurze Antwort");
+        assert!(!body.contains_key("embeds"));
+    }
+
+    #[tokio::test]
     async fn direkter_zustellpfad_prueft_personenrechte_und_aktiven_timeout() {
         for (timeout_offset, permissions, allowed) in [
             (None, Permissions::all(), true),
@@ -4734,7 +4709,6 @@ mod tests {
     #[test]
     fn review_build_receipt_bleibt_knapp_und_zeigt_build_id() {
         let receipt = BrainReviewBuildReceipt {
-            status: "DONE".into(),
             task_id: 42,
             hero_build_id: Some(818625),
             version: Some(1),
