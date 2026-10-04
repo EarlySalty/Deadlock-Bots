@@ -163,11 +163,15 @@ async fn public_post(
     let Ok(req) = serde_json::from_str::<Value>(&body) else {
         return json_response(StatusCode::BAD_REQUEST, json!({"error":"invalid_request"}));
     };
+    let request_id = headers
+        .get("x-discord-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|id| !id.is_empty() && id.len() <= 128);
     let user = headers
         .get("x-discord-user-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .filter(|id| *id != 0);
+        .filter(|id| *id != 0 && request_id.is_some());
     let result = match req["method"].as_str() {
         Some("tools/list") => {
             json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"}]})
@@ -407,7 +411,7 @@ fn tool_definitions() -> Value {
     json!([
         {
             "name": "public_server_facts",
-            "description": "Aktuelle öffentliche Kanalstruktur, Topics, Voice-Anzahlen ohne Namen und registrierte Infotexte unseres Bots. Sichtbarkeit wird für everyone geprüft; Cache 60 Sekunden.",
+            "description": "Aktuelle Kanalstruktur, Topics, Voice-Anzahlen ohne Namen und registrierte Infotexte unseres Bots aus der verifizierten Mitgliedersicht; Cache 60 Sekunden.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -1282,7 +1286,7 @@ mod tests {
 
     #[tokio::test]
     async fn brain_zugang_prueft_rechte_an_der_http_grenze() {
-        use serenity::all::{Cache, Guild, GuildId, Role, RoleId, Permissions};
+        use serenity::all::{Cache, Guild, GuildId, Permissions, Role, RoleId};
         let adapter = dl_discord::DiscordAdapter::new("synthetic-bot");
         let cache = Arc::new(Cache::new());
         let mut guild = Guild::default();
@@ -1301,45 +1305,90 @@ mod tests {
             let channel: serenity::all::GuildChannel = serde_json::from_value(json!({"id":id.to_string(),"guild_id":"1","name":"Kanal","type":0,"position":0,"permission_overwrites":overwrites})).expect("Testkanal");
             guild.channels.insert(channel.id, channel);
         }
-        let mut event: serenity::all::GuildCreateEvent = serde_json::from_value(serde_json::to_value(guild).expect("Testguild")).expect("Testereignis");
+        let mut event: serenity::all::GuildCreateEvent =
+            serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
+                .expect("Testereignis");
         cache.update(&mut event);
         adapter.link_cache(cache);
         let mock = Router::new().fallback(|request: axum::extract::Request| async move {
             let path = request.uri().path();
-            if path.ends_with("/members/42") { axum::Json(json!({"roles":["3","4"]})).into_response() }
-            else if path.ends_with("/members/43") { axum::Json(json!({"roles":["3"]})).into_response() }
-            else if path.contains("/members/") { StatusCode::NOT_FOUND.into_response() }
-            else { axum::Json(json!([{"id":"100","content":"Nur für diese Antwort"}])).into_response() }
+            if path.ends_with("/members/42") {
+                axum::Json(json!({"user":{"id":"42"},"roles":["3","4"]})).into_response()
+            } else if path.ends_with("/members/43") {
+                axum::Json(json!({"user":{"id":"43"},"roles":["3"]})).into_response()
+            } else if path.contains("/members/") {
+                StatusCode::NOT_FOUND.into_response()
+            } else if path.ends_with("/roles") {
+                axum::Json(json!([{"id":"1","permissions":"65536"},{"id":"3","permissions":"65536"},{"id":"4","permissions":"65536"}])).into_response()
+            } else if matches!(path, "/channels/10" | "/channels/11" | "/channels/12") {
+                let (id, kind) = match path { "/channels/10" => ("3",0), "/channels/11" => ("4",0), _ => ("42",1) };
+                axum::Json(json!({"guild_id":"1","type":0,"permission_overwrites":[{"id":id,"type":kind,"deny":"0","allow":"1024"}]})).into_response()
+            } else {
+                axum::Json(json!([{"id":"100","content":"Nur für diese Antwort"}])).into_response()
+            }
         });
-        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("Testlistener");
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Testlistener");
         let mock_addr = mock_listener.local_addr().expect("Testadresse");
-        let mock_task = tokio::spawn(async move { axum::serve(mock_listener, mock).await.expect("Testserver"); });
-        let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgresql:///synthetic").expect("Testpool");
-        let mut state = state(Some("general-only")).expect("Teststate").with_public_source(adapter, pool, 1);
+        let mock_task = tokio::spawn(async move {
+            axum::serve(mock_listener, mock).await.expect("Testserver");
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql:///synthetic")
+            .expect("Testpool");
+        let mut state = state(Some("general-only"))
+            .expect("Teststate")
+            .with_public_source(adapter, pool, 1);
         state.public_token = Some("brain-only".into());
         state.public_policy.mcp_verified_role_id = Some(3);
         state.discord_api = format!("http://{mock_addr}");
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("Testlistener");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Testlistener");
         let addr = listener.local_addr().expect("Testadresse");
-        let task = tokio::spawn(async move { axum::serve(listener, router(Arc::new(state))).await.expect("Testserver"); });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router(Arc::new(state)))
+                .await
+                .expect("Testserver");
+        });
         let client = reqwest::Client::new();
         for route in ["/mcp", "/mcp/public"] {
-            for tool in ["api_call", "export_category", "search_members", "delete_message"] {
+            for tool in [
+                "api_call",
+                "export_category",
+                "search_members",
+                "delete_message",
+            ] {
                 let response = client.post(format!("http://{addr}{route}")).bearer_auth("brain-only").json(&json!({"id":1,"method":"tools/call","params":{"name":tool,"arguments":{}}})).send().await.expect("HTTP-Antwort");
                 assert_eq!(response.status(), StatusCode::FORBIDDEN, "{route} {tool}");
             }
         }
         for (user, channel, tool, status) in [
-            ("43",11,"read_messages",403), ("42",11,"read_messages",200),
-            ("43",12,"read_messages",403), ("42",12,"read_messages",200),
-            ("999",10,"read_messages",200), ("999",11,"read_messages",403),
-            ("999",10,"send_message",403), ("43",10,"send_message",403),
+            ("43", 11, "read_messages", 403),
+            ("42", 11, "read_messages", 200),
+            ("43", 12, "read_messages", 403),
+            ("42", 12, "read_messages", 200),
+            ("999", 10, "read_messages", 200),
+            ("999", 11, "read_messages", 403),
+            ("999", 10, "send_message", 403),
+            ("43", 10, "send_message", 403),
         ] {
-            let arguments = if tool == "send_message" { json!({"channel_id":channel,"content":"Test"}) } else { json!({"channel_id":channel}) };
+            let arguments = if tool == "send_message" {
+                json!({"channel_id":channel,"content":"Test"})
+            } else {
+                json!({"channel_id":channel})
+            };
             let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id",user).header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).send().await.expect("HTTP-Antwort");
-            assert_eq!(response.status().as_u16(), status, "{user} {channel} {tool}");
+            assert_eq!(
+                response.status().as_u16(),
+                status,
+                "{user} {channel} {tool}"
+            );
         }
         let response = client.post(format!("http://{addr}/mcp")).bearer_auth("brain-only").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10}}})).send().await.expect("HTTP-Antwort");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","43").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10,"user_id":42}}})).send().await.expect("HTTP-Antwort");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         task.abort();
         mock_task.abort();

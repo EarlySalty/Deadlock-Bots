@@ -67,6 +67,76 @@ pub async fn values(path: &Path) -> Result<Vec<(String, Zeroizing<String>)>> {
     values_with_config(config).await
 }
 
+pub async fn ensure_discord_public_facts_secret(path: &Path) -> Result<()> {
+    let config = load_config(path)?;
+    let token = load_credential(&config)?;
+    let token = std::str::from_utf8(&token)
+        .map_err(|_| anyhow!("Infisical Credential ist ungültig"))?
+        .trim();
+    let client = uplink_infisical_transport::client_builder(&config.socket_path, 0)
+        .map_err(|message| anyhow!(message))?
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let name = "DISCORD_PUBLIC_FACTS_TOKEN";
+    let status = client
+        .get(format!(
+            "{}/api/v4/secrets/{name}",
+            uplink_infisical_transport::BASE_URL
+        ))
+        .query(&[
+            ("projectId", config.project_id.as_str()),
+            ("environment", config.environment.as_str()),
+            ("secretPath", config.secret_path.as_str()),
+            ("viewSecretValue", "false"),
+        ])
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| anyhow!("Infisical ist nicht erreichbar"))?
+        .status();
+    if status.is_success() {
+        return Ok(());
+    }
+    if status != reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!(
+            "Infisical Zugriff fehlgeschlagen (HTTP {})",
+            status.as_u16()
+        ));
+    }
+    let mut random = Zeroizing::new([0u8; 32]);
+    std::fs::File::open("/dev/urandom")?.read_exact(random.as_mut())?;
+    let value = Zeroizing::new(
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    let mut payload = Zeroizing::new(Vec::new());
+    serde_json::to_writer(
+        &mut *payload,
+        &serde_json::json!({"workspaceId":config.project_id,"environment":config.environment,"secretPath":config.secret_path,"type":"shared","secretValue":value.as_str()}),
+    )?;
+    let status = client
+        .post(format!(
+            "{}/api/v3/secrets/raw/{name}",
+            uplink_infisical_transport::BASE_URL
+        ))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(payload.to_vec())
+        .send()
+        .await
+        .map_err(|_| anyhow!("Infisical ist nicht erreichbar"))?
+        .status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Infisical Anlage fehlgeschlagen (HTTP {})",
+            status.as_u16()
+        ));
+    }
+    Ok(())
+}
+
 /// Betroffene Token-DB-Dienste akzeptieren ausschließlich den privaten FD3-
 /// Snapshot. Fehlende Metadaten dürfen keinen anderen Secrettransport wählen.
 pub fn private_values(path: &Path) -> Result<Vec<(String, Zeroizing<String>)>> {

@@ -231,6 +231,15 @@ fn insert_entries(values: &mut BTreeMap<String, String>, entries: Vec<SecretEntr
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    #[ignore = "Legt ausschließlich den eigenen engen Discord-Zugang im bestehenden Infisical an."]
+    async fn engen_discord_zugang_in_infisical_anlegen() {
+        dl_token_secrets::ensure_discord_public_facts_secret(std::path::Path::new(
+            "/etc/deadlock-brain/infisical.json",
+        ))
+        .await
+        .expect("Enger Infisical-Zugang");
+    }
     use super::*;
 
     fn fixture_config() -> Config {

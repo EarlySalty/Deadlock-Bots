@@ -413,6 +413,7 @@ impl RuntimeConfig {
             self.start.owner_id,
             self.start.command_guild_id,
             self.start.mcp_guild_id,
+            self.start.mcp_verified_role_id,
             self.bridges.matcher_guild_id,
             self.bridges.matcher_notify_channel_id,
             self.bridges.matcher_role_id,
