@@ -69,6 +69,7 @@ section!(StartOptions {
     mcp_port: u16 => "MCP_CONNECTOR_PORT",
     mcp_guild_id: u64 => "MCP_DEFAULT_GUILD_ID",
     mcp_export_dir: PathBuf => "MCP_EXPORT_DIR",
+    mcp_verified_role_id: u64 => "MCP_VERIFIED_ROLE_ID",
 });
 
 section!(BridgeOptions {

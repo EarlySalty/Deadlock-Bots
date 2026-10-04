@@ -38,7 +38,11 @@ const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"]
 pub struct McpState {
     http: reqwest::Client,
     bot_token: String,
+    discord_api: String,
     auth_token: String,
+    public_token: Option<String>,
+    public_policy: StartOptions,
+    public_tempvoice: Option<Arc<dl_voice::tempvoice::TempVoiceEngine>>,
     default_guild: Option<String>,
     export_dir: PathBuf,
     public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool, u64)>,
@@ -62,7 +66,11 @@ impl McpState {
         Ok(Self {
             http,
             bot_token,
+            discord_api: DISCORD_API.into(),
             auth_token,
+            public_token: None,
+            public_policy: config.clone(),
+            public_tempvoice: None,
             default_guild: config.mcp_guild_id.map(|id| id.to_string()),
             export_dir: config
                 .mcp_export_dir
@@ -86,11 +94,27 @@ impl McpState {
     pub fn bind_addr(config: &StartOptions) -> String {
         format!("127.0.0.1:{}", config.mcp_port.unwrap_or(8890))
     }
+
+    pub fn with_public_access(
+        mut self,
+        token: Option<String>,
+        engine: Arc<dl_voice::tempvoice::TempVoiceEngine>,
+    ) -> Result<Self> {
+        if let Some(token) = token {
+            if token.trim().is_empty() || constant_time_eq(&token, &self.auth_token) {
+                bail!("Öffentlicher MCP-Zugang benötigt einen eigenen Schlüssel");
+            }
+            self.public_token = Some(token);
+        }
+        self.public_tempvoice = Some(engine);
+        Ok(self)
+    }
 }
 
 pub fn router(state: Arc<McpState>) -> Router {
     Router::new()
         .route("/mcp", post(mcp_post).get(mcp_get))
+        .route("/mcp/public", post(public_post))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -116,6 +140,94 @@ fn auth_ok(st: &McpState, headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+fn public_auth(st: &McpState, headers: &HeaderMap) -> bool {
+    st.public_token.as_ref().is_some_and(|expected| {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split_once(' '))
+            .is_some_and(|(scheme, token)| {
+                scheme.eq_ignore_ascii_case("Bearer") && constant_time_eq(token.trim(), expected)
+            })
+    })
+}
+
+async fn public_post(
+    State(st): State<Arc<McpState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !public_auth(&st, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, json!({"error":"unauthorized"}));
+    }
+    let Ok(req) = serde_json::from_str::<Value>(&body) else {
+        return json_response(StatusCode::BAD_REQUEST, json!({"error":"invalid_request"}));
+    };
+    let user = headers
+        .get("x-discord-user-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|id| *id != 0);
+    let result = match req["method"].as_str() {
+        Some("tools/list") => {
+            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"}]})
+        }
+        Some("tools/call") if req["params"]["name"] == "public_server_facts" => {
+            let Ok(access) = public::access(&st, user).await else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            match public::facts_for(&st, &req["params"]["arguments"], &access).await {
+                Ok(facts) => {
+                    json!({"content":[{"type":"text","text":serde_json::to_string(&facts).expect("Fakten sind serialisierbar")}],"isError":false})
+                }
+                Err(_) => {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"error":"public_facts_unavailable"}),
+                    )
+                }
+            }
+        }
+        Some("tools/call")
+            if matches!(
+                req["params"]["name"].as_str(),
+                Some("read_messages" | "send_message")
+            ) =>
+        {
+            let request_id = headers
+                .get("x-discord-request-id")
+                .and_then(|v| v.to_str().ok())
+                .filter(|id| !id.is_empty() && id.len() <= 128);
+            if request_id.is_none() {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            }
+            let Ok(access) = public::access(&st, user).await else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            match public::request_tool(
+                &st,
+                req["params"]["name"].as_str().unwrap_or_default(),
+                &req["params"]["arguments"],
+                &access,
+            )
+            .await
+            {
+                Ok(value) => {
+                    json!({"content":[{"type":"text","text":value.to_string()}],"isError":false})
+                }
+                Err(_) => {
+                    return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}))
+                }
+            }
+        }
+        _ => return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"})),
+    };
+    json_response(
+        StatusCode::OK,
+        json!({"jsonrpc":"2.0","id":req["id"],"result":result}),
+    )
+}
+
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let left = Sha256::digest(a.as_bytes());
     let right = Sha256::digest(b.as_bytes());
@@ -126,6 +238,9 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 async fn mcp_get(State(st): State<Arc<McpState>>, headers: HeaderMap) -> Response {
+    if public_auth(&st, &headers) {
+        return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+    }
     if !auth_ok(&st, &headers) {
         return json_response(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
     }
@@ -137,6 +252,9 @@ async fn mcp_get(State(st): State<Arc<McpState>>, headers: HeaderMap) -> Respons
 }
 
 async fn mcp_post(State(st): State<Arc<McpState>>, headers: HeaderMap, body: String) -> Response {
+    if public_auth(&st, &headers) {
+        return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+    }
     if !auth_ok(&st, &headers) {
         return json_response(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
     }
@@ -250,7 +368,9 @@ async fn tools_call(st: &Arc<McpState>, params: &Value) -> Result<Value> {
         .unwrap_or_else(|| json!({}));
 
     let outcome = match name {
-        "public_server_facts" => public::facts(st, &args).await,
+        "public_server_facts" => public::facts(st, &args)
+            .await
+            .and_then(|facts| serde_json::to_value(facts).map_err(Into::into)),
         "server_overview" => tool_server_overview(st, &args).await,
         "list_channels" => tool_list_channels(st, &args).await,
         "read_messages" => tool_read_messages(st, &args).await,
@@ -386,7 +506,7 @@ async fn discord_call(
     body: Option<&Value>,
     audit_reason: Option<&str>,
 ) -> Result<Value> {
-    let url = format!("{DISCORD_API}{path}");
+    let url = format!("{}{path}", st.discord_api);
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
@@ -1159,6 +1279,71 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn brain_zugang_prueft_rechte_an_der_http_grenze() {
+        use serenity::all::{Cache, Guild, GuildId, Role, RoleId, Permissions};
+        let adapter = dl_discord::DiscordAdapter::new("synthetic-bot");
+        let cache = Arc::new(Cache::new());
+        let mut guild = Guild::default();
+        guild.id = GuildId::new(1);
+        for id in [1, 3, 4] {
+            let mut role = Role::default();
+            role.id = RoleId::new(id);
+            role.permissions = Permissions::READ_MESSAGE_HISTORY;
+            guild.roles.insert(role.id, role);
+        }
+        for (id, overwrites) in [
+            (10, json!([{"id":"3","type":0,"deny":"0","allow":"1024"}])),
+            (11, json!([{"id":"4","type":0,"deny":"0","allow":"1024"}])),
+            (12, json!([{"id":"42","type":1,"deny":"0","allow":"1024"}])),
+        ] {
+            let channel: serenity::all::GuildChannel = serde_json::from_value(json!({"id":id.to_string(),"guild_id":"1","name":"Kanal","type":0,"position":0,"permission_overwrites":overwrites})).expect("Testkanal");
+            guild.channels.insert(channel.id, channel);
+        }
+        let mut event: serenity::all::GuildCreateEvent = serde_json::from_value(serde_json::to_value(guild).expect("Testguild")).expect("Testereignis");
+        cache.update(&mut event);
+        adapter.link_cache(cache);
+        let mock = Router::new().fallback(|request: axum::extract::Request| async move {
+            let path = request.uri().path();
+            if path.ends_with("/members/42") { axum::Json(json!({"roles":["3","4"]})).into_response() }
+            else if path.ends_with("/members/43") { axum::Json(json!({"roles":["3"]})).into_response() }
+            else if path.contains("/members/") { StatusCode::NOT_FOUND.into_response() }
+            else { axum::Json(json!([{"id":"100","content":"Nur für diese Antwort"}])).into_response() }
+        });
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("Testlistener");
+        let mock_addr = mock_listener.local_addr().expect("Testadresse");
+        let mock_task = tokio::spawn(async move { axum::serve(mock_listener, mock).await.expect("Testserver"); });
+        let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgresql:///synthetic").expect("Testpool");
+        let mut state = state(Some("general-only")).expect("Teststate").with_public_source(adapter, pool, 1);
+        state.public_token = Some("brain-only".into());
+        state.public_policy.mcp_verified_role_id = Some(3);
+        state.discord_api = format!("http://{mock_addr}");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("Testlistener");
+        let addr = listener.local_addr().expect("Testadresse");
+        let task = tokio::spawn(async move { axum::serve(listener, router(Arc::new(state))).await.expect("Testserver"); });
+        let client = reqwest::Client::new();
+        for route in ["/mcp", "/mcp/public"] {
+            for tool in ["api_call", "export_category", "search_members", "delete_message"] {
+                let response = client.post(format!("http://{addr}{route}")).bearer_auth("brain-only").json(&json!({"id":1,"method":"tools/call","params":{"name":tool,"arguments":{}}})).send().await.expect("HTTP-Antwort");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{route} {tool}");
+            }
+        }
+        for (user, channel, tool, status) in [
+            ("43",11,"read_messages",403), ("42",11,"read_messages",200),
+            ("43",12,"read_messages",403), ("42",12,"read_messages",200),
+            ("999",10,"read_messages",200), ("999",11,"read_messages",403),
+            ("999",10,"send_message",403), ("43",10,"send_message",403),
+        ] {
+            let arguments = if tool == "send_message" { json!({"channel_id":channel,"content":"Test"}) } else { json!({"channel_id":channel}) };
+            let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id",user).header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).send().await.expect("HTTP-Antwort");
+            assert_eq!(response.status().as_u16(), status, "{user} {channel} {tool}");
+        }
+        let response = client.post(format!("http://{addr}/mcp")).bearer_auth("brain-only").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10}}})).send().await.expect("HTTP-Antwort");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        task.abort();
+        mock_task.abort();
+    }
 
     fn state(token: Option<&str>) -> Result<McpState> {
         McpState::from_config(

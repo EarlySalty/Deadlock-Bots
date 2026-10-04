@@ -21,6 +21,7 @@ changelog_port = 8899
 # Der MCP-Connector bindet fest an 127.0.0.1. Authentisierung nutzt einen
 # bestehenden TWITCH_INTERNAL_API_TOKEN aus Infisical; hier stehen nur Betriebswerte.
 mcp_port = 8890
+mcp_verified_role_id = 1304216250649415771
 
 [runtime.community]
 # Patenangebot im Discord-Onboarding. Für eine begrenzte Live-Probe hier

@@ -1,5 +1,6 @@
 use super::{discord_call, McpState};
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serenity::all::{GuildId, RoleId};
 use sqlx::Row;
@@ -11,37 +12,311 @@ use std::{
 const VIEW: u64 = 1 << 10;
 const HISTORY: u64 = 1 << 16;
 const ADMIN: u64 = 1 << 3;
+const SEND: u64 = 1 << 11;
 const TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Facts {
+    schema: String,
+    guild_id: String,
+    observed_at: String,
+    cache_seconds: u64,
+    audience: String,
+    channels: Vec<Channel>,
+    voice_counts: Vec<VoiceCount>,
+    bot_infos: Vec<BotInfo>,
+    tempvoice: TempVoice,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Channel {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    kind: u64,
+    topic: Option<String>,
+    position: i64,
+    parent_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct VoiceCount {
+    channel_id: String,
+    count: usize,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BotInfo {
+    channel_id: String,
+    message_id: String,
+    text: String,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TempVoice {
+    category_ids: Vec<String>,
+    join_channel_ids: Vec<String>,
+    open_lanes: Vec<OpenLane>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OpenLane {
+    channel_id: String,
+    count: usize,
+    mode: String,
+}
+
+pub(super) struct Access {
+    pub user_id: Option<u64>,
+    guild: String,
+    roles: Vec<String>,
+    base: u64,
+}
+
+pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result<Access> {
+    let (adapter, _, guild_id) = st.public_source.as_ref().context("Gateway-Quelle fehlt")?;
+    let verified = st
+        .public_policy
+        .mcp_verified_role_id
+        .filter(|id| *id != 0 && *id != *guild_id)
+        .context("Mitgliederrolle ist nicht konfiguriert")?;
+    let member_roles = if let Some(user) = requested_user {
+        discord_call(
+            st,
+            "GET",
+            &format!("/guilds/{guild_id}/members/{user}"),
+            &[],
+            None,
+            None,
+        )
+        .await
+        .ok()
+        .and_then(|member| member["roles"].as_array().cloned())
+        .and_then(|roles| {
+            roles
+                .iter()
+                .map(|role| role.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        })
+    } else {
+        None
+    };
+    let guild = adapter
+        .cache()
+        .guild(GuildId::new(*guild_id))
+        .context("Guild-Cache fehlt")?;
+    let everyone = guild
+        .roles
+        .get(&RoleId::new(*guild_id))
+        .context("everyone-Rolle fehlt")?
+        .permissions
+        .bits();
+    let verified_bits = guild
+        .roles
+        .get(&RoleId::new(verified))
+        .context("Mitgliederrolle ist unbekannt")?
+        .permissions
+        .bits();
+    if verified_bits & ADMIN != 0 {
+        bail!("Mitgliederrolle ist nicht eindeutig zulässig");
+    }
+    let user_id = member_roles.as_ref().and(requested_user);
+    let roles = member_roles.unwrap_or_else(|| vec![verified.to_string()]);
+    let mut base = everyone;
+    for role in &roles {
+        let id = role.parse::<u64>()?;
+        base |= guild
+            .roles
+            .get(&RoleId::new(id))
+            .context("Mitgliedsrolle ist unbekannt")?
+            .permissions
+            .bits();
+    }
+    Ok(Access {
+        user_id,
+        guild: guild_id.to_string(),
+        roles,
+        base,
+    })
+}
+
+fn effective_permissions(channel: &Value, access: &Access) -> Option<u64> {
+    if access.base & ADMIN != 0 && access.user_id.is_some() {
+        return Some(u64::MAX);
+    }
+    if access.base & ADMIN != 0 {
+        return None;
+    }
+    let mut permissions = access.base;
+    let mut role_deny = 0;
+    let mut role_allow = 0;
+    let mut member = None;
+    let mut seen = HashSet::new();
+    for overwrite in channel.get("permission_overwrites")?.as_array()? {
+        let kind = overwrite.get("type")?.as_u64()?;
+        let id = overwrite.get("id")?.as_str()?;
+        if kind > 1 || !seen.insert((kind, id)) {
+            return None;
+        }
+        let deny = overwrite.get("deny")?.as_str()?.parse::<u64>().ok()?;
+        let allow = overwrite.get("allow")?.as_str()?.parse::<u64>().ok()?;
+        if kind == 0 && id == access.guild {
+            permissions = (permissions & !deny) | allow;
+        } else if kind == 0 && access.roles.iter().any(|role| role == id) {
+            role_deny |= deny;
+            role_allow |= allow;
+        } else if kind == 1 && access.user_id.is_some_and(|user| user.to_string() == id) {
+            member = Some((deny, allow));
+        }
+    }
+    permissions = (permissions & !role_deny) | role_allow;
+    if let Some((deny, allow)) = member {
+        permissions = (permissions & !deny) | allow;
+    }
+    Some(permissions)
+}
 
 pub(super) struct CachedFacts {
     guild: String,
     channels: Value,
     created: Instant,
-    facts: Value,
+    facts: Facts,
 }
 
-fn everyone_permissions(channel: &Value, guild: &str, base: u64) -> Option<u64> {
-    if base & ADMIN != 0 {
-        return None;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    channel_id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendArgs {
+    channel_id: u64,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ReadResult {
+    channel_id: String,
+    messages: Vec<Message>,
+}
+
+#[derive(Serialize)]
+struct Message {
+    id: String,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct SendResult {
+    channel_id: String,
+    message_id: String,
+}
+
+fn channel_permission(
+    st: &McpState,
+    access: &Access,
+    channel_id: u64,
+    required: u64,
+) -> Result<()> {
+    let (adapter, _, guild_id) = st.public_source.as_ref().context("Gateway-Quelle fehlt")?;
+    let guild = adapter
+        .cache()
+        .guild(GuildId::new(*guild_id))
+        .context("Guild-Cache fehlt")?;
+    let channel = guild
+        .channels
+        .get(&serenity::all::ChannelId::new(channel_id))
+        .context("Kanal fehlt")?;
+    if !matches!(
+        channel.kind,
+        serenity::all::ChannelType::Text | serenity::all::ChannelType::News
+    ) {
+        bail!("Kanaltyp ist nicht freigegeben");
     }
-    let mut permissions = base;
-    for overwrite in channel.get("permission_overwrites")?.as_array()? {
-        let kind = overwrite.get("type")?.as_u64()?;
-        let id = overwrite.get("id")?.as_str()?;
-        if kind == 0 && id == guild {
-            let deny = overwrite.get("deny")?.as_str()?.parse::<u64>().ok()?;
-            let allow = overwrite.get("allow")?.as_str()?.parse::<u64>().ok()?;
-            permissions = (permissions & !deny) | allow;
+    let raw = serde_json::to_value(channel)?;
+    if !effective_permissions(&raw, access).is_some_and(|p| p & required == required) {
+        bail!("Kanalrecht fehlt");
+    }
+    Ok(())
+}
+
+pub(super) async fn request_tool(
+    st: &McpState,
+    tool: &str,
+    args: &Value,
+    access: &Access,
+) -> Result<Value> {
+    match tool {
+        "read_messages" => {
+            let args: ReadArgs = serde_json::from_value(args.clone())?;
+            channel_permission(st, access, args.channel_id, VIEW | HISTORY)?;
+            let raw = discord_call(
+                st,
+                "GET",
+                &format!("/channels/{}/messages", args.channel_id),
+                &[("limit".into(), "20".into())],
+                None,
+                None,
+            )
+            .await?;
+            let mut messages = Vec::new();
+            for message in raw.as_array().context("Nachrichtenformat ist unbekannt")? {
+                messages.push(Message {
+                    id: message["id"]
+                        .as_str()
+                        .context("Nachrichten-ID fehlt")?
+                        .into(),
+                    text: message["content"]
+                        .as_str()
+                        .context("Nachrichtentext fehlt")?
+                        .into(),
+                });
+            }
+            Ok(serde_json::to_value(ReadResult {
+                channel_id: args.channel_id.to_string(),
+                messages,
+            })?)
         }
+        "send_message" => {
+            if access.user_id.is_none() {
+                bail!("Schreiben benötigt eine bekannte Identität");
+            }
+            let args: SendArgs = serde_json::from_value(args.clone())?;
+            if args.content.is_empty() || args.content.chars().count() > 2000 {
+                bail!("Nachrichtenlänge ist ungültig");
+            }
+            channel_permission(st, access, args.channel_id, VIEW | SEND)?;
+            let raw = discord_call(
+                st,
+                "POST",
+                &format!("/channels/{}/messages", args.channel_id),
+                &[],
+                Some(&json!({"content":args.content,"allowed_mentions":{"parse":[]}})),
+                None,
+            )
+            .await?;
+            Ok(serde_json::to_value(SendResult {
+                channel_id: args.channel_id.to_string(),
+                message_id: raw["id"].as_str().context("Nachrichten-ID fehlt")?.into(),
+            })?)
+        }
+        _ => bail!("Werkzeug ist nicht freigegeben"),
     }
-    Some(permissions)
 }
 
-fn public_channels(channels: &[Value], guild: &str, base: u64) -> Vec<Value> {
+fn public_channels(channels: &[Value], access: &Access) -> Vec<Value> {
     let allowed: HashSet<&str> = channels
         .iter()
         .filter(|c| {
-            everyone_permissions(c, guild, base).is_some_and(|p| p & VIEW != 0)
+            effective_permissions(c, access).is_some_and(|p| p & VIEW != 0)
                 && matches!(c["type"].as_u64(), Some(0 | 2 | 4 | 5 | 13 | 15 | 16))
         })
         .filter_map(|c| c["id"].as_str())
@@ -175,7 +450,12 @@ fn registered_info(message: &Value, bot_id: &str, channel: &str, id: &str) -> Op
     own_info(message, bot_id)
 }
 
-pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
+pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Facts> {
+    let access = access(st, None).await?;
+    facts_for(st, args, &access).await
+}
+
+pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> Result<Facts> {
     if args.as_object().is_none_or(|args| !args.is_empty()) {
         bail!(
             "Öffentliche Live-Fakten akzeptieren keine abweichende Guild oder Nachrichtenauswahl."
@@ -190,30 +470,24 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
     let voice = adapter
         .voice_cache_snapshot(guild_number)
         .context("Gateway-Momentaufnahme ist derzeit unbekannt")?;
-    let (channels, raw, base) = {
+    let (channels, raw) = {
         let guild = adapter
             .cache()
             .guild(GuildId::new(guild_number))
             .context("Guild-Cache fehlt")?;
-        let base = guild
-            .roles
-            .get(&RoleId::new(guild_number))
-            .context("everyone-Rolle fehlt")?
-            .permissions
-            .bits();
         let raw: Vec<Value> = guild
             .channels
             .values()
             .map(serde_json::to_value)
             .collect::<std::result::Result<_, _>>()?;
-        (public_channels(&raw, &guild_id, base), raw, base)
+        (public_channels(&raw, access), raw)
     };
     let readable: Vec<Value> = channels
         .iter()
         .filter(|c| {
             raw.iter()
                 .find(|raw| raw["id"] == c["id"])
-                .and_then(|raw| everyone_permissions(raw, &guild_id, base))
+                .and_then(|raw| effective_permissions(raw, access))
                 .is_some_and(|p| p & HISTORY != 0)
         })
         .map(|c| c["id"].clone())
@@ -221,7 +495,10 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
     let channels_value = json!({"channels": channels, "readable": readable});
     let mut cache = st.public_cache.lock().await;
     if let Some(cached) = cache.as_ref().filter(|c| {
-        c.guild == guild_id && c.channels == channels_value && c.created.elapsed() < TTL
+        access.user_id.is_none()
+            && c.guild == guild_id
+            && c.channels == channels_value
+            && c.created.elapsed() < TTL
     }) {
         return Ok(cached.facts.clone());
     }
@@ -303,13 +580,44 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Value> {
             infos.push(json!({"channel_id": id, "message_id": message_id, "text": text}));
         }
     }
-    let result = json!({"schema": "discord.public-facts.v1", "guild_id": guild_id, "observed_at": chrono::Utc::now().to_rfc3339(), "cache_seconds": 60, "audience": "everyone", "channels": channels, "voice_counts": voice_counts, "bot_infos": infos});
-    *cache = Some(CachedFacts {
-        guild: guild_id,
-        channels: channels_value,
-        created: Instant::now(),
-        facts: result.clone(),
-    });
+    let mut tempvoice = TempVoice::default();
+    if let Some(engine) = &st.public_tempvoice {
+        for channel in &channels {
+            let id = channel["id"]
+                .as_str()
+                .context("Kanal-ID fehlt")?
+                .parse::<u64>()?;
+            if engine.config.tempvoice_categories.contains(&id) {
+                tempvoice.category_ids.push(id.to_string());
+            }
+            if engine.config.staging_channels.contains(&id) {
+                tempvoice.join_channel_ids.push(id.to_string());
+            }
+            if let Some(mode) = engine.lane_mode(id).await {
+                let count = voice
+                    .members
+                    .values()
+                    .filter(|channel| **channel == id)
+                    .count();
+                tempvoice.open_lanes.push(OpenLane {
+                    channel_id: id.to_string(),
+                    count,
+                    mode: mode.to_owned(),
+                });
+            }
+        }
+    }
+    let result: Facts = serde_json::from_value(
+        json!({"schema": "discord.public-facts.v2", "guild_id": guild_id, "observed_at": chrono::Utc::now().to_rfc3339(), "cache_seconds": 60, "audience": if access.user_id.is_some() { "requester" } else { "verified_members" }, "channels": channels, "voice_counts": voice_counts, "bot_infos": infos, "tempvoice":tempvoice}),
+    )?;
+    if access.user_id.is_none() {
+        *cache = Some(CachedFacts {
+            guild: guild_id,
+            channels: channels_value,
+            created: Instant::now(),
+            facts: result.clone(),
+        });
+    }
     Ok(result)
 }
 
@@ -328,7 +636,13 @@ mod tests {
             json!({"id":"15","name":"Teamkind","type":0,"parent_id":"14","position":5,"permission_overwrites":[]}),
             json!({"id":"16","name":"Unbekannt","type":0,"position":6}),
         ];
-        let result = public_channels(&channels, "1", VIEW | HISTORY);
+        let access = Access {
+            user_id: None,
+            guild: "1".into(),
+            roles: vec!["3".into()],
+            base: VIEW | HISTORY,
+        };
+        let result = public_channels(&channels, &access);
         assert_eq!(
             result
                 .iter()
@@ -336,7 +650,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["10", "11"]
         );
-        assert!(public_channels(&channels, "1", ADMIN | VIEW).is_empty());
+        assert!(public_channels(
+            &channels,
+            &Access {
+                base: ADMIN | VIEW,
+                ..access
+            }
+        )
+        .is_empty());
     }
 
     #[test]
