@@ -1421,7 +1421,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         // Streamer-Link-Matcher: 6h-Scan + Admin-Kommandos (brauchen Gateway-Cache)
         if let Some(matcher) = &matcher {
-            dl_bridges::matcher::spawn_scan_loop(matcher.clone());
+            let mut matcher_ready = dispatcher.subscribe_gateway();
+            let ready_matcher = matcher.clone();
+            tokio::spawn(async move {
+                loop {
+                    match matcher_ready.recv().await {
+                        Ok(dl_discord::GatewayEvent::CacheReady { guild_ids })
+                            if guild_ids.contains(&ready_matcher.config.guild_id) =>
+                        {
+                            dl_bridges::matcher::spawn_scan_loop(ready_matcher);
+                            return;
+                        }
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            continue
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            });
             dl_bridges::matcher::spawn_command_listener(&dispatcher, matcher.clone());
             // Streamer-Intent-Watcher: korreliert neu auftauchende Streamer mit
             // offenen /streamer-Absichten (1-h-Fenster) und verknüpft sie.

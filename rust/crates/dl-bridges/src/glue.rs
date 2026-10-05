@@ -16,20 +16,51 @@ pub struct AdapterGlue {
 #[async_trait::async_trait]
 impl GuildPort for AdapterGlue {
     async fn members(&self, guild_id: u64) -> Option<Vec<MemberLite>> {
-        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
-        Some(
-            guild
-                .members
-                .values()
-                .map(|member| MemberLite {
+        // Ein Teilcache darf keinen dauerhaft gespeicherten Negativentscheid auslösen.
+        let mut members = Vec::new();
+        let mut after = None;
+        loop {
+            let page = match self
+                .adapter
+                .http
+                .get_guild_members(GuildId::new(guild_id), Some(1000), after)
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    tracing::error!(%err, "Matcher: vollständiger Mitgliederabruf fehlgeschlagen");
+                    return None;
+                }
+            };
+            let count = page.len();
+            let next = page.iter().map(|member| member.user.id.get()).max();
+            members.extend(page.into_iter().map(|member| {
+                MemberLite {
                     user_id: member.user.id.get(),
                     name: member.user.name.to_string(),
-                    global_name: member.user.global_name.as_ref().map(|n| n.to_string()),
-                    nick: member.nick.as_ref().map(|n| n.to_string()),
+                    global_name: member
+                        .user
+                        .global_name
+                        .as_ref()
+                        .map(|name| name.to_string()),
+                    nick: member.nick.as_ref().map(|name| name.to_string()),
                     is_bot: member.user.bot,
-                })
-                .collect(),
-        )
+                }
+            }));
+            if count < 1000 {
+                break;
+            }
+            if next.is_none() || next <= after {
+                tracing::error!("Matcher: Mitgliederabruf macht keinen Fortschritt");
+                return None;
+            }
+            after = next;
+        }
+        if members.is_empty() {
+            tracing::error!("Matcher: leerer Mitgliederbestand, Abgleich gesperrt");
+            return None;
+        }
+        Some(members)
     }
 
     async fn grant_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> String {
