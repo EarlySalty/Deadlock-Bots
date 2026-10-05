@@ -302,7 +302,7 @@ fn count(body: &Value, name: &str) -> Option<i64> {
 }
 fn recovery_log(completion: &Completion) {
     if let Ok(recovery) = serde_json::to_string(completion) {
-        eprintln!("LLM_USAGE_RECOVERY recovery={recovery}");
+        eprintln!("LLM_USAGE_RECOVERY: recovery={recovery}");
     }
 }
 pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
@@ -415,7 +415,7 @@ mod tests {
         let stderr = String::from_utf8(output.stderr).unwrap();
         let message = stderr
             .lines()
-            .find(|line| line.starts_with("LLM_USAGE_RECOVERY recovery="))
+            .find(|line| line.starts_with("LLM_USAGE_RECOVERY: recovery="))
             .expect("Vorabbeleg wird unabhängig vom Tracingfilter geschrieben");
         let record = json!({"MESSAGE":message}).to_string();
         let completion = recovery_from_journal(&record).expect("Echter Stderrbeleg ist replaybar");
