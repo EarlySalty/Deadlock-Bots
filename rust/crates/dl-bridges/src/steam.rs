@@ -194,6 +194,15 @@ impl SteamBotClient {
         name: &str,
         options: Option<Map<String, Value>>,
     ) -> Map<String, Value> {
+        Self::slash_event_payload(interaction.user_id, interaction.guild_id, name, options)
+    }
+
+    fn slash_event_payload(
+        user_id: u64,
+        guild_id: u64,
+        name: &str,
+        options: Option<Map<String, Value>>,
+    ) -> Map<String, Value> {
         let mut command_data = Map::new();
         command_data.insert("name".into(), json!(name));
         if let Some(options) = options.filter(|o| !o.is_empty()) {
@@ -201,12 +210,45 @@ impl SteamBotClient {
         }
         let mut inner = Map::new();
         inner.insert("custom_id".into(), json!(""));
-        inner.insert("user_id".into(), json!(interaction.user_id));
-        inner.insert("guild_id".into(), json!(interaction.guild_id));
+        inner.insert("user_id".into(), json!(user_id));
+        inner.insert("guild_id".into(), json!(guild_id));
         inner.insert("data".into(), Value::Object(command_data));
         let mut data = Map::new();
         data.insert("interaction".into(), Value::Object(inner));
         data
+    }
+
+    /// Nutzt denselben Slash-Event wie `/invite`. Der Aufrufer ist der Bot;
+    /// Audit und Dispatch-Schutz bleiben im vorhandenen Steam-Handler.
+    pub async fn invite_from_bot(
+        &self,
+        bot_id: u64,
+        guild_id: u64,
+        friend_code: &str,
+        target_id: u64,
+    ) -> Result<String, String> {
+        if bot_id == 0 {
+            return Err("Die Discord-ID des Bots fehlt".into());
+        }
+        let options = Map::from_iter([
+            ("freundescode".into(), json!(friend_code)),
+            ("user".into(), json!(target_id)),
+        ]);
+        let payload = Self::slash_event_payload(bot_id, guild_id, "invite", Some(options));
+        self.post_event(
+            "slash_command",
+            payload,
+            Duration::from_secs(INVITE_FORWARD_TIMEOUT_SECS),
+        )
+        .await
+        .and_then(|value| {
+            value
+                .get("reply_text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
     }
 
     /// Frische Einmal-Login-URL — öffentlicher Helfer (voice_nudge nutzt ihn).
@@ -1008,6 +1050,43 @@ mod tests {
             channel_id: 9,
             ..BridgeInteraction::default()
         }
+    }
+
+    #[tokio::test]
+    async fn lounge_invite_nutzt_denselben_slash_event_mit_bot_als_admin() {
+        let response = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung.";
+        let (url, received, server) = mock_steam_bot(json!({ "reply_text": response })).await;
+        let client = SteamBotClient::new(url, None);
+        assert_eq!(
+            client
+                .invite_from_bot(99, 7, "123456789", 42)
+                .await
+                .unwrap(),
+            response
+        );
+        assert_eq!(
+            received.lock().unwrap().as_slice(),
+            &[json!({
+                "kind": "slash_command",
+                "interaction": {
+                    "custom_id": "", "user_id": 99, "guild_id": 7,
+                    "data": { "name": "invite", "options": { "freundescode": "123456789", "user": 42 } }
+                }
+            })]
+        );
+        assert!(client.invite_from_bot(0, 7, "123456789", 42).await.is_err());
+        assert_eq!(received.lock().unwrap().len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lounge_invite_ohne_handler_antwort_ist_ein_fehler() {
+        let (url, _, server) = mock_steam_bot(json!({})).await;
+        assert!(SteamBotClient::new(url, None)
+            .invite_from_bot(99, 7, "123456789", 42)
+            .await
+            .is_err());
+        server.abort();
     }
 
     #[test]

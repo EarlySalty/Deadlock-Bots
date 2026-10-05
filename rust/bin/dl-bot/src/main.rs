@@ -1788,8 +1788,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
             None
         };
-        let _invite_lounge_watcher =
-            dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
+        let _invite_lounge_watcher = dl_community::invite_lounge::spawn(
+            central_pool.clone(),
+            adapter.clone(),
+            steam_client.clone(),
+            onboardglue::MAIN_GUILD_ID,
+            &dispatcher,
+        );
         let voice_hint_enabled =
             dl_community::voice_change_hint::enabled_from_lookup(operating_value);
         let voice_hint_classifier = if voice_hint_enabled {

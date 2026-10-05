@@ -129,6 +129,20 @@ impl DiscordAdapter {
         })
     }
 
+    /// Nachrichten einschließlich Antwortbezug, etwa für den Lounge-Verlauf.
+    pub async fn channel_message_history(
+        &self,
+        channel_id: u64,
+        before_id: Option<u64>,
+    ) -> Result<Vec<serenity::all::Message>, String> {
+        let pagination =
+            before_id.map(|id| serenity::http::MessagePagination::Before(MessageId::new(id)));
+        self.http
+            .get_messages(ChannelId::new(channel_id), pagination, Some(100))
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     /// Vollständig geladener und verbundener Guild-Cache, sonst unbekannt.
     pub fn voice_cache_snapshot(
         &self,
