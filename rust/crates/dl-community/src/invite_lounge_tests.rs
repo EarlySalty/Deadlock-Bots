@@ -228,6 +228,14 @@ fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
         "<@42> Kannst du mir sagen, wie ich mit Code 1313436779 jemanden einladen kann?",
         "<@42> Kannst du mir sagen, wieso ich mit Code 1313436779 niemanden einladen kann?",
         "<@42> Kannst du mir sagen, weshalb ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
+        "<@!42> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
         "<@42> Kannst du mir erklären, wie ich mich einladen lassen kann? Code 1313436779",
         "<@42> Kannst du mir sagen, wie lange es dauert, bis du mich mit Code 1313436779 einladen kannst?",
         "<@42> Wie besprochen, kannst du mir erklären, wie ich mich einladen lassen kann? Code 1313436779",
@@ -354,25 +362,29 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
 
 #[tokio::test]
 async fn erklaerungsfrage_mit_code_loest_keinen_invite_aus() {
-    let (watcher, _, port, invite) = setup();
-    watcher
-        .handle_message(
-            message(
-                1,
-                NOW,
-                "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
-            ),
-            NOW,
-            Some(false),
-        )
-        .await
-        .expect("Die Erklärungsfrage muss verarbeitet werden können");
-    watcher
-        .poll_due(NOW + 3600)
-        .await
-        .expect("Die Prüfung fälliger Einladungen muss gelingen");
-    assert!(invite.calls.lock().await.is_empty());
-    assert!(port.replies.lock().await.is_empty());
+    for content in [
+        "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
+        "<@!99> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
+    ] {
+        let (watcher, _, port, invite) = setup();
+        watcher
+            .handle_message(message(1, NOW, content), NOW, Some(false))
+            .await
+            .expect("Die Informationsfrage muss verarbeitet werden können");
+        watcher
+            .poll_due(NOW + 3600)
+            .await
+            .expect("Die Prüfung fälliger Einladungen muss gelingen");
+        assert!(invite.calls.lock().await.is_empty(), "{content}");
+        assert!(port.replies.lock().await.is_empty(), "{content}");
+    }
 }
 
 #[test]
@@ -410,6 +422,14 @@ async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
     for content in [
         "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
         "<@99> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
+        "<@!99> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
         "<@99> Wie kann ich mich mit Code 1313436779 einladen lassen?",
         "<@99> Kann ich mich mit Code 1313436779 einladen lassen?",
         "<@99> Muss ich mich mit Code 1313436779 einladen lassen?",

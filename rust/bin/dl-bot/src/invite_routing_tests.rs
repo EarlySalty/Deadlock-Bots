@@ -403,6 +403,14 @@ async fn invite_erklaerungsfrage_mit_code_bleibt_beim_brain() {
         for content in [
             "<@42> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
             "<@42> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+            "<@42> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+            "<@!42> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+            "<@42> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+            "<@!42> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+            "<@42> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+            "<@!42> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+            "<@42> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
+            "<@!42> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
             "<@42> Wie kann ich mich mit Code 1313436779 einladen lassen?",
             "<@!42> Wie könnte ich mich mit Code 1313436779 einladen lassen?",
             "<@42> Warum kannst du mich mit Code 1313436779 nicht einladen?",
@@ -493,6 +501,14 @@ async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
     for content in [
         "<@42> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
         "<@42> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Kannst du mir sagen, wo du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Kannst du mir sagen, was ich tun muss, damit du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
+        "<@!42> Kannst du mir sagen, wer mich mit Code 1313436779 einladen kann?",
         "<@42> Wie kann ich mich mit Code 1313436779 einladen lassen?",
         "<@42> Kann ich mich mit Code 1313436779 einladen lassen?",
         "Muss ich mich mit Code 1313436779 einladen lassen?",
@@ -539,7 +555,13 @@ async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
         assert_eq!(sent.len(), 2);
         assert_eq!(
             sent[1].2["content"],
-            format!("Antwort: {}", content.trim_start_matches("<@42>").trim()),
+            format!(
+                "Antwort: {}",
+                content
+                    .trim_start_matches("<@42>")
+                    .trim_start_matches("<@!42>")
+                    .trim()
+            ),
             "{content}"
         );
         drop(sent);

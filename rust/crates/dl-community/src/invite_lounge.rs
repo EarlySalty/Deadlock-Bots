@@ -867,9 +867,12 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
         .min();
     let information = words.iter().enumerate().find_map(|(index, word)| {
         (matches!(*word, "sag" | "sage" | "sagen" | "sagst" | "sagt")
-            && words[index + 1..]
-                .iter()
-                .any(|word| matches!(*word, "warum" | "wie" | "wieso" | "weshalb" | "ob")))
+            && words[index + 1..].iter().any(|word| {
+                matches!(
+                    *word,
+                    "warum" | "wie" | "wieso" | "weshalb" | "ob" | "wann" | "wo" | "was" | "wer"
+                )
+            }))
         .then_some(index)
     });
     // Der Frageanfang endet am ersten Komma. „Wie besprochen, du ...“ enthält
