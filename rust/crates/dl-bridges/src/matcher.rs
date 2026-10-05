@@ -289,14 +289,37 @@ impl LinkState {
                 .cloned()
                 .unwrap_or_default()
         };
-        Self {
+        let mut state = Self {
             path,
             processed: get("processed"),
             attempted_ids: get("attempted_ids"),
             pending: get("pending"),
             manual_pending: get("manual_pending"),
             load_error,
+        };
+        // ID-tragender Altbestand bleibt erhalten, selbst wenn sein alter Login neu vergeben wird.
+        let known = state
+            .processed
+            .iter()
+            .chain(state.manual_pending.iter())
+            .map(|(login, record)| (login.clone(), record.clone()))
+            .chain(state.pending.values().filter_map(|record| {
+                record
+                    .get("login")
+                    .and_then(Value::as_str)
+                    .map(|login| (login.to_string(), record.clone()))
+            }))
+            .collect::<Vec<_>>();
+        for (login, record) in known {
+            if let Some(twitch_id) = stored_twitch_id(&record) {
+                state.attempted_ids.entry(twitch_id).or_insert_with(|| {
+                    json!({
+                        "login": login.to_lowercase(), "status":"inherited", "evidence":record
+                    })
+                });
+            }
         }
+        state
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -344,18 +367,29 @@ impl LinkState {
             }
             return Ok(retry);
         }
+        let login_is_bound_elsewhere = self.attempted_ids.iter().any(|(id, record)| {
+            id != twitch_id && record.get("login").and_then(Value::as_str) == Some(login)
+        });
+        let compatible = |record: &Value, stored_login: Option<&str>| match stored_twitch_id(record)
+        {
+            Some(id) => id == twitch_id,
+            None => !login_is_bound_elsewhere && stored_login == Some(login),
+        };
         let old_record = self
             .processed
-            .get(login)
-            .cloned()
-            .or_else(|| self.manual_pending.get(login).cloned())
+            .iter()
+            .find(|(key, record)| compatible(record, Some(key.as_str())))
+            .map(|(_, record)| record.clone())
+            .or_else(|| {
+                self.manual_pending
+                    .iter()
+                    .find(|(key, record)| compatible(record, Some(key.as_str())))
+                    .map(|(_, record)| record.clone())
+            })
             .or_else(|| {
                 self.pending
                     .values()
-                    .find(|record| {
-                        record.get("twitch_user_id").and_then(Value::as_str) == Some(twitch_id)
-                            || record.get("login").and_then(Value::as_str) == Some(login)
-                    })
+                    .find(|record| compatible(record, record.get("login").and_then(Value::as_str)))
                     .cloned()
             });
         let inherited = old_record.is_some();
@@ -401,16 +435,15 @@ impl LinkState {
                 attempt["status"] = json!(status);
                 attempt["login"] = json!(login.to_lowercase());
             }
-        } else {
-            // Alte manuelle Datensätze ohne ID behalten ihren bisherigen Abschlussweg.
-            for attempt in self.attempted_ids.values_mut() {
-                if attempt.get("login").and_then(Value::as_str)
-                    == Some(login.to_lowercase().as_str())
-                {
-                    attempt["status"] = json!(status);
-                }
-            }
         }
+    }
+}
+
+fn stored_twitch_id(record: &Value) -> Option<String> {
+    match record.get("twitch_user_id")? {
+        Value::String(id) if !id.is_empty() => Some(id.clone()),
+        Value::Number(id) => id.as_u64().filter(|id| *id > 0).map(|id| id.to_string()),
+        _ => None,
     }
 }
 
@@ -638,7 +671,19 @@ impl Matcher {
 
         self.deliver_saved_prompts().await;
         let (exact, bucket) = Self::build_index(&members);
-        let mut used_member_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut used_member_ids: std::collections::HashSet<u64> = self
+            .state
+            .lock()
+            .await
+            .pending
+            .values()
+            .filter_map(|record| record.get("discord_user_id"))
+            .filter_map(|id| {
+                id.as_str()
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .or_else(|| id.as_u64())
+            })
+            .collect();
 
         for entry in &candidates {
             let login = entry
@@ -861,14 +906,15 @@ impl Matcher {
         let Some(components) = record.get("components").cloned() else {
             return false;
         };
-        let custom_id = if manual {
-            format!("slm:manual:{key}")
-        } else {
-            format!("slm:link:{key}")
+        let Some(custom_id) = components
+            .pointer("/0/components/0/custom_id")
+            .and_then(Value::as_str)
+        else {
+            return false;
         };
         let Some((channel_id, message_id)) = self
             .notifier
-            .notify_once(&custom_id, embed, components)
+            .notify_once(custom_id, embed, components.clone())
             .await
         else {
             return false;
@@ -905,16 +951,24 @@ impl Matcher {
         let previous_processed = state.processed.clone();
         let previous_attempts = state.attempted_ids.clone();
         let previous_manual = state.manual_pending.clone();
+        let twitch_id = stored_twitch_id(&extra);
         state.mark(
             login,
             status,
             extra.as_object().cloned().unwrap_or_default(),
         );
         if status == "no_match" {
-            state
+            let key = login.to_lowercase();
+            let same_account = state
                 .manual_pending
-                .entry(login.to_lowercase())
-                .or_insert_with(|| json!({"login": login, "delivered": false}));
+                .get(&key)
+                .is_some_and(|record| stored_twitch_id(record) == twitch_id);
+            if !same_account {
+                state.manual_pending.insert(
+                    key,
+                    json!({"login": login, "twitch_user_id": twitch_id, "delivered": false}),
+                );
+            }
         }
         if let Err(err) = state.save() {
             state.processed = previous_processed;
@@ -1048,10 +1102,32 @@ impl Matcher {
             }
         }
         let record = self.state.lock().await.pending.get(&token).cloned();
-        match record {
-            Some(record) => self.deliver_prompt(&token, record, false).await,
-            None => false,
+        if let Some(record) = record {
+            self.deliver_prompt(&token, record, false).await;
         }
+        // Ein dauerhaft gespeicherter Vorschlag reserviert den Member auch bei Versandfehlern.
+        true
+    }
+
+    async fn current_login(&self, record: &Value, fallback: &str) -> Result<String, BridgeReply> {
+        let Some(twitch_id) = stored_twitch_id(record) else {
+            return Ok(fallback.to_string());
+        };
+        let entries = self.client.link_candidates().await.map_err(|err| {
+            tracing::warn!(%err, "Matcher: Twitch-ID vor manueller Verknüpfung nicht prüfbar");
+            BridgeReply::ephemeral_text("Der Twitch-Account konnte gerade nicht geprüft werden. Bitte später erneut versuchen.")
+        })?;
+        entries
+            .iter()
+            .find(|entry| stored_twitch_id(entry).as_deref() == Some(&twitch_id))
+            .and_then(|entry| entry.get("twitch_login").and_then(Value::as_str))
+            .filter(|login| !login.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                BridgeReply::ephemeral_text(
+                    "Dieser Twitch-Account ist nicht mehr für eine Verknüpfung offen.",
+                )
+            })
     }
 
     /// Review-Button bestätigt/abgelehnt (slm:link:* / slm:reject:*).
@@ -1068,7 +1144,7 @@ impl Matcher {
         let Some(record) = record else {
             return BridgeReply::ephemeral_text("Dieser Vorschlag ist nicht mehr offen.");
         };
-        let login = record
+        let mut login = record
             .get("login")
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -1083,7 +1159,7 @@ impl Matcher {
                 state.mark(
                     &login,
                     "rejected",
-                    json!({"by": moderator})
+                    json!({"by": moderator, "twitch_user_id": stored_twitch_id(&record)})
                         .as_object()
                         .cloned()
                         .unwrap_or_default(),
@@ -1104,6 +1180,11 @@ impl Matcher {
             }
             return BridgeReply::ephemeral_text(format!("Abgelehnt: {login}"));
         }
+
+        login = match self.current_login(&record, &login).await {
+            Ok(login) => login,
+            Err(reply) => return reply,
+        };
 
         let user_id = record
             .get("discord_user_id")
@@ -1135,7 +1216,7 @@ impl Matcher {
             state.mark(
                 &login,
                 "linked",
-                json!({"discord_user_id": user_id.to_string(), "by": moderator})
+                json!({"discord_user_id": user_id.to_string(), "by": moderator, "twitch_user_id": stored_twitch_id(&record)})
                     .as_object()
                     .cloned()
                     .unwrap_or_default(),
@@ -1167,11 +1248,22 @@ impl Matcher {
             ),
             "color": 0xE67E22u32,
         });
+        let twitch_id = self
+            .state
+            .lock()
+            .await
+            .manual_pending
+            .get(&login.to_lowercase())
+            .and_then(stored_twitch_id);
+        let button_id = match twitch_id {
+            Some(id) => format!("slm:manual:{login}:{id}"),
+            None => format!("slm:manual:{login}"),
+        };
         let components = json!([{ "type": 1, "components": [{
             "type": 2,
             "style": 1,
             "label": "Discord eingeben",
-            "custom_id": format!("slm:manual:{login}"),
+            "custom_id": button_id,
         }]}]);
         let key = login.to_lowercase();
         let record = {
@@ -1212,6 +1304,33 @@ impl Matcher {
         if !interaction.author_can_manage_roles {
             return BridgeReply::ephemeral_text("Nur Mods mit Rollen-Rechten.");
         }
+        let (stored_login, button_twitch_id) = login
+            .split_once(':')
+            .map(|(login, id)| (login, Some(id)))
+            .unwrap_or((login, None));
+        let record = self
+            .state
+            .lock()
+            .await
+            .manual_pending
+            .get(&stored_login.to_lowercase())
+            .cloned();
+        let Some(record) = record else {
+            return BridgeReply::ephemeral_text("Diese manuelle Eingabe ist nicht mehr offen.");
+        };
+        let stored_id = stored_twitch_id(&record);
+        if button_twitch_id.is_some_and(|id| stored_id.as_deref() != Some(id))
+            || (button_twitch_id.is_none()
+                && stored_id.is_some()
+                && interaction.custom_id.starts_with("slm:manual_submit:"))
+        {
+            return BridgeReply::ephemeral_text("Diese Eingabe gehört zu einem alten Twitch-Account. Bitte den aktuellen Button verwenden.");
+        }
+        let current_login = match self.current_login(&record, stored_login).await {
+            Ok(login) => login,
+            Err(reply) => return reply,
+        };
+        let login = current_login.as_str();
         let value = interaction
             .options
             .get("discord_input")
@@ -1220,14 +1339,15 @@ impl Matcher {
             .trim()
             .to_string();
 
-        let (channel_id, message_id) = {
+        let (channel_id, message_id, twitch_id) = {
             let state = self.state.lock().await;
-            let rec = state.manual_pending.get(&login.to_lowercase());
+            let rec = state.manual_pending.get(&stored_login.to_lowercase());
             (
                 rec.and_then(|r| r.get("channel_id"))
                     .and_then(Value::as_u64),
                 rec.and_then(|r| r.get("message_id"))
                     .and_then(Value::as_u64),
+                rec.and_then(stored_twitch_id),
             )
         };
 
@@ -1288,12 +1408,12 @@ impl Matcher {
             state.mark(
                 login,
                 "linked",
-                json!({"discord_user_id": user_id.to_string(), "by": moderator})
+                json!({"discord_user_id": user_id.to_string(), "by": moderator, "twitch_user_id": twitch_id})
                     .as_object()
                     .cloned()
                     .unwrap_or_default(),
             );
-            state.manual_pending.remove(&login.to_lowercase());
+            state.manual_pending.remove(&stored_login.to_lowercase());
             if let Err(err) = state.save() {
                 tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
             }
@@ -1397,7 +1517,7 @@ impl InteractionHandler for ReviewHandler {
             "link" => self.matcher.confirm_pending(token, true, &moderator).await,
             "reject" => self.matcher.confirm_pending(token, false, &moderator).await,
             "manual" => {
-                // token = login; Button öffnet Modal
+                // Der Button trägt bei neuen Aufträgen Login und Twitch-ID.
                 BridgeReply {
                     modal: Some(ModalSpec {
                         custom_id: format!("slm:manual_submit:{token}"),
@@ -1417,7 +1537,7 @@ impl InteractionHandler for ReviewHandler {
                 }
             }
             "manual_submit" => {
-                // token = login; Modaleingabe verarbeiten
+                // Alte Buttons ohne ID bleiben für alte Aufträge bedienbar.
                 self.matcher.handle_manual_submit(token, &interaction).await
             }
             _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
@@ -1936,6 +2056,14 @@ mod tests {
             "/internal/twitch/v1/streamers/ohnetreffer/discord-profile",
             axum::routing::post(|| async { axum::Json(json!({"status":"linked"})) }),
         );
+        let app = app.route(
+            "/internal/twitch/v1/streamers/link-candidates",
+            axum::routing::get(|| async {
+                axum::Json(
+                    json!({"entries":[{"twitch_login":"ohnetreffer", "twitch_user_id":"123"}]}),
+                )
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1967,9 +2095,10 @@ mod tests {
         {
             let mut state = matcher.state.lock().await;
             assert!(state.claim("123", "ohnetreffer").unwrap());
-            state
-                .manual_pending
-                .insert("ohnetreffer".into(), json!({"login":"ohnetreffer"}));
+            state.manual_pending.insert(
+                "ohnetreffer".into(),
+                json!({"login":"ohnetreffer", "twitch_user_id":"123"}),
+            );
         }
         matcher
             .handle_manual_submit(
@@ -2325,7 +2454,11 @@ mod tests {
         let path = dir.path().join("state.json");
         let mut state = LinkState::load(path.clone());
         assert!(state.claim("123", "altername").unwrap());
-        state.mark("altername", "no_match", Map::new());
+        state.mark(
+            "altername",
+            "no_match",
+            json!({"twitch_user_id":"123"}).as_object().unwrap().clone(),
+        );
         state.save().unwrap();
         assert!(!state.claim("123", "altername").unwrap());
         let mut state = LinkState::load(path);
@@ -2395,6 +2528,216 @@ mod tests {
         assert_eq!(matcher.run_scan_quiet("Test").await.checked, 0);
         assert_eq!(notifier.embeds.lock().unwrap().len(), count);
         assert!(scorer.calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[test]
+    fn wiederverwendeter_login_erbt_keinen_fremden_id_abschluss() {
+        for source in ["processed", "manual", "review"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = LinkState::load(dir.path().join("state.json"));
+            let record = json!({"login":"name", "twitch_user_id":"123", "status":"no_match"});
+            match source {
+                "processed" => {
+                    state.processed.insert("name".into(), record);
+                }
+                "manual" => {
+                    state.manual_pending.insert("name".into(), record);
+                }
+                _ => {
+                    state.pending.insert("token".into(), record);
+                }
+            }
+            assert!(state.claim("456", "name").unwrap());
+            assert_eq!(state.attempted_ids["456"]["status"], "evaluating");
+            state.mark("name", "linked", Map::new());
+            assert_eq!(state.attempted_ids["456"]["status"], "evaluating");
+        }
+    }
+
+    #[test]
+    fn id_altbestand_ueberlebt_das_ueberschreiben_seines_alten_logins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LinkState::load(path.clone());
+        state.processed.insert(
+            "name".into(),
+            json!({"twitch_user_id":"123", "status":"no_match"}),
+        );
+        state.save().unwrap();
+        let mut state = LinkState::load(path.clone());
+        assert!(state.claim("456", "name").unwrap());
+        state.mark(
+            "name",
+            "no_match",
+            json!({"twitch_user_id":"456"}).as_object().unwrap().clone(),
+        );
+        state.save().unwrap();
+        let mut state = LinkState::load(path);
+        assert!(!state.claim("123", "anderername").unwrap());
+        assert!(!state.claim("456", "name").unwrap());
+    }
+
+    #[test]
+    fn altbestand_ohne_id_wird_nur_einem_account_zugeordnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = LinkState::load(dir.path().join("state.json"));
+        state
+            .processed
+            .insert("name".into(), json!({"status":"no_match"}));
+        assert!(!state.claim("123", "name").unwrap());
+        assert!(state.claim("456", "name").unwrap());
+        assert!(!state.claim("123", "name").unwrap());
+        state.mark("name", "no_match", Map::new());
+        assert_eq!(state.attempted_ids["123"]["status"], "inherited");
+        assert_eq!(state.attempted_ids["456"]["status"], "evaluating");
+    }
+
+    #[tokio::test]
+    async fn ungesendeter_review_reserviert_member_im_lauf_und_nach_neustart() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let entries = Arc::new(Mutex::new(json!([
+            {"twitch_login":"alic", "twitch_user_id":"123"},
+            {"twitch_login":"alice", "twitch_user_id":"456"}
+        ])));
+        let linked = Arc::new(AtomicUsize::new(0));
+        let candidate_entries = entries.clone();
+        let link_calls = linked.clone();
+        let app = axum::Router::new()
+            .route(
+                "/internal/twitch/v1/streamers/link-candidates",
+                axum::routing::get(move || {
+                    let entries = candidate_entries.lock().unwrap().clone();
+                    async move { axum::Json(json!({"entries":entries})) }
+                }),
+            )
+            .route(
+                "/internal/twitch/v1/streamers/{login}/discord-profile",
+                axum::routing::post(move || {
+                    link_calls.fetch_add(1, SeqCst);
+                    async { axum::Json(json!({"status":"linked"})) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = MatcherConfig::from_env(|_| None);
+        config.state_path = dir.path().join("state.json");
+        let client = TwitchApiClient::new(
+            format!("http://{address}"),
+            "tok",
+            std::time::Duration::from_secs(2),
+        );
+        let guild = Arc::new(MockGuild {
+            members: vec![MemberLite {
+                user_id: 42,
+                name: "alice".into(),
+                ..Default::default()
+            }],
+        });
+        let notifier = Arc::new(DurableNotifier::default());
+        notifier.history_failed.store(true, SeqCst);
+        let matcher = Matcher::new(
+            config.clone(),
+            client.clone(),
+            guild.clone(),
+            notifier.clone(),
+            Arc::new(NoAi),
+        );
+        let stats = matcher.run_scan_quiet("Test").await;
+        assert_eq!(stats.review, 1);
+        assert_eq!(stats.auto, 0);
+        assert_eq!(linked.load(SeqCst), 0);
+        assert_eq!(matcher.state.lock().await.pending.len(), 1);
+        *entries.lock().unwrap() = json!([{"twitch_login":"alice_live", "twitch_user_id":"789"}]);
+        let matcher = Matcher::new(config, client, guild, notifier, Arc::new(NoAi));
+        let stats = matcher.run_scan_quiet("Neustart").await;
+        assert_eq!(stats.checked, 1);
+        assert_eq!(stats.auto, 0);
+        assert_eq!(linked.load(SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn manuelle_eingabe_folgt_id_bei_umbenennung_und_blockt_alte_buttons() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let linked = Arc::new(AtomicUsize::new(0));
+        let calls = linked.clone();
+        let app = axum::Router::new()
+            .route(
+                "/internal/twitch/v1/streamers/link-candidates",
+                axum::routing::get(|| async {
+                    axum::Json(
+                        json!({"entries":[{"twitch_login":"neuername", "twitch_user_id":"123"}]}),
+                    )
+                }),
+            )
+            .route(
+                "/internal/twitch/v1/streamers/neuername/discord-profile",
+                axum::routing::post(move || {
+                    calls.fetch_add(1, SeqCst);
+                    async { axum::Json(json!({"status":"linked"})) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = MatcherConfig::from_env(|_| None);
+        config.state_path = dir.path().join("state.json");
+        let matcher = Matcher::new(
+            config,
+            TwitchApiClient::new(
+                format!("http://{address}"),
+                "tok",
+                std::time::Duration::from_secs(2),
+            ),
+            Arc::new(MockGuild {
+                members: vec![MemberLite {
+                    user_id: 42,
+                    name: "discord".into(),
+                    ..Default::default()
+                }],
+            }),
+            Arc::new(DurableNotifier::default()),
+            Arc::new(NoAi),
+        );
+        {
+            let mut state = matcher.state.lock().await;
+            assert!(state.claim("123", "altername").unwrap());
+            state.manual_pending.insert(
+                "altername".into(),
+                json!({"login":"altername", "twitch_user_id":"123"}),
+            );
+        }
+        let mut interaction = BridgeInteraction {
+            author_can_manage_roles: true,
+            user_id: 99,
+            custom_id: "slm:manual_submit:altername:456".into(),
+            options: HashMap::from([("discord_input".into(), json!("42"))]),
+            ..Default::default()
+        };
+        let reply = matcher
+            .handle_manual_submit("altername:456", &interaction)
+            .await;
+        assert!(reply.content.unwrap().contains("alten Twitch-Account"));
+        assert_eq!(linked.load(SeqCst), 0);
+        interaction.custom_id = "slm:manual_submit:altername".into();
+        let reply = matcher
+            .handle_manual_submit("altername", &interaction)
+            .await;
+        assert!(reply.content.unwrap().contains("alten Twitch-Account"));
+        assert_eq!(linked.load(SeqCst), 0);
+        interaction.custom_id = "slm:manual_submit:altername:123".into();
+        let reply = matcher
+            .handle_manual_submit("altername:123", &interaction)
+            .await;
+        assert!(reply.content.unwrap().contains("neuername"));
+        assert_eq!(linked.load(SeqCst), 1);
+        let state = matcher.state.lock().await;
+        assert_eq!(state.attempted_ids["123"]["status"], "linked");
+        assert!(!state.manual_pending.contains_key("altername"));
         server.abort();
     }
 
