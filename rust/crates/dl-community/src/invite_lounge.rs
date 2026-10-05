@@ -789,6 +789,17 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
         .filter(|(_, ch)| matches!(ch, '.' | '!' | '?' | ';'))
         .chain(std::iter::once((content.len(), '\0')))
     {
+        // Das Ausrufezeichen einer Nickname-Mention ist keine Satzgrenze.
+        if punctuation == '!'
+            && content[..position].ends_with("<@")
+            && content[position + 1..]
+                .split_once('>')
+                .is_some_and(|(id, _)| {
+                    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        {
+            continue;
+        }
         if punctuation == '.' {
             let word = content[sentence_start..position]
                 .split_whitespace()
