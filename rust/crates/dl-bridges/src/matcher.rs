@@ -1,13 +1,11 @@
-//! Streamer-Link-Matcher — Port von `cogs/twitch/streamer_link_matcher.py`.
+//! Verknüpft Twitch-Streamer nach einem kostenlosen Namensvergleich mit Discord.
 //!
 //! Gleicht unverknüpfte Twitch-Streamer gegen die Discord-Memberliste ab:
 //! Namens-Normalisierung + Fuzzy-Match (difflib-Algorithmus nachgebaut),
 //! Score-Entscheidung Auto-Link / Review-Vorschlag (Buttons) / kein Treffer.
 //!
-//! Bewusste Lücke bis Phase 6: Das AI-Scoring (MiniMax via AIConnector) hängt
-//! an dl-ai — bis dahin läuft der Heuristik-Modus, exakt wie das Original
-//! ohne verfügbaren AIConnector (nur eindeutige Exakt-Treffer erreichen den
-//! Auto-Bereich).
+//! Nur eindeutige exakte Treffer werden automatisch verknüpft. Ähnliche Namen
+//! benötigen eine Bestätigung. Automatische Versuche werden nach Twitch-ID gespeichert.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -249,6 +247,9 @@ impl AiScorer for NoAi {
 pub struct LinkState {
     path: PathBuf,
     pub processed: Map<String, Value>,
+    /// Dauerhaft abgeschlossene automatische Versuche nach Twitch-ID.
+    pub attempted_ids: Map<String, Value>,
+    load_error: Option<String>,
     pub pending: Map<String, Value>,
     /// Offene manuelle Verknüpfungs-Prompts (kein Auto-Match) — für Neustart-Restore.
     pub manual_pending: Map<String, Value>,
@@ -256,45 +257,107 @@ pub struct LinkState {
 
 impl LinkState {
     pub fn load(path: PathBuf) -> Self {
-        let (processed, pending, manual_pending) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .map(|data| {
-                let get = |key: &str| {
-                    data.get(key)
-                        .and_then(Value::as_object)
-                        .cloned()
-                        .unwrap_or_default()
-                };
-                (get("processed"), get("pending"), get("manual_pending"))
-            })
-            .unwrap_or_default();
+        let loaded = match std::fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str::<Value>(&raw)
+                .map_err(|err| err.to_string())
+                .and_then(|data| {
+                    if !data.is_object()
+                        || ["processed", "pending", "manual_pending", "attempted_ids"]
+                            .iter()
+                            .any(|key| data.get(key).is_some_and(|value| !value.is_object()))
+                    {
+                        Err("Ungültiges Format des Matcher-Zustands".to_string())
+                    } else {
+                        Ok(data)
+                    }
+                }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+            Err(err) => Err(err.to_string()),
+        };
+        let load_error = loaded.as_ref().err().cloned();
+        let data = loaded.unwrap_or(Value::Null);
+        let get = |key: &str| {
+            data.get(key)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default()
+        };
         Self {
             path,
-            processed,
-            pending,
-            manual_pending,
+            processed: get("processed"),
+            attempted_ids: get("attempted_ids"),
+            pending: get("pending"),
+            manual_pending: get("manual_pending"),
+            load_error,
         }
     }
 
-    pub fn save(&self) {
+    pub fn save(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        if let Some(error) = &self.load_error {
+            return Err(std::io::Error::other(format!(
+                "Matcher-Zustand konnte nicht geladen werden: {error}"
+            )));
+        }
         let payload = json!({
             "processed": self.processed,
+            "attempted_ids": self.attempted_ids,
             "pending": self.pending,
             "manual_pending": self.manual_pending,
         });
         if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
         let tmp = self.path.with_extension("tmp");
-        if std::fs::write(&tmp, payload.to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(payload.to_string().as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &self.path)?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
         }
+        Ok(())
+    }
+
+    fn claim(&mut self, twitch_id: &str, login: &str) -> std::io::Result<bool> {
+        if let Some(record) = self.attempted_ids.get(twitch_id) {
+            return Ok(record.get("status").and_then(Value::as_str) == Some("retry_auto"));
+        }
+        let old_record = self
+            .processed
+            .get(login)
+            .cloned()
+            .or_else(|| self.manual_pending.get(login).cloned())
+            .or_else(|| {
+                self.pending
+                    .values()
+                    .find(|record| {
+                        record.get("twitch_user_id").and_then(Value::as_str) == Some(twitch_id)
+                            || record.get("login").and_then(Value::as_str) == Some(login)
+                    })
+                    .cloned()
+            });
+        let inherited = old_record.is_some();
+        self.attempted_ids.insert(
+            twitch_id.to_string(),
+            json!({
+                "login": login,
+                "at": chrono::Utc::now().to_rfc3339(),
+                "status": if inherited { "inherited" } else { "attempted" },
+                "evidence": old_record,
+            }),
+        );
+        if let Err(err) = self.save() {
+            self.attempted_ids.remove(twitch_id);
+            return Err(err);
+        }
+        Ok(!inherited)
     }
 
     pub fn is_handled(&self, login: &str) -> bool {
         let login = login.to_lowercase();
         self.processed.contains_key(&login)
+            || self.manual_pending.contains_key(&login)
             || self
                 .pending
                 .values()
@@ -308,6 +371,11 @@ impl LinkState {
         record.extend(extra);
         self.processed
             .insert(login.to_lowercase(), Value::Object(record));
+        for attempt in self.attempted_ids.values_mut() {
+            if attempt.get("login").and_then(Value::as_str) == Some(login.to_lowercase().as_str()) {
+                attempt["status"] = json!(status);
+            }
+        }
     }
 }
 
@@ -329,7 +397,7 @@ pub struct MatcherConfig {
 }
 
 impl MatcherConfig {
-    /// ENV-Namen wie das Original (+ STREAMER_LINK_STATE_PATH für den Pfad).
+    /// Bestehende Betriebsschlüssel aus der normalen Konfiguration.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let get = |key: &str| {
             lookup(key)
@@ -495,6 +563,11 @@ impl Matcher {
         if !self.config.enabled {
             return stats;
         }
+        if let Err(err) = self.state.lock().await.save() {
+            tracing::error!(%err, "Matcher: Speicherprüfung fehlgeschlagen, Abgleich gesperrt");
+            stats.errors += 1;
+            return stats;
+        }
 
         let Some(members) = self.guild.members(self.config.guild_id).await else {
             self.notifier
@@ -523,7 +596,6 @@ impl Matcher {
 
         let (exact, bucket) = Self::build_index(&members);
         let mut used_member_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let ai_available = self.scorer.is_available();
 
         for entry in &candidates {
             let login = entry
@@ -535,10 +607,29 @@ impl Matcher {
             if login.is_empty() {
                 continue;
             }
-            {
-                let state = self.state.lock().await;
-                if state.is_handled(&login) {
-                    continue;
+            let twitch_id = entry.get("twitch_user_id").and_then(|value| match value {
+                Value::String(id)
+                    if !id.is_empty()
+                        && id.chars().all(|c| c.is_ascii_digit())
+                        && id.parse::<u64>().ok().is_some_and(|id| id > 0) =>
+                {
+                    Some(id.clone())
+                }
+                Value::Number(id) => id.as_u64().filter(|id| *id > 0).map(|id| id.to_string()),
+                _ => None,
+            });
+            let Some(twitch_id) = twitch_id else {
+                tracing::error!(login, "Matcher: Twitch-ID fehlt oder ist ungültig");
+                stats.errors += 1;
+                continue;
+            };
+            match self.state.lock().await.claim(&twitch_id, &login) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(err) => {
+                    tracing::error!(%err, "Matcher: dauerhafte Speicherung fehlgeschlagen, Abgleich beendet");
+                    stats.errors += 1;
+                    break;
                 }
             }
             stats.checked += 1;
@@ -582,34 +673,23 @@ impl Matcher {
                 continue;
             }
 
-            if ai_available && stats.ai_calls >= self.config.max_ai_per_scan {
-                stats.checked = stats.checked.saturating_sub(1);
-                stats.new_streamers.pop();
-                break;
-            }
-
-            let (ai_score, ai_reason) = if ai_available {
-                self.scorer.score(&login, member, ratio).await
-            } else {
-                (None, String::new())
-            };
-            if ai_score.is_some() {
-                stats.ai_calls += 1;
-            }
-            let (score, reason) = match ai_score {
-                Some(score) => (score, ai_reason),
-                None => (
-                    fallback_score(ratio, exact_unique),
-                    if ai_reason.is_empty() {
-                        format!("Heuristik (Ähnlichkeit {ratio:.2})")
-                    } else {
-                        ai_reason
-                    },
-                ),
-            };
-
-            let can_auto = score >= self.config.auto_threshold && !is_monitored;
+            let score = fallback_score(ratio, exact_unique);
+            let reason = format!("Namensvergleich (Ähnlichkeit {ratio:.2})");
+            let can_auto = exact_unique && score >= self.config.auto_threshold && !is_monitored;
             if can_auto {
+                {
+                    let mut state = self.state.lock().await;
+                    state
+                        .attempted_ids
+                        .get_mut(&twitch_id)
+                        .expect("Versuch vorhanden")["status"] = json!("retry_auto");
+                    if let Err(err) = state.save() {
+                        tracing::error!(%err, "Matcher: Auto-Verknüpfung konnte nicht vorbereitet werden");
+                        stats.errors += 1;
+                        stats.new_streamers[entry_idx].outcome = ScanOutcome::Failed;
+                        break;
+                    }
+                }
                 if self.auto_link(&login, member, score, &reason).await {
                     used_member_ids.insert(member.user_id);
                     stats.auto += 1;
@@ -617,6 +697,11 @@ impl Matcher {
                         discord_user_id: member.user_id,
                     };
                 } else {
+                    let mut state = self.state.lock().await;
+                    state.attempted_ids.remove(&twitch_id);
+                    if let Err(err) = state.save() {
+                        tracing::error!(%err, "Matcher: technischer Fehler konnte nicht wieder geöffnet werden");
+                    }
                     stats.errors += 1;
                     stats.new_streamers[entry_idx].outcome = ScanOutcome::Failed;
                 }
@@ -642,7 +727,9 @@ impl Matcher {
 
         {
             let state = self.state.lock().await;
-            state.save();
+            if let Err(err) = state.save() {
+                tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
+            }
         }
         let nothing_happened = stats.new_streamers.is_empty() && stats.errors == 0;
         if !(quiet_when_empty && nothing_happened) {
@@ -660,6 +747,9 @@ impl Matcher {
             status,
             extra.as_object().cloned().unwrap_or_default(),
         );
+        if let Err(err) = state.save() {
+            tracing::error!(%err, "Matcher: Ergebnis konnte nicht gespeichert werden");
+        }
     }
 
     async fn auto_link(&self, login: &str, member: &MemberLite, score: i64, reason: &str) -> bool {
@@ -694,7 +784,7 @@ impl Matcher {
         let embed = json!({
             "title": "✅ Auto-verknüpft",
             "description": format!(
-                "**Twitch:** `{login}`\n**Discord:** <@{}> (`{}`)\n**Wahrscheinlichkeit:** {score}%\n**Grund:** {reason}\n{role_note}",
+                "**Twitch:** `{login}`\n**Discord:** <@{}> (`{}`)\n**Namensvergleich:** {score} von 100\n**Grund:** {reason}\n{role_note}",
                 member.user_id, member.name
             ),
             "color": 0x2ECC71,
@@ -721,7 +811,7 @@ impl Matcher {
         let embed = json!({
             "title": "❓ Möglicher Streamer-Match",
             "description": format!(
-                "**Twitch:** `{login}`\n**Discord:** <@{}> (`{}`)\n**Wahrscheinlichkeit:** {score}%\n**Grund:** {reason}{note}",
+                "**Twitch:** `{login}`\n**Discord:** <@{}> (`{}`)\n**Namensvergleich:** {score} von 100\n**Grund:** {reason}{note}",
                 member.user_id, member.name
             ),
             "color": 0xF1C40F,
@@ -730,8 +820,6 @@ impl Matcher {
             { "type": 2, "style": 3, "label": "Verknüpfen", "custom_id": format!("slm:link:{token}") },
             { "type": 2, "style": 4, "label": "Ablehnen", "custom_id": format!("slm:reject:{token}") },
         ]}]);
-        let posted = self.notifier.notify(embed, Some(components)).await;
-
         let mut record = Map::new();
         record.insert("login".into(), json!(login));
         record.insert(
@@ -751,16 +839,27 @@ impl Matcher {
         );
         record.insert("score".into(), json!(score));
         record.insert("reason".into(), json!(reason));
-        record.insert(
-            "message_id".into(),
-            posted.map(|(_, m)| json!(m)).unwrap_or(Value::Null),
-        );
-        record.insert(
-            "channel_id".into(),
-            posted.map(|(c, _)| json!(c)).unwrap_or(Value::Null),
-        );
-        let mut state = self.state.lock().await;
-        state.pending.insert(token, Value::Object(record));
+        record.insert("message_id".into(), Value::Null);
+        record.insert("channel_id".into(), Value::Null);
+        {
+            let mut state = self.state.lock().await;
+            state.pending.insert(token.clone(), Value::Object(record));
+            if let Err(err) = state.save() {
+                tracing::error!(%err, "Matcher: Vorschlag konnte nicht gespeichert werden");
+                return;
+            }
+        }
+        let posted = self.notifier.notify(embed, Some(components)).await;
+        if let Some((channel_id, message_id)) = posted {
+            let mut state = self.state.lock().await;
+            if let Some(record) = state.pending.get_mut(&token).and_then(Value::as_object_mut) {
+                record.insert("channel_id".into(), json!(channel_id));
+                record.insert("message_id".into(), json!(message_id));
+            }
+            if let Err(err) = state.save() {
+                tracing::error!(%err, "Matcher: Nachrichtenadresse konnte nicht gespeichert werden");
+            }
+        }
     }
 
     /// Review-Button bestätigt/abgelehnt (slm:link:* / slm:reject:*).
@@ -797,7 +896,9 @@ impl Matcher {
                         .cloned()
                         .unwrap_or_default(),
                 );
-                state.save();
+                if let Err(err) = state.save() {
+                    tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
+                }
             }
             if let (Some(channel_id), Some(message_id)) = (channel_id, message_id) {
                 self.notifier
@@ -847,7 +948,9 @@ impl Matcher {
                     .cloned()
                     .unwrap_or_default(),
             );
-            state.save();
+            if let Err(err) = state.save() {
+                tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
+            }
         }
         if let (Some(channel_id), Some(message_id)) = (channel_id, message_id) {
             self.notifier
@@ -878,6 +981,16 @@ impl Matcher {
             "label": "Discord eingeben",
             "custom_id": format!("slm:manual:{login}"),
         }]}]);
+        {
+            let mut state = self.state.lock().await;
+            state
+                .manual_pending
+                .insert(login.to_lowercase(), json!({"login": login}));
+            if let Err(err) = state.save() {
+                tracing::error!(%err, "Matcher: manuelle Eingabe konnte nicht gespeichert werden");
+                return;
+            }
+        }
         let posted = self.notifier.notify(embed, Some(components)).await;
         let (channel_val, message_val) = match posted {
             Some((ch, msg)) => (json!(ch), json!(msg)),
@@ -981,7 +1094,9 @@ impl Matcher {
                     .unwrap_or_default(),
             );
             state.manual_pending.remove(&login.to_lowercase());
-            state.save();
+            if let Err(err) = state.save() {
+                tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
+            }
         }
 
         if let (Some(channel_id), Some(message_id)) = (channel_id, message_id) {
@@ -1114,17 +1229,27 @@ pub fn register(router: &mut InteractionRouter, matcher: Arc<Matcher>) {
     router.on_prefix(REVIEW_PREFIX, Arc::new(ReviewHandler { matcher }));
 }
 
-/// 6h-Loop (erste Iteration wird übersprungen — Backfill nur manuell).
+/// Stiller Startscan und danach der konfigurierte regelmäßige Abgleich.
 pub fn spawn_scan_loop(matcher: Arc<Matcher>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let hours = matcher.config.scan_interval_hours;
         if !matcher.config.enabled || hours == 0 {
             return;
         }
+        tracing::info!(state_path = %matcher.config.state_path.display(), "Matcher: dauerhafter Zustand");
         let interval = std::time::Duration::from_secs(hours * 3600);
         loop {
+            let stats = matcher.run_scan_quiet("Auto-Scan (neue Streamer)").await;
+            tracing::info!(
+                checked = stats.checked,
+                auto = stats.auto,
+                review = stats.review,
+                skipped = stats.skipped,
+                errors = stats.errors,
+                ai_calls = stats.ai_calls,
+                "Matcher: automatischer Abgleich abgeschlossen"
+            );
             tokio::time::sleep(interval).await;
-            let _ = matcher.run_scan_quiet("Auto-Scan (neue Streamer)").await;
         }
     })
 }
@@ -1194,9 +1319,38 @@ pub fn spawn_command_listener(
                 Some("!twitch_link_rescan_login") => {
                     let Some(login) = parts.next() else { continue };
                     let key = login.trim().to_lowercase();
+                    let candidates = match matcher.client.link_candidates().await {
+                        Ok(entries) => entries,
+                        Err(err) => {
+                            tracing::error!(%err, "Matcher: erneuter Abgleich konnte nicht vorbereitet werden");
+                            matcher.notifier.send_text(event.channel_id, "Der erneute Abgleich konnte nicht vorbereitet werden. Bitte später erneut versuchen.".to_string()).await;
+                            continue;
+                        }
+                    };
+                    let twitch_id = candidates
+                        .iter()
+                        .find(|entry| {
+                            entry
+                                .get("twitch_login")
+                                .and_then(Value::as_str)
+                                .is_some_and(|login| login.eq_ignore_ascii_case(&key))
+                        })
+                        .and_then(|entry| entry.get("twitch_user_id"))
+                        .map(|id| {
+                            id.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| id.to_string())
+                        });
                     {
                         let mut state = matcher.state.lock().await;
                         state.processed.remove(&key);
+                        state.attempted_ids.retain(|_, record| {
+                            record.get("login").and_then(Value::as_str) != Some(key.as_str())
+                        });
+                        if let Some(twitch_id) = &twitch_id {
+                            state.attempted_ids.remove(twitch_id);
+                        }
+                        state.manual_pending.remove(&key);
                         let stale: Vec<String> = state
                             .pending
                             .iter()
@@ -1208,7 +1362,19 @@ pub fn spawn_command_listener(
                         for token in stale {
                             state.pending.remove(&token);
                         }
-                        state.save();
+                        if let Err(err) = state.save() {
+                            tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
+                            drop(state);
+                            matcher
+                                .notifier
+                                .send_text(
+                                    event.channel_id,
+                                    "Der erneute Abgleich konnte nicht gespeichert werden."
+                                        .to_string(),
+                                )
+                                .await;
+                            continue;
+                        }
                     }
                     matcher
                         .notifier
@@ -1420,11 +1586,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ai_budget_cap_bricht_scan_mit_checked_korrektur_ab() {
+    async fn matcher_verwendet_auch_mit_scorer_keine_ki() {
         let entries = json!([
-            { "twitch_login": "alice" },
-            { "twitch_login": "bob" },
-            { "twitch_login": "carol" }
+            { "twitch_login": "alice", "twitch_user_id": "1" },
+            { "twitch_login": "bob", "twitch_user_id": "2" },
+            { "twitch_login": "carol", "twitch_user_id": "3" }
         ]);
         let (url, server) = mock_link_candidates(entries).await;
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1476,19 +1642,23 @@ mod tests {
         );
 
         let stats = matcher.run_scan("Test").await;
-        assert_eq!(stats.checked, 2);
-        assert_eq!(stats.ai_calls, 2);
-        assert_eq!(stats.skipped, 2);
+        assert_eq!(stats.checked, 3);
+        assert_eq!(stats.ai_calls, 0);
+        assert_eq!(stats.errors, 3);
         assert_eq!(
             scorer.calls.lock().expect("lock").clone(),
-            vec!["alice".to_string(), "bob".to_string()]
+            Vec::<String>::new()
         );
+        let second = matcher.run_scan_quiet("Noch einmal").await;
+        assert_eq!(second.checked, 3);
+        assert_eq!(second.errors, 3);
+        assert_eq!(second.ai_calls, 0);
         let embeds = notifier.embeds.lock().expect("lock");
         let summary = embeds.last().expect("summary");
         assert!(summary["description"]
             .as_str()
             .expect("description")
-            .contains("**AI-Aufrufe:** 2"));
+            .contains("**AI-Aufrufe:** 0"));
         server.abort();
     }
 
@@ -1550,6 +1720,181 @@ mod tests {
         assert!(!statuses[0].contains("Moderator"));
     }
 
+    #[tokio::test]
+    async fn manuelle_verknuepfung_bleibt_nach_negativem_versuch_benutzbar() {
+        let app = axum::Router::new().route(
+            "/internal/twitch/v1/streamers/ohnetreffer/discord-profile",
+            axum::routing::post(|| async { axum::Json(json!({"status":"linked"})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = MatcherConfig::from_env(|_| None);
+        config.state_path = dir.path().join("state.json");
+        let matcher = Matcher::new(
+            config,
+            TwitchApiClient::new(
+                format!("http://{address}"),
+                "tok",
+                std::time::Duration::from_secs(2),
+            ),
+            Arc::new(MockGuild {
+                members: vec![MemberLite {
+                    user_id: 42,
+                    name: "discordname".into(),
+                    ..Default::default()
+                }],
+            }),
+            Arc::new(MockNotifier {
+                embeds: Mutex::new(Vec::new()),
+                statuses: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoAi),
+        );
+        {
+            let mut state = matcher.state.lock().await;
+            assert!(state.claim("123", "ohnetreffer").unwrap());
+            state
+                .manual_pending
+                .insert("ohnetreffer".into(), json!({"login":"ohnetreffer"}));
+        }
+        matcher
+            .handle_manual_submit(
+                "ohnetreffer",
+                &BridgeInteraction {
+                    author_can_manage_roles: true,
+                    user_id: 99,
+                    options: HashMap::from([("discord_input".to_string(), json!("42"))]),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let state = matcher.state.lock().await;
+        assert_eq!(state.processed["ohnetreffer"]["status"], "linked");
+        assert!(!state.manual_pending.contains_key("ohnetreffer"));
+        assert_eq!(
+            LinkState::load(state.path.clone()).attempted_ids["123"]["status"],
+            "linked"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mehrdeutige_exakte_namen_brauchen_bestaetigung() {
+        let (url, server) =
+            mock_link_candidates(json!([{"twitch_login":"alice", "twitch_user_id":"123"}])).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = MatcherConfig::from_env(|_| None);
+        config.state_path = dir.path().join("state.json");
+        config.auto_threshold = 70;
+        let matcher = Matcher::new(
+            config,
+            TwitchApiClient::new(url, "tok", std::time::Duration::from_secs(2)),
+            Arc::new(MockGuild {
+                members: vec![
+                    MemberLite {
+                        user_id: 1,
+                        name: "alice".into(),
+                        ..Default::default()
+                    },
+                    MemberLite {
+                        user_id: 2,
+                        name: "Alice TTV".into(),
+                        ..Default::default()
+                    },
+                ],
+            }),
+            Arc::new(MockNotifier {
+                embeds: Mutex::new(Vec::new()),
+                statuses: Mutex::new(Vec::new()),
+            }),
+            Arc::new(NoAi),
+        );
+        let stats = matcher.run_scan_quiet("Test").await;
+        assert_eq!(stats.auto, 0);
+        assert_eq!(stats.review, 1);
+        let state = LinkState::load(matcher.config.state_path.clone());
+        assert_eq!(state.pending.len(), 1);
+        assert!(state.attempted_ids.contains_key("123"));
+        server.abort();
+    }
+
+    #[test]
+    fn versuch_bleibt_nach_neustart_und_umbenennung_geschlossen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = LinkState::load(path.clone());
+        assert!(state.claim("123", "altername").unwrap());
+        assert!(!state.claim("123", "altername").unwrap());
+        let mut state = LinkState::load(path);
+        assert!(!state.claim("123", "neuername").unwrap());
+        assert!(state.claim("456", "anderer").unwrap());
+    }
+
+    #[test]
+    fn alte_negative_und_manuelle_faelle_werden_ohne_neuen_versuch_uebernommen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = LinkState::load(dir.path().join("state.json"));
+        state.mark("negativ", "no_match", Map::new());
+        state.manual_pending.insert(
+            "manuell".into(),
+            json!({"login":"manuell", "message_id": 7}),
+        );
+        assert!(!state.claim("1", "negativ").unwrap());
+        assert!(!state.claim("2", "manuell").unwrap());
+        assert_eq!(state.manual_pending["manuell"]["message_id"], 7);
+    }
+
+    #[test]
+    fn speicherfehler_erlaubt_keine_nebenwirkung_und_beschaedigte_datei_bleibt_erhalten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, "kaputt").unwrap();
+        let mut state = LinkState::load(path.clone());
+        assert!(state.claim("1", "name").is_err());
+        assert!(state.attempted_ids.is_empty());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "kaputt");
+    }
+
+    #[tokio::test]
+    async fn negativer_scan_sendet_nur_einmal_auch_nach_neustart() {
+        let (url, server) =
+            mock_link_candidates(json!([{"twitch_login":"ohnetreffer", "twitch_user_id":"123"}]))
+                .await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = MatcherConfig::from_env(|_| None);
+        config.state_path = dir.path().join("state.json");
+        let client = TwitchApiClient::new(url, "tok", std::time::Duration::from_secs(2));
+        let guild = Arc::new(MockGuild {
+            members: Vec::new(),
+        });
+        let notifier = Arc::new(MockNotifier {
+            embeds: Mutex::new(Vec::new()),
+            statuses: Mutex::new(Vec::new()),
+        });
+        let scorer = Arc::new(CountingAi {
+            calls: Mutex::new(Vec::new()),
+        });
+        let matcher = Matcher::new(
+            config.clone(),
+            client.clone(),
+            guild.clone(),
+            notifier.clone(),
+            scorer.clone(),
+        );
+        assert_eq!(matcher.run_scan_quiet("Test").await.skipped, 1);
+        let count = notifier.embeds.lock().unwrap().len();
+        assert_eq!(matcher.run_scan_quiet("Test").await.checked, 0);
+        let matcher = Matcher::new(config, client, guild, notifier.clone(), scorer.clone());
+        assert_eq!(matcher.run_scan_quiet("Test").await.checked, 0);
+        assert_eq!(notifier.embeds.lock().unwrap().len(), count);
+        assert!(scorer.calls.lock().unwrap().is_empty());
+        server.abort();
+    }
+
     #[test]
     fn state_roundtrip_und_handled() {
         let dir = std::env::temp_dir().join(format!("slm-test-{}", std::process::id()));
@@ -1560,7 +1905,9 @@ mod tests {
         state
             .pending
             .insert("tok1".into(), json!({"login": "other"}));
-        state.save();
+        if let Err(err) = state.save() {
+            tracing::error!(%err, "Matcher: Zustand konnte nicht gespeichert werden");
+        }
 
         let reloaded = LinkState::load(path);
         assert!(reloaded.is_handled("NANI"));

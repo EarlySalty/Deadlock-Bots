@@ -228,30 +228,6 @@ fn model_from_lookup(
         .unwrap_or_else(|| default_model.to_string())
 }
 
-/// Legacy-Anbieterwahl des Streamer-Matchers.
-///
-/// Gesetzt und bekannt: der Wert wandert als Gate-Schluessel weiter, das
-/// Compliance-Gate entscheidet darueber. Gesetzt und unbekannt (frueher der
-/// `_ => NoAi`-Zweig, etwa `gemini` oder `off`): kein KI-Scoring. Nicht
-/// gesetzt: es gilt der Standard aus `DL_LLM_PROVIDER_STREAMER_MATCHER`.
-enum MatcherProviderChoice {
-    Gate(Option<String>),
-    Off(String),
-}
-
-fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
-    let Some(raw) = raw
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return MatcherProviderChoice::Gate(None);
-    };
-    match raw.parse::<dl_ai::LlmProviderKind>() {
-        Ok(kind) => MatcherProviderChoice::Gate(Some(kind.as_str().to_string())),
-        Err(_) => MatcherProviderChoice::Off(raw),
-    }
-}
-
 #[cfg(test)]
 fn brain_channel_allowlist_from_value(raw: Option<&str>) -> Option<HashSet<u64>> {
     raw.and_then(modglue::parse_brain_channel_allowlist)
@@ -618,35 +594,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 adapter: adapter.clone(),
                 notify_channel_id: matcher_config.notify_channel_id,
             });
-            // AI-Scoring: STREAMER_LINK_AI_PROVIDER waehlt weiter den Anbieter,
-            // aber ueber das Compliance-Gate statt ueber eigene Clients.
-            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> = match matcher_provider_choice(
-                operating_value("STREAMER_LINK_AI_PROVIDER"),
-            ) {
-                MatcherProviderChoice::Off(raw) => {
-                    tracing::info!(
-                        provider = %raw,
-                        "Streamer-Matcher ohne KI-Scoring: STREAMER_LINK_AI_PROVIDER nennt keinen Anbieter des Gates"
-                    );
-                    Arc::new(dl_bridges::matcher::NoAi)
-                }
-                MatcherProviderChoice::Gate(override_provider) => {
-                    let generator = chat_text_generator_with(
-                        dl_ai::LlmUseCase::StreamerMatcher,
-                        false,
-                        |key| match (key, override_provider.as_deref()) {
-                            ("DL_LLM_PROVIDER_STREAMER_MATCHER", Some(provider)) => {
-                                operating_value(key).or_else(|| Some(provider.to_string()))
-                            }
-                            _ => operating_value(key),
-                        },
-                    );
-                    match generator {
-                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
-                        None => Arc::new(dl_bridges::matcher::NoAi),
-                    }
-                }
-            };
+            let scorer = Arc::new(dl_bridges::matcher::NoAi);
             let matcher = dl_bridges::matcher::Matcher::new(
                 matcher_config,
                 twitch_client.clone(),
@@ -2130,8 +2078,8 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     use super::{
         brain_channel_allowlist_from_value, chat_text_generator_with, legacy_lfg_responder_enabled,
         lfg_cutover_active, lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
-        matcher_provider_choice, model_from_lookup, moderation_enforce_from_lookup,
-        validate_voice_worker_token, warn_if_lagebild_token_empty, MatcherProviderChoice,
+        model_from_lookup, moderation_enforce_from_lookup, validate_voice_worker_token,
+        warn_if_lagebild_token_empty,
     };
     use std::{
         collections::HashMap,
@@ -2349,31 +2297,6 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             model_from_lookup(lookup, "MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL),
             dl_ai::DEFAULT_OPENAI_MODEL
         );
-    }
-
-    #[test]
-    fn matcher_anbieterwahl_bleibt_an_streamer_link_ai_provider() {
-        assert!(matches!(
-            matcher_provider_choice(Some("openai".to_string())),
-            MatcherProviderChoice::Gate(Some(provider)) if provider == "openai"
-        ));
-        assert!(matches!(
-            matcher_provider_choice(Some("MiniMax".to_string())),
-            MatcherProviderChoice::Gate(Some(provider)) if provider == "minimax"
-        ));
-        assert!(matches!(
-            matcher_provider_choice(None),
-            MatcherProviderChoice::Gate(None)
-        ));
-        assert!(matches!(
-            matcher_provider_choice(Some("   ".to_string())),
-            MatcherProviderChoice::Gate(None)
-        ));
-        // gemini kennt das Gate nicht — frueher der `_ => NoAi`-Zweig.
-        assert!(matches!(
-            matcher_provider_choice(Some("gemini".to_string())),
-            MatcherProviderChoice::Off(raw) if raw == "gemini"
-        ));
     }
 
     #[test]
