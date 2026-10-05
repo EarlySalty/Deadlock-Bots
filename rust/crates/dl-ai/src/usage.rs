@@ -103,6 +103,11 @@ pub async fn replay_pending() -> Result<usize, sqlx::Error> {
             "Journal konnte nicht gelesen werden".into(),
         ));
     }
+    // Laufende Aufrufe haben fünf Minuten Zeit; ältere offene Versuche ohne
+    // Journalbeleg bleiben unbekannt und müssen ebenfalls sichtbar gemeldet werden.
+    let outstanding: i64 = sqlx::query_scalar("SELECT count(*) FROM public.llm_usage WHERE project='Deadlock-Bots' AND service=$1 AND attempt_state='started' AND ts::timestamptz < now() - interval '5 minutes'")
+        .bind(service).fetch_one(pool).await?;
+    unresolved_count = unresolved_count.max(usize::try_from(outstanding).unwrap_or(usize::MAX));
     Ok(unresolved_count)
 }
 
