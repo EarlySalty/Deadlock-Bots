@@ -1096,6 +1096,7 @@ async fn send_json_with_retry(
 ) -> Result<HttpJsonResult, ChatProviderError> {
     let started = Instant::now();
     for attempt in 0..=retry.max_retries {
+        let deadline = Instant::now() + retry.request_timeout;
         let request = make_request();
         let mut tracked = if provider == "fireworks" {
             let metadata = request
@@ -1103,16 +1104,23 @@ async fn send_json_with_retry(
                 .ok_or_else(|| ChatProviderError::Provider("Aufrufmetadaten fehlen".into()))?
                 .build()
                 .map_err(|_| ChatProviderError::Provider("Aufrufmetadaten ungültig".into()))?;
-            Some(crate::usage::Attempt::begin(&metadata).await?)
+            Some(crate::usage::Attempt::begin_before(&metadata, deadline).await?)
         } else {
             None
         };
-        let response = request.send().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            if let Some(tracked) = tracked.take() {
+                tracked.finish_before(None, Some("timeout"), deadline).await;
+            }
+            return Err(ChatProviderError::Timeout);
+        }
+        let response = request.timeout(remaining).send().await;
         let response = match response {
             Ok(response) => response,
             Err(err) if err.is_timeout() => {
                 if let Some(tracked) = tracked.take() {
-                    tracked.finish(None, Some("timeout")).await;
+                    tracked.finish_before(None, Some("timeout"), deadline).await;
                 }
                 tracing::warn!(
                     provider = provider,
@@ -1123,7 +1131,9 @@ async fn send_json_with_retry(
             }
             Err(err) => {
                 if let Some(tracked) = tracked.take() {
-                    tracked.finish(None, Some("transport")).await;
+                    tracked
+                        .finish_before(None, Some("transport"), deadline)
+                        .await;
                 }
                 tracing::warn!(
                     provider = provider,
@@ -1140,7 +1150,9 @@ async fn send_json_with_retry(
         let status = response.status();
         if !status.is_success() {
             if let Some(tracked) = tracked.take() {
-                tracked.finish(None, Some("http_error")).await;
+                tracked
+                    .finish_before(None, Some("http_error"), deadline)
+                    .await;
             }
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -1205,7 +1217,9 @@ async fn send_json_with_retry(
             Ok(body) => body,
             Err(_) => {
                 if let Some(tracked) = tracked.take() {
-                    tracked.finish(None, Some("invalid_json")).await;
+                    tracked
+                        .finish_before(None, Some("invalid_json"), deadline)
+                        .await;
                 }
                 return Err(ChatProviderError::Provider("invalid JSON response".into()));
             }
@@ -1214,7 +1228,7 @@ async fn send_json_with_retry(
             let error = parse_openai_chat_response(&body)
                 .is_err()
                 .then_some("invalid_output");
-            tracked.finish(Some(&body), error).await;
+            tracked.finish_before(Some(&body), error, deadline).await;
         }
         return Ok(HttpJsonResult {
             status,

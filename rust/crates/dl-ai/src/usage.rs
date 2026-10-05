@@ -160,6 +160,18 @@ pub struct Attempt {
 }
 
 impl Attempt {
+    pub async fn begin_before(
+        request: &reqwest::Request,
+        deadline: Instant,
+    ) -> Result<Self, ChatProviderError> {
+        tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            Self::begin(request),
+        )
+        .await
+        .map_err(|_| ChatProviderError::Timeout)?
+    }
+
     pub async fn begin(request: &reqwest::Request) -> Result<Self, ChatProviderError> {
         #[cfg(test)]
         if request
@@ -243,11 +255,23 @@ impl Attempt {
                         .map(str::to_owned);
                 }
             }
-            if recover(completion).await.is_err() {
-                recovery_log(completion);
-            }
+            recovery_log(completion);
+            let _ = recover(completion).await;
             self.completion = None;
         }
+    }
+
+    pub async fn finish_before(
+        self,
+        body: Option<&Value>,
+        error_code: Option<&str>,
+        deadline: Instant,
+    ) {
+        let _ = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            self.finish(body, error_code),
+        )
+        .await;
     }
 }
 
@@ -278,7 +302,7 @@ fn count(body: &Value, name: &str) -> Option<i64> {
 }
 fn recovery_log(completion: &Completion) {
     if let Ok(recovery) = serde_json::to_string(completion) {
-        tracing::error!(%recovery, "LLM_USAGE_RECOVERY: Abschluss aus dem Journal nachliefern");
+        eprintln!("LLM_USAGE_RECOVERY recovery={recovery}");
     }
 }
 pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
@@ -376,6 +400,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn journalbeleg_bleibt_bei_error_filter_sichtbar() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "usage::tests::journalbeleg_stderr_kind",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let message = stderr
+            .lines()
+            .find(|line| line.starts_with("LLM_USAGE_RECOVERY recovery="))
+            .expect("Vorabbeleg wird unabhängig vom Tracingfilter geschrieben");
+        let record = json!({"MESSAGE":message}).to_string();
+        let completion = recovery_from_journal(&record).expect("Echter Stderrbeleg ist replaybar");
+        assert_eq!(completion.total, Some(15));
+    }
+
+    #[test]
+    #[ignore = "Isolierter Kindprozess für den Error-Filter"]
+    fn journalbeleg_stderr_kind() {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .init();
+        recovery_log(&Completion {
+            project: "Deadlock-Bots".into(),
+            service: "test-fixture".into(),
+            id: 7,
+            tokens_in: Some(12),
+            tokens_out: Some(3),
+            total: Some(15),
+            request_id: None,
+            success: true,
+            error_code: None,
+            http_status: Some(200),
+            latency_ms: 1,
+        });
+    }
+
     #[tokio::test]
     #[ignore = "Benötigt lokale PostgreSQL-Peer-Authentifizierung und CREATE DATABASE"]
     async fn lokale_datenbank_belegt_abschluss_abbruch_nullwerte_und_herkunft() {
@@ -411,6 +478,56 @@ mod tests {
             .json(&json!({"model":"fixture-model","messages":[{"content":"nicht speichern"}]}))
             .build()
             .unwrap();
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE public.llm_usage IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let started = Instant::now();
+        let result =
+            Attempt::begin_before(&request, started + std::time::Duration::from_millis(100)).await;
+        assert!(matches!(result, Err(ChatProviderError::Timeout)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        lock.rollback().await.unwrap();
+
+        let delayed = Attempt::begin(&request).await.unwrap();
+        let delayed_id = delayed.completion.as_ref().unwrap().id;
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM public.llm_usage WHERE id=$1 FOR UPDATE")
+            .bind(delayed_id)
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        let started = Instant::now();
+        delayed
+            .finish_before(
+                Some(
+                    &json!({"usage":{"prompt_tokens":19,"completion_tokens":5,"total_tokens":24}}),
+                ),
+                None,
+                started + std::time::Duration::from_millis(100),
+            )
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        lock.rollback().await.unwrap();
+        let total = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let total: Option<i64> =
+                    sqlx::query_scalar("SELECT total FROM public.llm_usage WHERE id=$1")
+                        .bind(delayed_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if let Some(total) = total {
+                    break total;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Drop-Recovery liefert echte Fixtureusage nach");
+        assert_eq!(total, 24);
+
         let attempt = with_purpose("fixture.text", Attempt::begin(&request))
             .await
             .unwrap();

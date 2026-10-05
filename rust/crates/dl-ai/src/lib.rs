@@ -468,24 +468,33 @@ impl OpenAiClient {
 
 impl FireworksClient {
     async fn tracked_json(&self, body: Value) -> Option<Value> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let request = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
             .json(&body);
         let metadata = request.try_clone()?.build().ok()?;
-        let mut attempt = usage::Attempt::begin(&metadata).await.ok()?;
-        let response = match request.send().await {
+        let mut attempt = usage::Attempt::begin_before(&metadata, deadline)
+            .await
+            .ok()?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            attempt.finish_before(None, Some("timeout"), deadline).await;
+            return None;
+        }
+        let response = match request.timeout(remaining).send().await {
             Ok(response) => response,
             Err(error) => {
                 attempt
-                    .finish(
+                    .finish_before(
                         None,
                         Some(if error.is_timeout() {
                             "timeout"
                         } else {
                             "transport"
                         }),
+                        deadline,
                     )
                     .await;
                 return None;
@@ -493,24 +502,30 @@ impl FireworksClient {
         };
         attempt.response(&response);
         if !response.status().is_success() {
-            attempt.finish(None, Some("http_error")).await;
+            attempt
+                .finish_before(None, Some("http_error"), deadline)
+                .await;
             return None;
         }
         let Some(bytes) = bounded_response(response, MAX_API_RESPONSE_BYTES).await else {
-            attempt.finish(None, Some("response_body")).await;
+            attempt
+                .finish_before(None, Some("response_body"), deadline)
+                .await;
             return None;
         };
         let data = match serde_json::from_slice::<Value>(&bytes) {
             Ok(data) => data,
             Err(_) => {
-                attempt.finish(None, Some("invalid_json")).await;
+                attempt
+                    .finish_before(None, Some("invalid_json"), deadline)
+                    .await;
                 return None;
             }
         };
         let error = Self::complete_text(&data)
             .is_none()
             .then_some("invalid_output");
-        attempt.finish(Some(&data), error).await;
+        attempt.finish_before(Some(&data), error, deadline).await;
         Some(data)
     }
 
