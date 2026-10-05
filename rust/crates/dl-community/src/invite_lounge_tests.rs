@@ -318,6 +318,8 @@ fn direkte_bitte_mit_mejn_bleibt_eine_versandbitte() {
         "<@42> Kannst du mich wie die anderen einladen? mejn Code ist 1313436779",
         "<@42> Wie wäre es, wenn du mich einladen würdest? 1313436779",
         "<@!42> Wie wäre es, wenn du mich einladen würdest? Code 1313436779",
+        "<@42> Wie wäre es wenn du mich mit Code 1313436779 einladen würdest?",
+        "<@!42> Wie wäre es wenn du mich mit Code 1313436779 einladen würdest?",
     ] {
         assert_eq!(
             request_kind(content, 42),
@@ -335,6 +337,7 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
             "Bitte lade mich ein. Danke für die Erklärung",
             "Bitte lade mich ein und sag mir, wie lange es dauert",
             "Wie besprochen, du kannst mich jetzt einladen",
+            "Wie wäre es wenn du mich einladen würdest?",
             "Danke für die Erklärung. Bitte lade mich ein",
             "Kannst du mir erklären, wie Einladungen funktionieren? Bitte lade mich ein",
             "Wie kann ich eine Einladung bekommen, und kannst du mich einladen?",

@@ -945,7 +945,7 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
     ) || (matches!(question_opening, ["wie" | "wo" | "wann" | "was", ..])
         // Kurze Einleitungen wie „Wie besprochen,“ und Vorschläge bleiben Bitten.
         && !matches!(question_opening, ["wie", _] if folded.contains(','))
-        && !matches!(question_opening, ["wie", "ware", "es"]));
+        && !matches!(question_opening, ["wie", "ware", "es", ..]));
     let invite_positions: Vec<usize> = INVITE_TERM_RE
         .as_ref()
         .into_iter()

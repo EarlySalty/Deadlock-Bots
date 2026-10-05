@@ -461,6 +461,8 @@ async fn invite_direkte_bitte_mit_wie_umgeht_brain() {
         "<@42> Kannst du mich wie die anderen einladen? mejn Code ist 1313436779",
         "<@42> Wie wäre es, wenn du mich einladen würdest? 1313436779",
         "<@!42> Wie wäre es, wenn du mich einladen würdest? Code 1313436779",
+        "<@42> Wie wäre es wenn du mich mit Code 1313436779 einladen würdest?",
+        "<@!42> Wie wäre es wenn du mich mit Code 1313436779 einladen würdest?",
         "<@42> Bitte lade mich ein. Danke für die Erklärung. Code 1313436779",
         "<@42> Bitte lade mich ein und sag mir, wie lange es dauert. Code 1313436779",
         "<@42> Wie besprochen, du kannst mich jetzt einladen. Code 1313436779",
