@@ -784,7 +784,38 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
         content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
     let mut kind = None;
     for sentence in content.split_inclusive(['.', '!', '?', ';']) {
-        let sentence_kind = sentence_request_kind(sentence, bot_mention);
+        let mut sentence_kind = sentence_request_kind(sentence, bot_mention);
+        if sentence_kind == Some(RequestKind::Information) {
+            let folded = fold_german_umlauts(&sentence.to_lowercase());
+            // Nach „und“ kann eine eigene Bitte folgen. Indirekte Nebensätze
+            // bleiben bei der Informationsfrage des gesamten Satzes.
+            for clause in folded.split(" und ").skip(1) {
+                let words: Vec<&str> = clause
+                    .split(|ch: char| !ch.is_alphanumeric())
+                    .filter(|word| !word.is_empty())
+                    .take(3)
+                    .collect();
+                let opening = words.strip_prefix(&["bitte"]).unwrap_or(&words);
+                let own_request = matches!(
+                    opening,
+                    [verb, "du" | "mich" | "mcih" | "mir" | "uns" | "me", ..]
+                        if is_direct_request_verb(verb)
+                ) || matches!(
+                    opening,
+                    [
+                        "lad" | "lade" | "ladet" | "ladt",
+                        "mich" | "mcih" | "uns" | "me",
+                        ..
+                    ]
+                );
+                if own_request
+                    && sentence_request_kind(clause, bot_mention) == Some(RequestKind::Direct)
+                {
+                    sentence_kind = Some(RequestKind::Direct);
+                    break;
+                }
+            }
+        }
         match sentence_kind {
             Some(RequestKind::Direct) => return sentence_kind,
             Some(RequestKind::Room) => kind = sentence_kind,
@@ -947,11 +978,7 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
             "jemand" | "wer" | "irgendwer" | "irgendjemand" | "einer" | "jmd"
         )
     });
-    let direct_verb = words.iter().any(|word| {
-        ["kannst", "kannste", "konntest", "wurdest", "magst"]
-            .iter()
-            .any(|candidate| close_word(word, candidate, 1))
-    });
+    let direct_verb = words.iter().any(|word| is_direct_request_verb(word));
     if bot_mention || (!room_address && (direct_verb || words.contains(&"du"))) {
         Some(RequestKind::Direct)
     } else if has_question_signal(&content.to_lowercase()) || room_address {
@@ -959,6 +986,12 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
     } else {
         None
     }
+}
+
+fn is_direct_request_verb(word: &str) -> bool {
+    ["kannst", "kannste", "konntest", "wurdest", "magst"]
+        .iter()
+        .any(|candidate| close_word(word, candidate, 1))
 }
 
 /// Kleine Tippfehler in Anrede und Einladungsverb werden ohne KI erkannt.

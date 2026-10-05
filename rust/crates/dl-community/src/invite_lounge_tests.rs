@@ -237,6 +237,9 @@ fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
         "<@42> Kannst du mir deinen Botinvite erklären? Code 1313436779",
         "<@42> Kannst du mir eine Erklärung zum Einladen geben? Code 1313436779",
         "<@42> Gib mir bitte eine Erklärung zum Einladen. Code 1313436779",
+        "<@42> Kannst du mir erklären, warum ich jemanden einladen kann und mich einladen lassen kann? Code 1313436779",
+        "<@!42> Erklär mir, wie du mich einladen kannst und wie Einladungen funktionieren. Code 1313436779",
+        "<@42> Sag mir, wie Einladungen funktionieren und ob du mich einladen kannst. Code 1313436779",
     ] {
         assert_eq!(
             request_kind(content, 42),
@@ -313,6 +316,9 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
             "Wie besprochen, du kannst mich jetzt einladen",
             "Danke für die Erklärung. Bitte lade mich ein",
             "Kannst du mir erklären, wie Einladungen funktionieren? Bitte lade mich ein",
+            "Wie kann ich eine Einladung bekommen, und kannst du mich einladen?",
+            "Erklär mir Einladungen und lade mich ein",
+            "Sag mir, wie Einladungen funktionieren, und lade mich ein",
         ] {
             let content = format!("{mention} {request}. Code 1313436779");
             assert_eq!(
@@ -414,6 +420,9 @@ async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
         "<@99> Kannst du mir die Einladung erklären? Code 1313436779",
         "<@99> Kannst du mir den Invite erklären? Code 1313436779",
         "<@99> Kannst du mich über das Einladen informieren? Code 1313436779",
+        "<@99> Kannst du mir erklären, warum ich jemanden einladen kann und mich einladen lassen kann? Code 1313436779",
+        "<@99> Erklär mir, wie du mich einladen kannst und wie Einladungen funktionieren. Code 1313436779",
+        "<@99> Sag mir, wie Einladungen funktionieren und ob du mich einladen kannst. Code 1313436779",
     ] {
         let (watcher, store, port, invite) = setup();
         watcher

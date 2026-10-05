@@ -414,6 +414,9 @@ async fn invite_erklaerungsfrage_mit_code_bleibt_beim_brain() {
             "<@42> Darf ich mir mit Code 1313436779 jemanden einladen?",
             "<@42> Kannst du mir eine Erklärung zum Einladen geben? Code 1313436779",
             "<@42> Gib mir bitte eine Erklärung zum Einladen. Code 1313436779",
+            "<@42> Kannst du mir erklären, warum ich jemanden einladen kann und mich einladen lassen kann? Code 1313436779",
+            "<@!42> Erklär mir, wie du mich einladen kannst und wie Einladungen funktionieren. Code 1313436779",
+            "<@42> Sag mir, wie Einladungen funktionieren und ob du mich einladen kannst. Code 1313436779",
         ] {
             let (handler, answerer, invites) = invite_test_handler();
             let replies = RecordingBrainReplies::default();
@@ -441,6 +444,12 @@ async fn invite_direkte_bitte_mit_wie_umgeht_brain() {
         "<@42> Bitte lade mich ein und sag mir, wie lange es dauert. Code 1313436779",
         "<@42> Wie besprochen, du kannst mich jetzt einladen. Code 1313436779",
         "<@42> Bitte lade mich ein und gib mir eine Erklärung. Code 1313436779",
+        "<@42> Wie kann ich eine Einladung bekommen, und kannst du mich einladen? Code 1313436779",
+        "<@!42> Wie kann ich eine Einladung bekommen, und kannst du mich einladen? Code 1313436779",
+        "<@42> Erklär mir Einladungen und lade mich ein. Code 1313436779",
+        "<@!42> Erklär mir Einladungen und lade mich ein. Code 1313436779",
+        "<@42> Sag mir, wie Einladungen funktionieren, und lade mich ein. Code 1313436779",
+        "<@!42> Sag mir, wie Einladungen funktionieren, und lade mich ein. Code 1313436779",
     ] {
         let (handler, answerer, invites) = invite_test_handler();
         let replies = RecordingBrainReplies::default();
@@ -490,6 +499,9 @@ async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
         "Darf ich mir mit Code 1313436779 jemanden einladen?",
         "<@42> Kannst du mir eine Erklärung zum Einladen geben? Code 1313436779",
         "<@42> Gib mir bitte eine Erklärung zum Einladen. Code 1313436779",
+        "<@42> Kannst du mir erklären, warum ich jemanden einladen kann und mich einladen lassen kann? Code 1313436779",
+        "<@42> Erklär mir, wie du mich einladen kannst und wie Einladungen funktionieren. Code 1313436779",
+        "<@42> Sag mir, wie Einladungen funktionieren und ob du mich einladen kannst. Code 1313436779",
     ] {
         let (handler, answerer, invites) = invite_test_handler();
         let replies = RecordingBrainReplies::default();
