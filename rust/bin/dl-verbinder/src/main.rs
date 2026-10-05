@@ -155,6 +155,7 @@ async fn run(taeglich: bool) -> Result<()> {
     let pool = dl_central_db::connect_pool(&dsn)
         .await
         .context("zentrale DB verbinden")?;
+    dl_ai::usage::initialize(pool.clone(), "dl-verbinder").map_err(anyhow::Error::msg)?;
 
     // Schritt 0: Grundwahrheit nachziehen, bevor neue Urteile fallen.
     let aufgeloest = resolve_outcomes(&pool, guild_id).await?;

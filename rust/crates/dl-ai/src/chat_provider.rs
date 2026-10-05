@@ -481,7 +481,7 @@ impl LlmProviderConfig {
         // Anwendungsfaelle erfasst, ohne dass eine Aufrufstelle etwas tun
         // muss. Ohne registrierte Senke reicht der Wrapper unveraendert durch.
         Ok(crate::transparency::wrap_with_transparency(
-            overrides.wrap(built),
+            crate::usage::wrap(overrides.wrap(built), format!("{use_case:?}")),
             use_case,
         ))
     }
@@ -1072,6 +1072,7 @@ impl RetryConfig {
     fn http_client(&self) -> reqwest::Client {
         reqwest::Client::builder()
             .timeout(self.request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default()
     }
@@ -1095,10 +1096,24 @@ async fn send_json_with_retry(
 ) -> Result<HttpJsonResult, ChatProviderError> {
     let started = Instant::now();
     for attempt in 0..=retry.max_retries {
-        let response = make_request().send().await;
+        let request = make_request();
+        let mut tracked = if provider == "fireworks" {
+            let metadata = request
+                .try_clone()
+                .ok_or_else(|| ChatProviderError::Provider("Aufrufmetadaten fehlen".into()))?
+                .build()
+                .map_err(|_| ChatProviderError::Provider("Aufrufmetadaten ungültig".into()))?;
+            Some(crate::usage::Attempt::begin(&metadata).await?)
+        } else {
+            None
+        };
+        let response = request.send().await;
         let response = match response {
             Ok(response) => response,
             Err(err) if err.is_timeout() => {
+                if let Some(tracked) = tracked.take() {
+                    tracked.finish(None, Some("timeout")).await;
+                }
                 tracing::warn!(
                     provider = provider,
                     elapsed_ms = started.elapsed().as_millis(),
@@ -1107,6 +1122,9 @@ async fn send_json_with_retry(
                 return Err(ChatProviderError::Timeout);
             }
             Err(err) => {
+                if let Some(tracked) = tracked.take() {
+                    tracked.finish(None, Some("transport")).await;
+                }
                 tracing::warn!(
                     provider = provider,
                     elapsed_ms = started.elapsed().as_millis(),
@@ -1116,7 +1134,15 @@ async fn send_json_with_retry(
                 return Err(ChatProviderError::Provider(request_error_kind(&err)));
             }
         };
+        if let Some(tracked) = &mut tracked {
+            tracked.response(&response);
+        }
         let status = response.status();
+        if !status.is_success() {
+            if let Some(tracked) = tracked.take() {
+                tracked.finish(None, Some("http_error")).await;
+            }
+        }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             tracing::warn!(
                 provider = provider,
@@ -1175,10 +1201,21 @@ async fn send_json_with_retry(
             );
             return Err(ChatProviderError::Provider(hinweis));
         }
-        let body = response
-            .json::<Value>()
-            .await
-            .map_err(|_| ChatProviderError::Provider("invalid JSON response".to_string()))?;
+        let body = match response.json::<Value>().await {
+            Ok(body) => body,
+            Err(_) => {
+                if let Some(tracked) = tracked.take() {
+                    tracked.finish(None, Some("invalid_json")).await;
+                }
+                return Err(ChatProviderError::Provider("invalid JSON response".into()));
+            }
+        };
+        if let Some(tracked) = tracked.take() {
+            let error = parse_openai_chat_response(&body)
+                .is_err()
+                .then_some("invalid_output");
+            tracked.finish(Some(&body), error).await;
+        }
         return Ok(HttpJsonResult {
             status,
             body,

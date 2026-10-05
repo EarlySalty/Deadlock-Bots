@@ -187,6 +187,10 @@ async fn main() -> ExitCode {
         }
     };
 
+    if let Err(error) = dl_ai::usage::initialize(pool.clone(), "dl-brain-feeder") {
+        tracing::error!(error, "Verbrauchserfassung konnte nicht gestartet werden");
+        return ExitCode::FAILURE;
+    }
     let now = Utc::now();
     let period_end = now;
     let period_start = now - TimeDelta::days(7);
@@ -791,6 +795,7 @@ async fn run_plan_phase(
         .await?;
         return Ok(());
     };
+    let client = dl_ai::usage::text(client, "brain.plan");
     let Some(response) = call_plan_llm(client.as_ref(), &model, prompt).await else {
         record_plan_failure(
             pool,

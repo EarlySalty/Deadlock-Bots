@@ -503,6 +503,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let central_pool = dl_central_db::connect_pool(central_dsn)
         .await
         .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?;
+    dl_ai::usage::initialize(central_pool.clone(), "dl-bot").map_err(anyhow::Error::msg)?;
     tracing::info!("Zentrale DB verbunden");
 
     // Discord-Adapter (REST sofort, Cache erst mit Gateway)
@@ -973,8 +974,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         "MOD_TEXT_ANALYZE_MODEL",
         dl_ai::DEFAULT_FIREWORKS_MODEL,
     );
-    let moderation_image_analyze_client = dl_ai::fireworks_vision_from_lookup(env);
-    let moderation_verify_vision_client = dl_ai::fireworks_vision_from_lookup(env);
+    let moderation_image_analyze_client =
+        dl_ai::fireworks_vision_from_lookup(env).map(|(client, model)| {
+            (
+                dl_ai::usage::vision(client, "moderation.image_analyze"),
+                model,
+            )
+        });
+    let moderation_verify_vision_client =
+        dl_ai::fireworks_vision_from_lookup(env).map(|(client, model)| {
+            (
+                dl_ai::usage::vision(client, "moderation.image_verify"),
+                model,
+            )
+        });
     let moderation_verify_text_client =
         chat_text_generator(dl_ai::LlmUseCase::ModerationVerify, false);
     tracing::info!(

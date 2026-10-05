@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let central_pool = dl_central_db::connect_pool(central_dsn)
         .await
         .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?;
+    dl_ai::usage::initialize(central_pool.clone(), "dl-web").map_err(anyhow::Error::msg)?;
 
     let dashboard = DashboardClient::new(
         web_cfg.dashboard_base.clone(),

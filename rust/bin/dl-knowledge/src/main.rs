@@ -727,11 +727,23 @@ async fn main() -> Result<()> {
         "dl-knowledge Korpus geladen"
     );
 
+    if !retrieval_only {
+        if !dl_core::token_snapshot::installed() {
+            dl_core::token_snapshot::load(dl_core::config::process_bot_config()?.source())
+                .map_err(anyhow::Error::msg)?;
+        }
+        let dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
+            .context("Verbrauchsdatenbank fehlt im privaten Infisical-Snapshot")?;
+        let pool = dl_central_db::connect_pool(dsn)
+            .await
+            .map_err(|_| anyhow::anyhow!("Verbrauchsdatenbank nicht erreichbar"))?;
+        dl_ai::usage::initialize(pool, "dl-knowledge").map_err(anyhow::Error::msg)?;
+    }
     let generator: Option<Arc<dyn TextGenerator>> = if retrieval_only {
         None
     } else {
-        FireworksClient::from_env(|key| std::env::var(key).ok())
-            .map(|client| client as Arc<dyn TextGenerator>)
+        FireworksClient::from_env(dl_core::runtime_config::lookup)
+            .map(|client| dl_ai::usage::text(client, "knowledge.ask"))
     };
     if generator.is_none() && !retrieval_only {
         tracing::warn!("Fireworks-Client nicht initialisiert; /ask antwortet fail-closed");

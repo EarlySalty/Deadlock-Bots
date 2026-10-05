@@ -17,6 +17,7 @@ mod configured_chat;
 mod selected_chat;
 mod transparency;
 mod transparency_log;
+pub mod usage;
 pub use chat_provider::*;
 pub use chat_text::*;
 pub use fireworks_model_selection::selected_model as selected_flash_model;
@@ -466,6 +467,53 @@ impl OpenAiClient {
 }
 
 impl FireworksClient {
+    async fn tracked_json(&self, body: Value) -> Option<Value> {
+        let request = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&body);
+        let metadata = request.try_clone()?.build().ok()?;
+        let mut attempt = usage::Attempt::begin(&metadata).await.ok()?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                attempt
+                    .finish(
+                        None,
+                        Some(if error.is_timeout() {
+                            "timeout"
+                        } else {
+                            "transport"
+                        }),
+                    )
+                    .await;
+                return None;
+            }
+        };
+        attempt.response(&response);
+        if !response.status().is_success() {
+            attempt.finish(None, Some("http_error")).await;
+            return None;
+        }
+        let Some(bytes) = bounded_response(response, MAX_API_RESPONSE_BYTES).await else {
+            attempt.finish(None, Some("response_body")).await;
+            return None;
+        };
+        let data = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(data) => data,
+            Err(_) => {
+                attempt.finish(None, Some("invalid_json")).await;
+                return None;
+            }
+        };
+        let error = Self::complete_text(&data)
+            .is_none()
+            .then_some("invalid_output");
+        attempt.finish(Some(&data), error).await;
+        Some(data)
+    }
+
     fn http_client() -> Option<reqwest::Client> {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
@@ -578,27 +626,7 @@ impl TextGenerator for FireworksClient {
             "reasoning_effort": request.reasoning_effort.as_deref().unwrap_or("none"),
         });
 
-        let response = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::warn!(%err, "Fireworks-Text-Request fehlgeschlagen");
-                return None;
-            }
-        };
-        if !response.status().is_success() {
-            tracing::warn!(status = %response.status(), "Fireworks-Text-API-Fehler");
-            return None;
-        }
-        let data: Value =
-            serde_json::from_slice(&bounded_response(response, MAX_API_RESPONSE_BYTES).await?)
-                .ok()?;
+        let data = self.tracked_json(body).await?;
         Self::complete_text(&data)
     }
 }
@@ -647,11 +675,8 @@ impl VisionGenerator for FireworksClient {
     async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String> {
         let model = self.selected_request_model(request.model.clone())?;
         let messages = self.vision_messages(&request).await?;
-        let response = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&json!({
+        let data = self
+            .tracked_json(json!({
                 "model": model,
                 "messages": messages,
                 "max_tokens": request.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -659,16 +684,7 @@ impl VisionGenerator for FireworksClient {
                 "response_format": {"type": "json_object"},
                 "reasoning_effort": "none",
             }))
-            .send()
-            .await
-            .ok()?;
-        if !response.status().is_success() {
-            tracing::warn!(status = %response.status(), "Flash-Bildanalyse fehlgeschlagen");
-            return None;
-        }
-        let data: Value =
-            serde_json::from_slice(&bounded_response(response, MAX_API_RESPONSE_BYTES).await?)
-                .ok()?;
+            .await?;
         let text = Self::complete_text(&data)?;
         Some(OpenAiClient::normalize_scam_json(&text).unwrap_or(text))
     }
