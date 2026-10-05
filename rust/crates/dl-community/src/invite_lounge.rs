@@ -783,6 +783,7 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     let bot_mention =
         content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
     let mut kind = None;
+    let mut supplied_code = false;
     let mut sentence_start = 0;
     for (position, punctuation) in content
         .char_indices()
@@ -855,7 +856,12 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
         match sentence_kind {
             Some(RequestKind::Direct) => return sentence_kind,
             Some(RequestKind::Room) => kind = sentence_kind,
-            Some(RequestKind::Information) if kind.is_none() => kind = sentence_kind,
+            // Eine eigene Code-Antwort erfüllt die offene Nachfrage auch dann,
+            // wenn ein weiterer Satz eine Frage ist. Ohne Nachfrage bleibt None.
+            None if kind.is_none() && friend_code(sentence).is_some() => supplied_code = true,
+            Some(RequestKind::Information) if kind.is_none() && !supplied_code => {
+                kind = sentence_kind;
+            }
             _ => {}
         }
     }

@@ -525,8 +525,66 @@ async fn invite_informationsfrage_in_lounge_erhaelt_proaktive_brain_antwort() {
 }
 
 #[tokio::test]
+async fn invite_eigene_code_antwort_mit_folgefrage_erfuellt_nur_offene_nachfrage() {
+    for mention in ["", "<@42>", "<@!42>"] {
+        for content in [
+            "Hier ist mein Code 1313436779. Was brauchst du noch?",
+            "Hier ist mein Code 1313436779. Wie geht es weiter?",
+            "1313436779. Was brauchst du noch?",
+        ] {
+            for waiting in [false, true] {
+                let (handler, answerer, invites) = invite_test_handler();
+                let replies = RecordingBrainReplies::default();
+                if waiting {
+                    handler
+                        .handle_message_event_with_replies(
+                            &test_message_event(Some(1), "<@42> Kannst du mich einladen?"),
+                            42,
+                            &replies,
+                        )
+                        .await;
+                }
+                let mut code = test_message_event(Some(1), &format!("{mention} {content}"));
+                code.message_id = 4;
+                handler
+                    .handle_message_event_with_replies(&code, 42, &replies)
+                    .await;
+                if waiting {
+                    assert_eq!(
+                        *invites.calls.lock().await,
+                        vec![(42, 1, "1313436779".into(), 3)],
+                        "{content}"
+                    );
+                    assert!(answerer.calls.lock().await.is_empty(), "{content}");
+                    assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+                    let sent = replies.sent.lock().await;
+                    assert_eq!(sent.len(), 2, "{content}");
+                    assert_eq!(sent[1].2["content"], "Einladung raus", "{content}");
+                } else {
+                    assert!(invites.calls.lock().await.is_empty(), "{content}");
+                    let expected_answers = usize::from(!mention.is_empty());
+                    assert_eq!(
+                        answerer.calls.lock().await.len(),
+                        expected_answers,
+                        "{content}"
+                    );
+                    assert_eq!(
+                        replies.sent.lock().await.len(),
+                        expected_answers,
+                        "{content}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
     for content in [
+        "Was brauchst du noch?",
+        "Wie geht es weiter?",
+        "Was brauchst du noch? Hier ist mein Code 1313436779.",
         "Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "<@42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "<@!42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",

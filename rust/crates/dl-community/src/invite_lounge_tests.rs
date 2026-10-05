@@ -476,8 +476,65 @@ fn informationsfrage_veraendert_den_lounge_zustand_nicht() {
 }
 
 #[tokio::test]
+async fn eigene_code_antwort_mit_folgefrage_erfuellt_nur_offene_lounge_nachfrage() {
+    for content in [
+        "Hier ist mein Code 1313436779. Was brauchst du noch?",
+        "Hier ist mein Code 1313436779. Wie geht es weiter?",
+        "1313436779. Was brauchst du noch?",
+        "<@99> Hier ist mein Code 1313436779. Was brauchst du noch?",
+        "<@!99> Hier ist mein Code 1313436779. Was brauchst du noch?",
+    ] {
+        assert_eq!(request_kind(content, BOT), None, "{content}");
+        for waiting in [false, true] {
+            let (watcher, store, port, invite) = setup();
+            if waiting {
+                watcher
+                    .handle_message(
+                        message(1, NOW, "<@99> Kannst du mich einladen?"),
+                        NOW,
+                        Some(false),
+                    )
+                    .await
+                    .expect("Die direkte Bitte muss eine Code-Nachfrage erzeugen");
+            }
+            watcher
+                .handle_message(message(2, NOW + 1, content), NOW + 1, Some(false))
+                .await
+                .expect("Die eigene Code-Antwort muss verarbeitet werden");
+            if waiting {
+                assert_eq!(
+                    invite.calls.lock().await.as_slice(),
+                    &[(BOT, GUILD, "1313436779".into(), USER)],
+                    "{content}"
+                );
+                assert_eq!(
+                    port.replies.lock().await.as_slice(),
+                    &[
+                        (1, INVITE_LOUNGE_HINT_TEXT.into()),
+                        (2, "Die Steam-Einladung ist raus.".into()),
+                    ],
+                    "{content}"
+                );
+            } else {
+                assert!(invite.calls.lock().await.is_empty(), "{content}");
+                assert!(port.replies.lock().await.is_empty(), "{content}");
+                assert!(store
+                    .states
+                    .lock()
+                    .await
+                    .get(&USER)
+                    .is_some_and(|state| state.request.is_none()));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
     for content in [
+        "Was brauchst du noch?",
+        "Wie geht es weiter?",
+        "Was brauchst du noch? Hier ist mein Code 1313436779.",
         "Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "<@99> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "<@!99> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
