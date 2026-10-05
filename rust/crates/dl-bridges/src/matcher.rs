@@ -207,6 +207,13 @@ pub trait GuildPort: Send + Sync {
 pub trait Notifier: Send + Sync {
     /// Embed (+ optionale Components) in den Ops-Kanal → (channel_id, message_id).
     async fn notify(&self, embed: Value, components: Option<Value>) -> Option<(u64, u64)>;
+    /// Offenen Versand anhand der Button-Kennung abgleichen und bei Bedarf senden.
+    async fn notify_once(
+        &self,
+        custom_id: &str,
+        embed: Value,
+        components: Value,
+    ) -> Option<(u64, u64)>;
     /// Review-Nachricht finalisieren (Status-Feld anhängen, Buttons entfernen).
     async fn finalize_review(&self, channel_id: u64, message_id: u64, status: String, color: u32);
     /// Klartext-Antwort (für die !twitch_link_*-Kommandos).
@@ -321,11 +328,21 @@ impl LinkState {
     }
 
     fn claim(&mut self, twitch_id: &str, login: &str) -> std::io::Result<bool> {
-        if let Some(record) = self.attempted_ids.get(twitch_id) {
-            return Ok(matches!(
+        if let Some(record) = self.attempted_ids.get(twitch_id).cloned() {
+            let retry = matches!(
                 record.get("status").and_then(Value::as_str),
                 Some("retry_auto" | "evaluating")
-            ));
+            );
+            if retry && record.get("login").and_then(Value::as_str) != Some(login) {
+                self.attempted_ids
+                    .get_mut(twitch_id)
+                    .expect("Versuch vorhanden")["login"] = json!(login);
+                if let Err(err) = self.save() {
+                    self.attempted_ids.insert(twitch_id.to_string(), record);
+                    return Err(err);
+                }
+            }
+            return Ok(retry);
         }
         let old_record = self
             .processed
@@ -372,12 +389,26 @@ impl LinkState {
         let mut record = Map::new();
         record.insert("status".into(), json!(status));
         record.insert("at".into(), json!(chrono::Utc::now().to_rfc3339()));
+        let twitch_id = extra
+            .get("twitch_user_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         record.extend(extra);
         self.processed
             .insert(login.to_lowercase(), Value::Object(record));
-        for attempt in self.attempted_ids.values_mut() {
-            if attempt.get("login").and_then(Value::as_str) == Some(login.to_lowercase().as_str()) {
+        if let Some(twitch_id) = twitch_id {
+            if let Some(attempt) = self.attempted_ids.get_mut(&twitch_id) {
                 attempt["status"] = json!(status);
+                attempt["login"] = json!(login.to_lowercase());
+            }
+        } else {
+            // Alte manuelle Datensätze ohne ID behalten ihren bisherigen Abschlussweg.
+            for attempt in self.attempted_ids.values_mut() {
+                if attempt.get("login").and_then(Value::as_str)
+                    == Some(login.to_lowercase().as_str())
+                {
+                    attempt["status"] = json!(status);
+                }
             }
         }
     }
@@ -657,7 +688,11 @@ impl Matcher {
             let login_key = norm_key(&login);
             if login_key.is_empty() {
                 if !self
-                    .mark(&login, "no_match", json!({"reason": "leerer Schlüssel"}))
+                    .mark(
+                        &login,
+                        "no_match",
+                        json!({"reason": "leerer Schlüssel", "twitch_user_id": twitch_id}),
+                    )
                     .await
                 {
                     stats.errors += 1;
@@ -674,7 +709,7 @@ impl Matcher {
                     .mark(
                         &login,
                         "no_match",
-                        json!({"reason": format!("kein Member (beste Ähnlichkeit {ratio:.2})")}),
+                        json!({"reason": format!("kein Member (beste Ähnlichkeit {ratio:.2})"), "twitch_user_id": twitch_id}),
                     )
                     .await
                 {
@@ -691,7 +726,7 @@ impl Matcher {
                     .mark(
                         &login,
                         "no_match",
-                        json!({"reason": "Member-Kollision im Lauf"}),
+                        json!({"reason": "Member-Kollision im Lauf", "twitch_user_id": twitch_id}),
                     )
                     .await
                 {
@@ -720,7 +755,10 @@ impl Matcher {
                         break;
                     }
                 }
-                if self.auto_link(&login, member, score, &reason).await {
+                if self
+                    .auto_link(&twitch_id, &login, member, score, &reason)
+                    .await
+                {
                     used_member_ids.insert(member.user_id);
                     stats.auto += 1;
                     stats.new_streamers[entry_idx].outcome = ScanOutcome::AutoLinked {
@@ -753,7 +791,7 @@ impl Matcher {
                 if !self.mark(
                     &login,
                     "no_match",
-                    json!({"reason": format!("Score {score} < {}", self.config.review_threshold)}),
+                    json!({"reason": format!("Score {score} < {}", self.config.review_threshold), "twitch_user_id": twitch_id}),
                 )
                 .await {
                     stats.errors += 1;
@@ -811,46 +849,55 @@ impl Matcher {
             self.post_manual_link_prompt(&login).await;
         }
         for (token, record) in reviews {
-            let Some(embed) = record.get("embed").cloned() else {
-                continue;
-            };
-            {
-                let mut state = self.state.lock().await;
-                if let Some(record) = state.pending.get_mut(&token) {
-                    record["delivered"] = json!(true);
-                }
-                if let Err(err) = state.save() {
-                    if let Some(record) = state.pending.get_mut(&token) {
-                        record["delivered"] = json!(false);
-                    }
-                    tracing::error!(%err, "Matcher: Versand konnte nicht dauerhaft vorbereitet werden");
-                    continue;
-                }
-            }
-            let Some((channel_id, message_id)) = self
-                .notifier
-                .notify(embed, record.get("components").cloned())
-                .await
-            else {
-                let mut state = self.state.lock().await;
-                if let Some(record) = state.pending.get_mut(&token) {
-                    record["delivered"] = json!(false);
-                }
-                if let Err(err) = state.save() {
-                    tracing::error!(%err, "Matcher: fehlgeschlagener Versand konnte nicht gespeichert werden");
-                }
-                continue;
-            };
-            let mut state = self.state.lock().await;
-            if let Some(record) = state.pending.get_mut(&token).and_then(Value::as_object_mut) {
-                record.insert("delivered".into(), json!(true));
-                record.insert("channel_id".into(), json!(channel_id));
-                record.insert("message_id".into(), json!(message_id));
-            }
-            if let Err(err) = state.save() {
-                tracing::error!(%err, "Matcher: gespeicherter Vorschlag konnte nicht finalisiert werden");
-            }
+            self.deliver_prompt(&token, record, false).await;
         }
+    }
+
+    /// Der Auftrag bleibt offen, bis Discord die Nachricht belegt und der Abschluss gespeichert ist.
+    async fn deliver_prompt(&self, key: &str, record: Value, manual: bool) -> bool {
+        let Some(embed) = record.get("embed").cloned() else {
+            return false;
+        };
+        let Some(components) = record.get("components").cloned() else {
+            return false;
+        };
+        let custom_id = if manual {
+            format!("slm:manual:{key}")
+        } else {
+            format!("slm:link:{key}")
+        };
+        let Some((channel_id, message_id)) = self
+            .notifier
+            .notify_once(&custom_id, embed, components)
+            .await
+        else {
+            return false;
+        };
+        let mut state = self.state.lock().await;
+        let records = if manual {
+            &mut state.manual_pending
+        } else {
+            &mut state.pending
+        };
+        let Some(current) = records.get_mut(key) else {
+            // Ein Moderator kann den Auftrag bereits während des Versands abgeschlossen haben.
+            return true;
+        };
+        let previous = current.clone();
+        current["delivered"] = json!(true);
+        current["channel_id"] = json!(channel_id);
+        current["message_id"] = json!(message_id);
+        if let Err(err) = state.save() {
+            let records = if manual {
+                &mut state.manual_pending
+            } else {
+                &mut state.pending
+            };
+            records.insert(key.to_string(), previous);
+            tracing::error!(%err, "Matcher: Versandabschluss konnte nicht gespeichert werden");
+            return false;
+        }
+        true
     }
 
     async fn mark(&self, login: &str, status: &str, extra: Value) -> bool {
@@ -879,7 +926,14 @@ impl Matcher {
         true
     }
 
-    async fn auto_link(&self, login: &str, member: &MemberLite, score: i64, reason: &str) -> bool {
+    async fn auto_link(
+        &self,
+        twitch_id: &str,
+        login: &str,
+        member: &MemberLite,
+        score: i64,
+        reason: &str,
+    ) -> bool {
         if let Err(err) = self
             .client
             .link_discord_profile(login, member.user_id, member.display())
@@ -905,7 +959,7 @@ impl Matcher {
         self.mark(
             login,
             "auto_linked",
-            json!({"discord_user_id": member.user_id.to_string(), "score": score}),
+            json!({"discord_user_id": member.user_id.to_string(), "score": score, "twitch_user_id": twitch_id}),
         )
         .await;
         let embed = json!({
@@ -966,7 +1020,7 @@ impl Matcher {
         );
         record.insert("score".into(), json!(score));
         record.insert("reason".into(), json!(reason));
-        record.insert("delivered".into(), json!(true));
+        record.insert("delivered".into(), json!(false));
         record.insert("embed".into(), embed.clone());
         record.insert("components".into(), components.clone());
         record.insert("message_id".into(), Value::Null);
@@ -975,8 +1029,16 @@ impl Matcher {
             let mut state = self.state.lock().await;
             let previous_processed = state.processed.clone();
             let previous_attempts = state.attempted_ids.clone();
+            let twitch_id = record.get("twitch_user_id").cloned().unwrap_or(Value::Null);
             state.pending.insert(token.clone(), Value::Object(record));
-            state.mark(login, "review", Map::new());
+            state.mark(
+                login,
+                "review",
+                json!({"twitch_user_id": twitch_id})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             if let Err(err) = state.save() {
                 state.pending.remove(&token);
                 state.processed = previous_processed;
@@ -985,28 +1047,11 @@ impl Matcher {
                 return false;
             }
         }
-        let posted = self.notifier.notify(embed, Some(components)).await;
-        if posted.is_none() {
-            let mut state = self.state.lock().await;
-            if let Some(record) = state.pending.get_mut(&token) {
-                record["delivered"] = json!(false);
-            }
-            if let Err(err) = state.save() {
-                tracing::error!(%err, "Matcher: fehlgeschlagener Versand konnte nicht gespeichert werden");
-            }
+        let record = self.state.lock().await.pending.get(&token).cloned();
+        match record {
+            Some(record) => self.deliver_prompt(&token, record, false).await,
+            None => false,
         }
-        if let Some((channel_id, message_id)) = posted {
-            let mut state = self.state.lock().await;
-            if let Some(record) = state.pending.get_mut(&token).and_then(Value::as_object_mut) {
-                record.insert("delivered".into(), json!(true));
-                record.insert("channel_id".into(), json!(channel_id));
-                record.insert("message_id".into(), json!(message_id));
-            }
-            if let Err(err) = state.save() {
-                tracing::error!(%err, "Matcher: Nachrichtenadresse konnte nicht gespeichert werden");
-            }
-        }
-        posted.is_some()
     }
 
     /// Review-Button bestätigt/abgelehnt (slm:link:* / slm:reject:*).
@@ -1128,31 +1173,34 @@ impl Matcher {
             "label": "Discord eingeben",
             "custom_id": format!("slm:manual:{login}"),
         }]}]);
-        {
+        let key = login.to_lowercase();
+        let record = {
             let mut state = self.state.lock().await;
-            state
+            let previous = state.manual_pending.get(&key).cloned();
+            if previous.as_ref().is_some_and(|record| {
+                record.get("delivered").and_then(Value::as_bool) == Some(true)
+            }) {
+                return;
+            }
+            let record = state
                 .manual_pending
-                .entry(login.to_lowercase())
+                .entry(key.clone())
                 .or_insert_with(|| json!({"login": login, "delivered": false}));
-            state
-                .manual_pending
-                .get_mut(&login.to_lowercase())
-                .expect("manuelle Eingabe vorhanden")["delivered"] = json!(true);
+            record["embed"] = embed;
+            record["components"] = components;
+            let saved = record.clone();
             if let Err(err) = state.save() {
+                if let Some(previous) = previous {
+                    state.manual_pending.insert(key, previous);
+                } else {
+                    state.manual_pending.remove(&key);
+                }
                 tracing::error!(%err, "Matcher: manuelle Eingabe konnte nicht gespeichert werden");
                 return;
             }
-        }
-        let posted = self.notifier.notify(embed, Some(components)).await;
-        let (channel_val, message_val) = match posted {
-            Some((ch, msg)) => (json!(ch), json!(msg)),
-            None => (Value::Null, Value::Null),
+            saved
         };
-        let mut state = self.state.lock().await;
-        state.manual_pending.insert(
-            login.to_lowercase(),
-            json!({"login": login, "message_id": message_val, "channel_id": channel_val, "delivered": posted.is_some()}),
-        );
+        self.deliver_prompt(&key, record, true).await;
     }
 
     /// Modaleingabe verarbeiten: Member via Name oder ID suchen, Profil verknüpfen.
@@ -1685,6 +1733,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Notifier for MockNotifier {
+        async fn notify_once(
+            &self,
+            _: &str,
+            embed: Value,
+            components: Value,
+        ) -> Option<(u64, u64)> {
+            self.notify(embed, Some(components)).await
+        }
+
         async fn notify(&self, embed: Value, _components: Option<Value>) -> Option<(u64, u64)> {
             self.embeds.lock().expect("lock").push(embed);
             Some((10, 20))
@@ -2003,6 +2060,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Notifier for FlakyNotifier {
+        async fn notify_once(
+            &self,
+            _: &str,
+            embed: Value,
+            components: Value,
+        ) -> Option<(u64, u64)> {
+            self.notify(embed, Some(components)).await
+        }
+
         async fn notify(&self, embed: Value, _: Option<Value>) -> Option<(u64, u64)> {
             if embed["title"] == "🔗 Kein Discord-Match"
                 && self
@@ -2055,6 +2121,202 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    #[test]
+    fn unterbrochene_versuche_schliessen_nach_umbenennung_nur_ihre_twitch_id() {
+        for status in ["evaluating", "retry_auto"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.json");
+            let mut state = LinkState::load(path.clone());
+            assert!(state.claim("123", "altername").unwrap());
+            state.attempted_ids["123"]["status"] = json!(status);
+            assert!(state.claim("456", "neuername").unwrap());
+            state.save().unwrap();
+            let mut state = LinkState::load(path.clone());
+            assert!(state.claim("123", "neuername").unwrap());
+            assert_eq!(state.attempted_ids["123"]["login"], "neuername");
+            state.mark(
+                "neuername",
+                "no_match",
+                json!({"twitch_user_id": "123"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            assert_eq!(state.attempted_ids["456"]["status"], "evaluating");
+            state.save().unwrap();
+            let mut state = LinkState::load(path);
+            assert!(!state.claim("123", "drittername").unwrap());
+        }
+    }
+
+    #[derive(Default)]
+    struct DurableNotifier {
+        messages: Mutex<HashMap<String, (u64, u64)>>,
+        sends: std::sync::atomic::AtomicUsize,
+        history_failed: std::sync::atomic::AtomicBool,
+        interrupt_after_send: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Notifier for DurableNotifier {
+        async fn notify(&self, _: Value, _: Option<Value>) -> Option<(u64, u64)> {
+            Some((10, 20))
+        }
+        async fn notify_once(&self, custom_id: &str, _: Value, _: Value) -> Option<(u64, u64)> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.history_failed.load(SeqCst) {
+                return None;
+            }
+            let mut messages = self.messages.lock().unwrap();
+            if let Some(address) = messages.get(custom_id) {
+                return Some(*address);
+            }
+            self.sends.fetch_add(1, SeqCst);
+            messages.insert(custom_id.to_string(), (10, 20));
+            if self.interrupt_after_send.swap(false, SeqCst) {
+                return None;
+            }
+            Some((10, 20))
+        }
+        async fn finalize_review(&self, _: u64, _: u64, _: String, _: u32) {}
+        async fn send_text(&self, _: u64, _: String) {}
+    }
+
+    fn delivery_matcher(path: PathBuf, notifier: Arc<DurableNotifier>) -> Arc<Matcher> {
+        let mut config = MatcherConfig::from_env(|_| None);
+        config.state_path = path;
+        Matcher::new(
+            config,
+            TwitchApiClient::new(
+                "http://127.0.0.1:9",
+                "tok",
+                std::time::Duration::from_secs(1),
+            ),
+            Arc::new(MockGuild {
+                members: Vec::new(),
+            }),
+            notifier,
+            Arc::new(NoAi),
+        )
+    }
+
+    fn saved_delivery(login: &str, manual: bool) -> Value {
+        let custom_id = if manual {
+            format!("slm:manual:{login}")
+        } else {
+            format!("slm:link:{login}")
+        };
+        json!({"login":login, "delivered":false, "embed":{"title":"Test"},
+            "components":[{"type":1, "components":[{"type":2,"custom_id":custom_id}]}]})
+    }
+
+    #[tokio::test]
+    async fn versand_bleibt_bei_abbruch_und_historienfehler_offen_ohne_doppelte_nachricht() {
+        use std::sync::atomic::Ordering::SeqCst;
+        for manual in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.json");
+            let notifier = Arc::new(DurableNotifier::default());
+            let matcher = delivery_matcher(path.clone(), notifier.clone());
+            let record = saved_delivery("name", manual);
+            {
+                let mut state = matcher.state.lock().await;
+                if manual {
+                    state.manual_pending.insert("name".into(), record);
+                } else {
+                    state.pending.insert("name".into(), record);
+                }
+                state.save().unwrap();
+            }
+            // Neustart vor dem Versand; ein Historienfehler darf keinen neuen Versand auslösen.
+            let matcher = delivery_matcher(path.clone(), notifier.clone());
+            notifier.history_failed.store(true, SeqCst);
+            matcher.deliver_saved_prompts().await;
+            assert_eq!(notifier.sends.load(SeqCst), 0);
+            notifier.history_failed.store(false, SeqCst);
+            notifier.interrupt_after_send.store(true, SeqCst);
+            matcher.deliver_saved_prompts().await;
+            assert_eq!(notifier.sends.load(SeqCst), 1);
+            // Neustart nach dem Versand, aber vor dem lokalen Abschluss.
+            let matcher = delivery_matcher(path.clone(), notifier.clone());
+            matcher.deliver_saved_prompts().await;
+            matcher.deliver_saved_prompts().await;
+            assert_eq!(notifier.sends.load(SeqCst), 1);
+            let state = LinkState::load(path);
+            let record = if manual {
+                &state.manual_pending["name"]
+            } else {
+                &state.pending["name"]
+            };
+            assert_eq!(record["delivered"], true);
+            assert_eq!(record["message_id"], 20);
+        }
+    }
+
+    #[tokio::test]
+    async fn fehlgeschlagener_versandabschluss_bleibt_wiederholbar() {
+        use std::sync::atomic::Ordering::SeqCst;
+        for manual in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.json");
+            let notifier = Arc::new(DurableNotifier::default());
+            let matcher = delivery_matcher(path.clone(), notifier.clone());
+            let record = saved_delivery("name", manual);
+            {
+                let mut state = matcher.state.lock().await;
+                if manual {
+                    state.manual_pending.insert("name".into(), record.clone());
+                } else {
+                    state.pending.insert("name".into(), record.clone());
+                }
+                state.save().unwrap();
+                state.path = dir.path().to_path_buf();
+            }
+            assert!(!matcher.deliver_prompt("name", record, manual).await);
+            {
+                let state = matcher.state.lock().await;
+                let record = if manual {
+                    &state.manual_pending["name"]
+                } else {
+                    &state.pending["name"]
+                };
+                assert_eq!(record["delivered"], false);
+            }
+            let matcher = delivery_matcher(path.clone(), notifier.clone());
+            matcher.deliver_saved_prompts().await;
+            assert_eq!(notifier.sends.load(SeqCst), 1);
+            let state = LinkState::load(path);
+            let record = if manual {
+                &state.manual_pending["name"]
+            } else {
+                &state.pending["name"]
+            };
+            assert_eq!(record["delivered"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn manueller_auftrag_bleibt_bei_vorbereitungsfehler_ungesendet() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = tempfile::tempdir().unwrap();
+        let notifier = Arc::new(DurableNotifier::default());
+        let matcher = delivery_matcher(dir.path().join("state.json"), notifier.clone());
+        {
+            let mut state = matcher.state.lock().await;
+            state
+                .manual_pending
+                .insert("name".into(), json!({"login":"name", "delivered":false}));
+            state.save().unwrap();
+            state.path = dir.path().to_path_buf();
+        }
+        matcher.post_manual_link_prompt("name").await;
+        assert_eq!(notifier.sends.load(SeqCst), 0);
+        assert_eq!(
+            matcher.state.lock().await.manual_pending["name"]["delivered"],
+            false
+        );
     }
 
     #[test]

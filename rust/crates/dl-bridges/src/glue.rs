@@ -128,6 +128,80 @@ impl Notifier for AdapterGlue {
         }
     }
 
+    async fn notify_once(
+        &self,
+        custom_id: &str,
+        embed: Value,
+        components: Value,
+    ) -> Option<(u64, u64)> {
+        let bot_id = match self.adapter.http.get_current_user().await {
+            Ok(user) => user.id,
+            Err(err) => {
+                tracing::warn!(%err, "Matcher: Versandabgleich konnte Bot-ID nicht laden");
+                return None;
+            }
+        };
+        let mut before = None;
+        loop {
+            let page = match self
+                .adapter
+                .channel_message_history(self.notify_channel_id, before)
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    tracing::warn!(%err, "Matcher: Kanalhistorie nicht verfügbar, Versand bleibt offen");
+                    return None;
+                }
+            };
+            for message in &page {
+                if message.author.id == bot_id {
+                    let value = match serde_json::to_value(&message.components) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            tracing::warn!(%err, "Matcher: Nachrichtenkomponenten nicht lesbar");
+                            return None;
+                        }
+                    };
+                    if contains_custom_id(&value, custom_id) {
+                        return Some((self.notify_channel_id, message.id.get()));
+                    }
+                }
+            }
+            if page.len() < 100 {
+                break;
+            }
+            let next = page.iter().map(|message| message.id.get()).min();
+            if next.is_none() || before.is_some_and(|before| next >= Some(before)) {
+                tracing::warn!(
+                    "Matcher: Kanalhistorie macht keinen Fortschritt, Versand bleibt offen"
+                );
+                return None;
+            }
+            before = next;
+        }
+        let mut body = Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        // Ergänzt den dauerhaften Historienabgleich für kurze API-Verzögerungen.
+        let nonce = custom_id.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+        body.insert("nonce".into(), json!(nonce.to_string()));
+        body.insert("enforce_nonce".into(), json!(true));
+        match self
+            .adapter
+            .send_raw_public(self.notify_channel_id, &body)
+            .await
+        {
+            Ok(message_id) => Some((self.notify_channel_id, message_id)),
+            Err(err) => {
+                tracing::warn!(%err, "Matcher: Versand bleibt zur erneuten Prüfung offen");
+                None
+            }
+        }
+    }
+
     async fn finalize_review(&self, channel_id: u64, message_id: u64, status: String, color: u32) {
         // Original-Embed holen, Status-Feld anhängen, Buttons entfernen.
         let original = self
@@ -175,5 +249,37 @@ impl Notifier for AdapterGlue {
         if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
             tracing::warn!(%err, channel_id, "Matcher: Text-Antwort fehlgeschlagen");
         }
+    }
+}
+
+/// Sucht ausschließlich nach der unveränderten Button-Kennung des gespeicherten Auftrags.
+fn contains_custom_id(value: &Value, custom_id: &str) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| contains_custom_id(value, custom_id)),
+        Value::Object(values) => {
+            values.get("custom_id").and_then(Value::as_str) == Some(custom_id)
+                || values
+                    .values()
+                    .any(|value| contains_custom_id(value, custom_id))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versandkennung_muss_exakt_in_einem_button_stehen() {
+        let components = json!([{"components": [{"custom_id": "slm:link:123"}]}]);
+        assert!(contains_custom_id(&components, "slm:link:123"));
+        assert!(!contains_custom_id(&components, "slm:link:12"));
+        assert!(!contains_custom_id(
+            &json!({"description": "slm:link:123"}),
+            "slm:link:123"
+        ));
     }
 }
