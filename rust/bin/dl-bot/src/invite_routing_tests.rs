@@ -454,8 +454,20 @@ async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
             "{content}"
         );
         drop(sent);
+        // Nach der Wissensantwort gelten weiterhin die bestehenden Reply-Grenzen.
+        let mut old_prompt_reply = test_message_event(Some(1), "1313436779");
+        old_prompt_reply.message_id = 5;
+        old_prompt_reply.is_reply = true;
+        old_prompt_reply.reply_message_id = Some(1001);
+        old_prompt_reply.reply_channel_id = Some(1);
+        handler
+            .handle_message_event_with_replies(&old_prompt_reply, 42, &replies)
+            .await;
+        assert!(invites.calls.lock().await.is_empty());
+        assert_eq!(answerer.calls.lock().await.len(), 1);
+        assert_eq!(replies.sent.lock().await.len(), 2);
         let mut code = test_message_event(Some(1), "1313436779");
-        code.message_id = 5;
+        code.message_id = 6;
         handler
             .handle_message_event_with_replies(&code, 42, &replies)
             .await;

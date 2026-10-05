@@ -264,7 +264,7 @@ fn prozessfragen_zu_einladungen_sind_information() {
     }
     for content in [
         "Kann mich jemand mit Code 1313436779 einladen?",
-        "Wer lädt mich mit Code 1313436779 ein?",
+        "Wer lädt mich ein? Code 1313436779",
     ] {
         assert_eq!(
             request_kind(content, 42),
