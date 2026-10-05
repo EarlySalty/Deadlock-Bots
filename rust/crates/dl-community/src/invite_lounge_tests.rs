@@ -260,6 +260,9 @@ fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
 #[test]
 fn prozessfragen_zu_einladungen_sind_information() {
     for content in [
+        "Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "Wie kann <@42> mich mit Code 1313436779 einladen?",
         "Wie kann <@!42> mich mit Code 1313436779 einladen?",
         "<@42> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
@@ -339,6 +342,7 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
             "Bitte lade mich ein. Danke für die Erklärung",
             "Bitte lade mich ein und sag mir, wie lange es dauert",
             "Wie besprochen, du kannst mich jetzt einladen",
+            "Wie wäre es, wenn du mich einladen würdest?",
             "Wie wäre es wenn du mich einladen würdest?",
             "Danke für die Erklärung. Bitte lade mich ein",
             "Kannst du mir erklären, wie Einladungen funktionieren? Bitte lade mich ein",
@@ -401,6 +405,8 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
 #[tokio::test]
 async fn erklaerungsfrage_mit_code_loest_keinen_invite_aus() {
     for content in [
+        "<@99> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "Wie kann <@99> mich mit Code 1313436779 einladen?",
         "Wie kann <@!99> mich mit Code 1313436779 einladen?",
         "<@99> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
@@ -472,6 +478,9 @@ fn informationsfrage_veraendert_den_lounge_zustand_nicht() {
 #[tokio::test]
 async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
     for content in [
+        "Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "Wie kann <@99> mich mit Code 1313436779 einladen?",
         "Wie kann <@!99> mich mit Code 1313436779 einladen?",
         "<@99> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",

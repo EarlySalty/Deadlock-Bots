@@ -401,6 +401,8 @@ async fn invite_wissensfrage_bleibt_beim_brain() {
 async fn invite_erklaerungsfrage_mit_code_bleibt_beim_brain() {
     for in_lounge in [false, true] {
         for content in [
+            "<@42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+            "<@!42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
             "Wie kann <@42> mich mit Code 1313436779 einladen?",
             "Wie kann <@!42> mich mit Code 1313436779 einladen?",
             "<@42> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
@@ -525,6 +527,9 @@ async fn invite_informationsfrage_in_lounge_erhaelt_proaktive_brain_antwort() {
 #[tokio::test]
 async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
     for content in [
+        "Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Wie lange, bis du mich mit Code 1313436779 einladen kannst?",
         "Wie kann <@42> mich mit Code 1313436779 einladen?",
         "Wie kann <@!42> mich mit Code 1313436779 einladen?",
         "<@42> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
