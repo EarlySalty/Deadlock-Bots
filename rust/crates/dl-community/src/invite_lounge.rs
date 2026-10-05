@@ -783,7 +783,7 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     let bot_mention =
         content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
     let mut kind = None;
-    for sentence in content.split(['.', '!', '?', ';']) {
+    for sentence in content.split_inclusive(['.', '!', '?', ';']) {
         let sentence_kind = sentence_request_kind(sentence, bot_mention);
         match sentence_kind {
             Some(RequestKind::Direct) => return sentence_kind,

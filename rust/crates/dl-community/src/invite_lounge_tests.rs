@@ -209,6 +209,10 @@ fn direkte_bitte_mit_umgangssprache_und_tippfehlern() {
         request_kind("kann mich jemand einladen?", BOT),
         Some(RequestKind::Room)
     );
+    assert_eq!(
+        request_kind("Mich einladen? Code 1313436779", BOT),
+        Some(RequestKind::Room)
+    );
 }
 
 #[test]
