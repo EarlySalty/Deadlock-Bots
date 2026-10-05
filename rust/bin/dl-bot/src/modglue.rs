@@ -266,6 +266,7 @@ pub struct BrainHandler {
 pub struct BrainConversations {
     entries: HashMap<(u64, u64, u64), (u64, Instant)>,
     awaiting_invite_codes: HashMap<(u64, u64, u64), (u64, Instant)>,
+    invite_reply_requests: HashMap<(u64, u64, u64), (u64, Instant)>,
 }
 
 impl BrainConversations {
@@ -276,12 +277,39 @@ impl BrainConversations {
         self.awaiting_invite_codes.retain(|_, (_, requested_at)| {
             now.saturating_duration_since(*requested_at) < BRAIN_CONVERSATION_TTL
         });
+        self.invite_reply_requests.retain(|_, (_, requested_at)| {
+            now.saturating_duration_since(*requested_at) < BRAIN_CONVERSATION_TTL
+        });
     }
 
     fn clear_invite_code_request(&mut self, key: (u64, u64, u64), request: (u64, Instant)) {
         if self.awaiting_invite_codes.get(&key) == Some(&request) {
             self.awaiting_invite_codes.remove(&key);
         }
+    }
+
+    fn record_invite_reply(
+        &mut self,
+        event: &dl_discord::MessageEvent,
+        message_id: u64,
+        request: (u64, Instant),
+        now: Instant,
+    ) {
+        self.prune(now);
+        let Some(guild_id) = event.guild_id else {
+            return;
+        };
+        let key = (guild_id, event.channel_id, event.author_id);
+        // Eine ältere Versandantwort darf keine neuere Gesprächsaufnahme verdrängen.
+        if self.invite_reply_requests.get(&key) != Some(&request)
+            || self
+                .entries
+                .get(&key)
+                .is_some_and(|(_, recorded_at)| *recorded_at > request.1)
+        {
+            return;
+        }
+        self.record(event, message_id, now);
     }
 
     fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
@@ -746,6 +774,7 @@ impl BrainHandler {
             return true;
         }
         let mut prompt_request = None;
+        let reply_request;
         let text = if let Some(code) = code {
             {
                 let mut conversations = self.conversations.lock().await;
@@ -757,6 +786,10 @@ impl BrainHandler {
                     return true;
                 }
                 conversations.awaiting_invite_codes.remove(&key);
+                reply_request = (event.message_id, Instant::now());
+                conversations
+                    .invite_reply_requests
+                    .insert(key, reply_request);
             }
             match self
                 .invites
@@ -777,6 +810,8 @@ impl BrainHandler {
             // Vor der Zustellung reservieren, damit parallele Bitten nur einmal fragen.
             let request = (event.message_id, Instant::now());
             conversations.awaiting_invite_codes.insert(key, request);
+            conversations.invite_reply_requests.insert(key, request);
+            reply_request = request;
             prompt_request = Some(request);
             "Schick mir bitte deinen Steam-Freundescode als Zahl. Du findest ihn in Steam unter Freunde → „Freund hinzufügen“.".into()
         };
@@ -786,10 +821,12 @@ impl BrainHandler {
                 .await
             {
                 Ok(message_id) => {
-                    self.conversations
-                        .lock()
-                        .await
-                        .record(event, message_id, Instant::now());
+                    self.conversations.lock().await.record_invite_reply(
+                        event,
+                        message_id,
+                        reply_request,
+                        Instant::now(),
+                    );
                     true
                 }
                 Err(err) => {

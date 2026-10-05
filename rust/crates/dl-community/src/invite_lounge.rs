@@ -780,31 +780,58 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     if is_offer(content) {
         return None;
     }
+    let bot_mention =
+        content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
+    let mut kind = None;
+    for sentence in content.split(['.', '!', '?', ';']) {
+        let sentence_kind = sentence_request_kind(sentence, bot_mention);
+        match sentence_kind {
+            Some(RequestKind::Direct) => return sentence_kind,
+            Some(RequestKind::Room) => kind = sentence_kind,
+            Some(RequestKind::Information) if kind.is_none() => kind = sentence_kind,
+            _ => {}
+        }
+    }
+    kind
+}
+
+fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind> {
     let folded = fold_german_umlauts(&content.to_lowercase());
     let words: Vec<&str> = folded
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect();
-    // Ausdrückliche Erklärungsfragen bitten nicht um einen Versand.
-    let explanation = words.iter().any(|word| {
+    // Das angefragte Verb entscheidet. Substantive wie „Erklärung“ sind keine Bitte.
+    let explanation = words.iter().position(|word| {
         ["erklar", "erklaer", "erlauter", "erlaeuter", "informier"]
             .iter()
-            .any(|stem| word.starts_with(stem))
+            .any(|stem| {
+                word.strip_prefix(stem)
+                    .is_some_and(|ending| matches!(ending, "" | "e" | "en" | "n" | "st" | "t"))
+            })
     });
-    let information = words.iter().enumerate().any(|(index, word)| {
-        matches!(*word, "sag" | "sage" | "sagen" | "sagst" | "sagt")
+    let information = words.iter().enumerate().find_map(|(index, word)| {
+        (matches!(*word, "sag" | "sage" | "sagen" | "sagst" | "sagt")
             && words[index + 1..]
                 .iter()
-                .any(|word| matches!(*word, "warum" | "wie" | "wieso" | "weshalb" | "ob"))
+                .any(|word| matches!(*word, "warum" | "wie" | "wieso" | "weshalb" | "ob")))
+        .then_some(index)
     });
-    // Führende Mention-IDs gehören nicht zum Frageanfang. Prozessfragen behalten
-    // ihren Informationscharakter auch mit Code und bei einer offenen Nachfrage.
-    let question_start = words
+    // Der Frageanfang endet am ersten Komma. „Wie besprochen, du ...“ enthält
+    // dadurch keine Prozessfrage. Mention-IDs gehören nicht zum Frageanfang.
+    let opening_words: Vec<&str> = folded
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let question_start = opening_words
         .iter()
         .position(|word| !word.chars().all(|ch| ch.is_ascii_digit()))
-        .unwrap_or(words.len());
+        .unwrap_or(opening_words.len());
     let process_question = matches!(
-        &words[question_start..],
+        &opening_words[question_start..],
         ["warum" | "wieso" | "weshalb", ..]
             | [
                 "wie" | "wo" | "wann" | "was",
@@ -838,20 +865,56 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
                 ..
             ]
     );
-    if explanation || information || process_question {
-        return Some(RequestKind::Information);
-    }
-    let invite = INVITE_TERM_RE
+    let invite_positions: Vec<usize> = INVITE_TERM_RE
         .as_ref()
-        .is_some_and(|regex| regex.is_match(&folded))
-        || words
-            .iter()
-            .any(|word| close_word(word, "einladen", 2) || close_word(word, "inviten", 1));
-    let self_request = words.iter().any(|word| {
+        .into_iter()
+        .flat_map(|regex| regex.find_iter(&folded))
+        .map(|found| {
+            let before = &folded[..found.start()];
+            let starts_inside_word = before
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+            before
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .count()
+                .saturating_sub(usize::from(starts_inside_word))
+        })
+        .chain(words.iter().enumerate().filter_map(|(position, word)| {
+            (close_word(word, "einladen", 2) || close_word(word, "inviten", 1)).then_some(position)
+        }))
+        .collect();
+    let invite_action_position = invite_positions
+        .iter()
+        .copied()
+        .filter(|position| {
+            let word = words[*position];
+            let action_word = matches!(word, "lad" | "lade" | "ladet" | "ladt")
+                || (!word.starts_with("einladung")
+                    && !word.ends_with("invite")
+                    && !word.ends_with("invites")
+                    && (close_word(word, "einladen", 2) || close_word(word, "inviten", 1)));
+            action_word
+                && !position.checked_sub(1).is_some_and(|previous| {
+                    matches!(words[previous], "das" | "beim" | "zum" | "vom" | "durchs")
+                })
+        })
+        .min();
+    let self_request_position = words.iter().position(|word| {
         matches!(*word, "mich" | "mcih" | "mir" | "uns" | "me")
             || (word.starts_with('m') && word.len() >= 3 && close_word(word, "mich", 1))
     });
-    if !invite || !self_request {
+    // Eine anschließende Auskunft hebt eine bereits formulierte Bitte nicht auf.
+    if process_question
+        || explanation.into_iter().chain(information).any(|position| {
+            invite_action_position.is_none_or(|invite| position < invite)
+                || self_request_position.is_none_or(|request| position < request)
+        })
+    {
+        return Some(RequestKind::Information);
+    }
+    if invite_positions.is_empty() || self_request_position.is_none() {
         return None;
     }
     let room_address = words.iter().any(|word| {
@@ -860,8 +923,6 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
             "jemand" | "wer" | "irgendwer" | "irgendjemand" | "einer" | "jmd"
         )
     });
-    let bot_mention =
-        content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
     let direct_verb = words.iter().any(|word| {
         ["kannst", "kannste", "konntest", "wurdest", "magst"]
             .iter()

@@ -294,6 +294,75 @@ async fn invite_alte_versandantwort_loescht_keine_neuere_code_nachfrage() {
 }
 
 #[tokio::test]
+async fn invite_alte_erfolgsantwort_erhaelt_reply_auf_neuere_code_nachfrage() {
+    let (mut handler, answerer, _) = invite_test_handler();
+    let invites = Arc::new(DelayedInviteEvents::default());
+    handler.invites = invites.clone();
+    let handler = Arc::new(handler);
+    let replies = Arc::new(RecordingBrainReplies::default());
+    let slow_handler = handler.clone();
+    let slow_replies = replies.clone();
+    let slow = tokio::spawn(async move {
+        slow_handler
+            .handle_message_event_with_replies(
+                &test_message_event(Some(1), "<@42> Kannst du mich einladen? 1313436779"),
+                42,
+                slow_replies.as_ref(),
+            )
+            .await;
+    });
+    tokio::time::timeout(Duration::from_secs(2), invites.started.notified())
+        .await
+        .expect("Der erste Versand wartet auf seine Freigabe");
+    let mut request = test_message_event(Some(1), "<@42> Kannst du mich einladen?");
+    request.message_id = 4;
+    handler
+        .handle_message_event_with_replies(&request, 42, replies.as_ref())
+        .await;
+    invites.resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), slow)
+        .await
+        .expect("Die alte Versandantwort wurde erfolgreich zugestellt")
+        .expect("Der alte Versandtask ist erfolgreich beendet");
+    assert_eq!(replies.sent.lock().await.len(), 2);
+    assert_eq!(
+        handler
+            .conversations
+            .lock()
+            .await
+            .entries
+            .get(&(1, 1, 3))
+            .map(|entry| entry.0),
+        Some(1001)
+    );
+    let mut code = test_message_event(Some(1), "1234567890");
+    code.message_id = 5;
+    code.is_reply = true;
+    code.reply_message_id = Some(1001);
+    code.reply_channel_id = Some(1);
+    handler
+        .handle_message_event_with_replies(&code, 42, replies.as_ref())
+        .await;
+    assert_eq!(
+        *invites.invites.calls.lock().await,
+        vec![
+            (42, 1, "1313436779".into(), 3),
+            (42, 1, "1234567890".into(), 3),
+        ]
+    );
+    assert!(answerer.calls.lock().await.is_empty());
+    assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+    let sent = replies.sent.lock().await;
+    assert_eq!(sent.len(), 3);
+    assert!(sent[0].2["content"]
+        .as_str()
+        .expect("Die neue Nachfrage nach dem Freundescode muss Text enthalten")
+        .contains("Steam-Freundescode als Zahl"));
+    assert_eq!(sent[1].2["content"], "Einladung raus");
+    assert_eq!(sent[2].2["content"], "Einladung raus");
+}
+
+#[tokio::test]
 async fn invite_direkte_bitte_in_laufendem_gespraech_umgeht_brain() {
     let (handler, answerer, invites) = invite_test_handler();
     let replies = RecordingBrainReplies::default();
@@ -366,6 +435,9 @@ async fn invite_direkte_bitte_mit_wie_umgeht_brain() {
     for content in [
         "<@42> Kannst du mich wie die anderen einladen? mejn Code ist 1313436779",
         "<@42> Wie wäre es, wenn du mich einladen würdest? 1313436779",
+        "<@42> Bitte lade mich ein. Danke für die Erklärung. Code 1313436779",
+        "<@42> Bitte lade mich ein und sag mir, wie lange es dauert. Code 1313436779",
+        "<@42> Wie besprochen, du kannst mich jetzt einladen. Code 1313436779",
     ] {
         let (handler, answerer, invites) = invite_test_handler();
         let replies = RecordingBrainReplies::default();

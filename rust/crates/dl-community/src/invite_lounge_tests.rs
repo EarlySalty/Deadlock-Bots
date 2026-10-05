@@ -224,6 +224,13 @@ fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
         "<@42> Kannst du mir sagen, wie ich mit Code 1313436779 jemanden einladen kann?",
         "<@42> Kannst du mir sagen, wieso ich mit Code 1313436779 niemanden einladen kann?",
         "<@42> Kannst du mir sagen, weshalb ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Kannst du mir erklären, wie ich mich einladen lassen kann? Code 1313436779",
+        "<@42> Kannst du mir sagen, wie lange es dauert, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Wie besprochen, kannst du mir erklären, wie ich mich einladen lassen kann? Code 1313436779",
+        "<@42> Kannst du mir die Einladung erklären? Code 1313436779",
+        "<@42> Kannst du mir den Invite erklären? Code 1313436779",
+        "<@42> Kannst du mich über das Einladen informieren? Code 1313436779",
+        "<@42> Kannst du mir deinen Botinvite erklären? Code 1313436779",
     ] {
         assert_eq!(
             request_kind(content, 42),
@@ -292,6 +299,48 @@ fn direkte_bitte_mit_mejn_bleibt_eine_versandbitte() {
 }
 
 #[tokio::test]
+async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag() {
+    for mention in ["<@99>", "<@!99>"] {
+        for request in [
+            "Bitte lade mich ein. Danke für die Erklärung",
+            "Bitte lade mich ein und sag mir, wie lange es dauert",
+            "Wie besprochen, du kannst mich jetzt einladen",
+            "Danke für die Erklärung. Bitte lade mich ein",
+            "Kannst du mir erklären, wie Einladungen funktionieren? Bitte lade mich ein",
+        ] {
+            let content = format!("{mention} {request}. Code 1313436779");
+            assert_eq!(
+                request_kind(&content, BOT),
+                Some(RequestKind::Direct),
+                "{content}"
+            );
+            let (watcher, _, port, invite) = setup();
+            watcher
+                .handle_message(message(1, NOW, &content), NOW, Some(false))
+                .await
+                .expect("Die eindeutige Bitte muss sofort versendet werden");
+            assert_eq!(
+                invite.calls.lock().await.as_slice(),
+                &[(BOT, GUILD, "1313436779".into(), USER)],
+                "{content}"
+            );
+            assert_eq!(
+                port.replies.lock().await.as_slice(),
+                &[(1, "Die Steam-Einladung ist raus.".into())],
+                "{content}"
+            );
+        }
+    }
+    assert_eq!(
+        request_kind(
+            "Wie kann ich mich einladen lassen? Kann mich jemand einladen? Code 1313436779",
+            BOT,
+        ),
+        Some(RequestKind::Room),
+    );
+}
+
+#[tokio::test]
 async fn erklaerungsfrage_mit_code_loest_keinen_invite_aus() {
     let (watcher, _, port, invite) = setup();
     watcher
@@ -353,6 +402,12 @@ async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
         "<@99> Kann ich mich mit Code 1313436779 einladen lassen?",
         "<@99> Muss ich mich mit Code 1313436779 einladen lassen?",
         "<@99> Darf ich mir mit Code 1313436779 jemanden einladen?",
+        "<@99> Kannst du mir erklären, wie ich mich einladen lassen kann? Code 1313436779",
+        "<@99> Kannst du mir sagen, wie lange es dauert, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Wie besprochen, kannst du mir erklären, wie ich mich einladen lassen kann? Code 1313436779",
+        "<@99> Kannst du mir die Einladung erklären? Code 1313436779",
+        "<@99> Kannst du mir den Invite erklären? Code 1313436779",
+        "<@99> Kannst du mich über das Einladen informieren? Code 1313436779",
     ] {
         let (watcher, store, port, invite) = setup();
         watcher
