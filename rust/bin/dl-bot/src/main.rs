@@ -1068,6 +1068,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 emoji_index: Arc::new(modglue::BrainEmojiIndex::default()),
                 guide_pending: Default::default(),
                 conversations: Default::default(),
+                invites: steam_client.clone(),
             }))
         }
     };

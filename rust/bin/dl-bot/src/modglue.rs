@@ -259,11 +259,13 @@ pub struct BrainHandler {
     pub emoji_index: Arc<BrainEmojiIndex>,
     pub guide_pending: tokio::sync::Mutex<Option<(u64, u64)>>,
     pub conversations: Mutex<BrainConversations>,
+    pub invites: Arc<dyn dl_community::invite_lounge::InviteEventPort>,
 }
 
 #[derive(Default)]
 pub struct BrainConversations {
     entries: HashMap<(u64, u64, u64), (u64, Instant)>,
+    awaiting_invite_codes: HashMap<(u64, u64, u64), (u64, Instant)>,
 }
 
 impl BrainConversations {
@@ -271,6 +273,15 @@ impl BrainConversations {
         self.entries.retain(|_, (_, last_reply)| {
             now.saturating_duration_since(*last_reply) < BRAIN_CONVERSATION_TTL
         });
+        self.awaiting_invite_codes.retain(|_, (_, requested_at)| {
+            now.saturating_duration_since(*requested_at) < BRAIN_CONVERSATION_TTL
+        });
+    }
+
+    fn clear_invite_code_request(&mut self, key: (u64, u64, u64), request: (u64, Instant)) {
+        if self.awaiting_invite_codes.get(&key) == Some(&request) {
+            self.awaiting_invite_codes.remove(&key);
+        }
     }
 
     fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
@@ -626,7 +637,8 @@ impl BrainHandler {
             if !replies.is_human(event).await {
                 return None;
             }
-            let proactive = guide_question(event, bot_id);
+            let proactive = guide_question(event, bot_id)
+                && dl_community::invite_lounge::request_kind(&event.content, bot_id).is_none();
             *self.guide_pending.lock().await =
                 proactive.then_some((event.author_id, event.message_id));
             proactive
@@ -643,6 +655,14 @@ impl BrainHandler {
         replies: &dyn BrainDirectReplyPort,
         proactive: bool,
     ) {
+        // Der Lounge-Watcher übernimmt diese Bitten einschließlich Code-Nachfrage.
+        if event.guild_id.is_some()
+            && event.channel_id == dl_community::invite_lounge::INVITE_LOUNGE_CHANNEL_ID
+            && dl_community::invite_lounge::request_kind(&event.content, bot_id).is_some()
+        {
+            self.clear_guide_pending(event, proactive).await;
+            return;
+        }
         if self
             .handle_direct_message_event(event, bot_id, replies)
             .await
@@ -676,8 +696,106 @@ impl BrainHandler {
         let Some(question) = self.conversation_question(event, bot_id).await else {
             return false;
         };
+        if self.handle_direct_invite(event, bot_id, replies).await {
+            return true;
+        }
         self.answer_discord_event(event, replies, &question, false)
             .await;
+        true
+    }
+
+    async fn handle_direct_invite(
+        &self,
+        event: &dl_discord::MessageEvent,
+        bot_id: u64,
+        replies: &dyn BrainDirectReplyPort,
+    ) -> bool {
+        use dl_community::invite_lounge::{
+            friend_code, is_offer, lounge_response, request_kind, RequestKind,
+        };
+
+        let Some(guild_id) = event.guild_id else {
+            return false;
+        };
+        let key = (guild_id, event.channel_id, event.author_id);
+        let kind = request_kind(&event.content, bot_id);
+        let code = friend_code(&event.content);
+        let waiting = {
+            let mut conversations = self.conversations.lock().await;
+            conversations.prune(Instant::now());
+            conversations.awaiting_invite_codes.get(&key).copied()
+        };
+        if kind != Some(RequestKind::Direct)
+            && !(waiting.is_some() && code.is_some() && kind.is_none() && !is_offer(&event.content))
+        {
+            return false;
+        }
+        if !replies.can_reply(event).await {
+            return true;
+        }
+        let mut prompt_request = None;
+        let text = if let Some(code) = code {
+            {
+                let mut conversations = self.conversations.lock().await;
+                conversations.prune(Instant::now());
+                // Nur eine parallele Zahlennachricht darf die ursprüngliche Nachfrage erfüllen.
+                if kind != Some(RequestKind::Direct)
+                    && conversations.awaiting_invite_codes.get(&key).copied() != waiting
+                {
+                    return true;
+                }
+                conversations.awaiting_invite_codes.remove(&key);
+            }
+            match self
+                .invites
+                .invite(bot_id, guild_id, &code, event.author_id)
+                .await
+            {
+                Ok(text) => lounge_response(&text),
+                Err(err) => {
+                    tracing::warn!(%err, user_id = event.author_id, "Direkte Invite-Bitte fehlgeschlagen");
+                    "Die Einladung hat gerade nicht geklappt. Bitte frag mich erneut, wenn ich es noch einmal versuchen soll.".into()
+                }
+            }
+        } else {
+            let mut conversations = self.conversations.lock().await;
+            if conversations.awaiting_invite_codes.contains_key(&key) {
+                return true;
+            }
+            // Vor der Zustellung reservieren, damit parallele Bitten nur einmal fragen.
+            let request = (event.message_id, Instant::now());
+            conversations.awaiting_invite_codes.insert(key, request);
+            prompt_request = Some(request);
+            "Schick mir bitte deinen Steam-Freundescode als Zahl. Du findest ihn in Steam unter Freunde → „Freund hinzufügen“.".into()
+        };
+        let delivered = if replies.can_reply(event).await {
+            match replies
+                .reply(event, &direct_brain_reply_body(event, &text))
+                .await
+            {
+                Ok(message_id) => {
+                    self.conversations
+                        .lock()
+                        .await
+                        .record(event, message_id, Instant::now());
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Direkte Invite-Antwort konnte nicht zugestellt werden");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !delivered {
+            if let Some(request) = prompt_request {
+                self.conversations
+                    .lock()
+                    .await
+                    .clear_invite_code_request(key, request);
+            }
+        }
         true
     }
 
@@ -4402,6 +4520,7 @@ mod tests {
             emoji_index: Arc::new(BrainEmojiIndex::default()),
             guide_pending: Default::default(),
             conversations: Default::default(),
+            invites: dl_bridges::steam::SteamBotClient::new("http://127.0.0.1:1", None),
         }
     }
 
@@ -6208,4 +6327,6 @@ mod tests {
         let members = visible_lfg_member_ids(&[(1, false), (2, true), (3, false)]);
         assert_eq!(members, vec![1, 3]);
     }
+
+    include!("invite_routing_tests.rs");
 }

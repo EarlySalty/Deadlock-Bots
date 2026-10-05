@@ -134,7 +134,7 @@ impl InviteLoungeReplyPort for dl_discord::DiscordAdapter {
 
 #[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
-trait InviteEventPort: Send + Sync {
+pub trait InviteEventPort: Send + Sync {
     async fn invite(
         &self,
         bot_id: u64,
@@ -641,7 +641,7 @@ fn spawn_dispatch(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestKind {
+pub enum RequestKind {
     Direct,
     Room,
 }
@@ -746,7 +746,7 @@ fn is_due(request: &Request, now: i64) -> bool {
         && (request.direct || now.saturating_sub(request.created_at) >= ROOM_WAIT_SECONDS)
 }
 
-fn friend_code(content: &str) -> Option<String> {
+pub fn friend_code(content: &str) -> Option<String> {
     let without_urls = URL_RE.replace_all(content, " ");
     FRIEND_CODE_RE
         .as_ref()?
@@ -754,7 +754,7 @@ fn friend_code(content: &str) -> Option<String> {
         .map(|found| found.as_str().to_string())
 }
 
-fn is_offer(content: &str) -> bool {
+pub fn is_offer(content: &str) -> bool {
     let folded = fold_german_umlauts(&content.to_lowercase());
     let words: Vec<&str> = folded
         .split(|ch: char| !ch.is_alphanumeric())
@@ -769,7 +769,7 @@ fn is_offer(content: &str) -> bool {
         }))
 }
 
-fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
+pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     if is_offer(content) {
         return None;
     }
@@ -842,7 +842,7 @@ fn hint_references(history: &[LoungeMessage], bot_id: u64) -> HashSet<u64> {
         .collect()
 }
 
-fn lounge_response(handler_text: &str) -> String {
+pub fn lounge_response(handler_text: &str) -> String {
     if handler_text.starts_with("🎮 Ihr seid schon Steam-Freunde,") {
         "Die Steam-Einladung ist raus.".into()
     } else if handler_text.starts_with("📨 Freundschaftsanfrage ist raus.") {
