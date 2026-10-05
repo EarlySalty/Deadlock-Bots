@@ -783,7 +783,32 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     let bot_mention =
         content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
     let mut kind = None;
-    for sentence in content.split_inclusive(['.', '!', '?', ';']) {
+    let mut sentence_start = 0;
+    for (position, punctuation) in content
+        .char_indices()
+        .filter(|(_, ch)| matches!(ch, '.' | '!' | '?' | ';'))
+        .chain(std::iter::once((content.len(), '\0')))
+    {
+        if punctuation == '.' {
+            let word = content[sentence_start..position]
+                .split_whitespace()
+                .next_back()
+                .unwrap_or_default();
+            // Punkte in Abkürzungen wie „z.B.“ oder „z. B.“ beenden den Satz nicht.
+            let abbreviation = word.chars().all(|ch| ch.is_alphabetic() || ch == '.')
+                && (word.contains('.') || word.chars().count() == 1);
+            let inside_word = word.chars().next_back().is_some_and(char::is_alphabetic)
+                && content[position + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphabetic);
+            if abbreviation || inside_word {
+                continue;
+            }
+        }
+        let sentence_end = position + usize::from(punctuation != '\0');
+        let sentence = &content[sentence_start..sentence_end];
+        sentence_start = sentence_end;
         let mut sentence_kind = sentence_request_kind(sentence, bot_mention);
         if sentence_kind == Some(RequestKind::Information) {
             let folded = fold_german_umlauts(&sentence.to_lowercase());
@@ -888,15 +913,10 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
         .iter()
         .position(|word| !word.chars().all(|ch| ch.is_ascii_digit()))
         .unwrap_or(opening_words.len());
+    let question_opening = &opening_words[question_start..];
     let process_question = matches!(
-        &opening_words[question_start..],
+        question_opening,
         ["warum" | "wieso" | "weshalb", ..]
-            | [
-                "wie" | "wo" | "wann" | "was",
-                _,
-                "ich" | "wir" | "du" | "man",
-                ..
-            ]
             | [
                 "kann"
                     | "konnen"
@@ -922,7 +942,10 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
                 "ich" | "wir" | "man",
                 ..
             ]
-    );
+    ) || (matches!(question_opening, ["wie" | "wo" | "wann" | "was", ..])
+        // Kurze Einleitungen wie „Wie besprochen,“ und Vorschläge bleiben Bitten.
+        && !matches!(question_opening, ["wie", _] if folded.contains(','))
+        && !matches!(question_opening, ["wie", "ware", "es"]));
     let invite_positions: Vec<usize> = INVITE_TERM_RE
         .as_ref()
         .into_iter()

@@ -260,6 +260,18 @@ fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
 #[test]
 fn prozessfragen_zu_einladungen_sind_information() {
     for content in [
+        "<@42> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Wie funktioniert das Einladen mit Code 1313436779?",
+        "<@!42> Wie funktioniert das Einladen mit Code 1313436779?",
+        "<@42> Erklär mir, wie z.B. du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Erklär mir, wie z.B. du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Wie klappt es, dass du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Wie klappt es, dass du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Erklär mir, wie z. B. du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Erklär mir, wie z. B. du mich mit Code 1313436779 einladen kannst?",
+        "<@42> Erklär mir, wie i.d.R. du mich mit Code 1313436779 einladen kannst?",
+        "<@!42> Erklär mir, wie i.d.R. du mich mit Code 1313436779 einladen kannst?",
         "<@42> Wie kann ich mich mit Code 1313436779 einladen lassen?",
         "<@!42> Wie könnte ich mich mit Code 1313436779 einladen lassen?",
         "Wie soll ich mich mit Code 1313436779 einladen lassen?",
@@ -305,6 +317,7 @@ fn direkte_bitte_mit_mejn_bleibt_eine_versandbitte() {
         "<@42> kannst du mich einladen mein Code ist 1313436779",
         "<@42> Kannst du mich wie die anderen einladen? mejn Code ist 1313436779",
         "<@42> Wie wäre es, wenn du mich einladen würdest? 1313436779",
+        "<@!42> Wie wäre es, wenn du mich einladen würdest? Code 1313436779",
     ] {
         assert_eq!(
             request_kind(content, 42),
@@ -327,6 +340,9 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
             "Wie kann ich eine Einladung bekommen, und kannst du mich einladen?",
             "Erklär mir Einladungen und lade mich ein",
             "Sag mir, wie Einladungen funktionieren, und lade mich ein",
+            "Wie funktioniert das Einladen. Bitte lade mich ein",
+            "Erklär mir, wie z.B. du mich einladen kannst. Bitte lade mich ein",
+            "Erklär mir, wie z. B. du mich einladen kannst. Bitte lade mich ein",
         ] {
             let content = format!("{mention} {request}. Code 1313436779");
             assert_eq!(
@@ -363,6 +379,18 @@ async fn eindeutige_bitte_bleibt_mit_zusaetzlicher_auskunft_ein_versandauftrag()
 #[tokio::test]
 async fn erklaerungsfrage_mit_code_loest_keinen_invite_aus() {
     for content in [
+        "<@99> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Wie funktioniert das Einladen mit Code 1313436779?",
+        "<@!99> Wie funktioniert das Einladen mit Code 1313436779?",
+        "<@99> Erklär mir, wie z.B. du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Erklär mir, wie z.B. du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Wie klappt es, dass du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Wie klappt es, dass du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Erklär mir, wie z. B. du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Erklär mir, wie z. B. du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Erklär mir, wie i.d.R. du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Erklär mir, wie i.d.R. du mich mit Code 1313436779 einladen kannst?",
         "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
         "<@99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
         "<@!99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
@@ -420,6 +448,18 @@ fn informationsfrage_veraendert_den_lounge_zustand_nicht() {
 #[tokio::test]
 async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
     for content in [
+        "<@99> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Wie lange dauert es, bis du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Wie funktioniert das Einladen mit Code 1313436779?",
+        "<@!99> Wie funktioniert das Einladen mit Code 1313436779?",
+        "<@99> Erklär mir, wie z.B. du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Erklär mir, wie z.B. du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Wie klappt es, dass du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Wie klappt es, dass du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Erklär mir, wie z. B. du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Erklär mir, wie z. B. du mich mit Code 1313436779 einladen kannst?",
+        "<@99> Erklär mir, wie i.d.R. du mich mit Code 1313436779 einladen kannst?",
+        "<@!99> Erklär mir, wie i.d.R. du mich mit Code 1313436779 einladen kannst?",
         "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
         "<@99> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
         "<@99> Kannst du mir sagen, wann du mich mit Code 1313436779 einladen kannst?",
