@@ -211,6 +211,178 @@ fn direkte_bitte_mit_umgangssprache_und_tippfehlern() {
     );
 }
 
+#[test]
+fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
+    for content in [
+        "<@42> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@!42> Kannst du mir erklaeren, wie ich mit Code 1313436779 jemanden einladen kann?",
+        "<@42> Kannst du mir erklären, ob ich mit Code 1313436779 jemanden einladen darf?",
+        "<@42> Kannst du mir erlaeutern, ob ich Code 1313436779 zum Einladen brauche?",
+        "Kann mir jemand erläutern, wie eine Einladung mit Code 1313436779 funktioniert?",
+        "<@42> Kannst du mich über Einladungen mit Code 1313436779 informieren?",
+        "<@42> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Kannst du mir sagen, wie ich mit Code 1313436779 jemanden einladen kann?",
+        "<@42> Kannst du mir sagen, wieso ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Kannst du mir sagen, weshalb ich mit Code 1313436779 niemanden einladen kann?",
+    ] {
+        assert_eq!(
+            request_kind(content, 42),
+            Some(RequestKind::Information),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn prozessfragen_zu_einladungen_sind_information() {
+    for content in [
+        "<@42> Wie kann ich mich mit Code 1313436779 einladen lassen?",
+        "<@!42> Wie könnte ich mich mit Code 1313436779 einladen lassen?",
+        "Wie soll ich mich mit Code 1313436779 einladen lassen?",
+        "Wie lade ich mit Code 1313436779 jemanden ein?",
+        "Wie nutze ich Code 1313436779, um mich einladen zu lassen?",
+        "Wie nutzen wir Code 1313436779, um uns einladen zu lassen?",
+        "Wie kannst du mich mit Code 1313436779 einladen?",
+        "Wie kann man mich mit Code 1313436779 einladen?",
+        "Warum kannst du mich mit Code 1313436779 nicht einladen?",
+        "Wieso kannst du mich mit Code 1313436779 nicht einladen?",
+        "Weshalb kannst du mich mit Code 1313436779 nicht einladen?",
+        "Wo kann ich mich mit Code 1313436779 einladen lassen?",
+        "Wann kannst du mich mit Code 1313436779 einladen?",
+        "Was muss ich tun, um mich mit Code 1313436779 einladen zu lassen?",
+        "<@42> Kann ich mich mit Code 1313436779 einladen lassen?",
+        "<@42> Muss ich mich mit Code 1313436779 einladen lassen?",
+        "<@42> Darf ich mir mit Code 1313436779 jemanden einladen?",
+        "Können wir uns mit Code 1313436779 einladen lassen?",
+        "Soll man mich mit Code 1313436779 einladen?",
+    ] {
+        assert_eq!(
+            request_kind(content, 42),
+            Some(RequestKind::Information),
+            "{content}"
+        );
+    }
+    for content in [
+        "Kann mich jemand mit Code 1313436779 einladen?",
+        "Wer lädt mich mit Code 1313436779 ein?",
+    ] {
+        assert_eq!(
+            request_kind(content, 42),
+            Some(RequestKind::Room),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn direkte_bitte_mit_mejn_bleibt_eine_versandbitte() {
+    for content in [
+        "<@42> kannst du mich einladen mejn Code ist 1313436779",
+        "<@42> kannst du mich einladen mein Code ist 1313436779",
+        "<@42> Kannst du mich wie die anderen einladen? mejn Code ist 1313436779",
+        "<@42> Wie wäre es, wenn du mich einladen würdest? 1313436779",
+    ] {
+        assert_eq!(
+            request_kind(content, 42),
+            Some(RequestKind::Direct),
+            "{content}"
+        );
+        assert_eq!(friend_code(content).as_deref(), Some("1313436779"));
+    }
+}
+
+#[tokio::test]
+async fn erklaerungsfrage_mit_code_loest_keinen_invite_aus() {
+    let (watcher, _, port, invite) = setup();
+    watcher
+        .handle_message(
+            message(
+                1,
+                NOW,
+                "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+            ),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Die Erklärungsfrage muss verarbeitet werden können");
+    watcher
+        .poll_due(NOW + 3600)
+        .await
+        .expect("Die Prüfung fälliger Einladungen muss gelingen");
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[test]
+fn informationsfrage_veraendert_den_lounge_zustand_nicht() {
+    let mut state = LoungeState {
+        last_seen: 1,
+        friend_code: Some("123456789".into()),
+        request: Some(Request {
+            message_id: 1,
+            created_at: NOW,
+            direct: true,
+            phase: Phase::WaitingForCode,
+        }),
+        ..Default::default()
+    };
+    let previous = state.clone();
+    assert!(!update_state(
+        &mut state,
+        &message(
+            2,
+            NOW + 1,
+            "Kannst du mir erklären, warum ich niemanden einladen kann?"
+        ),
+        Some(RequestKind::Information),
+        Some("1313436779".into()),
+        true,
+        NOW + 1,
+        (NOW + 1) * 1000,
+    ));
+    assert_eq!(state, previous);
+}
+
+#[tokio::test]
+async fn informationsfrage_mit_code_erfuellt_offene_lounge_nachfrage_nicht() {
+    for content in [
+        "<@99> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@99> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@99> Wie kann ich mich mit Code 1313436779 einladen lassen?",
+        "<@99> Kann ich mich mit Code 1313436779 einladen lassen?",
+        "<@99> Muss ich mich mit Code 1313436779 einladen lassen?",
+        "<@99> Darf ich mir mit Code 1313436779 jemanden einladen?",
+    ] {
+        let (watcher, store, port, invite) = setup();
+        watcher
+            .handle_message(
+                message(1, NOW, "<@99> Kannst du mich einladen?"),
+                NOW,
+                Some(false),
+            )
+            .await
+            .expect("Die direkte Bitte muss eine Code-Nachfrage erzeugen");
+        let previous = store.states.lock().await.get(&USER).cloned();
+        watcher
+            .handle_message(message(2, NOW + 1, content), NOW + 1, Some(false))
+            .await
+            .expect("Die Informationsfrage muss ohne Versand verarbeitet werden");
+        assert!(invite.calls.lock().await.is_empty(), "{content}");
+        assert_eq!(port.replies.lock().await.len(), 1, "{content}");
+        assert_eq!(store.states.lock().await.get(&USER).cloned(), previous);
+        watcher
+            .handle_message(message(3, NOW + 2, "1313436779"), NOW + 2, Some(false))
+            .await
+            .expect("Die reine Zahl muss die ursprüngliche Code-Nachfrage erfüllen");
+        assert_eq!(
+            invite.calls.lock().await.as_slice(),
+            &[(BOT, GUILD, "1313436779".into(), USER)]
+        );
+        assert_eq!(port.replies.lock().await.len(), 2);
+    }
+}
+
 #[tokio::test]
 async fn direkte_bitte_nutzt_bekannten_code() {
     let (watcher, store, port, invite) = setup();

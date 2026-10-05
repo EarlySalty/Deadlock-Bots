@@ -183,7 +183,7 @@ async fn invite_ohne_code_fragt_einmal_und_nimmt_zahl_in_fortsetzung_an() {
     assert_eq!(sent.len(), 1);
     assert!(sent[0].2["content"]
         .as_str()
-        .unwrap()
+        .expect("Die Nachfrage nach dem Freundescode muss Text enthalten")
         .contains("Steam-Freundescode als Zahl"));
     drop(sent);
     let mut code = test_message_event(Some(1), "1313436779");
@@ -287,7 +287,7 @@ async fn invite_alte_versandantwort_loescht_keine_neuere_code_nachfrage() {
         assert_eq!(sent.len(), 2);
         assert!(sent[0].2["content"]
             .as_str()
-            .unwrap()
+            .expect("Die Nachfrage nach dem neuen Freundescode muss Text enthalten")
             .contains("Steam-Freundescode als Zahl"));
         assert_eq!(sent[1].2["content"], "Einladung raus");
     }
@@ -326,6 +326,173 @@ async fn invite_wissensfrage_bleibt_beim_brain() {
         replies.sent.lock().await[0].2["content"],
         "Antwort: Welche Lanes gibt es?"
     );
+}
+
+#[tokio::test]
+async fn invite_erklaerungsfrage_mit_code_bleibt_beim_brain() {
+    for in_lounge in [false, true] {
+        for content in [
+            "<@42> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+            "<@42> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+            "<@42> Wie kann ich mich mit Code 1313436779 einladen lassen?",
+            "<@!42> Wie könnte ich mich mit Code 1313436779 einladen lassen?",
+            "<@42> Warum kannst du mich mit Code 1313436779 nicht einladen?",
+            "<@42> Wo kann ich mich mit Code 1313436779 einladen lassen?",
+            "<@42> Wann kannst du mich mit Code 1313436779 einladen?",
+            "<@42> Was muss ich tun, um mich mit Code 1313436779 einladen zu lassen?",
+            "<@42> Kann ich mich mit Code 1313436779 einladen lassen?",
+            "<@42> Muss ich mich mit Code 1313436779 einladen lassen?",
+            "<@42> Darf ich mir mit Code 1313436779 jemanden einladen?",
+        ] {
+            let (handler, answerer, invites) = invite_test_handler();
+            let replies = RecordingBrainReplies::default();
+            let event = if in_lounge {
+                guide_test_event(content)
+            } else {
+                test_message_event(Some(1), content)
+            };
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            assert_eq!(answerer.calls.lock().await.len(), 1, "{content}");
+            assert!(invites.calls.lock().await.is_empty(), "{content}");
+            assert_eq!(replies.sent.lock().await.len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn invite_direkte_bitte_mit_wie_umgeht_brain() {
+    for content in [
+        "<@42> Kannst du mich wie die anderen einladen? mejn Code ist 1313436779",
+        "<@42> Wie wäre es, wenn du mich einladen würdest? 1313436779",
+    ] {
+        let (handler, answerer, invites) = invite_test_handler();
+        let replies = RecordingBrainReplies::default();
+        handler
+            .handle_message_event_with_replies(&test_message_event(Some(1), content), 42, &replies)
+            .await;
+        assert_eq!(
+            *invites.calls.lock().await,
+            vec![(42, 1, "1313436779".into(), 3)],
+            "{content}"
+        );
+        assert!(answerer.calls.lock().await.is_empty(), "{content}");
+        assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].2["content"], "Einladung raus");
+    }
+}
+
+#[tokio::test]
+async fn invite_informationsfrage_in_lounge_erhaelt_proaktive_brain_antwort() {
+    for content in [
+        "Kann mir jemand erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "Kann mir jemand sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+    ] {
+        let (handler, answerer, invites) = invite_test_handler();
+        let replies = RecordingBrainReplies::default();
+        handler
+            .handle_message_event_with_replies(&guide_test_event(content), 42, &replies)
+            .await;
+        assert_eq!(answerer.calls.lock().await.len(), 1, "{content}");
+        assert!(invites.calls.lock().await.is_empty(), "{content}");
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].2["content"], format!("Antwort: {content}"));
+    }
+}
+
+#[tokio::test]
+async fn invite_informationsfrage_mit_code_erfuellt_offene_nachfrage_nicht() {
+    for content in [
+        "<@42> Kannst du mir erklären, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Kannst du mir sagen, warum ich mit Code 1313436779 niemanden einladen kann?",
+        "<@42> Wie kann ich mich mit Code 1313436779 einladen lassen?",
+        "<@42> Kann ich mich mit Code 1313436779 einladen lassen?",
+        "Muss ich mich mit Code 1313436779 einladen lassen?",
+        "Darf ich mir mit Code 1313436779 jemanden einladen?",
+    ] {
+        let (handler, answerer, invites) = invite_test_handler();
+        let replies = RecordingBrainReplies::default();
+        let request = test_message_event(Some(1), "<@42> Kannst du mich einladen?");
+        handler
+            .handle_message_event_with_replies(&request, 42, &replies)
+            .await;
+        assert!(answerer.calls.lock().await.is_empty());
+        let previous = handler
+            .conversations
+            .lock()
+            .await
+            .awaiting_invite_codes
+            .get(&(1, 1, 3))
+            .copied();
+        assert!(previous.is_some());
+        let mut information = test_message_event(Some(1), content);
+        information.message_id = 4;
+        handler
+            .handle_message_event_with_replies(&information, 42, &replies)
+            .await;
+        assert_eq!(answerer.calls.lock().await.len(), 1);
+        assert!(invites.calls.lock().await.is_empty(), "{content}");
+        assert_eq!(
+            handler
+                .conversations
+                .lock()
+                .await
+                .awaiting_invite_codes
+                .get(&(1, 1, 3))
+                .copied(),
+            previous
+        );
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1].2["content"],
+            format!("Antwort: {}", content.trim_start_matches("<@42>").trim()),
+            "{content}"
+        );
+        drop(sent);
+        let mut code = test_message_event(Some(1), "1313436779");
+        code.message_id = 5;
+        handler
+            .handle_message_event_with_replies(&code, 42, &replies)
+            .await;
+        assert_eq!(
+            *invites.calls.lock().await,
+            vec![(42, 1, "1313436779".into(), 3)]
+        );
+        assert_eq!(answerer.calls.lock().await.len(), 1);
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[2].2["content"], "Einladung raus");
+    }
+}
+
+#[tokio::test]
+async fn invite_abgelaufene_code_nachfrage_bleibt_in_aktivem_gespraech_ohne_versand() {
+    let (handler, answerer, invites) = invite_test_handler();
+    let replies = RecordingBrainReplies::default();
+    let event = test_message_event(Some(1), "1313436779");
+    {
+        let mut conversations = handler.conversations.lock().await;
+        conversations.record(&event, 1001, Instant::now());
+        conversations
+            .awaiting_invite_codes
+            .insert((1, 1, 3), (2, Instant::now() - BRAIN_CONVERSATION_TTL));
+    }
+    handler
+        .handle_message_event_with_replies(&event, 42, &replies)
+        .await;
+    assert!(invites.calls.lock().await.is_empty());
+    assert!(handler
+        .conversations
+        .lock()
+        .await
+        .awaiting_invite_codes
+        .is_empty());
+    assert_eq!(answerer.calls.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -434,7 +601,7 @@ async fn invite_fehlender_zahlencode_im_profillink_fragt_nach() {
     assert!(invites.calls.lock().await.is_empty());
     assert!(replies.sent.lock().await[0].2["content"]
         .as_str()
-        .unwrap()
+        .expect("Die Nachfrage bei einem Profillink ohne Zahlencode muss Text enthalten")
         .contains("Steam-Freundescode als Zahl"));
 }
 
@@ -455,7 +622,7 @@ async fn invite_versandfehler_antwortet_ohne_brain() {
     assert_eq!(invites.calls.lock().await.len(), 1);
     assert!(replies.sent.lock().await[0].2["content"]
         .as_str()
-        .unwrap()
+        .expect("Die Antwort auf den Versandfehler muss Text enthalten")
         .starts_with("Die Einladung hat gerade nicht geklappt."));
 }
 

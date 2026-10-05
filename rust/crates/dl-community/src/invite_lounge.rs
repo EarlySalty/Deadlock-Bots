@@ -343,12 +343,15 @@ impl InviteLoungeWatcher {
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
+        let kind = request_kind(&event.content, bot_id);
+        if kind == Some(RequestKind::Information) {
+            return Ok(None);
+        }
         let previous = self.store.load(event.author_id).await?;
         let mut next = previous.clone().unwrap_or_default();
         if event.message_id <= next.last_seen {
             return Ok(None);
         }
-        let kind = request_kind(&event.content, bot_id);
         let code = friend_code(&event.content);
         if is_offer(&event.content) || (kind.is_none() && code.is_none()) {
             return Ok(None);
@@ -644,6 +647,7 @@ fn spawn_dispatch(
 pub enum RequestKind {
     Direct,
     Room,
+    Information,
 }
 
 fn update_state(
@@ -655,6 +659,9 @@ fn update_state(
     now: i64,
     now_millis: i64,
 ) -> bool {
+    if kind == Some(RequestKind::Information) {
+        return false;
+    }
     state.last_seen = event.message_id;
     let has_message_code = code.is_some();
     let code_changed = code
@@ -778,6 +785,62 @@ pub fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect();
+    // Ausdrückliche Erklärungsfragen bitten nicht um einen Versand.
+    let explanation = words.iter().any(|word| {
+        ["erklar", "erklaer", "erlauter", "erlaeuter", "informier"]
+            .iter()
+            .any(|stem| word.starts_with(stem))
+    });
+    let information = words.iter().enumerate().any(|(index, word)| {
+        matches!(*word, "sag" | "sage" | "sagen" | "sagst" | "sagt")
+            && words[index + 1..]
+                .iter()
+                .any(|word| matches!(*word, "warum" | "wie" | "wieso" | "weshalb" | "ob"))
+    });
+    // Führende Mention-IDs gehören nicht zum Frageanfang. Prozessfragen behalten
+    // ihren Informationscharakter auch mit Code und bei einer offenen Nachfrage.
+    let question_start = words
+        .iter()
+        .position(|word| !word.chars().all(|ch| ch.is_ascii_digit()))
+        .unwrap_or(words.len());
+    let process_question = matches!(
+        &words[question_start..],
+        ["warum" | "wieso" | "weshalb", ..]
+            | [
+                "wie" | "wo" | "wann" | "was",
+                _,
+                "ich" | "wir" | "du" | "man",
+                ..
+            ]
+            | [
+                "kann"
+                    | "konnen"
+                    | "koennen"
+                    | "konnte"
+                    | "koennte"
+                    | "konnten"
+                    | "koennten"
+                    | "muss"
+                    | "mussen"
+                    | "muessen"
+                    | "musste"
+                    | "mussten"
+                    | "darf"
+                    | "durfen"
+                    | "duerfen"
+                    | "durfte"
+                    | "durften"
+                    | "soll"
+                    | "sollen"
+                    | "sollte"
+                    | "sollten",
+                "ich" | "wir" | "man",
+                ..
+            ]
+    );
+    if explanation || information || process_question {
+        return Some(RequestKind::Information);
+    }
     let invite = INVITE_TERM_RE
         .as_ref()
         .is_some_and(|regex| regex.is_match(&folded))

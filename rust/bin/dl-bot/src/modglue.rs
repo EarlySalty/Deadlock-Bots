@@ -638,7 +638,13 @@ impl BrainHandler {
                 return None;
             }
             let proactive = guide_question(event, bot_id)
-                && dl_community::invite_lounge::request_kind(&event.content, bot_id).is_none();
+                && !matches!(
+                    dl_community::invite_lounge::request_kind(&event.content, bot_id),
+                    Some(
+                        dl_community::invite_lounge::RequestKind::Direct
+                            | dl_community::invite_lounge::RequestKind::Room
+                    )
+                );
             *self.guide_pending.lock().await =
                 proactive.then_some((event.author_id, event.message_id));
             proactive
@@ -658,7 +664,13 @@ impl BrainHandler {
         // Der Lounge-Watcher übernimmt diese Bitten einschließlich Code-Nachfrage.
         if event.guild_id.is_some()
             && event.channel_id == dl_community::invite_lounge::INVITE_LOUNGE_CHANNEL_ID
-            && dl_community::invite_lounge::request_kind(&event.content, bot_id).is_some()
+            && matches!(
+                dl_community::invite_lounge::request_kind(&event.content, bot_id),
+                Some(
+                    dl_community::invite_lounge::RequestKind::Direct
+                        | dl_community::invite_lounge::RequestKind::Room
+                )
+            )
         {
             self.clear_guide_pending(event, proactive).await;
             return;
