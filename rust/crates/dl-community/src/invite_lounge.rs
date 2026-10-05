@@ -802,7 +802,7 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
         .filter(|word| !word.is_empty())
         .collect();
     // Das angefragte Verb entscheidet. Substantive wie „Erklärung“ sind keine Bitte.
-    let explanation = words.iter().position(|word| {
+    let explanation_verb = words.iter().position(|word| {
         ["erklar", "erklaer", "erlauter", "erlaeuter", "informier"]
             .iter()
             .any(|stem| {
@@ -810,6 +810,30 @@ fn sentence_request_kind(content: &str, bot_mention: bool) -> Option<RequestKind
                     .is_some_and(|ending| matches!(ending, "" | "e" | "en" | "n" | "st" | "t"))
             })
     });
+    let explanation_noun = words.iter().any(|word| {
+        matches!(
+            *word,
+            "erklarung"
+                | "erklarungen"
+                | "erklaerung"
+                | "erklaerungen"
+                | "erlauterung"
+                | "erlauterungen"
+                | "erlaeuterung"
+                | "erlaeuterungen"
+        )
+    });
+    let requested_explanation = explanation_noun
+        .then(|| {
+            words
+                .iter()
+                .position(|word| matches!(*word, "gib" | "gibt" | "geben" | "gebt" | "gebe"))
+        })
+        .flatten();
+    let explanation = explanation_verb
+        .into_iter()
+        .chain(requested_explanation)
+        .min();
     let information = words.iter().enumerate().find_map(|(index, word)| {
         (matches!(*word, "sag" | "sage" | "sagen" | "sagst" | "sagt")
             && words[index + 1..]

@@ -235,6 +235,8 @@ fn erklaerungsfragen_zu_einladungen_sind_keine_versandbitten() {
         "<@42> Kannst du mir den Invite erklären? Code 1313436779",
         "<@42> Kannst du mich über das Einladen informieren? Code 1313436779",
         "<@42> Kannst du mir deinen Botinvite erklären? Code 1313436779",
+        "<@42> Kannst du mir eine Erklärung zum Einladen geben? Code 1313436779",
+        "<@42> Gib mir bitte eine Erklärung zum Einladen. Code 1313436779",
     ] {
         assert_eq!(
             request_kind(content, 42),
