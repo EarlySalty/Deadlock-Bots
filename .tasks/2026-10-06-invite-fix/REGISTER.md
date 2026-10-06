@@ -4,5 +4,5 @@
 - Worker: `271ced8b-5d9f-4972-b3a2-f7b0d59f99d7`, Blatt-Worker, keine weiteren Threads.
 - Worktree: `/home/nathanael/.worktrees/Deadlock-Bots-invite-fix`.
 - Branch: `fix/game-invite-spaete-antwort`; Basis `600b832ac90b314512c60bff470f78b6914509dd`.
-- Status: 44 Invite-Tests bestanden, Clippy und abschließender Prüflauf laufen. Merge, Auslieferung und Live-Nachweis offen.
+- Status: BLOCK durch `gpt-6.1-sol`, zwei verifizierte Funde in `REVIEW.md`. 44 Invite-Tests bestanden. Clippy: main 228, Fix 250 Diagnosen; 22 zusätzliche `unwrap`-Diagnosen in den ergänzten Tests. Übergabe an einen frischen Fixer erforderlich. Nicht gemergt, nicht ausgeliefert, kein Live-Nachweis. Worktree und Remote-Branch bleiben erhalten.
 - Bericht: `/home/nathanael/repos/Deadlock-Brain/.tasks/2026-10-06-brain-abschluss/AN_HAUPT-B.md`.
