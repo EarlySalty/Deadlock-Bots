@@ -280,6 +280,7 @@ async fn raumbitte_mit_code_wartet_genau_eine_stunde() {
     watcher.poll_due(NOW + 3600).await.unwrap();
     watcher.poll_due(NOW + 7200).await.unwrap();
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+    assert!(port.replies.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -414,7 +415,7 @@ async fn fehler_bleibt_gespeichert_neue_direkte_bitte_erlaubt_einen_versuch() {
 async fn neustart_wiederholt_keinen_begonnenen_versuch() {
     let (watcher, store, port, invite) = setup();
     watcher
-        .handle_message(
+        .record_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
             NOW,
             Some(false),
@@ -547,13 +548,14 @@ async fn rueckblick_sieben_tage_einmal_mit_juengeren_warteauftraegen() {
     young.guild_id = None;
     port.history.lock().await.extend([young, mature, old]);
     watcher.backfill(NOW).await.unwrap();
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
     assert!(store.backfill_done().await.unwrap());
     let fetched = port.history_calls.load(Ordering::SeqCst);
     watcher.backfill(NOW).await.unwrap();
     assert_eq!(port.history_calls.load(Ordering::SeqCst), fetched);
     watcher.poll_due(NOW + 1).await.unwrap();
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 2);
+    assert!(invite.calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -567,9 +569,19 @@ async fn rueckblick_bewahrt_direkte_code_fortsetzung_und_vorhandenen_tipp() {
     let code = message(3, NOW - 60, "123456789");
     port.history.lock().await.extend([code, tip, source]);
     watcher.backfill(NOW).await.unwrap();
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
+    watcher
+        .handle_message(
+            message(4, NOW, "Kannst du mich einladen?"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .unwrap();
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
     assert_eq!(port.replies.lock().await.len(), 1);
-    assert_ne!(port.replies.lock().await[0].1, INVITE_LOUNGE_HINT_TEXT);
+    assert_eq!(port.replies.lock().await[0].0, 4);
 }
 
 #[tokio::test]
@@ -586,7 +598,8 @@ async fn rueckblick_paginiert_ueber_mehr_als_hundert_nachrichten() {
     port.history.lock().await.extend(history);
     watcher.backfill(NOW).await.unwrap();
     assert!(port.history_calls.load(Ordering::SeqCst) >= 3);
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -604,6 +617,52 @@ async fn fehlende_bot_id_erzeugt_keinen_menschlichen_admin() {
         .await
         .is_err());
     assert!(invite.calls.lock().await.is_empty());
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("Testdatenbank");
+    let store = Arc::new(PgLoungeStore {
+        pool: db.pool().clone(),
+    });
+    let port = Arc::new(RecordingPort::default());
+    let invite = Arc::new(RecordingInvite::default());
+    let watcher = InviteLoungeWatcher {
+        store: store.clone(),
+        port: port.clone(),
+        invite: invite.clone(),
+        guild_id: GUILD,
+        clock_millis: || NOW * 1000,
+    };
+    let pending = LoungeState {
+        friend_code: Some("123456789".into()),
+        request: Some(Request {
+            message_id: 1,
+            created_at: NOW - 7200,
+            direct: false,
+            phase: Phase::Pending,
+        }),
+        ..Default::default()
+    };
+    assert!(store.compare_exchange(USER, None, &pending).await.unwrap());
+    watcher.poll_due(NOW).await.unwrap();
+    assert_eq!(
+        store
+            .load(USER)
+            .await
+            .unwrap()
+            .unwrap()
+            .request
+            .unwrap()
+            .phase,
+        Phase::Expired
+    );
+    assert!(store.pending_users().await.unwrap().is_empty());
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
 }
 
 #[cfg(feature = "testing")]
@@ -781,10 +840,10 @@ async fn laufender_versand_blockiert_keine_bitte_eines_anderen_nutzers() {
     let mut tasks = tokio::task::JoinSet::new();
     spawn_dispatch(&mut tasks, watcher.clone(), USER);
     invite.started.notified().await;
-    let mut second = message(2, NOW + 1, "Kannst du mich einladen? 222222222");
+    let mut second = message(2, NOW, "Kannst du mich einladen? 222222222");
     second.author_id = 8;
     let user_id = watcher
-        .record_message(second, NOW + 1, Some(false))
+        .record_message(second, NOW, Some(false))
         .await
         .unwrap()
         .unwrap();
@@ -802,7 +861,7 @@ async fn laufender_versand_blockiert_keine_bitte_eines_anderen_nutzers() {
 }
 
 #[tokio::test]
-async fn geaenderter_code_im_rueckblick_startet_eine_neue_stunde() {
+async fn geaenderter_code_im_rueckblick_bleibt_ohne_auftrag() {
     let (watcher, _, port, invite) = setup();
     port.history.lock().await.extend([
         message(1, NOW - 7200, "Kann mich jemand einladen? 123456789"),
@@ -813,11 +872,127 @@ async fn geaenderter_code_im_rueckblick_startet_eine_neue_stunde() {
     watcher.poll_due(NOW + 3299).await.unwrap();
     assert!(invite.calls.lock().await.is_empty());
     watcher.poll_due(NOW + 3300).await.unwrap();
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn verspätete_gateway_nachricht_erzeugt_weder_hinweis_noch_versand() {
+    for content in [
+        "Kannst du mich einladen?",
+        "Kannst du mich einladen? 123456789",
+        "Kann mich jemand einladen? 123456789",
+    ] {
+        let (watcher, store, port, invite) = setup();
+        watcher
+            .handle_message(message(1, NOW - 7200, content), NOW, Some(false))
+            .await
+            .unwrap();
+        assert!(store.load(USER).await.unwrap().is_none());
+        assert!(port.replies.lock().await.is_empty());
+        assert!(invite.calls.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn alter_warteauftrag_verfällt_ohne_steam_oder_antwort() {
+    for direct in [true, false] {
+        let (watcher, store, port, invite) = setup();
+        store.states.lock().await.insert(
+            USER,
+            LoungeState {
+                friend_code: Some("123456789".into()),
+                request: Some(Request {
+                    message_id: 1,
+                    created_at: NOW - 7200,
+                    direct,
+                    phase: Phase::Pending,
+                }),
+                ..Default::default()
+            },
+        );
+        watcher.poll_due(NOW).await.unwrap();
+        watcher.poll_due(NOW + 1).await.unwrap();
+        assert_eq!(
+            store
+                .load(USER)
+                .await
+                .unwrap()
+                .unwrap()
+                .request
+                .unwrap()
+                .phase,
+            Phase::Expired
+        );
+        assert!(port.replies.lock().await.is_empty());
+        assert!(invite.calls.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn raumbitte_mit_echtem_audit_erzeugt_keine_späte_statusantwort() {
+    let (watcher, store, port, invite) = setup();
+    invite.audit.store(true, Ordering::SeqCst);
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .unwrap();
+    watcher.poll_due(NOW + ROOM_WAIT_SECONDS).await.unwrap();
+    assert_eq!(invite.calls.lock().await.len(), 1);
+    assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
     assert_eq!(
-        invite.calls.lock().await.as_slice(),
-        &[(BOT, GUILD, "222222222".into(), USER)]
+        store
+            .load(USER)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_result
+            .as_deref(),
+        Some(AUDIT_REPLY)
     );
-    assert_eq!(port.replies.lock().await[0].0, 2);
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn langsamer_direkter_versand_speichert_ergebnis_ohne_späte_antwort() {
+    let (mut watcher, store, port, invite) = setup();
+    watcher.clock_millis = || (NOW + 7200) * 1000;
+    watcher
+        .handle_message(
+            message(1, NOW, "Kannst du mich einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .load(USER)
+            .await
+            .unwrap()
+            .unwrap()
+            .request
+            .unwrap()
+            .phase,
+        Phase::Attempted
+    );
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[test]
+fn frischefenster_hat_eine_obere_und_untere_grenze() {
+    assert!(is_fresh(NOW - FRESHNESS_SECONDS, NOW, FRESHNESS_SECONDS));
+    assert!(!is_fresh(
+        NOW - FRESHNESS_SECONDS - 1,
+        NOW,
+        FRESHNESS_SECONDS
+    ));
+    assert!(!is_fresh(NOW + 1, NOW, FRESHNESS_SECONDS));
 }
 
 #[tokio::test]

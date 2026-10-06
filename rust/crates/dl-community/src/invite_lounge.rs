@@ -13,13 +13,14 @@ use sqlx::PgPool;
 
 /// Stabile ID von `#frag-die-community`.
 pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
-pub const INVITE_LOUNGE_HINT_TEXT: &str = "Kleiner Tipp: pack noch deinen Steam-Freundescode dazu, sonst kann dich niemand einladen :) Du findest ihn in Steam unter Freunde → „Freund hinzufügen\". Einfach hier posten — wer Zeit hat, lädt dich ein.";
+pub const INVITE_LOUNGE_HINT_TEXT: &str = "Pack noch deinen Steam-Freundescode dazu :) Du findest ihn in Steam unter Freunde → „Freund hinzufügen“. Einfach hier posten, dann kann dich jemand einladen.";
 
 const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
 const COOLDOWN_KV_NS: &str = "invite_lounge:cooldown";
 const STATE_KV_NS: &str = "invite_lounge:requests";
 const BACKFILL_KV_NS: &str = "invite_lounge:history";
 const ROOM_WAIT_SECONDS: i64 = 60 * 60;
+const FRESHNESS_SECONDS: i64 = 5 * 60;
 pub const NEWCOMER_MAX_JOIN_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 static FRIEND_CODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{6,12}\b").ok());
@@ -163,6 +164,7 @@ enum Phase {
     Pending,
     Dispatching,
     Attempted,
+    Expired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,52 +342,68 @@ impl InviteLoungeWatcher {
         {
             return Ok(None);
         }
+        if !is_fresh(event.created_at, now, FRESHNESS_SECONDS) {
+            tracing::info!(
+                message_id = event.message_id,
+                "Invite-Lounge überspringt verspätete Nachricht"
+            );
+            return Ok(None);
+        }
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
-        let previous = self.store.load(event.author_id).await?;
-        let mut next = previous.clone().unwrap_or_default();
-        if event.message_id <= next.last_seen {
-            return Ok(None);
+        loop {
+            let previous = self.store.load(event.author_id).await?;
+            let mut next = previous.clone().unwrap_or_default();
+            if event.message_id <= next.last_seen {
+                return Ok(None);
+            }
+            let kind = request_kind(&event.content, bot_id);
+            let code = friend_code(&event.content);
+            if is_offer(&event.content) || (kind.is_none() && code.is_none()) {
+                return Ok(None);
+            }
+            if previous.is_none() {
+                next.last_hint_at = self.store.last_hint_at(event.author_id).await?;
+            }
+            if code.is_none() && next.friend_code.is_none() && kind == Some(RequestKind::Direct) {
+                next.friend_code = self.store.known_code(event.author_id).await?;
+            }
+            let mut wants_hint = update_state(
+                &mut next,
+                &event,
+                kind,
+                code,
+                existing_hint.unwrap_or(false),
+                now,
+                (self.clock_millis)(),
+            );
+            if wants_hint
+                && existing_hint.is_none()
+                && self.has_hint(event.message_id, bot_id).await?
+            {
+                wants_hint = false;
+            }
+            if !self
+                .store
+                .compare_exchange(event.author_id, previous.as_ref(), &next)
+                .await?
+            {
+                continue;
+            }
+            if wants_hint
+                && is_fresh(
+                    event.created_at,
+                    now.max((self.clock_millis)() / 1000),
+                    FRESHNESS_SECONDS,
+                )
+            {
+                self.port
+                    .reply_text(event.channel_id, event.message_id, INVITE_LOUNGE_HINT_TEXT)
+                    .await?;
+            }
+            return Ok(Some(event.author_id));
         }
-        let kind = request_kind(&event.content, bot_id);
-        let code = friend_code(&event.content);
-        if is_offer(&event.content) || (kind.is_none() && code.is_none()) {
-            return Ok(None);
-        }
-        if previous.is_none() {
-            next.last_hint_at = self.store.last_hint_at(event.author_id).await?;
-        }
-        if code.is_none() && next.friend_code.is_none() && kind == Some(RequestKind::Direct) {
-            next.friend_code = self.store.known_code(event.author_id).await?;
-        }
-        let mut wants_hint = update_state(
-            &mut next,
-            &event,
-            kind,
-            code,
-            existing_hint.unwrap_or(false),
-            now,
-            (self.clock_millis)(),
-        );
-        if wants_hint && existing_hint.is_none() && self.has_hint(event.message_id, bot_id).await? {
-            wants_hint = false;
-        }
-        if !self
-            .store
-            .compare_exchange(event.author_id, previous.as_ref(), &next)
-            .await?
-        {
-            return Ok(None);
-        }
-        if wants_hint {
-            // Die Reservierung steht vor dem Discord-Aufruf. Auch ein unklarer
-            // HTTP-Ausgang darf keinen zweiten Hinweis unter derselben Bitte erzeugen.
-            self.port
-                .reply_text(event.channel_id, event.message_id, INVITE_LOUNGE_HINT_TEXT)
-                .await?;
-        }
-        Ok(Some(event.author_id))
     }
 
     async fn has_hint(&self, message_id: u64, bot_id: u64) -> Result<bool, String> {
@@ -420,10 +438,32 @@ impl InviteLoungeWatcher {
         let Some(request) = previous
             .request
             .as_ref()
-            .filter(|request| is_due(request, now))
+            .filter(|request| request.phase == Phase::Pending)
         else {
             return Ok(());
         };
+        let max_age = FRESHNESS_SECONDS + if request.direct { 0 } else { ROOM_WAIT_SECONDS };
+        if !is_fresh(request.created_at, now, max_age) {
+            let mut expired = previous.clone();
+            expired.request.as_mut().expect("offene Bitte").phase = Phase::Expired;
+            expired.last_result = Some("Verspätete Bitte ohne Versand beendet".into());
+            if self
+                .store
+                .compare_exchange(user_id, Some(&previous), &expired)
+                .await?
+            {
+                tracing::info!(
+                    user_id,
+                    message_id = request.message_id,
+                    "Invite-Lounge beendet verspäteten Auftrag"
+                );
+            }
+            return Ok(());
+        }
+        if !is_due(request, now) {
+            return Ok(());
+        }
+        let direct = request.direct;
         let Some(code) = previous.friend_code.as_deref() else {
             return Ok(());
         };
@@ -457,6 +497,21 @@ impl InviteLoungeWatcher {
         let finished_at = (self.clock_millis)();
         self.finish_attempt(user_id, message_id, &outcome, finished_at)
             .await?;
+        tracing::info!(user_id, message_id, result = %outcome, "Invite-Lounge-Versuch abgeschlossen");
+        if !direct
+            || !is_fresh(
+                request.created_at,
+                now.max(finished_at / 1000),
+                FRESHNESS_SECONDS,
+            )
+        {
+            tracing::info!(
+                user_id,
+                message_id,
+                "Invite-Lounge unterdrückt verzögerte öffentliche Antwort"
+            );
+            return Ok(());
+        }
         let text = match result {
             Ok(text) => lounge_response(&text),
             Err(err) => {
@@ -556,13 +611,39 @@ impl InviteLoungeWatcher {
             self.port.bot_id().ok_or("Die Discord-ID des Bots fehlt")?,
         );
         history.sort_by_key(|message| message.message_id);
-        for mut message in history {
-            // Discord liefert guild_id bei REST-Nachrichten nicht immer mit.
-            if message.guild_id.is_none() {
-                message.guild_id = Some(self.guild_id);
+        for message in history {
+            if message.is_bot
+                || message.author_id == self.port.bot_id().unwrap_or(0)
+                || is_offer(&message.content)
+            {
+                continue;
             }
-            let hinted = hints.contains(&message.message_id);
-            self.record_message(message, now, Some(hinted)).await?;
+            let code = friend_code(&message.content);
+            if code.is_none()
+                && request_kind(&message.content, self.port.bot_id().unwrap_or(0)).is_none()
+            {
+                continue;
+            }
+            let previous = self.store.load(message.author_id).await?;
+            let mut observed = previous.clone().unwrap_or_default();
+            if previous.is_none() {
+                observed.last_hint_at = self.store.last_hint_at(message.author_id).await?;
+            }
+            if message.message_id <= observed.last_seen {
+                continue;
+            }
+            observed.last_seen = message.message_id;
+            if observed.request.is_none() {
+                if let Some(code) = code {
+                    observed.friend_code = Some(code);
+                }
+            }
+            if hints.contains(&message.message_id) {
+                observed.last_hint_at = Some(message.created_at);
+            }
+            self.store
+                .compare_exchange(message.author_id, previous.as_ref(), &observed)
+                .await?;
         }
         self.store.mark_backfill_done().await
     }
@@ -580,7 +661,7 @@ pub fn spawn(
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         let mut history_ready = false;
-        let mut buffered = Vec::new();
+        let mut history_tasks = tokio::task::JoinSet::new();
         let mut dispatches = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
@@ -588,7 +669,6 @@ pub fn spawn(
                     Ok(event) => {
                         let message = LoungeMessage::from(event);
                         if message.channel_id != INVITE_LOUNGE_CHANNEL_ID { continue; }
-                        if !history_ready { buffered.push(message); continue; }
                         match watcher.record_message(message, chrono::Utc::now().timestamp(), None).await {
                             Ok(Some(user_id)) => spawn_dispatch(&mut dispatches, watcher.clone(), user_id),
                             Ok(None) => {},
@@ -602,22 +682,20 @@ pub fn spawn(
                 },
                 _ = tick.tick() => {
                     let now = chrono::Utc::now().timestamp();
-                    if !history_ready {
-                        if let Err(err) = watcher.record_history(now).await {
-                            tracing::warn!(%err, "Invite-Lounge-Verlauf konnte nicht verarbeitet werden");
-                            continue;
-                        }
-                        history_ready = true;
-                        buffered.sort_by_key(|message| message.message_id);
-                        for message in buffered.drain(..) {
-                            if let Err(err) = watcher.record_message(message, now, None).await {
-                                tracing::warn!(%err, "Invite-Lounge-Nachricht konnte nicht verarbeitet werden");
-                            }
-                        }
+                    if !history_ready && history_tasks.is_empty() {
+                        let reader = watcher.clone();
+                        history_tasks.spawn(async move { reader.record_history(now).await });
                     }
                     match watcher.store.pending_users().await {
                         Ok(users) => for user_id in users { spawn_dispatch(&mut dispatches, watcher.clone(), user_id); },
                         Err(err) => tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden"),
+                    }
+                }
+                Some(result) = history_tasks.join_next(), if !history_tasks.is_empty() => {
+                    match result {
+                        Ok(Ok(())) => history_ready = true,
+                        Ok(Err(err)) => tracing::warn!(%err, "Invite-Lounge-Verlauf konnte nicht verarbeitet werden"),
+                        Err(err) => tracing::error!(%err, "Invite-Lounge-Verlaufstask ist abgebrochen"),
                     }
                 }
                 Some(result) = dispatches.join_next(), if !dispatches.is_empty() => {
@@ -634,7 +712,7 @@ fn spawn_dispatch(
     user_id: u64,
 ) {
     dispatches.spawn(async move {
-        if let Err(err) = watcher.dispatch_due(user_id, chrono::Utc::now().timestamp()).await {
+        if let Err(err) = watcher.dispatch_due(user_id, (watcher.clock_millis)() / 1000).await {
             tracing::warn!(%err, user_id, "Invite-Lounge-Auftrag konnte nicht abgeschlossen werden");
         }
     });
@@ -741,6 +819,10 @@ fn update_state(
     needs_hint
 }
 
+fn is_fresh(created_at: i64, now: i64, max_age: i64) -> bool {
+    (0..=max_age).contains(&now.saturating_sub(created_at))
+}
+
 fn is_due(request: &Request, now: i64) -> bool {
     request.phase == Phase::Pending
         && (request.direct || now.saturating_sub(request.created_at) >= ROOM_WAIT_SECONDS)
@@ -837,7 +919,13 @@ fn close_word(word: &str, expected: &str, max_edits: usize) -> bool {
 fn hint_references(history: &[LoungeMessage], bot_id: u64) -> HashSet<u64> {
     history
         .iter()
-        .filter(|message| message.author_id == bot_id && message.content == INVITE_LOUNGE_HINT_TEXT)
+        .filter(|message| {
+            message.author_id == bot_id
+                && (message.content == INVITE_LOUNGE_HINT_TEXT
+                    || message
+                        .content
+                        .starts_with("Kleiner Tipp: pack noch deinen Steam-Freundescode dazu,"))
+        })
         .filter_map(|message| message.reply_message_id)
         .collect()
 }
