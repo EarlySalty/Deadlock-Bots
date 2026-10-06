@@ -102,6 +102,11 @@ impl BrainApiAnswerer {
                 None => self.client.answer(&query).await,
             }
             .map_err(|_| backend_error())?;
+            tracing::info!(
+                request_id = %response.request_id,
+                status = ?response.status,
+                "Discord-Brain-Antwort empfangen"
+            );
             project(response)
         })
         .await

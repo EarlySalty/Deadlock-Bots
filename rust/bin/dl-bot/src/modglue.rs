@@ -715,7 +715,7 @@ impl BrainHandler {
             dl_brain::BrainOutcome::NoAnswer
             | dl_brain::BrainOutcome::OutOfDomain
             | dl_brain::BrainOutcome::Answer(_) => {
-                "Dazu hab ich gerade nichts Genaues. Frag am besten direkt im Discord nach."
+                "Dazu habe ich gerade keine gesicherten Infos. Frag bitte Nani hier im Discord."
                     .to_owned()
             }
             dl_brain::BrainOutcome::Usage => "Was möchtest du wissen?".to_owned(),
@@ -4794,7 +4794,7 @@ mod tests {
             .await;
         assert_eq!(
             replies.sent.lock().await[0].2["content"],
-            "Dazu hab ich gerade nichts Genaues. Frag am besten direkt im Discord nach."
+            "Dazu habe ich gerade keine gesicherten Infos. Frag bitte Nani hier im Discord."
         );
         let last = handler.conversations.lock().await.entries[&(1, 1, 3)];
         handler
