@@ -298,7 +298,7 @@ pub struct InviteLoungeWatcher {
     port: Arc<dyn InviteLoungeReplyPort>,
     invite: Arc<dyn InviteEventPort>,
     guild_id: u64,
-    clock_millis: fn() -> i64,
+    clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 impl InviteLoungeWatcher {
@@ -313,7 +313,7 @@ impl InviteLoungeWatcher {
             port,
             invite,
             guild_id,
-            clock_millis: || chrono::Utc::now().timestamp_millis(),
+            clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
         }
     }
 
@@ -443,6 +443,7 @@ impl InviteLoungeWatcher {
             return Ok(());
         };
         let max_age = FRESHNESS_SECONDS + if request.direct { 0 } else { ROOM_WAIT_SECONDS };
+        let now = now.max((self.clock_millis)() / 1000);
         if !is_fresh(request.created_at, now, max_age) {
             let mut expired = previous.clone();
             expired.request.as_mut().expect("offene Bitte").phase = Phase::Expired;
@@ -463,7 +464,6 @@ impl InviteLoungeWatcher {
         if !is_due(request, now) {
             return Ok(());
         }
-        let direct = request.direct;
         let Some(code) = previous.friend_code.as_deref() else {
             return Ok(());
         };
@@ -484,8 +484,23 @@ impl InviteLoungeWatcher {
         {
             return Ok(());
         }
-        // Ausschließlich dieser Event ruft handle_invite_command auf. Dort
-        // entscheidet betainvite_lookup_audit_by_steam und der Dispatch-Claim.
+        let dispatch_at = (self.clock_millis)();
+        if !is_fresh(request.created_at, now.max(dispatch_at / 1000), max_age) {
+            self.finish_dispatch(
+                user_id,
+                message_id,
+                Phase::Expired,
+                "Verspätete Bitte ohne Versand beendet",
+                dispatch_at,
+            )
+            .await?;
+            tracing::info!(
+                user_id,
+                message_id,
+                "Invite-Lounge beendet abgelaufenen Versand-Claim"
+            );
+            return Ok(());
+        }
         let result = self
             .invite
             .invite(bot_id, self.guild_id, code, user_id)
@@ -495,40 +510,17 @@ impl InviteLoungeWatcher {
             Err(err) => format!("Fehlgeschlagen: {err}"),
         };
         let finished_at = (self.clock_millis)();
-        self.finish_attempt(user_id, message_id, &outcome, finished_at)
+        self.finish_dispatch(user_id, message_id, Phase::Attempted, &outcome, finished_at)
             .await?;
         tracing::info!(user_id, message_id, result = %outcome, "Invite-Lounge-Versuch abgeschlossen");
-        if !direct
-            || !is_fresh(
-                request.created_at,
-                now.max(finished_at / 1000),
-                FRESHNESS_SECONDS,
-            )
-        {
-            tracing::info!(
-                user_id,
-                message_id,
-                "Invite-Lounge unterdrückt verzögerte öffentliche Antwort"
-            );
-            return Ok(());
-        }
-        let text = match result {
-            Ok(text) => lounge_response(&text),
-            Err(err) => {
-                tracing::warn!(%err, user_id, "Invite-Lounge-Versuch fehlgeschlagen");
-                "Die Einladung hat gerade nicht geklappt. Bitte frag mich erneut, wenn ich es noch einmal versuchen soll.".into()
-            }
-        };
-        self.port
-            .reply_text(INVITE_LOUNGE_CHANNEL_ID, message_id, &text)
-            .await?;
         Ok(())
     }
 
-    async fn finish_attempt(
+    async fn finish_dispatch(
         &self,
         user_id: u64,
         message_id: u64,
+        phase: Phase,
         outcome: &str,
         finished_at: i64,
     ) -> Result<(), String> {
@@ -543,7 +535,7 @@ impl InviteLoungeWatcher {
             }
             let mut finished = current.clone();
             if let Some(request) = finished.request.as_mut() {
-                request.phase = Phase::Attempted;
+                request.phase = phase;
             }
             finished.last_result = Some(outcome.to_string());
             finished.last_dispatch_finished_at_millis = Some(finished_at);
@@ -624,26 +616,36 @@ impl InviteLoungeWatcher {
             {
                 continue;
             }
-            let previous = self.store.load(message.author_id).await?;
-            let mut observed = previous.clone().unwrap_or_default();
-            if previous.is_none() {
-                observed.last_hint_at = self.store.last_hint_at(message.author_id).await?;
-            }
-            if message.message_id <= observed.last_seen {
-                continue;
-            }
-            observed.last_seen = message.message_id;
-            if observed.request.is_none() {
-                if let Some(code) = code {
-                    observed.friend_code = Some(code);
+            loop {
+                let previous = self.store.load(message.author_id).await?;
+                let mut observed = previous.clone().unwrap_or_default();
+                if previous.is_none() {
+                    observed.last_hint_at = self.store.last_hint_at(message.author_id).await?;
+                }
+                if message.message_id <= observed.last_seen {
+                    break;
+                }
+                if observed.request.is_none() {
+                    if let Some(code) = code.as_ref() {
+                        observed.friend_code = Some(code.clone());
+                    }
+                }
+                if hints.contains(&message.message_id) {
+                    observed.last_hint_at = Some(
+                        observed
+                            .last_hint_at
+                            .unwrap_or(message.created_at)
+                            .max(message.created_at),
+                    );
+                }
+                if self
+                    .store
+                    .compare_exchange(message.author_id, previous.as_ref(), &observed)
+                    .await?
+                {
+                    break;
                 }
             }
-            if hints.contains(&message.message_id) {
-                observed.last_hint_at = Some(message.created_at);
-            }
-            self.store
-                .compare_exchange(message.author_id, previous.as_ref(), &observed)
-                .await?;
         }
         self.store.mark_backfill_done().await
     }
@@ -928,17 +930,6 @@ fn hint_references(history: &[LoungeMessage], bot_id: u64) -> HashSet<u64> {
         })
         .filter_map(|message| message.reply_message_id)
         .collect()
-}
-
-fn lounge_response(handler_text: &str) -> String {
-    if handler_text.starts_with("🎮 Ihr seid schon Steam-Freunde,") {
-        "Die Steam-Einladung ist raus.".into()
-    } else if handler_text.starts_with("📨 Freundschaftsanfrage ist raus.") {
-        "Die Steam-Freundschaftsanfrage ist raus. Nimm sie an, dann folgt die Einladung.".into()
-    } else {
-        // Insbesondere Audit- und Dispatch-Antworten kommen unverändert vom Handler.
-        handler_text.to_string()
-    }
 }
 
 // Bisherige Hinweisentscheidung für bestehende Aufrufer und Regressionstests.

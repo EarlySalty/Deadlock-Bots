@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 const NOW: i64 = 1_790_000_000;
@@ -10,18 +10,48 @@ const USER: u64 = 7;
 const AUDIT_REPLY: &str = "ℹ️ Dieser Steam-Account wurde schon eingeladen, am <t:1700000000:D>. Hier ist nichts mehr zu tun.";
 const RUNNING_REPLY: &str = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung. Ich schicke sie nicht doppelt, sonst zählt sie zweimal gegen das Tageslimit.";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitPoint {
+    Load,
+    Claim,
+    Finish,
+    Hint,
+}
+
+struct ClockAdvance {
+    point: WaitPoint,
+    clock: Arc<AtomicI64>,
+    at: i64,
+}
+
 #[derive(Default)]
 struct MemoryStore {
     states: Mutex<HashMap<u64, LoungeState>>,
     known: Mutex<HashMap<u64, String>>,
     legacy_hints: Mutex<HashMap<u64, i64>>,
     backfilled: AtomicBool,
+    advance: Mutex<Option<ClockAdvance>>,
+}
+
+impl MemoryStore {
+    async fn after_wait(&self, point: WaitPoint) {
+        let mut advance = self.advance.lock().await;
+        if advance
+            .as_ref()
+            .is_some_and(|advance| advance.point == point)
+        {
+            let advance = advance.take().expect("passender Uhrschritt ist vorhanden");
+            advance.clock.store(advance.at, Ordering::SeqCst);
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl LoungeStore for MemoryStore {
     async fn load(&self, id: u64) -> Result<Option<LoungeState>, String> {
-        Ok(self.states.lock().await.get(&id).cloned())
+        let state = self.states.lock().await.get(&id).cloned();
+        self.after_wait(WaitPoint::Load).await;
+        Ok(state)
     }
     async fn compare_exchange(
         &self,
@@ -34,6 +64,13 @@ impl LoungeStore for MemoryStore {
             return Ok(false);
         }
         states.insert(id, next.clone());
+        drop(states);
+        match next.request.as_ref().map(|request| request.phase) {
+            Some(Phase::Dispatching) => self.after_wait(WaitPoint::Claim).await,
+            Some(Phase::Attempted) => self.after_wait(WaitPoint::Finish).await,
+            Some(Phase::WaitingForCode) => self.after_wait(WaitPoint::Hint).await,
+            _ => {}
+        }
         Ok(true)
     }
     async fn pending_users(&self) -> Result<Vec<u64>, String> {
@@ -110,6 +147,7 @@ struct RecordingInvite {
     hold: AtomicBool,
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    advance: Mutex<Option<(Arc<AtomicI64>, i64)>>,
 }
 
 #[async_trait::async_trait]
@@ -122,6 +160,9 @@ impl InviteEventPort for RecordingInvite {
         if self.hold.load(Ordering::SeqCst) {
             self.started.notify_one();
             self.release.notified().await;
+        }
+        if let Some((clock, at)) = self.advance.lock().await.take() {
+            clock.store(at, Ordering::SeqCst);
         }
         if self.audit.load(Ordering::SeqCst) {
             return Ok(AUDIT_REPLY.into());
@@ -151,7 +192,7 @@ fn setup() -> (
         port: port.clone(),
         invite: invite.clone(),
         guild_id: GUILD,
-        clock_millis: || NOW * 1000,
+        clock_millis: Arc::new(|| NOW * 1000),
     };
     (watcher, store, port, invite)
 }
@@ -179,15 +220,12 @@ async fn direkte_bitte_sofort_ohne_neulingsgrenze_und_ohne_tipp() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(
         invite.calls.lock().await.as_slice(),
         &[(BOT, GUILD, "123456789".into(), USER)]
     );
-    assert_eq!(
-        port.replies.lock().await.as_slice(),
-        &[(1, "Die Steam-Einladung ist raus.".into())]
-    );
+    assert!(port.replies.lock().await.is_empty());
 }
 
 #[test]
@@ -222,7 +260,7 @@ async fn direkte_bitte_nutzt_bekannten_code() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
     assert!(!port
         .replies
@@ -242,7 +280,7 @@ async fn direkte_bitte_fragt_einmal_code_und_fortsetzung_geht_sofort() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
         .handle_message(
             message(2, NOW + 20, "Kannste mich auch einladen?"),
@@ -250,7 +288,7 @@ async fn direkte_bitte_fragt_einmal_code_und_fortsetzung_geht_sofort() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(port.replies.lock().await.len(), 1);
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
     let mut code = message(3, NOW + 40, "Mein Freundescode: 123456789");
@@ -258,9 +296,10 @@ async fn direkte_bitte_fragt_einmal_code_und_fortsetzung_geht_sofort() {
     watcher
         .handle_message(code, NOW + 40, Some(false))
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
-    assert_eq!(port.replies.lock().await.last().unwrap().0, 3);
+    assert_eq!(port.replies.lock().await.len(), 1);
+    assert_eq!(port.replies.lock().await[0].0, 1);
 }
 
 #[tokio::test]
@@ -273,12 +312,21 @@ async fn raumbitte_mit_code_wartet_genau_eine_stunde() {
             Some(false),
         )
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 3599).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 3599)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(port.replies.lock().await.is_empty());
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
-    watcher.poll_due(NOW + 3600).await.unwrap();
-    watcher.poll_due(NOW + 7200).await.unwrap();
+    watcher
+        .poll_due(NOW + 3600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 7200)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
     assert!(port.replies.lock().await.is_empty());
 }
@@ -293,15 +341,21 @@ async fn raumbitte_ohne_code_startet_stunde_erst_bei_code() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(port.replies.lock().await[0].1, INVITE_LOUNGE_HINT_TEXT);
     watcher
         .handle_message(message(2, NOW + 4000, "123456789"), NOW + 4000, Some(false))
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 7599).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 7599)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
-    watcher.poll_due(NOW + 7600).await.unwrap();
+    watcher
+        .poll_due(NOW + 7600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
 }
 
@@ -311,7 +365,7 @@ async fn raumbitte_ohne_code_verwendet_keinen_alten_code() {
     watcher
         .handle_message(message(1, NOW - 100, "123456789"), NOW - 100, Some(false))
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
         .handle_message(
             message(2, NOW, "Kann mich jemand einladen?"),
@@ -319,8 +373,11 @@ async fn raumbitte_ohne_code_verwendet_keinen_alten_code() {
             Some(false),
         )
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 8000).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 8000)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
     assert_eq!(port.replies.lock().await.len(), 1);
 }
@@ -335,21 +392,24 @@ async fn fremder_nutzer_kann_code_fortsetzung_nicht_ausloesen() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let mut other = message(2, NOW + 1, "123456789");
     other.author_id = 8;
     watcher
         .handle_message(other, NOW + 1, Some(false))
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 8000).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 8000)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn audit_und_dispatch_task_blocken_und_antwort_bleibt_erhalten() {
     for (audit, expected) in [(true, AUDIT_REPLY), (false, RUNNING_REPLY)] {
-        let (watcher, _, port, invite) = setup();
+        let (watcher, store, port, invite) = setup();
         invite.audit.store(audit, Ordering::SeqCst);
         invite.running_task.store(!audit, Ordering::SeqCst);
         watcher
@@ -359,11 +419,24 @@ async fn audit_und_dispatch_task_blocken_und_antwort_bleibt_erhalten() {
                 Some(false),
             )
             .await
-            .unwrap();
-        watcher.poll_due(NOW + 3600).await.unwrap();
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        watcher
+            .poll_due(NOW + 3600)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
         assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
         assert_eq!(invite.calls.lock().await.len(), 1);
-        assert_eq!(port.replies.lock().await[0].1, expected);
+        assert!(port.replies.lock().await.is_empty());
+        assert_eq!(
+            store
+                .load(USER)
+                .await
+                .expect("Testzustand lesbar")
+                .expect("Bitte wurde gespeichert")
+                .last_result
+                .as_deref(),
+            Some(expected)
+        );
     }
 }
 
@@ -378,9 +451,15 @@ async fn fehler_bleibt_gespeichert_neue_direkte_bitte_erlaubt_einen_versuch() {
             Some(false),
         )
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 3600).await.unwrap();
-    watcher.poll_due(NOW + 7200).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 3600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 7200)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
         .handle_message(
             message(2, NOW + 7200, "Kann mich jemand einladen? 123456789"),
@@ -388,26 +467,29 @@ async fn fehler_bleibt_gespeichert_neue_direkte_bitte_erlaubt_einen_versuch() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 1);
     assert!(store
         .load(USER)
         .await
-        .unwrap()
-        .unwrap()
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
         .last_result
-        .unwrap()
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
         .contains("Fehlgeschlagen"));
     let retry = message(3, NOW + 7300, "Kannste mich auch einladen?");
     watcher
         .handle_message(retry.clone(), NOW + 7300, Some(false))
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
         .handle_message(retry, NOW + 7300, Some(false))
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 12_000).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 12_000)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 2);
 }
 
@@ -421,22 +503,33 @@ async fn neustart_wiederholt_keinen_begonnenen_versuch() {
             Some(false),
         )
         .await
-        .unwrap();
-    let previous = store.load(USER).await.unwrap().unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let previous = store
+        .load(USER)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let mut claimed = previous.clone();
-    claimed.request.as_mut().unwrap().phase = Phase::Attempted;
+    claimed
+        .request
+        .as_mut()
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .phase = Phase::Attempted;
     assert!(store
         .compare_exchange(USER, Some(&previous), &claimed)
         .await
-        .unwrap());
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
     let restarted = InviteLoungeWatcher {
         store,
         port,
         invite: invite.clone(),
         guild_id: GUILD,
-        clock_millis: || NOW * 1000,
+        clock_millis: Arc::new(|| NOW * 1000),
     };
-    restarted.poll_due(NOW + 8000).await.unwrap();
+    restarted
+        .poll_due(NOW + 8000)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
 }
 
@@ -450,13 +543,13 @@ async fn zwei_dispatcher_erhalten_nur_einen_versuch() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let (first, second) = tokio::join!(
         watcher.dispatch_due(USER, NOW + 3600),
         watcher.dispatch_due(USER, NOW + 3600)
     );
-    first.unwrap();
-    second.unwrap();
+    first.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    second.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
 }
 
@@ -474,17 +567,20 @@ async fn angebote_dank_und_andere_kanaele_loesen_nichts_aus() {
         watcher
             .handle_message(message(index as u64 + 1, NOW, content), NOW, Some(false))
             .await
-            .unwrap();
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     }
     let mut other = message(20, NOW, "Kannst du mich einladen? 123456789");
     other.channel_id = 100;
     watcher
         .handle_message(other, NOW, Some(false))
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let mut bot = message(21, NOW, "Kannst du mich einladen? 123456789");
     bot.is_bot = true;
-    watcher.handle_message(bot, NOW, Some(false)).await.unwrap();
+    watcher
+        .handle_message(bot, NOW, Some(false))
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(port.replies.lock().await.is_empty());
     assert!(invite.calls.lock().await.is_empty());
 }
@@ -503,7 +599,7 @@ async fn profil_link_braucht_zahlencode() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(port.replies.lock().await[0].1, INVITE_LOUNGE_HINT_TEXT);
     assert!(invite.calls.lock().await.is_empty());
     assert_eq!(
@@ -521,7 +617,10 @@ async fn vorhandener_tipp_und_alter_cooldown_verhindern_zweiten_hinweis() {
     tip.is_bot = true;
     tip.reply_message_id = Some(1);
     port.history.lock().await.extend([source.clone(), tip]);
-    watcher.handle_message(source, NOW + 2, None).await.unwrap();
+    watcher
+        .handle_message(source, NOW + 2, None)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(port.replies.lock().await.is_empty());
     store.legacy_hints.lock().await.insert(8, NOW);
     let mut other = message(3, NOW + 3, "Kannst du mich einladen?");
@@ -529,7 +628,7 @@ async fn vorhandener_tipp_und_alter_cooldown_verhindern_zweiten_hinweis() {
     watcher
         .handle_message(other, NOW + 3, Some(false))
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(port.replies.lock().await.is_empty());
 }
 
@@ -547,14 +646,26 @@ async fn rueckblick_sieben_tage_einmal_mit_juengeren_warteauftraegen() {
     young.author_id = 9;
     young.guild_id = None;
     port.history.lock().await.extend([young, mature, old]);
-    watcher.backfill(NOW).await.unwrap();
+    watcher
+        .backfill(NOW)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
     assert!(port.replies.lock().await.is_empty());
-    assert!(store.backfill_done().await.unwrap());
+    assert!(store
+        .backfill_done()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
     let fetched = port.history_calls.load(Ordering::SeqCst);
-    watcher.backfill(NOW).await.unwrap();
+    watcher
+        .backfill(NOW)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(port.history_calls.load(Ordering::SeqCst), fetched);
-    watcher.poll_due(NOW + 1).await.unwrap();
+    watcher
+        .poll_due(NOW + 1)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
 }
 
@@ -568,7 +679,10 @@ async fn rueckblick_bewahrt_direkte_code_fortsetzung_und_vorhandenen_tipp() {
     tip.reply_message_id = Some(1);
     let code = message(3, NOW - 60, "123456789");
     port.history.lock().await.extend([code, tip, source]);
-    watcher.backfill(NOW).await.unwrap();
+    watcher
+        .backfill(NOW)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
     assert!(port.replies.lock().await.is_empty());
     watcher
@@ -578,10 +692,9 @@ async fn rueckblick_bewahrt_direkte_code_fortsetzung_und_vorhandenen_tipp() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
-    assert_eq!(port.replies.lock().await.len(), 1);
-    assert_eq!(port.replies.lock().await[0].0, 4);
+    assert!(port.replies.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -596,7 +709,10 @@ async fn rueckblick_paginiert_ueber_mehr_als_hundert_nachrichten() {
         history.push(message(id, NOW - 100, "Guten Morgen"));
     }
     port.history.lock().await.extend(history);
-    watcher.backfill(NOW).await.unwrap();
+    watcher
+        .backfill(NOW)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(port.history_calls.load(Ordering::SeqCst) >= 3);
     assert!(invite.calls.lock().await.is_empty());
     assert!(port.replies.lock().await.is_empty());
@@ -607,7 +723,10 @@ async fn fehlende_bot_id_erzeugt_keinen_menschlichen_admin() {
     let (watcher, store, port, invite) = setup();
     port.identity_missing.store(true, Ordering::SeqCst);
     assert!(watcher.backfill(NOW).await.is_err());
-    assert!(!store.backfill_done().await.unwrap());
+    assert!(!store
+        .backfill_done()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
     assert!(watcher
         .handle_message(
             message(1, NOW, "Kannst du mich einladen? 123456789"),
@@ -635,7 +754,7 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         port: port.clone(),
         invite: invite.clone(),
         guild_id: GUILD,
-        clock_millis: || NOW * 1000,
+        clock_millis: Arc::new(|| NOW * 1000),
     };
     let pending = LoungeState {
         friend_code: Some("123456789".into()),
@@ -647,20 +766,30 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         }),
         ..Default::default()
     };
-    assert!(store.compare_exchange(USER, None, &pending).await.unwrap());
-    watcher.poll_due(NOW).await.unwrap();
+    assert!(store
+        .compare_exchange(USER, None, &pending)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
+    watcher
+        .poll_due(NOW)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(
         store
             .load(USER)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
             .request
-            .unwrap()
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
             .phase,
         Phase::Expired
     );
-    assert!(store.pending_users().await.unwrap().is_empty());
+    assert!(store
+        .pending_users()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .is_empty());
     assert!(invite.calls.lock().await.is_empty());
     assert!(port.replies.lock().await.is_empty());
 }
@@ -684,21 +813,60 @@ async fn postgres_zustand_claim_und_bekannter_freundescode() {
         }),
         ..Default::default()
     };
-    assert!(store.compare_exchange(USER, None, &state).await.unwrap());
-    assert!(!store.compare_exchange(USER, None, &state).await.unwrap());
-    assert_eq!(store.pending_users().await.unwrap(), vec![USER]);
+    assert!(store
+        .compare_exchange(USER, None, &state)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
+    assert!(!store
+        .compare_exchange(USER, None, &state)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
+    assert_eq!(
+        store
+            .pending_users()
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"),
+        vec![USER]
+    );
     let previous = state.clone();
-    state.request.as_mut().unwrap().phase = Phase::Attempted;
+    state
+        .request
+        .as_mut()
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .phase = Phase::Attempted;
     let (a, b) = tokio::join!(
         store.compare_exchange(USER, Some(&previous), &state),
         store.compare_exchange(USER, Some(&previous), &state)
     );
-    assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
-    assert!(store.pending_users().await.unwrap().is_empty());
-    assert_eq!(store.load(USER).await.unwrap(), Some(state));
-    assert!(!store.backfill_done().await.unwrap());
-    store.mark_backfill_done().await.unwrap();
-    assert!(store.backfill_done().await.unwrap());
+    assert_eq!(
+        usize::from(a.expect("Testzustand und Testports erfüllen den erwarteten Vertrag"))
+            + usize::from(b.expect("Testzustand und Testports erfüllen den erwarteten Vertrag")),
+        1
+    );
+    assert!(store
+        .pending_users()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .is_empty());
+    assert_eq!(
+        store
+            .load(USER)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"),
+        Some(state)
+    );
+    assert!(!store
+        .backfill_done()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
+    store
+        .mark_backfill_done()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(store
+        .backfill_done()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
     kv::set(
         db.pool(),
         COOLDOWN_KV_NS,
@@ -706,16 +874,25 @@ async fn postgres_zustand_claim_und_bekannter_freundescode() {
         &NOW.to_string(),
     )
     .await
-    .unwrap();
-    assert_eq!(store.last_hint_at(USER).await.unwrap(), Some(NOW));
+    .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(
+        store
+            .last_hint_at(USER)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"),
+        Some(NOW)
+    );
     sqlx::query("INSERT INTO core.users (discord_id) VALUES ($1)")
         .bind(USER as i64)
         .execute(db.pool())
         .await
-        .unwrap();
-    sqlx::query("INSERT INTO core.steam_links (discord_id, steam_id, primary_account) VALUES ($1, '76561198083722517', true)").bind(USER as i64).execute(db.pool()).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    sqlx::query("INSERT INTO core.steam_links (discord_id, steam_id, primary_account) VALUES ($1, '76561198083722517', true)").bind(USER as i64).execute(db.pool()).await.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(
-        store.known_code(USER).await.unwrap(),
+        store
+            .known_code(USER)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"),
         Some("123456789".into())
     );
 }
@@ -738,16 +915,29 @@ async fn direkte_bitte_waehrend_dispatch_startet_keinen_zweiten_versuch() {
                 Some(false),
             )
             .await
-            .unwrap();
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
         assert_eq!(invite.calls.lock().await.len(), 1);
         invite.release.notify_one();
     };
     let (result, ()) = tokio::join!(initial, during);
-    result.unwrap();
-    let state = store.load(USER).await.unwrap().unwrap();
+    result.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let state = store
+        .load(USER)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(state.last_seen, 2);
-    assert_eq!(state.request.unwrap().phase, Phase::Attempted);
-    assert!(state.last_result.unwrap().starts_with("🎮"));
+    assert_eq!(
+        state
+            .request
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+            .phase,
+        Phase::Attempted
+    );
+    assert!(state
+        .last_result
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .starts_with("🎮"));
 }
 
 #[tokio::test]
@@ -760,7 +950,7 @@ async fn dank_ist_kein_audit_beleg_und_stoppt_keine_raumbitte() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
         .handle_message(
             message(2, NOW + 100, "Danke für die Einladung!"),
@@ -768,8 +958,11 @@ async fn dank_ist_kein_audit_beleg_und_stoppt_keine_raumbitte() {
             Some(false),
         )
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 3600).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 3600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
 }
 
@@ -811,7 +1004,7 @@ async fn gepufferte_bitte_waehrend_gescheitertem_versand_startet_keinen_versuch(
     watcher
         .handle_message(buffered, NOW + 121, Some(false))
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
     watcher
         .handle_message(
@@ -820,7 +1013,7 @@ async fn gepufferte_bitte_waehrend_gescheitertem_versand_startet_keinen_versuch(
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 1);
 }
 
@@ -836,7 +1029,7 @@ async fn laufender_versand_blockiert_keine_bitte_eines_anderen_nutzers() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let mut tasks = tokio::task::JoinSet::new();
     spawn_dispatch(&mut tasks, watcher.clone(), USER);
     invite.started.notified().await;
@@ -845,14 +1038,22 @@ async fn laufender_versand_blockiert_keine_bitte_eines_anderen_nutzers() {
     let user_id = watcher
         .record_message(second, NOW, Some(false))
         .await
-        .unwrap()
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     invite.hold.store(false, Ordering::SeqCst);
     spawn_dispatch(&mut tasks, watcher, user_id);
-    tasks.join_next().await.unwrap().unwrap();
+    tasks
+        .join_next()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
     invite.release.notify_one();
-    tasks.join_next().await.unwrap().unwrap();
+    tasks
+        .join_next()
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 2);
     let calls = invite.calls.lock().await;
     assert_eq!(calls.len(), 2);
@@ -867,11 +1068,20 @@ async fn geaenderter_code_im_rueckblick_bleibt_ohne_auftrag() {
         message(1, NOW - 7200, "Kann mich jemand einladen? 123456789"),
         message(2, NOW - 300, "Kann mich jemand einladen? 222222222"),
     ]);
-    watcher.backfill(NOW).await.unwrap();
+    watcher
+        .backfill(NOW)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
-    watcher.poll_due(NOW + 3299).await.unwrap();
+    watcher
+        .poll_due(NOW + 3299)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
-    watcher.poll_due(NOW + 3300).await.unwrap();
+    watcher
+        .poll_due(NOW + 3300)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
     assert!(port.replies.lock().await.is_empty());
 }
@@ -887,8 +1097,12 @@ async fn verspätete_gateway_nachricht_erzeugt_weder_hinweis_noch_versand() {
         watcher
             .handle_message(message(1, NOW - 7200, content), NOW, Some(false))
             .await
-            .unwrap();
-        assert!(store.load(USER).await.unwrap().is_none());
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        assert!(store
+            .load(USER)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+            .is_none());
         assert!(port.replies.lock().await.is_empty());
         assert!(invite.calls.lock().await.is_empty());
     }
@@ -911,16 +1125,22 @@ async fn alter_warteauftrag_verfällt_ohne_steam_oder_antwort() {
                 ..Default::default()
             },
         );
-        watcher.poll_due(NOW).await.unwrap();
-        watcher.poll_due(NOW + 1).await.unwrap();
+        watcher
+            .poll_due(NOW)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        watcher
+            .poll_due(NOW + 1)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
         assert_eq!(
             store
                 .load(USER)
                 .await
-                .unwrap()
-                .unwrap()
+                .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+                .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
                 .request
-                .unwrap()
+                .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
                 .phase,
             Phase::Expired
         );
@@ -940,16 +1160,19 @@ async fn raumbitte_mit_echtem_audit_erzeugt_keine_späte_statusantwort() {
             Some(false),
         )
         .await
-        .unwrap();
-    watcher.poll_due(NOW + ROOM_WAIT_SECONDS).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + ROOM_WAIT_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 1);
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
     assert_eq!(
         store
             .load(USER)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
             .last_result
             .as_deref(),
         Some(AUDIT_REPLY)
@@ -960,7 +1183,10 @@ async fn raumbitte_mit_echtem_audit_erzeugt_keine_späte_statusantwort() {
 #[tokio::test]
 async fn langsamer_direkter_versand_speichert_ergebnis_ohne_späte_antwort() {
     let (mut watcher, store, port, invite) = setup();
-    watcher.clock_millis = || (NOW + 7200) * 1000;
+    let clock = Arc::new(AtomicI64::new(NOW * 1000));
+    let reader = clock.clone();
+    watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+    *invite.advance.lock().await = Some((clock, (NOW + 7200) * 1000));
     watcher
         .handle_message(
             message(1, NOW, "Kannst du mich einladen? 123456789"),
@@ -968,16 +1194,16 @@ async fn langsamer_direkter_versand_speichert_ergebnis_ohne_späte_antwort() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
     assert_eq!(
         store
             .load(USER)
             .await
-            .unwrap()
-            .unwrap()
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
             .request
-            .unwrap()
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
             .phase,
         Phase::Attempted
     );
@@ -996,6 +1222,182 @@ fn frischefenster_hat_eine_obere_und_untere_grenze() {
 }
 
 #[tokio::test]
+async fn rueckblick_und_gateway_erhalten_die_bitte_in_beiden_reihenfolgen() {
+    for history_first in [true, false] {
+        for direct in [true, false] {
+            let (watcher, store, port, invite) = setup();
+            let content = if direct {
+                "Kannst du mich einladen? 123456789"
+            } else {
+                "Kann mich jemand einladen? 123456789"
+            };
+            let source = message(10, NOW, content);
+            port.history.lock().await.push(source.clone());
+            if history_first {
+                watcher
+                    .record_history(NOW)
+                    .await
+                    .expect("Rückblick beobachtet die frische Bitte");
+                assert_eq!(
+                    store
+                        .load(USER)
+                        .await
+                        .expect("Zustand lesbar")
+                        .expect("Historischer Code gespeichert")
+                        .last_seen,
+                    0
+                );
+            }
+            watcher
+                .record_message(source.clone(), NOW, Some(false))
+                .await
+                .expect("Gateway legt die Live-Bitte an");
+            if !history_first {
+                watcher
+                    .record_history(NOW)
+                    .await
+                    .expect("Rückblick bewahrt die Live-Bitte");
+            }
+            let state = store
+                .load(USER)
+                .await
+                .expect("Zustand lesbar")
+                .expect("Live-Bitte gespeichert");
+            assert_eq!(state.last_seen, source.message_id);
+            assert_eq!(
+                state.request.expect("Live-Bitte vorhanden").phase,
+                Phase::Pending
+            );
+            let due = NOW + if direct { 0 } else { ROOM_WAIT_SECONDS };
+            watcher
+                .dispatch_due(USER, due)
+                .await
+                .expect("Live-Bitte wird einmal ausgeführt");
+            watcher
+                .record_message(source, NOW, Some(false))
+                .await
+                .expect("Gateway-Duplikat ist harmlos");
+            watcher
+                .dispatch_due(USER, due)
+                .await
+                .expect("Erledigter Auftrag bleibt erledigt");
+            assert_eq!(invite.calls.lock().await.len(), 1);
+            assert!(port.replies.lock().await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn ablauf_waehrend_load_oder_claim_verhindert_jeden_versand() {
+    for direct in [true, false] {
+        for point in [WaitPoint::Load, WaitPoint::Claim] {
+            let (mut watcher, store, port, invite) = setup();
+            let clock = Arc::new(AtomicI64::new(NOW * 1000));
+            let reader = clock.clone();
+            watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+            let max_age = FRESHNESS_SECONDS + if direct { 0 } else { ROOM_WAIT_SECONDS };
+            store.states.lock().await.insert(
+                USER,
+                LoungeState {
+                    friend_code: Some("123456789".into()),
+                    request: Some(Request {
+                        message_id: 1,
+                        created_at: NOW - max_age,
+                        direct,
+                        phase: Phase::Pending,
+                    }),
+                    ..Default::default()
+                },
+            );
+            *store.advance.lock().await = Some(ClockAdvance {
+                point,
+                clock,
+                at: (NOW + 1) * 1000,
+            });
+            watcher
+                .dispatch_due(USER, NOW)
+                .await
+                .expect("Abgelaufene Bitte wird abgeschlossen");
+            let state = store
+                .load(USER)
+                .await
+                .expect("Zustand lesbar")
+                .expect("Bitte gespeichert");
+            assert_eq!(
+                state.request.expect("Bitte vorhanden").phase,
+                Phase::Expired
+            );
+            assert!(store
+                .pending_users()
+                .await
+                .expect("Offene Bitten lesbar")
+                .is_empty());
+            assert!(invite.calls.lock().await.is_empty());
+            assert!(port.replies.lock().await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn ablauf_waehrend_hinweis_claim_unterdrueckt_den_hinweis() {
+    let (mut watcher, store, port, invite) = setup();
+    let clock = Arc::new(AtomicI64::new(NOW * 1000));
+    let reader = clock.clone();
+    watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+    *store.advance.lock().await = Some(ClockAdvance {
+        point: WaitPoint::Hint,
+        clock,
+        at: (NOW + 1) * 1000,
+    });
+    watcher
+        .handle_message(
+            message(1, NOW - FRESHNESS_SECONDS, "Kannst du mich einladen?"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Verspäteter Hinweis wird unterdrückt");
+    assert!(port.replies.lock().await.is_empty());
+    assert!(invite.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn ablauf_waehrend_abschluss_speichert_status_ohne_oeffentliche_antwort() {
+    let (mut watcher, store, port, invite) = setup();
+    let clock = Arc::new(AtomicI64::new(NOW * 1000));
+    let reader = clock.clone();
+    watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+    *store.advance.lock().await = Some(ClockAdvance {
+        point: WaitPoint::Finish,
+        clock,
+        at: (NOW + 7200) * 1000,
+    });
+    watcher
+        .handle_message(
+            message(1, NOW, "Kannst du mich einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Echter Versandstatus wird gespeichert");
+    assert_eq!(invite.calls.lock().await.len(), 1);
+    let state = store
+        .load(USER)
+        .await
+        .expect("Zustand lesbar")
+        .expect("Bitte gespeichert");
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Attempted
+    );
+    assert!(state
+        .last_result
+        .expect("Versandstatus gespeichert")
+        .starts_with("🎮"));
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
 async fn gleicher_code_schiebt_die_stunde_nicht_auf() {
     let (watcher, _, _, invite) = setup();
     watcher
@@ -1005,11 +1407,14 @@ async fn gleicher_code_schiebt_die_stunde_nicht_auf() {
             Some(false),
         )
         .await
-        .unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
         .handle_message(message(2, NOW + 300, "123456789"), NOW + 300, Some(false))
         .await
-        .unwrap();
-    watcher.poll_due(NOW + 3600).await.unwrap();
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 3600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
 }
