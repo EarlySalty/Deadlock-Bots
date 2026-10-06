@@ -165,6 +165,20 @@ fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
 }
 
 fn without_links(text: &str) -> (String, bool) {
+    let (mut result, had_links) = without_links_pass(text);
+    if had_links {
+        loop {
+            let (clean, removed) = without_links_pass(&result);
+            if !removed {
+                break;
+            }
+            result = clean;
+        }
+    }
+    (result, had_links)
+}
+
+fn without_links_pass(text: &str) -> (String, bool) {
     let lower = text.to_ascii_lowercase();
     let mut rest = text;
     let mut offset = 0;
@@ -384,6 +398,54 @@ mod tests {
             let (clean, had_links) = without_links(text);
             assert_eq!(clean, expected);
             assert_eq!(had_links, text != expected);
+        }
+    }
+
+    #[test]
+    fn linkentfernung_prueft_rekonstruierte_urls_bis_zum_linkfreien_ergebnis() {
+        let mut nested = "https://a.invalid".to_owned();
+        for _ in 0..32 {
+            nested = format!("ht[{nested}]tp://b.invalid");
+        }
+        for text in [
+            "[http](https://a.invalid)://b.invalid",
+            "ht<https://a.invalid>tp://b.invalid",
+            "ht[https://a.invalid]tp://b.invalid",
+            "ht(https://a.invalid)tp://b.invalid",
+            "[HTTPS](http://a.invalid)://b.invalid",
+            "ht[https://a.invalid]t(https://b.invalid)p://c.invalid",
+            "ht[ht[https://a.invalid]tp://b.invalid]tp://c.invalid",
+            &nested,
+        ] {
+            let (clean, had_links) = without_links(text);
+            assert!(clean.is_empty(), "{text:?}: {clean:?}");
+            assert!(had_links);
+            assert_eq!(without_links(&clean), (clean, false));
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_rekonstruierte_urls_kommen_nicht_in_der_antwort_an() {
+        for status in ["answered", "build_rejected"] {
+            for text in [
+                "[http](https://a.invalid)://b.invalid",
+                "ht<https://a.invalid>tp://b.invalid",
+                "ht[https://a.invalid]tp://b.invalid",
+                "ht(https://a.invalid)tp://b.invalid",
+                "ht[ht[https://a.invalid]tp://b.invalid]tp://c.invalid",
+            ] {
+                assert_eq!(
+                    fixture_answer(status, text, false, false)
+                        .await
+                        .expect("Leere Antwort nach vollständiger Linkentfernung"),
+                    BrainOutcome::NoAnswer
+                );
+                let text = format!("Änderung: {text} Ende.");
+                let answer = fixture_answer(status, &text, false, false)
+                    .await
+                    .expect("Antwort nach vollständiger Linkentfernung");
+                assert_eq!(answer, BrainOutcome::Answer("Änderung:  Ende.".into()));
+            }
         }
     }
 
