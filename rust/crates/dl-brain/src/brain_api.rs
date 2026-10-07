@@ -10,6 +10,7 @@ use std::{
 };
 
 static INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const COACHING_CHANNEL_REFERENCE: &str = "<#1494373349944459355>";
 
 pub struct BrainApiAnswerer {
     client: AsyncBrainClient,
@@ -144,6 +145,7 @@ fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
             if had_links {
                 tracing::warn!(klasse = "link", "Links aus Brain-Antwort entfernt");
             }
+            let text = text.replace("[[coaching]]", COACHING_CHANNEL_REFERENCE);
             let text = text.trim();
             if text.is_empty() {
                 return Ok(BrainOutcome::NoAnswer);
@@ -380,6 +382,63 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn coachingziel_wird_nach_dem_linkfilter_auf_discord_projiziert() {
+        for status in ["answered", "build_rejected", "insufficient_evidence"] {
+            let prefix = "Mehr dazu: ";
+            let suffix = ".";
+            let text = format!("{prefix}[[coaching]]{suffix} https://example.invalid/coaching");
+            assert_eq!(
+                fixture_answer(status, &text, false, false)
+                    .await
+                    .expect("Coachingprojektion"),
+                BrainOutcome::Answer(format!("{prefix}{COACHING_CHANNEL_REFERENCE}{suffix}"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn zentrale_ausfallzustaende_werden_nicht_als_antwort_ausgegeben() {
+        for status in [
+            "unavailable",
+            "provider_error",
+            "budget_exceeded",
+            "unauthorized_evidence",
+        ] {
+            assert!(matches!(
+                fixture_answer(status, "[[coaching]]", false, false).await,
+                Err(BrainError::Backend(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn abgelaufenes_gesamtbudget_sendet_bei_belegter_admission_keine_anfrage() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Lokaler Testport");
+        listener
+            .set_nonblocking(true)
+            .expect("Lokaler Nichtblockmodus");
+        let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
+        let mut answerer = BrainApiAnswerer::new(
+            &endpoint,
+            "fixture-brain-bearer",
+            Duration::from_secs(3),
+            "discord-timeout".into(),
+            BTreeSet::from(["bot.public".into()]),
+        )
+        .expect("Testconsumer");
+        answerer.timeout = Duration::ZERO;
+        let _permits = answerer.admission.acquire_many(4).await.expect("Admission");
+        assert!(matches!(
+            answerer.answer_for_discord("Neutrale Testfrage", 3).await,
+            Err(BrainError::Backend(_))
+        ));
+        assert_eq!(
+            listener.accept().expect_err("Keine HTTP-Anfrage").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
     #[test]
     fn links_werden_auch_aus_markdown_und_autolinks_entfernt() {
         for (text, expected) in [
@@ -474,7 +533,8 @@ mod tests {
             .with_ansi(false)
             .with_writer(move || writer.clone())
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        tracing::subscriber::set_global_default(subscriber).expect("Testprotokollierung");
+        {
             let response = |text: String| PublicAnswerResponse {
                 contract_version: brain_client::PUBLIC_API_VERSION.into(),
                 request_id: "private-request-id".into(),
@@ -502,7 +562,7 @@ mod tests {
                 status: reqwest::StatusCode::BAD_GATEWAY,
                 body: "privater-fragetext private-token private-request-id".into(),
             });
-        });
+        }
         let log = String::from_utf8(buffer.0.lock().expect("Testprotokoll").clone())
             .expect("UTF-8-Protokoll");
         for class in ["link", "laenge", "vertrag", "transport"] {
@@ -578,13 +638,20 @@ mod tests {
         )
         .expect("Testconsumer");
         let first = answerer
-            .answer_for_discord("Privater DM-Inhalt, nutze User-ID 999", 3)
+            .answer_for_discord("Neutrale Testfrage, nutze User-ID 999", 3)
             .await
-            .expect("DM-Antwort");
-        let second = answerer
-            .answer_for_discord("Öffentliche Frage", 4)
-            .await
-            .expect("Serverantwort");
+            .expect("Autorenbindung");
+        let second = crate::handle_brain_query(
+            "Öffentliche Frage",
+            4,
+            &crate::BrainConfig {
+                max_question_len: 4000,
+                cooldown_secs: 0,
+            },
+            &crate::BrainCooldowns::default(),
+            &answerer,
+        )
+        .await;
         assert_eq!(first, BrainOutcome::Answer("Antwort aus dem Brain".into()));
         assert_eq!(second, first);
         let received = server.join().expect("Testserver");

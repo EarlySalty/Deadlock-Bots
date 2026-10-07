@@ -89,7 +89,6 @@ pub enum BrainError {
 
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
-    /// Führt Retrieval und genau eine gemeinsame Generierung aus.
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
 
     async fn answer_for_discord(
@@ -170,10 +169,13 @@ pub async fn handle_brain_query(
         }
     }
 
-    let outcome = match answerer.answer(question).await {
+    if user_id == 0 {
+        return BrainOutcome::BackendError;
+    }
+    let outcome = match answerer.answer_for_discord(question, user_id).await {
         Ok(outcome) => outcome,
-        Err(error) => {
-            tracing::warn!(%error, "Gemeinsame Brain-Antwort fehlgeschlagen");
+        Err(_) => {
+            tracing::warn!("Gemeinsame Brain-Antwort fehlgeschlagen");
             return BrainOutcome::BackendError;
         }
     };
@@ -316,6 +318,21 @@ mod tests {
             Some(BrainOutcome::BackendError)
         );
         assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            handle_brain_query(
+                "Frage",
+                3,
+                &BrainConfig {
+                    max_question_len: 300,
+                    cooldown_secs: 0,
+                },
+                &cooldowns,
+                &answerer,
+            )
+            .await,
+            BrainOutcome::BackendError
+        );
+        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
         assert!(
             handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer)
                 .await
@@ -379,6 +396,44 @@ mod tests {
         }
     }
 
+    struct DiscordAnswerer(CountingAnswerer);
+
+    type TestAnswerFuture<'a> = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BrainOutcome, BrainError>> + Send + 'a>,
+    >;
+
+    impl AiAnswerer for DiscordAnswerer {
+        fn answer<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _question: &'life1 str,
+        ) -> TestAnswerFuture<'async_trait>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                panic!("Discord-Kommandos dürfen keinen anonymen Antwortweg verwenden")
+            })
+        }
+
+        fn answer_for_discord<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            question: &'life1 str,
+            user_id: u64,
+        ) -> TestAnswerFuture<'async_trait>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                assert_eq!(user_id, 1);
+                self.0.answer(question).await
+            })
+        }
+    }
+
     #[tokio::test]
     async fn gemeinsame_antwort_erhaelt_frage_und_beachtet_grenzen_und_cooldown() {
         let config = BrainConfig {
@@ -386,10 +441,10 @@ mod tests {
             cooldown_secs: 20,
         };
         let cooldowns = BrainCooldowns::default();
-        let answerer = CountingAnswerer {
+        let answerer = DiscordAnswerer(CountingAnswerer {
             calls: AtomicUsize::new(0),
             fail: false,
-        };
+        });
         assert_eq!(
             handle_brain_query("", 1, &config, &cooldowns, &answerer).await,
             BrainOutcome::Usage
@@ -398,7 +453,12 @@ mod tests {
             handle_brain_query(&"x".repeat(21), 1, &config, &cooldowns, &answerer).await,
             BrainOutcome::TooLong { len: 21 }
         );
-        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            handle_brain_query("Frage", 0, &config, &cooldowns, &answerer).await,
+            BrainOutcome::BackendError
+        );
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
             BrainOutcome::Answer("Frage".into())
@@ -415,7 +475,7 @@ mod tests {
             handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
             BrainOutcome::Answer(_)
         ));
-        assert_eq!(answerer.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -425,10 +485,10 @@ mod tests {
             cooldown_secs: 20,
         };
         let cooldowns = BrainCooldowns::default();
-        let answerer = CountingAnswerer {
+        let answerer = DiscordAnswerer(CountingAnswerer {
             calls: AtomicUsize::new(0),
             fail: true,
-        };
+        });
         assert_eq!(
             handle_brain_query("Frage", 1, &config, &cooldowns, &answerer).await,
             BrainOutcome::BackendError

@@ -4436,9 +4436,32 @@ mod tests {
             &self,
             _question: &str,
         ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
+            panic!("Discord-Kommandos dürfen keinen anonymen Antwortweg verwenden")
+        }
+
+        fn answer_for_discord<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _question: &'life1 str,
+            user_id: u64,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<dl_brain::BrainOutcome, dl_brain::BrainError>,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                assert_ne!(user_id, 0);
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
+            })
         }
     }
 
