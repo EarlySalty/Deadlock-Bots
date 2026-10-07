@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -38,21 +38,27 @@ impl BrainCooldowns {
     }
 }
 
+struct DiscordReservation {
+    id: u64,
+    at: Instant,
+    completed: bool,
+}
+
 #[derive(Default)]
 struct DiscordRateState {
-    users: HashMap<u64, Instant>,
-    completed: HashSet<u64>,
+    users: HashMap<u64, DiscordReservation>,
+    next_reservation: u64,
     channels: HashMap<u64, VecDeque<Instant>>,
     day: u64,
     daily_count: usize,
 }
 
 impl DiscordRateState {
-    fn reserve_question(&mut self, question: &str, user_id: u64, channel_id: u64) -> bool {
-        let Ok(utc) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        let previous = if invite_status_question(question) && self.completed.contains(&user_id) {
+    fn reserve_question(&mut self, question: &str, user_id: u64, channel_id: u64) -> Option<u64> {
+        let utc = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        let previous = if invite_status_question(question)
+            && self.users.get(&user_id).is_some_and(|r| r.completed)
+        {
             self.users.remove(&user_id)
         } else {
             None
@@ -60,18 +66,23 @@ impl DiscordRateState {
         if !self.reserve(user_id, channel_id, Instant::now(), utc) {
             if let Some(previous) = previous {
                 self.users.insert(user_id, previous);
-                self.completed.insert(user_id);
             }
-            return false;
+            return None;
         }
-        self.completed.remove(&user_id);
-        true
+        self.users.get(&user_id).map(|r| r.id)
+    }
+
+    fn complete(&mut self, user_id: u64, reservation: u64) {
+        if let Some(current) = self.users.get_mut(&user_id) {
+            if current.id == reservation {
+                current.completed = true;
+            }
+        }
     }
 
     fn reserve(&mut self, user_id: u64, channel_id: u64, now: Instant, utc: Duration) -> bool {
         self.users
-            .retain(|_, last| now.saturating_duration_since(*last) < Duration::from_secs(60));
-        self.completed.retain(|user| self.users.contains_key(user));
+            .retain(|_, last| now.saturating_duration_since(last.at) < Duration::from_secs(60));
         self.channels.retain(|_, times| {
             while times.front().is_some_and(|last| {
                 now.saturating_duration_since(*last) >= Duration::from_secs(3600)
@@ -96,7 +107,18 @@ impl DiscordRateState {
         {
             return false;
         }
-        self.users.insert(user_id, now);
+        let Some(reservation) = self.next_reservation.checked_add(1) else {
+            return false;
+        };
+        self.next_reservation = reservation;
+        self.users.insert(
+            user_id,
+            DiscordReservation {
+                id: reservation,
+                at: now,
+                completed: false,
+            },
+        );
         self.channels.entry(channel_id).or_default().push_back(now);
         self.daily_count += 1;
         true
@@ -150,22 +172,27 @@ pub async fn handle_discord_query(
     cooldowns: &BrainCooldowns,
     answerer: &dyn AiAnswerer,
 ) -> Option<BrainOutcome> {
-    if !cooldowns
+    let reservation = cooldowns
         .discord
         .lock()
         .await
-        .reserve_question(question, user_id, channel_id)
-    {
-        return None;
-    }
+        .reserve_question(question, user_id, channel_id)?;
     let question = question.trim();
     if question.is_empty() {
-        cooldowns.discord.lock().await.completed.insert(user_id);
+        cooldowns
+            .discord
+            .lock()
+            .await
+            .complete(user_id, reservation);
         return Some(BrainOutcome::Usage);
     }
     let len = question.chars().count();
     if len > max_question_len {
-        cooldowns.discord.lock().await.completed.insert(user_id);
+        cooldowns
+            .discord
+            .lock()
+            .await
+            .complete(user_id, reservation);
         return Some(BrainOutcome::TooLong { len });
     }
     let outcome = match answerer.answer_for_discord(question, user_id).await {
@@ -175,7 +202,11 @@ pub async fn handle_discord_query(
             BrainOutcome::BackendError
         }
     };
-    cooldowns.discord.lock().await.completed.insert(user_id);
+    cooldowns
+        .discord
+        .lock()
+        .await
+        .complete(user_id, reservation);
     Some(outcome)
 }
 
@@ -409,6 +440,111 @@ mod tests {
         );
         assert_eq!(first, Some(BrainOutcome::Answer("Antwort".into())));
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn alter_abschluss_gibt_neue_reservierung_weder_bei_erfolg_noch_fehler_frei() {
+        struct WaitingAnswerer {
+            started: [tokio::sync::Notify; 2],
+            release: [tokio::sync::Notify; 2],
+            calls: AtomicUsize,
+            fail: bool,
+        }
+        #[async_trait::async_trait]
+        impl AiAnswerer for WaitingAnswerer {
+            async fn answer(&self, _question: &str) -> Result<BrainOutcome, BrainError> {
+                panic!("Identitätsloser Antwortweg")
+            }
+
+            async fn answer_for_discord(
+                &self,
+                _question: &str,
+                _user_id: u64,
+            ) -> Result<BrainOutcome, BrainError> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call < 2 {
+                    self.started[call].notify_one();
+                    self.release[call].notified().await;
+                }
+                if self.fail {
+                    Err(BrainError::Backend("Testfehler".into()))
+                } else {
+                    Ok(BrainOutcome::Answer("Antwort".into()))
+                }
+            }
+        }
+        for fail in [false, true] {
+            let answerer = std::sync::Arc::new(WaitingAnswerer {
+                started: Default::default(),
+                release: Default::default(),
+                calls: AtomicUsize::new(0),
+                fail,
+            });
+            let limits = std::sync::Arc::new(BrainCooldowns::default());
+            let start = || {
+                let answerer = answerer.clone();
+                let limits = limits.clone();
+                tokio::spawn(async move {
+                    handle_discord_query("Frage", 3, 4, 300, &limits, answerer.as_ref()).await
+                })
+            };
+            let old = start();
+            answerer.started[0].notified().await;
+            limits
+                .discord
+                .lock()
+                .await
+                .users
+                .get_mut(&3)
+                .expect("Alte Reservierung")
+                .at -= Duration::from_secs(60);
+            let new = start();
+            answerer.started[1].notified().await;
+            let new_reservation = limits.discord.lock().await.users[&3].id;
+            answerer.release[0].notify_one();
+            assert!(old.await.expect("Alter Abschluss").is_some());
+            {
+                let state = limits.discord.lock().await;
+                assert_eq!(state.users[&3].id, new_reservation);
+                assert!(!state.users[&3].completed);
+            }
+            assert!(
+                handle_discord_query("Invite-Status", 3, 5, 300, &limits, answerer.as_ref())
+                    .await
+                    .is_none()
+            );
+            assert_eq!(answerer.calls.load(Ordering::SeqCst), 2);
+            answerer.release[1].notify_one();
+            assert!(new.await.expect("Aktueller Abschluss").is_some());
+            assert!(
+                handle_discord_query("Invite-Status", 3, 5, 300, &limits, answerer.as_ref())
+                    .await
+                    .is_some()
+            );
+            assert_eq!(answerer.calls.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn validierungsabschluesse_erlauben_statusfolgefragen() {
+        let answerer = CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        };
+        for (question, expected) in [
+            ("", BrainOutcome::Usage),
+            ("zu lang", BrainOutcome::TooLong { len: 7 }),
+        ] {
+            let limits = BrainCooldowns::default();
+            assert_eq!(
+                handle_discord_query(question, 3, 4, 3, &limits, &answerer).await,
+                Some(expected)
+            );
+            assert!(matches!(
+                handle_discord_query("Invite-Status", 3, 4, 300, &limits, &answerer).await,
+                Some(BrainOutcome::Answer(_))
+            ));
+        }
     }
 
     #[tokio::test]

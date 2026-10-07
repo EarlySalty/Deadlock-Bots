@@ -136,7 +136,8 @@ async fn read_owned(pool: &PgPool, user: i64, guild: i64) -> Result<Reply, sqlx:
         "SELECT r.created_at, r.invite_sent_at, r.dispatch_task_id, t.status AS task_status,
                 CASE WHEN jsonb_typeof(t.result #> '{data,response,code}') = 'number'
                      THEN t.result #>> '{data,response,code}' END AS code,
-                COALESCE(t.finished_at, t.updated_at) AS finished_at
+                CASE WHEN t.status IN ('PENDING', 'RUNNING') THEN t.updated_at
+                     ELSE COALESCE(t.finished_at, t.updated_at) END AS finished_at
          FROM steam.invite_requests r
          LEFT JOIN steam.steam_tasks t ON t.id = r.dispatch_task_id
            AND t.type = 'AUTH_SEND_PLAYTEST_INVITE'
@@ -160,19 +161,22 @@ async fn read_owned(pool: &PgPool, user: i64, guild: i64) -> Result<Reply, sqlx:
     .bind(guild)
     .fetch_optional(&mut *tx)
     .await?;
-    let task_observation = request.as_ref().and_then(|r| {
-        Some(Observation {
-            code: Some(r.code.clone()?),
-            transport_failed: false,
-            at: r.finished_at?,
-        })
-    });
+    let task_observation = request
+        .as_ref()
+        .filter(|r| matches!(r.task_status.as_deref(), Some("DONE" | "FAILED")))
+        .and_then(|r| {
+            Some(Observation {
+                code: Some(r.code.clone()?),
+                transport_failed: false,
+                at: r.finished_at?,
+            })
+        });
     let observation = [event, task_observation]
         .into_iter()
         .flatten()
         .max_by_key(|o| o.at);
-    let reply =
-        if let Some(observation) = observation {
+    let observed_reply =
+        observation.map(|observation| {
             Reply::new(
                 observation.code.as_deref().map(gc_status).unwrap_or(
                     if observation.transport_failed {
@@ -183,23 +187,40 @@ async fn read_owned(pool: &PgPool, user: i64, guild: i64) -> Result<Reply, sqlx:
                 ),
                 Some(observation.at),
             )
-        } else if let Some(request) = request {
-            let at = request.finished_at.or_else(|| {
-                DateTime::from_timestamp(request.invite_sent_at.unwrap_or(request.created_at), 0)
-            });
-            let status = match request.task_status.as_deref() {
-                Some("FAILED") => Status::Error,
-                Some("DONE") => Status::Unknown,
-                None if request.invite_sent_at.is_some() || request.dispatch_task_id.is_some() => {
-                    Status::Unknown
-                }
-                None | Some("PENDING" | "RUNNING") => Status::Pending,
-                _ => Status::Unknown,
-            };
-            Reply::new(status, at)
-        } else {
-            Reply::new(Status::Unknown, audit)
+        });
+    let request_reply = request.map(|request| {
+        let request_at = DateTime::from_timestamp(request.created_at, 0);
+        let at = [
+            request_at,
+            DateTime::from_timestamp(request.invite_sent_at.unwrap_or(request.created_at), 0),
+            request.finished_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        let current_task = request
+            .finished_at
+            .is_some_and(|task_at| request_at.is_some_and(|request_at| task_at >= request_at));
+        let status = match request.task_status.as_deref().filter(|_| current_task) {
+            Some("PENDING" | "RUNNING") => Status::Pending,
+            Some("FAILED" | "DONE") if request.code.is_some() => {
+                gc_status(request.code.as_deref().unwrap_or_default())
+            }
+            Some("FAILED") => Status::Error,
+            Some("DONE") => Status::Unknown,
+            None if request.invite_sent_at.is_some() || request.dispatch_task_id.is_some() => {
+                Status::Unknown
+            }
+            None => Status::Pending,
+            _ => Status::Unknown,
         };
+        Reply::new(status, at)
+    });
+    let reply = [observed_reply, request_reply]
+        .into_iter()
+        .flatten()
+        .max_by_key(|reply| reply.at)
+        .unwrap_or_else(|| Reply::new(Status::Unknown, audit));
     tx.commit().await?;
     Ok(reply)
 }
@@ -408,6 +429,87 @@ mod tests {
         assert_eq!(
             read(db.pool(), 42, 1, &empty).await.expect("Lesefehler"),
             Reply::unavailable()
+        );
+    }
+
+    #[tokio::test]
+    async fn neuere_requestzustaende_verdrängen_historische_gc_belege() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("Wegwerf-Postgres");
+        sqlx::raw_sql(
+            "INSERT INTO core.users(discord_id) VALUES(42);
+             INSERT INTO core.steam_links(discord_id,steam_id,verified,primary_account)
+             VALUES(42,'76561197960265839',true,true);
+             INSERT INTO steam.bot_event_log(event_type,decision,discord_id,steam_id,detail,occurred_at)
+             VALUES('playtest_invite','sent',42,76561197960265839,'{\"code\":0}','2026-10-01T10:00:00Z');
+             INSERT INTO steam.beta_invite_audit(guild_id,discord_id,discord_name,steam_id64,steam_profile,invited_at)
+             VALUES(1,42,'privat',76561197960265839,'privat','2026-10-03T12:00:00Z');
+             INSERT INTO steam.invite_requests(steam_id64,account_id,admin_id,target_discord_id,created_at)
+             VALUES(76561197960265839,111,42,42,1790938800);",
+        )
+        .execute(db.pool())
+        .await
+        .expect("Alte Beobachtung und neue Anfrage");
+        let empty = json!({});
+        let request_at = "2026-10-02T11:00:00Z".parse().expect("Anfragezeit");
+        assert_eq!(
+            read(db.pool(), 42, 1, &empty).await.expect("Neue Anfrage"),
+            Reply::new(Status::Pending, Some(request_at))
+        );
+        sqlx::raw_sql(
+            "INSERT INTO steam.steam_tasks(id,type,payload,status,updated_at,finished_at)
+             VALUES(100,'AUTH_SEND_PLAYTEST_INVITE','{\"steam_id\":\"76561197960265839\"}',
+                    'FAILED','2026-10-02T12:00:00Z','2026-10-02T12:00:00Z');
+             UPDATE steam.invite_requests SET dispatch_task_id=100;",
+        )
+        .execute(db.pool())
+        .await
+        .expect("Neuer fehlgeschlagener Auftrag");
+        let task_at = "2026-10-02T12:00:00Z".parse().expect("Auftragszeit");
+        assert_eq!(
+            read(db.pool(), 42, 1, &empty).await.expect("Neuer Fehler"),
+            Reply::new(Status::Error, Some(task_at))
+        );
+        for status in ["PENDING", "RUNNING"] {
+            sqlx::query("UPDATE steam.steam_tasks SET status=$1, finished_at=NULL WHERE id=100")
+                .bind(status)
+                .execute(db.pool())
+                .await
+                .expect("Aktueller offener Auftrag");
+            assert_eq!(
+                read(db.pool(), 42, 1, &empty)
+                    .await
+                    .expect("Neuer offener Auftrag"),
+                Reply::new(Status::Pending, Some(task_at))
+            );
+        }
+        sqlx::query("UPDATE steam.steam_tasks SET status='DONE', result='{\"data\":{\"response\":{\"code\":5}}}', finished_at='2026-10-01T10:00:00Z', updated_at='2026-10-01T10:00:00Z' WHERE id=100")
+            .execute(db.pool()).await.expect("Alter zugeordneter GC-Auftrag");
+        assert_eq!(
+            read(db.pool(), 42, 1, &empty)
+                .await
+                .expect("Neue Anfrage bleibt maßgeblich"),
+            Reply::new(Status::Unknown, Some(request_at))
+        );
+        sqlx::query("UPDATE steam.steam_tasks SET status='RUNNING', updated_at='2026-10-02T12:00:00Z' WHERE id=100")
+            .execute(db.pool()).await.expect("Neuer Lauf mit altem Endmarker");
+        assert_eq!(
+            read(db.pool(), 42, 1, &empty)
+                .await
+                .expect("Aktuelle Auftragszeit"),
+            Reply::new(Status::Pending, Some(task_at))
+        );
+        sqlx::query("UPDATE steam.bot_event_log SET detail='{\"code\":3}', occurred_at='2026-10-02T13:00:00Z'")
+            .execute(db.pool()).await.expect("Neueste tatsächliche Beobachtung");
+        assert_eq!(
+            read(db.pool(), 42, 1, &empty)
+                .await
+                .expect("Neuere Beobachtung"),
+            Reply::new(
+                Status::FriendshipMissing,
+                Some("2026-10-02T13:00:00Z".parse().expect("Beobachtungszeit"))
+            )
         );
     }
 
