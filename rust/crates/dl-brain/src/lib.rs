@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -41,15 +41,37 @@ impl BrainCooldowns {
 #[derive(Default)]
 struct DiscordRateState {
     users: HashMap<u64, Instant>,
+    completed: HashSet<u64>,
     channels: HashMap<u64, VecDeque<Instant>>,
     day: u64,
     daily_count: usize,
 }
 
 impl DiscordRateState {
+    fn reserve_question(&mut self, question: &str, user_id: u64, channel_id: u64) -> bool {
+        let Ok(utc) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let previous = if invite_status_question(question) && self.completed.contains(&user_id) {
+            self.users.remove(&user_id)
+        } else {
+            None
+        };
+        if !self.reserve(user_id, channel_id, Instant::now(), utc) {
+            if let Some(previous) = previous {
+                self.users.insert(user_id, previous);
+                self.completed.insert(user_id);
+            }
+            return false;
+        }
+        self.completed.remove(&user_id);
+        true
+    }
+
     fn reserve(&mut self, user_id: u64, channel_id: u64, now: Instant, utc: Duration) -> bool {
         self.users
             .retain(|_, last| now.saturating_duration_since(*last) < Duration::from_secs(60));
+        self.completed.retain(|user| self.users.contains_key(user));
         self.channels.retain(|_, times| {
             while times.front().is_some_and(|last| {
                 now.saturating_duration_since(*last) >= Duration::from_secs(3600)
@@ -89,7 +111,6 @@ pub enum BrainError {
 
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
-    /// Führt Retrieval und genau eine gemeinsame Generierung aus.
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
 
     async fn answer_for_discord(
@@ -103,6 +124,24 @@ pub trait AiAnswerer: Send + Sync {
     }
 }
 
+fn invite_status_question(question: &str) -> bool {
+    let question = question.to_lowercase();
+    (question.contains("einlad") || question.contains("eingelad") || question.contains("invite"))
+        && [
+            "status",
+            "schon",
+            "wann",
+            "wo bleibt",
+            "noch",
+            "verschickt",
+            "gesendet",
+            "ausstehend",
+            "raus",
+        ]
+        .iter()
+        .any(|word| question.contains(word))
+}
+
 pub async fn handle_discord_query(
     question: &str,
     user_id: u64,
@@ -111,32 +150,33 @@ pub async fn handle_discord_query(
     cooldowns: &BrainCooldowns,
     answerer: &dyn AiAnswerer,
 ) -> Option<BrainOutcome> {
-    let Ok(utc) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return None;
-    };
     if !cooldowns
         .discord
         .lock()
         .await
-        .reserve(user_id, channel_id, Instant::now(), utc)
+        .reserve_question(question, user_id, channel_id)
     {
         return None;
     }
     let question = question.trim();
     if question.is_empty() {
+        cooldowns.discord.lock().await.completed.insert(user_id);
         return Some(BrainOutcome::Usage);
     }
     let len = question.chars().count();
     if len > max_question_len {
+        cooldowns.discord.lock().await.completed.insert(user_id);
         return Some(BrainOutcome::TooLong { len });
     }
-    Some(match answerer.answer_for_discord(question, user_id).await {
+    let outcome = match answerer.answer_for_discord(question, user_id).await {
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::warn!("Discord-Brain-Anfrage fehlgeschlagen");
             BrainOutcome::BackendError
         }
-    })
+    };
+    cooldowns.discord.lock().await.completed.insert(user_id);
+    Some(outcome)
 }
 
 pub async fn handle_brain_query(
@@ -146,6 +186,9 @@ pub async fn handle_brain_query(
     cooldowns: &BrainCooldowns,
     answerer: &dyn AiAnswerer,
 ) -> BrainOutcome {
+    if user_id == 0 {
+        return BrainOutcome::BackendError;
+    }
     let question = question.trim();
     if question.is_empty() {
         return BrainOutcome::Usage;
@@ -156,7 +199,7 @@ pub async fn handle_brain_query(
         return BrainOutcome::TooLong { len };
     }
 
-    if cfg.cooldown_secs > 0 {
+    if cfg.cooldown_secs > 0 && !invite_status_question(question) {
         let cooldown = std::time::Duration::from_secs(cfg.cooldown_secs);
         let map = cooldowns.lock().await;
         if let Some(last) = map.get(&user_id) {
@@ -170,10 +213,10 @@ pub async fn handle_brain_query(
         }
     }
 
-    let outcome = match answerer.answer(question).await {
+    let outcome = match answerer.answer_for_discord(question, user_id).await {
         Ok(outcome) => outcome,
-        Err(error) => {
-            tracing::warn!(%error, "Gemeinsame Brain-Antwort fehlgeschlagen");
+        Err(_) => {
+            tracing::warn!("Gemeinsame Discord-Brain-Antwort fehlgeschlagen");
             return BrainOutcome::BackendError;
         }
     };
@@ -306,16 +349,21 @@ mod tests {
 
     #[tokio::test]
     async fn discord_verwendet_keinen_alten_antwortweg_als_ersatz() {
-        let answerer = CountingAnswerer {
-            calls: AtomicUsize::new(0),
-            fail: false,
-        };
+        struct LegacyOnlyAnswerer(AtomicUsize);
+        #[async_trait::async_trait]
+        impl AiAnswerer for LegacyOnlyAnswerer {
+            async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(BrainOutcome::Answer(question.into()))
+            }
+        }
+        let answerer = LegacyOnlyAnswerer(AtomicUsize::new(0));
         let cooldowns = BrainCooldowns::default();
         assert_eq!(
             handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer).await,
             Some(BrainOutcome::BackendError)
         );
-        assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(answerer.0.load(Ordering::SeqCst), 0);
         assert!(
             handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer)
                 .await
@@ -363,12 +411,93 @@ mod tests {
         assert!(second.is_none());
     }
 
+    #[tokio::test]
+    async fn statusfolgefrage_behaelt_identitaet_und_kommt_ohne_normalen_cooldown() {
+        struct RequesterAnswerer(Mutex<Vec<u64>>);
+        #[async_trait::async_trait]
+        impl AiAnswerer for RequesterAnswerer {
+            async fn answer(&self, _question: &str) -> Result<BrainOutcome, BrainError> {
+                panic!("Identitätsloser Antwortweg")
+            }
+            async fn answer_for_discord(
+                &self,
+                question: &str,
+                user: u64,
+            ) -> Result<BrainOutcome, BrainError> {
+                self.0.lock().await.push(user);
+                Ok(BrainOutcome::Answer(question.into()))
+            }
+        }
+        let answerer = RequesterAnswerer(Mutex::new(Vec::new()));
+        let cooldowns = BrainCooldowns::default();
+        assert!(
+            handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer)
+                .await
+                .is_some()
+        );
+        assert!(
+            handle_discord_query("Normale Folgefrage", 3, 4, 300, &cooldowns, &answerer)
+                .await
+                .is_none()
+        );
+        assert!(matches!(
+            handle_discord_query(
+                "Bin ich schon eingeladen?",
+                3,
+                4,
+                300,
+                &cooldowns,
+                &answerer
+            )
+            .await,
+            Some(BrainOutcome::Answer(_))
+        ));
+        let cfg = BrainConfig {
+            max_question_len: 300,
+            cooldown_secs: 60,
+        };
+        assert!(matches!(
+            handle_brain_query("Frage", 7, &cfg, &cooldowns, &answerer).await,
+            BrainOutcome::Answer(_)
+        ));
+        assert!(matches!(
+            handle_brain_query("Wo bleibt meine Einladung?", 7, &cfg, &cooldowns, &answerer).await,
+            BrainOutcome::Answer(_)
+        ));
+        assert_eq!(
+            handle_brain_query("Invite-Status", 0, &cfg, &cooldowns, &answerer).await,
+            BrainOutcome::BackendError
+        );
+        assert_eq!(*answerer.0.lock().await, [3, 3, 7, 7]);
+        for _ in 2..20 {
+            assert!(
+                handle_discord_query("Invite-Status", 3, 4, 300, &cooldowns, &answerer)
+                    .await
+                    .is_some()
+            );
+        }
+        assert!(
+            handle_discord_query("Invite-Status", 3, 4, 300, &cooldowns, &answerer)
+                .await
+                .is_none()
+        );
+    }
+
     struct CountingAnswerer {
         calls: AtomicUsize,
         fail: bool,
     }
     #[async_trait::async_trait]
     impl AiAnswerer for CountingAnswerer {
+        async fn answer_for_discord(
+            &self,
+            question: &str,
+            user_id: u64,
+        ) -> Result<BrainOutcome, BrainError> {
+            assert_ne!(user_id, 0);
+            self.answer(question).await
+        }
+
         async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail {

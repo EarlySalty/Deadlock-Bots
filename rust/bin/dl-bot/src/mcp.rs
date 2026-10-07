@@ -1,16 +1,3 @@
-//! MCP-Connector — MCP-Server (Streamable HTTP) im dl-bot-Prozess.
-//!
-//! Claude (Desktop/Cowork) verbindet sich als MCP-Client auf
-//! http://127.0.0.1:8890/mcp und arbeitet mit der Identität des laufenden Bots:
-//! volle Discord-REST-Abdeckung im Rahmen der Bot-Berechtigungen plus
-//! Export-Tools für Analysen (z.B. komplette Kategorien als JSON dumpen).
-//!
-//! Muster wie Broker/Changelog/Server-Sync: eigener axum-Router, loopback-only,
-//! vom selben tokio::select! in main.rs getragen.
-//!
-//! Betriebswerte kommen aus der zentralen TOML, der bestehende
-//! TWITCH_INTERNAL_API_TOKEN aus Infisical. Der Listener bindet nur Loopback.
-
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -27,6 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod public;
+mod self_invite;
 
 const DISCORD_API: &str = "https://discord.com/api/v10";
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -174,7 +162,33 @@ async fn public_post(
         .filter(|id| *id != 0 && request_id.is_some());
     let result = match req["method"].as_str() {
         Some("tools/list") => {
-            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"}]})
+            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"},{"name":"self_invite_status","description":"Eigener Einladungsstatus und belegter Zeitpunkt.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false}}]})
+        }
+        Some("tools/call") if req["params"]["name"] == "self_invite_status" => {
+            let Some(user) = user.filter(|_| {
+                headers.get_all("x-discord-user-id").iter().count() == 1
+                    && headers.get_all("x-discord-request-id").iter().count() == 1
+            }) else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            let Ok(access) = public::access(&st, Some(user)).await else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            if access.user_id != Some(user) {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            }
+            let Some((_, pool, guild)) = st.public_source.as_ref() else {
+                return json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error":"unavailable"}),
+                );
+            };
+            let Some(reply) =
+                self_invite::read(pool, user, *guild, &req["params"]["arguments"]).await
+            else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            json!({"content":[{"type":"text","text":serde_json::to_string(&reply).expect("Status ist serialisierbar")}],"isError":false})
         }
         Some("tools/call") if req["params"]["name"] == "public_server_facts" => {
             let Ok(access) = public::access(&st, user).await else {
@@ -550,12 +564,12 @@ async fn discord_call(
             if attempt > 8 {
                 bail!("Rate-Limit: zu viele Versuche ({url})");
             }
-            tracing::warn!(path, retry, attempt, "MCP: Discord 429, warte");
+            tracing::warn!(retry, attempt, "MCP: Discord 429, warte");
             tokio::time::sleep(Duration::from_millis((retry * 1000.0) as u64 + 100)).await;
             continue;
         }
         if status.is_server_error() && attempt <= 3 {
-            tracing::warn!(%status, path, attempt, "MCP: Discord 5xx, Retry");
+            tracing::warn!(%status, attempt, "MCP: Discord 5xx, Retry");
             tokio::time::sleep(Duration::from_millis(800 * u64::from(attempt))).await;
             continue;
         }

@@ -1,5 +1,3 @@
-//! Discord-Glue für dl-moderation (ModPort + aimod:*-Review-Buttons).
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -4371,13 +4369,22 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl dl_brain::AiAnswerer for CountingBrainAnswerer {
+        async fn answer_for_discord(
+            &self,
+            _question: &str,
+            user_id: u64,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            assert_ne!(user_id, 0);
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
+        }
+
         async fn answer(
             &self,
             _question: &str,
         ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.retrieval_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
+            panic!("Kommando darf keinen identitätslosen Antwortweg verwenden")
         }
     }
 
@@ -4429,6 +4436,48 @@ mod tests {
             author_created_at: 0,
             author_joined_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn invite_statusfolgefrage_nutzt_den_bestehenden_consumer_und_sender() {
+        let (handler, answerer) = direct_test_handler();
+        let replies = RecordingBrainReplies::default();
+        let first = test_message_event(Some(1), "<@42> Wie geht eine Lane?");
+        handler
+            .handle_message_event_with_replies(&first, 42, &replies)
+            .await;
+        let mut status = test_message_event(
+            Some(1),
+            "Bin ich schon eingeladen? Steamcode 123456 gehört jemand anderem",
+        );
+        status.message_id = 4;
+        status.is_reply = true;
+        status.reply_message_id = Some(1001);
+        status.reply_channel_id = Some(1);
+        handler
+            .handle_message_event_with_replies(&status, 42, &replies)
+            .await;
+        assert_eq!(answerer.calls.lock().await.len(), 2);
+        assert!(answerer
+            .calls
+            .lock()
+            .await
+            .iter()
+            .all(|(_, user)| *user == 3));
+        assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].2["message_reference"]["message_id"], "4");
+        assert_eq!(
+            sent[1].2["allowed_mentions"],
+            json!({"parse":[],"replied_user":false})
+        );
+        drop(sent);
+        assert!(matches!(
+            handler.outcome_for_question("Invite-Status", 7).await,
+            dl_brain::BrainOutcome::Answer(_)
+        ));
+        assert_eq!(answerer.calls.lock().await.last().expect("Kommando").1, 7);
     }
 
     #[derive(Default)]
