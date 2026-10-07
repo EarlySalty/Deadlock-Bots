@@ -41,6 +41,7 @@ const BRAIN_THINKING_INTERVAL: Duration = Duration::from_millis(1200);
 const BRAIN_THINKING_MAX_TICKS: usize = 40;
 const BRAIN_CONVERSATION_TTL: Duration = Duration::from_secs(10 * 60);
 const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad. Probier's in ein paar Sekunden nochmal.";
+const BRAIN_PRIVATE_HELP: &str = "Private Fragen kann ich gerade nicht sicher beantworten. Für persönliche Hilfe öffne ein Ticket in <#1459628609705738539>. Allgemeine Fragen zum Server kannst du in <#1426220702054355077> stellen, ohne persönliche Angaben.";
 const BRAIN_NO_ANSWER: &str =
     "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter nach Held, Item oder Fähigkeit.";
 const BRAIN_OUT_OF_DOMAIN: &str =
@@ -309,6 +310,7 @@ impl BrainConversations {
 trait BrainDirectReplyPort: Send + Sync {
     async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn can_reply(&self, event: &dl_discord::MessageEvent) -> bool;
+    async fn is_public(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn reply(
         &self,
         event: &dl_discord::MessageEvent,
@@ -357,6 +359,12 @@ impl BrainDirectReplyPort for DiscordAdapter {
         )
     }
 
+    async fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
+        event
+            .guild_id
+            .is_some_and(|guild_id| brain_channel_is_public(self, guild_id, event.channel_id))
+    }
+
     async fn reply(
         &self,
         event: &dl_discord::MessageEvent,
@@ -364,6 +372,39 @@ impl BrainDirectReplyPort for DiscordAdapter {
     ) -> Result<u64, String> {
         self.send_raw_public(event.channel_id, body).await
     }
+}
+
+fn brain_channel_is_public(adapter: &DiscordAdapter, guild_id: u64, channel_id: u64) -> bool {
+    if guild_id == 0 || channel_id == 0 {
+        return false;
+    }
+    let Some(guild) = adapter.cache().guild(GuildId::new(guild_id)) else {
+        return false;
+    };
+    let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
+        return false;
+    };
+    if !matches!(
+        channel.kind,
+        serenity::all::ChannelType::Text | serenity::all::ChannelType::News
+    ) {
+        return false;
+    }
+    let Some(everyone) = guild.roles.get(&RoleId::new(guild_id)) else {
+        return false;
+    };
+    let mut visible = everyone.permissions.contains(Permissions::VIEW_CHANNEL);
+    for overwrite in &channel.permission_overwrites {
+        if overwrite.kind == PermissionOverwriteType::Role(RoleId::new(guild_id)) {
+            if overwrite.deny.contains(Permissions::VIEW_CHANNEL) {
+                visible = false;
+            }
+            if overwrite.allow.contains(Permissions::VIEW_CHANNEL) {
+                visible = true;
+            }
+        }
+    }
+    visible
 }
 
 fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Option<String> {
@@ -663,6 +704,11 @@ impl BrainHandler {
         let Some(question) = parse_brain_question(&event.content) else {
             return;
         };
+        if !replies.is_public(event).await {
+            self.answer_discord_event(event, replies, &question, false)
+                .await;
+            return;
+        }
         self.handle_brain_question(event.channel_id, event.author_id, &question)
             .await;
     }
@@ -697,6 +743,17 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
+        let public = replies.is_public(event).await;
+        if !public {
+            if replies.can_reply(event).await {
+                let body = direct_brain_reply_body(event, BRAIN_PRIVATE_HELP);
+                if replies.reply(event, &body).await.is_err() {
+                    tracing::warn!("Privater Brain-Hilfshinweis konnte nicht zugestellt werden");
+                }
+            }
+            self.clear_guide_pending(event, proactive).await;
+            return;
+        }
         let Some(outcome) = dl_brain::handle_discord_query(
             question,
             event.author_id,
@@ -725,7 +782,7 @@ impl BrainHandler {
                 return;
             }
         };
-        if replies.can_reply(event).await {
+        if replies.can_reply(event).await && replies.is_public(event).await {
             let mut pending = if proactive {
                 Some(self.guide_pending.lock().await)
             } else {
@@ -777,6 +834,13 @@ impl InteractionHandler for BrainHandler {
             return BridgeReply::ephemeral_text(
                 "Der Brain-Test ist in diesem Kanal nicht freigeschaltet.",
             );
+        }
+        if !brain_channel_is_public(
+            self.adapter.as_ref(),
+            interaction.guild_id,
+            interaction.channel_id,
+        ) {
+            return BridgeReply::ephemeral_text(BRAIN_PRIVATE_HELP);
         }
         let question = interaction
             .options
@@ -4378,13 +4442,37 @@ mod tests {
         }
     }
 
+    fn public_test_adapter() -> Arc<DiscordAdapter> {
+        let adapter = dl_discord::DiscordAdapter::new("test-token");
+        let mut guild = serenity::all::Guild::default();
+        guild.id = GuildId::new(1);
+        let mut role = serenity::all::Role::default();
+        role.id = RoleId::new(1);
+        role.permissions = Permissions::VIEW_CHANNEL;
+        guild.roles.insert(role.id, role);
+        for id in [1, 999_999] {
+            let mut channel = serenity::all::GuildChannel::default();
+            channel.id = ChannelId::new(id);
+            channel.guild_id = guild.id;
+            channel.kind = serenity::all::ChannelType::Text;
+            guild.channels.insert(channel.id, channel);
+        }
+        let cache = Arc::new(serenity::all::Cache::new());
+        let mut event: serenity::all::GuildCreateEvent =
+            serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
+                .expect("Testcacheereignis");
+        cache.update(&mut event);
+        adapter.link_cache(cache);
+        adapter
+    }
+
     fn test_brain_handler(
         channel_allowlist: Option<HashSet<u64>>,
         retriever_calls: Arc<AtomicUsize>,
         answerer_calls: Arc<AtomicUsize>,
     ) -> BrainHandler {
         BrainHandler {
-            adapter: dl_discord::DiscordAdapter::new("test-token"),
+            adapter: public_test_adapter(),
             config: Arc::new(dl_brain::BrainConfig {
                 max_question_len: 300,
                 cooldown_secs: 20,
@@ -4467,6 +4555,7 @@ mod tests {
         deny: bool,
         bot: bool,
         fail: bool,
+        private: bool,
         sent: Mutex<Vec<RecordedBrainReply>>,
         delivered: tokio::sync::Notify,
     }
@@ -4480,6 +4569,10 @@ mod tests {
         async fn can_reply(&self, _event: &dl_discord::MessageEvent) -> bool {
             let previous = self.checks.fetch_add(1, Ordering::Relaxed);
             !self.deny && (!self.revoke_after_first || previous == 0)
+        }
+
+        async fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
+            event.guild_id.is_some() && !self.private
         }
 
         async fn reply(
@@ -4717,17 +4810,17 @@ mod tests {
         ] {
             let (handler, _) = direct_test_handler();
             let event = test_message_event(Some(1), "<@42> Frage");
-            let last = Instant::now() - Duration::from_secs(120);
-            handler.conversations.lock().await.record(&event, 999, last);
             if limited {
                 handler
                     .handle_message_event_with_replies(
-                        &test_message_event(None, "Frage"),
+                        &test_message_event(Some(1), "<@42> Frage"),
                         42,
                         &RecordingBrainReplies::default(),
                     )
                     .await;
             }
+            let last = Instant::now() - Duration::from_secs(120);
+            handler.conversations.lock().await.record(&event, 999, last);
             let replies = RecordingBrainReplies {
                 fail,
                 deny,
@@ -4894,7 +4987,11 @@ mod tests {
             )
             .await;
         assert_eq!(answerer.calls.lock().await.len(), 1);
-        assert_eq!(replies.sent.lock().await.len(), 1);
+        assert_eq!(replies.sent.lock().await.len(), 2);
+        assert_eq!(
+            replies.sent.lock().await[1].2["content"],
+            BRAIN_PRIVATE_HELP
+        );
         assert!(handler.guide_pending.lock().await.is_none());
     }
 
@@ -5025,6 +5122,7 @@ mod tests {
         let mut channel = serenity::all::GuildChannel::default();
         channel.id = ChannelId::new(question.channel_id);
         channel.guild_id = guild.id;
+        channel.kind = serenity::all::ChannelType::Text;
         guild.channels.insert(channel.id, channel);
         let mut role = serenity::all::Role::default();
         role.id = RoleId::new(guild.id.get());
@@ -5035,12 +5133,15 @@ mod tests {
             member.user.id = UserId::new(author);
             guild.members.insert(member.user.id, member);
         }
-        let cache = Arc::new(serenity::all::Cache::new());
         let mut update: serenity::all::GuildCreateEvent =
             serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
                 .expect("Cacheereignis");
-        cache.update(&mut update);
-        handler.adapter.link_cache(cache);
+        handler.adapter.cache().update(&mut update);
+        assert!(brain_channel_is_public(
+            handler.adapter.as_ref(),
+            question.guild_id.expect("Testguild"),
+            question.channel_id,
+        ));
         handler.adapter.bot_user_id_cell().set(42).expect("Testbot");
         let handler = Arc::new(handler);
         let dispatcher = dl_discord::Dispatcher::new();
@@ -5275,10 +5376,18 @@ mod tests {
                 .await;
             assert_eq!(
                 *answerer.calls.lock().await,
-                vec![(expected.to_owned(), event.author_id)]
+                if guild_id.is_some() {
+                    vec![(expected.to_owned(), event.author_id)]
+                } else {
+                    Vec::new()
+                }
             );
             assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
             let sent = replies.sent.lock().await;
+            if guild_id.is_none() {
+                assert_eq!(sent[0].2["content"], BRAIN_PRIVATE_HELP);
+                assert!(handler.conversations.lock().await.entries.is_empty());
+            }
             assert_eq!(sent.len(), 1);
             assert_eq!((sent[0].0, sent[0].1), (event.channel_id, event.message_id));
             assert_eq!(
@@ -5291,6 +5400,50 @@ mod tests {
                 json!({"parse": [], "replied_user": false})
             );
         }
+    }
+
+    #[tokio::test]
+    async fn private_serverfragen_und_unbekannte_slashkanaele_starten_keinen_consumer() {
+        for content in ["<@42> Private Frage", "!brain Private Frage"] {
+            let (mut handler, answerer) = direct_test_handler();
+            handler.all_guild_channels = true;
+            let replies = RecordingBrainReplies {
+                private: true,
+                ..Default::default()
+            };
+            handler
+                .handle_message_event_with_replies(
+                    &test_message_event(Some(1), content),
+                    42,
+                    &replies,
+                )
+                .await;
+            assert!(answerer.calls.lock().await.is_empty());
+            assert_eq!(replies.sent.lock().await.len(), 1);
+            assert_eq!(
+                replies.sent.lock().await[0].2["content"],
+                BRAIN_PRIVATE_HELP
+            );
+            assert!(handler.conversations.lock().await.entries.is_empty());
+        }
+        let (mut handler, answerer) = direct_test_handler();
+        handler.all_guild_channels = true;
+        let reply = handler
+            .handle(BridgeInteraction {
+                guild_id: 1,
+                channel_id: 55,
+                user_id: 3,
+                options: HashMap::from([("frage".into(), json!("Privat"))]),
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(reply.content.as_deref(), Some(BRAIN_PRIVATE_HELP));
+        assert!(answerer.calls.lock().await.is_empty());
+        assert!(brain_channel_is_public(handler.adapter.as_ref(), 1, 1));
+        assert!(!brain_channel_is_public(handler.adapter.as_ref(), 0, 1));
+        let channel = private_text_channel(1, 1, 3, None);
+        let adapter = test_adapter_with_channels(1, vec![channel]);
+        assert!(!brain_channel_is_public(adapter.as_ref(), 1, 1));
     }
 
     #[tokio::test]
@@ -5345,7 +5498,16 @@ mod tests {
             .handle_message_event_with_replies(&server, 42, &replies)
             .await;
         assert_eq!(answerer.calls.lock().await.len(), 1);
-        assert_eq!(replies.sent.lock().await.len(), 1);
+        assert_eq!(replies.sent.lock().await.len(), 2);
+        assert_eq!(
+            replies.sent.lock().await[0].2["content"],
+            BRAIN_PRIVATE_HELP
+        );
+        handler
+            .handle_message_event_with_replies(&server, 42, &replies)
+            .await;
+        assert_eq!(answerer.calls.lock().await.len(), 1);
+        assert_eq!(replies.sent.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -5364,10 +5526,7 @@ mod tests {
             .await;
         assert_eq!(
             *answerer.calls.lock().await,
-            vec![
-                ("Privater DM-Inhalt".into(), 3),
-                ("Öffentliche Frage".into(), 4)
-            ]
+            vec![("Öffentliche Frage".into(), 4)]
         );
         let sent = replies.sent.lock().await;
         assert_eq!(sent.len(), 2);
