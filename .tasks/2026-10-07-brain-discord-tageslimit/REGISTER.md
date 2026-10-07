@@ -1,5 +1,13 @@
 # K: Register Discord-Tagesgrenze
 
+## Frische Livefortsetzung am 7. Oktober 2026
+
+status: aktiv. Eigener Worktree /home/nathanael/.worktrees/bots-k-live-20261007, Branch feat/bots-k-live-20261007, Start- und Produkt-SHA 0fb873c6887c6ec8df6ce50d15c8ded9781fbadf. Aktueller Quoten-Code bereits auf main. Retained dl-bot hashgeprüft regulär installiert und abschließend unter tatsächlicher bestehender Deploysperre aktiviert. Beide tatsächlichen Anwendungen laufen aus dem neuen Release ohne deleted; dl-bot-Hash 700d9ab5..., dl-web ausdrücklich alter unveränderter Build. Anfangsfehler und Sperraufrufkorrektur in LIVE-K.md. PID dl-bot 2848890 zu 2766584, dl-web 2848935 zu 2766645. Seit abschließender Aktivierung Fehlerjournale leer, NRestarts 0. Technischer Deploybeweis vorhanden, echte Antwort-/Nutzerprobe offen: 0 beobachtete Antwortmarker. Keine persistente Tagesquote behauptet. Ortskontext bleibt eigener Vertragsfolgeschritt; Query-Metadatennaht fehlt und benötigt begrenzte gemeinsame Eigentumsfreigabe. Kein vollständiger K-Abschluss, Cleanup oder settle.
+
+Delegator 481426fe-b477-42b3-91c6-901811fcba1d, native K-Session 47304059-5103-45b5-8e54-0fbb5f140555. Alter Thread 79c97ab5 nicht wieder aufnehmen. Native Ortsrecherche abgeschlossen ohne Sourceänderung, kein zusätzlicher Bots-Writer.
+
+## Historischer Stand vor Mainlieferung und Deploy
+
 Status: Sourcecommit 0758b1f26ebb0216e2350084e3dd25efaca2c1c1 tatsächlich geprüft, regulär ALLOW und auf eigenem Featurebranch gesichert. Mainpush zunächst durch den Sauberkeitsguard wegen dieser beiden noch ungetrackten eigenen Taskdateien verweigert; keine Umgehung. Taskakte wird gezielt committed. Noch kein Mainpush, Deploy, Neustart oder echter Funktionsbeweis.
 
 ## Aktueller Nachweis vom 7. Oktober 2026
