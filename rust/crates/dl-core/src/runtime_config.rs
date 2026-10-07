@@ -190,6 +190,7 @@ section!(AiOptions {
     brain_open_test_mode: bool => "BRAIN_OPEN_TEST_MODE",
     brain_channels: Vec<u64> => "BRAIN_CHANNEL_ALLOWLIST",
     brain_cooldown_seconds: u64 => "BRAIN_COOLDOWN_SECS",
+    brain_daily_user_limit: usize => "BRAIN_DAILY_USER_LIMIT",
     brain_max_question_len: usize => "BRAIN_MAX_QUESTION_LEN",
     brain_api_endpoint: String => "BRAIN_API_ENDPOINT",
     brain_api_timeout_ms: u64 => "BRAIN_API_TIMEOUT_MS",
@@ -255,6 +256,9 @@ impl RuntimeConfig {
             if seconds > 31_536_000 {
                 return Err(invalid());
             }
+        }
+        if self.ai.brain_daily_user_limit == Some(0) {
+            return Err(invalid());
         }
         if self
             .ai
@@ -707,6 +711,31 @@ pub fn lookup(key: &str) -> Option<String> {
             .snapshot()
             .runtime_value(key)
     })
+}
+
+#[cfg(test)]
+mod discord_brain_daily_limit_tests {
+    use crate::bot_config::BotConfig;
+
+    #[test]
+    fn tagesgrenze_kommt_aus_dem_ai_abschnitt_der_toml_konfiguration() {
+        for limit in [1, 50, 75] {
+            let config = BotConfig::parse(&format!(
+                "schema_version=1\n[runtime.ai]\nbrain_daily_user_limit={limit}\n"
+            ))
+            .expect("Synthetische Betriebskonfiguration");
+            assert_eq!(config.runtime.ai.brain_daily_user_limit, Some(limit));
+            assert_eq!(
+                config.runtime_value("BRAIN_DAILY_USER_LIMIT"),
+                Some(limit.to_string())
+            );
+        }
+        let config = BotConfig::parse("schema_version=1\n").expect("Standardkonfiguration");
+        assert_eq!(config.runtime.ai.brain_daily_user_limit, None);
+        assert!(
+            BotConfig::parse("schema_version=1\n[runtime.ai]\nbrain_daily_user_limit=0\n").is_err()
+        );
+    }
 }
 
 #[cfg(test)]

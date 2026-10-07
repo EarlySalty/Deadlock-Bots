@@ -31,7 +31,8 @@ const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
 const BRAIN_USAGE: &str = "🧠 Nutze `/brain frage:<deine Frage>`. Build-Fragen erzeugen einen markierten Review-Build für die In-Game-Prüfung.";
-const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig, eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
+const BRAIN_DAILY_LIMIT: &str =
+    "Deine Brain-Fragen für heute sind aufgebraucht. Morgen geht es weiter.";
 const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅. Pack deine Frage in unter {max} Zeichen.";
 #[allow(dead_code)]
@@ -416,19 +417,17 @@ fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Optio
     {
         return None;
     }
-    if event.guild_id.is_none() {
-        return Some(event.content.trim().to_owned());
-    }
     let mentions = [format!("<@{bot_id}>"), format!("<@!{bot_id}>")];
-    if !mentions
-        .iter()
-        .any(|mention| event.content.contains(mention))
+    if event.guild_id.is_some()
+        && !mentions
+            .iter()
+            .any(|mention| event.content.contains(mention))
     {
         return None;
     }
     let mut question = event.content.clone();
     for mention in mentions {
-        question = question.replace(&mention, "");
+        question = question.replace(&mention, " ");
     }
     Some(question.trim().to_owned())
 }
@@ -527,12 +526,32 @@ impl BrainHandler {
                 .unwrap_or(false)
     }
 
-    async fn outcome_for_question(&self, question: &str, user_id: u64) -> dl_brain::BrainOutcome {
-        dl_brain::handle_brain_query(
+    async fn outcome_for_question(
+        &self,
+        question: &str,
+        user_id: u64,
+        channel_id: u64,
+    ) -> Option<dl_brain::BrainOutcome> {
+        dl_brain::handle_discord_query(
             question,
             user_id,
-            self.config.as_ref(),
+            channel_id,
+            self.config.max_question_len,
             self.cooldowns.as_ref(),
+            self.answerer.as_ref(),
+        )
+        .await
+    }
+
+    async fn reserved_outcome_for_question(
+        &self,
+        question: &str,
+        user_id: u64,
+    ) -> dl_brain::BrainOutcome {
+        dl_brain::answer_discord_query(
+            question,
+            user_id,
+            self.config.max_question_len,
             self.answerer.as_ref(),
         )
         .await
@@ -548,9 +567,10 @@ impl BrainHandler {
             dl_brain::BrainOutcome::TooLong { .. } => vec![brain_public_message_body(
                 &BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string()),
             )],
-            dl_brain::BrainOutcome::Cooldown { remaining_secs } => vec![brain_public_message_body(
-                &BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string()),
-            )],
+            dl_brain::BrainOutcome::DailyLimit => {
+                vec![brain_public_message_body(BRAIN_DAILY_LIMIT)]
+            }
+            dl_brain::BrainOutcome::Cooldown { .. } => Vec::new(),
             dl_brain::BrainOutcome::Answer(answer) => {
                 match brain_answer_embed_body(question, &answer, self.emoji_index.as_ref()) {
                     Some(body) => vec![body],
@@ -588,6 +608,18 @@ impl BrainHandler {
     }
 
     async fn handle_brain_question(&self, channel_id: u64, user_id: u64, question: &str) {
+        match self.cooldowns.reserve_discord(user_id, channel_id).await {
+            dl_brain::DiscordReservation::Accepted => {}
+            dl_brain::DiscordReservation::DailyLimit => {
+                self.send_public_bodies(
+                    channel_id,
+                    &[brain_public_message_body(BRAIN_DAILY_LIMIT)],
+                )
+                .await;
+                return;
+            }
+            dl_brain::DiscordReservation::Suppressed => return,
+        }
         if question.trim().is_empty() {
             let bodies = vec![brain_public_message_body(BRAIN_USAGE)];
             self.send_public_bodies(channel_id, &bodies).await;
@@ -599,7 +631,7 @@ impl BrainHandler {
             Ok(message_id) => message_id,
             Err(err) => {
                 tracing::warn!(%err, channel_id, "Brain-Denk-Platzhalter konnte nicht gesendet werden");
-                let outcome = self.outcome_for_question(question, user_id).await;
+                let outcome = self.reserved_outcome_for_question(question, user_id).await;
                 let bodies = self.public_bodies_for_outcome(question, outcome);
                 self.send_public_bodies(channel_id, &bodies).await;
                 return;
@@ -614,7 +646,7 @@ impl BrainHandler {
             cancelled.clone(),
         );
 
-        let outcome = self.outcome_for_question(question, user_id).await;
+        let outcome = self.reserved_outcome_for_question(question, user_id).await;
         cancelled.store(true, Ordering::SeqCst);
         if let Err(err) = animation.await {
             tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation Task fehlgeschlagen");
@@ -767,7 +799,9 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         };
+        let extend_conversation = !matches!(outcome, dl_brain::BrainOutcome::DailyLimit);
         let text = match outcome {
+            dl_brain::BrainOutcome::DailyLimit => BRAIN_DAILY_LIMIT.to_owned(),
             dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => answer,
             dl_brain::BrainOutcome::NoAnswer
             | dl_brain::BrainOutcome::OutOfDomain
@@ -796,7 +830,7 @@ impl BrainHandler {
             }
             let body = direct_brain_reply_body(event, &text);
             match replies.reply(event, &body).await {
-                Ok(message_id) if !proactive && !guide_channel(event) => {
+                Ok(message_id) if extend_conversation && !proactive && !guide_channel(event) => {
                     self.conversations
                         .lock()
                         .await
@@ -851,9 +885,12 @@ impl InteractionHandler for BrainHandler {
             .map(ToOwned::to_owned)
             .or_else(|| parse_brain_question(&interaction.content))
             .unwrap_or_default();
-        let outcome = self
-            .outcome_for_question(&question, interaction.user_id)
-            .await;
+        let Some(outcome) = self
+            .outcome_for_question(&question, interaction.user_id, interaction.channel_id)
+            .await
+        else {
+            return BridgeReply::ephemeral_text(BRAIN_DAILY_LIMIT);
+        };
         brain_bridge_reply_from_body(self.public_body_for_outcome(&question, outcome))
     }
 }
@@ -4627,7 +4664,7 @@ mod tests {
 
     #[tokio::test]
     async fn gespraech_nackte_erwaehnung_fragt_einmal_und_nimmt_folgefrage_an() {
-        let (mut handler, answerer) = direct_test_handler();
+        let (handler, answerer) = direct_test_handler();
         let replies = RecordingBrainReplies::default();
         let mention = test_message_event(Some(1), " <@!42> ");
         handler
@@ -4646,8 +4683,6 @@ mod tests {
             .await;
         assert_eq!(replies.sent.lock().await.len(), 1);
 
-        // Die bestehende Minutensperre bleibt bestehen. Hier prüfen wir die Gesprächsfreigabe.
-        handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::default());
         let question = test_message_event(Some(1), "Welche Lanes gibt es?");
         handler
             .handle_message_event_with_replies(&question, 42, &replies)
@@ -4665,7 +4700,7 @@ mod tests {
     #[tokio::test]
     async fn gespraech_fortsetzung_und_reply_nutzen_denselben_antwortweg() {
         for reply in [false, true] {
-            let (mut handler, answerer) = direct_test_handler();
+            let (handler, answerer) = direct_test_handler();
             let replies = RecordingBrainReplies::default();
             let mention = test_message_event(Some(1), "<@42> Welche Lanes gibt es?");
             handler
@@ -4675,7 +4710,6 @@ mod tests {
                 replies.sent.lock().await[0].2["content"],
                 "Antwort: Welche Lanes gibt es?"
             );
-            handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::default());
             let mut followup = test_message_event(Some(1), "Und für neue Spieler?");
             followup.message_id = 4;
             if reply {
@@ -4709,14 +4743,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mehrere_erwaehnungen_bleiben_eine_anfrage_und_folgefragen_erreichen_dasselbe_tageslimit(
+    ) {
+        let (handler, answerer) = direct_test_handler();
+        let replies = RecordingBrainReplies::default();
+        let event = test_message_event(
+            Some(1),
+            "<@42>Welche Lanes gibt es?\n<@!42>Welche Items passen?\n<@42>Wie spiele ich Abrams?",
+        );
+        let expected = "Welche Lanes gibt es?\n Welche Items passen?\n Wie spiele ich Abrams?";
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        assert_eq!(*answerer.calls.lock().await, vec![(expected.to_owned(), 3)]);
+        let mut followup = test_message_event(Some(1), "Und danach?");
+        for index in 2..=50 {
+            followup.message_id = index + 2;
+            handler
+                .handle_message_event_with_replies(&followup, 42, &replies)
+                .await;
+        }
+        assert_eq!(answerer.calls.lock().await.len(), 50);
+        let last = handler.conversations.lock().await.entries[&(1, 1, 3)];
+        for _ in 0..5 {
+            handler
+                .handle_message_event_with_replies(&followup, 42, &replies)
+                .await;
+        }
+        assert_eq!(answerer.calls.lock().await.len(), 50);
+        assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 51);
+        assert_eq!(sent[50].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(
+            sent[50].2["message_reference"]["message_id"],
+            followup.message_id.to_string()
+        );
+        assert_eq!(handler.conversations.lock().await.entries[&(1, 1, 3)], last);
+    }
+
+    #[tokio::test]
     async fn gespraech_fremde_nutzer_kanaele_und_replies_brauchen_erwaehnung() {
-        let (mut handler, answerer) = direct_test_handler();
+        let (handler, answerer) = direct_test_handler();
         let replies = RecordingBrainReplies::default();
         let mention = test_message_event(Some(1), "<@42> Welche Lanes gibt es?");
         handler
             .handle_message_event_with_replies(&mention, 42, &replies)
             .await;
-        handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::default());
         let question = test_message_event(Some(1), "Und für neue Spieler?");
         let mut cases = Vec::new();
         let mut other = question.clone();
@@ -4831,16 +4904,16 @@ mod tests {
             (false, false, true, false),
             (false, false, false, true),
         ] {
-            let (handler, _) = direct_test_handler();
+            let (mut handler, _) = direct_test_handler();
             let event = test_message_event(Some(1), "<@42> Frage");
             if limited {
-                handler
-                    .handle_message_event_with_replies(
-                        &test_message_event(Some(1), "<@42> Frage"),
-                        42,
-                        &RecordingBrainReplies::default(),
-                    )
-                    .await;
+                handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(1));
+                let prior_replies = RecordingBrainReplies::default();
+                for _ in 0..2 {
+                    handler
+                        .handle_message_event_with_replies(&event, 42, &prior_replies)
+                        .await;
+                }
             }
             let last = Instant::now() - Duration::from_secs(120);
             handler.conversations.lock().await.record(&event, 999, last);
@@ -4888,7 +4961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gespraech_fortsetzung_behaelt_ehrliche_leermeldung_und_minutensperre() {
+    async fn gespraech_fortsetzung_behaelt_ehrliche_leermeldung_ohne_minutensperre() {
         let (mut handler, _) = direct_test_handler();
         let answerer = Arc::new(RecordingDiscordAnswerer {
             outcome: Some(dl_brain::BrainOutcome::NoAnswer),
@@ -4906,18 +4979,26 @@ mod tests {
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
         assert_eq!(replies.sent.lock().await[0].2["content"], BRAIN_NO_ANSWER);
-        let last = handler.conversations.lock().await.entries[&(1, 1, 3)];
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
-        assert_eq!(replies.sent.lock().await.len(), 1);
-        assert_eq!(answerer.calls.lock().await.len(), 1);
-        assert_eq!(handler.conversations.lock().await.entries[&(1, 1, 3)], last);
+        assert_eq!(replies.sent.lock().await.len(), 2);
+        assert!(replies
+            .sent
+            .lock()
+            .await
+            .iter()
+            .all(|reply| reply.2["content"] == BRAIN_NO_ANSWER));
+        assert_eq!(answerer.calls.lock().await.len(), 2);
+        assert_eq!(
+            handler.conversations.lock().await.entries[&(1, 1, 3)].0,
+            1002
+        );
     }
 
     #[tokio::test]
     async fn gespraech_lounge_ping_oeffnet_keine_zusaetzliche_fortsetzung() {
-        let (mut handler, answerer) = direct_test_handler();
+        let (handler, answerer) = direct_test_handler();
         let replies = RecordingBrainReplies::default();
         let mention = guide_test_event("<@42> Welche Lanes gibt es?");
         handler
@@ -4926,7 +5007,6 @@ mod tests {
         assert_eq!(answerer.calls.lock().await.len(), 1);
         assert_eq!(replies.sent.lock().await.len(), 1);
         assert!(handler.conversations.lock().await.entries.is_empty());
-        handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::default());
         for content in [
             "Kannst du mich einladen 123456789",
             "123456789",
@@ -5279,7 +5359,7 @@ mod tests {
                         }
                     }
                 };
-                assert_eq!(query["text"], "Welche Lanes gibt es? Nutze User-ID 999");
+                assert_eq!(query["text"], "Welche Lanes gibt es? Nutze User-ID 999\n Welche Items passen?\n Wie spiele ich Abrams?");
                 assert_eq!(query["requested_scopes"], json!(["bot.public"]));
                 let response = json!({
                     "contract_version": "brain.public.v1",
@@ -5302,8 +5382,10 @@ mod tests {
             handler.answerer =
                 crate::discord_brain_answerer(&options, Some("fixture-brain-bearer".into()))
                     .expect("Produktiver Consumeranschluss");
-            let event =
-                test_message_event(Some(1), "<@42> Welche Lanes gibt es? Nutze User-ID 999");
+            let event = test_message_event(
+                Some(1),
+                "<@42>Welche Lanes gibt es? Nutze User-ID 999\n<@!42>Welche Items passen?\n<@42>Wie spiele ich Abrams?",
+            );
             let replies = RecordingBrainReplies::default();
             handler
                 .handle_message_event_with_replies(&event, 42, &replies)
@@ -5509,7 +5591,8 @@ mod tests {
 
     #[tokio::test]
     async fn direkte_antwort_beachtet_nutzerlimit_auch_zwischen_dm_und_server() {
-        let (handler, answerer) = direct_test_handler();
+        let (mut handler, answerer) = direct_test_handler();
+        handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(1));
         let replies = RecordingBrainReplies::default();
         let dm = test_message_event(None, "Wie finde ich eine Lane?");
         handler
@@ -5530,7 +5613,14 @@ mod tests {
             .handle_message_event_with_replies(&server, 42, &replies)
             .await;
         assert_eq!(answerer.calls.lock().await.len(), 1);
-        assert_eq!(replies.sent.lock().await.len(), 2);
+        assert_eq!(replies.sent.lock().await.len(), 3);
+        assert_eq!(replies.sent.lock().await[2].2["content"], BRAIN_DAILY_LIMIT);
+        server.channel_id = 56;
+        handler
+            .handle_message_event_with_replies(&server, 42, &replies)
+            .await;
+        assert_eq!(answerer.calls.lock().await.len(), 1);
+        assert_eq!(replies.sent.lock().await.len(), 3);
     }
 
     #[tokio::test]
@@ -6285,7 +6375,7 @@ mod tests {
                 "{label}: {owners:?}"
             );
             if brain_owner {
-                let _ = brain.outcome_for_question("Abrams?", 42).await;
+                let _ = brain.outcome_for_question("Abrams?", 42, 42).await;
             }
             brain_calls.push((
                 retriever_calls.load(std::sync::atomic::Ordering::Relaxed),

@@ -1,5 +1,8 @@
-use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::time::Instant;
+
+use chrono::{DateTime, NaiveDate, Utc};
+use chrono_tz::Europe::Berlin;
 
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -14,6 +17,7 @@ pub enum BrainOutcome {
     Usage,
     TooLong { len: usize },
     Cooldown { remaining_secs: u64 },
+    DailyLimit,
     Answer(String),
     OutOfDomain,
     NoAnswer,
@@ -26,58 +30,86 @@ pub struct BrainConfig {
     pub cooldown_secs: u64,
 }
 
-#[derive(Default)]
+pub const DEFAULT_DISCORD_DAILY_USER_LIMIT: usize = 50;
+
 pub struct BrainCooldowns {
     legacy: Mutex<HashMap<u64, Instant>>,
     discord: Mutex<DiscordRateState>,
+    daily_user_limit: usize,
+}
+
+impl Default for BrainCooldowns {
+    fn default() -> Self {
+        Self::new(DEFAULT_DISCORD_DAILY_USER_LIMIT)
+    }
 }
 
 impl BrainCooldowns {
+    pub fn new(daily_user_limit: usize) -> Self {
+        Self {
+            legacy: Mutex::default(),
+            discord: Mutex::default(),
+            daily_user_limit,
+        }
+    }
+
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, HashMap<u64, Instant>> {
         self.legacy.lock().await
     }
+
+    pub async fn reserve_discord(&self, user_id: u64, channel_id: u64) -> DiscordReservation {
+        self.discord
+            .lock()
+            .await
+            .reserve(user_id, channel_id, Utc::now(), self.daily_user_limit)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscordReservation {
+    Accepted,
+    DailyLimit,
+    Suppressed,
+}
+
+#[derive(Default)]
+struct DiscordUserDay {
+    count: usize,
+    notified: bool,
 }
 
 #[derive(Default)]
 struct DiscordRateState {
-    users: HashMap<u64, Instant>,
-    channels: HashMap<u64, VecDeque<Instant>>,
-    day: u64,
-    daily_count: usize,
+    users: HashMap<u64, DiscordUserDay>,
+    day: Option<NaiveDate>,
 }
 
 impl DiscordRateState {
-    fn reserve(&mut self, user_id: u64, channel_id: u64, now: Instant, utc: Duration) -> bool {
-        self.users
-            .retain(|_, last| now.saturating_duration_since(*last) < Duration::from_secs(60));
-        self.channels.retain(|_, times| {
-            while times.front().is_some_and(|last| {
-                now.saturating_duration_since(*last) >= Duration::from_secs(3600)
-            }) {
-                times.pop_front();
+    fn reserve(
+        &mut self,
+        user_id: u64,
+        channel_id: u64,
+        utc: DateTime<Utc>,
+        daily_user_limit: usize,
+    ) -> DiscordReservation {
+        if user_id == 0 || channel_id == 0 {
+            return DiscordReservation::Suppressed;
+        }
+        let day = utc.with_timezone(&Berlin).date_naive();
+        if self.day != Some(day) {
+            self.day = Some(day);
+            self.users.clear();
+        }
+        let user = self.users.entry(user_id).or_default();
+        if user.count >= daily_user_limit {
+            if user.notified {
+                return DiscordReservation::Suppressed;
             }
-            !times.is_empty()
-        });
-        let day = utc.as_secs() / 86400;
-        if self.day != day {
-            self.day = day;
-            self.daily_count = 0;
+            user.notified = true;
+            return DiscordReservation::DailyLimit;
         }
-        if user_id == 0
-            || channel_id == 0
-            || self.users.contains_key(&user_id)
-            || self
-                .channels
-                .get(&channel_id)
-                .is_some_and(|times| times.len() >= 20)
-            || self.daily_count >= 500
-        {
-            return false;
-        }
-        self.users.insert(user_id, now);
-        self.channels.entry(channel_id).or_default().push_back(now);
-        self.daily_count += 1;
-        true
+        user.count += 1;
+        DiscordReservation::Accepted
     }
 }
 
@@ -110,32 +142,35 @@ pub async fn handle_discord_query(
     cooldowns: &BrainCooldowns,
     answerer: &dyn AiAnswerer,
 ) -> Option<BrainOutcome> {
-    let Ok(utc) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return None;
-    };
-    if !cooldowns
-        .discord
-        .lock()
-        .await
-        .reserve(user_id, channel_id, Instant::now(), utc)
-    {
-        return None;
+    match cooldowns.reserve_discord(user_id, channel_id).await {
+        DiscordReservation::Accepted => {}
+        DiscordReservation::DailyLimit => return Some(BrainOutcome::DailyLimit),
+        DiscordReservation::Suppressed => return None,
     }
+    Some(answer_discord_query(question, user_id, max_question_len, answerer).await)
+}
+
+pub async fn answer_discord_query(
+    question: &str,
+    user_id: u64,
+    max_question_len: usize,
+    answerer: &dyn AiAnswerer,
+) -> BrainOutcome {
     let question = question.trim();
     if question.is_empty() {
-        return Some(BrainOutcome::Usage);
+        return BrainOutcome::Usage;
     }
     let len = question.chars().count();
     if len > max_question_len {
-        return Some(BrainOutcome::TooLong { len });
+        return BrainOutcome::TooLong { len };
     }
-    Some(match answerer.answer_for_discord(question, user_id).await {
+    match answerer.answer_for_discord(question, user_id).await {
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::warn!("Discord-Brain-Anfrage fehlgeschlagen");
             BrainOutcome::BackendError
         }
-    })
+    }
 }
 
 pub async fn handle_brain_query(
@@ -270,40 +305,119 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn discord_limits_reservieren_nutzer_vor_dem_aufruf_auch_kanaluebergreifend() {
-        let mut state = DiscordRateState::default();
-        let now = Instant::now();
-        let utc = Duration::from_secs(86400);
-        assert!(state.reserve(1, 1, now, utc));
-        assert!(!state.reserve(1, 2, now, utc));
-        assert!(state.reserve(1, 2, now + Duration::from_secs(60), utc));
-        assert_eq!(state.daily_count, 2);
+    fn utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("Deterministischer Testzeitpunkt")
+            .with_timezone(&Utc)
     }
 
     #[test]
-    fn discord_limits_zaehlen_zwanzig_pro_kanal_und_stunde() {
+    fn discord_limit_laesst_fuenfzig_sofort_zu_und_meldet_die_einundfuenfzigste_einmal() {
         let mut state = DiscordRateState::default();
-        let now = Instant::now();
-        let utc = Duration::from_secs(86400);
-        for user in 1..=20 {
-            assert!(state.reserve(user, 1, now, utc));
+        let now = utc("2026-10-07T12:00:00Z");
+        for channel in 1..=50 {
+            assert_eq!(
+                state.reserve(1, channel, now, 50),
+                DiscordReservation::Accepted
+            );
         }
-        assert!(!state.reserve(21, 1, now, utc));
-        assert!(state.reserve(21, 2, now, utc));
-        assert!(state.reserve(22, 1, now + Duration::from_secs(3600), utc));
+        assert_eq!(state.users[&1].count, 50);
+        assert_eq!(
+            state.reserve(1, 51, now, 50),
+            DiscordReservation::DailyLimit
+        );
+        for channel in 1..=100 {
+            assert_eq!(
+                state.reserve(1, channel, now, 50),
+                DiscordReservation::Suppressed
+            );
+        }
+        assert_eq!(state.users[&1].count, 50);
+        assert_eq!(state.reserve(2, 1, now, 50), DiscordReservation::Accepted);
     }
 
     #[test]
-    fn discord_limits_zaehlen_fuenfhundert_pro_utc_tag() {
+    fn discord_limit_ist_konfigurierbar_ohne_kanal_stunden_oder_globales_tageslimit() {
         let mut state = DiscordRateState::default();
-        let now = Instant::now();
-        let utc = Duration::from_secs(86400);
-        for user in 1..=500 {
-            assert!(state.reserve(user, user, now, utc));
+        let now = utc("2026-10-07T12:00:00Z");
+        for user in 1..=501 {
+            for _ in 0..2 {
+                assert_eq!(state.reserve(user, 1, now, 2), DiscordReservation::Accepted);
+            }
+            assert_eq!(
+                state.reserve(user, 2, now, 2),
+                DiscordReservation::DailyLimit
+            );
         }
-        assert!(!state.reserve(501, 501, now, utc));
-        assert!(state.reserve(501, 501, now, utc + Duration::from_secs(86400)));
+        assert_eq!(state.users.len(), 501);
+        for (user, channel) in [(0, 1), (1, 0)] {
+            assert_eq!(
+                state.reserve(user, channel, now, 2),
+                DiscordReservation::Suppressed
+            );
+        }
+    }
+
+    #[test]
+    fn discord_limit_wechselt_am_berliner_kalendertag_auch_bei_zeitumstellungen() {
+        for (before, midnight, after_utc_midnight, transition_before, transition_after, next_day) in [
+            (
+                "2026-03-28T22:59:59Z",
+                "2026-03-28T23:00:00Z",
+                "2026-03-29T00:00:00Z",
+                "2026-03-29T00:59:59Z",
+                "2026-03-29T01:00:00Z",
+                "2026-03-29T22:00:00Z",
+            ),
+            (
+                "2026-10-24T21:59:59Z",
+                "2026-10-24T22:00:00Z",
+                "2026-10-25T00:00:00Z",
+                "2026-10-25T00:59:59Z",
+                "2026-10-25T01:00:00Z",
+                "2026-10-25T23:00:00Z",
+            ),
+            (
+                "2026-01-07T22:59:59Z",
+                "2026-01-07T23:00:00Z",
+                "2026-01-08T00:00:00Z",
+                "2026-01-08T01:00:00Z",
+                "2026-01-08T02:00:00Z",
+                "2026-01-08T23:00:00Z",
+            ),
+        ] {
+            let mut state = DiscordRateState::default();
+            assert_eq!(
+                state.reserve(1, 1, utc(before), 1),
+                DiscordReservation::Accepted
+            );
+            assert_eq!(
+                state.reserve(1, 1, utc(before), 1),
+                DiscordReservation::DailyLimit
+            );
+            assert_eq!(
+                state.reserve(1, 1, utc(midnight), 1),
+                DiscordReservation::Accepted
+            );
+            assert_eq!(
+                state.reserve(1, 1, utc(midnight), 1),
+                DiscordReservation::DailyLimit
+            );
+            for time in [after_utc_midnight, transition_before, transition_after] {
+                assert_eq!(
+                    state.reserve(1, 2, utc(time), 1),
+                    DiscordReservation::Suppressed
+                );
+            }
+            assert_eq!(
+                state.reserve(1, 1, utc(next_day), 1),
+                DiscordReservation::Accepted
+            );
+            assert_eq!(
+                state.reserve(1, 1, utc(next_day), 1),
+                DiscordReservation::DailyLimit
+            );
+        }
     }
 
     #[tokio::test]
@@ -312,7 +426,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             fail: false,
         };
-        let cooldowns = BrainCooldowns::default();
+        let cooldowns = BrainCooldowns::new(1);
         assert_eq!(
             handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer).await,
             Some(BrainOutcome::BackendError)
@@ -333,8 +447,12 @@ mod tests {
             BrainOutcome::BackendError
         );
         assert_eq!(answerer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer).await,
+            Some(BrainOutcome::DailyLimit)
+        );
         assert!(
-            handle_discord_query("Frage", 3, 4, 300, &cooldowns, &answerer)
+            handle_discord_query("Frage", 3, 5, 300, &cooldowns, &answerer)
                 .await
                 .is_none()
         );
@@ -365,7 +483,7 @@ mod tests {
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         };
-        let limits = BrainCooldowns::default();
+        let limits = BrainCooldowns::new(1);
         let (first, second) = tokio::join!(
             handle_discord_query("Erste Frage", 3, 4, 300, &limits, &answerer),
             async {
@@ -377,7 +495,8 @@ mod tests {
             }
         );
         assert_eq!(first, Some(BrainOutcome::Answer("Antwort".into())));
-        assert!(second.is_none());
+        assert_eq!(second, Some(BrainOutcome::DailyLimit));
+        assert_eq!(limits.discord.lock().await.users[&3].count, 1);
     }
 
     struct CountingAnswerer {
@@ -432,6 +551,34 @@ mod tests {
                 self.0.answer(question).await
             })
         }
+    }
+
+    #[tokio::test]
+    async fn discord_folgefragen_und_mehrfachfrage_zaehlen_je_einen_zentralen_aufruf() {
+        let cooldowns = BrainCooldowns::default();
+        let answerer = DiscordAnswerer(CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        });
+        let question = "Was ist Abrams?\nWelche Items passen?\nWie spiele ich die Lane?";
+        for channel in 1..=DEFAULT_DISCORD_DAILY_USER_LIMIT as u64 {
+            assert_eq!(
+                handle_discord_query(question, 1, channel, 300, &cooldowns, &answerer).await,
+                Some(BrainOutcome::Answer(question.into()))
+            );
+        }
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 50);
+        assert_eq!(cooldowns.discord.lock().await.users[&1].count, 50);
+        assert_eq!(
+            handle_discord_query(question, 1, 1, 300, &cooldowns, &answerer).await,
+            Some(BrainOutcome::DailyLimit)
+        );
+        assert!(
+            handle_discord_query(question, 1, 2, 300, &cooldowns, &answerer)
+                .await
+                .is_none()
+        );
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 50);
     }
 
     #[tokio::test]

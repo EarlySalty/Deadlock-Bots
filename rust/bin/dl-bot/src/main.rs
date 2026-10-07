@@ -1072,9 +1072,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 adapter: adapter.clone(),
                 config: Arc::new(dl_brain::BrainConfig {
                     max_question_len: options.brain_max_question_len.unwrap_or(300),
-                    cooldown_secs: 60,
+                    cooldown_secs: 0,
                 }),
-                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                cooldowns: Arc::new(dl_brain::BrainCooldowns::new(
+                    options
+                        .brain_daily_user_limit
+                        .unwrap_or(dl_brain::DEFAULT_DISCORD_DAILY_USER_LIMIT),
+                )),
                 answerer,
                 channel_allowlist: None,
                 all_guild_channels: false,
