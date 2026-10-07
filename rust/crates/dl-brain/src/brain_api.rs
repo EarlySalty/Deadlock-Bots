@@ -137,7 +137,9 @@ fn client_error(error: ClientError) -> BrainError {
 
 fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
     match response.status {
-        AnswerStatus::Answered | AnswerStatus::BuildRejected => {
+        AnswerStatus::Answered
+        | AnswerStatus::BuildRejected
+        | AnswerStatus::InsufficientEvidence => {
             let (text, had_links) = without_links(&response.text);
             if had_links {
                 tracing::warn!(klasse = "link", "Links aus Brain-Antwort entfernt");
@@ -159,7 +161,6 @@ fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
             };
             Ok(BrainOutcome::Answer(text.to_owned()))
         }
-        AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
         _ => Err(classified_backend_error("vertrag")),
     }
 }
@@ -367,7 +368,7 @@ mod tests {
             fixture_answer("insufficient_evidence", "Kein Beleg", false, false)
                 .await
                 .expect("Fehlendes Wissen"),
-            BrainOutcome::NoAnswer
+            BrainOutcome::Answer("Kein Beleg".into())
         );
         assert!(matches!(
             fixture_answer("answered", "Antwort", true, false).await,

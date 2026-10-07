@@ -714,10 +714,7 @@ impl BrainHandler {
             dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => answer,
             dl_brain::BrainOutcome::NoAnswer
             | dl_brain::BrainOutcome::OutOfDomain
-            | dl_brain::BrainOutcome::Answer(_) => {
-                "Dazu habe ich gerade keine gesicherten Infos. Frag bitte Nani hier im Discord."
-                    .to_owned()
-            }
+            | dl_brain::BrainOutcome::Answer(_) => BRAIN_NO_ANSWER.to_owned(),
             dl_brain::BrainOutcome::Usage => "Was möchtest du wissen?".to_owned(),
             dl_brain::BrainOutcome::TooLong { .. } => {
                 BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())
@@ -4792,10 +4789,7 @@ mod tests {
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
-        assert_eq!(
-            replies.sent.lock().await[0].2["content"],
-            "Dazu habe ich gerade keine gesicherten Infos. Frag bitte Nani hier im Discord."
-        );
+        assert_eq!(replies.sent.lock().await[0].2["content"], BRAIN_NO_ANSWER);
         let last = handler.conversations.lock().await.entries[&(1, 1, 3)];
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
