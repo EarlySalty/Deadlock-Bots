@@ -310,7 +310,7 @@ impl BrainConversations {
 trait BrainDirectReplyPort: Send + Sync {
     async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn can_reply(&self, event: &dl_discord::MessageEvent) -> bool;
-    async fn is_public(&self, event: &dl_discord::MessageEvent) -> bool;
+    fn is_public(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn reply(
         &self,
         event: &dl_discord::MessageEvent,
@@ -359,7 +359,7 @@ impl BrainDirectReplyPort for DiscordAdapter {
         )
     }
 
-    async fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
+    fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
         event
             .guild_id
             .is_some_and(|guild_id| brain_channel_is_public(self, guild_id, event.channel_id))
@@ -704,7 +704,7 @@ impl BrainHandler {
         let Some(question) = parse_brain_question(&event.content) else {
             return;
         };
-        if !replies.is_public(event).await {
+        if !replies.is_public(event) {
             self.answer_discord_event(event, replies, &question, false)
                 .await;
             return;
@@ -743,7 +743,7 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
-        let public = replies.is_public(event).await;
+        let public = replies.is_public(event);
         if !public {
             if replies.can_reply(event).await {
                 let body = direct_brain_reply_body(event, BRAIN_PRIVATE_HELP);
@@ -782,7 +782,7 @@ impl BrainHandler {
                 return;
             }
         };
-        if replies.can_reply(event).await && replies.is_public(event).await {
+        if replies.can_reply(event).await && replies.is_public(event) {
             let mut pending = if proactive {
                 Some(self.guide_pending.lock().await)
             } else {
@@ -4571,7 +4571,7 @@ mod tests {
             !self.deny && (!self.revoke_after_first || previous == 0)
         }
 
-        async fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
+        fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
             event.guild_id.is_some() && !self.private
         }
 
