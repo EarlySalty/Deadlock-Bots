@@ -265,6 +265,7 @@ mod tests {
         sync::{Arc, Mutex},
         thread,
     };
+    use tracing::instrument::WithSubscriber;
 
     async fn fixture_answer(
         status: &str,
@@ -509,8 +510,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn warnungen_nennen_nur_die_klasse_und_kuerzung_beachtet_utf16() {
+    #[tokio::test]
+    async fn warnungen_nennen_nur_die_klasse_und_kuerzung_beachtet_utf16() {
         #[derive(Clone)]
         struct LogBuffer(Arc<Mutex<Vec<u8>>>);
         impl Write for LogBuffer {
@@ -528,13 +529,19 @@ mod tests {
         }
         let buffer = LogBuffer(Arc::new(Mutex::new(Vec::new())));
         let writer = buffer.clone();
+        let _callsite_cache_dispatch =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
             .with_writer(move || writer.clone())
             .finish();
-        tracing::subscriber::set_global_default(subscriber).expect("Testprotokollierung");
-        {
+        async {
+            tokio::spawn(async {
+                tracing::warn!(klasse = "ausserhalb", "Fremdes Testprotokoll");
+            })
+            .await
+            .expect("Unabhängige Testtask");
             let response = |text: String| PublicAnswerResponse {
                 contract_version: brain_client::PUBLIC_API_VERSION.into(),
                 request_id: "private-request-id".into(),
@@ -562,13 +569,42 @@ mod tests {
                 status: reqwest::StatusCode::BAD_GATEWAY,
                 body: "privater-fragetext private-token private-request-id".into(),
             });
+            assert_eq!(
+                fixture_answer(
+                    "answered",
+                    "https://example.invalid/private-token",
+                    false,
+                    false,
+                )
+                .await
+                .expect("Asynchrone Linkentfernung"),
+                BrainOutcome::NoAnswer
+            );
+            assert!(matches!(
+                fixture_answer("answered", "Antwort", true, false).await,
+                Err(BrainError::Backend(_))
+            ));
+            assert!(matches!(
+                fixture_answer("answered", "Antwort", false, true).await,
+                Err(BrainError::Backend(_))
+            ));
         }
+        .with_subscriber(subscriber)
+        .await;
         let log = String::from_utf8(buffer.0.lock().expect("Testprotokoll").clone())
             .expect("UTF-8-Protokoll");
+        assert!(log.contains("Discord-Brain-Antwort empfangen"), "{log}");
+        assert!(!log.contains("Fremdes Testprotokoll"));
         for class in ["link", "laenge", "vertrag", "transport"] {
             assert!(log.contains(&format!("klasse=\"{class}\"")), "{class}");
         }
-        for private in ["privater-fragetext", "private-token", "private-request-id"] {
+        for private in [
+            "privater-fragetext",
+            "private-token",
+            "private-request-id",
+            "Sinclairs letzter Patch?",
+            "fixture-brain-bearer",
+        ] {
             assert!(!log.contains(private));
         }
     }
