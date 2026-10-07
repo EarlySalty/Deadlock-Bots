@@ -6,6 +6,14 @@ status: aktiv. Eigener Worktree /home/nathanael/.worktrees/bots-k-live-20261007,
 
 Delegator 481426fe-b477-42b3-91c6-901811fcba1d, native K-Session 47304059-5103-45b5-8e54-0fbb5f140555. Alter Thread 79c97ab5 nicht wieder aufnehmen. Native Ortsrecherche abgeschlossen ohne Sourceänderung, kein zusätzlicher Bots-Writer.
 
+## Fortschreibung nach Vertragsfreigabe
+
+Nachweisdocs 3d645c6f auf origin/feat/bots-k-live-20261007 gesichert; Mainpush durch Test-Gate vor Ausführung verweigert. Tatsächlicher Brain-Vertrags-/Providerlauf 79 passed, 0 failed, 0 ignored, Exit 0. Regex-/Transcriptprüfung belegt fehlende Erkennung von cargo-slot +1.97.1 test. Keine Hookänderung oder Umgehung, technische Quotenaktivierung bleibt davon unberührt. Exklusive Freigabe für das optionale Ortsvertragsdelta inzwischen vom Delegator erteilt. Vorbereitung desselben nativen Implementierers zunächst lesend, da regulärer unveränderlicher Brain-Installationsprozess noch läuft. Keine neue Quotenaktivierung, Nutzerprobe bleibt separat offen.
+
+## Neuer tatsächlicher Consumerblocker
+
+Nativer Discord-Ortsworker a3d648bce719faf6c ohne Sourceänderung gestoppt: ctx_execute_file verweigert rust/bin/dl-bot/src/mcp.rs im eigenen Botsworktree, da Werkzeugroot weiterhin der primäre Brainworktree ist. Kein alternativer Zugriff auf denselben Pfad oder Settingswechsel. Vorhandener Teilbestand: öffentliche Text/News aus guild.channels, DM beendet vor Brain; Thread-/Rechtebestand nicht vollständig gelesen. dl-brain bindet brain-client auf Gitrevision 7da630186fe7d55a7eef4156192dcac78002b008. Neue kompatible Ortsnaht ist im Brain noch WIP und kein konsumierbarer geprüfter Commit. Beide Grenzen getrennt, keine Consumer-/Thread-/DMabnahme, kein echter Testlauf.
+
 ## Historischer Stand vor Mainlieferung und Deploy
 
 Status: Sourcecommit 0758b1f26ebb0216e2350084e3dd25efaca2c1c1 tatsächlich geprüft, regulär ALLOW und auf eigenem Featurebranch gesichert. Mainpush zunächst durch den Sauberkeitsguard wegen dieser beiden noch ungetrackten eigenen Taskdateien verweigert; keine Umgehung. Taskakte wird gezielt committed. Noch kein Mainpush, Deploy, Neustart oder echter Funktionsbeweis.

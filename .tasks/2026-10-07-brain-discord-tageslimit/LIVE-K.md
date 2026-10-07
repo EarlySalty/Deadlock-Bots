@@ -10,6 +10,15 @@ Retained dl-bot tatsächlich unabhängig geprüft: 79301128 Bytes, SHA256 700d9a
 
 Git-Archiv des beauftragten SHA in privater Stage, dl-bot aus Retention; sieben Begleitbinaries gegen installierte SHA256SUMS geprüft und unverändert übernommen. dl-web bleibt der Build e1f11614, übrige sechs bleiben 600b832a laut ursprünglicher Provenance. BUILD-PROVENANCE.toml im neuen Release führt die gemischte Herkunft ausdrücklich auf. Kein frischer dl-web-/Workspacebau behauptet. Geprüfter Diff seit e1f11614: Discord-Consumer/Quota/Brain-API, optionales Quotenfeld in dl-core und Concierge-Text. dl-web hat keinen direkten dl-brain/dl-community-Eingang. Feeder/Verbinder verwenden dl-brain, bekommen hier aber keine neue Consumerabnahme und wurden nicht neu gestartet.
 
+## Dokumentationslieferung und belegter Gatekonflikt
+
+Eigene Nachweisakte als 3d645c6f committed und auf origin/feat/bots-k-live-20261007 gesichert. Mainpush vor Ausführung durch das Test-Gate verweigert, anschließend status und log -1 einzeln geprüft. Diese Dokumentation ist noch nicht auf main. Keine erneute Quotenaktivierung wegen Vertragsfreigabe oder Nutzerprobe.
+
+Tatsächlicher neuer Brain-Vertrags-/Providerlauf mit cargo-slot +1.97.1 auf 0ee3e521: 79 passed, 0 failed, 0 ignored, Exit 0. Kein Bots- oder Livefunktionstest. Ursache der Nichterkennung read-only belegt: gate_hook.py:227-231 erkennt cargo test/clippy/nextest, nicht cargo-slot mit Toolchainzusatz; transcript_test_facts:1116-1119 wendet genau dieses Muster auf Bash-Befehle an. Tatsächlicher Sessiontranscript: 1 cargo-slot-Testbefehl, 0 erkannte Bash-Testbefehle. Kein Hookwechsel, Skip-Flag, Erkennungstrick oder direktes Cargo als Ersatz. Reguläre Hookpflege liegt außerhalb dieses K-Auftrags.
+
+TESTNACHWEIS[TW-1]: 79 passed, 0 ignored | Baseline: nicht behauptet
+MERGEPROTOKOLL[MS-1]: 8 Git-Schritte einzeln | Anläufe: 1 | Gate: Test-Gate blockiert, Nachweisakte auf Featurebranch gesichert
+
 ## Tatsächliche Lieferung und Korrekturen
 
 Bestehender bestätigter Weg: Stage nach /opt/deadlock/bots/releases/<SHA>, root:root, go-w, temporärer Symlink, atomarer mv -T, bot-restart dl-bot web. FD3-Launcher und Units unverändert.
