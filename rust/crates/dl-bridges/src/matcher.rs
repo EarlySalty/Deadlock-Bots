@@ -201,8 +201,6 @@ impl MemberLite {
 pub trait GuildPort: Send + Sync {
     /// Alle Member der Guild (gechunkt) — None wenn Guild unbekannt.
     async fn members(&self, guild_id: u64) -> Option<Vec<MemberLite>>;
-    /// Streamer-Rolle vergeben → Status-Notiz (Texte sind Vertrag).
-    async fn grant_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> String;
 }
 
 #[async_trait::async_trait]
@@ -681,10 +679,7 @@ impl Matcher {
                 .await;
             return false;
         }
-        let role_note = self
-            .guild
-            .grant_role(self.config.guild_id, member.user_id, self.config.role_id)
-            .await;
+        let role_note = "Die Streamer-Rolle folgt automatisch deiner Bot-Einbindung.";
         self.mark(
             login,
             "auto_linked",
@@ -832,10 +827,7 @@ impl Matcher {
                 err.to_string().chars().take(160).collect::<String>()
             ));
         }
-        let role_note = self
-            .guild
-            .grant_role(self.config.guild_id, user_id, self.config.role_id)
-            .await;
+        let role_note = "Die Streamer-Rolle folgt automatisch deiner Bot-Einbindung.";
         {
             let mut state = self.state.lock().await;
             state.pending.remove(token);
@@ -964,10 +956,7 @@ impl Matcher {
             ));
         }
 
-        let role_note = self
-            .guild
-            .grant_role(self.config.guild_id, user_id, self.config.role_id)
-            .await;
+        let role_note = "Die Streamer-Rolle folgt automatisch deiner Bot-Einbindung.";
         {
             let mut state = self.state.lock().await;
             state.processed.remove(&login.to_lowercase());
@@ -1352,10 +1341,6 @@ mod tests {
     impl GuildPort for MockGuild {
         async fn members(&self, _guild_id: u64) -> Option<Vec<MemberLite>> {
             Some(self.members.clone())
-        }
-
-        async fn grant_role(&self, _guild_id: u64, _user_id: u64, _role_id: u64) -> String {
-            "Rolle gesetzt".to_string()
         }
     }
 

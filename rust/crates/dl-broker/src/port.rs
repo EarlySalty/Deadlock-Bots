@@ -316,6 +316,13 @@ pub trait DiscordPort: Send + Sync {
         guild_id: Option<u64>,
         role_id: u64,
     ) -> Result<RoleMembers, PortError>;
+    async fn live_role_members(
+        &self,
+        _guild_id: u64,
+        _role_id: u64,
+    ) -> Result<RoleMembers, PortError> {
+        Err(PortError::GuildUnavailable)
+    }
     /// Zugriffsstatus eines Mitglieds (Admin + Rollen) für die Dashboard-Auth.
     /// guild_id None = über alle Bot-Gilden aggregieren.
     async fn member_access(
