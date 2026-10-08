@@ -4637,7 +4637,16 @@ mod tests {
     #[test]
     fn ortskontext_beachtet_sichtrechte_und_vererbt_nichts_in_dms() {
         let adapter = public_test_adapter();
-        let mut guild = adapter.cache().guild(GuildId::new(1)).unwrap().clone();
+        let mut guild = adapter
+            .cache()
+            .guild(GuildId::new(1))
+            .expect("Testguild im Cache")
+            .clone();
+        guild
+            .roles
+            .get_mut(&RoleId::new(1))
+            .expect("Everyone-Testrolle")
+            .permissions = Permissions::VIEW_CHANNEL;
         let mut member = serenity::all::Member::default();
         member.user.id = UserId::new(3);
         guild.members.insert(member.user.id, member);
@@ -4647,12 +4656,16 @@ mod tests {
         category.kind = serenity::all::ChannelType::Category;
         category.name = "Community".into();
         guild.channels.insert(category.id, category);
-        let channel = guild.channels.get_mut(&ChannelId::new(1)).unwrap();
+        let channel = guild
+            .channels
+            .get_mut(&ChannelId::new(1))
+            .expect("Testkanal");
         channel.name = "Hilfe".into();
         channel.topic = Some("Fragen zum Server".into());
         channel.parent_id = Some(ChannelId::new(5));
         let mut update: serenity::all::GuildCreateEvent =
-            serde_json::from_value(serde_json::to_value(guild).unwrap()).unwrap();
+            serde_json::from_value(serde_json::to_value(guild).expect("Testguild serialisieren"))
+                .expect("Testguild-Ereignis");
         adapter.cache().update(&mut update);
         let context = brain_answer_context(
             &adapter,
@@ -4673,9 +4686,48 @@ mod tests {
         assert!(dm.channel_name.is_none());
         assert!(dm.category_name.is_none());
         assert!(dm.topic.is_none());
-        println!(
-            "Ortskontext: Hilfe / Community, fehlende Mitgliedschaft und DM ohne Serverfelder"
-        );
+        for (kind, overwrite) in [
+            (
+                serenity::all::ChannelType::Text,
+                Some(PermissionOverwriteType::Member(UserId::new(3))),
+            ),
+            (
+                serenity::all::ChannelType::Text,
+                Some(PermissionOverwriteType::Role(RoleId::new(1))),
+            ),
+            (serenity::all::ChannelType::PrivateThread, None),
+        ] {
+            let mut guild = adapter
+                .cache()
+                .guild(GuildId::new(1))
+                .expect("Testguild im Cache")
+                .clone();
+            let channel = guild
+                .channels
+                .get_mut(&ChannelId::new(1))
+                .expect("Testkanal");
+            channel.kind = kind;
+            channel.permission_overwrites = overwrite
+                .map(|kind| serenity::all::PermissionOverwrite {
+                    allow: Permissions::empty(),
+                    deny: Permissions::VIEW_CHANNEL,
+                    kind,
+                })
+                .into_iter()
+                .collect();
+            let mut update: serenity::all::GuildCreateEvent = serde_json::from_value(
+                serde_json::to_value(guild).expect("Testguild serialisieren"),
+            )
+            .expect("Testguild-Ereignis");
+            adapter.cache().update(&mut update);
+            let denied =
+                brain_answer_context(&adapter, Some(1), 1, 3, dl_brain::AnswerInputKind::Message);
+            assert!(denied.channel_name.is_none());
+            assert!(denied.category_name.is_none());
+            assert!(denied.topic.is_none());
+            assert!(denied.thread_name.is_none());
+        }
+        println!("Ortskontext: Hilfe / Community, Lesesperren, Threads und DM ohne Serverfelder");
     }
 
     fn test_brain_handler(
