@@ -312,6 +312,12 @@ trait BrainDirectReplyPort: Send + Sync {
     async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn can_reply(&self, event: &dl_discord::MessageEvent) -> bool;
     fn is_public(&self, event: &dl_discord::MessageEvent) -> bool;
+    fn answer_context(
+        &self,
+        _event: &dl_discord::MessageEvent,
+    ) -> Option<dl_brain::DiscordAnswerContext> {
+        None
+    }
     async fn reply(
         &self,
         event: &dl_discord::MessageEvent,
@@ -360,6 +366,27 @@ impl BrainDirectReplyPort for DiscordAdapter {
         )
     }
 
+    fn answer_context(
+        &self,
+        event: &dl_discord::MessageEvent,
+    ) -> Option<dl_brain::DiscordAnswerContext> {
+        let mention = self.bot_user_id_cell().get().is_some_and(|id| {
+            event.content.contains(&format!("<@{id}>"))
+                || event.content.contains(&format!("<@!{id}>"))
+        });
+        Some(brain_answer_context(
+            self,
+            event.guild_id,
+            event.channel_id,
+            event.author_id,
+            if mention {
+                dl_brain::AnswerInputKind::Mention
+            } else {
+                dl_brain::AnswerInputKind::Message
+            },
+        ))
+    }
+
     fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
         event
             .guild_id
@@ -373,6 +400,59 @@ impl BrainDirectReplyPort for DiscordAdapter {
     ) -> Result<u64, String> {
         self.send_raw_public(event.channel_id, body).await
     }
+}
+
+fn brain_answer_context(
+    adapter: &DiscordAdapter,
+    guild_id: Option<u64>,
+    channel_id: u64,
+    user_id: u64,
+    input_kind: dl_brain::AnswerInputKind,
+) -> dl_brain::DiscordAnswerContext {
+    let mut context = dl_brain::DiscordAnswerContext {
+        is_direct_message: Some(guild_id.is_none()),
+        input_kind: Some(input_kind),
+        ..Default::default()
+    };
+    let Some(guild_id) = guild_id else {
+        context.is_thread = Some(false);
+        return context;
+    };
+    let Some(guild) = adapter.cache().guild(GuildId::new(guild_id)) else {
+        return context;
+    };
+    let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
+        return context;
+    };
+    let thread = matches!(
+        channel.kind,
+        serenity::all::ChannelType::PublicThread
+            | serenity::all::ChannelType::PrivateThread
+            | serenity::all::ChannelType::NewsThread
+    );
+    context.is_thread = Some(thread);
+    let Some(member) = guild.members.get(&UserId::new(user_id)) else {
+        return context;
+    };
+    if thread
+        || !guild
+            .user_permissions_in(channel, member)
+            .contains(Permissions::VIEW_CHANNEL)
+        || !brain_channel_is_public(adapter, guild_id, channel_id)
+    {
+        return context;
+    }
+    context.channel_name = Some(channel.name.clone());
+    context.topic = channel.topic.clone().filter(|text| !text.trim().is_empty());
+    if let Some(category) = channel.parent_id.and_then(|id| guild.channels.get(&id)) {
+        if guild
+            .user_permissions_in(category, member)
+            .contains(Permissions::VIEW_CHANNEL)
+        {
+            context.category_name = Some(category.name.clone());
+        }
+    }
+    context
 }
 
 fn brain_channel_is_public(adapter: &DiscordAdapter, guild_id: u64, channel_id: u64) -> bool {
@@ -529,16 +609,16 @@ impl BrainHandler {
     async fn outcome_for_question(
         &self,
         question: &str,
-        user_id: u64,
+        context: &dl_brain::DiscordQueryContext,
         channel_id: u64,
     ) -> Option<dl_brain::BrainOutcome> {
-        dl_brain::handle_discord_query(
+        dl_brain::handle_discord_query_with_context(
             question,
-            user_id,
             channel_id,
             self.config.max_question_len,
             self.cooldowns.as_ref(),
             self.answerer.as_ref(),
+            context,
         )
         .await
     }
@@ -546,13 +626,13 @@ impl BrainHandler {
     async fn reserved_outcome_for_question(
         &self,
         question: &str,
-        user_id: u64,
+        context: &dl_brain::DiscordQueryContext,
     ) -> dl_brain::BrainOutcome {
-        dl_brain::answer_discord_query(
+        dl_brain::answer_discord_query_with_context(
             question,
-            user_id,
             self.config.max_question_len,
             self.answerer.as_ref(),
+            context,
         )
         .await
     }
@@ -607,8 +687,17 @@ impl BrainHandler {
         }
     }
 
-    async fn handle_brain_question(&self, channel_id: u64, user_id: u64, question: &str) {
-        match self.cooldowns.reserve_discord(user_id, channel_id).await {
+    async fn handle_brain_question(
+        &self,
+        channel_id: u64,
+        context: &dl_brain::DiscordQueryContext,
+        question: &str,
+    ) {
+        match self
+            .cooldowns
+            .reserve_discord(context.user_id, channel_id)
+            .await
+        {
             dl_brain::DiscordReservation::Accepted => {}
             dl_brain::DiscordReservation::DailyLimit => {
                 self.send_public_bodies(
@@ -631,7 +720,7 @@ impl BrainHandler {
             Ok(message_id) => message_id,
             Err(err) => {
                 tracing::warn!(%err, channel_id, "Brain-Denk-Platzhalter konnte nicht gesendet werden");
-                let outcome = self.reserved_outcome_for_question(question, user_id).await;
+                let outcome = self.reserved_outcome_for_question(question, context).await;
                 let bodies = self.public_bodies_for_outcome(question, outcome);
                 self.send_public_bodies(channel_id, &bodies).await;
                 return;
@@ -646,7 +735,7 @@ impl BrainHandler {
             cancelled.clone(),
         );
 
-        let outcome = self.reserved_outcome_for_question(question, user_id).await;
+        let outcome = self.reserved_outcome_for_question(question, context).await;
         cancelled.store(true, Ordering::SeqCst);
         if let Err(err) = animation.await {
             tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation Task fehlgeschlagen");
@@ -741,7 +830,12 @@ impl BrainHandler {
                 .await;
             return;
         }
-        self.handle_brain_question(event.channel_id, event.author_id, &question)
+        let context = dl_brain::DiscordQueryContext {
+            user_id: event.author_id,
+            allow_discord_reads: true,
+            answer_context: replies.answer_context(event),
+        };
+        self.handle_brain_question(event.channel_id, &context, &question)
             .await;
     }
 
@@ -775,15 +869,18 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
-        let allow_discord_reads = replies.is_public(event);
-        let Some(outcome) = dl_brain::handle_discord_query_with_read_access(
+        let context = dl_brain::DiscordQueryContext {
+            user_id: event.author_id,
+            allow_discord_reads: replies.is_public(event),
+            answer_context: replies.answer_context(event),
+        };
+        let Some(outcome) = dl_brain::handle_discord_query_with_context(
             question,
-            event.author_id,
             event.channel_id,
             self.config.max_question_len,
             self.cooldowns.as_ref(),
             self.answerer.as_ref(),
-            allow_discord_reads,
+            &context,
         )
         .await
         else {
@@ -876,8 +973,19 @@ impl InteractionHandler for BrainHandler {
             .map(ToOwned::to_owned)
             .or_else(|| parse_brain_question(&interaction.content))
             .unwrap_or_default();
+        let context = dl_brain::DiscordQueryContext {
+            user_id: interaction.user_id,
+            allow_discord_reads: true,
+            answer_context: Some(brain_answer_context(
+                self.adapter.as_ref(),
+                Some(interaction.guild_id),
+                interaction.channel_id,
+                interaction.user_id,
+                dl_brain::AnswerInputKind::SlashCommand,
+            )),
+        };
         let Some(outcome) = self
-            .outcome_for_question(&question, interaction.user_id, interaction.channel_id)
+            .outcome_for_question(&question, &context, interaction.channel_id)
             .await
         else {
             return BridgeReply::ephemeral_text(BRAIN_DAILY_LIMIT);
@@ -4460,6 +4568,15 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl dl_brain::AiAnswerer for CountingBrainAnswerer {
+        async fn answer_for_discord_with_context(
+            &self,
+            question: &str,
+            context: &dl_brain::DiscordQueryContext,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            assert!(context.allow_discord_reads);
+            self.answer_for_discord(question, context.user_id).await
+        }
+
         async fn answer(
             &self,
             _question: &str,
@@ -4515,6 +4632,50 @@ mod tests {
         cache.update(&mut event);
         adapter.link_cache(cache);
         adapter
+    }
+
+    #[test]
+    fn ortskontext_beachtet_sichtrechte_und_vererbt_nichts_in_dms() {
+        let adapter = public_test_adapter();
+        let mut guild = adapter.cache().guild(GuildId::new(1)).unwrap().clone();
+        let mut member = serenity::all::Member::default();
+        member.user.id = UserId::new(3);
+        guild.members.insert(member.user.id, member);
+        let mut category = serenity::all::GuildChannel::default();
+        category.id = ChannelId::new(5);
+        category.guild_id = guild.id;
+        category.kind = serenity::all::ChannelType::Category;
+        category.name = "Community".into();
+        guild.channels.insert(category.id, category);
+        let channel = guild.channels.get_mut(&ChannelId::new(1)).unwrap();
+        channel.name = "Hilfe".into();
+        channel.topic = Some("Fragen zum Server".into());
+        channel.parent_id = Some(ChannelId::new(5));
+        let mut update: serenity::all::GuildCreateEvent =
+            serde_json::from_value(serde_json::to_value(guild).unwrap()).unwrap();
+        adapter.cache().update(&mut update);
+        let context = brain_answer_context(
+            &adapter,
+            Some(1),
+            1,
+            3,
+            dl_brain::AnswerInputKind::SlashCommand,
+        );
+        assert_eq!(context.channel_name.as_deref(), Some("Hilfe"));
+        assert_eq!(context.category_name.as_deref(), Some("Community"));
+        assert_eq!(context.topic.as_deref(), Some("Fragen zum Server"));
+        let unknown =
+            brain_answer_context(&adapter, Some(1), 1, 4, dl_brain::AnswerInputKind::Message);
+        assert!(unknown.channel_name.is_none());
+        assert!(unknown.category_name.is_none());
+        let dm = brain_answer_context(&adapter, None, 1, 3, dl_brain::AnswerInputKind::Message);
+        assert_eq!(dm.is_direct_message, Some(true));
+        assert!(dm.channel_name.is_none());
+        assert!(dm.category_name.is_none());
+        assert!(dm.topic.is_none());
+        println!(
+            "Ortskontext: Hilfe / Community, fehlende Mitgliedschaft und DM ohne Serverfelder"
+        );
     }
 
     fn test_brain_handler(
@@ -5217,6 +5378,14 @@ mod tests {
             self.started.notify_one();
             self.release.notified().await;
             Ok(dl_brain::BrainOutcome::Answer("Antwort".into()))
+        }
+        async fn answer_for_discord_with_context(
+            &self,
+            question: &str,
+            context: &dl_brain::DiscordQueryContext,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            assert!(context.allow_discord_reads);
+            self.answer_for_discord(question, context.user_id).await
         }
     }
 
@@ -6583,7 +6752,12 @@ mod tests {
                 "{label}: {owners:?}"
             );
             if brain_owner {
-                let _ = brain.outcome_for_question("Abrams?", 42, 42).await;
+                let context = dl_brain::DiscordQueryContext {
+                    user_id: 42,
+                    allow_discord_reads: true,
+                    answer_context: None,
+                };
+                let _ = brain.outcome_for_question("Abrams?", &context, 42).await;
             }
             brain_calls.push((
                 retriever_calls.load(std::sync::atomic::Ordering::Relaxed),
