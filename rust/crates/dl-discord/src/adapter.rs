@@ -958,6 +958,60 @@ impl DiscordPort for DiscordAdapter {
         })
     }
 
+    async fn live_role_members(
+        &self,
+        guild_id: u64,
+        role_id: u64,
+    ) -> Result<RoleMembers, PortError> {
+        let gid = GuildId::new(guild_id);
+        let rid = RoleId::new(role_id);
+        let roles = self
+            .http
+            .get_guild_roles(gid)
+            .await
+            .map_err(|err| PortError::Discord(err.to_string()))?;
+        let role = roles
+            .iter()
+            .find(|role| role.id == rid)
+            .ok_or(PortError::RoleNotFound)?;
+        let mut members = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .http
+                .get_guild_members(gid, Some(1000), after)
+                .await
+                .map_err(|err| PortError::Discord(err.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            let cursor = page
+                .iter()
+                .map(|member| member.user.id.get())
+                .max()
+                .unwrap();
+            if after.is_some_and(|previous| cursor <= previous) {
+                return Err(PortError::Discord(
+                    "member pagination did not advance".into(),
+                ));
+            }
+            members.extend(
+                page.iter()
+                    .filter(|member| member.roles.contains(&rid))
+                    .map(|member| MemberInfo {
+                        user_id: member.user.id.get(),
+                        display_name: member.display_name().to_string(),
+                    }),
+            );
+            after = Some(cursor);
+        }
+        Ok(RoleMembers {
+            role_id,
+            name: role.name.clone(),
+            members,
+        })
+    }
+
     async fn member_access(
         &self,
         guild_id: Option<u64>,
@@ -1521,3 +1575,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "role_members_tests.rs"]
+mod role_members_tests;

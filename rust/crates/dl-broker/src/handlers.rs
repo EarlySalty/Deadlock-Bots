@@ -124,11 +124,22 @@ pub async fn role_members(
         .get("role_id")
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    match state.port.role_members(guild_id, role_id).await {
+    let live = params.get("live").is_some_and(|value| value == "true");
+    let result = if live {
+        let Some(guild_id) = guild_id.filter(|_| role_id > 0) else {
+            return bad_request(&rid, "live role lookup requires guild_id and role_id");
+        };
+        state.port.live_role_members(guild_id, role_id).await
+    } else {
+        state.port.role_members(guild_id, role_id).await
+    };
+    match result {
         Ok(info) => respond(
             200,
             json!({
                 "ok": true,
+                "complete": live,
+                "guild_id": guild_id.map(|id| id.to_string()),
                 "role_id": info.role_id.to_string(),
                 "name": info.name,
                 "members": info.members.iter().map(|m| json!({
@@ -137,6 +148,13 @@ pub async fn role_members(
                 })).collect::<Vec<_>>(),
             }),
         ),
+        Err(error) if live => {
+            tracing::warn!(%error, ?guild_id, role_id, "Live-Rollenabruf unvollständig");
+            respond(
+                503,
+                error_body(&rid, None, "unavailable", "live role members unavailable"),
+            )
+        }
         Err(PortError::GuildNotFound) => {
             respond(404, error_body(&rid, None, "not_found", "guild not found"))
         }

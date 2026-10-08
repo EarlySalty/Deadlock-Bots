@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
-use serenity::all::{ChannelId, GuildId, MessageId, RoleId, UserId};
+use serenity::all::{ChannelId, GuildId, MessageId};
 
 use crate::matcher::{GuildPort, MemberLite, Notifier};
 
@@ -30,49 +30,6 @@ impl GuildPort for AdapterGlue {
                 })
                 .collect(),
         )
-    }
-
-    async fn grant_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> String {
-        // Status-Texte sind Vertrag (identisch zu _grant_role im Original).
-        let role_exists = self
-            .adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .map(|g| g.roles.contains_key(&RoleId::new(role_id)))
-            .unwrap_or(false);
-        if !role_exists {
-            return "⚠️ Streamer-Rolle nicht gefunden – nur verknüpft.".to_string();
-        }
-        let already = self
-            .adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .and_then(|g| {
-                g.members
-                    .get(&UserId::new(user_id))
-                    .map(|m| m.roles.contains(&RoleId::new(role_id)))
-            })
-            .unwrap_or(false);
-        if already {
-            return "Streamer-Rolle war bereits vergeben.".to_string();
-        }
-        match self
-            .adapter
-            .http
-            .add_member_role(
-                GuildId::new(guild_id),
-                UserId::new(user_id),
-                RoleId::new(role_id),
-                Some("Auto-Match Twitch↔Discord"),
-            )
-            .await
-        {
-            Ok(()) => "Streamer-Rolle vergeben.".to_string(),
-            Err(err) => {
-                tracing::error!(%err, user_id, "Matcher: add_member_role fehlgeschlagen");
-                "⚠️ Rolle konnte nicht vergeben werden.".to_string()
-            }
-        }
     }
 }
 
