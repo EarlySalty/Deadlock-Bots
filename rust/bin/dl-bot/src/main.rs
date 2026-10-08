@@ -2150,7 +2150,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             global_ai
                 .provider_for(dl_ai::LlmUseCase::BotPate, global_lookup)
                 .expect("Anbieter"),
-            dl_ai::LlmProviderKind::OpenAi
+            dl_ai::LlmProviderKind::Fireworks
         );
         assert!(global_lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
     }
@@ -2315,8 +2315,8 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         );
 
         let erlaubt = HashMap::from([
-            ("DL_LLM_PROVIDER_FAQ".to_string(), "mistral".to_string()),
-            ("MISTRAL_API_KEY".to_string(), "geheim".to_string()),
+            ("DL_LLM_PROVIDER_FAQ".to_string(), "fireworks".to_string()),
+            ("FIREWORK_API_KEY".to_string(), "geheim".to_string()),
         ]);
         assert!(
             chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| erlaubt
@@ -2328,7 +2328,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
     }
 
     #[test]
-    fn gate_erlaubt_minimax_nur_mit_dem_dev_schluessel() {
+    fn gate_ignoriert_minimax_dev_schluessel_ohne_zentralen_zugang() {
         let mut vars = HashMap::from([
             ("DL_LLM_PROVIDER_FAQ".to_string(), "minimax".to_string()),
             ("MINIMAX_API_KEY".to_string(), "geheim".to_string()),
@@ -2344,8 +2344,14 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         );
         assert!(
             chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| vars.get(key).cloned())
+                .is_none(),
+            "die alte Dev-Ausnahme darf keinen anderen Textanbieter aktivieren"
+        );
+        vars.insert("FIREWORK_API_KEY".to_string(), "geheim".to_string());
+        assert!(
+            chat_text_generator_with(dl_ai::LlmUseCase::Faq, false, |key| vars.get(key).cloned())
                 .is_some(),
-            "die Dev-Ausnahme muss weiterhin greifen"
+            "der zentrale Textanbieter muss mit seinem Zugang funktionieren"
         );
     }
 

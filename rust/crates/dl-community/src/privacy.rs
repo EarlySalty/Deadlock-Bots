@@ -5336,7 +5336,7 @@ mod tests {
             rows: vec![fresh.clone()],
         };
         assert_eq!(
-            apply_viewer_page_with_activity(pool, &[], &[result.clone()], None)
+            apply_viewer_page_with_activity(pool, &[], std::slice::from_ref(&result), None)
                 .await
                 .expect("Neue Aktivität"),
             1
@@ -5376,7 +5376,7 @@ mod tests {
         assert_eq!(
             exported["tables"]["community_points_twitch_viewer_consents.discord_id"]
                 .as_array()
-                .unwrap()
+                .expect("Einwilligungen")
                 .len(),
             1
         );
@@ -5638,7 +5638,7 @@ mod tests {
         let pool = db.pool();
         let old = scout_outcome_for_test(42, "456", None, None);
         assert_eq!(
-            apply_suggestion_outcome_page(pool, &[old.clone()], None)
+            apply_suggestion_outcome_page(pool, std::slice::from_ref(&old), None)
                 .await
                 .expect("Erstcredit"),
             1
@@ -5676,7 +5676,7 @@ mod tests {
             0
         );
         assert_eq!(
-            apply_suggestion_outcome_page(pool, &[old.clone()], None)
+            apply_suggestion_outcome_page(pool, std::slice::from_ref(&old), None)
                 .await
                 .expect("Altreplay"),
             0
@@ -5729,7 +5729,7 @@ mod tests {
         );
         let new = scout_outcome_for_test(42, "789", Some(epoch), Some(fresh_stamp));
         assert_eq!(
-            apply_suggestion_outcome_page(pool, &[new.clone()], None)
+            apply_suggestion_outcome_page(pool, std::slice::from_ref(&new), None)
                 .await
                 .expect("Neue zulässige Zuordnung"),
             1

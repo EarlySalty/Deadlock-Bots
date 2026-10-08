@@ -982,14 +982,9 @@ impl DiscordPort for DiscordAdapter {
                 .get_guild_members(gid, Some(1000), after)
                 .await
                 .map_err(|err| PortError::Discord(err.to_string()))?;
-            if page.is_empty() {
+            let Some(cursor) = page.iter().map(|member| member.user.id.get()).max() else {
                 break;
-            }
-            let cursor = page
-                .iter()
-                .map(|member| member.user.id.get())
-                .max()
-                .unwrap();
+            };
             if after.is_some_and(|previous| cursor <= previous) {
                 return Err(PortError::Discord(
                     "member pagination did not advance".into(),

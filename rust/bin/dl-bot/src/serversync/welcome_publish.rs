@@ -603,8 +603,48 @@ pub struct WelcomePayloadAttachment {
 
 #[cfg(test)]
 #[test]
-#[ignore = "separate Releaseprobe mit kopiertem Testbinary und unsichtbarem Quellworktree"]
+#[ignore = "isolierte Releaseprobe mit kopiertem Testbinary"]
 fn release_root_probe_child() {
+    if std::env::var("DL_BOT_RELEASE_ROOT_PROBE_CHILD").as_deref() != Ok("1") {
+        let release = tempfile::tempdir().expect("Isolierte Releaseprobe");
+        let binary = release.path().join("dl-bot-test");
+        std::fs::copy(std::env::current_exe().expect("Testbinary"), &binary)
+            .expect("Testbinary kopieren");
+        let assets = release.path().join("assets");
+        std::fs::create_dir(&assets).expect("Releaseassets");
+        for (name, content) in [
+            (
+                "team_application_texts.toml",
+                include_str!("../../../../../assets/team_application_texts.toml"),
+            ),
+            (
+                "paten_leitfaden.toml",
+                include_str!("../../../../../assets/paten_leitfaden.toml"),
+            ),
+            (
+                "welcome_texts.toml",
+                include_str!("../../../../../assets/welcome_texts.toml"),
+            ),
+            (
+                "rang_guide_texts.toml",
+                include_str!("../../../../../assets/rang_guide_texts.toml"),
+            ),
+        ] {
+            std::fs::write(assets.join(name), content).expect("Revisionsgebundene Releaseasset");
+        }
+        let status = std::process::Command::new(&binary)
+            .args([
+                "--exact",
+                "serversync::welcome_publish::release_root_probe_child",
+                "--include-ignored",
+            ])
+            .env("DL_BOT_RELEASE_ROOT_PROBE_CHILD", "1")
+            .current_dir(release.path())
+            .status()
+            .expect("Releaseprobe starten");
+        assert!(status.success(), "Releaseprobe fehlgeschlagen: {status}");
+        return;
+    }
     let root =
         crate::runtime_assets::validated_release_root().expect("Assets neben dem kopierten Binary");
     assert_eq!(

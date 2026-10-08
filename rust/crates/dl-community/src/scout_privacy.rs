@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(
             export(&client, 42).await.expect("Scout-Export")["suggestions"]
                 .as_array()
-                .unwrap()
+                .expect("Scout-Fixture")
                 .len(),
             1
         );
@@ -298,7 +298,7 @@ mod tests {
         .expect("Aufträge");
         assert_eq!(original.len(), 2);
         assert!(deliver_user(pool, &client, 42).await.is_err());
-        assert!(remote.lock().unwrap().suggestions.is_empty());
+        assert!(remote.lock().expect("Testzustand").suggestions.is_empty());
         // Erfolgreiches Remote-Erase, aber zentraler Rollback beim Bestätigen.
         sqlx::raw_sql("CREATE FUNCTION community.reject_scout_ack() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'gezielter ACK-Rollback'; END $$;
           CREATE TRIGGER reject_scout_ack BEFORE DELETE ON community.scout_privacy_outbox FOR EACH ROW EXECUTE FUNCTION community.reject_scout_ack();")
@@ -318,17 +318,17 @@ mod tests {
         deliver_user(pool, &client, 42)
             .await
             .expect("Identische Erasereplays vor Consent");
-        let requests = remote.lock().unwrap().requests.clone();
+        let requests = remote.lock().expect("Testzustand").requests.clone();
         assert_eq!(requests[0], requests[1]);
         assert_eq!(requests[1], requests[2]);
-        assert_eq!(requests.last().unwrap()["epoch"], 2);
+        assert_eq!(requests.last().expect("Scout-Fixture")["epoch"], 2);
         let (epoch, since): (i64, DateTime<Utc>) = sqlx::query_as(
             "SELECT epoch, activity_since FROM community.scout_privacy_epochs
               WHERE subject_hash = sha256(convert_to('scout-community:discord-privacy:v1:42', 'UTF8'))",
         ).fetch_one(pool).await.expect("Consent bleibt nach echtem Remote-ACK");
         assert_eq!(epoch, 2);
         assert_eq!(
-            requests.last().unwrap()["activity_since"],
+            requests.last().expect("Scout-Fixture")["activity_since"],
             since.to_rfc3339()
         );
         let old = &requests[0];
@@ -337,7 +337,7 @@ mod tests {
             .await
             .expect("Verspätetes altes Erase");
         assert_eq!(stale["status"], "stale");
-        assert_eq!(remote.lock().unwrap().epoch, 2);
+        assert_eq!(remote.lock().expect("Testzustand").epoch, 2);
         let remaining: i64 =
             sqlx::query_scalar("SELECT count(*) FROM community.scout_privacy_outbox")
                 .fetch_one(pool)
@@ -364,7 +364,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("Port");
-        let address = listener.local_addr().unwrap();
+        let address = listener.local_addr().expect("Scout-Fixture");
         drop(listener);
         let client = TwitchApiClient::try_new(
             format!("http://{address}"),
@@ -372,7 +372,7 @@ mod tests {
             std::time::Duration::from_millis(100),
             false,
         )
-        .unwrap();
+        .expect("Scout-Fixture");
         crate::privacy::delete_user_data(db.pool(), 42, "test".into(), Utc::now().timestamp())
             .await
             .expect("Lokale Erasure");
@@ -383,7 +383,7 @@ mod tests {
         )
         .fetch_one(db.pool())
         .await
-        .unwrap();
+        .expect("Scout-Fixture");
         assert_eq!(count, 1);
     }
 }

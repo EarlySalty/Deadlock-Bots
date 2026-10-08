@@ -224,7 +224,7 @@ mod tests {
 
         assert!(text.contains("KI-Anbieter je Anwendungsfall"), "{text}");
         assert!(text.contains("bot_pate=fireworks"), "{text}");
-        assert!(text.contains("voice_hint=openai"), "{text}");
+        assert!(text.contains("voice_hint=fireworks"), "{text}");
         assert!(text.contains("1374364800817303632"), "{text}");
         assert!(text.contains("Moderation gespiegelt: nein"), "{text}");
         assert!(text.contains("Concierge: an"), "{text}");
@@ -237,8 +237,7 @@ mod tests {
 
     #[test]
     fn pfad_ohne_anbieter_wird_zur_warnung_mit_grund() {
-        // Nur Fireworks liegt vor: die drei OpenAI-Pfade fallen still aus.
-        let lookup = |key: &str| (key == "FIREWORK_API_KEY").then(|| "key".to_string());
+        let lookup = |_: &str| None;
         let config = dl_ai::LlmProviderConfig::from_env(lookup);
         let lines = ai_startup_inventory(
             &config,
@@ -251,13 +250,18 @@ mod tests {
             .iter()
             .filter(|line| line.level == InventoryLevel::Warn)
             .collect();
-        assert_eq!(warnungen.len(), 3, "{:?}", texte(&lines));
+        assert_eq!(
+            warnungen.len(),
+            dl_ai::LlmUseCase::all().len(),
+            "{:?}",
+            texte(&lines)
+        );
         for warnung in &warnungen {
             assert!(
                 warnung.text.contains("ohne nutzbaren Anbieter"),
                 "{warnung:?}"
             );
-            assert!(warnung.text.contains("OPENAI_API_KEY"), "{warnung:?}");
+            assert!(warnung.text.contains("FIREWORK_API_KEY"), "{warnung:?}");
         }
         let text = texte(&lines);
         assert!(text.contains("voice_hint"), "{text}");
@@ -336,11 +340,12 @@ mod tests {
 
     #[test]
     fn abgelehnte_anbieterkonfiguration_wird_gemeldet() {
-        let lookup = |key: &str| (key == "DL_LLM_PROVIDER_FAQ").then(|| "unknown".to_string());
-        let config = dl_ai::LlmProviderConfig::from_env(lookup);
+        let config = Err(dl_ai::LlmProviderConfigError::UnknownProvider(
+            "unknown".into(),
+        ));
         let lines = ai_startup_inventory(
             &config,
-            lookup,
+            |_| None,
             &dl_ai::TransparencyConfig::default(),
             &concierge_config(|_| None),
         );

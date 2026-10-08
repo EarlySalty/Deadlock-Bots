@@ -3222,6 +3222,7 @@ mod pg_tests {
         coach_ids: Mutex<Vec<u64>>,
         request_messages: Mutex<Vec<RequestMessageCall>>,
         request_edits: Mutex<Vec<RequestMessageEdit>>,
+        request_edit_notify: tokio::sync::Notify,
         role_ids: Mutex<Vec<(u64, Vec<u64>)>>,
         channel_texts: Mutex<Vec<(u64, String)>>,
         dm_texts: Mutex<Vec<(u64, String)>>,
@@ -3306,6 +3307,7 @@ mod pg_tests {
                     message_id,
                     body,
                 });
+            self.request_edit_notify.notify_one();
         }
 
         async fn send_channel_text(&self, channel_id: u64, content: &str) {
@@ -4844,36 +4846,41 @@ mod pg_tests {
         .await
         .expect("session insert");
 
-        let reply = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            CoachingHandler { coaching }.handle(BridgeInteraction {
+        let handler = CoachingHandler { coaching };
+        let completion_gate = barrier.wait();
+        tokio::pin!(completion_gate);
+        let reply = tokio::select! {
+            biased;
+            reply = handler.handle(BridgeInteraction {
                 custom_id: "coaching_complete_1".to_string(),
                 user_id: 12345,
                 guild_id: 1,
                 channel_id: 500,
                 ..BridgeInteraction::default()
-            }),
-        )
-        .await
-        .expect("button ack should not wait for completion work");
+            }) => reply,
+            _ = &mut completion_gate => {
+                panic!("button ack should not wait for completion work");
+            }
+        };
 
         assert_eq!(
             reply.content.as_deref(),
             Some("✅ Coaching als abgeschlossen markiert.")
         );
-        barrier.wait().await;
-        for _ in 0..20 {
-            if !port
+        completion_gate.await;
+        port.display_name_barrier
+            .lock()
+            .expect("display_name_barrier lock")
+            .take();
+        port.request_edit_notify.notified().await;
+        assert!(
+            !port
                 .request_edits
                 .lock()
                 .expect("request_edits lock")
-                .is_empty()
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        panic!("request edit was not synced");
+                .is_empty(),
+            "request edit was not synced"
+        );
     }
 
     #[tokio::test]

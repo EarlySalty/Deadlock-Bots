@@ -119,7 +119,7 @@ async fn export_erasure_minimalnachweis_und_fremdzeilen() -> Result<(), Box<dyn 
     assert_eq!(settings, vec![(1, None), (2, Some(43))]);
     let exported = crate::privacy::export_user_data(pool, 42, Utc::now().timestamp()).await?;
     let proof = &exported["tables"]["invite_privacy.member_privacy"];
-    assert_eq!(proof.as_array().unwrap().len(), 1);
+    assert_eq!(proof.as_array().expect("Datenschutznachweise").len(), 1);
     assert!(proof[0]["subject_hash"].is_string());
     assert!(proof[0].get("user_id").is_none());
     assert!(proof[0].get("voice_started_at").is_none());

@@ -1112,7 +1112,7 @@ mod tests {
             },
         )
         .await?;
-        sqlx::query("DROP TABLE scrim.participants")
+        sqlx::query("ALTER TABLE scrim.participants RENAME TO participants_unavailable")
             .execute(&db)
             .await?;
 

@@ -63,7 +63,7 @@ fn idempotency_key_folgt_dem_vertrag() {
         discord_id: 123_456_789_012_345_678,
         twitch_login: "someone".into(),
         submitted_at: chrono::DateTime::parse_from_rfc3339("2026-10-03T10:00:00Z")
-            .unwrap()
+            .expect("Scout-Fixture")
             .with_timezone(&chrono::Utc),
         privacy_epoch: 0,
         reason: "passt".into(),
@@ -680,7 +680,7 @@ mod db {
     #[async_trait]
     impl SuggestionForwarder for HoldingForwarder {
         async fn forward(&self, request: &ForwardRequest) -> ForwardResult {
-            self.seen.lock().unwrap().push(request.clone());
+            self.seen.lock().expect("Testzustand").push(request.clone());
             self.entered.notify_one();
             self.release.notified().await;
             ForwardResult::Answered {
@@ -730,16 +730,16 @@ mod db {
         .bind(MEMBER as i64)
         .fetch_one(db.pool())
         .await
-        .unwrap();
+        .expect("Scout-Fixture");
         assert_eq!(count, 0);
-        let request = forwarder.seen.lock().unwrap()[0].clone();
+        let request = forwarder.seen.lock().expect("Testzustand")[0].clone();
         assert_eq!(
             service.forward_one(&request).await,
             SuggestionStatus::Rejected
         );
-        assert_eq!(forwarder.seen.lock().unwrap().len(), 1);
+        assert_eq!(forwarder.seen.lock().expect("Testzustand").len(), 1);
         let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM community.scout_privacy_outbox WHERE discord_id = $1 AND action = 'erase'")
-            .bind(MEMBER as i64).fetch_one(db.pool()).await.unwrap();
+            .bind(MEMBER as i64).fetch_one(db.pool()).await.expect("Scout-Fixture");
         assert_eq!(pending, 1);
     }
 
@@ -752,7 +752,7 @@ mod db {
             .bind(old)
             .fetch_one(&mut *held)
             .await
-            .unwrap();
+            .expect("Scout-Fixture");
         let pool = db.pool().clone();
         let erasing = tokio::spawn(async move {
             crate::privacy::delete_user_data(
@@ -769,7 +769,7 @@ mod db {
         let writer =
             tokio::spawn(async move { service.submit(MEMBER, "neuerkanal", "neuer Grund").await });
         wait_locked(db.pool(), "pg_advisory_xact_lock($1)").await;
-        held.commit().await.unwrap();
+        held.commit().await.expect("Scout-Fixture");
         erasing.await.expect("Erasureaufgabe").expect("Erasure");
         assert_eq!(
             writer.await.expect("Schreibaufgabe"),
@@ -820,7 +820,7 @@ mod db {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             loop {
                 let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%pg_advisory_xact_lock%' AND pid <> pg_backend_pid()")
-                    .fetch_one(db.pool()).await.unwrap();
+                    .fetch_one(db.pool()).await.expect("Scout-Fixture");
                 if waiting >= 2 {
                     break;
                 }

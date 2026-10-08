@@ -778,7 +778,7 @@ mod db {
             TwitchSubmitOutcome::Rejected("invalid_clip_url")
         );
         // gespeicherte Zeile: kein Discord-Einsender, Credit = Streamer-Login
-        let row: (
+        type TwitchSubmissionRow = (
             Option<i64>,
             String,
             String,
@@ -787,7 +787,8 @@ mod db {
             String,
             Option<String>,
             Option<String>,
-        ) = sqlx::query_as(
+        );
+        let row: TwitchSubmissionRow = sqlx::query_as(
             "SELECT user_id, source, credit, streamer_login, title, link,
                     streamer_twitch_user_id, submitted_by_twitch_user_id
                FROM clips.clip_submissions WHERE id = $1",

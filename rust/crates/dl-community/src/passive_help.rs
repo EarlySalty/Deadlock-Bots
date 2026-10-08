@@ -430,7 +430,7 @@ mod tests {
         ) -> Result<Option<String>, String> {
             self.questions
                 .lock()
-                .unwrap()
+                .expect("Fixture-Mutex")
                 .push((content.into(), context.into()));
             Ok(content
                 .contains("wie")
@@ -447,7 +447,7 @@ mod tests {
     #[async_trait::async_trait]
     impl VoiceHintReplyPort for Port {
         async fn reply_text(&self, _: u64, _: u64, content: &str) -> Result<u64, String> {
-            self.0.lock().unwrap().push(content.into());
+            self.0.lock().expect("Fixture-Mutex").push(content.into());
             Ok(123)
         }
     }
@@ -521,7 +521,7 @@ mod tests {
             let (responder, backend, port) = responder(answer);
             responder.handle_message(&event(1, "wie geht das?")).await;
             assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
-            assert!(port.0.lock().unwrap().is_empty());
+            assert!(port.0.lock().expect("Fixture-Mutex").is_empty());
         }
         let mut answer = grounded();
         if let Answer::Grounded { text, .. } = &mut answer {
@@ -530,7 +530,7 @@ mod tests {
         let (responder, backend, port) = responder(answer);
         responder.handle_message(&event(1, "wie geht das?")).await;
         assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
-        assert_eq!(port.0.lock().unwrap().len(), 1);
+        assert_eq!(port.0.lock().expect("Fixture-Mutex").len(), 1);
     }
 
     #[test]
@@ -587,9 +587,9 @@ mod tests {
         responder
             .handle_message(&event(8, "wie funktioniert das?"))
             .await;
-        assert_eq!(port.0.lock().unwrap().len(), 1);
-        assert_eq!(backend.questions.lock().unwrap().len(), 1);
-        assert!(backend.questions.lock().unwrap()[0]
+        assert_eq!(port.0.lock().expect("Fixture-Mutex").len(), 1);
+        assert_eq!(backend.questions.lock().expect("Fixture-Mutex").len(), 1);
+        assert!(backend.questions.lock().expect("Fixture-Mutex")[0]
             .1
             .contains("server call?"));
     }
@@ -607,8 +607,8 @@ mod tests {
                 "kannst du nen server aufmachen, ka wie man das hier macht XD",
             ))
             .await;
-        assert_eq!(backend.questions.lock().unwrap().len(), 2);
-        assert_eq!(port.0.lock().unwrap().len(), 1);
+        assert_eq!(backend.questions.lock().expect("Fixture-Mutex").len(), 2);
+        assert_eq!(port.0.lock().expect("Fixture-Mutex").len(), 1);
     }
 
     #[tokio::test]
@@ -626,8 +626,8 @@ mod tests {
         responder
             .handle_message(&event(4, "/brain wie erstelle ich einen server?"))
             .await;
-        assert!(backend.questions.lock().unwrap().is_empty());
-        assert!(port.0.lock().unwrap().is_empty());
+        assert!(backend.questions.lock().expect("Fixture-Mutex").is_empty());
+        assert!(port.0.lock().expect("Fixture-Mutex").is_empty());
     }
 
     #[tokio::test]
@@ -637,7 +637,7 @@ mod tests {
             responder
                 .handle_message(&event(1, "wie funktioniert das?"))
                 .await;
-            assert!(port.0.lock().unwrap().is_empty());
+            assert!(port.0.lock().expect("Fixture-Mutex").is_empty());
         }
     }
 
@@ -654,8 +654,8 @@ mod tests {
         responder
             .handle_message(&event(2, "warum immer ranked lol"))
             .await;
-        assert_eq!(port.0.lock().unwrap().len(), 1);
-        assert_eq!(backend.questions.lock().unwrap().len(), 2);
+        assert_eq!(port.0.lock().expect("Fixture-Mutex").len(), 1);
+        assert_eq!(backend.questions.lock().expect("Fixture-Mutex").len(), 2);
         assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
     }
 
@@ -672,7 +672,7 @@ mod tests {
         responder
             .handle_message(&event(2, "wie erstelle ich einen Sprachkanal?"))
             .await;
-        assert_eq!(port.0.lock().unwrap().len(), 1);
+        assert_eq!(port.0.lock().expect("Fixture-Mutex").len(), 1);
         assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
     }
 }
