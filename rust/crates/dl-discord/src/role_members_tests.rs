@@ -11,7 +11,7 @@ async fn snapshot(fail_last_page: bool) -> Result<RoleMembers, PortError> {
         })
     };
     let pages = [
-        json!([{"id":"2","name":"Streamer","color":0,"hoist":false,"position":1,"permissions":"0","managed":false,"mentionable":false}]),
+        json!([{"id":"2","name":"Streamer","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":1,"permissions":"0","managed":false,"mentionable":false}]),
         json!([member(10, "2"), member(11, "3")]),
         json!([member(12, "2")]),
         json!([]),
