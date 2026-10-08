@@ -132,6 +132,21 @@ pub trait AiAnswerer: Send + Sync {
             "Discord-Kontext für diesen Consumer nicht verfügbar".into(),
         ))
     }
+
+    async fn answer_for_discord_with_read_access(
+        &self,
+        question: &str,
+        user_id: u64,
+        allow_discord_reads: bool,
+    ) -> Result<BrainOutcome, BrainError> {
+        if allow_discord_reads {
+            self.answer_for_discord(question, user_id).await
+        } else {
+            Err(BrainError::Backend(
+                "Discord-Lesesperre für diesen Consumer nicht verfügbar".into(),
+            ))
+        }
+    }
 }
 
 pub async fn handle_discord_query(
@@ -142,12 +157,42 @@ pub async fn handle_discord_query(
     cooldowns: &BrainCooldowns,
     answerer: &dyn AiAnswerer,
 ) -> Option<BrainOutcome> {
+    handle_discord_query_with_read_access(
+        question,
+        user_id,
+        channel_id,
+        max_question_len,
+        cooldowns,
+        answerer,
+        true,
+    )
+    .await
+}
+
+pub async fn handle_discord_query_with_read_access(
+    question: &str,
+    user_id: u64,
+    channel_id: u64,
+    max_question_len: usize,
+    cooldowns: &BrainCooldowns,
+    answerer: &dyn AiAnswerer,
+    allow_discord_reads: bool,
+) -> Option<BrainOutcome> {
     match cooldowns.reserve_discord(user_id, channel_id).await {
         DiscordReservation::Accepted => {}
         DiscordReservation::DailyLimit => return Some(BrainOutcome::DailyLimit),
         DiscordReservation::Suppressed => return None,
     }
-    Some(answer_discord_query(question, user_id, max_question_len, answerer).await)
+    Some(
+        answer_discord_query_with_read_access(
+            question,
+            user_id,
+            max_question_len,
+            answerer,
+            allow_discord_reads,
+        )
+        .await,
+    )
 }
 
 pub async fn answer_discord_query(
@@ -155,6 +200,16 @@ pub async fn answer_discord_query(
     user_id: u64,
     max_question_len: usize,
     answerer: &dyn AiAnswerer,
+) -> BrainOutcome {
+    answer_discord_query_with_read_access(question, user_id, max_question_len, answerer, true).await
+}
+
+pub async fn answer_discord_query_with_read_access(
+    question: &str,
+    user_id: u64,
+    max_question_len: usize,
+    answerer: &dyn AiAnswerer,
+    allow_discord_reads: bool,
 ) -> BrainOutcome {
     let question = question.trim();
     if question.is_empty() {
@@ -164,7 +219,10 @@ pub async fn answer_discord_query(
     if len > max_question_len {
         return BrainOutcome::TooLong { len };
     }
-    match answerer.answer_for_discord(question, user_id).await {
+    match answerer
+        .answer_for_discord_with_read_access(question, user_id, allow_discord_reads)
+        .await
+    {
         Ok(outcome) => outcome,
         Err(_) => {
             tracing::warn!("Discord-Brain-Anfrage fehlgeschlagen");
@@ -551,6 +609,36 @@ mod tests {
                 self.0.answer(question).await
             })
         }
+    }
+
+    #[tokio::test]
+    async fn private_lesesperre_faellt_nicht_auf_alten_discord_antwortweg_zurueck() {
+        let answerer = DiscordAnswerer(CountingAnswerer {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        });
+        let cooldowns = BrainCooldowns::default();
+        assert_eq!(
+            handle_discord_query_with_read_access(
+                "Was macht Abrams?",
+                1,
+                1,
+                300,
+                &cooldowns,
+                &answerer,
+                false,
+            )
+            .await,
+            Some(BrainOutcome::BackendError)
+        );
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cooldowns.discord.lock().await.users[&1].count, 1);
+        assert_eq!(
+            handle_discord_query("Was macht Abrams?", 1, 1, 300, &cooldowns, &answerer).await,
+            Some(BrainOutcome::Answer("Was macht Abrams?".into()))
+        );
+        assert_eq!(answerer.0.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cooldowns.discord.lock().await.users[&1].count, 2);
     }
 
     #[tokio::test]

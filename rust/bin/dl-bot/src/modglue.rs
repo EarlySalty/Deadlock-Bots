@@ -775,24 +775,15 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
-        let public = replies.is_public(event);
-        if !public {
-            if replies.can_reply(event).await {
-                let body = direct_brain_reply_body(event, BRAIN_PRIVATE_HELP);
-                if replies.reply(event, &body).await.is_err() {
-                    tracing::warn!("Privater Brain-Hilfshinweis konnte nicht zugestellt werden");
-                }
-            }
-            self.clear_guide_pending(event, proactive).await;
-            return;
-        }
-        let Some(outcome) = dl_brain::handle_discord_query(
+        let allow_discord_reads = replies.is_public(event);
+        let Some(outcome) = dl_brain::handle_discord_query_with_read_access(
             question,
             event.author_id,
             event.channel_id,
             self.config.max_question_len,
             self.cooldowns.as_ref(),
             self.answerer.as_ref(),
+            allow_discord_reads,
         )
         .await
         else {
@@ -816,7 +807,7 @@ impl BrainHandler {
                 return;
             }
         };
-        if replies.can_reply(event).await && replies.is_public(event) {
+        if replies.can_reply(event).await {
             let mut pending = if proactive {
                 Some(self.guide_pending.lock().await)
             } else {
@@ -4579,6 +4570,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingDiscordAnswerer {
         calls: Mutex<Vec<(String, u64)>>,
+        read_access: Mutex<Vec<bool>>,
         legacy_calls: AtomicUsize,
         outcome: Option<dl_brain::BrainOutcome>,
     }
@@ -4604,6 +4596,16 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| dl_brain::BrainOutcome::Answer(format!("Antwort: {question}"))))
         }
+
+        async fn answer_for_discord_with_read_access(
+            &self,
+            question: &str,
+            user_id: u64,
+            allow_discord_reads: bool,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            self.read_access.lock().await.push(allow_discord_reads);
+            self.answer_for_discord(question, user_id).await
+        }
     }
 
     type RecordedBrainReply = (u64, u64, Map<String, Value>);
@@ -4616,6 +4618,7 @@ mod tests {
         bot: bool,
         fail: bool,
         private: bool,
+        classification: Option<Arc<DiscordAdapter>>,
         sent: Mutex<Vec<RecordedBrainReply>>,
         delivered: tokio::sync::Notify,
     }
@@ -4632,7 +4635,10 @@ mod tests {
         }
 
         fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
-            event.guild_id.is_some() && !self.private
+            self.classification.as_ref().map_or_else(
+                || event.guild_id.is_some() && !self.private,
+                |adapter| adapter.is_public(event),
+            )
         }
 
         async fn reply(
@@ -5089,11 +5095,12 @@ mod tests {
                 &replies,
             )
             .await;
-        assert_eq!(answerer.calls.lock().await.len(), 1);
+        assert_eq!(answerer.calls.lock().await.len(), 2);
+        assert_eq!(*answerer.read_access.lock().await, vec![true, false]);
         assert_eq!(replies.sent.lock().await.len(), 2);
         assert_eq!(
             replies.sent.lock().await[1].2["content"],
-            BRAIN_PRIVATE_HELP
+            "Antwort: Andere Frage"
         );
         assert!(handler.guide_pending.lock().await.is_none());
     }
@@ -5318,6 +5325,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn privatfix_consumer_staff_thread_dm_binden_lesesperre_im_echten_wire() {
+        use axum::{extract::Json, http::HeaderMap, routing::post, Router};
+
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let app = Router::new().route(
+            "/v1/answer",
+            post(move |headers: HeaderMap, Json(query): Json<Value>| {
+                let captured = captured.clone();
+                async move {
+                    let response = json!({
+                        "contract_version": "brain.public.v1",
+                        "request_id": query["request_id"],
+                        "knowledge_release": "test-release",
+                        "status": "answered",
+                        "text": query["text"],
+                        "citations": [{"citation_id": "test", "label": "Serverwissen"}],
+                    });
+                    captured.lock().await.push((headers, query));
+                    Json(response)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Lokaler Testport");
+        let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("Lokaler Testserver");
+        });
+        let config = dl_core::bot_config::BotConfig::parse(&format!(
+            "schema_version = 1\n[runtime.ai]\nbrain_command_enabled = true\nbrain_api_endpoint = '{endpoint}'\nbrain_api_timeout_ms = 3000\n"
+        ))
+        .expect("Normale Consumerkonfiguration");
+        let (mut handler, _) = direct_test_handler();
+        handler.answerer =
+            crate::discord_brain_answerer(&config.runtime.ai, Some("fixture-brain-bearer".into()))
+                .expect("Produktiver Consumeranschluss");
+        let mut guild = serenity::all::Guild::default();
+        guild.id = GuildId::new(1);
+        guild.owner_id = UserId::new(99);
+        let mut everyone = serenity::all::Role::default();
+        everyone.id = RoleId::new(1);
+        everyone.permissions = Permissions::VIEW_CHANNEL
+            | Permissions::READ_MESSAGE_HISTORY
+            | Permissions::SEND_MESSAGES;
+        guild.roles.insert(everyone.id, everyone);
+        let mut member = serenity::all::Member::default();
+        member.user.id = UserId::new(3);
+        guild.members.insert(member.user.id, member);
+        for (id, private, kind) in [
+            (1, false, serenity::all::ChannelType::Text),
+            (2, true, serenity::all::ChannelType::Text),
+            (3, true, serenity::all::ChannelType::PrivateThread),
+        ] {
+            let mut channel = private_text_channel(1, id, 3, None);
+            channel.kind = kind;
+            if !private {
+                channel.permission_overwrites.clear();
+            }
+            guild.channels.insert(channel.id, channel);
+        }
+        let mut update: serenity::all::GuildCreateEvent =
+            serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
+                .expect("Cacheereignis");
+        handler.adapter.cache().update(&mut update);
+        let questions = [
+            "Was macht Abrams?",
+            "Wo stehen die Discord-Serverregeln?",
+            "Welche Dokumentation gibt es?",
+            "Wie ist mein eigener Invite-Status?",
+        ];
+        let mut request_ids = HashSet::new();
+        let mut conversation_ids = HashSet::new();
+        for (guild_id, channel_id, staff, allow_reads) in [
+            (Some(1), 1, false, true),
+            (Some(1), 2, true, false),
+            (Some(1), 3, false, false),
+            (None, 4, false, false),
+        ] {
+            let replies = RecordingBrainReplies {
+                classification: Some(handler.adapter.clone()),
+                ..Default::default()
+            };
+            for question in questions {
+                let content = if guild_id.is_some() {
+                    format!("<@42> {question}")
+                } else {
+                    question.to_owned()
+                };
+                let mut event = test_message_event(guild_id, &content);
+                event.channel_id = channel_id;
+                event.author_is_staff = staff;
+                let before = received.lock().await.len();
+                assert_eq!(handler.adapter.is_public(&event), allow_reads);
+                assert!(handler.adapter.can_reply(&event).await);
+                handler
+                    .handle_message_event_with_replies(&event, 42, &replies)
+                    .await;
+                let requests = received.lock().await;
+                assert_eq!(requests.len(), before + 1);
+                let (headers, query) = requests.last().expect("Echte HTTP-Anfrage");
+                assert_eq!(headers["x-discord-user-id"], "3");
+                assert_eq!(
+                    headers
+                        .get("x-discord-read-access")
+                        .map(|value| value.as_bytes()),
+                    (!allow_reads).then_some(b"disabled".as_slice())
+                );
+                assert_eq!(query["text"], question);
+                assert_eq!(query["requested_scopes"], json!(["bot.public"]));
+                assert!(request_ids
+                    .insert(query["request_id"].as_str().expect("Anfrage-ID").to_owned()));
+                assert!(conversation_ids.insert(
+                    query["conversation_id"]
+                        .as_str()
+                        .expect("Konversations-ID")
+                        .to_owned()
+                ));
+                let sent = replies.sent.lock().await;
+                assert_eq!(
+                    sent.len(),
+                    questions
+                        .iter()
+                        .position(|candidate| candidate == &question)
+                        .expect("Frageindex")
+                        + 1
+                );
+                let reply = sent.last().expect("Antwort am Eingangsort");
+                assert_eq!((reply.0, reply.1), (event.channel_id, event.message_id));
+                assert_eq!(reply.2["content"], question);
+                assert_eq!(
+                    reply.2["message_reference"]["channel_id"],
+                    channel_id.to_string()
+                );
+            }
+        }
+        for revoke in [false, true] {
+            let replies = RecordingBrainReplies {
+                deny: !revoke,
+                revoke_after_first: revoke,
+                classification: Some(handler.adapter.clone()),
+                ..Default::default()
+            };
+            let mut event = test_message_event(Some(1), "<@42> Was macht Abrams?");
+            event.channel_id = 2;
+            let before = received.lock().await.len();
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            assert_eq!(received.lock().await.len(), before + usize::from(revoke));
+            assert!(replies.sent.lock().await.is_empty());
+        }
+        server.abort();
+        assert!(server.await.expect_err("Testserverabbruch").is_cancelled());
+    }
+
+    #[tokio::test]
     async fn produktiver_discord_consumer_erhaelt_lange_antwort_und_quellbindung() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -5481,16 +5648,13 @@ mod tests {
                 .await;
             assert_eq!(
                 *answerer.calls.lock().await,
-                if guild_id.is_some() {
-                    vec![(expected.to_owned(), event.author_id)]
-                } else {
-                    Vec::new()
-                }
+                vec![(expected.to_owned(), event.author_id)]
             );
+            assert_eq!(*answerer.read_access.lock().await, vec![guild_id.is_some()]);
             assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
             let sent = replies.sent.lock().await;
+            assert_eq!(sent[0].2["content"], format!("Antwort: {expected}"));
             if guild_id.is_none() {
-                assert_eq!(sent[0].2["content"], BRAIN_PRIVATE_HELP);
                 assert!(handler.conversations.lock().await.entries.is_empty());
             }
             assert_eq!(sent.len(), 1);
@@ -5508,7 +5672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_serverfragen_und_unbekannte_slashkanaele_starten_keinen_consumer() {
+    async fn private_serverfragen_starten_lesegesperrten_consumer_und_slashgrenze_bleibt() {
         for content in ["<@42> Private Frage", "!brain Private Frage"] {
             let (mut handler, answerer) = direct_test_handler();
             handler.all_guild_channels = true;
@@ -5523,13 +5687,17 @@ mod tests {
                     &replies,
                 )
                 .await;
-            assert!(answerer.calls.lock().await.is_empty());
+            assert_eq!(
+                *answerer.calls.lock().await,
+                vec![("Private Frage".to_owned(), 3)]
+            );
+            assert_eq!(*answerer.read_access.lock().await, vec![false]);
             assert_eq!(replies.sent.lock().await.len(), 1);
             assert_eq!(
                 replies.sent.lock().await[0].2["content"],
-                BRAIN_PRIVATE_HELP
+                "Antwort: Private Frage"
             );
-            assert!(handler.conversations.lock().await.entries.is_empty());
+            assert_eq!(handler.conversations.lock().await.entries.len(), 1);
         }
         let (mut handler, answerer) = direct_test_handler();
         handler.all_guild_channels = true;
@@ -5549,6 +5717,40 @@ mod tests {
         let channel = private_text_channel(1, 1, 3, None);
         let adapter = test_adapter_with_channels(1, vec![channel]);
         assert!(!brain_channel_is_public(adapter.as_ref(), 1, 1));
+    }
+
+    #[tokio::test]
+    async fn privatfix_folgefragen_reservieren_genau_einmal_und_teilen_oeffentliche_quote() {
+        let (handler, answerer) = direct_test_handler();
+        let private = RecordingBrainReplies {
+            private: true,
+            ..Default::default()
+        };
+        let mut event = test_message_event(Some(1), "<@42> Welche Lanes gibt es?");
+        handler
+            .handle_message_event_with_replies(&event, 42, &private)
+            .await;
+        event.content = "Und für neue Spieler?".into();
+        for message_id in 3..=51 {
+            event.message_id = message_id;
+            handler
+                .handle_message_event_with_replies(&event, 42, &private)
+                .await;
+        }
+        assert_eq!(answerer.calls.lock().await.len(), 50);
+        assert_eq!(*answerer.read_access.lock().await, vec![false; 50]);
+        assert_eq!(private.sent.lock().await.len(), 50);
+        let public = RecordingBrainReplies::default();
+        let event = test_message_event(Some(1), "<@42> Was macht Abrams?");
+        for _ in 0..3 {
+            handler
+                .handle_message_event_with_replies(&event, 42, &public)
+                .await;
+        }
+        assert_eq!(answerer.calls.lock().await.len(), 50);
+        assert_eq!(public.sent.lock().await.len(), 1);
+        assert_eq!(public.sent.lock().await[0].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -5607,20 +5809,22 @@ mod tests {
         assert_eq!(replies.sent.lock().await.len(), 2);
         assert_eq!(
             replies.sent.lock().await[0].2["content"],
-            BRAIN_PRIVATE_HELP
+            "Antwort: Wie finde ich eine Lane?"
         );
+        assert_eq!(replies.sent.lock().await[1].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(*answerer.read_access.lock().await, vec![false]);
         handler
             .handle_message_event_with_replies(&server, 42, &replies)
             .await;
         assert_eq!(answerer.calls.lock().await.len(), 1);
-        assert_eq!(replies.sent.lock().await.len(), 3);
-        assert_eq!(replies.sent.lock().await[2].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(replies.sent.lock().await.len(), 2);
+        assert_eq!(replies.sent.lock().await[1].2["content"], BRAIN_DAILY_LIMIT);
         server.channel_id = 56;
         handler
             .handle_message_event_with_replies(&server, 42, &replies)
             .await;
         assert_eq!(answerer.calls.lock().await.len(), 1);
-        assert_eq!(replies.sent.lock().await.len(), 3);
+        assert_eq!(replies.sent.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -5639,8 +5843,12 @@ mod tests {
             .await;
         assert_eq!(
             *answerer.calls.lock().await,
-            vec![("Öffentliche Frage".into(), 4)]
+            vec![
+                ("Privater DM-Inhalt".into(), 3),
+                ("Öffentliche Frage".into(), 4)
+            ]
         );
+        assert_eq!(*answerer.read_access.lock().await, vec![false, true]);
         let sent = replies.sent.lock().await;
         assert_eq!(sent.len(), 2);
         assert!(!serde_json::to_string(&sent[1].2)

@@ -89,6 +89,7 @@ impl BrainApiAnswerer {
         &self,
         question: &str,
         user_id: Option<u64>,
+        allow_discord_reads: bool,
     ) -> Result<BrainOutcome, BrainError> {
         if question.trim().is_empty() || question.chars().count() > 4000 || user_id == Some(0) {
             return Err(backend_error());
@@ -101,7 +102,11 @@ impl BrainApiAnswerer {
                 .map_err(|_| backend_error())?;
             let query = self.query(question)?;
             let response = match user_id {
-                Some(user_id) => self.client.answer_for_discord(&query, user_id).await,
+                Some(user_id) => {
+                    self.client
+                        .answer_for_discord_with_read_access(&query, user_id, allow_discord_reads)
+                        .await
+                }
                 None => self.client.answer(&query).await,
             }
             .map_err(client_error)?;
@@ -243,7 +248,7 @@ fn without_links_pass(text: &str) -> (String, bool) {
 #[async_trait::async_trait]
 impl AiAnswerer for BrainApiAnswerer {
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, None).await
+        self.answer_query(question, None, true).await
     }
 
     async fn answer_for_discord(
@@ -251,7 +256,18 @@ impl AiAnswerer for BrainApiAnswerer {
         question: &str,
         user_id: u64,
     ) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, Some(user_id)).await
+        self.answer_for_discord_with_read_access(question, user_id, true)
+            .await
+    }
+
+    async fn answer_for_discord_with_read_access(
+        &self,
+        question: &str,
+        user_id: u64,
+        allow_discord_reads: bool,
+    ) -> Result<BrainOutcome, BrainError> {
+        self.answer_query(question, Some(user_id), allow_discord_reads)
+            .await
     }
 }
 
