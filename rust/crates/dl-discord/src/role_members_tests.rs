@@ -1,19 +1,22 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-async fn snapshot(fail_last_page: bool) -> Result<RoleMembers, PortError> {
+async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, PortError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let member = |id: u64, role: &str| {
+    let member = |id: u64, roles: &[&str]| {
         json!({
             "user": {"id": id.to_string(), "username": "test", "discriminator": "0", "avatar": null},
-            "roles": [role], "joined_at": "2026-10-08T00:00:00Z", "deaf": false, "mute": false, "flags": 0
+            "roles": roles, "joined_at": "2026-10-08T00:00:00Z", "deaf": false, "mute": false, "flags": 0
         })
     };
     let pages = [
-        json!([{"id":"2","name":"Streamer","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":1,"permissions":"0","managed":false,"mentionable":false}]),
-        json!([member(10, "2"), member(11, "3")]),
-        json!([member(12, "2")]),
+        json!([
+            {"id":"1","name":"@everyone","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":0,"permissions":"0","managed":false,"mentionable":false},
+            {"id":"2","name":"Streamer","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":1,"permissions":"0","managed":false,"mentionable":false}
+        ]),
+        json!([member(10, &["2"]), member(11, &["3"])]),
+        json!([member(12, &["2"]), member(13, &[])]),
         json!([]),
     ];
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -52,7 +55,7 @@ async fn snapshot(fail_last_page: bool) -> Result<RoleMembers, PortError> {
             .ratelimiter_disabled(true)
             .build(),
     );
-    let result = adapter.live_role_members(1, 2).await;
+    let result = adapter.live_role_members(1, role_id).await;
     server.abort();
     let _ = server.await;
     let requests = requests.lock().unwrap();
@@ -60,13 +63,13 @@ async fn snapshot(fail_last_page: bool) -> Result<RoleMembers, PortError> {
     assert!(requests[0].contains("/guilds/1/roles"));
     assert!(!requests[1].contains("after="));
     assert!(requests[2].contains("after=11"));
-    assert!(requests[3].contains("after=12"));
+    assert!(requests[3].contains("after=13"));
     result
 }
 
 #[tokio::test]
 async fn complete_role_snapshot_reads_every_rest_page_without_gateway_cache() {
-    let result = snapshot(false).await.unwrap();
+    let result = snapshot(2, false).await.unwrap();
     assert_eq!(result.role_id, 2);
     assert_eq!(
         result
@@ -79,6 +82,26 @@ async fn complete_role_snapshot_reads_every_rest_page_without_gateway_cache() {
 }
 
 #[tokio::test]
+async fn everyone_snapshot_includes_all_members_without_explicit_everyone_role() {
+    let result = snapshot(1, false).await.unwrap();
+    assert_eq!(result.role_id, 1);
+    assert_eq!(result.name, "@everyone");
+    assert_eq!(
+        result
+            .members
+            .iter()
+            .map(|member| member.user_id)
+            .collect::<Vec<_>>(),
+        vec![10, 11, 12, 13]
+    );
+}
+
+#[tokio::test]
 async fn later_rest_failure_never_returns_partial_role_holders() {
-    assert!(snapshot(true).await.is_err());
+    assert!(snapshot(2, true).await.is_err());
+}
+
+#[tokio::test]
+async fn later_rest_failure_never_returns_partial_everyone_members() {
+    assert!(snapshot(1, true).await.is_err());
 }

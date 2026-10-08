@@ -997,7 +997,7 @@ impl DiscordPort for DiscordAdapter {
             }
             members.extend(
                 page.iter()
-                    .filter(|member| member.roles.contains(&rid))
+                    .filter(|member| role_id == guild_id || member.roles.contains(&rid))
                     .map(|member| MemberInfo {
                         user_id: member.user.id.get(),
                         display_name: member.display_name().to_string(),
