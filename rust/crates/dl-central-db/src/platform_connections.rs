@@ -27,7 +27,7 @@ pub const MAX_TWITCH_IDS_PER_LOOKUP: usize = 5_000;
 pub async fn lock_twitch_identity(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), sqlx::Error> {
-    lock_twitch_identity_connection(&mut **tx).await
+    lock_twitch_identity_connection(tx).await
 }
 
 /// Dieselbe Sperre für Invitewriter, vor Guild-, Nutzer- und Zeilenlocks.
