@@ -318,6 +318,12 @@ trait BrainDirectReplyPort: Send + Sync {
     ) -> Option<dl_brain::DiscordAnswerContext> {
         None
     }
+    async fn reaction(
+        &self,
+        event: &dl_discord::MessageEvent,
+        emoji: &str,
+        present: bool,
+    ) -> Result<(), String>;
     async fn reply(
         &self,
         event: &dl_discord::MessageEvent,
@@ -391,6 +397,28 @@ impl BrainDirectReplyPort for DiscordAdapter {
         event
             .guild_id
             .is_some_and(|guild_id| brain_channel_is_public(self, guild_id, event.channel_id))
+    }
+
+    async fn reaction(
+        &self,
+        event: &dl_discord::MessageEvent,
+        emoji: &str,
+        present: bool,
+    ) -> Result<(), String> {
+        if present {
+            dl_broker::DiscordPort::add_reaction(self, event.channel_id, event.message_id, emoji)
+                .await
+                .map_err(|err| err.to_string())
+        } else {
+            self.http
+                .delete_reaction_me(
+                    ChannelId::new(event.channel_id),
+                    MessageId::new(event.message_id),
+                    &ReactionType::Unicode(emoji.to_owned()),
+                )
+                .await
+                .map_err(|err| err.to_string())
+        }
     }
 
     async fn reply(
@@ -874,19 +902,23 @@ impl BrainHandler {
             allow_discord_reads: replies.is_public(event),
             answer_context: replies.answer_context(event),
         };
-        let Some(outcome) = dl_brain::handle_discord_query_with_context(
-            question,
-            event.channel_id,
-            self.config.max_question_len,
-            self.cooldowns.as_ref(),
-            self.answerer.as_ref(),
-            &context,
-        )
-        .await
-        else {
+        let reservation = self
+            .cooldowns
+            .reserve_discord(context.user_id, event.channel_id)
+            .await;
+        if matches!(reservation, dl_brain::DiscordReservation::Suppressed) {
             self.clear_guide_pending(event, proactive).await;
             return;
+        }
+        let _ = replies.reaction(event, "👀", true).await;
+        let outcome = match reservation {
+            dl_brain::DiscordReservation::Accepted => {
+                self.reserved_outcome_for_question(question, &context).await
+            }
+            dl_brain::DiscordReservation::DailyLimit => dl_brain::BrainOutcome::DailyLimit,
+            dl_brain::DiscordReservation::Suppressed => unreachable!(),
         };
+        let mut failed = matches!(outcome, dl_brain::BrainOutcome::BackendError);
         let extend_conversation = !matches!(outcome, dl_brain::BrainOutcome::DailyLimit);
         let text = match outcome {
             dl_brain::BrainOutcome::DailyLimit => BRAIN_DAILY_LIMIT.to_owned(),
@@ -900,6 +932,7 @@ impl BrainHandler {
             }
             dl_brain::BrainOutcome::BackendError => BRAIN_BACKEND_ERR.to_owned(),
             dl_brain::BrainOutcome::Cooldown { .. } => {
+                let _ = replies.reaction(event, "👀", false).await;
                 self.clear_guide_pending(event, proactive).await;
                 return;
             }
@@ -914,6 +947,7 @@ impl BrainHandler {
                 .as_ref()
                 .is_some_and(|pending| **pending != Some((event.author_id, event.message_id)))
             {
+                let _ = replies.reaction(event, "👀", false).await;
                 return;
             }
             let body = direct_brain_reply_body(event, &text);
@@ -926,13 +960,26 @@ impl BrainHandler {
                 }
                 Ok(_) => {}
                 Err(err) => {
+                    failed = true;
                     tracing::warn!(%err, "Discord-Brain-Antwort konnte nicht zugestellt werden");
                 }
             }
             if let Some(pending) = pending.as_mut() {
                 **pending = None;
             }
+        } else {
+            failed = true;
         }
+        let _ = replies.reaction(event, "👀", false).await;
+        if failed {
+            let _ = replies.reaction(event, "❌", true).await;
+        }
+        tracing::debug!(
+            message_id = event.message_id,
+            channel_id = event.channel_id,
+            failed,
+            "brain_direct_reaction_finished"
+        );
         self.clear_guide_pending(event, proactive).await;
     }
 
@@ -4833,6 +4880,8 @@ mod tests {
         private: bool,
         classification: Option<Arc<DiscordAdapter>>,
         sent: Mutex<Vec<RecordedBrainReply>>,
+        reactions: Mutex<Vec<(u64, u64, String, bool)>>,
+        fail_reactions: bool,
         delivered: tokio::sync::Notify,
     }
 
@@ -4852,6 +4901,25 @@ mod tests {
                 || event.guild_id.is_some() && !self.private,
                 |adapter| adapter.is_public(event),
             )
+        }
+
+        async fn reaction(
+            &self,
+            event: &dl_discord::MessageEvent,
+            emoji: &str,
+            present: bool,
+        ) -> Result<(), String> {
+            self.reactions.lock().await.push((
+                event.channel_id,
+                event.message_id,
+                emoji.to_owned(),
+                present,
+            ));
+            if self.fail_reactions {
+                Err("Keine Berechtigung für Reaktionen".into())
+            } else {
+                Ok(())
+            }
         }
 
         async fn reply(
@@ -4879,6 +4947,86 @@ mod tests {
         );
         handler.answerer = answerer.clone();
         (handler, answerer)
+    }
+
+    #[tokio::test]
+    async fn brain_reaktion_steht_vor_antwort_und_verschwindet_danach() {
+        let (mut handler, _) = direct_test_handler();
+        let answerer = Arc::new(PendingGuideAnswerer::default());
+        handler.answerer = answerer.clone();
+        let replies = RecordingBrainReplies::default();
+        let event = test_message_event(Some(1), "<@42> Welche Lanes gibt es?");
+        let handle = handler.handle_message_event_with_replies(&event, 42, &replies);
+        let verify = async {
+            answerer.started.notified().await;
+            assert_eq!(
+                *replies.reactions.lock().await,
+                vec![(event.channel_id, event.message_id, "👀".into(), true)]
+            );
+            assert!(replies.sent.lock().await.is_empty());
+            answerer.release.notify_one();
+        };
+        tokio::join!(handle, verify);
+        assert_eq!(replies.sent.lock().await.len(), 1);
+        assert_eq!(
+            *replies.reactions.lock().await,
+            vec![
+                (event.channel_id, event.message_id, "👀".into(), true),
+                (event.channel_id, event.message_id, "👀".into(), false),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn brain_reaktion_unterscheidet_fehler_von_fachlicher_leermeldung() {
+        for (outcome, fail, revoke, fail_reactions, expected_error) in [
+            (
+                dl_brain::BrainOutcome::BackendError,
+                false,
+                false,
+                false,
+                true,
+            ),
+            (dl_brain::BrainOutcome::NoAnswer, false, false, false, false),
+            (
+                dl_brain::BrainOutcome::OutOfDomain,
+                false,
+                false,
+                false,
+                false,
+            ),
+            (dl_brain::BrainOutcome::NoAnswer, true, false, false, true),
+            (dl_brain::BrainOutcome::NoAnswer, false, true, false, true),
+            (dl_brain::BrainOutcome::NoAnswer, false, false, true, false),
+        ] {
+            let (mut handler, _) = direct_test_handler();
+            handler.answerer = Arc::new(RecordingDiscordAnswerer {
+                outcome: Some(outcome),
+                ..Default::default()
+            });
+            let replies = RecordingBrainReplies {
+                fail,
+                revoke_after_first: revoke,
+                fail_reactions,
+                ..Default::default()
+            };
+            let event = test_message_event(Some(1), "<@42> Frage");
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            let mut expected = vec![
+                (event.channel_id, event.message_id, "👀".into(), true),
+                (event.channel_id, event.message_id, "👀".into(), false),
+            ];
+            if expected_error {
+                expected.push((event.channel_id, event.message_id, "❌".into(), true));
+            }
+            assert_eq!(*replies.reactions.lock().await, expected);
+            assert_eq!(
+                replies.sent.lock().await.len(),
+                usize::from(!fail && !revoke)
+            );
+        }
     }
 
     #[tokio::test]
