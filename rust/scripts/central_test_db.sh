@@ -14,9 +14,12 @@ NAME="dl-central-test-postgres-$$"
 DB="deadlock_test"
 USER="deadlock"
 PASS="testpw"
+CONFIG_DIR="$(mktemp -d)"
 
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
+  rm -f "$CONFIG_DIR/bot.toml" "$CONFIG_DIR/infisical.json"
+  rmdir "$CONFIG_DIR"
 }
 
 finish() {
@@ -35,7 +38,7 @@ docker run --rm -d \
   -e POSTGRES_USER="$USER" \
   -e POSTGRES_PASSWORD="$PASS" \
   -p "127.0.0.1:0:5432" \
-  "$IMAGE" >/dev/null
+  "$IMAGE" postgres -c shared_buffers=128MB -c max_connections=100 >/dev/null
 
 PORT="$(docker port "$NAME" 5432/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
 if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
@@ -85,7 +88,10 @@ done
 echo "CENTRAL_TEST_DSN=postgres://${USER}:***@127.0.0.1:${PORT}/${DB}"
 
 cd "$ROOT"
-SQLX_OFFLINE=true DEADLOCK_CENTRAL_DSN="$CENTRAL_TEST_DSN" cargo run -p dl-central-migrate
+printf 'schema_version = 1\n' > "$CONFIG_DIR/bot.toml"
+printf '%s' '{"secret_values_fd":3,"project_id":"fixture","environment":"fixture","secret_path":"/","socket_path":"/nonexistent","database_secret":"DEADLOCK_CENTRAL_DSN"}' > "$CONFIG_DIR/infisical.json"
+chmod 600 "$CONFIG_DIR/bot.toml" "$CONFIG_DIR/infisical.json"
+SQLX_OFFLINE=true DEADLOCK_CENTRAL_DSN="$CENTRAL_TEST_DSN" cargo run -p dl-central-migrate -- --config "$CONFIG_DIR/bot.toml" 3< <(printf '{"DEADLOCK_CENTRAL_DSN":"%s"}' "$CENTRAL_TEST_DSN")
 
 set +e
 "$@"

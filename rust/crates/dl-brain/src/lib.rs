@@ -9,7 +9,10 @@ use tokio::sync::Mutex;
 
 pub mod api_ingest;
 pub mod brain_api;
-pub use brain_client::{AnswerContext, AnswerInputKind, DiscordAnswerContext};
+pub use brain_client::{
+    AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
+    DiscordAnswerTask,
+};
 
 #[derive(Clone)]
 pub struct DiscordQueryContext {
@@ -129,6 +132,15 @@ pub enum BrainError {
 
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
+    async fn answer_discord_task(
+        &self,
+        _question: &str,
+        _user_id: u64,
+        _task: &DiscordAnswerTask,
+    ) -> Result<BrainOutcome, BrainError> {
+        Err(BrainError::Backend("Bot-Aufgabe nicht verfügbar".into()))
+    }
+
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError>;
 
     async fn answer_for_discord(

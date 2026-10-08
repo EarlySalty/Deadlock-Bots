@@ -816,11 +816,48 @@ pub struct FaqChat {
     shadow_channel_id: Option<u64>,
     ticket_generator: Option<Arc<dyn TextGenerator>>,
     answers: Option<Arc<dl_answer::AnswerEngine>>,
+    brain: Option<Arc<dyn dl_brain::AiAnswerer>>,
     ticket_claims: Arc<dyn TicketClaimStore>,
     chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl FaqChat {
+    pub fn with_brain(
+        pool: PgPool,
+        port: Arc<dyn FaqPort>,
+        answers: Arc<dl_answer::AnswerEngine>,
+        brain: Arc<dyn dl_brain::AiAnswerer>,
+    ) -> Arc<Self> {
+        let mut faq = Self::with_answers(pool, port, answers);
+        Arc::get_mut(&mut faq).expect("Neue FAQ-Instanz").brain = Some(brain);
+        faq
+    }
+
+    async fn lookup_bound(
+        &self,
+        question: &str,
+        context: &str,
+        user_id: u64,
+        channel_id: u64,
+    ) -> KnowledgeLookup {
+        let Some(brain) = &self.brain else {
+            return self.lookup_with_context(question, context).await;
+        };
+        let task = dl_brain::DiscordAnswerTask {
+            capability: dl_brain::DiscordAnswerCapability::Faq,
+            channel_id,
+        };
+        match brain.answer_discord_task(question, user_id, &task).await {
+            Ok(dl_brain::BrainOutcome::Answer(text)) => KnowledgeLookup::Answer(KnowledgeAnswer {
+                answerable: true,
+                answer: Some(truncate_utf16(&text, 1900)),
+                sources: Vec::new(),
+            }),
+            Ok(_) => KnowledgeLookup::Unanswerable,
+            Err(_) => KnowledgeLookup::Transport,
+        }
+    }
+
     /// Produktiver FAQ-Eingang teilt exakt dieselbe Instanz wie Concierge und Brain.
     pub fn with_answers(
         pool: PgPool,
@@ -835,6 +872,7 @@ impl FaqChat {
             shadow_channel_id: Some(LOG_CHANNEL_ID),
             ticket_generator: None,
             answers: Some(answers),
+            brain: None,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -926,6 +964,7 @@ impl FaqChat {
             shadow_channel_id,
             ticket_generator,
             answers: None,
+            brain: None,
             ticket_claims,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
@@ -1040,6 +1079,7 @@ impl FaqChat {
         answer_text(lookup).unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
     }
 
+    #[allow(dead_code)]
     async fn generate_stateless_answer(&self, question: &str) -> String {
         self.visible_answer(self.lookup(question).await)
     }
@@ -1104,8 +1144,13 @@ impl FaqChat {
         .await?;
         let knowledge_question = knowledge_question_from_history(&history, question);
         let answer = self.visible_answer(
-            self.lookup_with_context(question, &knowledge_question)
-                .await,
+            self.lookup_bound(
+                question,
+                &knowledge_question,
+                u64::try_from(user_id).map_err(|_| sqlx::Error::RowNotFound)?,
+                channel_id,
+            )
+            .await,
         );
         let inserted = sqlx::query(
             "INSERT INTO bot.faq_chat_messages(session_id, role, content)
@@ -1275,7 +1320,10 @@ impl FaqChat {
                 }
                 let question = content.trim();
                 if !question.is_empty() {
-                    let answer = self.generate_stateless_answer(question).await;
+                    let answer = self.visible_answer(
+                        self.lookup_bound(question, question, author_id, channel_id)
+                            .await,
+                    );
                     let _ = self.port.send_message(channel_id, &answer, None).await;
                 }
                 return true;
@@ -1322,7 +1370,10 @@ impl FaqChat {
         {
             Ok(FaqMessageWrite::Stored) => {}
             Ok(FaqMessageWrite::PrivacyBlocked | FaqMessageWrite::Missing) => {
-                let stateless_answer = self.generate_stateless_answer(question).await;
+                let stateless_answer = self.visible_answer(
+                    self.lookup_bound(question, question, author_id, channel_id)
+                        .await,
+                );
                 let _ = self
                     .port
                     .send_message(channel_id, &stateless_answer, None)
@@ -1437,7 +1488,14 @@ impl FaqChat {
                 return;
             }
         }
-        let outcome = self.ticket_auto_answer(problem, author_id).await;
+        let outcome = if self.brain.is_some() {
+            ticket_auto_outcome_from_knowledge(
+                self.lookup_bound(problem, problem, author_id, channel_id)
+                    .await,
+            )
+        } else {
+            self.ticket_auto_answer(problem, author_id).await
+        };
         let (candidate_status, candidate) = self.ticket_candidate(problem, &outcome).await;
         tracing::info!(
             channel_id,
@@ -2246,6 +2304,64 @@ mod tests {
             let _ = stream.write_all(response.as_bytes()).await;
         });
         (format!("http://{addr}"), handle, called)
+    }
+
+    #[tokio::test]
+    async fn brain_task_keeps_faq_binding_and_fails_without_local_generation() {
+        struct TaskBrain(bool);
+        #[async_trait::async_trait]
+        impl dl_brain::AiAnswerer for TaskBrain {
+            async fn answer(
+                &self,
+                _: &str,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                panic!("Untypisierter Antwortpfad")
+            }
+            async fn answer_discord_task(
+                &self,
+                question: &str,
+                user_id: u64,
+                task: &dl_brain::DiscordAnswerTask,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                assert_eq!(question, "Wo finde ich Hilfe?");
+                assert_eq!(user_id, 42);
+                assert_eq!(task.channel_id, 10);
+                assert_eq!(task.capability, dl_brain::DiscordAnswerCapability::Faq);
+                if self.0 {
+                    Ok(dl_brain::BrainOutcome::Answer("Brain-Testantwort".into()))
+                } else {
+                    Err(dl_brain::BrainError::Backend("nicht verfügbar".into()))
+                }
+            }
+        }
+        for available in [true, false] {
+            let provider = dl_ai::MockChatProvider::new(Vec::new());
+            let engine = Arc::new(dl_answer::AnswerEngine::new(
+                Some(provider.clone()),
+                Arc::new(crate::knowledge_client::CommunityRetriever {
+                    base_url: "http://127.0.0.1:1".into(),
+                    timeout: KNOWLEDGE_TIMEOUT,
+                }),
+                None,
+                Duration::from_secs(1),
+            ));
+            let faq = FaqChat::with_brain(
+                lazy_pool(),
+                ticket_port(),
+                engine,
+                Arc::new(TaskBrain(available)),
+            );
+            let lookup = faq
+                .lookup_bound(
+                    "Wo finde ich Hilfe?",
+                    "Gespeicherter privater Verlauf",
+                    42,
+                    10,
+                )
+                .await;
+            assert_eq!(matches!(lookup, KnowledgeLookup::Answer(_)), available);
+            assert!(provider.requests().is_empty());
+        }
     }
 
     #[tokio::test]

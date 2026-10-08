@@ -1056,6 +1056,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
+    let community_brain = discord_brain_answerer(
+        &operating.runtime.ai,
+        dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN"),
+    )?;
+    tracing::info!(
+        concierge_enabled = concierge_config.enabled,
+        "Brain-Antwortweg für Concierge und FAQ vorbereitet"
+    );
+
     let brain_handler = {
         let options = &operating.runtime.ai;
         let enabled = options.brain_command_enabled.unwrap_or(false);
@@ -1131,17 +1140,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tokio::spawn(team_applications.clone().run_maintenance_loop());
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq = dl_community::faq::FaqChat::with_answers(
+    let faq = dl_community::faq::FaqChat::with_brain(
         central_pool.clone(),
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
         shared_answers.clone(),
+        community_brain.clone(),
     );
     dl_community::faq::register(&mut router, faq.clone());
 
     // Concierge-Onboarding Slice A: default AUS, T0 nur fuer Test-Allowlist.
-    let concierge = dl_community::concierge::Concierge::with_answers(
+    let concierge = dl_community::concierge::Concierge::with_brain(
         central_pool.clone(),
         Arc::new(modglue::ConciergeGlue {
             adapter: adapter.clone(),
@@ -1149,6 +1159,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_ai.clone(),
         concierge_config.clone(),
         shared_answers.clone(),
+        community_brain.clone(),
     );
     // Concierge-Knopf "Twitch verknüpfen": derselbe persönliche Link wie im
     // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
@@ -2200,8 +2211,8 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             .expect("Quelldatei enthält Produktionsbereich");
         assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 1);
         assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
-        assert!(source.contains("FaqChat::with_answers("));
-        assert!(source.contains("Concierge::with_answers("));
+        assert!(source.contains("FaqChat::with_brain("));
+        assert!(source.contains("Concierge::with_brain("));
         assert!(source.contains("discord_brain_answerer("));
         assert!(source.contains("secret_value(\"DISCORD_BRAIN_CLIENT_TOKEN\")"));
         assert!(!source.contains("SharedBrainAnswerer"));

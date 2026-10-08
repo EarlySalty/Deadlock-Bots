@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 dl-answer.workspace = true
+dl-brain.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 rand.workspace = true

@@ -3437,6 +3437,7 @@ pub struct Concierge {
     port: Arc<dyn ConciergePort>,
     ai: Option<Arc<dyn ChatProvider>>,
     answers: Arc<dl_answer::AnswerEngine>,
+    brain: Option<Arc<dyn dl_brain::AiAnswerer>>,
     config: ConciergeConfig,
     cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
     user_actions: Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
@@ -3457,6 +3458,21 @@ fn extract_bot_mention_question(content: &str, bot_user_id: Option<u64>) -> Opti
 }
 
 impl Concierge {
+    pub fn with_brain(
+        pool: PgPool,
+        port: Arc<dyn ConciergePort>,
+        ai: Option<Arc<dyn ChatProvider>>,
+        config: ConciergeConfig,
+        answers: Arc<dl_answer::AnswerEngine>,
+        brain: Arc<dyn dl_brain::AiAnswerer>,
+    ) -> Arc<Self> {
+        let mut concierge = Self::with_answers(pool, port, ai, config, answers);
+        Arc::get_mut(&mut concierge)
+            .expect("Neue Concierge-Instanz")
+            .brain = Some(brain);
+        concierge
+    }
+
     pub fn new(
         pool: PgPool,
         port: Arc<dyn ConciergePort>,
@@ -3490,6 +3506,7 @@ impl Concierge {
             port,
             ai,
             answers,
+            brain: None,
             config,
             cooldowns: Mutex::new(HashMap::new()),
             user_actions: Mutex::new(HashMap::new()),
@@ -4901,7 +4918,9 @@ impl Concierge {
             }
         };
         let answer = self
-            .answer_decision(
+            .answer_bound_decision(
+                user_id,
+                channel_id,
                 trimmed,
                 Some(&history),
                 Some(&conversation),
@@ -5151,6 +5170,58 @@ impl Concierge {
     /// `patience_channel` ist der Kanal, in dem der Concierge Bescheid sagt, wenn
     /// der LLM-Aufruf laenger braucht als `AI_GEDULD_HINWEIS_NACH`. `None` heisst
     /// stumm warten, etwa wenn niemand auf eine Antwort wartet.
+    #[allow(clippy::too_many_arguments)]
+    async fn answer_bound_decision(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        question: &str,
+        history: Option<&[String]>,
+        conversation: Option<&[ChatMessage]>,
+        route: AnswerRoute,
+        patience_channel: Option<u64>,
+    ) -> AnswerDecision {
+        let Some(brain) = &self.brain else {
+            return self
+                .answer_decision(question, history, conversation, route, patience_channel)
+                .await;
+        };
+        let task = dl_brain::DiscordAnswerTask {
+            capability: dl_brain::DiscordAnswerCapability::Concierge,
+            channel_id,
+        };
+        let answer = brain.answer_discord_task(question, user_id, &task);
+        let mut answer = std::pin::pin!(answer);
+        let result = if let Some(channel) = patience_channel {
+            tokio::select! {
+                result = &mut answer => result,
+                () = tokio::time::sleep(AI_GEDULD_HINWEIS_NACH) => {
+                    self.send_patience_notice(channel).await;
+                    answer.await
+                }
+            }
+        } else {
+            answer.await
+        };
+        let (reply, hit, outcome) = match result {
+            Ok(dl_brain::BrainOutcome::Answer(text)) => (text, true, ConciergeAnswerOutcome::Answered),
+            Ok(_) => (KNOWLEDGE_GAP_TEXT.into(), false, ConciergeAnswerOutcome::NoAnswer),
+            Err(_) => ("Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into(), false, ConciergeAnswerOutcome::Error),
+        };
+        let decision = AnswerDecision {
+            answer: LlmAnswer {
+                reply: Some(reply),
+                intent: Some(classify_intent(question)),
+                pate_request: explicit_pate_request(question),
+            },
+            source: "brain_task",
+            knowledge_hit: hit,
+            outcome,
+        };
+        log_concierge_answer_decision(route, &decision, question, history.is_some());
+        decision
+    }
+
     async fn answer_decision(
         &self,
         question: &str,
@@ -5440,7 +5511,15 @@ impl Concierge {
         response_components: Option<&Value>,
     ) -> AnswerTerminal {
         let decision = self
-            .answer_decision(question, None, None, route, Some(channel_id))
+            .answer_bound_decision(
+                user_id,
+                channel_id,
+                question,
+                None,
+                None,
+                route,
+                Some(channel_id),
+            )
             .await;
         let source = decision.source;
         let knowledge_hit = decision.knowledge_hit;
@@ -8661,6 +8740,73 @@ mod tests {
         });
         config.frischling_lookup_retry = StdDuration::from_millis(1);
         config
+    }
+
+    #[tokio::test]
+    async fn brain_task_keeps_identity_and_does_not_fall_back_to_bot_model() {
+        struct TaskBrain(bool);
+        #[async_trait]
+        impl dl_brain::AiAnswerer for TaskBrain {
+            async fn answer(
+                &self,
+                _: &str,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                panic!("Untypisierter Antwortpfad")
+            }
+            async fn answer_discord_task(
+                &self,
+                question: &str,
+                user_id: u64,
+                task: &dl_brain::DiscordAnswerTask,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                assert_eq!(question, "Hallo");
+                assert_eq!(user_id, 42);
+                assert_eq!(task.channel_id, 10);
+                assert_eq!(
+                    task.capability,
+                    dl_brain::DiscordAnswerCapability::Concierge
+                );
+                if self.0 {
+                    Ok(dl_brain::BrainOutcome::Answer("Brain-Testantwort".into()))
+                } else {
+                    Err(dl_brain::BrainError::Backend("nicht verfügbar".into()))
+                }
+            }
+        }
+        for available in [true, false] {
+            let provider = dl_ai::MockChatProvider::new(Vec::new());
+            let answers = Arc::new(dl_answer::AnswerEngine::new(
+                Some(provider.clone()),
+                Arc::new(knowledge_client::CommunityRetriever {
+                    base_url: "http://127.0.0.1:1".into(),
+                    timeout: KNOWLEDGE_TIMEOUT,
+                }),
+                None,
+                StdDuration::from_secs(1),
+            ));
+            let concierge = Concierge::with_brain(
+                lazy_pool(),
+                mock_port(),
+                Some(provider.clone()),
+                test_config(true, &[]),
+                answers,
+                Arc::new(TaskBrain(available)),
+            );
+            let decision = concierge
+                .answer_bound_decision(
+                    42,
+                    10,
+                    "Hallo",
+                    Some(&["Gespeicherter privater Verlauf".into()]),
+                    None,
+                    AnswerRoute::Concierge,
+                    None,
+                )
+                .await;
+            assert_eq!(decision.source, "brain_task");
+            assert_eq!(decision.knowledge_hit, available);
+            assert!(provider.requests().is_empty());
+        }
     }
 
     #[test]

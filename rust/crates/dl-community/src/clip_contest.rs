@@ -695,6 +695,8 @@ type FinalizeState = (
     DateTime<Utc>,
 );
 
+type TwitchSubmissionReplay = (i64, String, String, String, Option<String>, Option<String>);
+
 const VOTING_SELECT: &str =
     "SELECT v.window_id, v.guild_id, v.channel_id, v.status, v.message_id, \
             w.start_at, w.end_at, v.voting_start_at, v.voting_end_at, v.result_message_id, \
@@ -1359,15 +1361,14 @@ impl ClipStore {
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(ToString::to_string);
-        let replay: Option<(i64, String, String, String, Option<String>, Option<String>)> =
-            sqlx::query_as(
-                "SELECT id, link, streamer_twitch_user_id, streamer_login,
+        let replay: Option<TwitchSubmissionReplay> = sqlx::query_as(
+            "SELECT id, link, streamer_twitch_user_id, streamer_login,
                     submitted_by_twitch_user_id, title
                FROM clips.clip_submissions WHERE idempotency_key = $1",
-            )
-            .bind(&request.idempotency_key)
-            .fetch_optional(&mut *tx)
-            .await?;
+        )
+        .bind(&request.idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await?;
         // Der Producer-Schlüssel bindet die Clip-ID. Metadaten bleiben beim ersten
         // Submit; Drift wird als Duplicate sichtbar, ohne einen Retry auszulösen.
         if let Some((id, link, streamer_id, streamer_login, submitted_by, stored_title)) = replay {

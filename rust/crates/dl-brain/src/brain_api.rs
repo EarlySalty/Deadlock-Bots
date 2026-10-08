@@ -145,6 +145,13 @@ fn client_error(error: ClientError) -> BrainError {
 }
 
 fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
+    project_bounded(response, 3800)
+}
+
+fn project_bounded(
+    response: PublicAnswerResponse,
+    max_units: usize,
+) -> Result<BrainOutcome, BrainError> {
     match response.status {
         AnswerStatus::Answered
         | AnswerStatus::BuildRejected
@@ -161,7 +168,7 @@ fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
             let mut units = 0;
             let end = text.char_indices().find_map(|(index, character)| {
                 units += character.len_utf16();
-                (units > 3800).then_some(index)
+                (units > max_units).then_some(index)
             });
             let text = if let Some(end) = end {
                 tracing::warn!(klasse = "laenge", "Brain-Antwort gekürzt");
@@ -250,6 +257,46 @@ fn without_links_pass(text: &str) -> (String, bool) {
 
 #[async_trait::async_trait]
 impl AiAnswerer for BrainApiAnswerer {
+    async fn answer_discord_task(
+        &self,
+        question: &str,
+        user_id: u64,
+        task: &crate::DiscordAnswerTask,
+    ) -> Result<BrainOutcome, BrainError> {
+        if question.trim().is_empty()
+            || question.chars().count() > 4000
+            || user_id == 0
+            || !task.valid()
+        {
+            return Err(backend_error());
+        }
+        tokio::time::timeout(self.timeout, async {
+            let _permit = self
+                .admission
+                .acquire()
+                .await
+                .map_err(|_| backend_error())?;
+            let query = self.query(question)?;
+            let response = self
+                .client
+                .answer_discord_task(&query, user_id, task)
+                .await
+                .map_err(client_error)?;
+            tracing::info!(
+                capability = ?task.capability,
+                request_id = %response.request_id,
+                status = ?response.status,
+                "Discord-Bot-Aufgabe vom Brain empfangen"
+            );
+            match response.status {
+                AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
+                _ => project_bounded(response, 1800),
+            }
+        })
+        .await
+        .map_err(|_| classified_backend_error("transport"))?
+    }
+
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
         self.answer_query(question, None, true, None).await
     }
