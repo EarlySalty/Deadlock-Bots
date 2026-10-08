@@ -691,7 +691,27 @@ mod tests {
                 json!({}),
                 200,
             ),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            [
+                Value::Null,
+                json!([]),
+                json!("invalid"),
+                json!(1),
+                json!(true),
+            ]
+            .map(|args| {
+                (
+                    "fixture-brain",
+                    "/mcp/public",
+                    Some("42"),
+                    Some("fixture"),
+                    args,
+                    403,
+                )
+            }),
+        ) {
             let mut req = client
                 .post(format!("http://{addr}{route}"))
                 .bearer_auth(token);
@@ -717,6 +737,56 @@ mod tests {
                         Status::Sent
                     } else {
                         Status::Unknown
+                    }
+                );
+            }
+        }
+        for (token, user, request, expected) in [
+            ("falsch", Some("42"), Some("fixture"), 401),
+            ("fixture-internal", Some("42"), Some("fixture"), 401),
+            ("fixture-brain", None, Some("fixture"), 403),
+            ("fixture-brain", Some("0"), Some("fixture"), 403),
+            ("fixture-brain", Some("invalid"), Some("fixture"), 403),
+            ("fixture-brain", Some("999"), Some("fixture"), 403),
+            ("fixture-brain", Some("42"), None, 403),
+            ("fixture-brain", Some("42"), Some(""), 403),
+            ("fixture-brain", Some("42"), Some("fixture"), 200),
+            ("fixture-brain", Some("43"), Some("fixture"), 200),
+        ] {
+            let mut req = client
+                .post(format!("http://{addr}/mcp/public"))
+                .bearer_auth(token);
+            if let Some(user) = user {
+                req = req.header("x-discord-user-id", user);
+            }
+            if let Some(request) = request {
+                req = req.header("x-discord-request-id", request);
+            }
+            let response = req
+                .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"self_invite_status"}}))
+                .send()
+                .await
+                .expect("HTTP ohne arguments");
+            assert_eq!(response.status().as_u16(), expected);
+            if expected == 200 {
+                let rpc: Value = response.json().await.expect("JSON-RPC ohne arguments");
+                assert_eq!(rpc["id"], 2);
+                assert_eq!(rpc["result"]["isError"], false);
+                let reply: Reply = serde_json::from_str(
+                    rpc["result"]["content"][0]["text"]
+                        .as_str()
+                        .expect("Projektion ohne arguments"),
+                )
+                .expect("Minimalvertrag ohne arguments");
+                assert_eq!(
+                    reply,
+                    if user == Some("42") {
+                        Reply::new(
+                            Status::Sent,
+                            Some("2026-10-01T10:00:00Z".parse().expect("Beobachtungszeit")),
+                        )
+                    } else {
+                        Reply::new(Status::Unknown, None)
                     }
                 );
             }

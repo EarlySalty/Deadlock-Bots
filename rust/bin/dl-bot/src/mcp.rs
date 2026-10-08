@@ -187,9 +187,11 @@ async fn public_post(
             let Some((_, pool, guild)) = st.public_source.as_ref() else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
-            let Some(status) =
-                self_invite::read(pool, user, *guild, &req["params"]["arguments"]).await
-            else {
+            let arguments = req["params"]
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let Some(status) = self_invite::read(pool, user, *guild, &arguments).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
             json!({"content":[{"type":"text","text":serde_json::to_string(&status).expect("Status ist serialisierbar")}],"isError":false})
