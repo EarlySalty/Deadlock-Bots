@@ -76,11 +76,28 @@ pub(super) async fn read(pool: &PgPool, user: u64, guild: u64, args: &Value) -> 
     serde_json::from_value::<Arguments>(args.clone()).ok()?;
     let user = i64::try_from(user).ok().filter(|id| *id > 0)?;
     let guild = i64::try_from(guild).ok().filter(|id| *id > 0)?;
-    Some(
-        read_owned(pool, user, guild)
-            .await
-            .unwrap_or_else(|_| Reply::unavailable()),
-    )
+    Some(read_owned(pool, user, guild).await.unwrap_or_else(|error| {
+        let kind = match &error {
+            sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed => "connection",
+            sqlx::Error::Database(_) => "database",
+            _ => "query",
+        };
+        let sqlstate = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .filter(|code| {
+                code.len() == 5 && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            });
+        tracing::warn!(
+            error_kind = kind,
+            sqlstate = sqlstate.as_deref().unwrap_or("none"),
+            "self_invite_status unavailable"
+        );
+        Reply::unavailable()
+    }))
 }
 
 async fn read_owned(pool: &PgPool, user: i64, guild: i64) -> Result<Reply, sqlx::Error> {
