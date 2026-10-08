@@ -910,7 +910,15 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
-        let _ = replies.reaction(event, "👀", true).await;
+        if !proactive {
+            let reacted = replies.reaction(event, "👀", true).await.is_ok();
+            tracing::info!(
+                message_id = event.message_id,
+                channel_id = event.channel_id,
+                reacted,
+                "brain_direct_reaction_started"
+            );
+        }
         let outcome = match reservation {
             dl_brain::DiscordReservation::Accepted => {
                 self.reserved_outcome_for_question(question, &context).await
@@ -932,7 +940,9 @@ impl BrainHandler {
             }
             dl_brain::BrainOutcome::BackendError => BRAIN_BACKEND_ERR.to_owned(),
             dl_brain::BrainOutcome::Cooldown { .. } => {
-                let _ = replies.reaction(event, "👀", false).await;
+                if !proactive {
+                    let _ = replies.reaction(event, "👀", false).await;
+                }
                 self.clear_guide_pending(event, proactive).await;
                 return;
             }
@@ -947,7 +957,6 @@ impl BrainHandler {
                 .as_ref()
                 .is_some_and(|pending| **pending != Some((event.author_id, event.message_id)))
             {
-                let _ = replies.reaction(event, "👀", false).await;
                 return;
             }
             let body = direct_brain_reply_body(event, &text);
@@ -970,16 +979,18 @@ impl BrainHandler {
         } else {
             failed = true;
         }
-        let _ = replies.reaction(event, "👀", false).await;
-        if failed {
-            let _ = replies.reaction(event, "❌", true).await;
+        if !proactive {
+            let _ = replies.reaction(event, "👀", false).await;
+            if failed {
+                let _ = replies.reaction(event, "❌", true).await;
+            }
+            tracing::info!(
+                message_id = event.message_id,
+                channel_id = event.channel_id,
+                failed,
+                "brain_direct_reaction_finished"
+            );
         }
-        tracing::debug!(
-            message_id = event.message_id,
-            channel_id = event.channel_id,
-            failed,
-            "brain_direct_reaction_finished"
-        );
         self.clear_guide_pending(event, proactive).await;
     }
 
@@ -5027,6 +5038,38 @@ mod tests {
                 usize::from(!fail && !revoke)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn brain_reaktion_markiert_folgefragen_aber_keine_abbrechbare_guide_hilfe() {
+        let (handler, _) = direct_test_handler();
+        let replies = RecordingBrainReplies::default();
+        let event = test_message_event(Some(1), "Und welche Items passen dazu?");
+        handler
+            .conversations
+            .lock()
+            .await
+            .record(&event, 999, Instant::now());
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        assert_eq!(
+            *replies.reactions.lock().await,
+            vec![
+                (event.channel_id, event.message_id, "👀".into(), true),
+                (event.channel_id, event.message_id, "👀".into(), false),
+            ]
+        );
+        let replies = RecordingBrainReplies::default();
+        handler
+            .handle_message_event_with_replies(
+                &guide_test_event("Welche Lanes gibt es?"),
+                42,
+                &replies,
+            )
+            .await;
+        assert_eq!(replies.sent.lock().await.len(), 1);
+        assert!(replies.reactions.lock().await.is_empty());
     }
 
     #[tokio::test]
