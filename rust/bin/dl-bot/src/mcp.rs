@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod public;
+mod self_invite;
 
 const DISCORD_API: &str = "https://discord.com/api/v10";
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
@@ -174,7 +175,24 @@ async fn public_post(
         .filter(|id| *id != 0 && request_id.is_some());
     let result = match req["method"].as_str() {
         Some("tools/list") => {
-            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"}]})
+            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
+        }
+        Some("tools/call") if req["params"]["name"] == "self_invite_status" => {
+            let Ok(access) = public::access(&st, user).await else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            let Some(user) = access.user_id.filter(|id| Some(*id) == user) else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            let Some((_, pool, guild)) = st.public_source.as_ref() else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            let Some(status) =
+                self_invite::read(pool, user, *guild, &req["params"]["arguments"]).await
+            else {
+                return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
+            };
+            json!({"content":[{"type":"text","text":serde_json::to_string(&status).expect("Status ist serialisierbar")}],"isError":false})
         }
         Some("tools/call") if req["params"]["name"] == "public_server_facts" => {
             let Ok(access) = public::access(&st, user).await else {
