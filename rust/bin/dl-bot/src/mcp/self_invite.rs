@@ -160,7 +160,8 @@ async fn read_owned(pool: &PgPool, user: i64, guild: i64) -> Result<Reply, sqlx:
          FROM steam.invite_requests r
          LEFT JOIN steam.steam_tasks t ON t.id = r.dispatch_task_id
            AND t.type = 'AUTH_SEND_PLAYTEST_INVITE'
-           AND t.payload->>'steam_id' = $3
+           AND (t.payload->>'steam_id' = $3
+                OR (t.payload IS NULL AND t.result #>> '{data,steam_id64}' = $3))
            AND (t.result #>> '{data,steam_id64}' IS NULL OR t.result #>> '{data,steam_id64}' = $3)
          WHERE r.steam_id64 = $1 AND (r.target_discord_id = $2 OR r.target_discord_id IS NULL)",
     )
@@ -312,6 +313,29 @@ mod tests {
                 expected
             );
         }
+        for (code, expected) in [(0, Status::Sent), (5, Status::AlreadyHasGame)] {
+            sqlx::query("UPDATE steam.steam_tasks SET payload=NULL, status=$1, result=jsonb_build_object('ok',$2::boolean,'data',jsonb_build_object('steam_id64','76561197960265839','response',jsonb_build_object('code',$3::int))) WHERE id=100")
+                .bind(if code == 0 { "DONE" } else { "FAILED" })
+                .bind(code == 0)
+                .bind(code)
+                .execute(db.pool()).await.expect("Produktiver Abschluss ohne Payload");
+            assert_eq!(
+                read(db.pool(), 42, 1, &empty)
+                    .await
+                    .expect("Ergebnisidentität")
+                    .status,
+                expected
+            );
+        }
+        sqlx::query("UPDATE steam.steam_tasks SET result='{\"data\":{\"steam_id64\":\"76561197960265950\",\"response\":{\"code\":0}}}' WHERE id=100")
+            .execute(db.pool()).await.expect("Fremdes abgeschlossenes Ergebnis");
+        assert_eq!(
+            read(db.pool(), 42, 1, &empty)
+                .await
+                .expect("Keine fremde Ergebnisidentität")
+                .status,
+            Status::Unknown
+        );
         sqlx::query("UPDATE steam.steam_tasks SET payload='{\"steam_id\":\"76561197960265950\"}', result='{\"data\":{\"response\":{\"code\":0}}}' WHERE id=100")
             .execute(db.pool()).await.expect("Fremder Auftrag");
         assert_eq!(
