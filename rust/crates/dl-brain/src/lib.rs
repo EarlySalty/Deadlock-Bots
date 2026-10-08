@@ -9,6 +9,14 @@ use tokio::sync::Mutex;
 
 pub mod api_ingest;
 pub mod brain_api;
+pub use brain_client::{AnswerContext, AnswerInputKind, DiscordAnswerContext};
+
+#[derive(Clone)]
+pub struct DiscordQueryContext {
+    pub user_id: u64,
+    pub allow_discord_reads: bool,
+    pub answer_context: Option<DiscordAnswerContext>,
+}
 
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
 
@@ -133,6 +141,24 @@ pub trait AiAnswerer: Send + Sync {
         ))
     }
 
+    async fn answer_for_discord_with_context(
+        &self,
+        question: &str,
+        context: &DiscordQueryContext,
+    ) -> Result<BrainOutcome, BrainError> {
+        if context.answer_context.is_some() {
+            return Err(BrainError::Backend(
+                "Ortskontext für diesen Consumer nicht verfügbar".into(),
+            ));
+        }
+        self.answer_for_discord_with_read_access(
+            question,
+            context.user_id,
+            context.allow_discord_reads,
+        )
+        .await
+    }
+
     async fn answer_for_discord_with_read_access(
         &self,
         question: &str,
@@ -178,21 +204,35 @@ pub async fn handle_discord_query_with_read_access(
     answerer: &dyn AiAnswerer,
     allow_discord_reads: bool,
 ) -> Option<BrainOutcome> {
-    match cooldowns.reserve_discord(user_id, channel_id).await {
+    handle_discord_query_with_context(
+        question,
+        channel_id,
+        max_question_len,
+        cooldowns,
+        answerer,
+        &DiscordQueryContext {
+            user_id,
+            allow_discord_reads,
+            answer_context: None,
+        },
+    )
+    .await
+}
+
+pub async fn handle_discord_query_with_context(
+    question: &str,
+    channel_id: u64,
+    max_question_len: usize,
+    cooldowns: &BrainCooldowns,
+    answerer: &dyn AiAnswerer,
+    context: &DiscordQueryContext,
+) -> Option<BrainOutcome> {
+    match cooldowns.reserve_discord(context.user_id, channel_id).await {
         DiscordReservation::Accepted => {}
         DiscordReservation::DailyLimit => return Some(BrainOutcome::DailyLimit),
         DiscordReservation::Suppressed => return None,
     }
-    Some(
-        answer_discord_query_with_read_access(
-            question,
-            user_id,
-            max_question_len,
-            answerer,
-            allow_discord_reads,
-        )
-        .await,
-    )
+    Some(answer_discord_query_with_context(question, max_question_len, answerer, context).await)
 }
 
 pub async fn answer_discord_query(
@@ -211,6 +251,25 @@ pub async fn answer_discord_query_with_read_access(
     answerer: &dyn AiAnswerer,
     allow_discord_reads: bool,
 ) -> BrainOutcome {
+    answer_discord_query_with_context(
+        question,
+        max_question_len,
+        answerer,
+        &DiscordQueryContext {
+            user_id,
+            allow_discord_reads,
+            answer_context: None,
+        },
+    )
+    .await
+}
+
+pub async fn answer_discord_query_with_context(
+    question: &str,
+    max_question_len: usize,
+    answerer: &dyn AiAnswerer,
+    context: &DiscordQueryContext,
+) -> BrainOutcome {
     let question = question.trim();
     if question.is_empty() {
         return BrainOutcome::Usage;
@@ -220,7 +279,7 @@ pub async fn answer_discord_query_with_read_access(
         return BrainOutcome::TooLong { len };
     }
     match answerer
-        .answer_for_discord_with_read_access(question, user_id, allow_discord_reads)
+        .answer_for_discord_with_context(question, context)
         .await
     {
         Ok(outcome) => outcome,

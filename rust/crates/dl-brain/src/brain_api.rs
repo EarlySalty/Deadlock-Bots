@@ -1,4 +1,4 @@
-use crate::{AiAnswerer, BrainError, BrainOutcome};
+use crate::{AiAnswerer, AnswerContext, BrainError, BrainOutcome, DiscordQueryContext};
 use brain_client::{
     AnswerProfile, AnswerStatus, AsyncBrainClient, ClientError, PublicAnswerResponse, Query,
 };
@@ -74,6 +74,7 @@ impl BrainApiAnswerer {
             .map_err(|_| backend_error())?;
         let id = format!("{}-{sequence}", self.namespace);
         Ok(Query {
+            answer_context: None,
             request_id: id.clone(),
             conversation_id: id,
             text: question.to_owned(),
@@ -90,6 +91,7 @@ impl BrainApiAnswerer {
         question: &str,
         user_id: Option<u64>,
         allow_discord_reads: bool,
+        answer_context: Option<AnswerContext>,
     ) -> Result<BrainOutcome, BrainError> {
         if question.trim().is_empty() || question.chars().count() > 4000 || user_id == Some(0) {
             return Err(backend_error());
@@ -100,7 +102,8 @@ impl BrainApiAnswerer {
                 .acquire()
                 .await
                 .map_err(|_| backend_error())?;
-            let query = self.query(question)?;
+            let mut query = self.query(question)?;
+            query.answer_context = answer_context;
             let response = match user_id {
                 Some(user_id) => {
                     self.client
@@ -248,7 +251,7 @@ fn without_links_pass(text: &str) -> (String, bool) {
 #[async_trait::async_trait]
 impl AiAnswerer for BrainApiAnswerer {
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, None, true).await
+        self.answer_query(question, None, true, None).await
     }
 
     async fn answer_for_discord(
@@ -260,13 +263,27 @@ impl AiAnswerer for BrainApiAnswerer {
             .await
     }
 
+    async fn answer_for_discord_with_context(
+        &self,
+        question: &str,
+        context: &DiscordQueryContext,
+    ) -> Result<BrainOutcome, BrainError> {
+        self.answer_query(
+            question,
+            Some(context.user_id),
+            context.allow_discord_reads,
+            context.answer_context.clone().map(AnswerContext::Discord),
+        )
+        .await
+    }
+
     async fn answer_for_discord_with_read_access(
         &self,
         question: &str,
         user_id: u64,
         allow_discord_reads: bool,
     ) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, Some(user_id), allow_discord_reads)
+        self.answer_query(question, Some(user_id), allow_discord_reads, None)
             .await
     }
 }
@@ -689,8 +706,23 @@ mod tests {
             BTreeSet::from(["bot.public".into()]),
         )
         .expect("Testconsumer");
+        let location = crate::DiscordAnswerContext {
+            channel_name: Some("Hilfe".into()),
+            category_name: Some("Community".into()),
+            input_kind: Some(crate::AnswerInputKind::Mention),
+            is_thread: Some(false),
+            is_direct_message: Some(false),
+            ..Default::default()
+        };
         let first = answerer
-            .answer_for_discord("Neutrale Testfrage, nutze User-ID 999", 3)
+            .answer_for_discord_with_context(
+                "Neutrale Testfrage, nutze User-ID 999",
+                &DiscordQueryContext {
+                    user_id: 3,
+                    allow_discord_reads: true,
+                    answer_context: Some(location.clone()),
+                },
+            )
             .await
             .expect("Autorenbindung");
         let second = crate::handle_brain_query(
@@ -711,6 +743,11 @@ mod tests {
         assert_eq!(received[1].1, "4");
         assert_ne!(received[0].0.request_id, received[1].0.request_id);
         assert_ne!(received[0].0.conversation_id, received[1].0.conversation_id);
+        assert_eq!(
+            received[0].0.answer_context,
+            Some(AnswerContext::Discord(location))
+        );
+        assert!(received[1].0.answer_context.is_none());
         assert_eq!(received[1].0.text, "Öffentliche Frage");
     }
 }
