@@ -44,6 +44,7 @@ toml.workspace = true
 workspace = true
 
 [dev-dependencies]
+fs2 = "0.4.3"
 dl-central-db = { workspace = true, features = ["testing"] }
 dl-dashboard.workspace = true
 tempfile.workspace = true

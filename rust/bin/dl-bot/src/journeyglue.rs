@@ -602,7 +602,7 @@ mod tests {
             lookup.clone(),
             &dispatcher,
             1,
-            Duration::from_millis(10),
+            Duration::ZERO,
         );
 
         for _ in 0..5 {
@@ -612,8 +612,11 @@ mod tests {
             });
         }
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        task.abort();
+        drop(dispatcher);
+        task.await?;
+        while Arc::strong_count(&lookup) > 1 {
+            tokio::task::yield_now().await;
+        }
 
         assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
         Ok(())

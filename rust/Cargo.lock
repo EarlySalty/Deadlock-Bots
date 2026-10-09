@@ -1363,6 +1363,7 @@ dependencies = [
  "dl-squads",
  "dl-voice",
  "dl-webcore",
+ "fs2",
  "hex",
  "reqwest",
  "serde",
