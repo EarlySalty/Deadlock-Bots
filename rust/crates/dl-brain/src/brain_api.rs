@@ -288,10 +288,7 @@ impl AiAnswerer for BrainApiAnswerer {
                 status = ?response.status,
                 "Discord-Bot-Aufgabe vom Brain empfangen"
             );
-            match response.status {
-                AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
-                _ => project_bounded(response, 1800),
-            }
+            project_bounded(response, 1800)
         })
         .await
         .map_err(|_| classified_backend_error("transport"))?
@@ -353,6 +350,16 @@ mod tests {
         truncated_body: bool,
         invalid_contract: bool,
     ) -> Result<BrainOutcome, BrainError> {
+        fixture_answer_with_task(status, text, truncated_body, invalid_contract, None).await
+    }
+
+    async fn fixture_answer_with_task(
+        status: &str,
+        text: &str,
+        truncated_body: bool,
+        invalid_contract: bool,
+        task: Option<crate::DiscordAnswerCapability>,
+    ) -> Result<BrainOutcome, BrainError> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Lokaler Testport");
         let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
         let status = status.to_owned();
@@ -379,6 +386,26 @@ mod tests {
                         })
                         .expect("Inhaltslängenheader");
                     if request.len() >= end + 4 + length {
+                        if let Some(capability) = task {
+                            assert!(headers
+                                .to_ascii_lowercase()
+                                .contains("x-discord-user-id: 3"));
+                            assert!(headers
+                                .to_ascii_lowercase()
+                                .contains("x-discord-read-access: disabled"));
+                            let bound = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("x-discord-answer-task:")
+                                        .map(str::trim)
+                                        .map(str::to_owned)
+                                })
+                                .expect("Aufgabenheader");
+                            let bound: serde_json::Value =
+                                serde_json::from_str(&bound).expect("Aufgabenvertrag");
+                            assert_eq!(bound, json!({"capability": capability, "channel_id": 10}));
+                        }
                         break serde_json::from_slice(&request[end + 4..end + 4 + length])
                             .expect("Anfragevertrag");
                     }
@@ -411,11 +438,91 @@ mod tests {
             BTreeSet::from(["bot.public".into()]),
         )
         .expect("Testconsumer");
-        let result = answerer
-            .answer_for_discord("Sinclairs letzter Patch?", 3)
-            .await;
+        let result = match task {
+            Some(capability) => {
+                answerer
+                    .answer_discord_task(
+                        "Sinclairs letzter Patch?",
+                        3,
+                        &crate::DiscordAnswerTask {
+                            capability,
+                            channel_id: 10,
+                        },
+                    )
+                    .await
+            }
+            None => {
+                answerer
+                    .answer_for_discord("Sinclairs letzter Patch?", 3)
+                    .await
+            }
+        };
         server.join().expect("Testserver");
         result
+    }
+
+    #[tokio::test]
+    async fn aufgaben_erhalten_brain_text_und_bleiben_bei_ausfaellen_geschlossen() {
+        for capability in [
+            crate::DiscordAnswerCapability::Concierge,
+            crate::DiscordAnswerCapability::Faq,
+        ] {
+            for status in ["answered", "build_rejected", "insufficient_evidence"] {
+                let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1787));
+                let outcome =
+                    fixture_answer_with_task(status, &text, false, false, Some(capability))
+                        .await
+                        .expect("Brain-Text");
+                assert_eq!(
+                    outcome,
+                    BrainOutcome::Answer(format!("Ungeprüft: {}🧠", "ä".repeat(1787)))
+                );
+                assert_eq!(
+                    fixture_answer_with_task(
+                        status,
+                        "https://example.invalid/patch",
+                        false,
+                        false,
+                        Some(capability),
+                    )
+                    .await
+                    .expect("Linkentfernung"),
+                    BrainOutcome::NoAnswer
+                );
+                let empty =
+                    fixture_answer_with_task(status, "", false, false, Some(capability)).await;
+                if status == "insufficient_evidence" {
+                    assert_eq!(empty.expect("Leerer Brain-Text"), BrainOutcome::NoAnswer);
+                } else {
+                    assert!(matches!(empty, Err(BrainError::Backend(_))));
+                }
+            }
+            for status in [
+                "unavailable",
+                "provider_error",
+                "budget_exceeded",
+                "unauthorized_evidence",
+            ] {
+                assert!(matches!(
+                    fixture_answer_with_task(status, "Antwort", false, false, Some(capability))
+                        .await,
+                    Err(BrainError::Backend(_))
+                ));
+            }
+            for (truncated_body, invalid_contract) in [(true, false), (false, true)] {
+                assert!(matches!(
+                    fixture_answer_with_task(
+                        "answered",
+                        "Antwort",
+                        truncated_body,
+                        invalid_contract,
+                        Some(capability),
+                    )
+                    .await,
+                    Err(BrainError::Backend(_))
+                ));
+            }
+        }
     }
 
     #[tokio::test]
