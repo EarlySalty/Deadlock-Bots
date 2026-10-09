@@ -277,6 +277,30 @@ fn discord_brain_answerer(
     )?))
 }
 
+struct UnavailableCommunityBrain;
+
+#[async_trait::async_trait]
+impl dl_brain::AiAnswerer for UnavailableCommunityBrain {
+    async fn answer(&self, _: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+        Err(dl_brain::BrainError::Backend(
+            "Brain-Antworten gerade nicht verfügbar".into(),
+        ))
+    }
+}
+
+fn community_brain_answerer(
+    options: &dl_core::runtime_config::AiOptions,
+    token: Option<String>,
+) -> Arc<dyn dl_brain::AiAnswerer> {
+    match discord_brain_answerer(options, token) {
+        Ok(answerer) => answerer,
+        Err(error) => {
+            tracing::warn!(%error, "Brain-Antworten für Concierge und FAQ nicht verfügbar");
+            Arc::new(UnavailableCommunityBrain)
+        }
+    }
+}
+
 async fn wait_for_gateway_cache_ready(
     events: &mut tokio::sync::broadcast::Receiver<dl_discord::GatewayEvent>,
     guild_id: u64,
@@ -1056,10 +1080,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
-    let community_brain = discord_brain_answerer(
+    let community_brain = community_brain_answerer(
         &operating.runtime.ai,
         dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN"),
-    )?;
+    );
     tracing::info!(
         concierge_enabled = concierge_config.enabled,
         "Brain-Antwortweg für Concierge und FAQ vorbereitet"
@@ -2080,6 +2104,58 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn community_brain_ohne_zugang_bleibt_geschlossen_ohne_startfehler() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Testport");
+        listener
+            .set_nonblocking(true)
+            .expect("Nichtblockierender Testport");
+        let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
+        for (endpoint, token) in [
+            (Some(endpoint.clone()), None),
+            (Some(endpoint), Some(" ".into())),
+            (None, Some("fixture-community-consumer".into())),
+            (
+                Some("https://example.invalid".into()),
+                Some("fixture-community-consumer".into()),
+            ),
+        ] {
+            let options = dl_core::runtime_config::AiOptions {
+                brain_api_endpoint: endpoint,
+                brain_command_enabled: Some(false),
+                ..Default::default()
+            };
+            assert!(super::discord_brain_answerer(&options, token.clone()).is_err());
+            let brain = super::community_brain_answerer(&options, token);
+            for capability in [
+                dl_brain::DiscordAnswerCapability::Concierge,
+                dl_brain::DiscordAnswerCapability::Faq,
+            ] {
+                assert!(matches!(
+                    brain
+                        .answer_discord_task(
+                            "Synthetische Frage",
+                            42,
+                            &dl_brain::DiscordAnswerTask {
+                                capability,
+                                channel_id: 10,
+                            },
+                        )
+                        .await,
+                    Err(dl_brain::BrainError::Backend(_))
+                ));
+            }
+            assert!(matches!(
+                brain.answer("Synthetische Frage").await,
+                Err(dl_brain::BrainError::Backend(_))
+            ));
+        }
+        assert_eq!(
+            listener.accept().expect_err("Keine Anfrage").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
     #[test]
     fn typed_operating_snapshot_reaches_community_moderation_and_ai_constructors() {
         let config = dl_core::bot_config::BotConfig::parse(
