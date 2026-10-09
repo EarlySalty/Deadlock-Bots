@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "brain-client"
 version = "0.1.0"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=49eb65f801d2cae87bfb3da6df38dfeb9bbce659#49eb65f801d2cae87bfb3da6df38dfeb9bbce659"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=d13d5c8d54de4b85c9cfd065696576671a988f02#d13d5c8d54de4b85c9cfd065696576671a988f02"
 dependencies = [
  "brain-contracts",
  "reqwest",
@@ -432,7 +432,7 @@ dependencies = [
 [[package]]
 name = "brain-contracts"
 version = "0.1.0"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=49eb65f801d2cae87bfb3da6df38dfeb9bbce659#49eb65f801d2cae87bfb3da6df38dfeb9bbce659"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=d13d5c8d54de4b85c9cfd065696576671a988f02#d13d5c8d54de4b85c9cfd065696576671a988f02"
 dependencies = [
  "chrono",
  "regex",
@@ -3212,7 +3212,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -5068,7 +5068,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5106,7 +5106,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -7504,7 +7504,7 @@ dependencies = [
 [[package]]
 name = "uplink-infisical-transport"
 version = "0.1.1"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=49eb65f801d2cae87bfb3da6df38dfeb9bbce659#49eb65f801d2cae87bfb3da6df38dfeb9bbce659"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=d13d5c8d54de4b85c9cfd065696576671a988f02#d13d5c8d54de4b85c9cfd065696576671a988f02"
 dependencies = [
  "reqwest",
 ]

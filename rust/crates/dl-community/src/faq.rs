@@ -840,6 +840,18 @@ impl FaqChat {
         user_id: u64,
         channel_id: u64,
     ) -> KnowledgeLookup {
+        self.lookup_bound_with_history(question, context, user_id, channel_id, &[])
+            .await
+    }
+
+    async fn lookup_bound_with_history(
+        &self,
+        question: &str,
+        context: &str,
+        user_id: u64,
+        channel_id: u64,
+        user_questions: &[String],
+    ) -> KnowledgeLookup {
         let Some(brain) = &self.brain else {
             return self.lookup_with_context(question, context).await;
         };
@@ -847,7 +859,11 @@ impl FaqChat {
             capability: dl_brain::DiscordAnswerCapability::Faq,
             channel_id,
         };
-        match brain.answer_discord_task(question, user_id, &task).await {
+        let user_questions = dl_brain::bounded_user_questions(user_questions, question);
+        match brain
+            .answer_discord_task_with_history(question, user_id, &task, &user_questions)
+            .await
+        {
             Ok(dl_brain::BrainOutcome::Answer(text)) => KnowledgeLookup::Answer(KnowledgeAnswer {
                 answerable: true,
                 answer: Some(truncate_utf16(&text, 1900)),
@@ -1143,12 +1159,18 @@ impl FaqChat {
         .fetch_all(&mut *tx)
         .await?;
         let knowledge_question = knowledge_question_from_history(&history, question);
+        let user_questions: Vec<String> = history
+            .iter()
+            .filter(|(role, _)| role == "user")
+            .map(|(_, text)| text.clone())
+            .collect();
         let answer = self.visible_answer(
-            self.lookup_bound(
+            self.lookup_bound_with_history(
                 question,
                 &knowledge_question,
                 u64::try_from(user_id).map_err(|_| sqlx::Error::RowNotFound)?,
                 channel_id,
+                &user_questions,
             )
             .await,
         );
@@ -2693,6 +2715,93 @@ mod tests {
         }
         String::from_utf8(request[header_end..header_end + content_length].to_vec())
             .expect("utf8 request body")
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn brain_followup_route_reads_only_own_session_user_questions() {
+        struct LocalBrain(std::sync::Mutex<Vec<Vec<String>>>);
+        #[async_trait::async_trait]
+        impl dl_brain::AiAnswerer for LocalBrain {
+            async fn answer(
+                &self,
+                _: &str,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                panic!("Untypisierter Antwortpfad")
+            }
+            async fn answer_discord_task_with_history(
+                &self,
+                question: &str,
+                user_id: u64,
+                task: &dl_brain::DiscordAnswerTask,
+                history: &[String],
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                assert_eq!(question, "Wie mache ich das?");
+                assert_eq!(user_id, 42);
+                assert_eq!(task.capability, dl_brain::DiscordAnswerCapability::Faq);
+                self.0
+                    .lock()
+                    .expect("Brain-Verlaufsrecorder")
+                    .push(history.to_vec());
+                Ok(dl_brain::BrainOutcome::Answer("Antwort vom Brain".into()))
+            }
+        }
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("FAQ-Testdatenbank");
+        let provider = dl_ai::MockChatProvider::new(Vec::new());
+        let answers = Arc::new(dl_answer::AnswerEngine::new(
+            Some(provider.clone()),
+            Arc::new(knowledge_client::CommunityRetriever {
+                base_url: "http://127.0.0.1:1".into(),
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            Duration::from_secs(1),
+        ));
+        let brain = Arc::new(LocalBrain(std::sync::Mutex::new(Vec::new())));
+        let faq = FaqChat::with_brain(db.pool().clone(), ticket_port(), answers, brain.clone());
+        assert!(faq
+            .store
+            .create_session("own".into(), 42, "Test".into(), 100, 1)
+            .await
+            .expect("Eigene FAQ-Session"));
+        assert!(faq
+            .store
+            .create_session("foreign".into(), 99, "Andere Person".into(), 101, 1)
+            .await
+            .expect("Fremde FAQ-Session"));
+        for (session, role, text) in [
+            (
+                "own",
+                "user",
+                "Wie finde ich einen Paten? PRIVATE_CANARY_äöüß",
+            ),
+            ("own", "assistant", "ASSISTANT_CANARY Coaching"),
+            ("own", "system", "SYSTEM_CANARY Mitspieler"),
+            ("foreign", "user", "Fremdnutzer Coaching"),
+        ] {
+            assert_eq!(
+                faq.store
+                    .add_message(session, role, text)
+                    .await
+                    .expect("FAQ-Verlaufseintrag"),
+                FaqMessageWrite::Stored
+            );
+        }
+        assert_eq!(
+            faq.answer_statefully("own", 100, "Wie mache ich das?")
+                .await
+                .expect("Zustandsbehaftete FAQ-Antwort"),
+            FaqMessageWrite::Stored
+        );
+        assert_eq!(
+            *brain.0.lock().expect("Brain-Verlaufsrecorder"),
+            vec![vec![
+                "Wie finde ich einen Paten? PRIVATE_CANARY_äöüß".to_owned()
+            ]]
+        );
+        assert!(provider.requests().is_empty());
     }
 
     #[test]

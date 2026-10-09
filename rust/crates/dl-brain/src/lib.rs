@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 pub mod api_ingest;
 pub mod brain_api;
+pub use brain_client::bounded_user_questions;
 pub use brain_client::{
     AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
@@ -132,6 +133,21 @@ pub enum BrainError {
 
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
+    async fn answer_discord_task_with_history(
+        &self,
+        question: &str,
+        user_id: u64,
+        task: &DiscordAnswerTask,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
+        if !user_questions.is_empty() {
+            return Err(BrainError::Backend(
+                "Lokaler Gesprächsbezug nicht verfügbar".into(),
+            ));
+        }
+        self.answer_discord_task(question, user_id, task).await
+    }
+
     async fn answer_discord_task(
         &self,
         _question: &str,
@@ -151,6 +167,21 @@ pub trait AiAnswerer: Send + Sync {
         Err(BrainError::Backend(
             "Discord-Kontext für diesen Consumer nicht verfügbar".into(),
         ))
+    }
+
+    async fn answer_for_discord_with_history(
+        &self,
+        question: &str,
+        context: &DiscordQueryContext,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
+        if !user_questions.is_empty() {
+            return Err(BrainError::Backend(
+                "Lokaler Gesprächsbezug nicht verfügbar".into(),
+            ));
+        }
+        self.answer_for_discord_with_context(question, context)
+            .await
     }
 
     async fn answer_for_discord_with_context(
@@ -282,6 +313,16 @@ pub async fn answer_discord_query_with_context(
     answerer: &dyn AiAnswerer,
     context: &DiscordQueryContext,
 ) -> BrainOutcome {
+    answer_discord_query_with_history(question, max_question_len, answerer, context, &[]).await
+}
+
+pub async fn answer_discord_query_with_history(
+    question: &str,
+    max_question_len: usize,
+    answerer: &dyn AiAnswerer,
+    context: &DiscordQueryContext,
+    user_questions: &[String],
+) -> BrainOutcome {
     let question = question.trim();
     if question.is_empty() {
         return BrainOutcome::Usage;
@@ -291,7 +332,7 @@ pub async fn answer_discord_query_with_context(
         return BrainOutcome::TooLong { len };
     }
     match answerer
-        .answer_for_discord_with_context(question, context)
+        .answer_for_discord_with_history(question, context, user_questions)
         .await
     {
         Ok(outcome) => outcome,

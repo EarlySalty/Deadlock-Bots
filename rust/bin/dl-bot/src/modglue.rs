@@ -265,30 +265,56 @@ pub struct BrainHandler {
 
 #[derive(Default)]
 pub struct BrainConversations {
-    entries: HashMap<(u64, u64, u64), (u64, Instant)>,
+    entries: HashMap<(u64, u64, u64), BrainConversation>,
+}
+
+struct BrainConversation {
+    turns: Vec<(u64, String)>,
+    last_reply: Instant,
 }
 
 impl BrainConversations {
     fn prune(&mut self, now: Instant) {
-        self.entries.retain(|_, (_, last_reply)| {
-            now.saturating_duration_since(*last_reply) < BRAIN_CONVERSATION_TTL
+        self.entries.retain(|_, conversation| {
+            now.saturating_duration_since(conversation.last_reply) < BRAIN_CONVERSATION_TTL
         });
     }
 
-    fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
+    fn history(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<Vec<String>> {
         self.prune(now);
         let guild_id = event.guild_id?;
-        let (last_message, _) = self
+        let conversation = self
             .entries
             .get(&(guild_id, event.channel_id, event.author_id))?;
-        if (event.is_reply || event.reply_message_id.is_some() || event.reply_channel_id.is_some())
-            && (event.reply_message_id != Some(*last_message)
-                || event
-                    .reply_channel_id
-                    .is_some_and(|channel| channel != event.channel_id))
+        if event
+            .reply_channel_id
+            .is_some_and(|channel| channel != event.channel_id)
         {
             return None;
         }
+        let end = if event.is_reply
+            || event.reply_message_id.is_some()
+            || event.reply_channel_id.is_some()
+        {
+            let reply = event.reply_message_id?;
+            conversation
+                .turns
+                .iter()
+                .position(|(message_id, _)| *message_id == reply)?
+                + 1
+        } else {
+            conversation.turns.len()
+        };
+        Some(
+            conversation.turns[..end]
+                .iter()
+                .map(|(_, question)| question.clone())
+                .collect(),
+        )
+    }
+
+    fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
+        self.history(event, now)?;
         let question = event.content.trim();
         (!question.is_empty()).then(|| question.to_owned())
     }
@@ -299,10 +325,30 @@ impl BrainConversations {
             return;
         }
         if let Some(guild_id) = event.guild_id {
-            self.entries.insert(
-                (guild_id, event.channel_id, event.author_id),
-                (message_id, now),
-            );
+            let key = (guild_id, event.channel_id, event.author_id);
+            let history = self.history(event, now);
+            let mut conversation = self.entries.remove(&key).unwrap_or(BrainConversation {
+                turns: Vec::new(),
+                last_reply: now,
+            });
+            if let Some(history) = history {
+                conversation.turns.truncate(history.len());
+            } else {
+                conversation.turns.clear();
+            }
+            conversation
+                .turns
+                .push((message_id, event.content.trim().to_owned()));
+            let mut characters: usize = conversation
+                .turns
+                .iter()
+                .map(|(_, question)| question.chars().count())
+                .sum();
+            while conversation.turns.len() > 4 || characters > 4000 {
+                characters -= conversation.turns.remove(0).1.chars().count();
+            }
+            conversation.last_reply = now;
+            self.entries.insert(key, conversation);
         }
     }
 }
@@ -921,7 +967,24 @@ impl BrainHandler {
         }
         let outcome = match reservation {
             dl_brain::DiscordReservation::Accepted => {
-                self.reserved_outcome_for_question(question, &context).await
+                let history = if proactive {
+                    Vec::new()
+                } else {
+                    self.conversations
+                        .lock()
+                        .await
+                        .history(event, Instant::now())
+                        .unwrap_or_default()
+                };
+                let history = dl_brain::bounded_user_questions(&history, question);
+                dl_brain::answer_discord_query_with_history(
+                    question,
+                    self.config.max_question_len,
+                    self.answerer.as_ref(),
+                    &context,
+                    &history,
+                )
+                .await
             }
             dl_brain::DiscordReservation::DailyLimit => dl_brain::BrainOutcome::DailyLimit,
             dl_brain::DiscordReservation::Suppressed => unreachable!(),
@@ -4841,6 +4904,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingDiscordAnswerer {
         calls: Mutex<Vec<(String, u64)>>,
+        histories: Mutex<Vec<Vec<String>>>,
         read_access: Mutex<Vec<bool>>,
         legacy_calls: AtomicUsize,
         outcome: Option<dl_brain::BrainOutcome>,
@@ -4848,6 +4912,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl dl_brain::AiAnswerer for RecordingDiscordAnswerer {
+        async fn answer_for_discord_with_history(
+            &self,
+            question: &str,
+            context: &dl_brain::DiscordQueryContext,
+            history: &[String],
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            self.histories.lock().await.push(history.to_vec());
+            self.answer_for_discord_with_context(question, context)
+                .await
+        }
+
         async fn answer(
             &self,
             _question: &str,
@@ -4958,6 +5033,125 @@ mod tests {
         );
         handler.answerer = answerer.clone();
         (handler, answerer)
+    }
+
+    #[tokio::test]
+    async fn abrams_spirit_dreischritt_ueber_denselben_brain_eingang() {
+        use axum::{extract::Json, http::HeaderMap, routing::post, Router};
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let live_endpoint = std::env::var("DISCORD_BRAIN_PROBE_ENDPOINT").ok();
+        let live = live_endpoint.is_some();
+        let mut server = None;
+        let (endpoint, token, timeout) = if let Some(endpoint) = live_endpoint {
+            (
+                endpoint,
+                std::env::var("DISCORD_BRAIN_CLIENT_TOKEN").expect("Injizierter Probe-Zugang"),
+                Duration::from_millis(
+                    std::env::var("DISCORD_BRAIN_PROBE_TIMEOUT_MS")
+                        .expect("Probe-Frist")
+                        .parse()
+                        .expect("Probe-Frist in Millisekunden"),
+                ),
+            )
+        } else {
+            let app = Router::new().route("/v1/answer", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let captured = captured.clone();
+                async move {
+                    let q = body.get("query").unwrap_or(&body);
+                    let response = json!({"contract_version": "brain.public.v1", "request_id": q["request_id"],
+                        "knowledge_release": "test-release", "status": "insufficient_evidence",
+                        "text": "Ungeprüft: Für Abrams im Spirit-Build passt **Spirit-Item**.", "citations": []});
+                    captured.lock().await.push((headers, body));
+                    Json(response)
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("Lokaler Probe-Port");
+            let endpoint = format!("http://{}", listener.local_addr().expect("Probe-Adresse"));
+            server = Some(tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("Probe-Server")
+            }));
+            (
+                endpoint,
+                "fixture-brain-bearer".to_owned(),
+                Duration::from_secs(3),
+            )
+        };
+        let (mut handler, _) = direct_test_handler();
+        handler.answerer = Arc::new(
+            dl_brain::brain_api::BrainApiAnswerer::new(
+                &endpoint,
+                &token,
+                timeout,
+                "discord-synthetic-direct-probe".into(),
+                std::collections::BTreeSet::from(["bot.public".into()]),
+            )
+            .expect("Probe-Facade"),
+        );
+        let replies = RecordingBrainReplies::default();
+        let first = test_message_event(Some(1), "<@42> Welche Items passen zu Abrams?");
+        handler
+            .handle_message_event_with_replies(&first, 42, &replies)
+            .await;
+        let mut second = test_message_event(Some(1), "Okay ja ne Idee für ein Spirit build");
+        second.message_id = 4;
+        second.is_reply = true;
+        second.reply_message_id = Some(1001);
+        second.reply_channel_id = Some(second.channel_id);
+        handler
+            .handle_message_event_with_replies(&second, 42, &replies)
+            .await;
+        let mut third = test_message_event(Some(1), "Abrams");
+        third.message_id = 5;
+        handler
+            .handle_message_event_with_replies(&third, 42, &replies)
+            .await;
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 3);
+        for (index, (_, _, body)) in sent.iter().enumerate() {
+            let answer = body["content"]
+                .as_str()
+                .expect("Synthetische Brain-Antwort");
+            assert!(!answer.starts_with("Ungeprüft:"));
+            if index > 0 {
+                assert!(
+                    !answer.to_lowercase().contains("welchen helden"),
+                    "{answer}"
+                );
+                assert!(!answer.contains("Worauf beziehst"), "{answer}");
+                assert!(answer.to_lowercase().contains("spirit"), "{answer}");
+                assert!(answer.to_lowercase().contains("abrams"), "{answer}");
+                assert!(answer.contains("**"), "{answer}");
+            }
+            println!(
+                "{}",
+                json!({"case": "synthetic_abrams_spirit", "step": index + 1,
+                "live": live, "answer": answer})
+            );
+        }
+        if !live {
+            let received = received.lock().await;
+            assert_eq!(received.len(), 3);
+            assert_eq!(received[0].1["text"], "Welche Items passen zu Abrams?");
+            assert_eq!(received[1].1["query"]["text"], second.content);
+            assert_eq!(received[1].1["user_questions"], json!([first.content]));
+            assert_eq!(received[2].1["query"]["text"], "Abrams");
+            assert_eq!(
+                received[2].1["user_questions"],
+                json!([first.content, second.content])
+            );
+            for (headers, body) in &received[1..] {
+                assert_eq!(headers["x-discord-read-access"], "disabled");
+                assert_eq!(headers["x-discord-user-id"], "3");
+                assert!(headers.get("x-discord-answer-task").is_none());
+                assert!(body["query"]["answer_context"].is_null());
+            }
+        }
+        if let Some(server) = server {
+            server.abort();
+        }
     }
 
     #[tokio::test]
@@ -5138,6 +5332,10 @@ mod tests {
                 ]
             );
             assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                *answerer.histories.lock().await,
+                vec![Vec::<String>::new(), vec![mention.content.clone()]]
+            );
             let sent = replies.sent.lock().await;
             assert_eq!(sent.len(), 2);
             assert_eq!(sent[1].2["message_reference"]["message_id"], "4");
@@ -5146,7 +5344,11 @@ mod tests {
                 json!({"parse": [], "replied_user": false})
             );
             assert_eq!(
-                handler.conversations.lock().await.entries[&(1, 1, 3)].0,
+                handler.conversations.lock().await.entries[&(1, 1, 3)]
+                    .turns
+                    .last()
+                    .expect("Letzter Gesprächszug")
+                    .0,
                 1002
             );
         }
@@ -5174,7 +5376,7 @@ mod tests {
                 .await;
         }
         assert_eq!(answerer.calls.lock().await.len(), 50);
-        let last = handler.conversations.lock().await.entries[&(1, 1, 3)];
+        let last = handler.conversations.lock().await.entries[&(1, 1, 3)].last_reply;
         for _ in 0..5 {
             handler
                 .handle_message_event_with_replies(&followup, 42, &replies)
@@ -5189,7 +5391,10 @@ mod tests {
             sent[50].2["message_reference"]["message_id"],
             followup.message_id.to_string()
         );
-        assert_eq!(handler.conversations.lock().await.entries[&(1, 1, 3)], last);
+        assert_eq!(
+            handler.conversations.lock().await.entries[&(1, 1, 3)].last_reply,
+            last
+        );
     }
 
     #[tokio::test]
@@ -5244,6 +5449,49 @@ mod tests {
     }
 
     #[test]
+    fn eigener_kanalverlauf_bleibt_begrenzt_und_reply_waehlt_nur_seinen_zweig() {
+        let now = Instant::now();
+        let mut conversations = BrainConversations::default();
+        let mut event = test_message_event(Some(1), "");
+        for index in 0..6 {
+            event.content = format!("Frage {index} {}", "ä".repeat(900));
+            conversations.record(&event, 1000 + index, now);
+        }
+        let history = conversations.history(&event, now).expect("Eigener Verlauf");
+        assert_eq!(history.len(), 4);
+        assert!(
+            history
+                .iter()
+                .map(|question| question.chars().count())
+                .sum::<usize>()
+                <= 4000
+        );
+        event.is_reply = true;
+        event.reply_message_id = Some(1003);
+        let branch = conversations
+            .history(&event, now)
+            .expect("Eigene frühere Botantwort");
+        assert_eq!(branch, history[..2]);
+        event.content = "Neuer Gesprächszweig".into();
+        conversations.record(&event, 1010, now);
+        event.is_reply = false;
+        event.reply_message_id = None;
+        assert_eq!(
+            conversations.history(&event, now).expect("Eigener Zweig"),
+            [branch, vec![event.content.clone()]].concat()
+        );
+        event.author_id = 99;
+        assert!(conversations.history(&event, now).is_none());
+        event.author_id = 3;
+        event.channel_id = 99;
+        assert!(conversations.history(&event, now).is_none());
+        event.channel_id = 1;
+        event.is_reply = true;
+        event.reply_message_id = Some(1000);
+        assert!(conversations.history(&event, now).is_none());
+    }
+
+    #[test]
     fn gespraech_zehn_minuten_grenze_und_letzte_botantwort() {
         let now = Instant::now();
         let event = test_message_event(Some(1), "Folgefrage");
@@ -5253,7 +5501,6 @@ mod tests {
             conversations.question(&event, now + Duration::from_secs(599)),
             Some("Folgefrage".into())
         );
-        // Eine zugestellte Antwort startet die Frist neu und ersetzt das Reply-Ziel.
         conversations.record(&event, 1002, now + Duration::from_secs(599));
         assert!(conversations
             .question(&event, now + Duration::from_secs(600))
@@ -5263,7 +5510,11 @@ mod tests {
         reply.reply_message_id = Some(1001);
         assert!(conversations
             .question(&reply, now + Duration::from_secs(600))
-            .is_none());
+            .is_some());
+        assert_eq!(
+            conversations.history(&reply, now + Duration::from_secs(600)),
+            Some(vec!["Folgefrage".to_owned()])
+        );
         reply.reply_message_id = Some(1002);
         assert!(conversations
             .question(&reply, now + Duration::from_secs(600))
@@ -5337,9 +5588,16 @@ mod tests {
                 .handle_message_event_with_replies(&event, 42, &replies)
                 .await;
             assert!(replies.sent.lock().await.is_empty());
+            let conversations = handler.conversations.lock().await;
+            let conversation = &conversations.entries[&(1, 1, 3)];
+            assert_eq!(conversation.last_reply, last);
             assert_eq!(
-                handler.conversations.lock().await.entries[&(1, 1, 3)],
-                (999, last)
+                conversation
+                    .turns
+                    .last()
+                    .expect("Vorhandener Gesprächszug")
+                    .0,
+                999
             );
         }
     }
@@ -5401,7 +5659,11 @@ mod tests {
             .all(|reply| reply.2["content"] == BRAIN_NO_ANSWER));
         assert_eq!(answerer.calls.lock().await.len(), 2);
         assert_eq!(
-            handler.conversations.lock().await.entries[&(1, 1, 3)].0,
+            handler.conversations.lock().await.entries[&(1, 1, 3)]
+                .turns
+                .last()
+                .expect("Letzter Gesprächszug")
+                .0,
             1002
         );
     }
@@ -5744,9 +6006,10 @@ mod tests {
         let captured = received.clone();
         let app = Router::new().route(
             "/v1/answer",
-            post(move |headers: HeaderMap, Json(query): Json<Value>| {
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
                 let captured = captured.clone();
                 async move {
+                    let query = body.get("query").unwrap_or(&body);
                     let response = json!({
                         "contract_version": "brain.public.v1",
                         "request_id": query["request_id"],
@@ -5755,7 +6018,7 @@ mod tests {
                         "text": query["text"],
                         "citations": [{"citation_id": "test", "label": "Serverwissen"}],
                     });
-                    captured.lock().await.push((headers, query));
+                    captured.lock().await.push((headers, body));
                     Json(response)
                 }
             }),
@@ -5823,7 +6086,7 @@ mod tests {
                 classification: Some(handler.adapter.clone()),
                 ..Default::default()
             };
-            for question in questions {
+            for (index, question) in questions.into_iter().enumerate() {
                 let content = if guild_id.is_some() {
                     format!("<@42> {question}")
                 } else {
@@ -5840,14 +6103,27 @@ mod tests {
                     .await;
                 let requests = received.lock().await;
                 assert_eq!(requests.len(), before + 1);
-                let (headers, query) = requests.last().expect("Echte HTTP-Anfrage");
+                let (headers, body) = requests.last().expect("Echte HTTP-Anfrage");
+                let history = guild_id.is_some() && index > 0;
+                assert_eq!(body.get("query").is_some(), history);
+                let query = body.get("query").unwrap_or(body);
                 assert_eq!(headers["x-discord-user-id"], "3");
                 assert_eq!(
                     headers
                         .get("x-discord-read-access")
                         .map(|value| value.as_bytes()),
-                    (!allow_reads).then_some(b"disabled".as_slice())
+                    (!allow_reads || history).then_some(b"disabled".as_slice())
                 );
+                if history {
+                    assert!(query["answer_context"].is_null());
+                    assert_eq!(
+                        body["user_questions"],
+                        json!(questions[..index]
+                            .iter()
+                            .map(|question| format!("<@42> {question}"))
+                            .collect::<Vec<_>>())
+                    );
+                }
                 assert_eq!(query["text"], question);
                 assert_eq!(query["requested_scopes"], json!(["bot.public"]));
                 assert!(request_ids

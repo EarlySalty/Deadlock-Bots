@@ -35,6 +35,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::json!({"capability": capability, "question": question, "answer": answer})
         );
+        let followup = "Wie mache ich das?";
+        let history = vec![format!("{question} SYNTHETIC_PRIVATE_CANARY_äöüß")];
+        let outcome = brain
+            .answer_discord_task_with_history(followup, 42, &task, &history)
+            .await?;
+        let BrainOutcome::Answer(answer) = outcome else {
+            return Err("Keine Antwort auf die synthetische Folgefrage".into());
+        };
+        if answer.contains("SYNTHETIC_PRIVATE_CANARY") {
+            return Err("Synthetischer privater Verlauf in der Antwort".into());
+        }
+        println!(
+            "{}",
+            serde_json::json!({"capability": capability, "case": "synthetic_followup", "question": followup, "answer": answer})
+        );
     }
     Ok(())
 }

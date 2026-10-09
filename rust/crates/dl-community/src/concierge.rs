@@ -5190,7 +5190,10 @@ impl Concierge {
             capability: dl_brain::DiscordAnswerCapability::Concierge,
             channel_id,
         };
-        let answer = brain.answer_discord_task(question, user_id, &task);
+        let user_questions =
+            dl_brain::bounded_user_questions(history.unwrap_or_default(), question);
+        let answer =
+            brain.answer_discord_task_with_history(question, user_id, &task, &user_questions);
         let mut answer = std::pin::pin!(answer);
         let result = if let Some(channel) = patience_channel {
             tokio::select! {
@@ -8753,6 +8756,16 @@ mod tests {
             ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
                 panic!("Untypisierter Antwortpfad")
             }
+            async fn answer_discord_task_with_history(
+                &self,
+                question: &str,
+                user_id: u64,
+                task: &dl_brain::DiscordAnswerTask,
+                user_questions: &[String],
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                assert_eq!(user_questions, &["Gespeicherter privater Verlauf"]);
+                self.answer_discord_task(question, user_id, task).await
+            }
             async fn answer_discord_task(
                 &self,
                 question: &str,
@@ -8807,6 +8820,92 @@ mod tests {
             assert_eq!(decision.knowledge_hit, available);
             assert!(provider.requests().is_empty());
         }
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn brain_followup_route_reads_only_own_user_questions() {
+        struct LocalBrain(std::sync::Mutex<Vec<Vec<String>>>);
+        #[async_trait]
+        impl dl_brain::AiAnswerer for LocalBrain {
+            async fn answer(
+                &self,
+                _: &str,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                panic!("Untypisierter Antwortpfad")
+            }
+            async fn answer_discord_task_with_history(
+                &self,
+                question: &str,
+                user_id: u64,
+                task: &dl_brain::DiscordAnswerTask,
+                history: &[String],
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                assert_eq!(question, "Wie mache ich das?");
+                assert_eq!(user_id, 42);
+                assert_eq!(
+                    task.capability,
+                    dl_brain::DiscordAnswerCapability::Concierge
+                );
+                self.0
+                    .lock()
+                    .expect("Brain-Verlaufsrecorder")
+                    .push(history.to_vec());
+                Ok(dl_brain::BrainOutcome::Answer("Antwort vom Brain".into()))
+            }
+        }
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("Concierge-Testdatenbank");
+        let store = ConciergeStore::new(db.pool().clone());
+        for (user, role, text) in [
+            (42, "user", "Wo finde ich Coaching? PRIVATE_CANARY_äöüß"),
+            (42, "assistant", "ASSISTANT_CANARY Paten"),
+            (42, "system", "SYSTEM_CANARY Mitspieler"),
+            (99, "user", "Fremdnutzer Paten"),
+        ] {
+            assert!(store
+                .record_conversation(
+                    user,
+                    1,
+                    role,
+                    text,
+                    chrono::DateTime::parse_from_rfc3339("2026-10-09T12:00:00Z")
+                        .expect("Fester Testzeitpunkt")
+                        .with_timezone(&Utc)
+                )
+                .await
+                .expect("Concierge-Verlaufseintrag"));
+        }
+        let provider = dl_ai::MockChatProvider::new(Vec::new());
+        let answers = Arc::new(dl_answer::AnswerEngine::new(
+            Some(provider.clone()),
+            Arc::new(knowledge_client::CommunityRetriever {
+                base_url: "http://127.0.0.1:1".into(),
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            StdDuration::from_secs(1),
+        ));
+        let brain = Arc::new(LocalBrain(std::sync::Mutex::new(Vec::new())));
+        let concierge = Concierge::with_brain(
+            db.pool().clone(),
+            mock_port(),
+            Some(provider.clone()),
+            test_config(true, &[]),
+            answers,
+            brain.clone(),
+        );
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Wie mache ich das?")
+                .await
+        );
+        assert_eq!(
+            *brain.0.lock().expect("Brain-Verlaufsrecorder"),
+            vec![vec!["Wo finde ich Coaching? PRIVATE_CANARY_äöüß".to_owned()]]
+        );
+        assert!(provider.requests().is_empty());
     }
 
     #[test]

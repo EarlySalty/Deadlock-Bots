@@ -92,6 +92,7 @@ impl BrainApiAnswerer {
         user_id: Option<u64>,
         allow_discord_reads: bool,
         answer_context: Option<AnswerContext>,
+        user_questions: &[String],
     ) -> Result<BrainOutcome, BrainError> {
         if question.trim().is_empty() || question.chars().count() > 4000 || user_id == Some(0) {
             return Err(backend_error());
@@ -103,13 +104,21 @@ impl BrainApiAnswerer {
                 .await
                 .map_err(|_| backend_error())?;
             let mut query = self.query(question)?;
-            query.answer_context = answer_context;
+            if user_questions.is_empty() {
+                query.answer_context = answer_context;
+            }
             let response = match user_id {
+                Some(user_id) if !user_questions.is_empty() => {
+                    self.client
+                        .answer_for_discord_with_history(&query, user_id, user_questions)
+                        .await
+                }
                 Some(user_id) => {
                     self.client
                         .answer_for_discord_with_read_access(&query, user_id, allow_discord_reads)
                         .await
                 }
+                None if !user_questions.is_empty() => return Err(backend_error()),
                 None => self.client.answer(&query).await,
             }
             .map_err(client_error)?;
@@ -162,6 +171,12 @@ fn project_bounded(
             }
             let text = text.replace("[[coaching]]", COACHING_CHANNEL_REFERENCE);
             let text = text.trim();
+            let text = if let Some(text) = text.strip_prefix("Ungeprüft:") {
+                tracing::info!(status = ?response.status, "Discord-Prüfhinweis intern erhalten");
+                text.trim_start()
+            } else {
+                text
+            };
             if text.is_empty() {
                 return Ok(BrainOutcome::NoAnswer);
             }
@@ -263,6 +278,17 @@ impl AiAnswerer for BrainApiAnswerer {
         user_id: u64,
         task: &crate::DiscordAnswerTask,
     ) -> Result<BrainOutcome, BrainError> {
+        self.answer_discord_task_with_history(question, user_id, task, &[])
+            .await
+    }
+
+    async fn answer_discord_task_with_history(
+        &self,
+        question: &str,
+        user_id: u64,
+        task: &crate::DiscordAnswerTask,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
         if question.trim().is_empty()
             || question.chars().count() > 4000
             || user_id == 0
@@ -277,11 +303,14 @@ impl AiAnswerer for BrainApiAnswerer {
                 .await
                 .map_err(|_| backend_error())?;
             let query = self.query(question)?;
-            let response = self
-                .client
-                .answer_discord_task(&query, user_id, task)
-                .await
-                .map_err(client_error)?;
+            let response = if user_questions.is_empty() {
+                self.client.answer_discord_task(&query, user_id, task).await
+            } else {
+                self.client
+                    .answer_discord_task_with_history(&query, user_id, task, user_questions)
+                    .await
+            }
+            .map_err(client_error)?;
             tracing::info!(
                 capability = ?task.capability,
                 request_id = %response.request_id,
@@ -295,7 +324,7 @@ impl AiAnswerer for BrainApiAnswerer {
     }
 
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, None, true, None).await
+        self.answer_query(question, None, true, None, &[]).await
     }
 
     async fn answer_for_discord(
@@ -312,11 +341,22 @@ impl AiAnswerer for BrainApiAnswerer {
         question: &str,
         context: &DiscordQueryContext,
     ) -> Result<BrainOutcome, BrainError> {
+        self.answer_for_discord_with_history(question, context, &[])
+            .await
+    }
+
+    async fn answer_for_discord_with_history(
+        &self,
+        question: &str,
+        context: &DiscordQueryContext,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
         self.answer_query(
             question,
             Some(context.user_id),
             context.allow_discord_reads,
             context.answer_context.clone().map(AnswerContext::Discord),
+            user_questions,
         )
         .await
     }
@@ -327,7 +367,7 @@ impl AiAnswerer for BrainApiAnswerer {
         user_id: u64,
         allow_discord_reads: bool,
     ) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, Some(user_id), allow_discord_reads, None)
+        self.answer_query(question, Some(user_id), allow_discord_reads, None, &[])
             .await
     }
 }
@@ -360,10 +400,22 @@ mod tests {
         invalid_contract: bool,
         task: Option<crate::DiscordAnswerCapability>,
     ) -> Result<BrainOutcome, BrainError> {
+        fixture_answer_with_history(status, text, truncated_body, invalid_contract, task, &[]).await
+    }
+
+    async fn fixture_answer_with_history(
+        status: &str,
+        text: &str,
+        truncated_body: bool,
+        invalid_contract: bool,
+        task: Option<crate::DiscordAnswerCapability>,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Lokaler Testport");
         let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
         let status = status.to_owned();
         let text = text.to_owned();
+        let recorded_history = user_questions.to_vec();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("Testverbindung");
             stream
@@ -406,8 +458,26 @@ mod tests {
                                 serde_json::from_str(&bound).expect("Aufgabenvertrag");
                             assert_eq!(bound, json!({"capability": capability, "channel_id": 10}));
                         }
-                        break serde_json::from_slice(&request[end + 4..end + 4 + length])
-                            .expect("Anfragevertrag");
+                        let body = &request[end + 4..end + 4 + length];
+                        if recorded_history.is_empty() {
+                            break serde_json::from_slice(body).expect("Anfragevertrag");
+                        }
+                        assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
+                        assert!(headers
+                            .to_ascii_lowercase()
+                            .contains("x-discord-user-id: 3"));
+                        assert!(headers
+                            .to_ascii_lowercase()
+                            .contains("x-discord-read-access: disabled"));
+                        assert!(!String::from_utf8_lossy(body).contains("Dieser Ortskontext"));
+                        let envelope: serde_json::Value =
+                            serde_json::from_slice(body).expect("Lokaler Kontextvertrag");
+                        assert_eq!(envelope["user_questions"], json!(recorded_history));
+                        let query: Query = serde_json::from_value(envelope["query"].clone())
+                            .expect("Getrennte aktuelle Frage");
+                        assert_eq!(query.text, "Wie mache ich das?");
+                        assert!(query.answer_context.is_none());
+                        break query;
                     }
                 }
             };
@@ -440,14 +510,40 @@ mod tests {
         .expect("Testconsumer");
         let result = match task {
             Some(capability) => {
+                let task = crate::DiscordAnswerTask {
+                    capability,
+                    channel_id: 10,
+                };
+                if user_questions.is_empty() {
+                    answerer
+                        .answer_discord_task("Sinclairs letzter Patch?", 3, &task)
+                        .await
+                } else {
+                    answerer
+                        .answer_discord_task_with_history(
+                            "Wie mache ich das?",
+                            3,
+                            &task,
+                            user_questions,
+                        )
+                        .await
+                }
+            }
+            None if !user_questions.is_empty() => {
                 answerer
-                    .answer_discord_task(
-                        "Sinclairs letzter Patch?",
-                        3,
-                        &crate::DiscordAnswerTask {
-                            capability,
-                            channel_id: 10,
+                    .answer_for_discord_with_history(
+                        "Wie mache ich das?",
+                        &DiscordQueryContext {
+                            user_id: 3,
+                            allow_discord_reads: true,
+                            answer_context: Some(crate::DiscordAnswerContext {
+                                topic: Some(
+                                    "Dieser Ortskontext bleibt bei privatem Verlauf lokal".into(),
+                                ),
+                                ..Default::default()
+                            }),
                         },
+                        user_questions,
                     )
                     .await
             }
@@ -462,21 +558,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lokaler_verlauf_bleibt_getrennt_und_ausfaelle_bleiben_geschlossen() {
+        let mut prior = "Wo finde ich einen Paten? PRIVATE_CANARY_äöüß".to_owned();
+        prior.push_str(&"ä".repeat(4000 - prior.chars().count()));
+        let history = vec![prior];
+        for capability in [
+            Some(crate::DiscordAnswerCapability::Faq),
+            Some(crate::DiscordAnswerCapability::Concierge),
+            None,
+        ] {
+            for status in ["answered", "insufficient_evidence"] {
+                assert_eq!(
+                    fixture_answer_with_history(
+                        status,
+                        "Antwort vom Brain",
+                        false,
+                        false,
+                        capability,
+                        &history
+                    )
+                    .await
+                    .expect("Brain-Text"),
+                    BrainOutcome::Answer("Antwort vom Brain".into())
+                );
+            }
+            for (status, truncated, invalid) in [
+                ("provider_error", false, false),
+                ("answered", true, false),
+                ("answered", false, true),
+            ] {
+                assert!(matches!(
+                    fixture_answer_with_history(
+                        status, "Antwort", truncated, invalid, capability, &history
+                    )
+                    .await,
+                    Err(BrainError::Backend(_))
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn aufgaben_erhalten_brain_text_und_bleiben_bei_ausfaellen_geschlossen() {
         for capability in [
             crate::DiscordAnswerCapability::Concierge,
             crate::DiscordAnswerCapability::Faq,
         ] {
             for status in ["answered", "build_rejected", "insufficient_evidence"] {
-                let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1787));
+                let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1799));
                 let outcome =
                     fixture_answer_with_task(status, &text, false, false, Some(capability))
                         .await
                         .expect("Brain-Text");
-                assert_eq!(
-                    outcome,
-                    BrainOutcome::Answer(format!("Ungeprüft: {}🧠", "ä".repeat(1787)))
-                );
+                assert_eq!(outcome, BrainOutcome::Answer("ä".repeat(1799)));
                 assert_eq!(
                     fixture_answer_with_task(
                         status,
