@@ -5114,7 +5114,7 @@ mod tests {
             let answer = body["content"]
                 .as_str()
                 .expect("Synthetische Brain-Antwort");
-            assert!(!answer.starts_with("Ungeprüft:"));
+            assert!(answer.starts_with("Ungeprüft:"));
             if index > 0 {
                 assert!(
                     !answer.to_lowercase().contains("welchen helden"),

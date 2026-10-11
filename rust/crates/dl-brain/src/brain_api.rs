@@ -171,12 +171,6 @@ fn project_bounded(
             }
             let text = text.replace("[[coaching]]", COACHING_CHANNEL_REFERENCE);
             let text = text.trim();
-            let text = if let Some(text) = text.strip_prefix("Ungeprüft:") {
-                tracing::info!(status = ?response.status, "Discord-Prüfhinweis intern erhalten");
-                text.trim_start()
-            } else {
-                text
-            };
             if text.is_empty() {
                 return Ok(BrainOutcome::NoAnswer);
             }
@@ -638,12 +632,15 @@ mod tests {
             crate::DiscordAnswerCapability::Faq,
         ] {
             for status in ["answered", "build_rejected", "insufficient_evidence"] {
-                let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1799));
+                let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1788));
                 let outcome =
                     fixture_answer_with_task(status, &text, false, false, Some(capability))
                         .await
                         .expect("Brain-Text");
-                assert_eq!(outcome, BrainOutcome::Answer("ä".repeat(1799)));
+                assert_eq!(
+                    outcome,
+                    BrainOutcome::Answer(format!("Ungeprüft: {}", "ä".repeat(1788)))
+                );
                 assert_eq!(
                     fixture_answer_with_task(
                         status,
