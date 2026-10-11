@@ -43,10 +43,7 @@ const BRAIN_THINKING_MAX_TICKS: usize = 40;
 const BRAIN_CONVERSATION_TTL: Duration = Duration::from_secs(10 * 60);
 const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad. Probier's in ein paar Sekunden nochmal.";
 const BRAIN_PRIVATE_HELP: &str = "Private Fragen kann ich gerade nicht sicher beantworten. Für persönliche Hilfe öffne ein Ticket in <#1459628609705738539>. Allgemeine Fragen zum Server kannst du in <#1426220702054355077> stellen, ohne persönliche Angaben.";
-const BRAIN_NO_ANSWER: &str =
-    "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter nach Held, Item oder Fähigkeit.";
-const BRAIN_OUT_OF_DOMAIN: &str =
-    "🧠 Klingt nicht nach Deadlock. Dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
+const BRAIN_SLASH_NO_ANSWER: &str = "Dazu habe ich gerade keine gesicherte Antwort.";
 const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain";
 const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
@@ -726,15 +723,11 @@ impl BrainHandler {
             }
             dl_brain::BrainOutcome::Cooldown { .. } => Vec::new(),
             dl_brain::BrainOutcome::Answer(answer) => {
-                match brain_answer_embed_body(question, &answer, self.emoji_index.as_ref()) {
-                    Some(body) => vec![body],
-                    None => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
-                }
+                brain_answer_embed_body(question, &answer, self.emoji_index.as_ref())
+                    .into_iter()
+                    .collect()
             }
-            dl_brain::BrainOutcome::OutOfDomain => {
-                vec![brain_public_message_body(BRAIN_OUT_OF_DOMAIN)]
-            }
-            dl_brain::BrainOutcome::NoAnswer => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
+            dl_brain::BrainOutcome::OutOfDomain | dl_brain::BrainOutcome::NoAnswer => Vec::new(),
             dl_brain::BrainOutcome::BackendError => {
                 vec![brain_public_message_body(BRAIN_BACKEND_ERR)]
             }
@@ -745,11 +738,8 @@ impl BrainHandler {
         &self,
         question: &str,
         outcome: dl_brain::BrainOutcome,
-    ) -> Map<String, Value> {
-        let mut bodies = self.public_bodies_for_outcome(question, outcome);
-        bodies
-            .pop()
-            .unwrap_or_else(|| brain_public_message_body(BRAIN_NO_ANSWER))
+    ) -> Option<Map<String, Value>> {
+        self.public_bodies_for_outcome(question, outcome).pop()
     }
 
     async fn send_public_bodies(&self, channel_id: u64, bodies: &[Map<String, Value>]) {
@@ -815,7 +805,11 @@ impl BrainHandler {
             tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation Task fehlgeschlagen");
         }
 
-        let body = self.public_body_for_outcome(question, outcome);
+        let Some(body) = self.public_body_for_outcome(question, outcome) else {
+            self.remove_thinking_placeholder(channel_id, message_id)
+                .await;
+            return;
+        };
         if let Err(err) = self
             .adapter
             .edit_raw_public(channel_id, message_id, &body)
@@ -823,6 +817,22 @@ impl BrainHandler {
         {
             tracing::warn!(%err, channel_id, message_id, "Brain-Antwort konnte nicht editiert werden");
             self.send_public_bodies(channel_id, &[body]).await;
+        }
+    }
+
+    async fn remove_thinking_placeholder(&self, channel_id: u64, message_id: u64) {
+        tracing::info!(channel_id, message_id, "brain_public_ohne_antwort");
+        if let Err(err) = self
+            .adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("Brain ohne gesicherte Antwort"),
+            )
+            .await
+        {
+            tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Platzhalter konnte nicht entfernt werden");
         }
     }
 
@@ -994,15 +1004,20 @@ impl BrainHandler {
         let text = match outcome {
             dl_brain::BrainOutcome::DailyLimit => BRAIN_DAILY_LIMIT.to_owned(),
             dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => answer,
-            dl_brain::BrainOutcome::NoAnswer
-            | dl_brain::BrainOutcome::OutOfDomain
-            | dl_brain::BrainOutcome::Answer(_) => BRAIN_NO_ANSWER.to_owned(),
             dl_brain::BrainOutcome::Usage => "Was möchtest du wissen?".to_owned(),
             dl_brain::BrainOutcome::TooLong { .. } => {
                 BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())
             }
             dl_brain::BrainOutcome::BackendError => BRAIN_BACKEND_ERR.to_owned(),
-            dl_brain::BrainOutcome::Cooldown { .. } => {
+            dl_brain::BrainOutcome::NoAnswer
+            | dl_brain::BrainOutcome::OutOfDomain
+            | dl_brain::BrainOutcome::Answer(_)
+            | dl_brain::BrainOutcome::Cooldown { .. } => {
+                tracing::info!(
+                    message_id = event.message_id,
+                    channel_id = event.channel_id,
+                    "brain_direct_ohne_antwort"
+                );
                 if !proactive {
                     let _ = replies.reaction(event, "👀", false).await;
                 }
@@ -1111,7 +1126,10 @@ impl InteractionHandler for BrainHandler {
         else {
             return BridgeReply::ephemeral_text(BRAIN_DAILY_LIMIT);
         };
-        brain_bridge_reply_from_body(self.public_body_for_outcome(&question, outcome))
+        match self.public_body_for_outcome(&question, outcome) {
+            Some(body) => brain_bridge_reply_from_body(body),
+            None => BridgeReply::ephemeral_text(BRAIN_SLASH_NO_ANSWER),
+        }
     }
 }
 
@@ -5060,8 +5078,9 @@ mod tests {
                 async move {
                     let q = body.get("query").unwrap_or(&body);
                     let response = json!({"contract_version": "brain.public.v1", "request_id": q["request_id"],
-                        "knowledge_release": "test-release", "status": "insufficient_evidence",
-                        "text": "Ungeprüft: Für Abrams im Spirit-Build passt **Spirit-Item**.", "citations": []});
+                        "knowledge_release": "test-release", "status": "answered",
+                        "text": "Für Abrams im Spirit-Build passt **Spirit-Item**.",
+                        "citations": [{"citation_id": "test", "label": "Serverwissen"}]});
                     captured.lock().await.push((headers, body));
                     Json(response)
                 }
@@ -5114,7 +5133,7 @@ mod tests {
             let answer = body["content"]
                 .as_str()
                 .expect("Synthetische Brain-Antwort");
-            assert!(answer.starts_with("Ungeprüft:"));
+            assert!(!answer.starts_with("Ungeprüft:"));
             if index > 0 {
                 assert!(
                     !answer.to_lowercase().contains("welchen helden"),
@@ -5183,26 +5202,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brain_reaktion_unterscheidet_fehler_von_fachlicher_leermeldung() {
-        for (outcome, fail, revoke, fail_reactions, expected_error) in [
-            (
-                dl_brain::BrainOutcome::BackendError,
-                false,
-                false,
-                false,
-                true,
-            ),
-            (dl_brain::BrainOutcome::NoAnswer, false, false, false, false),
+    async fn brain_reaktion_unterscheidet_fehler_von_stiller_leermeldung() {
+        let backend = dl_brain::BrainOutcome::BackendError;
+        let no_answer = dl_brain::BrainOutcome::NoAnswer;
+        for (outcome, fail, revoke, fail_reactions, expected_error, expected_sent) in [
+            (backend.clone(), false, false, false, true, 1),
+            (backend.clone(), true, false, false, true, 0),
+            (backend, false, true, false, true, 0),
+            (no_answer.clone(), false, false, false, false, 0),
             (
                 dl_brain::BrainOutcome::OutOfDomain,
                 false,
                 false,
                 false,
                 false,
+                0,
             ),
-            (dl_brain::BrainOutcome::NoAnswer, true, false, false, true),
-            (dl_brain::BrainOutcome::NoAnswer, false, true, false, true),
-            (dl_brain::BrainOutcome::NoAnswer, false, false, true, false),
+            (
+                dl_brain::BrainOutcome::Answer(" ".into()),
+                false,
+                false,
+                false,
+                false,
+                0,
+            ),
+            (no_answer.clone(), true, false, false, false, 0),
+            (no_answer.clone(), false, true, false, false, 0),
+            (no_answer, false, false, true, false, 0),
         ] {
             let (mut handler, _) = direct_test_handler();
             handler.answerer = Arc::new(RecordingDiscordAnswerer {
@@ -5227,10 +5253,7 @@ mod tests {
                 expected.push((event.channel_id, event.message_id, "❌".into(), true));
             }
             assert_eq!(*replies.reactions.lock().await, expected);
-            assert_eq!(
-                replies.sent.lock().await.len(),
-                usize::from(!fail && !revoke)
-            );
+            assert_eq!(replies.sent.lock().await.len(), expected_sent);
         }
     }
 
@@ -5629,7 +5652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gespraech_fortsetzung_behaelt_ehrliche_leermeldung_ohne_minutensperre() {
+    async fn gespraech_fortsetzung_schweigt_ohne_antwort_und_ohne_minutensperre() {
         let (mut handler, _) = direct_test_handler();
         let answerer = Arc::new(RecordingDiscordAnswerer {
             outcome: Some(dl_brain::BrainOutcome::NoAnswer),
@@ -5646,17 +5669,11 @@ mod tests {
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
-        assert_eq!(replies.sent.lock().await[0].2["content"], BRAIN_NO_ANSWER);
+        assert!(replies.sent.lock().await.is_empty());
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
-        assert_eq!(replies.sent.lock().await.len(), 2);
-        assert!(replies
-            .sent
-            .lock()
-            .await
-            .iter()
-            .all(|reply| reply.2["content"] == BRAIN_NO_ANSWER));
+        assert!(replies.sent.lock().await.is_empty());
         assert_eq!(answerer.calls.lock().await.len(), 2);
         assert_eq!(
             handler.conversations.lock().await.entries[&(1, 1, 3)]
@@ -5664,7 +5681,7 @@ mod tests {
                 .last()
                 .expect("Letzter Gesprächszug")
                 .0,
-            1002
+            999
         );
     }
 
@@ -6613,6 +6630,51 @@ mod tests {
             reply.allowed_mentions,
             Some(json!({ "parse": [], "replied_user": false }))
         );
+    }
+
+    struct SilentBrainAnswerer;
+
+    #[async_trait::async_trait]
+    impl dl_brain::AiAnswerer for SilentBrainAnswerer {
+        async fn answer_for_discord_with_context(
+            &self,
+            _question: &str,
+            _context: &dl_brain::DiscordQueryContext,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            Ok(dl_brain::BrainOutcome::NoAnswer)
+        }
+
+        async fn answer(
+            &self,
+            _question: &str,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            panic!("Discord-Kommandos dürfen keinen anonymen Antwortweg verwenden")
+        }
+    }
+
+    #[tokio::test]
+    async fn brain_slash_command_ohne_antwort_meldet_sich_nur_beim_fragenden() {
+        let mut handler = test_brain_handler(
+            Some(HashSet::from([1])),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        handler.answerer = Arc::new(SilentBrainAnswerer);
+        let mut options = HashMap::new();
+        options.insert("frage".to_string(), json!("Wie geht es dir?"));
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "brain".to_string(),
+                options,
+                guild_id: 1,
+                channel_id: 1,
+                user_id: 3,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert!(reply.ephemeral);
+        assert!(reply.embeds.is_empty());
+        assert_eq!(reply.content.as_deref(), Some(BRAIN_SLASH_NO_ANSWER));
     }
 
     #[tokio::test]

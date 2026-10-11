@@ -162,9 +162,8 @@ fn project_bounded(
     max_units: usize,
 ) -> Result<BrainOutcome, BrainError> {
     match response.status {
-        AnswerStatus::Answered
-        | AnswerStatus::BuildRejected
-        | AnswerStatus::InsufficientEvidence => {
+        AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
+        AnswerStatus::Answered | AnswerStatus::BuildRejected => {
             let (text, had_links) = without_links(&response.text);
             if had_links {
                 tracing::warn!(klasse = "link", "Links aus Brain-Antwort entfernt");
@@ -609,7 +608,10 @@ mod tests {
             Some(crate::DiscordAnswerCapability::Concierge),
             None,
         ] {
-            for status in ["answered", "insufficient_evidence"] {
+            for (status, expected) in [
+                ("answered", BrainOutcome::Answer("Antwort vom Brain".into())),
+                ("insufficient_evidence", BrainOutcome::NoAnswer),
+            ] {
                 assert_eq!(
                     fixture_answer_with_history(
                         status,
@@ -621,7 +623,7 @@ mod tests {
                     )
                     .await
                     .expect("Brain-Text"),
-                    BrainOutcome::Answer("Antwort vom Brain".into())
+                    expected
                 );
             }
             for (status, truncated, invalid) in [
@@ -646,7 +648,21 @@ mod tests {
             crate::DiscordAnswerCapability::Concierge,
             crate::DiscordAnswerCapability::Faq,
         ] {
-            for status in ["answered", "build_rejected", "insufficient_evidence"] {
+            for text in ["Ungeprüft: Mir geht es gut, danke!", "Kein Beleg", ""] {
+                assert_eq!(
+                    fixture_answer_with_task(
+                        "insufficient_evidence",
+                        text,
+                        false,
+                        false,
+                        Some(capability),
+                    )
+                    .await
+                    .expect("Fehlendes Wissen"),
+                    BrainOutcome::NoAnswer
+                );
+            }
+            for status in ["answered", "build_rejected"] {
                 let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1788));
                 let outcome =
                     fixture_answer_with_task(status, &text, false, false, Some(capability))
@@ -670,11 +686,7 @@ mod tests {
                 );
                 let empty =
                     fixture_answer_with_task(status, "", false, false, Some(capability)).await;
-                if status == "insufficient_evidence" {
-                    assert_eq!(empty.expect("Leerer Brain-Text"), BrainOutcome::NoAnswer);
-                } else {
-                    assert!(matches!(empty, Err(BrainError::Backend(_))));
-                }
+                assert!(matches!(empty, Err(BrainError::Backend(_))));
             }
             for status in [
                 "unavailable",
@@ -738,7 +750,7 @@ mod tests {
             fixture_answer("insufficient_evidence", "Kein Beleg", false, false)
                 .await
                 .expect("Fehlendes Wissen"),
-            BrainOutcome::Answer("Kein Beleg".into())
+            BrainOutcome::NoAnswer
         );
         assert!(matches!(
             fixture_answer("answered", "Antwort", true, false).await,
@@ -752,7 +764,7 @@ mod tests {
 
     #[tokio::test]
     async fn coachingziel_wird_nach_dem_linkfilter_auf_discord_projiziert() {
-        for status in ["answered", "build_rejected", "insufficient_evidence"] {
+        for status in ["answered", "build_rejected"] {
             let prefix = "Mehr dazu: ";
             let suffix = ".";
             let text = format!("{prefix}[[coaching]]{suffix} https://example.invalid/coaching");
@@ -950,8 +962,8 @@ mod tests {
             );
             linked.status = AnswerStatus::InsufficientEvidence;
             assert_eq!(
-                project(linked).expect("Ohne Grafik"),
-                BrainOutcome::Answer("Haze hat weniger Lebenspunkte.".into())
+                project(linked).expect("Ohne Antwort"),
+                BrainOutcome::NoAnswer
             );
             client_error(ClientError::InvalidResponse);
             client_error(ClientError::HttpStatus {
