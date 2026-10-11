@@ -174,10 +174,12 @@ fn project_bounded(
             if text.is_empty() {
                 return Ok(BrainOutcome::NoAnswer);
             }
+            let links = artifact_links(&response);
+            let budget = max_units.saturating_sub(links.encode_utf16().count());
             let mut units = 0;
             let end = text.char_indices().find_map(|(index, character)| {
                 units += character.len_utf16();
-                (units > max_units).then_some(index)
+                (units > budget).then_some(index)
             });
             let text = if let Some(end) = end {
                 tracing::warn!(klasse = "laenge", "Brain-Antwort gekürzt");
@@ -185,10 +187,23 @@ fn project_bounded(
             } else {
                 text
             };
-            Ok(BrainOutcome::Answer(text.to_owned()))
+            Ok(BrainOutcome::Answer(format!("{text}{links}")))
         }
         _ => Err(classified_backend_error("vertrag")),
     }
+}
+
+fn artifact_links(response: &PublicAnswerResponse) -> String {
+    if response.status != AnswerStatus::Answered {
+        return String::new();
+    }
+    response
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.validate().is_ok())
+        .take(brain_client::MAX_PUBLIC_ARTIFACTS)
+        .map(|artifact| format!("\n\nGrafik: {}\n<{}>", artifact.title, artifact.page_url))
+        .collect()
 }
 
 fn without_links(text: &str) -> (String, bool) {
@@ -901,6 +916,7 @@ mod tests {
                 status: AnswerStatus::Answered,
                 text,
                 citations: vec![],
+                artifacts: vec![],
             };
             assert_eq!(
                 project(response("https://example.invalid/private-token".into()))
@@ -915,6 +931,27 @@ mod tests {
             assert_eq!(
                 project(response(format!("{full}weiter"))).expect("Gekürzte Antwort"),
                 BrainOutcome::Answer(full)
+            );
+            let id = "a".repeat(64);
+            let graphic = brain_client::PublicArtifact::hero_compare(
+                &id,
+                "Haze gegen Infernus: Lebenspunkte nach Boons",
+            )
+            .expect("Dienstlink");
+            let mut forged = graphic.clone();
+            forged.page_url = "https://example.invalid/private-token".into();
+            let mut linked = response("Haze hat weniger Lebenspunkte.".into());
+            linked.artifacts = vec![graphic, forged];
+            assert_eq!(
+                project(linked.clone()).expect("Antwort mit Grafik"),
+                BrainOutcome::Answer(format!(
+                    "Haze hat weniger Lebenspunkte.\n\nGrafik: Haze gegen Infernus: Lebenspunkte nach Boons\n<https://deutsche-deadlock-community.de/brain/site/compare/{id}>"
+                ))
+            );
+            linked.status = AnswerStatus::InsufficientEvidence;
+            assert_eq!(
+                project(linked).expect("Ohne Grafik"),
+                BrainOutcome::Answer("Haze hat weniger Lebenspunkte.".into())
             );
             client_error(ClientError::InvalidResponse);
             client_error(ClientError::HttpStatus {
