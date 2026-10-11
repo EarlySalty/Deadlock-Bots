@@ -9,10 +9,12 @@ use dl_central_db::kv;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use serenity::all::{ChannelId, GuildId};
 use sqlx::PgPool;
 
 /// Stabile ID von `#frag-die-community`.
 pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
+pub const COMMUNITY_CATEGORY_ID: u64 = 1_289_721_245_281_292_289;
 pub const INVITE_LOUNGE_HINT_TEXT: &str = "Pack noch deinen Steam-Freundescode dazu :) Du findest ihn in Steam unter Freunde → „Freund hinzufügen“. Einfach hier posten, dann kann dich jemand einladen.";
 
 const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
@@ -73,7 +75,12 @@ impl From<dl_discord::MessageEvent> for LoungeMessage {
 #[async_trait::async_trait]
 pub trait InviteLoungeReplyPort: Send + Sync {
     fn bot_id(&self) -> Option<u64>;
-    async fn history(&self, before_id: Option<u64>) -> Result<Vec<LoungeMessage>, String>;
+    fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
+    async fn history(
+        &self,
+        channel_id: u64,
+        before_id: Option<u64>,
+    ) -> Result<Vec<LoungeMessage>, String>;
     async fn reply_text(
         &self,
         channel_id: u64,
@@ -88,9 +95,22 @@ impl InviteLoungeReplyPort for dl_discord::DiscordAdapter {
         self.bot_user_id_cell().get().copied().filter(|id| *id > 0)
     }
 
-    async fn history(&self, before_id: Option<u64>) -> Result<Vec<LoungeMessage>, String> {
+    fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
+        self.cache()
+            .guild(GuildId::new(guild_id))?
+            .channels
+            .get(&ChannelId::new(channel_id))?
+            .parent_id
+            .map(|parent| parent.get())
+    }
+
+    async fn history(
+        &self,
+        channel_id: u64,
+        before_id: Option<u64>,
+    ) -> Result<Vec<LoungeMessage>, String> {
         Ok(self
-            .channel_message_history(INVITE_LOUNGE_CHANNEL_ID, before_id)
+            .channel_message_history(channel_id, before_id)
             .await?
             .into_iter()
             .map(|message| LoungeMessage {
@@ -337,8 +357,9 @@ impl InviteLoungeWatcher {
         existing_hint: Option<bool>,
     ) -> Result<Option<u64>, String> {
         if event.is_bot
-            || event.channel_id != INVITE_LOUNGE_CHANNEL_ID
             || event.guild_id != Some(self.guild_id)
+            || self.port.channel_category(self.guild_id, event.channel_id)
+                != Some(COMMUNITY_CATEGORY_ID)
         {
             return Ok(None);
         }
@@ -380,7 +401,9 @@ impl InviteLoungeWatcher {
             );
             if wants_hint
                 && existing_hint.is_none()
-                && self.has_hint(event.message_id, bot_id).await?
+                && self
+                    .has_hint(event.channel_id, event.message_id, bot_id)
+                    .await?
             {
                 wants_hint = false;
             }
@@ -406,10 +429,15 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn has_hint(&self, message_id: u64, bot_id: u64) -> Result<bool, String> {
+    async fn has_hint(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        bot_id: u64,
+    ) -> Result<bool, String> {
         let mut before = None;
         loop {
-            let page = self.port.history(before).await?;
+            let page = self.port.history(channel_id, before).await?;
             if page.is_empty() {
                 return Ok(false);
             }
@@ -576,7 +604,7 @@ impl InviteLoungeWatcher {
         let mut before = None;
         let mut history = Vec::new();
         loop {
-            let page = self.port.history(before).await?;
+            let page = self.port.history(INVITE_LOUNGE_CHANNEL_ID, before).await?;
             if page.is_empty() {
                 break;
             }
@@ -670,7 +698,6 @@ pub fn spawn(
                 event = messages.recv() => match event {
                     Ok(event) => {
                         let message = LoungeMessage::from(event);
-                        if message.channel_id != INVITE_LOUNGE_CHANNEL_ID { continue; }
                         match watcher.record_message(message, chrono::Utc::now().timestamp(), None).await {
                             Ok(Some(user_id)) => spawn_dispatch(&mut dispatches, watcher.clone(), user_id),
                             Ok(None) => {},
@@ -868,10 +895,17 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
         || words
             .iter()
             .any(|word| close_word(word, "einladen", 2) || close_word(word, "inviten", 1));
-    let self_request = words.iter().any(|word| {
-        matches!(*word, "mich" | "mcih" | "mir" | "uns" | "me")
-            || (word.starts_with('m') && word.len() >= 3 && close_word(word, "mich", 1))
+    let asks = words.iter().any(|word| {
+        matches!(
+            *word,
+            "wie" | "benotige" | "brauche" | "krieg" | "kriege" | "mochte" | "will" | "suche"
+        )
     });
+    let self_request = (asks && words.contains(&"ich"))
+        || words.iter().any(|word| {
+            matches!(*word, "mich" | "mcih" | "mir" | "uns" | "me")
+                || (word.starts_with('m') && word.len() >= 3 && close_word(word, "mich", 1))
+        });
     if !invite || !self_request {
         return None;
     }
@@ -890,7 +924,7 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     });
     if bot_mention || (!room_address && (direct_verb || words.contains(&"du"))) {
         Some(RequestKind::Direct)
-    } else if has_question_signal(&content.to_lowercase()) || room_address {
+    } else if has_question_signal(&content.to_lowercase()) || room_address || asks {
         Some(RequestKind::Room)
     } else {
         None

@@ -116,7 +116,18 @@ impl InviteLoungeReplyPort for RecordingPort {
     fn bot_id(&self) -> Option<u64> {
         (!self.identity_missing.load(Ordering::SeqCst)).then_some(BOT)
     }
-    async fn history(&self, before: Option<u64>) -> Result<Vec<LoungeMessage>, String> {
+    fn channel_category(&self, _guild_id: u64, channel_id: u64) -> Option<u64> {
+        Some(if channel_id == 100 {
+            0
+        } else {
+            COMMUNITY_CATEGORY_ID
+        })
+    }
+    async fn history(
+        &self,
+        _channel_id: u64,
+        before: Option<u64>,
+    ) -> Result<Vec<LoungeMessage>, String> {
         self.history_calls.fetch_add(1, Ordering::SeqCst);
         let mut messages: Vec<_> = self
             .history
@@ -586,6 +597,21 @@ async fn angebote_dank_und_andere_kanaele_loesen_nichts_aus() {
 }
 
 #[tokio::test]
+async fn direkte_bitte_in_jedem_kanal_der_community_kategorie_wird_bearbeitet() {
+    let (watcher, _, _, invite) = setup();
+    let mut event = message(1, NOW, "Kannst du mich einladen? 123456789");
+    event.channel_id = 101;
+    watcher
+        .handle_message(event, NOW, Some(false))
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(
+        invite.calls.lock().await.as_slice(),
+        &[(BOT, GUILD, "123456789".into(), USER)]
+    );
+}
+
+#[tokio::test]
 async fn profil_link_braucht_zahlencode() {
     let (watcher, _, port, invite) = setup();
     watcher
@@ -980,6 +1006,27 @@ fn raumbitten_mit_bitte_sind_keine_direkte_bot_bitte() {
             "{content}"
         );
     }
+}
+
+#[test]
+fn wie_frage_und_ich_bitte_ohne_fragezeichen_sind_raumbitten() {
+    for content in [
+        "yo leute wie genau bekomm ich ein invite",
+        "Freunde, ich benötige einen invite zum Playtest. Wäre jemand so nett?",
+    ] {
+        assert_eq!(
+            request_kind(content, BOT),
+            Some(RequestKind::Room),
+            "{content}"
+        );
+    }
+    assert_eq!(
+        request_kind(
+            "Du musst von jemand eingeladen werden der des Game hat",
+            BOT
+        ),
+        None
+    );
 }
 
 #[tokio::test]
