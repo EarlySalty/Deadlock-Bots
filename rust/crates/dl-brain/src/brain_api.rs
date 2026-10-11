@@ -423,7 +423,7 @@ mod tests {
                 .expect("Testzeitlimit");
             let mut request = Vec::new();
             let mut buffer = [0; 4096];
-            let query: Query = loop {
+            let request_id = loop {
                 let count = stream.read(&mut buffer).expect("Testanfrage");
                 assert!(count > 0);
                 request.extend_from_slice(&buffer[..count]);
@@ -438,29 +438,46 @@ mod tests {
                         })
                         .expect("Inhaltslängenheader");
                     if request.len() >= end + 4 + length {
-                        if let Some(capability) = task {
-                            assert!(headers
-                                .to_ascii_lowercase()
-                                .contains("x-discord-user-id: 3"));
-                            assert!(headers
-                                .to_ascii_lowercase()
-                                .contains("x-discord-read-access: disabled"));
-                            let bound = headers
-                                .lines()
-                                .find_map(|line| {
-                                    line.to_ascii_lowercase()
-                                        .strip_prefix("x-discord-answer-task:")
-                                        .map(str::trim)
-                                        .map(str::to_owned)
-                                })
-                                .expect("Aufgabenheader");
-                            let bound: serde_json::Value =
-                                serde_json::from_str(&bound).expect("Aufgabenvertrag");
-                            assert_eq!(bound, json!({"capability": capability, "channel_id": 10}));
-                        }
                         let body = &request[end + 4..end + 4 + length];
+                        if let Some(capability) = task {
+                            assert!(headers.starts_with("POST /v1/task HTTP/1.1"));
+                            let lower = headers.to_ascii_lowercase();
+                            assert!(!lower.contains("x-discord-answer-task"));
+                            assert!(!lower.contains("x-discord-user-id"));
+                            assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
+                            let envelope: serde_json::Value =
+                                serde_json::from_slice(body).expect("Aufgabenvertrag");
+                            assert_eq!(
+                                envelope["contract_version"],
+                                brain_client::BOT_TASK_VERSION
+                            );
+                            assert_eq!(
+                                envelope["identity"],
+                                json!({"kind": "discord", "channel_id": 10, "user_id": 3})
+                            );
+                            let question = if recorded_history.is_empty() {
+                                "Sinclairs letzter Patch?"
+                            } else {
+                                "Wie mache ich das?"
+                            };
+                            assert_eq!(
+                                envelope["task"],
+                                json!({
+                                    "kind": "discord_answer",
+                                    "capability": capability,
+                                    "question": question,
+                                    "user_questions": recorded_history,
+                                })
+                            );
+                            break envelope["request_id"]
+                                .as_str()
+                                .expect("Aufgaben-ID")
+                                .to_owned();
+                        }
                         if recorded_history.is_empty() {
-                            break serde_json::from_slice(body).expect("Anfragevertrag");
+                            let query: Query =
+                                serde_json::from_slice(body).expect("Anfragevertrag");
+                            break query.request_id;
                         }
                         assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
                         assert!(headers
@@ -477,13 +494,13 @@ mod tests {
                             .expect("Getrennte aktuelle Frage");
                         assert_eq!(query.text, "Wie mache ich das?");
                         assert!(query.answer_context.is_none());
-                        break query;
+                        break query.request_id;
                     }
                 }
             };
             let mut response = json!({
                 "contract_version": brain_client::PUBLIC_API_VERSION,
-                "request_id": query.request_id,
+                "request_id": request_id,
                 "knowledge_release": "test-release",
                 "status": status,
                 "text": text,
@@ -491,6 +508,22 @@ mod tests {
             });
             if invalid_contract {
                 response["contract_version"] = json!("falscher-vertrag");
+            }
+            if let Some(capability) = task {
+                let result = if status == "task_failed" {
+                    json!({
+                        "kind": "failed",
+                        "capability": brain_client::BotCapability::from(capability),
+                        "failure": "provider_rate_limited",
+                    })
+                } else {
+                    json!({"kind": "discord_answer", "answer": response})
+                };
+                response = json!({
+                    "contract_version": brain_client::BOT_TASK_VERSION,
+                    "request_id": request_id,
+                    "result": result,
+                });
             }
             let response = response.to_string();
             let body = if truncated_body {
@@ -636,6 +669,7 @@ mod tests {
                 "provider_error",
                 "budget_exceeded",
                 "unauthorized_evidence",
+                "task_failed",
             ] {
                 assert!(matches!(
                     fixture_answer_with_task(status, "Antwort", false, false, Some(capability))
