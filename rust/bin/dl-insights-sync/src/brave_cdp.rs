@@ -333,6 +333,37 @@ fn browser_ws_endpoint() -> Result<String> {
     })
 }
 
+fn http_header_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
+}
+
+fn http_content_length(headers: &[u8]) -> Option<usize> {
+    let text = std::str::from_utf8(headers).ok()?;
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r');
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
+fn http_response_complete(raw: &[u8]) -> bool {
+    let Some(header_end) = http_header_end(raw) else {
+        return false;
+    };
+    let Some(len) = http_content_length(&raw[..header_end]) else {
+        return false;
+    };
+    raw.len().saturating_sub(header_end) >= len
+}
+
 fn json_version_ws(port: u16) -> Option<String> {
     use std::io::{Read, Write};
     let mut stream = StdTcp::connect(("127.0.0.1", port)).ok()?;
@@ -350,20 +381,25 @@ fn json_version_ws(port: u16) -> Option<String> {
     let _ = stream.flush();
     let mut raw = Vec::new();
     let mut chunk = [0u8; 2048];
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if http_response_complete(&raw) {
+                    break;
+                }
+            }
             Err(err)
                 if err.kind() == std::io::ErrorKind::WouldBlock
                     || err.kind() == std::io::ErrorKind::TimedOut =>
             {
-                break;
+                if http_response_complete(&raw) || std::time::Instant::now() >= deadline {
+                    break;
+                }
             }
             Err(_) => return None,
-        }
-        if raw.windows(4).any(|w| w == b"\r\n\r\n") && raw.contains(&b'{') {
-            break;
         }
     }
     ws_url_from_version_http(&String::from_utf8_lossy(&raw))
@@ -936,8 +972,8 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::{
-        insights_ready_from_value, json_version_ws, parse_port_file_text, ws_request,
-        ws_url_from_version_http,
+        http_response_complete, insights_ready_from_value, json_version_ws, parse_port_file_text,
+        ws_request, ws_url_from_version_http,
     };
     use serde_json::json;
 
@@ -967,21 +1003,22 @@ mod tests {
 
     #[test]
     fn leere_charts_sind_nicht_bereit() {
-        let snap = insights_ready_from_value(&json!({"charts": 2, "points": 0, "csv": 3})).unwrap();
+        let snap =
+            insights_ready_from_value(&json!({"charts": 2, "points": 0, "csv": 3})).expect("snap");
         assert!(!snap.has_data());
     }
 
     #[test]
     fn punkte_ohne_csv_knopf_sind_nicht_bereit() {
         let snap =
-            insights_ready_from_value(&json!({"charts": 1, "points": 12, "csv": 0})).unwrap();
+            insights_ready_from_value(&json!({"charts": 1, "points": 12, "csv": 0})).expect("snap");
         assert!(!snap.has_data());
     }
 
     #[test]
     fn punkte_und_csv_sind_bereit() {
         let snap =
-            insights_ready_from_value(&json!({"charts": 3, "points": 40, "csv": 4})).unwrap();
+            insights_ready_from_value(&json!({"charts": 3, "points": 40, "csv": 4})).expect("snap");
         assert!(snap.has_data());
         assert_eq!(snap.points, 40);
         assert_eq!(snap.csv, 4);
@@ -990,5 +1027,49 @@ mod tests {
     #[test]
     fn totes_debug_port_ist_kein_live_cdp() {
         assert!(json_version_ws(1).is_none());
+    }
+
+    fn version_json_body() -> &'static str {
+        r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:9333/devtools/browser/abc"}"#
+    }
+
+    fn version_http_headers(body_len: usize) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\n\r\n"
+        )
+    }
+
+    #[test]
+    fn http_headers_und_klammer_sind_unvollstaendig() {
+        let body = version_json_body();
+        let mut raw = version_http_headers(body.len()).into_bytes();
+        raw.push(b'{');
+        assert!(!http_response_complete(&raw));
+        assert!(ws_url_from_version_http(&String::from_utf8_lossy(&raw)).is_none());
+    }
+
+    #[test]
+    fn http_200_mit_content_length_ist_vollstaendig() {
+        let body = version_json_body();
+        let raw = format!("{}{body}", version_http_headers(body.len()));
+        assert!(http_response_complete(raw.as_bytes()));
+        assert_eq!(
+            ws_url_from_version_http(&raw).expect("url"),
+            "ws://127.0.0.1:9333/devtools/browser/abc"
+        );
+    }
+
+    #[test]
+    fn http_fragmentierter_json_body_wird_vollstaendig() {
+        let body = version_json_body();
+        let mut raw = version_http_headers(body.len()).into_bytes();
+        raw.push(b'{');
+        assert!(!http_response_complete(&raw));
+        raw.extend_from_slice(&body.as_bytes()[1..]);
+        assert!(http_response_complete(&raw));
+        assert_eq!(
+            ws_url_from_version_http(&String::from_utf8_lossy(&raw)).expect("url"),
+            "ws://127.0.0.1:9333/devtools/browser/abc"
+        );
     }
 }
