@@ -20,6 +20,8 @@ const DEFAULT_PORT_FILE: &str =
     "/home/nathanael/.config/BraveSoftware/Brave-Browser/DevToolsActivePort";
 const DEFAULT_BRAVE_BIN: &str = "/usr/bin/brave-browser-stable";
 const DEFAULT_XAUTH: &str = "/home/nathanael/.Xauthority";
+const DEFAULT_DEBUG_PORT: u16 = 9222;
+const BRAVE_START_WAIT: Duration = Duration::from_secs(60);
 const GROWTH_PATH: &str = "/analytics/growth-activation";
 const ENGAGEMENT_PATH: &str = "/analytics/engagement";
 
@@ -162,30 +164,25 @@ async fn ensure_brave() -> Result<()> {
     if explicit_ws_override().is_some() || json_version_ready() {
         return Ok(());
     }
-    if browser_ws_endpoint().is_ok() {
-        return Ok(());
-    }
     if !start_enabled() {
-        return Err(anyhow!(
-            "Brave-Port-Datei fehlt und INSIGHTS_BRAVE_START ist aus"
-        ));
+        return Err(anyhow!("kein live CDP und INSIGHTS_BRAVE_START ist aus"));
     }
     if default_brave_running() {
         return Err(anyhow!(
-            "Brave laeuft, aber DevToolsActivePort fehlt. Remote Debugging unter brave://inspect anschalten."
+            "Brave laeuft, aber CDP antwortet nicht. Remote Debugging oder Port {DEFAULT_DEBUG_PORT} pruefen."
         ));
     }
-    start_default_brave()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    let port = start_default_brave()?;
+    let deadline = std::time::Instant::now() + BRAVE_START_WAIT;
     while std::time::Instant::now() < deadline {
-        if browser_ws_endpoint().is_ok() {
-            tracing::info!("Brave mit Remote-Debugging gestartet");
+        if json_version_ws(port).is_some() {
+            tracing::info!(port, "Brave mit Remote-Debugging gestartet");
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
     Err(anyhow!(
-        "Brave gestartet, aber DevToolsActivePort kam nicht. DISPLAY={} pruefen.",
+        "Brave gestartet, aber CDP auf Port {port} kam nicht. DISPLAY={} pruefen.",
         detect_display()
     ))
 }
@@ -197,9 +194,9 @@ fn start_enabled() -> bool {
     )
 }
 
-fn start_default_brave() -> Result<()> {
+fn start_default_brave() -> Result<u16> {
     let bin = std::env::var("INSIGHTS_BRAVE_BIN").unwrap_or_else(|_| DEFAULT_BRAVE_BIN.to_string());
-    let port = port_from_env_or_file().unwrap_or(9222);
+    let port = port_from_env_or_file().unwrap_or(DEFAULT_DEBUG_PORT);
     let x_display = detect_display();
     let xauth = std::env::var("XAUTHORITY").unwrap_or_else(|_| DEFAULT_XAUTH.to_string());
     tracing::info!(bin = %bin, port, x_display = %x_display, "starte Brave");
@@ -218,7 +215,7 @@ fn start_default_brave() -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("Brave starten: {bin}"))?;
-    Ok(())
+    Ok(port)
 }
 
 fn default_brave_running() -> bool {
@@ -307,25 +304,33 @@ fn explicit_ws_override() -> Option<String> {
         .filter(|url| !url.is_empty())
 }
 
+fn live_debug_port() -> Option<u16> {
+    let mut candidates = Vec::new();
+    if let Ok(raw) = std::env::var("INSIGHTS_BRAVE_PORT") {
+        if let Ok(port) = raw.parse() {
+            candidates.push(port);
+        }
+    }
+    if let Ok((port, _)) = parse_port_file(&port_file()) {
+        candidates.push(port);
+    }
+    candidates.push(DEFAULT_DEBUG_PORT);
+    candidates
+        .into_iter()
+        .find(|port| json_version_ws(*port).is_some())
+}
+
 fn json_version_ready() -> bool {
-    port_from_env_or_file().and_then(json_version_ws).is_some()
+    live_debug_port().is_some()
 }
 
 fn browser_ws_endpoint() -> Result<String> {
     if let Some(url) = explicit_ws_override() {
         return Ok(url);
     }
-    if let Ok(raw) = std::env::var("INSIGHTS_BRAVE_PORT") {
-        let port: u16 = raw.parse().context("INSIGHTS_BRAVE_PORT ungueltig")?;
-        return json_version_ws(port).ok_or_else(|| {
-            anyhow!("kein webSocketDebuggerUrl unter http://127.0.0.1:{port}/json/version")
-        });
-    }
-    let (port, route) = parse_port_file(&port_file())?;
-    if let Some(url) = json_version_ws(port) {
-        return Ok(url);
-    }
-    Ok(format!("ws://127.0.0.1:{port}{route}"))
+    live_debug_port().and_then(json_version_ws).ok_or_else(|| {
+        anyhow!("kein live CDP auf Env-Port, DevToolsActivePort oder {DEFAULT_DEBUG_PORT}")
+    })
 }
 
 fn json_version_ws(port: u16) -> Option<String> {
@@ -931,7 +936,8 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::{
-        insights_ready_from_value, parse_port_file_text, ws_request, ws_url_from_version_http,
+        insights_ready_from_value, json_version_ws, parse_port_file_text, ws_request,
+        ws_url_from_version_http,
     };
     use serde_json::json;
 
@@ -979,5 +985,10 @@ mod tests {
         assert!(snap.has_data());
         assert_eq!(snap.points, 40);
         assert_eq!(snap.csv, 4);
+    }
+
+    #[test]
+    fn totes_debug_port_ist_kein_live_cdp() {
+        assert!(json_version_ws(1).is_none());
     }
 }
