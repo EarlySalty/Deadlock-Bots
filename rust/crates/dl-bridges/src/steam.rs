@@ -789,13 +789,11 @@ fn register_inner(
         forward_slash("steam_unlink", &["steam"], 15),
     );
 
-    // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
     router.on_command(
         "invite",
         spec(json!({
             "name": "invite",
             "description": "Lädt jemanden per Steam-Freundescode zum Playtest ein.",
-            "default_member_permissions": "8",
             "options": [
                 {"type": 3, "name": "freundescode", "description": "Steam-Freundescode, nur Ziffern, zum Beispiel 1852752823", "required": true},
                 {"type": 6, "name": "user", "description": "Das Discord-Mitglied, das den Playtest bekommt", "required": true}
@@ -803,6 +801,7 @@ fn register_inner(
         })),
         forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT_SECS),
     );
+    // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
     for (name, description) in [
         (
             "steam_rank_sync",
@@ -1482,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn invite_command_ist_admin_command_mit_freundescode_und_user_option() {
+    fn invite_command_ist_fuer_alle_mit_freundescode_und_user_option() {
         let mut router = InteractionRouter::new();
         register(&mut router, SteamBotClient::new("http://x", None));
 
@@ -1493,7 +1492,7 @@ mod tests {
             .find(|definition| definition["name"] == "invite")
             .expect("invite command definition");
 
-        assert_eq!(invite["default_member_permissions"], json!("8"));
+        assert!(invite.get("default_member_permissions").is_none());
 
         let options = invite["options"].as_array().expect("invite options");
         let shape: Vec<_> = options
