@@ -81,6 +81,19 @@ fn day_period_expr(column: &str, interval: Interval) -> String {
     }
 }
 
+fn default_window(interval: Interval, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+    match interval {
+        Interval::Daily => (today - Duration::days(DEFAULT_DAYS), today),
+        Interval::Weekly => {
+            let this_monday = monday(today);
+            (
+                this_monday - Duration::days(DEFAULT_DAYS),
+                this_monday + Duration::days(7),
+            )
+        }
+    }
+}
+
 fn parse_query(params: HashMap<String, String>) -> Result<InsightQuery, Response> {
     let interval = match params.get("interval").map(|s| s.trim().to_lowercase()) {
         None => Interval::Weekly,
@@ -89,13 +102,10 @@ fn parse_query(params: HashMap<String, String>) -> Result<InsightQuery, Response
         _ => return Err(err_text(400, "interval must be weekly or daily")),
     };
     let today = Utc::now().date_naive();
-    let default_to = match interval {
-        Interval::Daily => today,
-        Interval::Weekly => monday(today),
-    };
+    let (default_from, default_to) = default_window(interval, today);
     let from = match params.get("from").and_then(|s| parse_date(s)) {
         Some(date) => date,
-        None => default_to - Duration::days(DEFAULT_DAYS),
+        None => default_from,
     };
     let to = match params.get("to").and_then(|s| parse_date(s)) {
         Some(date) => date + Duration::days(1),
@@ -142,9 +152,8 @@ fn periods(query: &InsightQuery) -> Vec<Period> {
     out
 }
 
-fn current_and_previous(query: &InsightQuery) -> Option<(Period, Period)> {
-    let all = periods(query);
-    let current = *all.last()?;
+fn current_and_previous(query: &InsightQuery, today: NaiveDate) -> Option<(Period, Period)> {
+    let current = periods(query).into_iter().rev().find(|p| p.end <= today)?;
     let previous = Period {
         start: current.start - (current.end - current.start),
         end: current.start,
@@ -373,7 +382,7 @@ pub async fn overview(
         Ok(query) => query,
         Err(resp) => return resp,
     };
-    let Some((current, previous)) = current_and_previous(&query) else {
+    let Some((current, previous)) = current_and_previous(&query, Utc::now().date_naive()) else {
         return err_text(400, "no completed period in range");
     };
     let read: DashboardDbResult<Value> = async {
@@ -1484,6 +1493,54 @@ mod tests {
         assert_eq!(
             got[2].end,
             NaiveDate::from_ymd_opt(2026, 6, 22).expect("valid fixture date")
+        );
+    }
+
+    fn weekly_query_for(today: NaiveDate) -> InsightQuery {
+        let (from, to) = default_window(Interval::Weekly, today);
+        InsightQuery {
+            interval: Interval::Weekly,
+            from,
+            to,
+            guild_id: None,
+        }
+    }
+
+    #[test]
+    fn weekly_charts_enthalten_die_laufende_woche() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 11).expect("valid fixture date");
+        let query = weekly_query_for(today);
+        let got = periods(&query);
+        assert_eq!(
+            got.last().map(|p| p.start),
+            NaiveDate::from_ymd_opt(2026, 10, 5)
+        );
+        let csv = NaiveDate::from_ymd_opt(2026, 10, 9).expect("valid fixture date");
+        assert!(query.from <= csv && csv < query.to);
+        let (kpi, _) = current_and_previous(&query, today).expect("completed week");
+        assert_eq!(
+            kpi.start,
+            NaiveDate::from_ymd_opt(2026, 9, 28).expect("valid fixture date")
+        );
+        assert_eq!(
+            kpi.end,
+            NaiveDate::from_ymd_opt(2026, 10, 5).expect("valid fixture date")
+        );
+    }
+
+    #[test]
+    fn weekly_montags_wird_die_gerade_abgeschlossene_woche_zur_kpi() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 12).expect("valid fixture date");
+        let query = weekly_query_for(today);
+        let got = periods(&query);
+        assert_eq!(
+            got.last().map(|p| p.start),
+            NaiveDate::from_ymd_opt(2026, 10, 12)
+        );
+        let (kpi, _) = current_and_previous(&query, today).expect("completed week");
+        assert_eq!(
+            kpi.start,
+            NaiveDate::from_ymd_opt(2026, 10, 5).expect("valid fixture date")
         );
     }
 
