@@ -8822,6 +8822,131 @@ mod tests {
         }
     }
 
+    struct CountingConciergeBrain {
+        calls: std::sync::atomic::AtomicUsize,
+        available: bool,
+    }
+
+    #[async_trait]
+    impl dl_brain::AiAnswerer for CountingConciergeBrain {
+        async fn answer(&self, _: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            panic!("Untypisierter Antwortpfad")
+        }
+        async fn answer_discord_task(
+            &self,
+            _: &str,
+            _: u64,
+            task: &dl_brain::DiscordAnswerTask,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            assert_eq!(
+                task.capability,
+                dl_brain::DiscordAnswerCapability::Concierge
+            );
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.available {
+                Ok(dl_brain::BrainOutcome::Answer("Brain-Testantwort".into()))
+            } else {
+                Err(dl_brain::BrainError::Backend("HTTP 429".into()))
+            }
+        }
+    }
+
+    const PARRY_EVIDENCE: &str = r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Parry","path":"parry.html"},"text":"Parry blockt Nahkampfangriffe.","observed_at":null}],"truncated":false}"#;
+
+    #[tokio::test]
+    async fn community_brain_switch_off_concierge_answers_with_answer_engine() {
+        let (url, requests, evidence_server) = knowledge_server(PARRY_EVIDENCE).await;
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"answerable":true,"answer":"Parry blockt Nahkampfangriffe.","source_ids":["C1"]}"#,
+        );
+        let answers = Arc::new(dl_answer::AnswerEngine::new(
+            Some(provider.clone()),
+            Arc::new(knowledge_client::CommunityRetriever {
+                base_url: url,
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            StdDuration::from_secs(20),
+        ));
+        let concierge = Concierge::with_answers(
+            lazy_pool(),
+            mock_port(),
+            Some(provider.clone()),
+            test_config(true, &[]),
+            answers,
+        );
+        let decision = concierge
+            .answer_bound_decision(
+                42,
+                10,
+                "Wie funktioniert Parry in Deadlock?",
+                None,
+                None,
+                AnswerRoute::Concierge,
+                None,
+            )
+            .await;
+        evidence_server.await.expect("Wissensserver");
+        assert_ne!(decision.source, "brain_task");
+        assert!(decision.knowledge_hit);
+        assert_eq!(
+            decision.answer.reply.as_deref(),
+            Some("Parry blockt Nahkampfangriffe.")
+        );
+        assert_eq!(requests.lock().expect("Wissensanfragen").len(), 1);
+        assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn community_brain_switch_on_concierge_error_never_calls_bot_model() {
+        for available in [true, false] {
+            let provider = dl_ai::MockChatProvider::single(
+                r#"{"answerable":true,"answer":"Lokales Botmodell","source_ids":["C1"]}"#,
+            );
+            let answers = Arc::new(dl_answer::AnswerEngine::new(
+                Some(provider.clone()),
+                Arc::new(knowledge_client::CommunityRetriever {
+                    base_url: "http://127.0.0.1:1".into(),
+                    timeout: KNOWLEDGE_TIMEOUT,
+                }),
+                None,
+                StdDuration::from_secs(1),
+            ));
+            let brain = Arc::new(CountingConciergeBrain {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                available,
+            });
+            let concierge = Concierge::with_brain(
+                lazy_pool(),
+                mock_port(),
+                Some(provider.clone()),
+                test_config(true, &[]),
+                answers,
+                brain.clone(),
+            );
+            let decision = concierge
+                .answer_bound_decision(
+                    42,
+                    10,
+                    "Wie funktioniert Parry in Deadlock?",
+                    None,
+                    None,
+                    AnswerRoute::Concierge,
+                    None,
+                )
+                .await;
+            let expected = if available {
+                "Brain-Testantwort"
+            } else {
+                "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal."
+            };
+            assert_eq!(decision.source, "brain_task");
+            assert_eq!(decision.answer.reply.as_deref(), Some(expected));
+            assert_eq!(brain.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(provider.requests().is_empty());
+        }
+    }
+
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn brain_followup_route_reads_only_own_user_questions() {

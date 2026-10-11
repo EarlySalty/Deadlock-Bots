@@ -301,6 +301,18 @@ fn community_brain_answerer(
     }
 }
 
+fn community_brain_for_answers(
+    options: &dl_core::runtime_config::AiOptions,
+    token: impl FnOnce() -> Option<String>,
+) -> Option<Arc<dyn dl_brain::AiAnswerer>> {
+    if !options.community_brain_answers.unwrap_or(false) {
+        tracing::info!("Concierge und FAQ antworten über die bisherige Antwort-Engine");
+        return None;
+    }
+    tracing::info!("Concierge und FAQ antworten ausschließlich über das Brain");
+    Some(community_brain_answerer(options, token()))
+}
+
 async fn wait_for_gateway_cache_ready(
     events: &mut tokio::sync::broadcast::Receiver<dl_discord::GatewayEvent>,
     guild_id: u64,
@@ -1080,14 +1092,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
     );
 
-    let community_brain = community_brain_answerer(
-        &operating.runtime.ai,
-        dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN"),
-    );
-    tracing::info!(
-        concierge_enabled = concierge_config.enabled,
-        "Brain-Antwortweg für Concierge und FAQ vorbereitet"
-    );
+    let community_brain = community_brain_for_answers(&operating.runtime.ai, || {
+        dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN")
+    });
 
     let brain_handler = {
         let options = &operating.runtime.ai;
@@ -1163,28 +1170,44 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     team_applications.ensure_panel().await;
     tokio::spawn(team_applications.clone().run_maintenance_loop());
 
-    // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq = dl_community::faq::FaqChat::with_brain(
-        central_pool.clone(),
-        Arc::new(modglue::FaqGlue {
-            adapter: adapter.clone(),
-        }),
-        shared_answers.clone(),
-        community_brain.clone(),
-    );
+    let faq_answers = shared_answers.clone();
+    let faq_port = Arc::new(modglue::FaqGlue {
+        adapter: adapter.clone(),
+    });
+    let faq = match community_brain.clone() {
+        Some(brain) => dl_community::faq::FaqChat::with_brain(
+            central_pool.clone(),
+            faq_port,
+            faq_answers,
+            brain,
+        ),
+        None => {
+            dl_community::faq::FaqChat::with_answers(central_pool.clone(), faq_port, faq_answers)
+        }
+    };
     dl_community::faq::register(&mut router, faq.clone());
 
-    // Concierge-Onboarding Slice A: default AUS, T0 nur fuer Test-Allowlist.
-    let concierge = dl_community::concierge::Concierge::with_brain(
-        central_pool.clone(),
-        Arc::new(modglue::ConciergeGlue {
-            adapter: adapter.clone(),
-        }),
-        concierge_ai.clone(),
-        concierge_config.clone(),
-        shared_answers.clone(),
-        community_brain.clone(),
-    );
+    let concierge_answers = shared_answers.clone();
+    let concierge_port = Arc::new(modglue::ConciergeGlue {
+        adapter: adapter.clone(),
+    });
+    let concierge = match community_brain.clone() {
+        Some(brain) => dl_community::concierge::Concierge::with_brain(
+            central_pool.clone(),
+            concierge_port,
+            concierge_ai.clone(),
+            concierge_config.clone(),
+            concierge_answers,
+            brain,
+        ),
+        None => dl_community::concierge::Concierge::with_answers(
+            central_pool.clone(),
+            concierge_port,
+            concierge_ai.clone(),
+            concierge_config.clone(),
+            concierge_answers,
+        ),
+    };
     // Concierge-Knopf "Twitch verknüpfen": derselbe persönliche Link wie im
     // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
     concierge.install_twitch_link_source(Arc::new(concierge_twitch_link));
@@ -2105,6 +2128,57 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn community_brain_answers_switch_selects_answer_path() {
+        let config = dl_core::bot_config::BotConfig::parse(
+            "schema_version = 1\n[runtime.ai]\ncommunity_brain_answers = true\n",
+        )
+        .expect("Schalter ist gültige Betriebskonfiguration");
+        assert_eq!(config.runtime.ai.community_brain_answers, Some(true));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Testport");
+        listener
+            .set_nonblocking(true)
+            .expect("Nichtblockierender Testport");
+        let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
+        for switch in [None, Some(false)] {
+            let options = dl_core::runtime_config::AiOptions {
+                brain_api_endpoint: Some(endpoint.clone()),
+                community_brain_answers: switch,
+                ..Default::default()
+            };
+            assert!(super::community_brain_for_answers(&options, || {
+                panic!("Ohne Schalter wird kein Brain-Zugang gelesen")
+            })
+            .is_none());
+        }
+
+        let options = dl_core::runtime_config::AiOptions {
+            brain_api_endpoint: Some(endpoint),
+            community_brain_answers: Some(true),
+            ..Default::default()
+        };
+        let brain = super::community_brain_for_answers(&options, || None)
+            .expect("Eingeschalteter Brain-Antwortweg");
+        assert!(matches!(
+            brain
+                .answer_discord_task(
+                    "Synthetische Frage",
+                    42,
+                    &dl_brain::DiscordAnswerTask {
+                        capability: dl_brain::DiscordAnswerCapability::Faq,
+                        channel_id: 10,
+                    },
+                )
+                .await,
+            Err(dl_brain::BrainError::Backend(_))
+        ));
+        assert_eq!(
+            listener.accept().expect_err("Keine Anfrage").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
     async fn community_brain_ohne_zugang_bleibt_geschlossen_ohne_startfehler() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Testport");
         listener
@@ -2289,6 +2363,9 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
         assert!(source.contains("FaqChat::with_brain("));
         assert!(source.contains("Concierge::with_brain("));
+        assert!(source.contains("FaqChat::with_answers("));
+        assert!(source.contains("Concierge::with_answers("));
+        assert_eq!(source.matches("match community_brain.clone()").count(), 2);
         assert!(source.contains("discord_brain_answerer("));
         assert!(source.contains("secret_value(\"DISCORD_BRAIN_CLIENT_TOKEN\")"));
         assert!(!source.contains("SharedBrainAnswerer"));

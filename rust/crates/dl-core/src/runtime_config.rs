@@ -194,6 +194,7 @@ section!(AiOptions {
     brain_max_question_len: usize => "BRAIN_MAX_QUESTION_LEN",
     brain_api_endpoint: String => "BRAIN_API_ENDPOINT",
     brain_api_timeout_ms: u64 => "BRAIN_API_TIMEOUT_MS",
+    community_brain_answers: bool => "DL_COMMUNITY_BRAIN_ANSWERS",
 });
 
 #[derive(Clone, Default, Deserialize, Serialize)]

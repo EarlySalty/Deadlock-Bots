@@ -1095,9 +1095,16 @@ impl FaqChat {
         answer_text(lookup).unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
     }
 
-    #[allow(dead_code)]
-    async fn generate_stateless_answer(&self, question: &str) -> String {
-        self.visible_answer(self.lookup(question).await)
+    async fn generate_stateless_answer(
+        &self,
+        question: &str,
+        user_id: u64,
+        channel_id: u64,
+    ) -> String {
+        self.visible_answer(
+            self.lookup_bound(question, question, user_id, channel_id)
+                .await,
+        )
     }
 
     async fn answer_statefully(
@@ -1342,10 +1349,9 @@ impl FaqChat {
                 }
                 let question = content.trim();
                 if !question.is_empty() {
-                    let answer = self.visible_answer(
-                        self.lookup_bound(question, question, author_id, channel_id)
-                            .await,
-                    );
+                    let answer = self
+                        .generate_stateless_answer(question, author_id, channel_id)
+                        .await;
                     let _ = self.port.send_message(channel_id, &answer, None).await;
                 }
                 return true;
@@ -1392,10 +1398,9 @@ impl FaqChat {
         {
             Ok(FaqMessageWrite::Stored) => {}
             Ok(FaqMessageWrite::PrivacyBlocked | FaqMessageWrite::Missing) => {
-                let stateless_answer = self.visible_answer(
-                    self.lookup_bound(question, question, author_id, channel_id)
-                        .await,
-                );
+                let stateless_answer = self
+                    .generate_stateless_answer(question, author_id, channel_id)
+                    .await;
                 let _ = self
                     .port
                     .send_message(channel_id, &stateless_answer, None)
@@ -2246,7 +2251,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("{count} wartende Privacy-Locks nicht sichtbar"));
     }
     use crate::knowledge_client::test_logging::LogCapture;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn lazy_pool() -> PgPool {
@@ -2382,6 +2387,95 @@ mod tests {
                 )
                 .await;
             assert_eq!(matches!(lookup, KnowledgeLookup::Answer(_)), available);
+            assert!(provider.requests().is_empty());
+        }
+    }
+
+    struct CountingBrain {
+        calls: AtomicUsize,
+        available: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl dl_brain::AiAnswerer for CountingBrain {
+        async fn answer(&self, _: &str) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            panic!("Untypisierter Antwortpfad")
+        }
+        async fn answer_discord_task(
+            &self,
+            _: &str,
+            _: u64,
+            task: &dl_brain::DiscordAnswerTask,
+        ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+            assert_eq!(task.capability, dl_brain::DiscordAnswerCapability::Faq);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.available {
+                Ok(dl_brain::BrainOutcome::Answer("Brain-Testantwort".into()))
+            } else {
+                Err(dl_brain::BrainError::Backend("HTTP 429".into()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn community_brain_switch_off_faq_answers_with_answer_engine() {
+        let (url, server, called) = evidence_server(200,
+            r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Paten","path":"paten.html"},"text":"Ein Pate hilft beim Einstieg.","observed_at":null}],"truncated":false}"#,
+            Duration::ZERO,
+        ).await;
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"answerable":true,"answer":"Ein Pate hilft beim Einstieg.","source_ids":["C1"]}"#,
+        );
+        let engine = Arc::new(dl_answer::AnswerEngine::new(
+            Some(provider.clone()),
+            Arc::new(crate::knowledge_client::CommunityRetriever {
+                base_url: url,
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            Duration::from_secs(20),
+        ));
+        let faq = FaqChat::with_answers(lazy_pool(), ticket_port(), engine);
+        assert_eq!(
+            faq.generate_stateless_answer("Was ist ein Pate?", 42, 10)
+                .await,
+            "Ein Pate hilft beim Einstieg."
+        );
+        server.await.expect("Wissensserver");
+        assert!(called.load(Ordering::SeqCst));
+        assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn community_brain_switch_on_faq_error_never_calls_bot_model() {
+        for available in [true, false] {
+            let provider = dl_ai::MockChatProvider::single(
+                r#"{"answerable":true,"answer":"Lokales Botmodell","source_ids":["C1"]}"#,
+            );
+            let engine = Arc::new(dl_answer::AnswerEngine::new(
+                Some(provider.clone()),
+                Arc::new(crate::knowledge_client::CommunityRetriever {
+                    base_url: "http://127.0.0.1:1".into(),
+                    timeout: KNOWLEDGE_TIMEOUT,
+                }),
+                None,
+                Duration::from_secs(1),
+            ));
+            let brain = Arc::new(CountingBrain {
+                calls: AtomicUsize::new(0),
+                available,
+            });
+            let faq = FaqChat::with_brain(lazy_pool(), ticket_port(), engine, brain.clone());
+            let answer = faq
+                .generate_stateless_answer("Was ist ein Pate?", 42, 10)
+                .await;
+            let expected = if available {
+                "Brain-Testantwort"
+            } else {
+                "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal."
+            };
+            assert_eq!(answer, expected);
+            assert_eq!(brain.calls.load(Ordering::SeqCst), 1);
             assert!(provider.requests().is_empty());
         }
     }
