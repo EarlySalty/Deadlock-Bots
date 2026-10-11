@@ -3466,11 +3466,7 @@ impl Concierge {
         answers: Arc<dl_answer::AnswerEngine>,
         brain: Arc<dyn dl_brain::AiAnswerer>,
     ) -> Arc<Self> {
-        let mut concierge = Self::with_answers(pool, port, ai, config, answers);
-        Arc::get_mut(&mut concierge)
-            .expect("Neue Concierge-Instanz")
-            .brain = Some(brain);
-        concierge
+        Self::assemble(pool, port, ai, config, answers, Some(brain))
     }
 
     pub fn new(
@@ -3501,12 +3497,23 @@ impl Concierge {
         config: ConciergeConfig,
         answers: Arc<dl_answer::AnswerEngine>,
     ) -> Arc<Self> {
+        Self::assemble(pool, port, ai, config, answers, None)
+    }
+
+    fn assemble(
+        pool: PgPool,
+        port: Arc<dyn ConciergePort>,
+        ai: Option<Arc<dyn ChatProvider>>,
+        config: ConciergeConfig,
+        answers: Arc<dl_answer::AnswerEngine>,
+        brain: Option<Arc<dyn dl_brain::AiAnswerer>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: ConciergeStore::new(pool),
             port,
             ai,
             answers,
-            brain: None,
+            brain,
             config,
             cooldowns: Mutex::new(HashMap::new()),
             user_actions: Mutex::new(HashMap::new()),
@@ -4919,8 +4926,10 @@ impl Concierge {
         };
         let answer = self
             .answer_bound_decision(
-                user_id,
-                channel_id,
+                AnswerBinding {
+                    user_id,
+                    channel_id,
+                },
                 trimmed,
                 Some(&history),
                 Some(&conversation),
@@ -5167,14 +5176,9 @@ impl Concierge {
             .await
     }
 
-    /// `patience_channel` ist der Kanal, in dem der Concierge Bescheid sagt, wenn
-    /// der LLM-Aufruf laenger braucht als `AI_GEDULD_HINWEIS_NACH`. `None` heisst
-    /// stumm warten, etwa wenn niemand auf eine Antwort wartet.
-    #[allow(clippy::too_many_arguments)]
     async fn answer_bound_decision(
         &self,
-        user_id: u64,
-        channel_id: u64,
+        binding: AnswerBinding,
         question: &str,
         history: Option<&[String]>,
         conversation: Option<&[ChatMessage]>,
@@ -5186,14 +5190,21 @@ impl Concierge {
                 .answer_decision(question, history, conversation, route, patience_channel)
                 .await;
         };
+        if let Some(decision) = self.local_decision(question, route, history.is_some()) {
+            return decision;
+        }
         let task = dl_brain::DiscordAnswerTask {
             capability: dl_brain::DiscordAnswerCapability::Concierge,
-            channel_id,
+            channel_id: binding.channel_id,
         };
         let user_questions =
             dl_brain::bounded_user_questions(history.unwrap_or_default(), question);
-        let answer =
-            brain.answer_discord_task_with_history(question, user_id, &task, &user_questions);
+        let answer = brain.answer_discord_task_with_history(
+            question,
+            binding.user_id,
+            &task,
+            &user_questions,
+        );
         let mut answer = std::pin::pin!(answer);
         let result = if let Some(channel) = patience_channel {
             tokio::select! {
@@ -5225,6 +5236,23 @@ impl Concierge {
         decision
     }
 
+    fn local_decision(
+        &self,
+        question: &str,
+        route: AnswerRoute,
+        stateful: bool,
+    ) -> Option<AnswerDecision> {
+        let answer = local_conversational_answer(question, self.config.free_voice)?;
+        let decision = AnswerDecision {
+            answer,
+            source: "local",
+            knowledge_hit: false,
+            outcome: ConciergeAnswerOutcome::Answered,
+        };
+        log_concierge_answer_decision(route, &decision, question, stateful);
+        Some(decision)
+    }
+
     async fn answer_decision(
         &self,
         question: &str,
@@ -5234,14 +5262,7 @@ impl Concierge {
         patience_channel: Option<u64>,
     ) -> AnswerDecision {
         let stateful = history.is_some();
-        if let Some(answer) = local_conversational_answer(question, self.config.free_voice) {
-            let decision = AnswerDecision {
-                answer,
-                source: "local",
-                knowledge_hit: false,
-                outcome: ConciergeAnswerOutcome::Answered,
-            };
-            log_concierge_answer_decision(route, &decision, question, stateful);
+        if let Some(decision) = self.local_decision(question, route, stateful) {
             return decision;
         }
         // Reiner Smalltalk behält seine Persona, hat aber keinen zweiten Faktenaufruf.
@@ -5515,8 +5536,10 @@ impl Concierge {
     ) -> AnswerTerminal {
         let decision = self
             .answer_bound_decision(
-                user_id,
-                channel_id,
+                AnswerBinding {
+                    user_id,
+                    channel_id,
+                },
                 question,
                 None,
                 None,
@@ -7570,6 +7593,12 @@ struct LlmAnswer {
     pate_request: bool,
 }
 
+#[derive(Clone, Copy)]
+struct AnswerBinding {
+    user_id: u64,
+    channel_id: u64,
+}
+
 struct AnswerDecision {
     answer: LlmAnswer,
     source: &'static str,
@@ -8807,8 +8836,10 @@ mod tests {
             );
             let decision = concierge
                 .answer_bound_decision(
-                    42,
-                    10,
+                    AnswerBinding {
+                        user_id: 42,
+                        channel_id: 10,
+                    },
                     "Hallo",
                     Some(&["Gespeicherter privater Verlauf".into()]),
                     None,
@@ -8877,8 +8908,10 @@ mod tests {
         );
         let decision = concierge
             .answer_bound_decision(
-                42,
-                10,
+                AnswerBinding {
+                    user_id: 42,
+                    channel_id: 10,
+                },
                 "Wie funktioniert Parry in Deadlock?",
                 None,
                 None,
@@ -8895,6 +8928,49 @@ mod tests {
         );
         assert_eq!(requests.lock().expect("Wissensanfragen").len(), 1);
         assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn community_brain_switch_on_concierge_keeps_local_replies_before_brain() {
+        let provider = dl_ai::MockChatProvider::new(Vec::new());
+        let answers = Arc::new(dl_answer::AnswerEngine::new(
+            Some(provider.clone()),
+            Arc::new(knowledge_client::CommunityRetriever {
+                base_url: "http://127.0.0.1:1".into(),
+                timeout: KNOWLEDGE_TIMEOUT,
+            }),
+            None,
+            StdDuration::from_secs(1),
+        ));
+        let brain = Arc::new(CountingConciergeBrain {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            available: true,
+        });
+        let concierge = Concierge::with_brain(
+            lazy_pool(),
+            mock_port(),
+            Some(provider.clone()),
+            test_config(true, &[]),
+            answers,
+            brain.clone(),
+        );
+        let decision = concierge
+            .answer_bound_decision(
+                AnswerBinding {
+                    user_id: 42,
+                    channel_id: 10,
+                },
+                "Bist du ein Bot?",
+                None,
+                None,
+                AnswerRoute::Concierge,
+                None,
+            )
+            .await;
+        assert_eq!(decision.source, "local");
+        assert_eq!(decision.answer.reply.as_deref(), Some(BOT_IDENTITY_TEXT));
+        assert_eq!(brain.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(provider.requests().is_empty());
     }
 
     #[tokio::test]
@@ -8926,8 +9002,10 @@ mod tests {
             );
             let decision = concierge
                 .answer_bound_decision(
-                    42,
-                    10,
+                    AnswerBinding {
+                        user_id: 42,
+                        channel_id: 10,
+                    },
                     "Wie funktioniert Parry in Deadlock?",
                     None,
                     None,

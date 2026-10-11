@@ -828,9 +828,7 @@ impl FaqChat {
         answers: Arc<dl_answer::AnswerEngine>,
         brain: Arc<dyn dl_brain::AiAnswerer>,
     ) -> Arc<Self> {
-        let mut faq = Self::with_answers(pool, port, answers);
-        Arc::get_mut(&mut faq).expect("Neue FAQ-Instanz").brain = Some(brain);
-        faq
+        Self::assemble_with_answers(pool, port, answers, Some(brain))
     }
 
     async fn lookup_bound(
@@ -874,11 +872,19 @@ impl FaqChat {
         }
     }
 
-    /// Produktiver FAQ-Eingang teilt exakt dieselbe Instanz wie Concierge und Brain.
     pub fn with_answers(
         pool: PgPool,
         port: Arc<dyn FaqPort>,
         answers: Arc<dl_answer::AnswerEngine>,
+    ) -> Arc<Self> {
+        Self::assemble_with_answers(pool, port, answers, None)
+    }
+
+    fn assemble_with_answers(
+        pool: PgPool,
+        port: Arc<dyn FaqPort>,
+        answers: Arc<dl_answer::AnswerEngine>,
+        brain: Option<Arc<dyn dl_brain::AiAnswerer>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             ticket_claims: Arc::new(KvTicketClaimStore { pool: pool.clone() }),
@@ -888,7 +894,7 @@ impl FaqChat {
             shadow_channel_id: Some(LOG_CHANNEL_ID),
             ticket_generator: None,
             answers: Some(answers),
-            brain: None,
+            brain,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
     }
