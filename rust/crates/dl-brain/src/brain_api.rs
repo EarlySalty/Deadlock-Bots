@@ -68,7 +68,7 @@ impl BrainApiAnswerer {
     fn query(&self, question: &str) -> Result<Query, BrainError> {
         let sequence = self
             .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| backend_error())?;
@@ -93,11 +93,13 @@ impl BrainApiAnswerer {
         allow_discord_reads: bool,
         answer_context: Option<AnswerContext>,
         user_questions: &[String],
+        max_units: usize,
     ) -> Result<BrainOutcome, BrainError> {
         if question.trim().is_empty() || question.chars().count() > 4000 || user_id == Some(0) {
-            return Err(backend_error());
+            classified_backend_error("anfrage");
+            return Ok(BrainOutcome::NoAnswer);
         }
-        tokio::time::timeout(self.timeout, async {
+        match tokio::time::timeout(self.timeout, async {
             let _permit = self
                 .admission
                 .acquire()
@@ -127,10 +129,17 @@ impl BrainApiAnswerer {
                 status = ?response.status,
                 "Discord-Brain-Antwort empfangen"
             );
-            project(response)
+            project_bounded(response, max_units)
         })
         .await
-        .map_err(|_| classified_backend_error("transport"))?
+        {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(_)) => Ok(BrainOutcome::NoAnswer),
+            Err(_) => {
+                classified_backend_error("transport");
+                Ok(BrainOutcome::NoAnswer)
+            }
+        }
     }
 }
 
@@ -153,6 +162,7 @@ fn client_error(error: ClientError) -> BrainError {
     classified_backend_error(class)
 }
 
+#[cfg(test)]
 fn project(response: PublicAnswerResponse) -> Result<BrainOutcome, BrainError> {
     project_bounded(response, 3800)
 }
@@ -162,8 +172,10 @@ fn project_bounded(
     max_units: usize,
 ) -> Result<BrainOutcome, BrainError> {
     match response.status {
-        AnswerStatus::InsufficientEvidence => Ok(BrainOutcome::NoAnswer),
-        AnswerStatus::Answered | AnswerStatus::BuildRejected => {
+        AnswerStatus::InsufficientEvidence | AnswerStatus::BuildRejected => {
+            Ok(BrainOutcome::NoAnswer)
+        }
+        AnswerStatus::Answered => {
             let (text, had_links) = without_links(&response.text);
             if had_links {
                 tracing::warn!(klasse = "link", "Links aus Brain-Antwort entfernt");
@@ -173,7 +185,8 @@ fn project_bounded(
             if text.is_empty() {
                 return Ok(BrainOutcome::NoAnswer);
             }
-            let links = artifact_links(&response);
+            let first_units = text.chars().next().map_or(0, char::len_utf16);
+            let links = public_links(&response, max_units.saturating_sub(first_units));
             let budget = max_units.saturating_sub(links.encode_utf16().count());
             let mut units = 0;
             let end = text.char_indices().find_map(|(index, character)| {
@@ -186,23 +199,96 @@ fn project_bounded(
             } else {
                 text
             };
+            if text.is_empty() {
+                return Ok(BrainOutcome::NoAnswer);
+            }
             Ok(BrainOutcome::Answer(format!("{text}{links}")))
         }
-        _ => Err(classified_backend_error("vertrag")),
+        status => {
+            tracing::warn!(?status, "Brain hat keine verwendbare Antwort geliefert");
+            Ok(BrainOutcome::NoAnswer)
+        }
     }
 }
 
-fn artifact_links(response: &PublicAnswerResponse) -> String {
+fn public_links(response: &PublicAnswerResponse, max_units: usize) -> String {
     if response.status != AnswerStatus::Answered {
         return String::new();
     }
-    response
+    let mut seen = BTreeSet::new();
+    let docs = response
+        .citations
+        .iter()
+        .filter(|citation| citation.label.len() <= 256)
+        .filter_map(|citation| {
+            citation
+                .label
+                .split_whitespace()
+                .find(|url| valid_docs_url(url))
+        })
+        .filter(|url| seen.insert(*url))
+        .map(|url| format!("\n\nQuelle: <{url}>"));
+    let artifacts = response
         .artifacts
         .iter()
         .filter(|artifact| artifact.validate().is_ok())
         .take(brain_client::MAX_PUBLIC_ARTIFACTS)
-        .map(|artifact| format!("\n\nGrafik: {}\n<{}>", artifact.title, artifact.page_url))
-        .collect()
+        .map(|artifact| {
+            let (title, had_links) = without_links(&artifact.title);
+            if had_links {
+                tracing::warn!(klasse = "link", "Links aus Brain-Artefakttitel entfernt");
+            }
+            format!("\n\nGrafik: {}\n<{}>", title.trim(), artifact.page_url)
+        });
+    let mut links = String::new();
+    let mut units = 0;
+    for link in docs.chain(artifacts) {
+        let added = link.encode_utf16().count();
+        if added <= max_units.saturating_sub(units) {
+            links.push_str(&link);
+            units += added;
+        }
+    }
+    links
+}
+
+fn valid_docs_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://github.com/EarlySalty/Deadlock-Docs/blob/") else {
+        return false;
+    };
+    let Some((revision, section)) = rest.split_once("/public/") else {
+        return false;
+    };
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return false;
+    }
+    let Some((path, lines)) = section.split_once("#L") else {
+        return false;
+    };
+    if !path.ends_with(".html")
+        || path.split('/').any(|part| {
+            part.is_empty()
+                || matches!(part, "." | "..")
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return false;
+    }
+    let Some((start, end)) = lines.split_once("-L") else {
+        return false;
+    };
+    if !start.bytes().all(|byte| byte.is_ascii_digit())
+        || !end.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    matches!((start.parse::<u32>(), end.parse::<u32>()), (Ok(start), Ok(end)) if start > 0 && end >= start)
 }
 
 fn without_links(text: &str) -> (String, bool) {
@@ -297,42 +383,17 @@ impl AiAnswerer for BrainApiAnswerer {
         task: &crate::DiscordAnswerTask,
         user_questions: &[String],
     ) -> Result<BrainOutcome, BrainError> {
-        if question.trim().is_empty()
-            || question.chars().count() > 4000
-            || user_id == 0
-            || !task.valid()
-        {
-            return Err(backend_error());
+        if !task.valid() {
+            classified_backend_error("anfrage");
+            return Ok(BrainOutcome::NoAnswer);
         }
-        tokio::time::timeout(self.timeout, async {
-            let _permit = self
-                .admission
-                .acquire()
-                .await
-                .map_err(|_| backend_error())?;
-            let query = self.query(question)?;
-            let response = if user_questions.is_empty() {
-                self.client.answer_discord_task(&query, user_id, task).await
-            } else {
-                self.client
-                    .answer_discord_task_with_history(&query, user_id, task, user_questions)
-                    .await
-            }
-            .map_err(client_error)?;
-            tracing::info!(
-                capability = ?task.capability,
-                request_id = %response.request_id,
-                status = ?response.status,
-                "Discord-Bot-Aufgabe vom Brain empfangen"
-            );
-            project_bounded(response, 1800)
-        })
-        .await
-        .map_err(|_| classified_backend_error("transport"))?
+        self.answer_query(question, Some(user_id), true, None, user_questions, 1800)
+            .await
     }
 
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, None, true, None, &[]).await
+        self.answer_query(question, None, true, None, &[], 3800)
+            .await
     }
 
     async fn answer_for_discord(
@@ -365,6 +426,7 @@ impl AiAnswerer for BrainApiAnswerer {
             context.allow_discord_reads,
             context.answer_context.clone().map(AnswerContext::Discord),
             user_questions,
+            3800,
         )
         .await
     }
@@ -375,8 +437,15 @@ impl AiAnswerer for BrainApiAnswerer {
         user_id: u64,
         allow_discord_reads: bool,
     ) -> Result<BrainOutcome, BrainError> {
-        self.answer_query(question, Some(user_id), allow_discord_reads, None, &[])
-            .await
+        self.answer_query(
+            question,
+            Some(user_id),
+            allow_discord_reads,
+            None,
+            &[],
+            3800,
+        )
+        .await
     }
 }
 
@@ -447,44 +516,22 @@ mod tests {
                         .expect("Inhaltslängenheader");
                     if request.len() >= end + 4 + length {
                         let body = &request[end + 4..end + 4 + length];
-                        if let Some(capability) = task {
-                            assert!(headers.starts_with("POST /v1/task HTTP/1.1"));
-                            let lower = headers.to_ascii_lowercase();
-                            assert!(!lower.contains("x-discord-answer-task"));
-                            assert!(!lower.contains("x-discord-user-id"));
-                            assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
-                            let envelope: serde_json::Value =
-                                serde_json::from_slice(body).expect("Aufgabenvertrag");
-                            assert_eq!(
-                                envelope["contract_version"],
-                                brain_client::BOT_TASK_VERSION
-                            );
-                            assert_eq!(
-                                envelope["identity"],
-                                json!({"kind": "discord", "channel_id": 10, "user_id": 3})
-                            );
-                            let question = if recorded_history.is_empty() {
-                                "Sinclairs letzter Patch?"
-                            } else {
-                                "Wie mache ich das?"
-                            };
-                            assert_eq!(
-                                envelope["task"],
-                                json!({
-                                    "kind": "discord_answer",
-                                    "capability": capability,
-                                    "question": question,
-                                    "user_questions": recorded_history,
-                                })
-                            );
-                            break envelope["request_id"]
-                                .as_str()
-                                .expect("Aufgaben-ID")
-                                .to_owned();
-                        }
+                        assert!(headers.starts_with("POST /v1/answer HTTP/1.1"));
+                        assert!(!headers.contains("8896"));
+                        assert!(!headers
+                            .to_ascii_lowercase()
+                            .contains("x-discord-answer-task"));
+                        assert!(headers
+                            .to_ascii_lowercase()
+                            .contains("x-discord-user-id: 3"));
                         if recorded_history.is_empty() {
                             let query: Query =
                                 serde_json::from_slice(body).expect("Anfragevertrag");
+                            assert_eq!(
+                                query.requested_scopes,
+                                BTreeSet::from(["bot.public".into()])
+                            );
+                            assert_eq!(query.text, "Sinclairs letzter Patch?");
                             break query.request_id;
                         }
                         assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
@@ -516,22 +563,6 @@ mod tests {
             });
             if invalid_contract {
                 response["contract_version"] = json!("falscher-vertrag");
-            }
-            if let Some(capability) = task {
-                let result = if status == "task_failed" {
-                    json!({
-                        "kind": "failed",
-                        "capability": brain_client::BotCapability::from(capability),
-                        "failure": "provider_rate_limited",
-                    })
-                } else {
-                    json!({"kind": "discord_answer", "answer": response})
-                };
-                response = json!({
-                    "contract_version": brain_client::BOT_TASK_VERSION,
-                    "request_id": request_id,
-                    "result": result,
-                });
             }
             let response = response.to_string();
             let body = if truncated_body {
@@ -636,7 +667,7 @@ mod tests {
                         status, "Antwort", truncated, invalid, capability, &history
                     )
                     .await,
-                    Err(BrainError::Backend(_))
+                    Ok(BrainOutcome::NoAnswer)
                 ));
             }
         }
@@ -662,7 +693,8 @@ mod tests {
                     BrainOutcome::NoAnswer
                 );
             }
-            for status in ["answered", "build_rejected"] {
+            {
+                let status = "answered";
                 let text = format!("Ungeprüft: {}🧠Rest", "ä".repeat(1788));
                 let outcome =
                     fixture_answer_with_task(status, &text, false, false, Some(capability))
@@ -686,7 +718,7 @@ mod tests {
                 );
                 let empty =
                     fixture_answer_with_task(status, "", false, false, Some(capability)).await;
-                assert!(matches!(empty, Err(BrainError::Backend(_))));
+                assert!(matches!(empty, Ok(BrainOutcome::NoAnswer)));
             }
             for status in [
                 "unavailable",
@@ -698,7 +730,7 @@ mod tests {
                 assert!(matches!(
                     fixture_answer_with_task(status, "Antwort", false, false, Some(capability))
                         .await,
-                    Err(BrainError::Backend(_))
+                    Ok(BrainOutcome::NoAnswer)
                 ));
             }
             for (truncated_body, invalid_contract) in [(true, false), (false, true)] {
@@ -711,7 +743,7 @@ mod tests {
                         Some(capability),
                     )
                     .await,
-                    Err(BrainError::Backend(_))
+                    Ok(BrainOutcome::NoAnswer)
                 ));
             }
         }
@@ -719,7 +751,8 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_antworten_bleiben_trotz_links_und_ueberlaenge_erhalten() {
-        for status in ["answered", "build_rejected"] {
+        {
+            let status = "answered";
             let answer = fixture_answer(
                 status,
                 "Sinclair wurde angepasst. https://example.invalid/patch",
@@ -754,17 +787,18 @@ mod tests {
         );
         assert!(matches!(
             fixture_answer("answered", "Antwort", true, false).await,
-            Err(BrainError::Backend(_))
+            Ok(BrainOutcome::NoAnswer)
         ));
         assert!(matches!(
             fixture_answer("answered", "Antwort", false, true).await,
-            Err(BrainError::Backend(_))
+            Ok(BrainOutcome::NoAnswer)
         ));
     }
 
     #[tokio::test]
     async fn coachingziel_wird_nach_dem_linkfilter_auf_discord_projiziert() {
-        for status in ["answered", "build_rejected"] {
+        {
+            let status = "answered";
             let prefix = "Mehr dazu: ";
             let suffix = ".";
             let text = format!("{prefix}[[coaching]]{suffix} https://example.invalid/coaching");
@@ -787,9 +821,53 @@ mod tests {
         ] {
             assert!(matches!(
                 fixture_answer(status, "[[coaching]]", false, false).await,
-                Err(BrainError::Backend(_))
+                Ok(BrainOutcome::NoAnswer)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn ungueltige_anfragen_bleiben_still_und_ohne_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Lokaler Testport");
+        listener
+            .set_nonblocking(true)
+            .expect("Nichtblockierender Testport");
+        let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
+        let answerer = BrainApiAnswerer::new(
+            &endpoint,
+            "fixture-consumer",
+            Duration::from_secs(3),
+            "invalid-query".into(),
+            BTreeSet::from(["bot.public".into()]),
+        )
+        .expect("Testadapter");
+        for (question, user_id) in [("".into(), 3), ("ä".repeat(4001), 3), ("Frage".into(), 0)] {
+            assert_eq!(
+                answerer
+                    .answer_for_discord(&question, user_id)
+                    .await
+                    .expect("Stille Projektion"),
+                BrainOutcome::NoAnswer
+            );
+        }
+        assert_eq!(
+            answerer
+                .answer_discord_task(
+                    "Frage",
+                    3,
+                    &crate::DiscordAnswerTask {
+                        capability: crate::DiscordAnswerCapability::Faq,
+                        channel_id: 0,
+                    }
+                )
+                .await
+                .expect("Stille Aufgabenprojektion"),
+            BrainOutcome::NoAnswer
+        );
+        assert_eq!(
+            listener.accept().expect_err("Keine HTTP-Anfrage").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[tokio::test]
@@ -811,7 +889,7 @@ mod tests {
         let _permits = answerer.admission.acquire_many(4).await.expect("Admission");
         assert!(matches!(
             answerer.answer_for_discord("Neutrale Testfrage", 3).await,
-            Err(BrainError::Backend(_))
+            Ok(BrainOutcome::NoAnswer)
         ));
         assert_eq!(
             listener.accept().expect_err("Keine HTTP-Anfrage").kind(),
@@ -866,7 +944,8 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_rekonstruierte_urls_kommen_nicht_in_der_antwort_an() {
-        for status in ["answered", "build_rejected"] {
+        {
+            let status = "answered";
             for text in [
                 "[http](https://a.invalid)://b.invalid",
                 "ht<https://a.invalid>tp://b.invalid",
@@ -983,11 +1062,11 @@ mod tests {
             );
             assert!(matches!(
                 fixture_answer("answered", "Antwort", true, false).await,
-                Err(BrainError::Backend(_))
+                Ok(BrainOutcome::NoAnswer)
             ));
             assert!(matches!(
                 fixture_answer("answered", "Antwort", false, true).await,
-                Err(BrainError::Backend(_))
+                Ok(BrainOutcome::NoAnswer)
             ));
         }
         .with_subscriber(subscriber)
@@ -1008,6 +1087,180 @@ mod tests {
         ] {
             assert!(!log.contains(private));
         }
+    }
+
+    #[tokio::test]
+    async fn nicht_beantwortete_fragen_bleiben_auch_im_aufgabenadapter_still() {
+        for task in [
+            None,
+            Some(crate::DiscordAnswerCapability::Faq),
+            Some(crate::DiscordAnswerCapability::Concierge),
+        ] {
+            for status in ["insufficient_evidence", "build_rejected"] {
+                assert_eq!(
+                    fixture_answer_with_task(status, "Keine Sachantwort", false, false, task)
+                        .await
+                        .expect("Stille Projektion"),
+                    BrainOutcome::NoAnswer
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_titles_do_not_reintroduce_unvalidated_links() {
+        let id = "a".repeat(64);
+        let docs_url = "https://github.com/EarlySalty/Deadlock-Docs/blob/7b0f0e645f026214f28b99dddbb18bd477bc2819/public/deadlock-helden/billy.html#L35-L38";
+        for (title, expected_title) in [
+            ("Details http://127.0.0.1:8896/private", "Details"),
+            (
+                "Details [intern](http://127.0.0.1:8896/private)",
+                "Details intern",
+            ),
+            ("Details <HTTPS://example.invalid/private>", "Details"),
+            (
+                "Details ht[https://example.invalid]tp://127.0.0.1:8896/private",
+                "Details",
+            ),
+            ("Größe 𐐷 https://example.invalid/private", "Größe 𐐷"),
+            ("http://127.0.0.1:8896/private", ""),
+        ] {
+            let artifact = brain_client::PublicArtifact::hero_compare(&id, title)
+                .expect("Gültiges öffentliches Artefakt");
+            assert!(artifact.validate().is_ok());
+            let links = format!(
+                "\n\nQuelle: <{docs_url}>\n\nGrafik: {expected_title}\n<{}>",
+                artifact.page_url
+            );
+            let response = PublicAnswerResponse {
+                contract_version: brain_client::PUBLIC_API_VERSION.into(),
+                request_id: "artifact-title-projection".into(),
+                knowledge_release: "test-release".into(),
+                status: AnswerStatus::Answered,
+                text: "𐐷".repeat(2000),
+                citations: vec![
+                    brain_client::PublicCitation {
+                        citation_id: "docs".into(),
+                        label: format!("Deadlock-Docs: {docs_url}"),
+                    },
+                    brain_client::PublicCitation {
+                        citation_id: "duplicate".into(),
+                        label: docs_url.into(),
+                    },
+                ],
+                artifacts: vec![artifact],
+            };
+            for max_units in [1800, 3800] {
+                let BrainOutcome::Answer(text) = project_bounded(response.clone(), max_units)
+                    .expect("Linkfreier Artefakttitel")
+                else {
+                    panic!("Beantwortete Frage");
+                };
+                let body_units = max_units - links.encode_utf16().count();
+                assert_eq!(text, format!("{}{links}", "𐐷".repeat(body_units / 2)));
+                assert!(text.encode_utf16().count() <= max_units);
+                assert_eq!(text.matches(docs_url).count(), 1);
+                assert!(!text.contains("8896"));
+            }
+            let mut unanswered = response;
+            for status in [AnswerStatus::InsufficientEvidence, AnswerStatus::BuildRejected] {
+                unanswered.status = status;
+                assert!(public_links(&unanswered, 3800).is_empty());
+                assert_eq!(
+                    project_bounded(unanswered.clone(), 1800).expect("Stille Projektion"),
+                    BrainOutcome::NoAnswer
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projection_without_body_budget_is_silent() {
+        let response = PublicAnswerResponse {
+            contract_version: brain_client::PUBLIC_API_VERSION.into(),
+            request_id: "bounded-projection".into(),
+            knowledge_release: "test-release".into(),
+            status: AnswerStatus::Answered,
+            text: "🧠".into(),
+            citations: vec![],
+            artifacts: vec![],
+        };
+        for max_units in [0, 1] {
+            assert_eq!(
+                project_bounded(response.clone(), max_units).expect("Leere Projektion"),
+                BrainOutcome::NoAnswer
+            );
+        }
+        assert_eq!(
+            project_bounded(response, 2).expect("Vollständiges Zeichen"),
+            BrainOutcome::Answer("🧠".into())
+        );
+    }
+
+    #[test]
+    fn nur_immutable_oeffentliche_docs_quellen_erreichen_discord() {
+        let url = "https://github.com/EarlySalty/Deadlock-Docs/blob/7b0f0e645f026214f28b99dddbb18bd477bc2819/public/deadlock-helden/billy.html#L35-L38";
+        assert!(valid_docs_url(url));
+        for invalid in [
+            url.replace("https://", "http://"),
+            url.replace("github.com/", "github.com.evil.invalid/"),
+            url.replace("EarlySalty/", "Andere/"),
+            url.replace("/blob/", "/raw/"),
+            url.replace("7b0f0e645f026214f28b99dddbb18bd477bc2819", "main"),
+            url.replace("7b0f0e", "7B0F0E"),
+            url.replace("/public/", "/internal/"),
+            url.replace("/public/", "/public/../internal/"),
+            url.replace("/public/", "/public/%2e%2e/"),
+            url.replace(".html#", ".md#"),
+            url.replace("#L35-L38", "?query=1#L35-L38"),
+            url.replace("#L35-L38", "#early-game"),
+            url.replace("#L35-L38", "#L0-L38"),
+            url.replace("#L35-L38", "#L38-L35"),
+            url.replace("github.com", "user@github.com"),
+        ] {
+            assert!(!valid_docs_url(&invalid), "{invalid}");
+        }
+        let response = PublicAnswerResponse {
+            contract_version: brain_client::PUBLIC_API_VERSION.into(),
+            request_id: "docs-projection".into(),
+            knowledge_release: "test-release".into(),
+            status: AnswerStatus::Answered,
+            text: "ä".repeat(2000),
+            citations: vec![
+                brain_client::PublicCitation {
+                    citation_id: "docs".into(),
+                    label: format!("Deadlock-Docs: {url}"),
+                },
+                brain_client::PublicCitation {
+                    citation_id: "duplicate".into(),
+                    label: url.into(),
+                },
+                brain_client::PublicCitation {
+                    citation_id: "internal".into(),
+                    label: url.replace("/public/", "/internal/"),
+                },
+                brain_client::PublicCitation {
+                    citation_id: "oversized".into(),
+                    label: format!("{} {url}", "a".repeat(256)),
+                },
+            ],
+            artifacts: vec![],
+        };
+        let BrainOutcome::Answer(text) =
+            project_bounded(response.clone(), 1800).expect("Öffentliche Quelle")
+        else {
+            panic!("Beantwortete Frage");
+        };
+        assert_eq!(text.matches(url).count(), 1);
+        assert!(!text.contains("/internal/"));
+        assert_eq!(text.encode_utf16().count(), 1800);
+        let mut unicode = response;
+        unicode.text = "🧠".into();
+        let budget = format!("\n\nQuelle: <{url}>").encode_utf16().count() + 1;
+        assert_eq!(
+            project_bounded(unicode, budget).expect("UTF-16-Textreserve"),
+            BrainOutcome::Answer("🧠".into())
+        );
     }
 
     #[tokio::test]

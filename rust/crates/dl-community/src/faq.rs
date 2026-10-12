@@ -1,21 +1,3 @@
-//! FAQ-Chat — Port von `cogs/faq_chat.py`.
-//!
-//! Panel-Button (`faq_chat:start`) → privater Text-Kanal in der
-//! FAQ-Kategorie → Fragen werden über den dl-knowledge-Dienst beantwortet,
-//! mit Gesprächs-Gedächtnis (letzte Nutzerfragen der Session).
-//! Nachrichten). Sessions schließen nach 24 h automatisch; der
-//! Close-Button (`faq_chat:close:{session}`) beendet sofort.
-//! Dazu der Ticket-Auto-Helfer: die erste Nachricht in einem neuen
-//! Ticket-Kanal wird gegen dl-knowledge geprüft. Das Ergebnis erscheint nur im
-//! fest verdrahteten internen Log-Kanal und nie als direkte Ticket-Antwort.
-//!
-//! Bewusste Annäherung: das Original markiert Ticket-Kanäle beim
-//! `channel_create`-Event als „wartend"; Rust triggert auf die erste
-//! Nachricht eines Kanals der Ticket-Kategorie (einmal pro Kanal) —
-//! gleiches sichtbares Verhalten ohne eigenes Channel-Create-Event.
-//! Patchnote-Anreicherung der Antworten ist eine dokumentierte Lücke
-//! (im Original optional und fehlertolerant).
-
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -822,13 +804,21 @@ pub struct FaqChat {
 }
 
 impl FaqChat {
+    pub fn brain_only(
+        pool: PgPool,
+        port: Arc<dyn FaqPort>,
+        brain: Arc<dyn dl_brain::AiAnswerer>,
+    ) -> Arc<Self> {
+        Self::assemble_with_answers(pool, port, None, Some(brain))
+    }
+
     pub fn with_brain(
         pool: PgPool,
         port: Arc<dyn FaqPort>,
         answers: Arc<dl_answer::AnswerEngine>,
         brain: Arc<dyn dl_brain::AiAnswerer>,
     ) -> Arc<Self> {
-        Self::assemble_with_answers(pool, port, answers, Some(brain))
+        Self::assemble_with_answers(pool, port, Some(answers), Some(brain))
     }
 
     async fn lookup_bound(
@@ -877,13 +867,13 @@ impl FaqChat {
         port: Arc<dyn FaqPort>,
         answers: Arc<dl_answer::AnswerEngine>,
     ) -> Arc<Self> {
-        Self::assemble_with_answers(pool, port, answers, None)
+        Self::assemble_with_answers(pool, port, Some(answers), None)
     }
 
     fn assemble_with_answers(
         pool: PgPool,
         port: Arc<dyn FaqPort>,
-        answers: Arc<dl_answer::AnswerEngine>,
+        answers: Option<Arc<dl_answer::AnswerEngine>>,
         brain: Option<Arc<dyn dl_brain::AiAnswerer>>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -893,7 +883,7 @@ impl FaqChat {
             knowledge_url: knowledge_url_from_env(),
             shadow_channel_id: Some(LOG_CHANNEL_ID),
             ticket_generator: None,
-            answers: Some(answers),
+            answers,
             brain,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
@@ -904,6 +894,10 @@ impl FaqChat {
     }
 
     async fn lookup_with_context(&self, question: &str, context: &str) -> KnowledgeLookup {
+        if self.brain.is_some() {
+            tracing::warn!("FAQ: Ungebundener Wissensaufruf bei Brain-Adapter verworfen");
+            return KnowledgeLookup::Unanswerable;
+        }
         let Some(engine) = &self.answers else {
             return ask_knowledge_at(&self.knowledge_url, context).await;
         };
@@ -1090,15 +1084,23 @@ impl FaqChat {
         let _ = kv::delete(&self.store.pool, PANEL_KV_NS, LEGACY_KEY).await;
     }
 
-    fn visible_answer(&self, lookup: KnowledgeLookup) -> String {
+    fn visible_answer(&self, lookup: KnowledgeLookup) -> Option<String> {
+        if self.brain.is_some() {
+            let answer = answer_text(lookup).filter(|text| !text.trim().is_empty());
+            tracing::info!(
+                answered = answer.is_some(),
+                "FAQ: Brain-Antwortentscheidung"
+            );
+            return answer;
+        }
         if self.answers.is_some() {
             match lookup {
-                KnowledgeLookup::Timeout => return "Das Nachschlagen dauert gerade zu lange. Versuch es bitte gleich noch einmal.".into(),
-                KnowledgeLookup::Transport | KnowledgeLookup::InvalidResponse => return "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into(),
+                KnowledgeLookup::Timeout => return Some("Das Nachschlagen dauert gerade zu lange. Versuch es bitte gleich noch einmal.".into()),
+                KnowledgeLookup::Transport | KnowledgeLookup::InvalidResponse => return Some("Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into()),
                 _ => {}
             }
         }
-        answer_text(lookup).unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
+        Some(answer_text(lookup).unwrap_or_else(|| FAQ_NO_ANSWER.to_string()))
     }
 
     async fn generate_stateless_answer(
@@ -1106,7 +1108,7 @@ impl FaqChat {
         question: &str,
         user_id: u64,
         channel_id: u64,
-    ) -> String {
+    ) -> Option<String> {
         self.visible_answer(
             self.lookup_bound(question, question, user_id, channel_id)
                 .await,
@@ -1187,6 +1189,14 @@ impl FaqChat {
             )
             .await,
         );
+        let Some(answer) = answer else {
+            sqlx::query("UPDATE bot.faq_chat_sessions SET last_activity_at = now() WHERE session_id = $1 AND status = 'active'")
+                .bind(session_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(FaqMessageWrite::Stored);
+        };
         let inserted = sqlx::query(
             "INSERT INTO bot.faq_chat_messages(session_id, role, content)
              VALUES($1, 'assistant', $2)",
@@ -1285,7 +1295,7 @@ impl FaqChat {
         problem: &str,
         outcome: &TicketAutoOutcome,
     ) -> (&'static str, String) {
-        if self.answers.is_some() {
+        if self.brain.is_some() || self.answers.is_some() {
             return match &outcome.answer {
                 Some(answer) => ("generated", answer.clone()),
                 None => ("unavailable", TICKET_CANDIDATE_UNAVAILABLE.to_string()),
@@ -1355,10 +1365,12 @@ impl FaqChat {
                 }
                 let question = content.trim();
                 if !question.is_empty() {
-                    let answer = self
+                    if let Some(answer) = self
                         .generate_stateless_answer(question, author_id, channel_id)
-                        .await;
-                    let _ = self.port.send_message(channel_id, &answer, None).await;
+                        .await
+                    {
+                        let _ = self.port.send_message(channel_id, &answer, None).await;
+                    }
                 }
                 return true;
             }
@@ -1404,13 +1416,15 @@ impl FaqChat {
         {
             Ok(FaqMessageWrite::Stored) => {}
             Ok(FaqMessageWrite::PrivacyBlocked | FaqMessageWrite::Missing) => {
-                let stateless_answer = self
+                if let Some(stateless_answer) = self
                     .generate_stateless_answer(question, author_id, channel_id)
-                    .await;
-                let _ = self
-                    .port
-                    .send_message(channel_id, &stateless_answer, None)
-                    .await;
+                    .await
+                {
+                    let _ = self
+                        .port
+                        .send_message(channel_id, &stateless_answer, None)
+                        .await;
+                }
                 return true;
             }
             Ok(FaqMessageWrite::Inactive) => return true,
@@ -1529,6 +1543,10 @@ impl FaqChat {
         } else {
             self.ticket_auto_answer(problem, author_id).await
         };
+        if self.brain.is_some() && outcome.answer.is_none() {
+            tracing::info!(channel_id, author_id, verdict = %outcome.decision, "FAQ-Ticket: Brain hat keine Antwort geliefert");
+            return;
+        }
         let (candidate_status, candidate) = self.ticket_candidate(problem, &outcome).await;
         tracing::info!(
             channel_id,
@@ -2191,6 +2209,87 @@ pub fn spawn(
 }
 
 #[cfg(test)]
+pub(crate) const BRAIN_DOCS_FIXTURE_URL: &str = "https://github.com/EarlySalty/Deadlock-Docs/blob/7b0f0e645f026214f28b99dddbb18bd477bc2819/public/deadlock-helden/billy.html#L35-L38";
+
+#[cfg(test)]
+pub(crate) async fn brain_answer_fixture(
+    status: &'static str,
+) -> (
+    Arc<dyn dl_brain::AiAnswerer>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Json, Router,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn answer(
+        State((status, calls)): State<(&'static str, Arc<AtomicUsize>)>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        assert_eq!(headers["x-discord-user-id"], "42");
+        assert!(!headers.contains_key("x-discord-answer-task"));
+        let query = body.get("query").unwrap_or(&body);
+        assert_eq!(query["requested_scopes"], serde_json::json!(["bot.public"]));
+        calls.fetch_add(1, Ordering::SeqCst);
+        let code = if status == "http_error" {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::OK
+        };
+        let version = if status == "invalid_contract" {
+            "invalid"
+        } else {
+            "brain.public.v1"
+        };
+        let status = if status == "invalid_contract" {
+            "answered"
+        } else {
+            status
+        };
+        (
+            code,
+            Json(serde_json::json!({
+                "contract_version": version,
+                "request_id": query["request_id"],
+                "knowledge_release": "test-release",
+                "status": status,
+                "text": "Belegte Antwort.",
+                "citations": [{"citation_id": "docs-test", "label": format!("Billy {}", BRAIN_DOCS_FIXTURE_URL)}]
+            })),
+        )
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Brain-Testport");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("Brain-Testadresse")
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/v1/answer", post(answer))
+        .with_state((status, calls.clone()));
+    let server =
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("Brain-Testserver") });
+    let brain = dl_brain::brain_api::BrainApiAnswerer::new(
+        &endpoint,
+        "fixture-consumer",
+        Duration::from_secs(3),
+        "community-fixture".into(),
+        std::collections::BTreeSet::from(["bot.public".into()]),
+    )
+    .expect("Brain-Testadapter");
+    (Arc::new(brain), calls, server)
+}
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
@@ -2424,6 +2523,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn brain_only_rejects_unbound_lookups_without_legacy_http() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Testport");
+        listener
+            .set_nonblocking(true)
+            .expect("Nichtblockierender Testport");
+        let brain = Arc::new(CountingBrain {
+            calls: AtomicUsize::new(0),
+            available: false,
+        });
+        let mut faq = FaqChat::brain_only(lazy_pool(), ticket_port(), brain.clone());
+        Arc::get_mut(&mut faq)
+            .expect("Neuer FAQ-Adapter")
+            .knowledge_url = format!("http://{}", listener.local_addr().expect("Testadresse"));
+        assert!(matches!(
+            faq.lookup("Frage").await,
+            KnowledgeLookup::Unanswerable
+        ));
+        assert!(matches!(
+            faq.lookup_with_context("Frage", "Kontext").await,
+            KnowledgeLookup::Unanswerable
+        ));
+        assert!(faq.ticket_auto_answer("Frage", 42).await.answer.is_none());
+        assert_eq!(brain.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            listener.accept().expect_err("Kein Legacy-HTTP").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
     async fn community_brain_switch_off_faq_answers_with_answer_engine() {
         let (url, server, called) = evidence_server(200,
             r#"{"status":"ready","evidence":[{"id":"C1","source":{"kind":"community_page","title":"Paten","path":"paten.html"},"text":"Ein Pate hilft beim Einstieg.","observed_at":null}],"truncated":false}"#,
@@ -2444,8 +2573,9 @@ mod tests {
         let faq = FaqChat::with_answers(lazy_pool(), ticket_port(), engine);
         assert_eq!(
             faq.generate_stateless_answer("Was ist ein Pate?", 42, 10)
-                .await,
-            "Ein Pate hilft beim Einstieg."
+                .await
+                .as_deref(),
+            Some("Ein Pate hilft beim Einstieg.")
         );
         server.await.expect("Wissensserver");
         assert!(called.load(Ordering::SeqCst));
@@ -2475,12 +2605,8 @@ mod tests {
             let answer = faq
                 .generate_stateless_answer("Was ist ein Pate?", 42, 10)
                 .await;
-            let expected = if available {
-                "Brain-Testantwort"
-            } else {
-                "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal."
-            };
-            assert_eq!(answer, expected);
+            let expected = available.then_some("Brain-Testantwort");
+            assert_eq!(answer.as_deref(), expected);
             assert_eq!(brain.calls.load(Ordering::SeqCst), 1);
             assert!(provider.requests().is_empty());
         }
@@ -2580,7 +2706,7 @@ mod tests {
             } else {
                 matches!(lookup, KnowledgeLookup::Unanswerable)
             });
-            let visible = faq.visible_answer(lookup);
+            let visible = faq.visible_answer(lookup).expect("Legacy-Antwort");
             if invalid {
                 assert!(visible.contains("nicht zuverlässig an mein Wissen"));
                 assert_ne!(visible, FAQ_NO_ANSWER);
@@ -2815,6 +2941,74 @@ mod tests {
         }
         String::from_utf8(request[header_end..header_end + content_length].to_vec())
             .expect("utf8 request body")
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn brain_only_faq_preserves_docs_links_and_sends_no_failure_reply() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("FAQ-Testdatenbank");
+        for (index, status) in [
+            "answered",
+            "insufficient_evidence",
+            "build_rejected",
+            "unverified",
+            "unauthorized_evidence",
+            "budget_exceeded",
+            "provider_error",
+            "unavailable",
+            "invalid_contract",
+            "http_error",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (brain, calls, server) = brain_answer_fixture(status).await;
+            let port = ticket_port();
+            port.faq_private_channels
+                .lock()
+                .expect("Kanalrecorder")
+                .insert((1, 101, 42));
+            let faq = FaqChat::brain_only(db.pool().clone(), port.clone(), brain);
+            assert!(faq.answers.is_none());
+            let session_id = format!("brain-{index}");
+            assert!(faq
+                .store
+                .create_session(session_id.clone(), 42, "Test".into(), 100, 1)
+                .await
+                .expect("FAQ-Session"));
+            assert_eq!(
+                faq.answer_statefully(&session_id, 100, "Wie funktioniert Parry?")
+                    .await
+                    .expect("FAQ-Antwort"),
+                FaqMessageWrite::Stored
+            );
+            assert!(
+                faq.handle_chat_message(1, 101, 42, "Test", "Wie funktioniert Parry?")
+                    .await
+            );
+            faq.handle_ticket_message(1, 300 + index as u64, 42, "Wie funktioniert Parry?")
+                .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            let answered = status == "answered";
+            {
+                let sent = port.sent.lock().expect("Nachrichtenrecorder");
+                assert_eq!(sent.len(), if answered { 3 } else { 0 }, "{status}");
+                for (_, text) in sent.iter() {
+                    assert!(text.contains(BRAIN_DOCS_FIXTURE_URL), "{text}");
+                }
+            }
+            let assistant_count: i64 = sqlx::query_scalar("SELECT count(*) FROM bot.faq_chat_messages WHERE session_id = $1 AND role = 'assistant'")
+                .bind(&session_id).fetch_one(db.pool()).await.expect("FAQ-Verlauf");
+            assert_eq!(assistant_count, i64::from(answered));
+            sqlx::query("UPDATE bot.faq_chat_sessions SET status = 'closed' WHERE session_id = $1")
+                .bind(&session_id)
+                .execute(db.pool())
+                .await
+                .expect("FAQ-Session schließen");
+            server.abort();
+        }
     }
 
     #[cfg(feature = "testing")]

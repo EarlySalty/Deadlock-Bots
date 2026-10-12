@@ -304,13 +304,9 @@ fn community_brain_answerer(
 fn community_brain_for_answers(
     options: &dl_core::runtime_config::AiOptions,
     token: impl FnOnce() -> Option<String>,
-) -> Option<Arc<dyn dl_brain::AiAnswerer>> {
-    if !options.community_brain_answers.unwrap_or(false) {
-        tracing::info!("Concierge und FAQ antworten über die bisherige Antwort-Engine");
-        return None;
-    }
+) -> Arc<dyn dl_brain::AiAnswerer> {
     tracing::info!("Concierge und FAQ antworten ausschließlich über das Brain");
-    Some(community_brain_answerer(options, token()))
+    community_brain_answerer(options, token())
 }
 
 async fn wait_for_gateway_cache_ready(
@@ -1071,27 +1067,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             }
         }
     };
-    // Alle Wissenseingänge nutzen den laufenden Brain-Dienst. Der alte CLI-Start
-    // kann den privaten FD3-Snapshot des Bots nicht an einen Kindprozess weitergeben.
-    let shared_game: Option<Arc<dyn dl_answer::Retriever>> =
-        Some(Arc::new(dl_answer::game_http::HttpRetriever::new(
-            operating_value("DL_BRAIN_RETRIEVAL_URL")
-                .unwrap_or_else(|| "http://127.0.0.1:8788".into()),
-            dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN").unwrap_or_default(),
-        )));
-    let shared_answers = Arc::new(
-        dl_answer::AnswerEngine::new(
-            concierge_ai.clone(),
-            Arc::new(dl_community::knowledge_client::CommunityRetriever {
-                base_url: concierge_config.knowledge_url.clone(),
-                timeout: std::time::Duration::from_secs(20),
-            }),
-            shared_game,
-            concierge_config.ai_timeout,
-        )
-        .with_persona(dl_community::concierge::ANSWER_PERSONA.to_string()),
-    );
-
     let community_brain = community_brain_for_answers(&operating.runtime.ai, || {
         dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN")
     });
@@ -1170,44 +1145,26 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     team_applications.ensure_panel().await;
     tokio::spawn(team_applications.clone().run_maintenance_loop());
 
-    let faq_answers = shared_answers.clone();
     let faq_port = Arc::new(modglue::FaqGlue {
         adapter: adapter.clone(),
     });
-    let faq = match community_brain.clone() {
-        Some(brain) => dl_community::faq::FaqChat::with_brain(
-            central_pool.clone(),
-            faq_port,
-            faq_answers,
-            brain,
-        ),
-        None => {
-            dl_community::faq::FaqChat::with_answers(central_pool.clone(), faq_port, faq_answers)
-        }
-    };
+    let faq = dl_community::faq::FaqChat::brain_only(
+        central_pool.clone(),
+        faq_port,
+        community_brain.clone(),
+    );
     dl_community::faq::register(&mut router, faq.clone());
 
-    let concierge_answers = shared_answers.clone();
     let concierge_port = Arc::new(modglue::ConciergeGlue {
         adapter: adapter.clone(),
     });
-    let concierge = match community_brain.clone() {
-        Some(brain) => dl_community::concierge::Concierge::with_brain(
-            central_pool.clone(),
-            concierge_port,
-            concierge_ai.clone(),
-            concierge_config.clone(),
-            concierge_answers,
-            brain,
-        ),
-        None => dl_community::concierge::Concierge::with_answers(
-            central_pool.clone(),
-            concierge_port,
-            concierge_ai.clone(),
-            concierge_config.clone(),
-            concierge_answers,
-        ),
-    };
+    let concierge = dl_community::concierge::Concierge::brain_only(
+        central_pool.clone(),
+        concierge_port,
+        concierge_ai.clone(),
+        concierge_config.clone(),
+        community_brain.clone(),
+    );
     // Concierge-Knopf "Twitch verknüpfen": derselbe persönliche Link wie im
     // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
     concierge.install_twitch_link_source(Arc::new(concierge_twitch_link));
@@ -1844,7 +1801,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         {
             let backend = Arc::new(dl_community::passive_help::GroundedHelpBackend {
                 provider,
-                answers: shared_answers.clone(),
+                brain: community_brain.clone(),
             });
             let responder = Arc::new(dl_community::passive_help::PassiveHelpResponder::new(
                 channel_id,
@@ -2128,54 +2085,67 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn community_brain_answers_switch_selects_answer_path() {
-        let config = dl_core::bot_config::BotConfig::parse(
-            "schema_version = 1\n[runtime.ai]\ncommunity_brain_answers = true\n",
-        )
-        .expect("Schalter ist gültige Betriebskonfiguration");
-        assert_eq!(config.runtime.ai.community_brain_answers, Some(true));
+    async fn community_answers_use_brain_for_every_switch_value() {
+        use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Testport");
-        listener
-            .set_nonblocking(true)
-            .expect("Nichtblockierender Testport");
+        async fn answer(
+            State(calls): State<Arc<AtomicUsize>>,
+            headers: HeaderMap,
+            Json(query): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            assert_eq!(headers["x-discord-user-id"], "42");
+            assert_eq!(query["requested_scopes"], serde_json::json!(["bot.public"]));
+            calls.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({
+                "contract_version": "brain.public.v1",
+                "request_id": query["request_id"],
+                "knowledge_release": "test-release",
+                "status": "insufficient_evidence",
+                "text": "",
+                "citations": []
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Testport");
         let endpoint = format!("http://{}", listener.local_addr().expect("Testadresse"));
-        for switch in [None, Some(false)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/v1/answer", post(answer))
+            .with_state(calls.clone());
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router).await.expect("Testserver") });
+        for switch in [None, Some(false), Some(true)] {
             let options = dl_core::runtime_config::AiOptions {
                 brain_api_endpoint: Some(endpoint.clone()),
                 community_brain_answers: switch,
                 ..Default::default()
             };
-            assert!(super::community_brain_for_answers(&options, || {
-                panic!("Ohne Schalter wird kein Brain-Zugang gelesen")
-            })
-            .is_none());
+            let brain = super::community_brain_for_answers(&options, || {
+                Some("fixture-brain-consumer".into())
+            });
+            assert_eq!(
+                brain
+                    .answer_discord_task(
+                        "Synthetische Frage",
+                        42,
+                        &dl_brain::DiscordAnswerTask {
+                            capability: dl_brain::DiscordAnswerCapability::Faq,
+                            channel_id: 10,
+                        }
+                    )
+                    .await
+                    .expect("Brain-Antwort"),
+                dl_brain::BrainOutcome::NoAnswer
+            );
         }
-
-        let options = dl_core::runtime_config::AiOptions {
-            brain_api_endpoint: Some(endpoint),
-            community_brain_answers: Some(true),
-            ..Default::default()
-        };
-        let brain = super::community_brain_for_answers(&options, || None)
-            .expect("Eingeschalteter Brain-Antwortweg");
-        assert!(matches!(
-            brain
-                .answer_discord_task(
-                    "Synthetische Frage",
-                    42,
-                    &dl_brain::DiscordAnswerTask {
-                        capability: dl_brain::DiscordAnswerCapability::Faq,
-                        channel_id: 10,
-                    },
-                )
-                .await,
-            Err(dl_brain::BrainError::Backend(_))
-        ));
-        assert_eq!(
-            listener.accept().expect_err("Keine Anfrage").kind(),
-            std::io::ErrorKind::WouldBlock
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
     }
 
     #[tokio::test]
@@ -2359,17 +2329,29 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("Quelldatei enthält Produktionsbereich");
-        assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 1);
+        assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 0);
         assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
-        assert!(source.contains("FaqChat::with_brain("));
-        assert!(source.contains("Concierge::with_brain("));
-        assert!(source.contains("FaqChat::with_answers("));
-        assert!(source.contains("Concierge::with_answers("));
-        assert_eq!(source.matches("match community_brain.clone()").count(), 2);
+        assert!(source.contains("FaqChat::brain_only("));
+        assert!(source.contains("Concierge::brain_only("));
+        for legacy in [
+            "FaqChat::with_brain(",
+            "Concierge::with_brain(",
+            "FaqChat::with_answers(",
+            "Concierge::with_answers(",
+            "match community_brain.clone()",
+            "shared_answers",
+            "CommunityRetriever",
+            "game_http::HttpRetriever",
+            "DL_BRAIN_RETRIEVAL_URL",
+            "/v1/retrieve",
+            "8896",
+        ] {
+            assert!(!source.contains(legacy), "Aktiver Altpfad: {legacy}");
+        }
         assert!(source.contains("discord_brain_answerer("));
         assert!(source.contains("secret_value(\"DISCORD_BRAIN_CLIENT_TOKEN\")"));
         assert!(!source.contains("SharedBrainAnswerer"));
-        assert_eq!(source.matches("shared_answers.clone()").count(), 3);
+        assert!(source.contains("brain: community_brain.clone()"));
         assert!(source.contains("passive_help::GroundedHelpBackend"));
         assert!(!source.contains("BrainAiGlue"));
         assert!(!source.contains("chat_text_generator(dl_ai::LlmUseCase::Faq"));
