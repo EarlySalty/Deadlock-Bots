@@ -13,9 +13,11 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+#[cfg(test)]
+use crate::answer_fixture;
+use crate::answer_support::acquire_stateful_support_turn;
 use crate::concierge_community as community;
 use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
-use crate::knowledge_client;
 
 /// Rate-Limit fuer DM-Antworten: max. Aufrufe pro Fenster, Fensterlaenge,
 /// Mindestabstand (Sekunden). Uebernommen aus dem geloeschten DM-Assistenten,
@@ -53,7 +55,8 @@ pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
 pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
 pub const CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
 pub const CONCIERGE_STECKBRIEF_REVOKED_NS: &str = "concierge:steckbrief_revoked";
-pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
+#[cfg(test)]
+const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:9";
 pub const DEFAULT_PATE_CATEGORY_ID: u64 = 1465839366634209361;
 pub const RETENTION_DAYS: i64 = 90;
 pub const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = 1426220702054355077;
@@ -68,6 +71,7 @@ pub const SPRACHKANAL_VERWALTEN_CHANNEL_ID: u64 = 1513468476365209670;
 pub const MITSPILER_SUCHE_CHANNEL_ID: u64 = 1522769149208821881;
 pub const COACHING_CHANNEL_ID: u64 = 1494373349944459355;
 pub const DEFAULT_ROUTER_VOICE_ID: u64 = 1513468587195633674;
+#[cfg(test)]
 const KNOWLEDGE_TIMEOUT: StdDuration = StdDuration::from_secs(8);
 const CONCIERGE_DISCORD_IO_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3);
@@ -275,7 +279,8 @@ pub struct ConciergeConfig {
     pub pater_channel_id: Option<u64>,
     pub mod_ping_role_id: Option<u64>,
     pub brand_emoji: Option<String>,
-    pub knowledge_url: String,
+    #[cfg(test)]
+    knowledge_url: String,
     pub model: Option<String>,
     /// Notbremse fuer den LLM-Aufruf, siehe `CONCIERGE_AI_TIMEOUT_DEFAULT_SECS`.
     pub ai_timeout: StdDuration,
@@ -312,6 +317,7 @@ impl ConciergeConfig {
             brand_emoji: lookup("DL_CONCIERGE_BRAND_EMOJI")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            #[cfg(test)]
             knowledge_url: DEFAULT_KNOWLEDGE_URL.to_string(),
             model: lookup("DL_CONCIERGE_MODEL")
                 .map(|value| value.trim().to_string())
@@ -1190,6 +1196,7 @@ fn forget_core_matches(tokens: &[&str]) -> bool {
     }
 }
 
+#[cfg(test)]
 fn knowledge_question_from_user_history(history: &[String], current: &str) -> String {
     let current = current.trim();
     let earlier = if history.last().map(|question| question.trim()) == Some(current) {
@@ -3431,6 +3438,7 @@ pub struct Concierge {
     store: ConciergeStore,
     port: Arc<dyn ConciergePort>,
     ai: Option<Arc<dyn ChatProvider>>,
+    #[cfg(test)]
     answers: Option<Arc<dl_answer::AnswerEngine>>,
     brain: Option<Arc<dyn dl_brain::AiAnswerer>>,
     config: ConciergeConfig,
@@ -3460,9 +3468,23 @@ impl Concierge {
         config: ConciergeConfig,
         brain: Arc<dyn dl_brain::AiAnswerer>,
     ) -> Arc<Self> {
-        Self::assemble(pool, port, ai, config, None, Some(brain))
+        Arc::new(Self {
+            store: ConciergeStore::new(pool),
+            port,
+            ai,
+            #[cfg(test)]
+            answers: None,
+            brain: Some(brain),
+            config,
+            cooldowns: Mutex::new(HashMap::new()),
+            user_actions: Mutex::new(HashMap::new()),
+            steckbrief_revocations: Mutex::new(HashSet::new()),
+            twitch_link: OnceLock::new(),
+            start: Instant::now(),
+        })
     }
 
+    #[cfg(test)]
     pub fn with_brain(
         pool: PgPool,
         port: Arc<dyn ConciergePort>,
@@ -3474,6 +3496,7 @@ impl Concierge {
         Self::assemble(pool, port, ai, config, Some(answers), Some(brain))
     }
 
+    #[cfg(test)]
     pub fn new(
         pool: PgPool,
         port: Arc<dyn ConciergePort>,
@@ -3483,7 +3506,7 @@ impl Concierge {
         let answers = Arc::new(
             dl_answer::AnswerEngine::new(
                 ai.clone(),
-                Arc::new(knowledge_client::CommunityRetriever {
+                Arc::new(answer_fixture::CommunityRetriever {
                     base_url: config.knowledge_url.clone(),
                     timeout: KNOWLEDGE_TIMEOUT,
                 }),
@@ -3495,6 +3518,7 @@ impl Concierge {
         Self::with_answers(pool, port, ai, config, answers)
     }
 
+    #[cfg(test)]
     pub fn with_answers(
         pool: PgPool,
         port: Arc<dyn ConciergePort>,
@@ -3505,6 +3529,7 @@ impl Concierge {
         Self::assemble(pool, port, ai, config, Some(answers), None)
     }
 
+    #[cfg(test)]
     fn assemble(
         pool: PgPool,
         port: Arc<dyn ConciergePort>,
@@ -4665,7 +4690,7 @@ impl Concierge {
                 .await;
                 return true;
             }
-            let _support_turn = knowledge_client::acquire_stateful_support_turn().await;
+            let _support_turn = acquire_stateful_support_turn().await;
             self.send_stateless_reply(channel_id, effective_guild_id, user_id, trimmed, false)
                 .await;
             return true;
@@ -4718,7 +4743,7 @@ impl Concierge {
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
         };
-        let stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+        let stateful_turn = acquire_stateful_support_turn().await;
         let (db_user_id, mut delivery_tx) = match self.store.begin_privacy_action(user_id).await {
             Ok(Some(action)) => action,
             Ok(None) => {
@@ -5203,7 +5228,7 @@ impl Concierge {
         if let Some(decision) = self.local_decision(question, route, history.is_some()) {
             return decision;
         }
-        if self.answers.is_none()
+        if self.brain_only_mode()
             && self.config.free_voice
             && (pure_smalltalk(question) || pure_favorite_request(question))
         {
@@ -5232,7 +5257,7 @@ impl Concierge {
                 reply,
                 intent: hit.then(|| classify_intent(question)),
                 pate_request: hit
-                    && if self.answers.is_none() {
+                    && if self.brain_only_mode() {
                         pure_pate_request(question)
                     } else {
                         explicit_pate_request(question)
@@ -5246,13 +5271,24 @@ impl Concierge {
         decision
     }
 
+    fn brain_only_mode(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.brain.is_some() && self.answers.is_none()
+        }
+        #[cfg(not(test))]
+        {
+            self.brain.is_some()
+        }
+    }
+
     fn local_decision(
         &self,
         question: &str,
         route: AnswerRoute,
         stateful: bool,
     ) -> Option<AnswerDecision> {
-        let brain_only = self.brain.is_some() && self.answers.is_none();
+        let brain_only = self.brain_only_mode();
         if brain_only && !pure_local_conversational_input(question) {
             return None;
         }
@@ -5261,7 +5297,14 @@ impl Concierge {
         } else if brain_only {
             local_conversational_answer(question, self.config.free_voice)?
         } else {
-            legacy_local_conversational_answer(question, self.config.free_voice)?
+            #[cfg(test)]
+            {
+                legacy_local_conversational_answer(question, self.config.free_voice)?
+            }
+            #[cfg(not(test))]
+            {
+                return None;
+            }
         };
         let decision = AnswerDecision {
             answer,
@@ -5285,7 +5328,7 @@ impl Concierge {
         if let Some(decision) = self.local_decision(question, route, stateful) {
             return decision;
         }
-        let brain_only = self.brain.is_some() && self.answers.is_none();
+        let brain_only = self.brain_only_mode();
         if self.config.free_voice
             && (pure_smalltalk(question) || (brain_only && pure_favorite_request(question)))
         {
@@ -5326,6 +5369,33 @@ impl Concierge {
             log_concierge_answer_decision(route, &decision, question, stateful);
             return decision;
         }
+        #[cfg(test)]
+        {
+            self.answer_from_fixture_engine(question, history, route, patience_channel)
+                .await
+        }
+        #[cfg(not(test))]
+        {
+            let decision = AnswerDecision {
+                answer: LlmAnswer::default(),
+                source: "unavailable",
+                knowledge_hit: false,
+                outcome: ConciergeAnswerOutcome::NoAnswer,
+            };
+            log_concierge_answer_decision(route, &decision, question, stateful);
+            decision
+        }
+    }
+
+    #[cfg(test)]
+    async fn answer_from_fixture_engine(
+        &self,
+        question: &str,
+        history: Option<&[String]>,
+        route: AnswerRoute,
+        patience_channel: Option<u64>,
+    ) -> AnswerDecision {
+        let stateful = history.is_some();
         let retrieval_question = history.map_or_else(
             || question.to_string(),
             |history| knowledge_question_from_user_history(history, question),
@@ -6536,7 +6606,7 @@ impl Concierge {
         if self.steckbrief_revoked_in_process(user_id) {
             return SteckbriefPostOutcome::NotPosted;
         }
-        let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+        let _stateful_turn = acquire_stateful_support_turn().await;
         let (db_user_id, mut tx) = match self.store.begin_privacy_action(user_id).await {
             Ok(Some(action)) => action,
             Ok(None) => return SteckbriefPostOutcome::NotPosted,
@@ -6732,7 +6802,7 @@ impl Concierge {
         user_id: u64,
         now: DateTime<Utc>,
     ) -> CommunityDbResult<Option<(String, SteckbriefRoute)>> {
-        let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+        let _stateful_turn = acquire_stateful_support_turn().await;
         // Erste Transaktion: nur lesen. Sie endet vor dem LLM-Aufruf, denn
         // begin_privacy_action haelt ein Row-Lock auf user_privacy. Bliebe sie
         // ueber den Aufruf offen, haengt jeder parallele Loeschauftrag oder
@@ -7890,6 +7960,7 @@ fn parse_brain_command(trimmed: &str) -> (bool, &str) {
     }
 }
 
+#[cfg(test)]
 fn legacy_local_conversational_answer(text: &str, free_voice: bool) -> Option<LlmAnswer> {
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
@@ -8027,11 +8098,9 @@ fn pure_pate_request(text: &str) -> bool {
     }
     rest = match rest {
         ["pate" | "paten" | "patin" | "mentor" | "mentoren" | "mentorin", tail @ ..]
-        | [
-            "fest" | "feste" | "fester" | "festen",
-            "ansprechpartner" | "ansprechperson",
-            tail @ ..,
-        ] => tail,
+        | ["fest" | "feste" | "fester" | "festen", "ansprechpartner" | "ansprechperson", tail @ ..] => {
+            tail
+        }
         _ => return false,
     };
     while let Some(length) = pate_request_qualifier_len(rest) {
@@ -8225,8 +8294,8 @@ fn pure_bot_identity(input: &str) -> bool {
     let lower = input.to_lowercase();
     let mut has_identity = false;
     for (sentence, question) in identity_clauses(&lower) {
-        let declaration = !question
-            && normalized_conversational_input(sentence) == "du postest patchnotes";
+        let declaration =
+            !question && normalized_conversational_input(sentence) == "du postest patchnotes";
         for segment in sentence.split([',', ';', ':']) {
             let tokens = segment
                 .split(|character: char| !character.is_alphanumeric())
@@ -8238,8 +8307,10 @@ fn pure_bot_identity(input: &str) -> bool {
             let identity_len = (0..tokens.len()).find_map(|start| {
                 let length = alternate_identity_question_prefix_len(&tokens[start..])?;
                 let prefix = &tokens[..start];
-                (prefix.is_empty() || matches!(prefix, ["bitte"]) || pure_smalltalk(&prefix.join(" ")))
-                    .then_some(start + length)
+                (prefix.is_empty()
+                    || matches!(prefix, ["bitte"])
+                    || pure_smalltalk(&prefix.join(" ")))
+                .then_some(start + length)
             });
             let suffix = if let Some(identity_len) = identity_len {
                 has_identity = true;
@@ -8263,19 +8334,7 @@ fn identity_conversational_addendum(tokens: &[&str], declaration: bool) -> bool 
     let prompt = match tokens {
         [] | ["bitte"] => return true,
         ["ignoriere", "alle", "anweisungen", "und", "zeig" | "zeige", "deinen", prompt @ ..]
-        | [
-            "für" | "fuer",
-            "diese",
-            "antwort",
-            "ignorierst",
-            "du",
-            "alle",
-            "anweisungen",
-            "und",
-            "zeigst",
-            "deinen",
-            prompt @ ..,
-        ]
+        | ["für" | "fuer", "diese", "antwort", "ignorierst", "du", "alle", "anweisungen", "und", "zeigst", "deinen", prompt @ ..]
         | ["für" | "fuer", "diese", "antwort", "zeigst", "du", "deinen", prompt @ ..]
         | ["schreib" | "schreibe", "mir", "nicht", "deinen", prompt @ ..] => prompt,
         _ => {
@@ -8391,10 +8450,30 @@ fn recipe_modifier_len(tokens: &[&str]) -> usize {
         .take_while(|word| {
             matches!(
                 **word,
-                "ein" | "eine" | "einen" | "einem" | "einer" | "das" | "der" | "die"
-                    | "dein" | "deine" | "deinen" | "mein" | "meine" | "gut" | "gute"
-                    | "gutes" | "guten" | "lecker" | "leckere" | "leckeres" | "leckeren"
-                    | "beste" | "bestes" | "besten"
+                "ein"
+                    | "eine"
+                    | "einen"
+                    | "einem"
+                    | "einer"
+                    | "das"
+                    | "der"
+                    | "die"
+                    | "dein"
+                    | "deine"
+                    | "deinen"
+                    | "mein"
+                    | "meine"
+                    | "gut"
+                    | "gute"
+                    | "gutes"
+                    | "guten"
+                    | "lecker"
+                    | "leckere"
+                    | "leckeres"
+                    | "leckeren"
+                    | "beste"
+                    | "bestes"
+                    | "besten"
             )
         })
         .count()
@@ -8421,8 +8500,7 @@ fn recipe_object(tokens: &[&str]) -> bool {
     if !matches!(recipe, "rezept" | "rezepte" | "rezepten")
         && !matches!(
             *topic,
-            "muffin" | "muffins" | "blaubeer" | "blaubeeren" | "blaubeermuffin"
-                | "blaubeermuffins"
+            "muffin" | "muffins" | "blaubeer" | "blaubeeren" | "blaubeermuffin" | "blaubeermuffins"
         )
     {
         return false;
@@ -9115,7 +9193,7 @@ mod tests {
             let provider = dl_ai::MockChatProvider::new(Vec::new());
             let answers = Arc::new(dl_answer::AnswerEngine::new(
                 Some(provider.clone()),
-                Arc::new(knowledge_client::CommunityRetriever {
+                Arc::new(answer_fixture::CommunityRetriever {
                     base_url: "http://127.0.0.1:1".into(),
                     timeout: KNOWLEDGE_TIMEOUT,
                 }),
@@ -9275,7 +9353,7 @@ mod tests {
         );
         let answers = Arc::new(dl_answer::AnswerEngine::new(
             Some(provider.clone()),
-            Arc::new(knowledge_client::CommunityRetriever {
+            Arc::new(answer_fixture::CommunityRetriever {
                 base_url: url,
                 timeout: KNOWLEDGE_TIMEOUT,
             }),
@@ -9318,7 +9396,7 @@ mod tests {
         let provider = dl_ai::MockChatProvider::new(Vec::new());
         let answers = Arc::new(dl_answer::AnswerEngine::new(
             Some(provider.clone()),
-            Arc::new(knowledge_client::CommunityRetriever {
+            Arc::new(answer_fixture::CommunityRetriever {
                 base_url: "http://127.0.0.1:1".into(),
                 timeout: KNOWLEDGE_TIMEOUT,
             }),
@@ -9500,7 +9578,10 @@ mod tests {
                     question
                 );
                 assert_eq!(
-                    requests[0].0.iter().any(|message| message.content == history[0]),
+                    requests[0]
+                        .0
+                        .iter()
+                        .any(|message| message.content == history[0]),
                     stateful
                 );
                 assert_eq!(brain.calls.load(Ordering::SeqCst), 0);
@@ -9623,10 +9704,9 @@ mod tests {
                         OFFTOPIC_TEXT,
                     ),
                 ] {
-                    let (url, requests, server) = knowledge_server(
-                        r#"{"status":"ready","evidence":[],"truncated":false}"#,
-                    )
-                    .await;
+                    let (url, requests, server) =
+                        knowledge_server(r#"{"status":"ready","evidence":[],"truncated":false}"#)
+                            .await;
                     let provider = dl_ai::MockChatProvider::single(
                         r#"{"reply":"Unbelegtes Gespräch","pate_request":true}"#,
                     );
@@ -9638,7 +9718,7 @@ mod tests {
                     } else {
                         let answers = Arc::new(dl_answer::AnswerEngine::new(
                             Some(provider.clone()),
-                            Arc::new(knowledge_client::CommunityRetriever {
+                            Arc::new(answer_fixture::CommunityRetriever {
                                 base_url: url,
                                 timeout: KNOWLEDGE_TIMEOUT,
                             }),
@@ -9673,7 +9753,11 @@ mod tests {
                     );
                     assert_eq!(
                         decision.answer.reply.as_deref(),
-                        Some(if free_voice { KNOWLEDGE_GAP_TEXT } else { local_reply })
+                        Some(if free_voice {
+                            KNOWLEDGE_GAP_TEXT
+                        } else {
+                            local_reply
+                        })
                     );
                     assert_eq!(
                         decision.outcome,
@@ -9698,7 +9782,8 @@ mod tests {
                         server.await.expect("Wissensserver");
                         let recorded = requests.lock().expect("Wissensanfragen");
                         assert_eq!(recorded.len(), 1);
-                        let payload: Value = serde_json::from_str(&recorded[0]).expect("Wissensfrage");
+                        let payload: Value =
+                            serde_json::from_str(&recorded[0]).expect("Wissensfrage");
                         assert_eq!(payload["question"], question);
                     } else {
                         server.abort();
@@ -9727,7 +9812,7 @@ mod tests {
                     let provider = dl_ai::MockChatProvider::new(Vec::new());
                     let answers = Arc::new(dl_answer::AnswerEngine::new(
                         Some(provider.clone()),
-                        Arc::new(knowledge_client::CommunityRetriever {
+                        Arc::new(answer_fixture::CommunityRetriever {
                             base_url: "http://127.0.0.1:1".into(),
                             timeout: KNOWLEDGE_TIMEOUT,
                         }),
@@ -9761,7 +9846,10 @@ mod tests {
                             None,
                         )
                         .await;
-                    assert_eq!(decision.source, if free_voice { "brain_task" } else { "local" });
+                    assert_eq!(
+                        decision.source,
+                        if free_voice { "brain_task" } else { "local" }
+                    );
                     assert_eq!(
                         decision.answer.reply.as_deref(),
                         if free_voice {
@@ -9818,7 +9906,10 @@ mod tests {
             ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
                 assert_eq!(user_id, 42);
                 assert_eq!(task.channel_id, 10);
-                assert_eq!(task.capability, dl_brain::DiscordAnswerCapability::Concierge);
+                assert_eq!(
+                    task.capability,
+                    dl_brain::DiscordAnswerCapability::Concierge
+                );
                 assert!(user_questions.is_empty());
                 self.questions
                     .lock()
@@ -9842,13 +9933,18 @@ mod tests {
             for free_voice in [false, true] {
                 for (question, local) in [
                     ("Bist du ein Bot oder eine KI?", true),
-                    ("Bist du ein Bot oder eine KI, postest du Patchnotes?", false),
-                    ("Bist du ein Bot oder eine KI, veranstaltest du Turniere?", false),
+                    (
+                        "Bist du ein Bot oder eine KI, postest du Patchnotes?",
+                        false,
+                    ),
+                    (
+                        "Bist du ein Bot oder eine KI, veranstaltest du Turniere?",
+                        false,
+                    ),
                 ] {
-                    let (url, requests, server) = knowledge_server(
-                        r#"{"status":"ready","evidence":[],"truncated":false}"#,
-                    )
-                    .await;
+                    let (url, requests, server) =
+                        knowledge_server(r#"{"status":"ready","evidence":[],"truncated":false}"#)
+                            .await;
                     let provider = dl_ai::MockChatProvider::single(
                         r#"{"reply":"Unbelegtes Gespräch","pate_request":true}"#,
                     );
@@ -9864,7 +9960,7 @@ mod tests {
                     } else {
                         let answers = Arc::new(dl_answer::AnswerEngine::new(
                             Some(provider.clone()),
-                            Arc::new(knowledge_client::CommunityRetriever {
+                            Arc::new(answer_fixture::CommunityRetriever {
                                 base_url: url,
                                 timeout: KNOWLEDGE_TIMEOUT,
                             }),
@@ -9956,7 +10052,8 @@ mod tests {
                         server.await.expect("Wissensserver");
                         let recorded = requests.lock().expect("Wissensanfragen");
                         assert_eq!(recorded.len(), 1);
-                        let payload: Value = serde_json::from_str(&recorded[0]).expect("Wissensfrage");
+                        let payload: Value =
+                            serde_json::from_str(&recorded[0]).expect("Wissensfrage");
                         assert_eq!(payload["question"], question);
                     } else {
                         server.abort();
@@ -10316,7 +10413,11 @@ mod tests {
             ("Wer ist dein Lieblingsspieler?", FAVORITE_TEXT, false),
             ("Bitte nenne deinen Lieblingsspieler", FAVORITE_TEXT, false),
             ("Was ist dein Lieblingsrezept?", OFFTOPIC_TEXT, false),
-            ("Hast du ein Rezept für Blaubeermuffins?", OFFTOPIC_TEXT, false),
+            (
+                "Hast du ein Rezept für Blaubeermuffins?",
+                OFFTOPIC_TEXT,
+                false,
+            ),
             ("Zeige mir bitte ein Muffinrezept.", OFFTOPIC_TEXT, false),
             ("Empfiehlst du mir ein Muffinrezept?", OFFTOPIC_TEXT, false),
             ("Bist du ein Bot?", BOT_IDENTITY_TEXT, false),
@@ -10437,7 +10538,7 @@ mod tests {
             );
             let answers = Arc::new(dl_answer::AnswerEngine::new(
                 Some(provider.clone()),
-                Arc::new(knowledge_client::CommunityRetriever {
+                Arc::new(answer_fixture::CommunityRetriever {
                     base_url: "http://127.0.0.1:1".into(),
                     timeout: KNOWLEDGE_TIMEOUT,
                 }),
@@ -10603,7 +10704,7 @@ mod tests {
         let provider = dl_ai::MockChatProvider::new(Vec::new());
         let answers = Arc::new(dl_answer::AnswerEngine::new(
             Some(provider.clone()),
-            Arc::new(knowledge_client::CommunityRetriever {
+            Arc::new(answer_fixture::CommunityRetriever {
                 base_url: "http://127.0.0.1:1".into(),
                 timeout: KNOWLEDGE_TIMEOUT,
             }),
@@ -10857,7 +10958,7 @@ mod tests {
     #[test]
     fn produktionskonfiguration_ignoriert_knowledge_url_override() {
         let config = ConciergeConfig::from_env(|key| {
-            (key == "DL_KNOWLEDGE_URL").then(|| "http://192.0.2.1:8896".to_string())
+            (key == "DL_KNOWLEDGE_URL").then(|| "http://192.0.2.1:9".to_string())
         });
 
         assert_eq!(config.knowledge_url, DEFAULT_KNOWLEDGE_URL);
@@ -11419,7 +11520,7 @@ mod tests {
 
     #[tokio::test]
     async fn tour_answer_early_return_loggt_genau_eine_strukturierte_zeile() {
-        let capture = crate::knowledge_client::test_logging::LogCapture::default();
+        let capture = crate::answer_support::test_logging::LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
@@ -11454,7 +11555,7 @@ mod tests {
         let port = mock_port();
         let concierge = Concierge::new(db.pool().clone(), port.clone(), Some(fixture_ai()), config);
 
-        let capture = crate::knowledge_client::test_logging::LogCapture::default();
+        let capture = crate::answer_support::test_logging::LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
@@ -11801,7 +11902,7 @@ mod tests {
 
     #[tokio::test]
     async fn tour_kontrollzustellung_timeout_terminiert_uncertain_mit_einer_logzeile() {
-        let capture = crate::knowledge_client::test_logging::LogCapture::default();
+        let capture = crate::answer_support::test_logging::LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
@@ -11881,7 +11982,7 @@ mod tests {
             let headers = String::from_utf8_lossy(&request[..header_end]);
             assert_eq!(
                 headers.lines().next(),
-                Some("POST /public/v1/retrieve HTTP/1.1")
+                Some("POST /fixture/v1/retrieve HTTP/1.1")
             );
             let content_length = headers
                 .lines()

@@ -68,7 +68,7 @@ impl BrainApiAnswerer {
     fn query(&self, question: &str) -> Result<Query, BrainError> {
         let sequence = self
             .sequence
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| backend_error())?;
@@ -517,7 +517,7 @@ mod tests {
                     if request.len() >= end + 4 + length {
                         let body = &request[end + 4..end + 4 + length];
                         assert!(headers.starts_with("POST /v1/answer HTTP/1.1"));
-                        assert!(!headers.contains("8896"));
+                        assert!(!headers.contains("dl-knowledge"));
                         assert!(!headers
                             .to_ascii_lowercase()
                             .contains("x-discord-answer-task"));
@@ -1112,18 +1112,18 @@ mod tests {
         let id = "a".repeat(64);
         let docs_url = "https://github.com/EarlySalty/Deadlock-Docs/blob/7b0f0e645f026214f28b99dddbb18bd477bc2819/public/deadlock-helden/billy.html#L35-L38";
         for (title, expected_title) in [
-            ("Details http://127.0.0.1:8896/private", "Details"),
+            ("Details http://127.0.0.1:9/private", "Details"),
             (
-                "Details [intern](http://127.0.0.1:8896/private)",
+                "Details [intern](http://127.0.0.1:9/private)",
                 "Details intern",
             ),
             ("Details <HTTPS://example.invalid/private>", "Details"),
             (
-                "Details ht[https://example.invalid]tp://127.0.0.1:8896/private",
+                "Details ht[https://example.invalid]tp://127.0.0.1:9/private",
                 "Details",
             ),
             ("Größe 𐐷 https://example.invalid/private", "Größe 𐐷"),
-            ("http://127.0.0.1:8896/private", ""),
+            ("http://127.0.0.1:9/private", ""),
         ] {
             let artifact = brain_client::PublicArtifact::hero_compare(&id, title)
                 .expect("Gültiges öffentliches Artefakt");
@@ -1151,8 +1151,8 @@ mod tests {
                 artifacts: vec![artifact],
             };
             for max_units in [1800, 3800] {
-                let BrainOutcome::Answer(text) = project_bounded(response.clone(), max_units)
-                    .expect("Linkfreier Artefakttitel")
+                let BrainOutcome::Answer(text) =
+                    project_bounded(response.clone(), max_units).expect("Linkfreier Artefakttitel")
                 else {
                     panic!("Beantwortete Frage");
                 };
@@ -1160,10 +1160,13 @@ mod tests {
                 assert_eq!(text, format!("{}{links}", "𐐷".repeat(body_units / 2)));
                 assert!(text.encode_utf16().count() <= max_units);
                 assert_eq!(text.matches(docs_url).count(), 1);
-                assert!(!text.contains("8896"));
+                assert!(!text.contains("dl-knowledge"));
             }
             let mut unanswered = response;
-            for status in [AnswerStatus::InsufficientEvidence, AnswerStatus::BuildRejected] {
+            for status in [
+                AnswerStatus::InsufficientEvidence,
+                AnswerStatus::BuildRejected,
+            ] {
                 unanswered.status = status;
                 assert!(public_links(&unanswered, 3800).is_empty());
                 assert_eq!(

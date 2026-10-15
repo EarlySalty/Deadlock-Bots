@@ -4,6 +4,9 @@
 //!   versorgt TempVoice-Tag-Filter, Moderation (Ragebaiter) und Concierge.
 //! - FAQ, Clips, Leave-Survey, Bug-Reporter folgen.
 
+#[cfg(test)]
+mod answer_fixture;
+mod answer_support;
 pub mod clip_contest;
 pub mod clips;
 pub mod coaching;
@@ -16,7 +19,6 @@ pub mod feedback_hub;
 pub mod invite_lounge;
 mod invite_privacy;
 pub mod invites;
-pub mod knowledge_client;
 pub mod leave_survey;
 pub mod onboarding;
 pub mod passive_help;

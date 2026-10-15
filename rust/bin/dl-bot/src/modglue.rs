@@ -5687,11 +5687,7 @@ mod tests {
                 let replies = RecordingBrainReplies::default();
                 let mut event = test_message_event(Some(1), "Folgefrage ohne Belege");
                 let last = Instant::now() - Duration::from_secs(120);
-                handler
-                    .conversations
-                    .lock()
-                    .await
-                    .record(&event, 999, last);
+                handler.conversations.lock().await.record(&event, 999, last);
                 if reply {
                     event.is_reply = true;
                     event.reply_message_id = Some(999);
@@ -5726,11 +5722,7 @@ mod tests {
                 let conversation = &conversations.entries[&(1, 1, 3)];
                 assert_eq!(conversation.last_reply, last);
                 assert_eq!(
-                    conversation
-                        .turns
-                        .last()
-                        .expect("Letzter Gesprächszug")
-                        .0,
+                    conversation.turns.last().expect("Letzter Gesprächszug").0,
                     999
                 );
             }

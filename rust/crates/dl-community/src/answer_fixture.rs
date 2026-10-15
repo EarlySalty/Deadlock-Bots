@@ -2,107 +2,14 @@ use std::collections::HashSet;
 use std::path::{Component, Path};
 use std::time::Duration;
 
+use crate::answer_support::test_logging;
+use crate::answer_support::{KnowledgeAnswer, KnowledgeLookup, KnowledgeSource};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, SemaphorePermit};
 
 const ABSENT: &str = "absent";
-const STATEFUL_SUPPORT_TURN_LIMIT: usize = 4;
-
-struct StatefulSupportAdmission {
-    semaphore: Semaphore,
-}
-
-impl StatefulSupportAdmission {
-    const fn new() -> Self {
-        Self {
-            semaphore: Semaphore::const_new(STATEFUL_SUPPORT_TURN_LIMIT),
-        }
-    }
-
-    async fn acquire(&self) -> SemaphorePermit<'_> {
-        self.semaphore
-            .acquire()
-            .await
-            .expect("stateful support admission is never closed")
-    }
-}
-
-static STATEFUL_SUPPORT_ADMISSION: StatefulSupportAdmission = StatefulSupportAdmission::new();
-
-pub(crate) async fn acquire_stateful_support_turn() -> SemaphorePermit<'static> {
-    STATEFUL_SUPPORT_ADMISSION.acquire().await
-}
-
-#[cfg(test)]
-pub(crate) mod test_logging {
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone, Default)]
-    pub(crate) struct LogCapture {
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl LogCapture {
-        pub(crate) fn text(&self) -> String {
-            String::from_utf8_lossy(&self.bytes.lock().expect("log capture")).to_string()
-        }
-    }
-
-    pub(crate) struct LogCaptureWriter {
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl std::io::Write for LogCaptureWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.bytes
-                .lock()
-                .expect("log capture")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
-        type Writer = LogCaptureWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            LogCaptureWriter {
-                bytes: self.bytes.clone(),
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct KnowledgeAnswer {
-    pub answerable: bool,
-    pub answer: Option<String>,
-    #[serde(default)]
-    pub sources: Vec<KnowledgeSource>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct KnowledgeSource {
-    pub title: String,
-    pub path: String,
-}
-
 #[derive(Debug, Serialize)]
 struct KnowledgeQuestion<'a> {
     question: &'a str,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum KnowledgeLookup {
-    Answer(KnowledgeAnswer),
-    Unanswerable,
-    Timeout,
-    Transport,
-    InvalidResponse,
 }
 
 fn safe_source_paths(sources: &[KnowledgeSource]) -> String {
@@ -160,7 +67,7 @@ fn logged_lookup(
         reason = %reason,
         sources = %sources,
         error_class = %error_class.unwrap_or(ABSENT),
-        "dl-community knowledge-client decision"
+        "dl-community answer-fixture decision"
     );
     lookup
 }
@@ -178,7 +85,7 @@ pub(crate) async fn ask(base_url: &str, question: &str, timeout: Duration) -> Kn
             )
         }
     };
-    let path = format!("{}/public/v1/ask", url.path().trim_end_matches('/'));
+    let path = format!("{}/fixture/v1/ask", url.path().trim_end_matches('/'));
     url.set_path(&path);
     url.set_query(None);
     url.set_fragment(None);
@@ -338,8 +245,7 @@ mod tests {
         error_class: &str,
     ) {
         assert_eq!(
-            logs.matches("dl-community knowledge-client decision")
-                .count(),
+            logs.matches("dl-community answer-fixture decision").count(),
             1,
             "{logs}"
         );
@@ -417,8 +323,7 @@ mod tests {
 
         let logs = capture.text();
         assert_eq!(
-            logs.matches("dl-community knowledge-client decision")
-                .count(),
+            logs.matches("dl-community answer-fixture decision").count(),
             4,
             "{logs}"
         );
@@ -435,53 +340,6 @@ mod tests {
             assert!(logs.contains(&format!("verdict={verdict}")), "{logs}");
             assert!(logs.contains(&format!("confidence={confidence}")), "{logs}");
         }
-    }
-
-    #[tokio::test]
-    async fn stateful_support_admission_teilt_exakt_vier_db_pfade() {
-        let admission = Arc::new(StatefulSupportAdmission::new());
-        let mut held = Vec::new();
-        for _ in 0..STATEFUL_SUPPORT_TURN_LIMIT {
-            held.push(
-                admission
-                    .semaphore
-                    .try_acquire()
-                    .expect("vier gemeinsame FAQ-/Concierge-Slots"),
-            );
-        }
-        assert!(admission.semaphore.try_acquire().is_err());
-
-        let attempted = Arc::new(tokio::sync::Notify::new());
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let db_stateful_path_claimed = Arc::new(AtomicBool::new(false));
-        let attempted_wait = attempted.notified();
-        let fifth = tokio::spawn({
-            let admission = admission.clone();
-            let attempted = attempted.clone();
-            let entered = entered.clone();
-            let release = release.clone();
-            let db_stateful_path_claimed = db_stateful_path_claimed.clone();
-            async move {
-                attempted.notify_one();
-                let _permit = admission.acquire().await;
-                db_stateful_path_claimed.store(true, Ordering::SeqCst);
-                entered.notify_one();
-                release.notified().await;
-            }
-        });
-
-        attempted_wait.await;
-        assert!(
-            !db_stateful_path_claimed.load(Ordering::SeqCst),
-            "fuenfter Turn darf vor Permit keinen DB-Stateful-Pfad beanspruchen"
-        );
-        drop(held.pop());
-        entered.notified().await;
-        assert!(db_stateful_path_claimed.load(Ordering::SeqCst));
-
-        release.notify_one();
-        fifth.await.expect("fifth stateful turn");
     }
 
     async fn knowledge_server(
@@ -592,7 +450,7 @@ mod tests {
         let output = Command::new(std::env::current_exe().expect("current test executable"))
             .args([
                 "--exact",
-                "knowledge_client::tests::proxy_child_nutzt_loopback_direkt",
+                "answer_fixture::tests::proxy_child_nutzt_loopback_direkt",
                 "--test-threads=1",
             ])
             .env(PROXY_TEST_CHILD, "1")
@@ -735,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_loopback_target_wird_vor_request_abgelehnt() {
-        let base_url = "http://192.0.2.1:8896";
+        let base_url = "http://192.0.2.1:9";
 
         let (result, logs) = ask_with_logs(base_url, "Frage?", Duration::from_millis(10)).await;
 
@@ -942,7 +800,7 @@ impl dl_answer::Retriever for CommunityRetriever {
             return Err(AnswerError::InvalidEvidence);
         }
         url.set_path(&format!(
-            "{}/public/v1/retrieve",
+            "{}/fixture/v1/retrieve",
             url.path().trim_end_matches('/')
         ));
         url.set_query(None);
@@ -1033,20 +891,12 @@ pub fn is_loopback_url(url: &reqwest::Url) -> bool {
 mod loopback_host_tests {
     #[test]
     fn parsed_loopback_hosts_accept_ipv4_ipv6_and_reject_external_targets() {
-        for base in [
-            "http://127.0.0.1:8896",
-            "http://[::1]:8896",
-            "http://localhost:8896",
-        ] {
+        for base in ["http://127.0.0.1:9", "http://[::1]:9", "http://localhost:9"] {
             assert!(super::is_loopback_url(
                 &reqwest::Url::parse(base).expect("URL")
             ));
         }
-        for base in [
-            "http://[::2]:8896",
-            "http://192.0.2.1",
-            "http://example.org",
-        ] {
+        for base in ["http://[::2]:9", "http://192.0.2.1", "http://example.org"] {
             assert!(!super::is_loopback_url(
                 &reqwest::Url::parse(base).expect("URL")
             ));

@@ -2344,7 +2344,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             "game_http::HttpRetriever",
             "DL_BRAIN_RETRIEVAL_URL",
             "/v1/retrieve",
-            "8896",
+            "dl-knowledge",
         ] {
             assert!(!source.contains(legacy), "Aktiver Altpfad: {legacy}");
         }
