@@ -215,7 +215,7 @@ pub trait RenameExec: Send + Sync {
     /// Benennt den Channel um. `Err` = Fehler (wird ggf. erneut versucht).
     async fn edit_name(&self, channel_id: u64, name: &str, reason: &str)
         -> Result<(), RenameError>;
-    fn decorate(&self, _channel_id: u64, name: &str) -> String {
+    fn decorate(&self, _channel_id: u64, name: &str, _current: &str) -> String {
         name.to_string()
     }
 }
@@ -329,7 +329,11 @@ pub fn spawn_worker(pool: PgPool, exec: Arc<dyn RenameExec>) {
                 let _ = set_failed(&q.pool, claimed.id, "Channel nicht gefunden").await;
                 continue;
             };
-            let target = exec.decorate(claimed.channel_id, requested_name(&claimed, &current));
+            let target = exec.decorate(
+                claimed.channel_id,
+                requested_name(&claimed, &current),
+                &current,
+            );
             if current == target {
                 let _ = set_done(&q.pool, claimed.id).await;
                 continue;

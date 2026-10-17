@@ -1420,7 +1420,7 @@ impl LanePort for CacheSnapshot {
                 c.parent_id == Some(ChannelId::new(category_id))
                     && c.kind == serenity::all::ChannelType::Voice
             })
-            .map(|c| c.name.to_string())
+            .map(|c| crate::live_dot::strip_live_prefix(&c.name).to_string())
             .collect()
     }
 
@@ -1435,7 +1435,12 @@ impl LanePort for CacheSnapshot {
                 c.parent_id == Some(ChannelId::new(category_id))
                     && c.kind == serenity::all::ChannelType::Voice
             })
-            .map(|c| (c.id.get(), c.name.to_string()))
+            .map(|c| {
+                (
+                    c.id.get(),
+                    crate::live_dot::strip_live_prefix(&c.name).to_string(),
+                )
+            })
             .collect()
     }
 
@@ -1768,7 +1773,7 @@ impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
             .collect();
         Some(crate::solo_watch::LaneSnapshot {
             category_id,
-            name: channel.name.clone(),
+            name: crate::live_dot::strip_live_prefix(&channel.name).to_string(),
             non_bot_members,
             user_limit: channel
                 .user_limit
@@ -1969,7 +1974,7 @@ impl crate::status::StatusPort for StatusGlue {
                 result.push((
                     guild_id.get(),
                     channel_id.get(),
-                    channel.name.to_string(),
+                    crate::live_dot::strip_live_prefix(&channel.name).to_string(),
                     members,
                 ));
             }
@@ -1989,7 +1994,11 @@ impl crate::status::StatusPort for StatusGlue {
                     .filter(|(_, vs)| vs.channel_id == Some(ChannelId::new(channel_id)))
                     .map(|(user_id, _)| user_id.get())
                     .collect();
-                return Some((guild_id.get(), channel.name.to_string(), members));
+                return Some((
+                    guild_id.get(),
+                    crate::live_dot::strip_live_prefix(&channel.name).to_string(),
+                    members,
+                ));
             }
         }
         None
@@ -2374,7 +2383,12 @@ impl crate::rank::RankPort for RankGlue {
                     .filter(|(_, c)| {
                         c.kind == serenity::all::ChannelType::Voice && c.parent_id == Some(parent)
                     })
-                    .map(|(id, c)| (id.get(), c.name.to_string()))
+                    .map(|(id, c)| {
+                        (
+                            id.get(),
+                            crate::live_dot::strip_live_prefix(&c.name).to_string(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -2878,7 +2892,12 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
                     .values()
                     .filter(|vs| vs.channel_id == Some(c.id))
                     .count();
-                (c.id.get(), c.name.to_string(), members, c.position as i64)
+                (
+                    c.id.get(),
+                    crate::live_dot::strip_live_prefix(&c.name).to_string(),
+                    members,
+                    c.position as i64,
+                )
             })
             .collect()
     }
@@ -3060,9 +3079,9 @@ impl crate::rename_queue::RenameExec for RenameExecGlue {
             .map_err(rename_error_from_serenity)
     }
 
-    fn decorate(&self, channel_id: u64, name: &str) -> String {
+    fn decorate(&self, channel_id: u64, name: &str, current: &str) -> String {
         match &self.live_dot {
-            Some(live_dot) => live_dot.decorate(channel_id, name),
+            Some(live_dot) => live_dot.decorate(channel_id, name, current),
             None => name.to_string(),
         }
     }

@@ -1,12 +1,13 @@
 use std::{sync::Arc, time::Duration};
 
 use dl_discord::{DiscordAdapter, Dispatcher, GatewayEvent, RoleEvent, VoiceEvent};
-use serenity::all::{ChannelId, ChannelType, GuildId, Permissions, RoleId};
+use serenity::all::{
+    ChannelId, ChannelType, Guild, GuildId, Permissions, RoleId, UserId, VoiceState,
+};
 use tokio::sync::broadcast::error::RecvError;
 
 pub const LIVE_PREFIX: &str = "🟣 ";
 pub const DEFAULT_LIVE_STREAMER_ROLE_ID: u64 = 1_560_993_753_643_098_153;
-pub const DEFAULT_LIVE_DOT_GUILD_ID: u64 = 1_289_721_245_281_292_288;
 const MAX_CHANNEL_NAME_CHARS: usize = 100;
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 
@@ -29,23 +30,53 @@ pub fn decorate_name(name: &str, live: bool) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveState {
+    Ineligible,
+    Unknown,
+    Known(bool),
+}
+
+pub fn has_live_prefix(name: &str) -> bool {
+    name.starts_with(LIVE_PREFIX)
+}
+
+pub fn decorate_for_state(name: &str, current: &str, state: LiveState) -> String {
+    match state {
+        LiveState::Ineligible => name.to_string(),
+        LiveState::Unknown => decorate_name(name, has_live_prefix(current)),
+        LiveState::Known(live) => decorate_name(name, live),
+    }
+}
+
+fn fold_member_states(states: impl IntoIterator<Item = Option<bool>>) -> LiveState {
+    let mut unknown = false;
+    for state in states {
+        match state {
+            Some(true) => return LiveState::Known(true),
+            Some(false) => {}
+            None => unknown = true,
+        }
+    }
+    if unknown {
+        LiveState::Unknown
+    } else {
+        LiveState::Known(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveDotConfig {
     pub guild_id: u64,
     pub role_id: u64,
 }
 
 impl LiveDotConfig {
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let id = |key: &str, default: u64| {
-            lookup(key)
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(default)
-        };
-        Self {
-            guild_id: id("MAIN_GUILD_ID", DEFAULT_LIVE_DOT_GUILD_ID),
-            role_id: id("DL_LIVE_STREAMER_ROLE_ID", DEFAULT_LIVE_STREAMER_ROLE_ID),
-        }
+    pub fn new(guild_id: u64, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let role_id = lookup("DL_LIVE_STREAMER_ROLE_ID")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_LIVE_STREAMER_ROLE_ID);
+        Self { guild_id, role_id }
     }
 }
 
@@ -59,50 +90,42 @@ impl LiveDot {
         Arc::new(Self { adapter, config })
     }
 
-    pub fn decorate(&self, channel_id: u64, name: &str) -> String {
-        match self.channel_live(channel_id) {
-            Some(live) => decorate_name(name, live),
-            None => name.to_string(),
-        }
+    pub fn decorate(&self, channel_id: u64, name: &str, current: &str) -> String {
+        decorate_for_state(name, current, self.channel_live(channel_id))
     }
 
-    fn channel_live(&self, channel_id: u64) -> Option<bool> {
-        let bot_id = self.adapter.cache().current_user().id;
-        let guild = self
+    fn channel_live(&self, channel_id: u64) -> LiveState {
+        let Some(guild) = self
             .adapter
             .cache()
-            .guild(GuildId::new(self.config.guild_id))?;
+            .guild(GuildId::new(self.config.guild_id))
+        else {
+            return LiveState::Ineligible;
+        };
         let cid = ChannelId::new(channel_id);
-        let channel = guild.channels.get(&cid)?;
+        let Some(channel) = guild.channels.get(&cid) else {
+            return LiveState::Ineligible;
+        };
         if channel.kind != ChannelType::Voice {
-            return None;
+            return LiveState::Ineligible;
         }
-        let bot = guild.members.get(&bot_id)?;
+        let bot_id = self.adapter.cache().current_user().id;
+        let Some(bot) = guild.members.get(&bot_id) else {
+            return LiveState::Unknown;
+        };
         if !guild
             .user_permissions_in(channel, bot)
             .contains(Permissions::MANAGE_CHANNELS)
         {
-            return None;
+            return LiveState::Ineligible;
         }
         let role = RoleId::new(self.config.role_id);
-        Some(
+        fold_member_states(
             guild
                 .voice_states
                 .values()
                 .filter(|state| state.channel_id == Some(cid))
-                .any(|state| {
-                    guild
-                        .members
-                        .get(&state.user_id)
-                        .map(|member| member.roles.contains(&role))
-                        .or_else(|| {
-                            state
-                                .member
-                                .as_ref()
-                                .map(|member| member.roles.contains(&role))
-                        })
-                        .unwrap_or(false)
-                }),
+                .map(|state| member_has_role(&guild, state, role)),
         )
     }
 
@@ -137,13 +160,13 @@ impl LiveDot {
             .guild(GuildId::new(self.config.guild_id))?;
         guild
             .voice_states
-            .get(&serenity::all::UserId::new(user_id))?
+            .get(&UserId::new(user_id))?
             .channel_id
             .map(|channel| channel.get())
     }
 
     pub async fn refresh(&self, channel_id: u64) {
-        let Some(live) = self.channel_live(channel_id) else {
+        let LiveState::Known(live) = self.channel_live(channel_id) else {
             return;
         };
         let Some(current) = self.current_name(channel_id) else {
@@ -190,6 +213,14 @@ impl LiveDot {
             self.refresh(channel_id).await;
         }
     }
+}
+
+fn member_has_role(guild: &Guild, state: &VoiceState, role: RoleId) -> Option<bool> {
+    guild
+        .members
+        .get(&state.user_id)
+        .or(state.member.as_ref())
+        .map(|member| member.roles.contains(&role))
 }
 
 fn voice_event_channels(event: &VoiceEvent, guild: u64) -> Vec<u64> {
@@ -274,6 +305,32 @@ mod tests {
         assert_eq!(decorate_name(&once, true), once);
         let off = decorate_name(&once, false);
         assert_eq!(decorate_name(&off, false), off);
+    }
+
+    #[test]
+    fn unknown_state_keeps_current_prefix() {
+        assert_eq!(
+            decorate_for_state("Lane 3", "🟣 Lane 2", LiveState::Unknown),
+            "🟣 Lane 3"
+        );
+        assert_eq!(
+            decorate_for_state("Lane 3", "Lane 2", LiveState::Unknown),
+            "Lane 3"
+        );
+        assert_eq!(
+            decorate_for_state("Lane 3", "🟣 Lane 2", LiveState::Ineligible),
+            "Lane 3"
+        );
+    }
+
+    #[test]
+    fn unknown_member_blocks_negative_answer() {
+        assert_eq!(fold_member_states([Some(false), None]), LiveState::Unknown);
+        assert_eq!(
+            fold_member_states([None, Some(true)]),
+            LiveState::Known(true)
+        );
+        assert_eq!(fold_member_states([]), LiveState::Known(false));
     }
 
     #[test]

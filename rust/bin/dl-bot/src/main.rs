@@ -1580,7 +1580,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::rename_queue::init(central_pool.clone());
         let live_dot = dl_voice::live_dot::LiveDot::new(
             adapter.clone(),
-            dl_voice::live_dot::LiveDotConfig::from_lookup(operating_value),
+            dl_voice::live_dot::LiveDotConfig::new(our_guild_id, operating_value),
         );
         dl_voice::rename_queue::spawn_worker(
             central_pool.clone(),
