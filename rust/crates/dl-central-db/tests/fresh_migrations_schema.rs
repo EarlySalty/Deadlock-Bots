@@ -1,6 +1,8 @@
 use std::{
+    io::Write,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use dl_central_db::connect_pool;
@@ -1173,11 +1175,57 @@ fn migrator_command() -> Command {
     command
 }
 
+fn write_private(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .unwrap_or_else(|err| panic!("chmod {}: {err}", path.display()));
+}
+
+fn migrator_bot_toml(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "dl-central-migrate-test-{}-{}",
+            std::process::id(),
+            label.replace(' ', "-")
+        ))
+        .join("config");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("create {}: {err}", dir.display()));
+    write_private(&dir.join("bot.toml"), "schema_version = 1\n");
+    write_private(
+        &dir.join("infisical.json"),
+        r#"{"secret_values_fd":3,"project_id":"fixture","environment":"fixture","secret_path":"/","socket_path":"/nonexistent","database_secret":"DEADLOCK_CENTRAL_DSN"}"#,
+    );
+    dir.join("bot.toml")
+}
+
 fn run_migrator(dsn: &str, label: &str) {
-    let output = migrator_command()
+    let mut migrator = migrator_command();
+    migrator.arg("--config").arg(migrator_bot_toml(label));
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "exec 3<&0; exec \"$@\"", "dl-central-migrate-fd3"])
+        .arg(migrator.get_program())
+        .args(migrator.get_args())
         .env("DEADLOCK_CENTRAL_DSN", dsn)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = migrator.get_current_dir() {
+        command.current_dir(dir);
+    }
+    let mut child = command
+        .spawn()
         .unwrap_or_else(|err| panic!("{label}: start dl-central-migrate: {err}"));
+    let snapshot = format!(r#"{{"DEADLOCK_CENTRAL_DSN":"{dsn}"}}"#);
+    child
+        .stdin
+        .take()
+        .unwrap_or_else(|| panic!("{label}: FD3 pipe missing"))
+        .write_all(snapshot.as_bytes())
+        .unwrap_or_else(|err| panic!("{label}: write FD3 snapshot: {err}"));
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|err| panic!("{label}: wait dl-central-migrate: {err}"));
 
     assert!(
         output.status.success(),
