@@ -661,7 +661,10 @@ impl CacheSnapshot {
 
 #[async_trait::async_trait]
 impl VoiceSnapshot for CacheSnapshot {
-    async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+    async fn guild_voice_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         self.adapter.voice_cache_snapshot(guild_id)
     }
 
@@ -702,7 +705,7 @@ impl VoiceSnapshot for CacheSnapshot {
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
-            .map(|c| c.name.to_string())
+            .map(|c| crate::live_dot::strip_live_prefix(&c.name).to_string())
     }
 }
 
@@ -791,7 +794,10 @@ impl LanePort for CacheSnapshot {
         }
     }
 
-    async fn guild_voice_snapshot(&self, guild_id: u64) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
+    async fn guild_voice_snapshot(
+        &self,
+        guild_id: u64,
+    ) -> Option<dl_discord::voice_cache::GuildVoiceSnapshot> {
         self.adapter.voice_cache_snapshot(guild_id)
     }
 
@@ -900,10 +906,21 @@ impl LanePort for CacheSnapshot {
     }
 
     async fn delete_channel(&self, channel_id: u64, reason: &str) -> Result<(), String> {
-        match self.adapter.http.delete_channel(ChannelId::new(channel_id), Some(reason)).await {
+        match self
+            .adapter
+            .http
+            .delete_channel(ChannelId::new(channel_id), Some(reason))
+            .await
+        {
             Ok(_) => Ok(()),
             // Nach erfolgreichem Discord-Delete kann ein DB-/LFG-Retry folgen.
-            Err(serenity::Error::Http(err)) if err.status_code().is_some_and(|status| status.as_u16() == 404) => Ok(()),
+            Err(serenity::Error::Http(err))
+                if err
+                    .status_code()
+                    .is_some_and(|status| status.as_u16() == 404) =>
+            {
+                Ok(())
+            }
             Err(err) => Err(err.to_string()),
         }
     }
@@ -1229,7 +1246,9 @@ impl LanePort for CacheSnapshot {
             // Der User kann die Voice-Lane vor dem REST-Check verlassen haben.
             // Das ist beim Ban erlaubt und braucht keinen Disconnect.
             Err(serenity::Error::Http(err))
-                if err.status_code().is_some_and(|status| status.as_u16() == 404) =>
+                if err
+                    .status_code()
+                    .is_some_and(|status| status.as_u16() == 404) =>
             {
                 return Ok(false);
             }
@@ -1377,7 +1396,7 @@ impl LanePort for CacheSnapshot {
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
-            .map(|c| c.name.to_string())
+            .map(|c| crate::live_dot::strip_live_prefix(&c.name).to_string())
     }
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
@@ -1401,7 +1420,7 @@ impl LanePort for CacheSnapshot {
                 c.parent_id == Some(ChannelId::new(category_id))
                     && c.kind == serenity::all::ChannelType::Voice
             })
-            .map(|c| c.name.to_string())
+            .map(|c| crate::live_dot::strip_live_prefix(&c.name).to_string())
             .collect()
     }
 
@@ -1416,7 +1435,12 @@ impl LanePort for CacheSnapshot {
                 c.parent_id == Some(ChannelId::new(category_id))
                     && c.kind == serenity::all::ChannelType::Voice
             })
-            .map(|c| (c.id.get(), c.name.to_string()))
+            .map(|c| {
+                (
+                    c.id.get(),
+                    crate::live_dot::strip_live_prefix(&c.name).to_string(),
+                )
+            })
             .collect()
     }
 
@@ -1749,7 +1773,7 @@ impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
             .collect();
         Some(crate::solo_watch::LaneSnapshot {
             category_id,
-            name: channel.name.clone(),
+            name: crate::live_dot::strip_live_prefix(&channel.name).to_string(),
             non_bot_members,
             user_limit: channel
                 .user_limit
@@ -1950,7 +1974,7 @@ impl crate::status::StatusPort for StatusGlue {
                 result.push((
                     guild_id.get(),
                     channel_id.get(),
-                    channel.name.to_string(),
+                    crate::live_dot::strip_live_prefix(&channel.name).to_string(),
                     members,
                 ));
             }
@@ -1970,7 +1994,11 @@ impl crate::status::StatusPort for StatusGlue {
                     .filter(|(_, vs)| vs.channel_id == Some(ChannelId::new(channel_id)))
                     .map(|(user_id, _)| user_id.get())
                     .collect();
-                return Some((guild_id.get(), channel.name.to_string(), members));
+                return Some((
+                    guild_id.get(),
+                    crate::live_dot::strip_live_prefix(&channel.name).to_string(),
+                    members,
+                ));
             }
         }
         None
@@ -2263,7 +2291,7 @@ impl crate::rank::RankPort for RankGlue {
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
-            .map(|c| c.name.to_string())
+            .map(|c| crate::live_dot::strip_live_prefix(&c.name).to_string())
     }
 
     async fn category_name(&self, guild_id: u64, channel_id: u64) -> Option<String> {
@@ -2355,7 +2383,12 @@ impl crate::rank::RankPort for RankGlue {
                     .filter(|(_, c)| {
                         c.kind == serenity::all::ChannelType::Voice && c.parent_id == Some(parent)
                     })
-                    .map(|(id, c)| (id.get(), c.name.to_string()))
+                    .map(|(id, c)| {
+                        (
+                            id.get(),
+                            crate::live_dot::strip_live_prefix(&c.name).to_string(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -2859,7 +2892,12 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
                     .values()
                     .filter(|vs| vs.channel_id == Some(c.id))
                     .count();
-                (c.id.get(), c.name.to_string(), members, c.position as i64)
+                (
+                    c.id.get(),
+                    crate::live_dot::strip_live_prefix(&c.name).to_string(),
+                    members,
+                    c.position as i64,
+                )
             })
             .collect()
     }
@@ -3005,6 +3043,7 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
 /// aus dem Gateway-Cache und führt die eigentliche Discord-Umbenennung aus.
 pub struct RenameExecGlue {
     pub adapter: Arc<DiscordAdapter>,
+    pub live_dot: Option<Arc<crate::live_dot::LiveDot>>,
 }
 
 #[async_trait::async_trait]
@@ -3038,6 +3077,13 @@ impl crate::rename_queue::RenameExec for RenameExecGlue {
             .await
             .map(|_| ())
             .map_err(rename_error_from_serenity)
+    }
+
+    fn decorate(&self, channel_id: u64, name: &str, current: &str) -> String {
+        match &self.live_dot {
+            Some(live_dot) => live_dot.decorate(channel_id, name, current),
+            None => name.to_string(),
+        }
     }
 }
 
