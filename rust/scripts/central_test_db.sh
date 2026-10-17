@@ -13,7 +13,7 @@ IMAGE="timescale/timescaledb:2.17.2-pg16"
 NAME="dl-central-test-postgres-$$"
 DB="deadlock_test"
 USER="deadlock"
-PASS="testpw"
+PASS="$(openssl rand -hex 16)"
 CONFIG_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -34,6 +34,7 @@ trap 'finish 143' TERM
 
 docker run --rm -d \
   --name "$NAME" \
+  --label io.earlysalty.cargo-test=throwaway-only \
   -e POSTGRES_DB="$DB" \
   -e POSTGRES_USER="$USER" \
   -e POSTGRES_PASSWORD="$PASS" \
