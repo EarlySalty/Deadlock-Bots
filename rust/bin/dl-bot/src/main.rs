@@ -1578,12 +1578,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker
         // drainiert FIFO mit >=360s Abstand pro Channel.
         dl_voice::rename_queue::init(central_pool.clone());
+        let live_dot = dl_voice::live_dot::LiveDot::new(
+            adapter.clone(),
+            dl_voice::live_dot::LiveDotConfig::from_lookup(operating_value),
+        );
         dl_voice::rename_queue::spawn_worker(
             central_pool.clone(),
             Arc::new(dl_voice::glue::RenameExecGlue {
                 adapter: adapter.clone(),
+                live_dot: Some(live_dot.clone()),
             }),
         );
+        dl_voice::live_dot::spawn(live_dot, &dispatcher);
 
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
         let voice_tracker =

@@ -15,6 +15,7 @@ mod db;
 pub mod feedback;
 pub mod glue;
 pub mod lfg_panel;
+pub mod live_dot;
 mod lfg_watch;
 pub mod mate_survey;
 pub mod nudge;
