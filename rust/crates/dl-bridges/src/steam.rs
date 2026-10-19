@@ -71,6 +71,11 @@ const FRIEND_CODE_MODAL_CUSTOM_ID: &str = "steam_bridge:friend_code_modal";
 const FRIEND_CODE_SUBMIT_CUSTOM_ID: &str = "steam_link_panel:friend_code:submit";
 pub const STEAM_PANEL_KV_NS: &str = "steam_link_panel";
 pub const STEAM_PANEL_KV_KEY: &str = "panel_ref";
+pub const RANG_GUIDE_OWNED_CHANNEL_ID: u64 = 1_398_021_105_339_334_666;
+
+fn steam_panel_restore_blocked(channel_id: u64) -> bool {
+    channel_id == RANG_GUIDE_OWNED_CHANNEL_ID
+}
 pub const BRD09_STEAM_PANEL_POSTED_MSG: &str = "✅ Steam-Panel gepostet.";
 pub const BRD09_STEAM_PANEL_MESSAGE_ID_OPTION_DESC: &str =
     "ID einer bestehenden Message, die editiert werden soll (optional)";
@@ -864,6 +869,14 @@ pub fn spawn_panel_restore(
         let Some(panel_ref) = store.get().await else {
             return;
         };
+        if steam_panel_restore_blocked(panel_ref.channel_id) {
+            tracing::info!(
+                channel_id = panel_ref.channel_id,
+                message_id = panel_ref.message_id,
+                "Steam-Panel-Restore übersprungen: Kanal gehört dem Rang-Guide (rang-guide-owned-channel-skip)"
+            );
+            return;
+        }
         let Some(result) = fetch_panel_result(&client, "publish_steam_panel", 0, 0).await else {
             return;
         };
@@ -1401,6 +1414,12 @@ mod tests {
         assert!(should_clear_panel_ref_after_restore_status(Some(404)));
         assert!(!should_clear_panel_ref_after_restore_status(Some(403)));
         assert!(!should_clear_panel_ref_after_restore_status(None));
+    }
+
+    #[test]
+    fn panel_restore_ueberspringt_rang_guide_kanal() {
+        assert!(steam_panel_restore_blocked(RANG_GUIDE_OWNED_CHANNEL_ID));
+        assert!(!steam_panel_restore_blocked(9));
     }
 
     #[tokio::test]

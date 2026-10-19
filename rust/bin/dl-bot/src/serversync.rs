@@ -8,7 +8,7 @@ mod twitch_link;
 pub(crate) mod voice_ux_publish;
 mod welcome_publish;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -2080,6 +2080,9 @@ impl ServerSyncService {
                     author_id,
                     flags: message.flags,
                     has_embeds: !message.embeds.is_empty(),
+                    has_v2_marker: rang_guide_publish::has_rang_guide_v2_marker(
+                        &message.components,
+                    ),
                     custom_ids,
                 };
                 if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(&legacy, bot_user_id)
@@ -2563,7 +2566,17 @@ impl ServerSyncService {
         output: &mut rang_guide_publish::RangGuidePublishOutput,
     ) -> ServerSyncResult<()> {
         let candidates = output.legacy_cleanup_candidates.clone();
+        let protected: BTreeSet<u64> = output
+            .messages
+            .iter()
+            .filter_map(|message| message.message_id)
+            .chain(output.posted_message_ids.iter().copied())
+            .chain(output.edited_message_ids.iter().copied())
+            .collect();
         for candidate in candidates {
+            if protected.contains(&candidate.message_id) {
+                continue;
+            }
             match self
                 .discord_delete(format!(
                     "{}/channels/{}/messages/{}",
@@ -4366,6 +4379,10 @@ impl ServerSyncOps for ServerSyncService {
             output.warnings.extend(delete_outcome.warnings);
         } else if !adopted_from_history
             && rang_guide_publish::rang_guide_payload_is_unchanged(&output)
+            && rang_guide_publish::rang_guide_stored_ids_are_live_v2(
+                &stored_message_ids,
+                &discovered_v2_message_ids,
+            )
         {
             for message in &mut output.messages {
                 if let Some(message_id) = message.stored_message_id {
