@@ -48,6 +48,7 @@ pub const TWITCH_LINK_SERVICE: &str = "twitch-link";
 pub const TWITCH_LINK_FLOW_TYPE: &str = "delegated:twitch-link";
 /// Oeffentliche Abschlussseite nach dem Discord-Callback.
 pub const TWITCH_LINK_DONE_PATH: &str = "/twitch-verknuepfen/fertig";
+const TWITCH_LINK_DONE_ORIGIN: &str = "https://deutsche-deadlock-community.de";
 const AUTH_MISCONFIGURED_MESSAGE: &str = "Dashboard Auth ist nicht korrekt konfiguriert. \
 Discord OAuth Client-ID/Secret fehlen im Windows-Tresor (DeadlockBot).";
 
@@ -1420,11 +1421,10 @@ async fn twitch_link_callback_result(
     })
 }
 
-/// Oeffentliche Abschluss-URL des Twitch-Flows, nur wenn sie ein erlaubtes
-/// Weiterleitungsziel ist.
-fn twitch_link_done_url(cfg: &DashboardConfig) -> Option<String> {
-    let base = cfg.public_base_url.as_deref()?.trim().trim_end_matches('/');
-    let url = format!("{base}{TWITCH_LINK_DONE_PATH}");
+/// Oeffentliche Abschluss-URL des Twitch-Flows auf dem Nutzer-Host
+/// (`twitch-link-done-user-host`).
+fn twitch_link_done_url() -> Option<String> {
+    let url = format!("{TWITCH_LINK_DONE_ORIGIN}{TWITCH_LINK_DONE_PATH}");
     auth::is_allowed_redirect_after(&url).then_some(url)
 }
 
@@ -1442,7 +1442,7 @@ async fn twitch_link_initiate(
     if !app.cfg().discord_oauth_configured() {
         return err_json(503, "discord_oauth_not_configured");
     }
-    let Some(redirect_after) = twitch_link_done_url(app.cfg()) else {
+    let Some(redirect_after) = twitch_link_done_url() else {
         return err_json(503, "twitch_link_redirect_not_allowed");
     };
     let state = crate::token::session_token();
@@ -2402,6 +2402,14 @@ mod tests {
         format!("http://{addr}")
     }
 
+    #[test]
+    fn twitch_link_done_url_ist_nutzer_host() {
+        assert_eq!(
+            twitch_link_done_url().as_deref(),
+            Some("https://deutsche-deadlock-community.de/twitch-verknuepfen/fertig")
+        );
+    }
+
     fn twitch_link_cfg(api_base: &str) -> DashboardConfig {
         let api_base = api_base.to_string();
         DashboardConfig::from_lookup(move |key| match key {
@@ -2526,7 +2534,7 @@ mod tests {
         );
         assert_eq!(
             stored.redirect_after,
-            "https://admin.deutsche-deadlock-community.de/twitch-verknuepfen/fertig"
+            "https://deutsche-deadlock-community.de/twitch-verknuepfen/fertig"
         );
     }
 
@@ -2541,7 +2549,7 @@ mod tests {
 
         let (state, location) = twitch_link_through_callback(&app, "code=abc").await;
         assert!(location.starts_with(
-            "https://admin.deutsche-deadlock-community.de/twitch-verknuepfen/fertig?state_id="
+            "https://deutsche-deadlock-community.de/twitch-verknuepfen/fertig?state_id="
         ));
         let raw_metadata: Option<String> =
             sqlx::query_scalar("SELECT metadata::text FROM bot.oauth_states WHERE state = $1")
