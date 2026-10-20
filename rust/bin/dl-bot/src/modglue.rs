@@ -3251,63 +3251,26 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         self.adapter.send_raw_public(channel_id, &body).await
     }
 
-    async fn find_channel_message_by_nonce(
+    async fn set_channel_read_only(
         &self,
         channel_id: u64,
-        after_message_id: u64,
-        nonce: &str,
-    ) -> Result<Option<u64>, String> {
-        let bot_id = self
-            .adapter
-            .http
-            .get_current_user()
-            .await
-            .map_err(|err| err.to_string())?
-            .id;
-        let mut before = None;
-        loop {
-            let mut request = GetMessages::new().limit(100);
-            if let Some(message_id) = before {
-                request = request.before(MessageId::new(message_id));
-            }
-            let messages = ChannelId::new(channel_id)
-                .messages(&self.adapter.http, request)
+        member_ids: &[u64],
+    ) -> Result<(), String> {
+        let channel = ChannelId::new(channel_id);
+        for member_id in member_ids {
+            channel
+                .create_permission(
+                    &self.adapter.http,
+                    serenity::all::PermissionOverwrite {
+                        allow: Permissions::from_bits_truncate(1024 | 65536),
+                        deny: Permissions::from_bits_truncate(2048 | (1 << 38)),
+                        kind: PermissionOverwriteType::Member(UserId::new(*member_id)),
+                    },
+                )
                 .await
                 .map_err(|err| err.to_string())?;
-            if messages.is_empty() {
-                return Ok(None);
-            }
-            for message in &messages {
-                let matching_reply = message
-                    .message_reference
-                    .as_ref()
-                    .and_then(|reference| reference.message_id)
-                    == Some(MessageId::new(after_message_id))
-                    && serde_json::to_string(&message.components).is_ok_and(|body| {
-                        body.contains("diese Patenanfrage wartet seit zwei Stunden")
-                    });
-                if message.id.get() > after_message_id
-                    && message.author.id == bot_id
-                    && (matches!(&message.nonce, Some(serenity::all::Nonce::String(value)) if value == nonce)
-                        || matching_reply)
-                {
-                    return Ok(Some(message.id.get()));
-                }
-            }
-            let oldest = messages.iter().map(|message| message.id.get()).min();
-            if oldest.is_some_and(|id| id <= after_message_id) {
-                return Ok(None);
-            }
-            if before == oldest {
-                return Err(
-                    "Discord-Verlauf für den Owner-Hinweis bewegt sich nicht weiter".into(),
-                );
-            }
-            before = oldest;
-            if messages.len() < 100 {
-                return Ok(None);
-            }
         }
+        Ok(())
     }
 
     async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
