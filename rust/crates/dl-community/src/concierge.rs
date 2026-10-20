@@ -167,8 +167,11 @@ pub fn pate_waiting_text(help_channel_id: u64) -> String {
     format!("Ein Pate meldet sich, sobald jemand Zeit hat. Bis dahin kannst du gern in <#{help_channel_id}> fragen.")
 }
 
-fn pate_active_text(channel_id: u64) -> String {
-    format!("Du hast schon einen Paten. Euer Kanal ist <#{channel_id}>.")
+fn pate_active_text(channel_id: Option<u64>) -> String {
+    match channel_id {
+        Some(channel_id) => format!("Du hast schon einen Paten. Euer Kanal ist <#{channel_id}>."),
+        None => "Du hast schon einen Paten.".to_string(),
+    }
 }
 
 fn pate_withdrawn_card_text(user_id: u64) -> String {
@@ -2043,10 +2046,11 @@ async fn existing_pate_reply_tx(
     .bind(user_id)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(channel
-        .flatten()
-        .and_then(|channel_id| u64::try_from(channel_id).ok())
-        .map(|channel_id| text_reply(&pate_active_text(channel_id))))
+    Ok(channel.map(|channel_id| {
+        text_reply(&pate_active_text(
+            channel_id.and_then(|channel_id| u64::try_from(channel_id).ok()),
+        ))
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2750,10 +2754,14 @@ impl ConciergeStore {
         Ok(sqlx::query(
             "UPDATE bot.concierge_patenschaften
                 SET inactivity_notice_at = $2
-              WHERE id = $1 AND inactivity_notice_at IS NULL AND released_at IS NULL",
+              WHERE id = $1
+                AND inactivity_notice_at IS NULL
+                AND released_at IS NULL
+                AND COALESCE(last_human_message_at, created_at) <= $3",
         )
         .bind(id)
         .bind(now)
+        .bind(now - Duration::days(PATENSCHAFT_QUIET_NOTICE_DAYS))
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -2788,11 +2796,23 @@ impl ConciergeStore {
         let ended = sqlx::query(
             "UPDATE bot.concierge_patenschaften
                 SET ended_at = $2, released_at = $2, end_reason = $3
-              WHERE id = $1 AND ended_at IS NULL AND released_at IS NULL",
+              WHERE id = $1
+                AND user_id = $6
+                AND ended_at IS NULL
+                AND released_at IS NULL
+                AND CASE $3
+                    WHEN 'expired' THEN created_at <= $4
+                    WHEN 'inactive' THEN inactivity_notice_at IS NOT NULL
+                                     AND inactivity_notice_at <= $5
+                    ELSE FALSE
+                END",
         )
         .bind(id)
         .bind(now)
         .bind(reason.as_str())
+        .bind(now - Duration::days(PATENSCHAFT_DURATION_DAYS))
+        .bind(now - Duration::days(PATENSCHAFT_QUIET_END_DAYS))
+        .bind(user_id)
         .execute(&mut *tx)
         .await?
         .rows_affected()
@@ -2807,6 +2827,11 @@ impl ConciergeStore {
             .bind(now)
             .execute(&mut *tx)
             .await?;
+            sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(CONCIERGE_PATE_CLAIM_NS)
+                .bind(user_id.to_string())
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(ended)
@@ -6014,12 +6039,19 @@ impl Concierge {
         let fingerprint = leitfaden_fingerprint(&content);
         let body = v2_body(&content, Vec::new());
         let pool = self.store.pool();
-        let stored_message_id =
-            dl_central_db::kv::get(pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id")
-                .await
-                .ok()
-                .flatten()
-                .and_then(|raw| raw.parse::<u64>().ok());
+        let stored_message_id = match dl_central_db::kv::get(
+            pool,
+            CONCIERGE_PATE_LEITFADEN_NS,
+            "message_id",
+        )
+        .await
+        {
+            Ok(raw) => raw.and_then(|raw| raw.parse::<u64>().ok()),
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Leitfaden-Nachrichten-ID nicht lesbar; nichts gepostet");
+                return;
+            }
+        };
         let stored_fingerprint =
             dl_central_db::kv::get(pool, CONCIERGE_PATE_LEITFADEN_NS, "fingerprint")
                 .await
@@ -6147,10 +6179,16 @@ impl Concierge {
             text.inhalt.trim()
         ));
         let pool = self.store.pool();
-        let stored_message_id = dl_central_db::kv::get(pool, CONCIERGE_PATE_PANEL_NS, "message_id")
+        let stored_raw = match dl_central_db::kv::get(pool, CONCIERGE_PATE_PANEL_NS, "message_id")
             .await
-            .ok()
-            .flatten()
+        {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Paten-Panel-Nachrichten-ID nicht lesbar; nichts gepostet");
+                return;
+            }
+        };
+        let stored_message_id = stored_raw
             .and_then(|raw| {
                 raw.split_once(':')
                     .map(|(c, m)| (c.to_string(), m.to_string()))
@@ -17229,6 +17267,70 @@ mod tests {
                 PATE_INACTIVITY_NOTICE_TEXT.to_string(),
                 PATE_END_INACTIVE_TEXT.to_string()
             ]
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn beendete_patenschaft_erlaubt_neue_anfrage_und_neuen_claim() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockConciergePort::default());
+        let mut config = test_config(true, &[]);
+        config.pater_channel_id = Some(PATE_REQUEST_CHANNEL_ID);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let handler = ConciergeHandler {
+            concierge: concierge.clone(),
+        };
+        let now = Utc::now();
+        seed_open_pate_request(
+            &pool,
+            42,
+            i64::try_from(PATE_CLAIM_TEST_MESSAGE_ID).unwrap(),
+            now,
+        )
+        .await;
+        let first = handler.handle(valid_pate_claim_interaction(42, 77)).await;
+        assert_eq!(first.content, None);
+
+        concierge
+            .run_patenschaft_lifecycle(now + Duration::days(31))
+            .await;
+        assert_eq!(
+            concierge.store.active_patenschaft_count(77).await.unwrap(),
+            0
+        );
+        let claim_key: Option<String> =
+            sqlx::query_scalar("SELECT v FROM bot.kv_store WHERE ns = $1 AND k = '42'")
+                .bind(CONCIERGE_PATE_CLAIM_NS)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(claim_key.is_none());
+
+        let request = concierge.request_pate(42, 1, "Nani").await;
+        assert_eq!(
+            bridge_reply_text(&request),
+            Some(pate_waiting_text(FRAG_DIE_COMMUNITY_CHANNEL_ID).as_str())
+        );
+        let message_id: i64 = sqlx::query_scalar(
+            "SELECT message_id FROM bot.concierge_pate_requests WHERE user_id = 42 AND status = 'open'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("neue offene Anfrage");
+        let second = handler
+            .handle(BridgeInteraction {
+                message_id: Some(u64::try_from(message_id).unwrap()),
+                ..valid_pate_claim_interaction(42, 78)
+            })
+            .await;
+        assert_eq!(second.content, None);
+        assert_eq!(
+            concierge.store.active_patenschaft_count(78).await.unwrap(),
+            1
         );
     }
 

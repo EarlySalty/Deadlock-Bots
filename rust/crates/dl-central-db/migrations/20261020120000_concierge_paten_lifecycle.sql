@@ -14,6 +14,10 @@ ALTER TABLE bot.concierge_patenschaften
     ADD COLUMN archived_at TIMESTAMPTZ,
     ADD COLUMN channel_deleted_at TIMESTAMPTZ;
 
+UPDATE bot.concierge_patenschaften
+   SET last_human_message_at = now()
+ WHERE released_at IS NULL;
+
 ALTER TABLE bot.concierge_patenschaften
     ADD CONSTRAINT concierge_patenschaften_end_reason_check
     CHECK (end_reason IS NULL OR end_reason IN ('expired', 'inactive'));
