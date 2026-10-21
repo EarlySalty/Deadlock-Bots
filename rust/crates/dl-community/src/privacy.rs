@@ -1105,6 +1105,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "turnier_solo_balance_waitlist",
+        "discord_id",
+        "turnier.solo_balance_waitlist",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "turnier_tournament_signups",
         "discord_id",
         "turnier.tournament_signups",
