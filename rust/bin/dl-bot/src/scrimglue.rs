@@ -3036,7 +3036,13 @@ impl ScrimDiscordEffectSender for dl_discord::DiscordAdapter {
         recipient_user_id: &str,
         body: &Map<String, Value>,
     ) -> Result<DiscordDmReceipt, String> {
-        let (dm_channel_id, message_id) = self.send_raw_dm_public(recipient_user_id, body).await?;
+        let (dm_channel_id, message_id) = self
+            .send_raw_dm_public(
+                recipient_user_id,
+                dl_discord::dm_gate::DmIntent::Proactive("scrim"),
+                body,
+            )
+            .await?;
         Ok(DiscordDmReceipt {
             dm_channel_id,
             message_id,

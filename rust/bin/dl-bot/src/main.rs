@@ -547,6 +547,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         anyhow::bail!("DISCORD_TOKEN fehlt — dl-bot kann ohne Bot-Token nichts ausrichten");
     };
     let adapter = dl_discord::DiscordAdapter::new(&discord_token);
+    adapter.link_dm_gate(central_pool.clone());
     // Application-ID auf dem REST-Http-Client setzen — sonst scheitern
     // Interaction-Followups nach einem Defer (POST /webhooks/{app_id}/{token})
     // mit „Application id was expected but missing", und der User sieht nichts.
@@ -596,6 +597,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
+    dl_discord::dm_gate::register(&mut router, central_pool.clone());
     // Modellwahl bleibt bei TURNIER_AI_MODEL; der Weg zum Modell laeuft jetzt
     // ueber das Compliance-Gate statt am Gate vorbei.
     let turnier_model = model_from_lookup(env, "TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
@@ -1661,7 +1663,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 "Steam-Link-Voice-Nudge deaktiviert (DL_STEAM_VOICE_NUDGE_ENABLED nicht gesetzt)"
             );
         }
-        dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
         if lane_pairing_enabled {
             dl_voice::pairing::spawn(lane_pairing.clone());
         } else {

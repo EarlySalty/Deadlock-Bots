@@ -1,6 +1,7 @@
 pub mod bearer;
 pub mod community_points;
 pub mod core_users;
+pub mod dm_optout;
 pub mod kv;
 mod locks;
 pub mod platform_connections;
@@ -11,6 +12,7 @@ pub mod scrim_runtime;
 pub mod testing;
 
 pub use core_users::{get_user, upsert_user, CoreUser};
+pub use dm_optout::{is_dm_opted_out, set_dm_opted_out};
 pub use kv::{delete as delete_kv, get as get_kv, set as set_kv};
 pub use locks::{
     lock_raw_event_retention_erasure, lock_user_privacy, lock_user_privacy_and_is_opted_out,

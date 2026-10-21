@@ -72,8 +72,7 @@ pub const NOT_IN_LANE_REPLY: &str =
     "Du sitzt gerade nicht mehr in deiner Lane. Spring wieder rein, dann klappt es.";
 pub const NO_REPLY: &str = "Alles gut, dann zockst du in Ruhe für dich. Viel Spaß.";
 pub const LATER_REPLY: &str = "Passt, ich frag später nochmal.";
-pub const NEVER_REPLY: &str =
-    "Erledigt, ich frag dich nicht mehr wegen Mitspielern. Über die Mitspieler-Suche findest du trotzdem jederzeit Leute.";
+pub const NEVER_REPLY: &str = dl_discord::dm_gate::DM_OPTOUT_CONFIRMATION;
 pub const NEVER_FAILED_REPLY: &str =
     "Das konnte ich gerade nicht speichern. Probier es gleich nochmal.";
 pub const INVALID_REPLY: &str = "Diese Anfrage ist abgelaufen.";

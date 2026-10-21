@@ -12,7 +12,7 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::payload::{self};
-use crate::port::{MemberPresence, PortError, RichMessage};
+use crate::port::{DmPurpose, MemberPresence, PortError, RichMessage};
 use crate::{
     authorize, error_body, payload_hash, request_id, require_loopback, respond, run_idempotent,
     success_body, SharedBroker, IDEMPOTENCY_HEADER,
@@ -22,6 +22,25 @@ type Peer = ConnectInfo<SocketAddr>;
 
 fn bad_request(rid: &str, message: &str) -> Response {
     respond(400, error_body(rid, None, "bad_request", message))
+}
+
+fn insert_dm_purpose(op: &mut Map<String, Value>, purpose: DmPurpose) {
+    if purpose != DmPurpose::Proactive {
+        op.insert("dm_purpose".into(), json!(purpose.as_str()));
+    }
+}
+
+fn dm_opted_out_response(rid: &str, idem: &str, user_id: u64) -> (u16, Value) {
+    tracing::info!(user_id, "Broker-DM unterdrueckt: globaler Opt-out");
+    (
+        403,
+        error_body(
+            rid,
+            Some(idem),
+            "dm_opted_out",
+            &format!("user {user_id} opted out of bot DMs"),
+        ),
+    )
 }
 
 /// Body als JSON-Objekt; alles andere → "invalid JSON payload".
@@ -554,6 +573,10 @@ pub async fn send_message(
         Err(resp) => return resp,
     };
 
+    let dm_purpose = match payload::dm_purpose(&payload) {
+        Ok(purpose) => purpose,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
     let parsed = (|| -> Result<(String, Option<u64>, Option<u64>), String> {
         let content = payload::required_content(&payload)?;
         let has_channel = payload
@@ -607,6 +630,7 @@ pub async fn send_message(
     if let Some(u) = user_id {
         op.insert("user_id".into(), json!(u));
     }
+    insert_dm_purpose(&mut op, dm_purpose);
     let hash = payload_hash(&op);
 
     run_idempotent(
@@ -664,7 +688,7 @@ pub async fn send_message(
                         ),
                     );
                 };
-                match state.port.send_dm(user_id, &content).await {
+                match state.port.send_dm(user_id, &content, dm_purpose).await {
                     Ok((dm_channel_id, message_id)) => (
                         200,
                         success_body(
@@ -677,6 +701,7 @@ pub async fn send_message(
                             }),
                         ),
                     ),
+                    Err(PortError::DmOptedOut) => dm_opted_out_response(&rid, &idem, user_id),
                     Err(PortError::UserNotFound) => (
                         404,
                         error_body(
@@ -1900,12 +1925,13 @@ pub async fn send_dm(
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    let parsed = (|| -> Result<(u64, String), String> {
+    let parsed = (|| -> Result<(u64, String, DmPurpose), String> {
         let user_id = payload::positive_int(&payload, "user_id")?;
         let content = payload::required_content(&payload)?;
-        Ok((user_id, content))
+        let purpose = payload::dm_purpose(&payload)?;
+        Ok((user_id, content, purpose))
     })();
-    let (user_id, content) = match parsed {
+    let (user_id, content, dm_purpose) = match parsed {
         Ok(v) => v,
         Err(msg) => return bad_request(&rid, &msg),
     };
@@ -1913,10 +1939,11 @@ pub async fn send_dm(
     let mut op = Map::new();
     op.insert("user_id".into(), json!(user_id));
     op.insert("content".into(), json!(content));
+    insert_dm_purpose(&mut op, dm_purpose);
     let hash = payload_hash(&op);
 
     run_idempotent(&state, &rid, "discord.send_dm", &idem, &hash, || async {
-        match state.port.send_dm(user_id, &content).await {
+        match state.port.send_dm(user_id, &content, dm_purpose).await {
             Ok((dm_channel_id, message_id)) => (
                 200,
                 success_body(
@@ -1929,6 +1956,7 @@ pub async fn send_dm(
                     }),
                 ),
             ),
+            Err(PortError::DmOptedOut) => dm_opted_out_response(&rid, &idem, user_id),
             Err(PortError::UserNotFound) => (
                 404,
                 error_body(
@@ -2150,6 +2178,7 @@ pub(crate) mod tests {
             &self,
             _user_id: u64,
             _content: &str,
+            _purpose: DmPurpose,
         ) -> Result<(Option<u64>, u64), PortError> {
             Err(PortError::Discord("unused".to_string()))
         }

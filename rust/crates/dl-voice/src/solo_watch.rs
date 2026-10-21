@@ -5,8 +5,8 @@ use std::time::Duration as StdDuration;
 use chrono::{DateTime, Duration, Utc};
 use dl_central_db::kv;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, ModalField,
-    ModalSpec, VoiceEvent,
+    BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec,
+    VoiceEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,7 +42,7 @@ pub const CONFIRMATION_REPLY: &str =
     "Steht drin. Wenn jemand joint, lösch ich den Post wieder — du musst dich um nichts kümmern.";
 pub const LATER_REPLY: &str =
     "Alles gut. Wenn du magst, klick einfach nochmal, wenn du länger sitzt.";
-pub const NEVER_REPLY: &str = "Erledigt, ich frag dich nicht mehr. Eintragen kannst du dich trotzdem jederzeit selbst in <#1376335502919335936>.";
+pub const NEVER_REPLY: &str = dl_discord::dm_gate::DM_OPTOUT_CONFIRMATION;
 pub const INVALID_REPLY: &str =
     "Das ist schon abgelaufen. Wenn du noch allein sitzt, meld ich mich gleich nochmal.";
 pub const POST_ERROR_REPLY: &str = "Da ist beim Posten was schiefgelaufen, tut mir leid. Probier es gleich nochmal, oder schreib direkt in <#1376335502919335936>.";
@@ -1042,29 +1042,6 @@ impl InteractionHandler for SoloInteractionHandler {
 
 pub fn register(router: &mut InteractionRouter, watch: Arc<SoloWatch>) {
     router.on_prefix("solo_lfg:", Arc::new(SoloInteractionHandler { watch }));
-}
-
-pub fn spawn(watch: Arc<SoloWatch>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
-    let mut events = dispatcher.subscribe_voice();
-    tokio::spawn(async move {
-        watch.restore_at(Utc::now()).await;
-        let mut tick = tokio::time::interval(TICK_INTERVAL);
-        let mut daily = tokio::time::interval(StdDuration::from_secs(24 * 60 * 60));
-        daily.tick().await;
-        loop {
-            tokio::select! {
-                event = events.recv() => match event {
-                    Ok(event) => watch.handle_event_at(event, Utc::now()).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(skipped, "Solo-LFG: Voice-Events übersprungen");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                },
-                _ = tick.tick() => watch.tick_at(Utc::now()).await,
-                _ = daily.tick() => watch.flush_daily_summary().await,
-            }
-        }
-    })
 }
 
 pub(crate) async fn claim_prompt_db(

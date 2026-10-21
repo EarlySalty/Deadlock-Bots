@@ -8,6 +8,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
+use dl_discord::dm_gate::{attach_optout_button, optout_action_row, DmError, DmIntent};
 use dl_discord::{BridgeInteraction, BridgeReply, CommandSpec, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{
@@ -1530,17 +1531,15 @@ impl dl_moderation::ModPort for ModGlue {
     }
 
     async fn send_dm(&self, user_id: u64, text: String) {
-        let Ok(channel) = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        else {
-            return;
-        };
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
-        let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+        if let Err(err) = self
+            .adapter
+            .deliver_dm(user_id, DmIntent::Moderation, &body)
+            .await
+        {
+            tracing::debug!(%err, user_id, "Moderations-DM nicht zugestellt");
+        }
     }
 
     async fn add_mod_tag(&self, user_id: u64, tag: &str, reason: &str) -> bool {
@@ -2454,17 +2453,15 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
     }
 
     async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String> {
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|e| e.to_string())?;
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
-        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+        match self
+            .adapter
+            .deliver_dm(user_id, DmIntent::Proactive("coaching_notification"), &body)
+            .await
+        {
             Ok(_) => Ok(true),
-            // 50007 = Cannot send messages to this user (DMs zu) → ackbar
+            Err(DmError::OptedOut) => Ok(false),
             Err(err) if err.to_string().contains("50007") => Ok(false),
             Err(err) => Err(err.to_string()),
         }
@@ -2540,20 +2537,24 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
 
         let channel = match self
             .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .open_dm_channel(user_id, DmIntent::Proactive("leave_survey"))
             .await
         {
             Ok(channel) => channel,
-            Err(err) if is_discord_cannot_send_messages(&err) => return SurveyDmDelivery::Blocked,
-            Err(err) => return failed_survey_dm(user_id, err),
+            Err(DmError::Discord(err)) if is_discord_cannot_send_messages(&err) => {
+                return SurveyDmDelivery::Blocked
+            }
+            Err(DmError::Discord(err)) => return failed_survey_dm(user_id, *err),
+            Err(DmError::OptedOut) => return SurveyDmDelivery::Blocked,
+            Err(err) => return SurveyDmDelivery::Failed(err.to_string()),
         };
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("components".into(), components);
+        attach_optout_button(&mut body);
         match self
             .adapter
-            .send_raw_public_typed(channel.id.get(), &body)
+            .send_raw_public_typed(channel.get(), &body)
             .await
         {
             Ok(_) => SurveyDmDelivery::Sent,
@@ -2634,15 +2635,16 @@ impl dl_community::clips::ClipPort for ClipGlue {
         let dm = async {
             let channel = self
                 .adapter
-                .http
-                .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+                .open_dm_channel(user_id, DmIntent::Proactive("clip_dump"))
                 .await
                 .map_err(|e| e.to_string())?;
             channel
                 .send_files(
                     &self.adapter.http,
                     vec![attachment.clone()],
-                    serenity::all::CreateMessage::new().content(caption.clone()),
+                    serenity::all::CreateMessage::new()
+                        .content(caption.clone())
+                        .components(vec![optout_action_row()]),
                 )
                 .await
                 .map_err(|e| e.to_string())
@@ -2725,7 +2727,11 @@ impl dl_community::clips::ClipPort for ClipGlue {
         body.insert("allowed_mentions".into(), json!({ "parse": [] }));
         match self
             .adapter
-            .send_raw_dm_public(&user_id.to_string(), &body)
+            .send_raw_dm_public(
+                &user_id.to_string(),
+                DmIntent::Proactive("clip_contest_curator"),
+                &body,
+            )
             .await
         {
             Ok(_) => Ok(()),
@@ -3113,23 +3119,24 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
 
         let channel = match self
             .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .open_dm_channel(user_id, DmIntent::Proactive("concierge"))
             .await
         {
             Ok(channel) => channel,
-            Err(err) if is_discord_cannot_send_messages(&err) => {
+            Err(DmError::Discord(err)) if is_discord_cannot_send_messages(&err) => {
                 return ConciergeDmDelivery::CannotSend50007;
             }
             Err(err) => return ConciergeDmDelivery::Failed(err.to_string()),
         };
+        let mut body = body;
+        attach_optout_button(&mut body);
         match self
             .adapter
-            .send_raw_public_typed(channel.id.get(), &body)
+            .send_raw_public_typed(channel.get(), &body)
             .await
         {
             Ok(message_id) => ConciergeDmDelivery::Sent {
-                channel_id: channel.id.get(),
+                channel_id: channel.get(),
                 message_id,
             },
             Err(err) if is_discord_cannot_send_messages(&err) => {
@@ -3479,17 +3486,14 @@ pub struct FeedbackGlue {
 #[async_trait::async_trait]
 impl dl_community::feedback_hub::FeedbackPort for FeedbackGlue {
     async fn send_dm_text(&self, user_id: u64, text: String) -> Result<(), String> {
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|e| e.to_string())?;
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
-        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+        match self
+            .adapter
+            .deliver_dm(user_id, DmIntent::Proactive("feedback_hub_forward"), &body)
+            .await
+        {
             Ok(_) => Ok(()),
-            // 50007 = Cannot send messages to this user (DMs zu) → nicht actionbar
             Err(err) if err.to_string().contains("50007") => Ok(()),
             Err(err) => Err(err.to_string()),
         }
@@ -3592,20 +3596,19 @@ impl dl_community::reaction_roles::ReactionRolePort for ReactionRoleGlue {
         user_id: u64,
         content: &str,
     ) -> Result<(), dl_community::reaction_roles::DmErr> {
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(reaction_role_dm_err)?;
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(content));
-        self.adapter
-            .http
-            .send_message(channel.id, Vec::new(), &body)
+        match self
+            .adapter
+            .deliver_dm(user_id, DmIntent::Reply, &body)
             .await
-            .map(|_| ())
-            .map_err(reaction_role_dm_err)
+        {
+            Ok(_) => Ok(()),
+            Err(DmError::Discord(err)) => Err(reaction_role_dm_err(*err)),
+            Err(err) => Err(dl_community::reaction_roles::DmErr::Permanent(
+                err.to_string(),
+            )),
+        }
     }
 
     async fn reaction_users(
@@ -4125,16 +4128,15 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
         user_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String> {
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({"recipient_id": user_id.to_string()}))
-            .await
-            .map_err(|error| error.to_string())?;
         self.adapter
-            .send_raw_public(channel.id.get(), &body)
+            .deliver_dm(
+                user_id,
+                DmIntent::Proactive("team_application_status"),
+                &body,
+            )
             .await
             .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     async fn add_role(
@@ -4366,18 +4368,10 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
     }
 
     async fn send_dm(&self, user_id: u64, content: &str) -> bool {
-        let Ok(channel) = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        else {
-            return false;
-        };
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(content));
         self.adapter
-            .send_raw_public(channel.id.get(), &body)
+            .deliver_dm(user_id, DmIntent::Proactive("coaching_request"), &body)
             .await
             .is_ok()
     }
@@ -4421,18 +4415,10 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
     }
 
     async fn send_dm_embed(&self, user_id: u64, embed: serde_json::Value) -> bool {
-        let Ok(channel) = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        else {
-            return false;
-        };
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         self.adapter
-            .send_raw_public(channel.id.get(), &body)
+            .deliver_dm(user_id, DmIntent::Proactive("coaching_survey"), &body)
             .await
             .is_ok()
     }
@@ -4544,28 +4530,26 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
         components: serde_json::Value,
     ) -> dl_community::retention::MissYouDelivery {
         use dl_community::retention::MissYouDelivery;
-        let channel = match self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        {
-            Ok(channel) => channel,
-            Err(err) => return MissYouDelivery::Failed(err.to_string()),
-        };
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("components".into(), components);
-        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+        match self
+            .adapter
+            .deliver_dm(user_id, DmIntent::Proactive("retention_miss_you"), &body)
+            .await
+            .map_err(|err| match err {
+                DmError::OptedOut => None,
+                other => Some(other.to_string()),
+            }) {
             Ok(_) => MissYouDelivery::Sent,
-            // 50007 = Cannot send messages to this user (DMs deaktiviert).
-            Err(err)
+            Err(None) => MissYouDelivery::Blocked,
+            Err(Some(err))
                 if err.contains("50007")
                     && !err.to_ascii_lowercase().contains("no mutual guild") =>
             {
                 MissYouDelivery::Blocked
             }
-            Err(err) => MissYouDelivery::Failed(err),
+            Err(Some(err)) => MissYouDelivery::Failed(err),
         }
     }
 

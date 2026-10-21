@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::port::ViewSpec;
+use crate::port::{DmPurpose, ViewSpec};
 
 pub type ParseResult<T> = Result<T, String>;
 
@@ -44,6 +44,15 @@ pub fn optional_content(payload: &Map<String, Value>, key: &str) -> ParseResult<
             }
         }
         Some(_) => Err(format!("{key} must be a string")),
+    }
+}
+
+pub fn dm_purpose(payload: &Map<String, Value>) -> ParseResult<DmPurpose> {
+    match payload.get("dm_purpose") {
+        None | Some(Value::Null) => Ok(DmPurpose::Proactive),
+        Some(Value::String(raw)) => DmPurpose::parse(raw.trim())
+            .ok_or_else(|| "dm_purpose must be proactive, moderation or security".to_string()),
+        Some(_) => Err("dm_purpose must be a string".to_string()),
     }
 }
 

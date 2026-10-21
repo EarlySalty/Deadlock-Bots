@@ -62,7 +62,7 @@ pub const THANKS_RATHER_NOT: &str =
     "Danke für die Ehrlichkeit. Ich schlag euch nicht mehr als Paarung vor.";
 pub const THANKS_COMMENT: &str =
     "Angekommen, danke dir. Das liest nur das Team, dein Mitspieler sieht davon nichts.";
-pub const NEVER_REPLY: &str = "Erledigt, ich frag dich nicht mehr nach deinen Mitspielern.";
+pub const NEVER_REPLY: &str = dl_discord::dm_gate::DM_OPTOUT_CONFIRMATION;
 pub const SAVE_FAILED_REPLY: &str =
     "Das konnte ich gerade nicht speichern. Probier es gleich nochmal.";
 pub const INVALID_REPLY: &str = "Diese Umfrage ist abgelaufen.";

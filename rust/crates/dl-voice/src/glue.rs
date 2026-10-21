@@ -6,6 +6,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
+use dl_discord::dm_gate::{attach_optout_button, DmIntent};
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
 use serenity::all::{
@@ -372,27 +373,26 @@ fn router_file_part_name(id: u8) -> String {
     format!("files[{id}]")
 }
 
-/// DM senden und dabei den Breiten-Trenner mitschicken, sobald der Body ihn
-/// referenziert. Ohne die Datei bliebe die Media-Komponente leer und Discord
-/// wiese die Nachricht ab.
 async fn send_dm_body(
     adapter: &DiscordAdapter,
     user_id: u64,
+    feature: &'static str,
     body: &Map<String, Value>,
 ) -> Result<(u64, u64), String> {
-    let channel = adapter
-        .http
-        .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+    let channel_id = adapter
+        .open_dm_channel(user_id, DmIntent::Proactive(feature))
         .await
-        .map_err(|err| err.to_string())?;
-    let channel_id = channel.id.get();
+        .map_err(|err| err.to_string())?
+        .get();
+    let mut body = body.clone();
+    attach_optout_button(&mut body);
 
-    let needs_divider = serde_json::to_string(body)
+    let needs_divider = serde_json::to_string(&body)
         .map(|text| text.contains(crate::router::DM_WIDTH_IMAGE))
         .unwrap_or(false);
     if !needs_divider {
         let message_id = adapter
-            .send_raw_public(channel_id, body)
+            .send_raw_public(channel_id, &body)
             .await
             .map_err(|err| err.to_string())?;
         return Ok((channel_id, message_id));
@@ -403,7 +403,7 @@ async fn send_dm_body(
         adapter,
         "POST",
         url,
-        body.clone(),
+        body,
         vec![RouterPanelFile {
             id: 0,
             filename: crate::router::DM_WIDTH_IMAGE.to_string(),
@@ -1670,20 +1670,15 @@ impl crate::nudge::NudgePort for NudgeGlue {
         embeds: &[serde_json::Value],
         components: &serde_json::Value,
     ) -> Result<(u64, u64), String> {
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|e| e.to_string())?;
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!(embeds));
         body.insert("components".into(), components.clone());
-        let message_id = self
+        let delivery = self
             .adapter
-            .send_raw_public(channel.id.get(), &body)
-            .await?;
-        Ok((channel.id.get(), message_id))
+            .deliver_dm(user_id, DmIntent::Proactive("steam_link_nudge"), &body)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((delivery.channel_id, delivery.message_id))
     }
 
     async fn send_log(&self, text: String) {
@@ -1799,16 +1794,11 @@ impl crate::solo_watch::SoloWatchPort for SoloWatchGlue {
         let body = body
             .as_object()
             .ok_or_else(|| "Solo-LFG-DM ist kein JSON-Objekt".to_string())?;
-        let channel = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|error| error.to_string())?;
         self.adapter
-            .send_raw_public(channel.id.get(), body)
+            .deliver_dm(user_id, DmIntent::Proactive("solo_lfg"), body)
             .await
             .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
@@ -2403,52 +2393,40 @@ pub struct FeedbackGlue {
 #[async_trait::async_trait]
 impl crate::feedback::FeedbackPort for FeedbackGlue {
     async fn send_feedback_dm(&self, user_id: u64, text: String) -> (String, Option<u64>) {
-        let channel = match self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        {
-            Ok(channel) => channel,
-            Err(err) => {
-                return if err.to_string().contains("50007") {
-                    ("forbidden".to_string(), None)
-                } else {
-                    ("error".to_string(), None)
-                }
-            }
-        };
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
         body.insert(
             "components".into(),
             crate::feedback::feedback_button_components(),
         );
-        match self.adapter.send_raw_public(channel.id.get(), &body).await {
-            Ok(message_id) => ("sent".to_string(), Some(message_id)),
+        match self
+            .adapter
+            .deliver_dm(user_id, DmIntent::Proactive("voice_feedback"), &body)
+            .await
+        {
+            Ok(delivery) => ("sent".to_string(), Some(delivery.message_id)),
+            Err(dl_discord::dm_gate::DmError::OptedOut) => ("forbidden".to_string(), None),
             Err(err) if err.to_string().contains("50007") => ("forbidden".to_string(), None),
             Err(_) => ("error".to_string(), None),
         }
     }
 
     async fn forward_to_owner(&self, owner_id: u64, text: String) {
-        if let Ok(channel) = self
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        if let Err(err) = self
             .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": owner_id.to_string() }))
+            .deliver_dm(owner_id, DmIntent::Proactive("voice_feedback_owner"), &body)
             .await
         {
-            let mut body = serde_json::Map::new();
-            body.insert("content".into(), json!(text));
-            let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+            tracing::debug!(%err, owner_id, "Feedback-Weiterleitung nicht zugestellt");
         }
     }
 
     async fn delete_feedback_prompt(&self, user_id: u64, message_id: u64) {
         let Ok(channel) = self
             .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .open_dm_channel(user_id, DmIntent::Cleanup)
             .await
         else {
             return;
@@ -2457,7 +2435,7 @@ impl crate::feedback::FeedbackPort for FeedbackGlue {
             .adapter
             .http
             .delete_message(
-                channel.id,
+                channel,
                 serenity::all::MessageId::new(message_id),
                 Some("Voice feedback: stale prompt replaced"),
             )
@@ -2553,15 +2531,14 @@ impl crate::router::RouterPort for RouterGlue {
     }
 
     async fn send_dm(&self, user_id: u64, text: String) {
-        if let Ok(channel) = self
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        if let Err(err) = self
             .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .deliver_dm(user_id, DmIntent::Proactive("router_text"), &body)
             .await
         {
-            let mut body = serde_json::Map::new();
-            body.insert("content".into(), json!(text));
-            let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+            tracing::debug!(%err, user_id, "Router-DM nicht zugestellt");
         }
     }
 
@@ -2573,7 +2550,7 @@ impl crate::router::RouterPort for RouterGlue {
         let map = body
             .as_object()
             .ok_or_else(|| "Router: Intro-DM-Body ist kein JSON-Objekt".to_string())?;
-        send_dm_body(&self.adapter, user_id, map).await
+        send_dm_body(&self.adapter, user_id, "router_intro", map).await
     }
 
     async fn delete_dm_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
@@ -2814,15 +2791,13 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
     }
 
     async fn send_dm(&self, user_id: u64, content: String) -> Result<(), String> {
-        let channel = UserId::new(user_id)
-            .create_dm_channel(&self.adapter.http)
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        self.adapter
+            .deliver_dm(user_id, DmIntent::Proactive("lfg_watch"), &body)
             .await
-            .map_err(|err| format!("DM-Kanal: {err}"))?;
-        channel
-            .send_message(&self.adapter.http, CreateMessage::new().content(content))
-            .await
-            .map_err(|err| format!("DM senden: {err}"))?;
-        Ok(())
+            .map(|_| ())
+            .map_err(|err| format!("DM senden: {err}"))
     }
 
     async fn move_member(&self, guild_id: u64, user_id: u64, lane_id: u64) -> Result<(), String> {
@@ -3143,7 +3118,9 @@ impl crate::mate_survey::MateSurveyPort for MateSurveyGlue {
         let body = body
             .as_object()
             .ok_or_else(|| "Umfrage-DM ist kein JSON-Objekt".to_string())?;
-        send_dm_body(&self.adapter, user_id, body).await.map(|_| ())
+        send_dm_body(&self.adapter, user_id, "mate_survey", body)
+            .await
+            .map(|_| ())
     }
 
     async fn set_never_ask(&self, user_id: u64) -> Result<(), String> {
@@ -3246,7 +3223,9 @@ impl crate::pairing::PairingPort for PairingGlue {
         let body = body
             .as_object()
             .ok_or_else(|| "Pairing-DM ist kein JSON-Objekt".to_string())?;
-        send_dm_body(&self.adapter, user_id, body).await.map(|_| ())
+        send_dm_body(&self.adapter, user_id, "voice_pairing", body)
+            .await
+            .map(|_| ())
     }
 
     async fn lane_mode(&self, _guild_id: u64, channel_id: u64) -> Option<String> {
