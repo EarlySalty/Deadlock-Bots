@@ -9704,9 +9704,10 @@ mod tests {
                         OFFTOPIC_TEXT,
                     ),
                 ] {
-                    let (url, requests, server) =
-                        knowledge_server(r#"{"status":"ready","evidence":[],"truncated":false}"#)
-                            .await;
+                    let (url, requests, server) = knowledge_server(
+                        r#"{"status":"no_evidence","evidence":[],"truncated":false}"#,
+                    )
+                    .await;
                     let provider = dl_ai::MockChatProvider::single(
                         r#"{"reply":"Unbelegtes Gespräch","pate_request":true}"#,
                     );
@@ -9942,9 +9943,10 @@ mod tests {
                         false,
                     ),
                 ] {
-                    let (url, requests, server) =
-                        knowledge_server(r#"{"status":"ready","evidence":[],"truncated":false}"#)
-                            .await;
+                    let (url, requests, server) = knowledge_server(
+                        r#"{"status":"no_evidence","evidence":[],"truncated":false}"#,
+                    )
+                    .await;
                     let provider = dl_ai::MockChatProvider::single(
                         r#"{"reply":"Unbelegtes Gespräch","pate_request":true}"#,
                     );

@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 use std::sync::Arc;
 
 use dl_bridges::twitch::TwitchApiClient;
