@@ -79,6 +79,14 @@ impl HelpBackend for GroundedHelpBackend {
     }
 }
 
+fn answer_body(text: &str) -> &str {
+    ["\n\nQuelle: <", "\n\nGrafik: "]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+        .map_or(text, |end| &text[..end])
+}
+
 #[derive(Default)]
 struct State {
     recent: VecDeque<(u64, Instant, String)>,
@@ -239,7 +247,7 @@ impl PassiveHelpResponder {
         let text = match result {
             Ok(Ok(BrainOutcome::Answer(text)))
                 if !text.trim().is_empty()
-                    && text.chars().count() <= 650
+                    && answer_body(&text).chars().count() <= 650
                     && !has_forbidden_pause(&text) =>
             {
                 text
@@ -248,7 +256,7 @@ impl PassiveHelpResponder {
                 let reason = match answer {
                     BrainOutcome::OutOfDomain => "fachfremd",
                     BrainOutcome::NoAnswer => "keine Belege",
-                    BrainOutcome::Answer(ref text) if text.chars().count() > 650 => {
+                    BrainOutcome::Answer(ref text) if answer_body(text).chars().count() > 650 => {
                         "Antwort überschreitet das Kurzbudget"
                     }
                     BrainOutcome::Answer(ref text) if has_forbidden_pause(text) => {
@@ -551,6 +559,15 @@ mod tests {
         responder.handle_message(&event(1, "wie geht das?")).await;
         assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
         assert_eq!(port.0.lock().expect("Fixture-Mutex").len(), 1);
+        let cited = format!(
+            "{}\n\nQuelle: <{}>",
+            "x".repeat(650),
+            crate::faq::BRAIN_DOCS_FIXTURE_URL
+        );
+        let (responder, backend, port) = self::responder(BrainOutcome::Answer(cited.clone()));
+        responder.handle_message(&event(1, "wie geht das?")).await;
+        assert_eq!(backend.answers.load(Ordering::SeqCst), 1);
+        assert_eq!(*port.0.lock().expect("Fixture-Mutex"), vec![cited]);
     }
 
     #[test]

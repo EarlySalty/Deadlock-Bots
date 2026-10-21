@@ -305,6 +305,11 @@ fn community_brain_for_answers(
     options: &dl_core::runtime_config::AiOptions,
     token: impl FnOnce() -> Option<String>,
 ) -> Arc<dyn dl_brain::AiAnswerer> {
+    if options.community_brain_answers == Some(false) {
+        tracing::warn!(
+            "runtime.ai.community_brain_answers=false wird ignoriert, Concierge und FAQ nutzen immer das Brain"
+        );
+    }
     tracing::info!("Concierge und FAQ antworten ausschließlich über das Brain");
     community_brain_answerer(options, token())
 }
@@ -2098,6 +2103,7 @@ mod tests {
             Json(query): Json<serde_json::Value>,
         ) -> Json<serde_json::Value> {
             assert_eq!(headers["x-discord-user-id"], "42");
+            assert_eq!(headers["x-discord-read-access"], "disabled");
             assert_eq!(query["requested_scopes"], serde_json::json!(["bot.public"]));
             calls.fetch_add(1, Ordering::SeqCst);
             Json(serde_json::json!({

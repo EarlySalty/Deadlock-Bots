@@ -2317,6 +2317,7 @@ pub(crate) async fn brain_answer_fixture(
     ) -> (StatusCode, Json<serde_json::Value>) {
         assert_eq!(headers["x-discord-user-id"], "42");
         assert!(!headers.contains_key("x-discord-answer-task"));
+        assert_eq!(headers["x-discord-read-access"], "disabled");
         let query = body.get("query").unwrap_or(&body);
         assert_eq!(query["requested_scopes"], serde_json::json!(["bot.public"]));
         calls.fetch_add(1, Ordering::SeqCst);

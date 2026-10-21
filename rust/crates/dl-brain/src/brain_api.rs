@@ -96,10 +96,9 @@ impl BrainApiAnswerer {
         max_units: usize,
     ) -> Result<BrainOutcome, BrainError> {
         if question.trim().is_empty() || question.chars().count() > 4000 || user_id == Some(0) {
-            classified_backend_error("anfrage");
-            return Ok(BrainOutcome::NoAnswer);
+            return Err(classified_backend_error("anfrage"));
         }
-        match tokio::time::timeout(self.timeout, async {
+        tokio::time::timeout(self.timeout, async {
             let _permit = self
                 .admission
                 .acquire()
@@ -132,14 +131,7 @@ impl BrainApiAnswerer {
             project_bounded(response, max_units)
         })
         .await
-        {
-            Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(_)) => Ok(BrainOutcome::NoAnswer),
-            Err(_) => {
-                classified_backend_error("transport");
-                Ok(BrainOutcome::NoAnswer)
-            }
-        }
+        .map_err(|_| classified_backend_error("transport"))?
     }
 }
 
@@ -204,9 +196,12 @@ fn project_bounded(
             }
             Ok(BrainOutcome::Answer(format!("{text}{links}")))
         }
-        status => {
-            tracing::warn!(?status, "Brain hat keine verwendbare Antwort geliefert");
+        AnswerStatus::Unverified | AnswerStatus::UnauthorizedEvidence => {
+            tracing::warn!(status = ?response.status, "Brain hat keine verwendbare Antwort geliefert");
             Ok(BrainOutcome::NoAnswer)
+        }
+        AnswerStatus::Unavailable | AnswerStatus::ProviderError | AnswerStatus::BudgetExceeded => {
+            Err(classified_backend_error("vertrag"))
         }
     }
 }
@@ -384,10 +379,9 @@ impl AiAnswerer for BrainApiAnswerer {
         user_questions: &[String],
     ) -> Result<BrainOutcome, BrainError> {
         if !task.valid() {
-            classified_backend_error("anfrage");
-            return Ok(BrainOutcome::NoAnswer);
+            return Err(classified_backend_error("anfrage"));
         }
-        self.answer_query(question, Some(user_id), true, None, user_questions, 1800)
+        self.answer_query(question, Some(user_id), false, None, user_questions, 1800)
             .await
     }
 
@@ -493,6 +487,7 @@ mod tests {
         let status = status.to_owned();
         let text = text.to_owned();
         let recorded_history = user_questions.to_vec();
+        let task_request = task.is_some();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("Testverbindung");
             stream
@@ -525,6 +520,12 @@ mod tests {
                             .to_ascii_lowercase()
                             .contains("x-discord-user-id: 3"));
                         if recorded_history.is_empty() {
+                            assert_eq!(
+                                headers
+                                    .to_ascii_lowercase()
+                                    .contains("x-discord-read-access: disabled"),
+                                task_request
+                            );
                             let query: Query =
                                 serde_json::from_slice(body).expect("Anfragevertrag");
                             assert_eq!(
@@ -667,7 +668,7 @@ mod tests {
                         status, "Antwort", truncated, invalid, capability, &history
                     )
                     .await,
-                    Ok(BrainOutcome::NoAnswer)
+                    Err(BrainError::Backend(_))
                 ));
             }
         }
@@ -718,15 +719,21 @@ mod tests {
                 );
                 let empty =
                     fixture_answer_with_task(status, "", false, false, Some(capability)).await;
-                assert!(matches!(empty, Ok(BrainOutcome::NoAnswer)));
+                assert!(matches!(empty, Err(BrainError::Backend(_))));
             }
             for status in [
                 "unavailable",
                 "provider_error",
                 "budget_exceeded",
-                "unauthorized_evidence",
                 "task_failed",
             ] {
+                assert!(matches!(
+                    fixture_answer_with_task(status, "Antwort", false, false, Some(capability))
+                        .await,
+                    Err(BrainError::Backend(_))
+                ));
+            }
+            for status in ["unverified", "unauthorized_evidence"] {
                 assert!(matches!(
                     fixture_answer_with_task(status, "Antwort", false, false, Some(capability))
                         .await,
@@ -743,7 +750,7 @@ mod tests {
                         Some(capability),
                     )
                     .await,
-                    Ok(BrainOutcome::NoAnswer)
+                    Err(BrainError::Backend(_))
                 ));
             }
         }
@@ -787,11 +794,11 @@ mod tests {
         );
         assert!(matches!(
             fixture_answer("answered", "Antwort", true, false).await,
-            Ok(BrainOutcome::NoAnswer)
+            Err(BrainError::Backend(_))
         ));
         assert!(matches!(
             fixture_answer("answered", "Antwort", false, true).await,
-            Ok(BrainOutcome::NoAnswer)
+            Err(BrainError::Backend(_))
         ));
     }
 
@@ -813,12 +820,13 @@ mod tests {
 
     #[tokio::test]
     async fn zentrale_ausfallzustaende_werden_nicht_als_antwort_ausgegeben() {
-        for status in [
-            "unavailable",
-            "provider_error",
-            "budget_exceeded",
-            "unauthorized_evidence",
-        ] {
+        for status in ["unavailable", "provider_error", "budget_exceeded"] {
+            assert!(matches!(
+                fixture_answer(status, "[[coaching]]", false, false).await,
+                Err(BrainError::Backend(_))
+            ));
+        }
+        for status in ["unverified", "unauthorized_evidence"] {
             assert!(matches!(
                 fixture_answer(status, "[[coaching]]", false, false).await,
                 Ok(BrainOutcome::NoAnswer)
@@ -827,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ungueltige_anfragen_bleiben_still_und_ohne_http() {
+    async fn ungueltige_anfragen_scheitern_ohne_http() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Lokaler Testport");
         listener
             .set_nonblocking(true)
@@ -842,15 +850,12 @@ mod tests {
         )
         .expect("Testadapter");
         for (question, user_id) in [("".into(), 3), ("ä".repeat(4001), 3), ("Frage".into(), 0)] {
-            assert_eq!(
-                answerer
-                    .answer_for_discord(&question, user_id)
-                    .await
-                    .expect("Stille Projektion"),
-                BrainOutcome::NoAnswer
-            );
+            assert!(matches!(
+                answerer.answer_for_discord(&question, user_id).await,
+                Err(BrainError::Backend(_))
+            ));
         }
-        assert_eq!(
+        assert!(matches!(
             answerer
                 .answer_discord_task(
                     "Frage",
@@ -860,10 +865,9 @@ mod tests {
                         channel_id: 0,
                     }
                 )
-                .await
-                .expect("Stille Aufgabenprojektion"),
-            BrainOutcome::NoAnswer
-        );
+                .await,
+            Err(BrainError::Backend(_))
+        ));
         assert_eq!(
             listener.accept().expect_err("Keine HTTP-Anfrage").kind(),
             std::io::ErrorKind::WouldBlock
@@ -889,7 +893,7 @@ mod tests {
         let _permits = answerer.admission.acquire_many(4).await.expect("Admission");
         assert!(matches!(
             answerer.answer_for_discord("Neutrale Testfrage", 3).await,
-            Ok(BrainOutcome::NoAnswer)
+            Err(BrainError::Backend(_))
         ));
         assert_eq!(
             listener.accept().expect_err("Keine HTTP-Anfrage").kind(),
@@ -1062,11 +1066,11 @@ mod tests {
             );
             assert!(matches!(
                 fixture_answer("answered", "Antwort", true, false).await,
-                Ok(BrainOutcome::NoAnswer)
+                Err(BrainError::Backend(_))
             ));
             assert!(matches!(
                 fixture_answer("answered", "Antwort", false, true).await,
-                Ok(BrainOutcome::NoAnswer)
+                Err(BrainError::Backend(_))
             ));
         }
         .with_subscriber(subscriber)
