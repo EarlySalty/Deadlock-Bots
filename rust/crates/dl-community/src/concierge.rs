@@ -201,6 +201,7 @@ pub const PATE_REQUEST_PRIVACY_TEXT: &str = "Für dich ist der globale Datenschu
 pub const PATE_CLAIM_PRIVACY_TEXT: &str = "Diese Patenschaft lässt sich gerade nicht anlegen, weil die Datenschutzeinstellungen einer beteiligten Person das verhindern. Bitte umgeh das nicht auf eigene Faust, wenn du Klärungsbedarf hast, mach ein Support-Ticket in <#1459628609705738539> auf.";
 pub const PATE_REQUEST_ERROR_TEXT: &str = "Wir konnten deinen Privatsphäre-Status gerade nicht sicher prüfen und speichern, deshalb haben wir nichts intern weitergegeben und keine Patenschaft gestartet. Probier es später nochmal, und wenn es weiter klemmt, mach über <#1459628609705738539> ein Ticket auf, dann schaut ein Mensch drauf.";
 pub const PATE_CLAIM_ERROR_TEXT: &str = "Die sichere Prüfung und Anlage ist technisch fehlgeschlagen, deshalb wurde hier nichts gestartet. Versuch es später nochmal, sonst gib uns über <#1459628609705738539> per Ticket Bescheid.";
+pub const PATE_CLAIM_OPTED_OUT_TEXT: &str = "Der neue Spieler hat Bot-Nachrichten abbestellt, deshalb konnte ich ihm nicht schreiben. Hier wurde nichts gestartet.";
 pub const PATE_REQUEST_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und der interne Hinweis konnte möglicherweise nicht vollständig zurückgenommen werden. Eine Patenschaft ist nicht zuverlässig gestartet; bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
 pub const PATE_CLAIM_UNCERTAIN_TEXT: &str = "Die sichere Anlage ist technisch fehlgeschlagen, und bereits angelegte Discord-Schritte konnten möglicherweise nicht vollständig zurückgenommen werden. Bitte öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
 pub const FRESHLING_T0_PATE_TEXT: &str = "Und weil du hier ganz neu bist: Ich kann dir direkt einen Paten an die Seite stellen. Das ist ein Mensch aus der Community, der dir alles zeigt und mit dir die ersten Runden dreht. Kein Programm, kein fester Termin, einfach jemand, der dir den Anfang leicht macht. Magst du?";
@@ -1587,6 +1588,7 @@ fn parse_u64_set(raw: Option<&str>) -> HashSet<u64> {
 pub enum ConciergeDmDelivery {
     Sent { channel_id: u64, message_id: u64 },
     CannotSend50007,
+    OptedOut,
     Failed(String),
 }
 
@@ -4411,6 +4413,10 @@ impl Concierge {
                 )
                 .await
             }
+            Ok(ConciergeDmDelivery::OptedOut) => {
+                tracing::info!(user_id, "Concierge: T0-DM entfaellt, Bot-DMs abbestellt");
+                DiscordEffectOutcome::NotDelivered
+            }
             Ok(ConciergeDmDelivery::Failed(err)) => {
                 tracing::warn!(%err, user_id, "Concierge: T0-DM-Zustellung unsicher; Wiederholung wird gesperrt");
                 DiscordEffectOutcome::Uncertain
@@ -6657,6 +6663,14 @@ impl Concierge {
                     DiscordEffectOutcome::NotDelivered
                 }
             }
+            Ok(ConciergeDmDelivery::OptedOut) => {
+                tracing::info!(
+                    user_id = profile.user_id,
+                    label,
+                    "Concierge: Kadenz-DM entfaellt, Bot-DMs abbestellt"
+                );
+                DiscordEffectOutcome::NotDelivered
+            }
             Ok(ConciergeDmDelivery::Failed(err)) => {
                 tracing::warn!(%err, user_id = profile.user_id, label, "Concierge: Kadenz-DM-Zustellung unsicher; Wiederholung wird gesperrt");
                 DiscordEffectOutcome::Uncertain
@@ -7726,14 +7740,22 @@ impl Concierge {
                 return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
             }
         };
-        if matches!(dm_delivery, ConciergeDmDelivery::CannotSend50007) {
+        if matches!(
+            dm_delivery,
+            ConciergeDmDelivery::CannotSend50007 | ConciergeDmDelivery::OptedOut
+        ) {
             drop(tx);
+            let discarded_text = if dm_delivery == ConciergeDmDelivery::OptedOut {
+                PATE_CLAIM_OPTED_OUT_TEXT
+            } else {
+                PATE_CLAIM_ERROR_TEXT
+            };
             return BridgeReply::ephemeral_text(
                 if self
                     .discard_pate_channel_or_mark_uncertain(channel_id, user_id, pate_id)
                     .await
                 {
-                    PATE_CLAIM_ERROR_TEXT
+                    discarded_text
                 } else {
                     PATE_CLAIM_UNCERTAIN_TEXT
                 },

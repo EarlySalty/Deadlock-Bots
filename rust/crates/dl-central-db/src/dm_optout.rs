@@ -32,3 +32,12 @@ pub async fn set_dm_opted_out(
         .await?;
     Ok(())
 }
+
+pub async fn clear_dm_opted_out(pool: &PgPool, user_id: u64) -> Result<(), CentralDbError> {
+    let user_id = db_user_id(user_id)?;
+    sqlx::query("DELETE FROM core.dm_optout WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

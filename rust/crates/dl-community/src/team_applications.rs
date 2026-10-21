@@ -552,7 +552,7 @@ pub trait TeamApplicationPort: Send + Sync {
         channel_id: u64,
         message_id: u64,
     ) -> Result<(), String>;
-    async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String>;
+    async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<bool, String>;
     async fn add_role(
         &self,
         guild_id: u64,
@@ -1495,9 +1495,13 @@ impl TeamApplications {
                 dm.insert("content".into(), json!(dm_text));
                 dm.insert("allowed_mentions".into(), json!({"parse": []}));
                 add_nonce(&mut dm, status_dm_nonce(id, status_version));
-                if let Err(error) = self.port.send_dm(applicant_user_id, dm).await {
+                let delivery = self.port.send_dm(applicant_user_id, dm).await;
+                if let Err(error) = &delivery {
                     tracing::warn!(%error, id, "Team-Bewerbungs-DM konnte nicht eindeutig zugestellt werden");
                     delivery_warning = Some("Der Status wurde gespeichert, aber die DM-Zustellung ist unklar. Zum Schutz vor Doppelversand wird sie nicht automatisch wiederholt; bitte kontaktiere den Bewerber manuell.");
+                } else if delivery == Ok(false) {
+                    tracing::info!(id, "Team-Bewerbungs-DM entfaellt, Bot-DMs abbestellt");
+                    delivery_warning = Some("Der Status wurde gespeichert. Der Bewerber hat Bot-Nachrichten abbestellt, deshalb ging keine DM raus. Bitte kontaktiere ihn manuell.");
                 } else {
                     match sqlx::query(
                         "UPDATE community.team_applications SET status_dm_sent_at=now(), updated_at=now() WHERE id=$1 AND status=$2 AND status_version=$3 AND status_dm_dispatch_started_at IS NOT NULL",
@@ -1975,12 +1979,12 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<(), String> {
+        async fn send_dm(&self, user_id: u64, body: Map<String, Value>) -> Result<bool, String> {
             self.sent_dms
                 .lock()
                 .expect("sent_dms lock")
                 .push((user_id, body));
-            Ok(())
+            Ok(true)
         }
         async fn add_role(
             &self,

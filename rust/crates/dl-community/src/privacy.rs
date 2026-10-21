@@ -4527,6 +4527,7 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
+        out.insert(("core.dm_optout".to_string(), "user_id".to_string()));
         // Öffentliche Partnerkanal-Referenzen werden nicht als Zuschauerprofil
         // geführt. Die personenbezogene Viewer-ID steht dagegen in USER_TABLES.
         for (relation, column) in [

@@ -5,8 +5,8 @@ use std::time::Duration as StdDuration;
 use chrono::{DateTime, Duration, Utc};
 use dl_central_db::kv;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec,
-    VoiceEvent,
+    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, ModalField,
+    ModalSpec, VoiceEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -174,15 +174,25 @@ pub struct SoloWatch {
     pending: tokio::sync::Mutex<HashMap<u64, PendingSolo>>,
     posts: tokio::sync::Mutex<HashMap<u64, ActivePost>>,
     daily: tokio::sync::Mutex<DailyCounters>,
+    prompts_enabled: bool,
 }
 
 impl SoloWatch {
     pub fn new(port: Arc<dyn SoloWatchPort>) -> Arc<Self> {
+        Self::build(port, true)
+    }
+
+    pub fn without_prompts(port: Arc<dyn SoloWatchPort>) -> Arc<Self> {
+        Self::build(port, false)
+    }
+
+    fn build(port: Arc<dyn SoloWatchPort>, prompts_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             port,
             pending: tokio::sync::Mutex::new(HashMap::new()),
             posts: tokio::sync::Mutex::new(HashMap::new()),
             daily: tokio::sync::Mutex::new(DailyCounters::default()),
+            prompts_enabled,
         })
     }
 
@@ -245,6 +255,9 @@ impl SoloWatch {
         self.count_checked().await;
         let snapshot = self.port.lane_snapshot(guild_id, channel_id).await;
         self.reconcile_posts(channel_id, snapshot.as_ref()).await;
+        if !self.prompts_enabled {
+            return;
+        }
 
         let Some(lane) = snapshot else {
             self.log_cleared_pending(channel_id, "kanal_nicht_im_cache")
@@ -1042,6 +1055,29 @@ impl InteractionHandler for SoloInteractionHandler {
 
 pub fn register(router: &mut InteractionRouter, watch: Arc<SoloWatch>) {
     router.on_prefix("solo_lfg:", Arc::new(SoloInteractionHandler { watch }));
+}
+
+pub fn spawn(watch: Arc<SoloWatch>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
+    let mut events = dispatcher.subscribe_voice();
+    tokio::spawn(async move {
+        watch.restore_at(Utc::now()).await;
+        let mut tick = tokio::time::interval(TICK_INTERVAL);
+        let mut daily = tokio::time::interval(StdDuration::from_secs(24 * 60 * 60));
+        daily.tick().await;
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(event) => watch.handle_event_at(event, Utc::now()).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "Solo-LFG: Voice-Events übersprungen");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                _ = tick.tick() => watch.tick_at(Utc::now()).await,
+                _ = daily.tick() => watch.flush_daily_summary().await,
+            }
+        }
+    })
 }
 
 pub(crate) async fn claim_prompt_db(
@@ -1941,6 +1977,34 @@ mod tests {
             .await;
 
         assert_eq!(port.state.lock().expect("lock").deletes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ohne_ansprache_kein_dm_aber_posts_werden_aufgeraeumt() {
+        let port = Arc::new(MockPort::default());
+        create_post(&SoloWatch::new(port.clone()), &port).await;
+        let cleanup_only = SoloWatch::without_prompts(port.clone());
+        cleanup_only.restore_at(now()).await;
+
+        prompt(&cleanup_only, &port).await;
+        assert_eq!(port.dms(), 0);
+
+        port.set_lane(CHILL, &[USER, 43]);
+        cleanup_only
+            .handle_event_at(
+                VoiceEvent::Join {
+                    guild_id: GUILD,
+                    user_id: 43,
+                    channel_id: CHANNEL,
+                },
+                now(),
+            )
+            .await;
+
+        assert_eq!(
+            port.state.lock().expect("lock").deletes,
+            vec![(LFG_CHANNEL_ID, 701, "zweite_person_beigetreten".to_string())]
+        );
     }
 
     #[tokio::test]

@@ -2416,7 +2416,7 @@ impl crate::feedback::FeedbackPort for FeedbackGlue {
         body.insert("content".into(), json!(text));
         if let Err(err) = self
             .adapter
-            .deliver_dm(owner_id, DmIntent::Proactive("voice_feedback_owner"), &body)
+            .deliver_dm(owner_id, DmIntent::Internal, &body)
             .await
         {
             tracing::debug!(%err, owner_id, "Feedback-Weiterleitung nicht zugestellt");

@@ -2727,11 +2727,7 @@ impl dl_community::clips::ClipPort for ClipGlue {
         body.insert("allowed_mentions".into(), json!({ "parse": [] }));
         match self
             .adapter
-            .send_raw_dm_public(
-                &user_id.to_string(),
-                DmIntent::Proactive("clip_contest_curator"),
-                &body,
-            )
+            .send_raw_dm_public(&user_id.to_string(), DmIntent::Internal, &body)
             .await
         {
             Ok(_) => Ok(()),
@@ -3126,6 +3122,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             Err(DmError::Discord(err)) if is_discord_cannot_send_messages(&err) => {
                 return ConciergeDmDelivery::CannotSend50007;
             }
+            Err(DmError::OptedOut) => return ConciergeDmDelivery::OptedOut,
             Err(err) => return ConciergeDmDelivery::Failed(err.to_string()),
         };
         let mut body = body;
@@ -3490,7 +3487,7 @@ impl dl_community::feedback_hub::FeedbackPort for FeedbackGlue {
         body.insert("content".into(), json!(text));
         match self
             .adapter
-            .deliver_dm(user_id, DmIntent::Proactive("feedback_hub_forward"), &body)
+            .deliver_dm(user_id, DmIntent::Internal, &body)
             .await
         {
             Ok(_) => Ok(()),
@@ -4127,16 +4124,20 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
         &self,
         user_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), String> {
-        self.adapter
+    ) -> Result<bool, String> {
+        match self
+            .adapter
             .deliver_dm(
                 user_id,
                 DmIntent::Proactive("team_application_status"),
                 &body,
             )
             .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        {
+            Ok(_) => Ok(true),
+            Err(DmError::OptedOut) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     async fn add_role(

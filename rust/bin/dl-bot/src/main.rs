@@ -748,7 +748,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::nudge::register(&mut router, nudge.clone());
 
     let solo_watch =
-        dl_voice::solo_watch::SoloWatch::new(Arc::new(dl_voice::glue::SoloWatchGlue {
+        dl_voice::solo_watch::SoloWatch::without_prompts(Arc::new(dl_voice::glue::SoloWatchGlue {
             adapter: adapter.clone(),
             pool: central_pool.clone(),
             log_channel_id: dl_voice::solo_watch::LOG_CHANNEL_ID,
@@ -1663,6 +1663,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 "Steam-Link-Voice-Nudge deaktiviert (DL_STEAM_VOICE_NUDGE_ENABLED nicht gesetzt)"
             );
         }
+        dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
         if lane_pairing_enabled {
             dl_voice::pairing::spawn(lane_pairing.clone());
         } else {

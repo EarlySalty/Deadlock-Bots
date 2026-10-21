@@ -3010,7 +3010,7 @@ trait ScrimDiscordEffectSender: Send + Sync {
         &self,
         recipient_user_id: &str,
         body: &Map<String, Value>,
-    ) -> Result<DiscordDmReceipt, String>;
+    ) -> Result<DiscordDmReceipt, ScrimDmFailure>;
     async fn edit_effect(
         &self,
         channel_id: u64,
@@ -3035,18 +3035,31 @@ impl ScrimDiscordEffectSender for dl_discord::DiscordAdapter {
         &self,
         recipient_user_id: &str,
         body: &Map<String, Value>,
-    ) -> Result<DiscordDmReceipt, String> {
-        let (dm_channel_id, message_id) = self
-            .send_raw_dm_public(
-                recipient_user_id,
+    ) -> Result<DiscordDmReceipt, ScrimDmFailure> {
+        let user_id = recipient_user_id
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                ScrimDmFailure::Uncertain("Discord-DM-Recipient-ID ungueltig".to_string())
+            })?;
+        match self
+            .deliver_dm(
+                user_id,
                 dl_discord::dm_gate::DmIntent::Proactive("scrim"),
                 body,
             )
-            .await?;
-        Ok(DiscordDmReceipt {
-            dm_channel_id,
-            message_id,
-        })
+            .await
+        {
+            Ok(delivery) => Ok(DiscordDmReceipt {
+                dm_channel_id: delivery.channel_id.to_string(),
+                message_id: delivery.message_id.to_string(),
+            }),
+            Err(dl_discord::dm_gate::DmError::OptedOut) => Err(ScrimDmFailure::OptedOut),
+            Err(err) => Err(ScrimDmFailure::Uncertain(format!(
+                "Discord-DM fehlgeschlagen: {err}"
+            ))),
+        }
     }
 
     async fn edit_effect(
@@ -3071,6 +3084,12 @@ enum DiscordEffectOperation {
 struct DiscordDmReceipt {
     dm_channel_id: String,
     message_id: String,
+}
+
+#[derive(Debug)]
+enum ScrimDmFailure {
+    OptedOut,
+    Uncertain(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3591,7 +3610,18 @@ async fn deliver_claimed_discord_effect(
                         )
                         .await?;
                     }
-                    Err(err) => {
+                    Err(ScrimDmFailure::OptedOut) => {
+                        mark_discord_effect_dead(
+                            pool,
+                            effect.id,
+                            effect.attempts,
+                            &effect.payload_hash,
+                            "err_discord_dm_opted_out",
+                            "empfaenger hat bot-dms abbestellt",
+                        )
+                        .await?;
+                    }
+                    Err(ScrimDmFailure::Uncertain(err)) => {
                         mark_discord_effect_uncertain(
                             pool,
                             sender,
@@ -4799,13 +4829,15 @@ mod tests {
             &self,
             recipient_user_id: &str,
             body: &Map<String, Value>,
-        ) -> Result<DiscordDmReceipt, String> {
+        ) -> Result<DiscordDmReceipt, ScrimDmFailure> {
             self.dm_sent
                 .lock()
                 .await
                 .push((recipient_user_id.to_string(), Value::Object(body.clone())));
             if self.fail_send {
-                Err("discord dm timeout after send attempt".to_string())
+                Err(ScrimDmFailure::Uncertain(
+                    "discord dm timeout after send attempt".to_string(),
+                ))
             } else {
                 Ok(DiscordDmReceipt {
                     dm_channel_id: "7001".to_string(),

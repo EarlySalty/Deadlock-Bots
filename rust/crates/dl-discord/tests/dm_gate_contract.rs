@@ -60,6 +60,7 @@ fn only_proactive_dms_are_gated() {
     assert!(!DmIntent::Moderation.is_gated());
     assert!(!DmIntent::Security.is_gated());
     assert!(!DmIntent::Cleanup.is_gated());
+    assert!(!DmIntent::Internal.is_gated());
 }
 
 #[test]
@@ -134,6 +135,92 @@ mod db {
             check_dm_allowed(Some(pool), other, DmIntent::Proactive("router_intro")).await,
             Err(DmError::OptedOut)
         ));
+    }
+
+    async fn opted_out(pool: &sqlx::PgPool, user_id: u64) -> bool {
+        dl_central_db::is_dm_opted_out(pool, user_id)
+            .await
+            .expect("read global opt-out")
+    }
+
+    async fn exec(pool: &sqlx::PgPool, sql: &str, user_id: u64) {
+        sqlx::query(sql)
+            .bind(i64::try_from(user_id).expect("user id fits"))
+            .execute(pool)
+            .await
+            .expect("execute statement");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a central Postgres DSN; run with --include-ignored"]
+    async fn feature_reversal_recomputes_global_optout_and_keeps_button() {
+        if !has_dsn() {
+            eprintln!(
+                "skipping: CENTRAL_TEST_DSN, DATABASE_URL or DEADLOCK_CENTRAL_DSN is required"
+            );
+            return;
+        }
+        let db = test_pool().await.expect("create migrated test pool");
+        let pool = db.pool();
+        let kv_on = "INSERT INTO bot.kv_store (ns, k, v) VALUES ('voice_pair_never', $1::BIGINT::TEXT, 'true')";
+        let kv_delete =
+            "DELETE FROM bot.kv_store WHERE ns = 'voice_pair_never' AND k = $1::BIGINT::TEXT";
+        let tournament_on = "INSERT INTO turnier.tournament_dm_optout (discord_id, scope, created_at) VALUES ($1, 'fun', now())";
+        let tournament_delete = "DELETE FROM turnier.tournament_dm_optout WHERE discord_id = $1";
+
+        let two_sources = 5_001_u64;
+        exec(pool, kv_on, two_sources).await;
+        exec(pool, tournament_on, two_sources).await;
+        exec(pool, kv_delete, two_sources).await;
+        assert!(
+            opted_out(pool, two_sources).await,
+            "tournament source still active"
+        );
+        exec(pool, tournament_delete, two_sources).await;
+        assert!(!opted_out(pool, two_sources).await, "no source left");
+
+        let flipped = 5_002_u64;
+        exec(pool, kv_on, flipped).await;
+        assert!(opted_out(pool, flipped).await);
+        exec(
+            pool,
+            "UPDATE bot.kv_store SET v = 'false' WHERE ns = 'voice_pair_never' AND k = $1::BIGINT::TEXT",
+            flipped,
+        )
+        .await;
+        assert!(!opted_out(pool, flipped).await, "kv value reverted");
+
+        let button = 5_003_u64;
+        exec(pool, kv_on, button).await;
+        dl_central_db::set_dm_opted_out(pool, button, "dm_optout_button")
+            .await
+            .expect("button opt-out");
+        exec(pool, kv_delete, button).await;
+        assert!(
+            opted_out(pool, button).await,
+            "button source survives feature reversal"
+        );
+        dl_central_db::clear_dm_opted_out(pool, button)
+            .await
+            .expect("undo button");
+        assert!(
+            !opted_out(pool, button).await,
+            "undo removes the global flag"
+        );
+
+        let erased = 5_004_u64;
+        exec(pool, kv_on, erased).await;
+        exec(
+            pool,
+            "INSERT INTO core.user_privacy (user_id, opted_out, deleted_at) VALUES ($1, TRUE, now())",
+            erased,
+        )
+        .await;
+        exec(pool, kv_delete, erased).await;
+        assert!(
+            opted_out(pool, erased).await,
+            "erasure keeps the global flag"
+        );
     }
 
     #[tokio::test]

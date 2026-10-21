@@ -8,6 +8,9 @@ use crate::interactions::{BridgeInteraction, BridgeReply, InteractionHandler, In
 pub const DM_OPTOUT_CUSTOM_ID: &str = "dm_optout:global";
 pub const DM_OPTOUT_LABEL: &str = "Keine Bot-Nachrichten mehr";
 pub const DM_OPTOUT_CONFIRMATION: &str = "Alles klar, der Bot schreibt dir ab jetzt keine Nachrichten mehr von sich aus. Antworten auf deine eigenen Befehle und Klicks bekommst du weiterhin.";
+pub const DM_OPTIN_CUSTOM_ID: &str = "dm_optout:undo";
+pub const DM_OPTIN_LABEL: &str = "Doch wieder Nachrichten erhalten";
+pub const DM_OPTIN_CONFIRMATION: &str = "Alles klar, der Bot darf dir wieder schreiben.";
 pub const DM_OPTOUT_FAILED: &str =
     "Das hat gerade nicht geklappt. Versuch es bitte gleich noch einmal.";
 
@@ -21,6 +24,7 @@ pub enum DmIntent {
     Moderation,
     Security,
     Cleanup,
+    Internal,
 }
 
 impl DmIntent {
@@ -68,6 +72,18 @@ pub fn optout_button_row() -> Value {
             "style": 2,
             "label": DM_OPTOUT_LABEL,
             "custom_id": DM_OPTOUT_CUSTOM_ID,
+        }]
+    })
+}
+
+pub fn optin_button_row() -> Value {
+    json!({
+        "type": 1,
+        "components": [{
+            "type": 2,
+            "style": 2,
+            "label": DM_OPTIN_LABEL,
+            "custom_id": DM_OPTIN_CUSTOM_ID,
         }]
     })
 }
@@ -184,6 +200,13 @@ impl DmOptoutHandler {
     }
 }
 
+fn optout_confirmation() -> BridgeReply {
+    BridgeReply {
+        components: Some(json!([optin_button_row()])),
+        ..BridgeReply::ephemeral_text(DM_OPTOUT_CONFIRMATION)
+    }
+}
+
 #[async_trait::async_trait]
 impl InteractionHandler for DmOptoutHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
@@ -195,7 +218,7 @@ impl InteractionHandler for DmOptoutHandler {
                     user_id = interaction.user_id,
                     "Globaler Bot-DM-Opt-out gesetzt"
                 );
-                BridgeReply::ephemeral_text(DM_OPTOUT_CONFIRMATION)
+                optout_confirmation()
             }
             Err(err) => {
                 tracing::warn!(%err, user_id = interaction.user_id, "Globaler Bot-DM-Opt-out fehlgeschlagen");
@@ -205,6 +228,36 @@ impl InteractionHandler for DmOptoutHandler {
     }
 }
 
+pub struct DmOptinHandler {
+    pool: PgPool,
+}
+
+impl DmOptinHandler {
+    pub fn new(pool: PgPool) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self { pool })
+    }
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for DmOptinHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        match dl_central_db::clear_dm_opted_out(&self.pool, interaction.user_id).await {
+            Ok(()) => {
+                tracing::info!(
+                    user_id = interaction.user_id,
+                    "Globaler Bot-DM-Opt-out aufgehoben"
+                );
+                BridgeReply::ephemeral_text(DM_OPTIN_CONFIRMATION)
+            }
+            Err(err) => {
+                tracing::warn!(%err, user_id = interaction.user_id, "Globaler Bot-DM-Opt-out nicht aufgehoben");
+                BridgeReply::ephemeral_text(DM_OPTOUT_FAILED)
+            }
+        }
+    }
+}
+
 pub fn register(router: &mut InteractionRouter, pool: PgPool) {
-    router.on_custom_id(DM_OPTOUT_CUSTOM_ID, DmOptoutHandler::new(pool));
+    router.on_custom_id(DM_OPTOUT_CUSTOM_ID, DmOptoutHandler::new(pool.clone()));
+    router.on_custom_id(DM_OPTIN_CUSTOM_ID, DmOptinHandler::new(pool));
 }
