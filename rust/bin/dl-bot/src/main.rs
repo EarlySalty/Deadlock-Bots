@@ -1912,13 +1912,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 
         // LFG-Lobby-Finder (5): Antworten im alten Suche-Kanal bis zum Forum-Cutover.
+        let lfg_glue = Arc::new(modglue::LfgGlue {
+            adapter: adapter.clone(),
+            status_store: Arc::new(dl_voice::status::StatusStore {
+                pool: central_pool.clone(),
+            }),
+        });
+        let lane_panel = dl_voice::lane_panel::LanePanel::new(
+            central_pool.clone(),
+            Arc::new(modglue::LanePanelGlue {
+                lanes: lfg_glue.clone(),
+            }),
+            onboardglue::MAIN_GUILD_ID,
+            dl_activity::lfg::LFG_CHANNEL_ID,
+        );
+        dl_voice::lane_panel::spawn(lane_panel, &dispatcher);
         if legacy_lfg_responder_enabled(lfg_cutover_active) {
-            let lfg_responder = dl_activity::lfg::LfgResponder::new(
-                central_pool.clone(),
-                Arc::new(modglue::LfgGlue {
-                    adapter: adapter.clone(),
-                }),
-            );
+            let lfg_responder =
+                dl_activity::lfg::LfgResponder::new(central_pool.clone(), lfg_glue.clone());
             dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
         } else {
             tracing::info!("Alter LFG-Text-Responder wegen DL_LFG_FORUM_CUTOVER deaktiviert");

@@ -399,6 +399,21 @@ pub struct LaneInfo {
     pub is_staging: bool,
     /// Namen der anwesenden bekannten Mitspieler (max. 3 genutzt).
     pub co_player_names: Vec<String>,
+    pub member_ids: Vec<u64>,
+    pub activity: Option<LaneActivity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneActivity {
+    Lobby,
+    Match { minute: i64 },
+}
+
+pub fn lane_activity_label(activity: LaneActivity) -> String {
+    match activity {
+        LaneActivity::Lobby => "In der Lobby".to_string(),
+        LaneActivity::Match { minute } => format!("Im Match · Min {minute}"),
+    }
 }
 
 impl LaneInfo {
@@ -999,6 +1014,9 @@ pub fn build_lobby_field_value(lane: &LaneInfo, warning_line: &str) -> String {
         lines.push("Noch leer — eröffne sie doch".to_string());
     } else {
         lines.push(format!("{} im Voice", lane.member_count));
+        if let Some(activity) = lane.activity {
+            lines.push(lane_activity_label(activity));
+        }
     }
     lines.push(format!("Ø-Rang: {}", lane.avg_rank_label));
     if !warning_line.is_empty() {
@@ -1709,6 +1727,8 @@ mod tests {
             position: id as i64,
             is_staging: false,
             co_player_names: (0..co).map(|i| format!("Co{i}")).collect(),
+            member_ids: Vec::new(),
+            activity: None,
         }
     }
 

@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use dl_activity::lfg::LaneActivity;
 use dl_discord::{ChannelSender, Dispatcher};
 use sqlx::PgPool;
 
@@ -291,6 +292,56 @@ pub fn select_channel_cohort(entries: &[CohortEntry], min_active_players: usize)
     candidate
 }
 
+pub fn cohort_entries(
+    members: &[u64],
+    steam_map: &HashMap<u64, Vec<String>>,
+    presence_map: &HashMap<String, PresenceRow>,
+    now: i64,
+) -> (Vec<CohortEntry>, HashMap<u64, String>) {
+    let mut entries = Vec::new();
+    let mut chosen_steam: HashMap<u64, String> = HashMap::new();
+    for member in members {
+        let steam_ids = steam_map.get(member).cloned().unwrap_or_default();
+        let Some((stage, minutes, server_id, sid)) =
+            select_best_presence(&steam_ids, presence_map, now, PRESENCE_STALE_SECONDS)
+        else {
+            continue;
+        };
+        if stage != "lobby" && stage != "match" {
+            continue;
+        }
+        chosen_steam.insert(*member, sid);
+        entries.push(CohortEntry {
+            member_id: *member,
+            stage,
+            minutes: minutes.unwrap_or(0),
+            server_id,
+        });
+    }
+    (entries, chosen_steam)
+}
+
+pub fn cohort_display_minute(cohort: &Cohort) -> i64 {
+    cohort.minute_values.iter().copied().max().unwrap_or(0) + match_minute_display_offset()
+}
+
+pub fn lane_activity(
+    members: &[u64],
+    steam_map: &HashMap<u64, Vec<String>>,
+    presence_map: &HashMap<String, PresenceRow>,
+    now: i64,
+) -> Option<LaneActivity> {
+    let (entries, _) = cohort_entries(members, steam_map, presence_map, now);
+    let cohort = select_channel_cohort(&entries, MIN_ACTIVE_PLAYERS)?;
+    match cohort.stage.as_str() {
+        "lobby" => Some(LaneActivity::Lobby),
+        "match" => Some(LaneActivity::Match {
+            minute: cohort_display_minute(&cohort),
+        }),
+        _ => None,
+    }
+}
+
 /// `"Lane 1 - im Match Min 17 (4/6)"` → ("Lane 1", Some(suffix)).
 pub fn split_suffix(name: &str) -> (String, Option<String>) {
     let lower = name.to_lowercase();
@@ -551,6 +602,32 @@ impl StatusStore {
                         deadlock_party_hint: row.deadlock_party_hint,
                     },
                 )
+            })
+            .collect()
+    }
+
+    pub async fn lane_activities(&self, lanes: &[(u64, Vec<u64>)]) -> HashMap<u64, LaneActivity> {
+        let user_ids: Vec<u64> = lanes
+            .iter()
+            .flat_map(|(_, members)| members.iter().copied())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let steam_map = self.steam_ids_for(user_ids).await;
+        let steam_ids: Vec<String> = steam_map
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let presence_map = self.presence_rows(steam_ids).await;
+        let now = chrono::Utc::now().timestamp();
+        lanes
+            .iter()
+            .filter_map(|(channel_id, members)| {
+                lane_activity(members, &steam_map, &presence_map, now)
+                    .map(|activity| (*channel_id, activity))
             })
             .collect()
     }
@@ -915,26 +992,7 @@ impl VoiceStatusWorker {
             return;
         }
 
-        let mut entries = Vec::new();
-        let mut chosen_steam: HashMap<u64, String> = HashMap::new();
-        for member in members {
-            let steam_ids = steam_map.get(member).cloned().unwrap_or_default();
-            let Some((stage, minutes, server_id, sid)) =
-                select_best_presence(&steam_ids, presence_map, now, PRESENCE_STALE_SECONDS)
-            else {
-                continue;
-            };
-            if stage != "lobby" && stage != "match" {
-                continue;
-            }
-            chosen_steam.insert(*member, sid);
-            entries.push(CohortEntry {
-                member_id: *member,
-                stage,
-                minutes: minutes.unwrap_or(0),
-                server_id,
-            });
-        }
+        let (entries, chosen_steam) = cohort_entries(members, steam_map, presence_map, now);
         let Some(cohort) = select_channel_cohort(&entries, MIN_ACTIVE_PLAYERS) else {
             self.apply(channel_id, name, &base_name, None, None, None, None, None)
                 .await;
@@ -975,8 +1033,7 @@ impl VoiceStatusWorker {
             )
             .await;
         } else {
-            let max_minutes = cohort.minute_values.iter().copied().max().unwrap_or(0);
-            let display_minutes = max_minutes + match_minute_display_offset();
+            let display_minutes = cohort_display_minute(&cohort);
             let suffix = format!("im Match Min {display_minutes} ({player_count}/{voice_slots})");
             self.apply(
                 channel_id,

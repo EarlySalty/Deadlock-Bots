@@ -3691,6 +3691,7 @@ impl dl_discord::gateway::ReactionRoleGatewayPort for ReactionRoleGatewayGlue {
 
 pub struct LfgGlue {
     pub adapter: Arc<DiscordAdapter>,
+    pub status_store: Arc<dl_voice::status::StatusStore>,
 }
 
 const LFG_CATEGORIES: [(u64, &str); 4] = [
@@ -3867,9 +3868,26 @@ fn rank_from_roles(roles: &[(u64, String)]) -> (String, i64, Option<i64>) {
     }
 }
 
-#[async_trait::async_trait]
-impl dl_activity::lfg::LfgPort for LfgGlue {
-    async fn scan_lanes(
+impl LfgGlue {
+    pub async fn scan_lanes_with_activity(
+        &self,
+        guild_id: u64,
+        co_player_ids: &[u64],
+    ) -> Vec<dl_activity::lfg::LaneInfo> {
+        let mut lanes = self.scan_cached_lanes(guild_id, co_player_ids);
+        let occupied: Vec<(u64, Vec<u64>)> = lanes
+            .iter()
+            .filter(|lane| !lane.member_ids.is_empty())
+            .map(|lane| (lane.channel_id, lane.member_ids.clone()))
+            .collect();
+        let activities = self.status_store.lane_activities(&occupied).await;
+        for lane in &mut lanes {
+            lane.activity = activities.get(&lane.channel_id).copied();
+        }
+        lanes
+    }
+
+    fn scan_cached_lanes(
         &self,
         guild_id: u64,
         co_player_ids: &[u64],
@@ -3974,10 +3992,23 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
                 position: channel.position as i64,
                 is_staging: LFG_STAGINGS.contains(&channel.id.get()),
                 co_player_names: co_names,
+                member_ids,
+                activity: None,
             });
         }
         lanes.sort_by_key(|lane| (lane.category_id, lane.position, lane.channel_id));
         lanes
+    }
+}
+
+#[async_trait::async_trait]
+impl dl_activity::lfg::LfgPort for LfgGlue {
+    async fn scan_lanes(
+        &self,
+        guild_id: u64,
+        co_player_ids: &[u64],
+    ) -> Vec<dl_activity::lfg::LaneInfo> {
+        self.scan_lanes_with_activity(guild_id, co_player_ids).await
     }
 
     async fn member_rank(&self, guild_id: u64, user_id: u64) -> (String, i64, Option<i64>) {
@@ -4020,6 +4051,60 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(content));
         let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+}
+
+pub struct LanePanelGlue {
+    pub lanes: Arc<LfgGlue>,
+}
+
+#[async_trait::async_trait]
+impl dl_voice::lane_panel::LanePanelPort for LanePanelGlue {
+    async fn lanes(&self, guild_id: u64) -> Vec<dl_activity::lfg::LaneInfo> {
+        self.lanes.scan_lanes_with_activity(guild_id, &[]).await
+    }
+
+    async fn post(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String> {
+        self.lanes.adapter.send_raw_public(channel_id, body).await
+    }
+
+    async fn edit(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: &Map<String, Value>,
+    ) -> Result<(), String> {
+        self.lanes
+            .adapter
+            .edit_raw_public(channel_id, message_id, body)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn delete(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+        self.lanes
+            .adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("Lane-Panel neu unten gepostet"),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn messages_after(&self, channel_id: u64, message_id: u64) -> Result<usize, String> {
+        ChannelId::new(channel_id)
+            .messages(
+                &self.lanes.adapter.http,
+                GetMessages::new()
+                    .after(MessageId::new(message_id))
+                    .limit(50),
+            )
+            .await
+            .map(|messages| messages.len())
+            .map_err(|error| error.to_string())
     }
 }
 
