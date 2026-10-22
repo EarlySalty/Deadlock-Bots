@@ -14,7 +14,6 @@ pub mod community_points;
 mod db;
 pub mod feedback;
 pub mod glue;
-pub mod lane_panel;
 pub mod lfg_panel;
 mod lfg_watch;
 pub mod live_dot;
