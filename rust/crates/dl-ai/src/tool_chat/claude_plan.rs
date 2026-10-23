@@ -12,6 +12,7 @@ use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
 
 const PASSED_ENV: [&str; 5] = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"];
+const ENVELOPE_TOKENS: u32 = 512;
 
 pub struct ClaudePlanBackend {
     binary: PathBuf,
@@ -68,7 +69,10 @@ impl ClaudePlanBackend {
             .current_dir(&self.work_dir)
             .env_clear()
             .envs(self.env.iter().map(|(name, value)| (*name, value)))
-            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_tokens.to_string())
+            .env(
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                max_tokens.saturating_add(ENVELOPE_TOKENS).to_string(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -208,8 +212,14 @@ fn parse_result(line: &Value, requested_model: &str) -> Option<Result<Outcome, B
                 .get("result")
                 .and_then(Value::as_str)
                 .is_some_and(mentions_limit);
+        let truncated = line
+            .get("result")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("output token maximum"));
         return if limited {
             failure(FailureKind::Limit, "usage_limit")
+        } else if truncated {
+            failure(FailureKind::InvalidOutput, "output_token_maximum")
         } else {
             failure(FailureKind::Unavailable, "result_error")
         };
@@ -321,7 +331,7 @@ mod tests {
         assert_eq!(
             response.content,
             vec![super::super::types::ContentBlock::Text {
-                text: "leak=0 max=321".into()
+                text: "leak=0 max=833".into()
             }]
         );
         assert_eq!(response.usage.map(|u| u.input_tokens), Some(5));
