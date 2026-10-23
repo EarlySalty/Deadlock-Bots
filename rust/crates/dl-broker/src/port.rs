@@ -25,12 +25,41 @@ pub enum PortError {
     MessageNotFound,
     #[error("failed to open DM channel")]
     DmOpenFailed,
+    #[error("user opted out of bot DMs")]
+    DmOptedOut,
     #[error("channel does not expose voice members")]
     NoVoiceMembers,
     #[error("guild unavailable for channel creation")]
     GuildUnavailable,
     #[error("discord error: {0}")]
     Discord(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DmPurpose {
+    #[default]
+    Proactive,
+    Moderation,
+    Security,
+}
+
+impl DmPurpose {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "proactive" => Some(Self::Proactive),
+            "moderation" => Some(Self::Moderation),
+            "security" => Some(Self::Security),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proactive => "proactive",
+            Self::Moderation => "moderation",
+            Self::Security => "security",
+        }
+    }
 }
 
 /// Geparster view_spec (Vertrag wie Python _parse_view_spec).
@@ -210,8 +239,12 @@ pub trait DiscordPort: Send + Sync {
     async fn is_ready(&self) -> bool;
     /// → message_id
     async fn send_channel_message(&self, channel_id: u64, content: &str) -> Result<u64, PortError>;
-    /// → (dm_channel_id, message_id)
-    async fn send_dm(&self, user_id: u64, content: &str) -> Result<(Option<u64>, u64), PortError>;
+    async fn send_dm(
+        &self,
+        user_id: u64,
+        content: &str,
+        purpose: DmPurpose,
+    ) -> Result<(Option<u64>, u64), PortError>;
     /// → channel_id
     async fn create_text_channel(
         &self,

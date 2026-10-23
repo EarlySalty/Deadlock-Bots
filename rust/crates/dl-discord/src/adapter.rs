@@ -9,11 +9,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::dm_gate::{DmError, DmIntent};
 use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 use dl_broker::port::{
-    DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
-    MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers,
-    ViewSpec,
+    DiscordPort, DmPurpose, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess,
+    MemberInfo, MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo,
+    RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -39,6 +40,7 @@ pub struct DiscordAdapter {
     pub(crate) streamer_voice_lock: tokio::sync::Mutex<()>,
     invite_snapshot_health: Arc<InviteSnapshotHealth>,
     invite_tracker: OnceLock<Arc<InviteTracker>>,
+    pub(crate) dm_gate: OnceLock<sqlx::PgPool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,7 @@ impl DiscordAdapter {
             streamer_voice_lock: tokio::sync::Mutex::new(()),
             invite_snapshot_health: Arc::new(InviteSnapshotHealth::default()),
             invite_tracker: OnceLock::new(),
+            dm_gate: OnceLock::new(),
         })
     }
 
@@ -304,17 +307,39 @@ impl DiscordAdapter {
         body
     }
 
-    async fn open_dm(&self, user_id: u64) -> Result<ChannelId, PortError> {
-        // Existenz des Users prüfen (Python: _resolve_user → 404)
+    async fn open_dm(&self, user_id: u64, intent: DmIntent) -> Result<ChannelId, PortError> {
         if self.http.get_user(UserId::new(user_id)).await.is_err() {
             return Err(PortError::UserNotFound);
         }
-        let channel = self
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+        self.open_dm_channel(user_id, intent)
             .await
-            .map_err(|_| PortError::DmOpenFailed)?;
-        Ok(channel.id)
+            .map_err(Self::gate_port_error)
+    }
+
+    fn gate_port_error(err: DmError) -> PortError {
+        match err {
+            DmError::OptedOut => PortError::DmOptedOut,
+            DmError::GateUnavailable(reason) => PortError::Discord(reason),
+            DmError::Discord(_) => PortError::DmOpenFailed,
+        }
+    }
+
+    async fn send_gated_dm(
+        &self,
+        user_id: u64,
+        intent: DmIntent,
+        body: &Map<String, Value>,
+    ) -> Result<(ChannelId, u64), PortError> {
+        let dm_channel = self.open_dm(user_id, intent).await?;
+        let mut body = body.clone();
+        if intent.is_gated() {
+            crate::dm_gate::attach_optout_button(&mut body);
+        }
+        let message_id = self
+            .send_raw(dm_channel.get(), &body)
+            .await
+            .map_err(|err| PortError::Discord(err.to_string()))?;
+        Ok((dm_channel, message_id))
     }
 
     async fn send_raw(
@@ -340,11 +365,10 @@ impl DiscordAdapter {
             .map_err(|err| err.to_string())
     }
 
-    /// Sendet einen rohen Discord-API-Body per DM. Ein- und Ausgabe-IDs bleiben
-    /// Snowflake-Strings, damit Aufrufer keine praezisionskritischen JSON-Zahlen bauen.
     pub async fn send_raw_dm_public(
         &self,
         recipient_user_id: &str,
+        intent: DmIntent,
         body: &Map<String, Value>,
     ) -> Result<(String, String), String> {
         let user_id = recipient_user_id
@@ -352,14 +376,10 @@ impl DiscordAdapter {
             .ok()
             .filter(|value| *value > 0)
             .ok_or_else(|| "Discord-DM-Recipient-ID ungueltig".to_string())?;
-        let dm_channel = self
-            .open_dm(user_id)
+        let (dm_channel, message_id) = self
+            .send_gated_dm(user_id, intent, body)
             .await
-            .map_err(|err| format!("Discord-DM konnte nicht geoeffnet werden: {err}"))?;
-        let message_id = self
-            .send_raw(dm_channel.get(), body)
-            .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| format!("Discord-DM fehlgeschlagen: {err}"))?;
         Ok((dm_channel.get().to_string(), message_id.to_string()))
     }
 
@@ -513,14 +533,20 @@ impl DiscordPort for DiscordAdapter {
         })
     }
 
-    async fn send_dm(&self, user_id: u64, content: &str) -> Result<(Option<u64>, u64), PortError> {
-        let dm_channel = self.open_dm(user_id).await?;
+    async fn send_dm(
+        &self,
+        user_id: u64,
+        content: &str,
+        purpose: DmPurpose,
+    ) -> Result<(Option<u64>, u64), PortError> {
+        let intent = match purpose {
+            DmPurpose::Proactive => DmIntent::Proactive("broker"),
+            DmPurpose::Moderation => DmIntent::Moderation,
+            DmPurpose::Security => DmIntent::Security,
+        };
         let mut body = Map::new();
         body.insert("content".into(), json!(content));
-        let message_id = self
-            .send_raw(dm_channel.get(), &body)
-            .await
-            .map_err(|err| PortError::Discord(err.to_string()))?;
+        let (dm_channel, message_id) = self.send_gated_dm(user_id, intent, &body).await?;
         Ok((Some(dm_channel.get()), message_id))
     }
 

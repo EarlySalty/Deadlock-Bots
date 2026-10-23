@@ -189,6 +189,24 @@ fn reusable_candidate(
     Ok(())
 }
 
+fn refresh_assets(source: &Path, stage: &Path) -> Result<()> {
+    let assets = stage.join("assets");
+    if fs::symlink_metadata(&assets).is_ok() {
+        fs::remove_dir_all(&assets)?;
+    }
+    run(
+        "/usr/bin/cp",
+        &[
+            "-R",
+            "--no-preserve=all",
+            text(&source.join("assets"))?,
+            text(&assets)?,
+        ],
+    )?;
+    run("/usr/bin/chmod", &["-R", "u=rwX,go=rX", text(&assets)?])?;
+    owned(&assets, true, fs::metadata(stage)?.uid())
+}
+
 fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Result<()> {
     if run("/usr/bin/id", &["-u"])? != "0" {
         return Err("Der Releasewechsel benötigt root".into());
@@ -292,6 +310,7 @@ fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Re
         if hash(&stage.0.join("dl-bot"))? != expected_hash {
             return Err("Der kopierte Bot stimmt nicht mit dem geprüften Artefakt überein".into());
         }
+        refresh_assets(&source, &stage.0)?;
         for name in ["dl-web", "dl-infisical-env"] {
             if hash(&previous.join(name))? != hash(&stage.0.join(name))? {
                 return Err("Ein beibehaltenes Begleitbinary wurde verändert".into());
@@ -463,6 +482,25 @@ mod tests {
             fixture.uid
         )
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn stage_assets_follow_the_source_revision() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source");
+        let stage = directory.path().join("stage");
+        fs::create_dir_all(source.join("assets/nested"))?;
+        fs::create_dir_all(stage.join("assets"))?;
+        fs::set_permissions(&stage, fs::Permissions::from_mode(0o755))?;
+        fs::write(source.join("assets/paten_panel.toml"), b"new")?;
+        fs::write(source.join("assets/nested/emoji.png"), b"png")?;
+        fs::write(stage.join("assets/paten_panel.toml"), b"old")?;
+        fs::write(stage.join("assets/stale.toml"), b"stale")?;
+        refresh_assets(&source, &stage)?;
+        assert_eq!(fs::read(stage.join("assets/paten_panel.toml"))?, b"new");
+        assert_eq!(fs::read(stage.join("assets/nested/emoji.png"))?, b"png");
+        assert!(!stage.join("assets/stale.toml").exists());
         Ok(())
     }
 

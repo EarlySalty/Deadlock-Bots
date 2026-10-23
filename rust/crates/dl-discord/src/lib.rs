@@ -15,6 +15,7 @@ pub mod audit_log;
 mod core_user_sync;
 pub mod dispatch;
 pub mod dispatcher;
+pub mod dm_gate;
 pub mod gateway;
 pub mod interactions;
 pub mod invite_tracker;

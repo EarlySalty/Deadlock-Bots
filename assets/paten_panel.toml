@@ -1,0 +1,18 @@
+[panel]
+status = "entwurf"
+button = "Ich brauche einen Deadlock-Paten"
+inhalt = """
+**Neu hier? So läuft's 🌱**
+
+Egal ob du Deadlock gerade erst angefangen hast oder nur neu auf dem Server bist: Hier bist du richtig.
+
+**💬 Fragen stellen**
+In <#1426220702054355077> kannst du alles fragen, was dir zum Spiel oder zum Server einfällt. Es gibt keine dummen Fragen, hier waren alle mal neu.
+
+**🎙️ Zusammen spielen**
+In der 🆕Neue Spieler Lane findest du Leute, die ebenfalls am Anfang stehen oder gern mit Neuen spielen. Einfach reinkommen.
+
+**🤝 Ein Deadlock-Pate für dich**
+Du hättest gern eine feste Person, die dir den Einstieg zeigt? Dann drück auf den Knopf unten. Sobald ein Pate Zeit hat, bekommt ihr zwei einen eigenen Kanal. Dort kannst du alles fragen, ihr könnt euch zum Zocken verabreden und dein Pate zeigt dir, wo was ist.
+
+Die Patenschaft läuft 30 Tage. Danach kennst du dich hier aus und der Kanal schließt sich von selbst."""

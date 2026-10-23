@@ -34,6 +34,8 @@ community_brain_answers = false
 # zusätzlich concierge_test_users = [<Discord-User-ID>] eintragen.
 concierge_enabled = true
 concierge_proactive = true
+concierge_pate_panel_channel_id = 1562083323507900517
+concierge_pate_help_channel_id = 1426220702054355077
 
 [storage]
 # Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.

@@ -492,15 +492,14 @@ impl SurveyPulsePort for dl_discord::DiscordAdapter {
         let body = body
             .as_object()
             .ok_or_else(|| "survey DM body is not an object".to_string())?;
-        let channel = self
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-            .map_err(|error| error.to_string())?;
-        self.send_raw_public(channel.id.get(), body)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        self.deliver_dm(
+            user_id,
+            dl_discord::dm_gate::DmIntent::Proactive("survey_pulse"),
+            body,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -541,7 +540,9 @@ impl OutboxHandler for SurveyPulseOutboxHandler {
                 ), TRUE) OR COALESCE((
                     SELECT privacy.opted_out FROM core.user_privacy AS privacy
                      WHERE privacy.user_id = $1
-                ), FALSE) AS opted_out,
+                ), FALSE) OR EXISTS(
+                    SELECT 1 FROM core.dm_optout AS dm WHERE dm.user_id = $1
+                ) AS opted_out,
                 (SELECT patterns.last_pinged_at
                    FROM activity.user_activity_patterns AS patterns
                   WHERE patterns.user_id = $1) AS last_pinged_at,

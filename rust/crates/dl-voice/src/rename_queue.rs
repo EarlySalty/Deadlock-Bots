@@ -28,6 +28,7 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(10);
 const RENAME_THROTTLE: Duration = Duration::from_secs(360);
 const MAX_RETRIES: i32 = 5;
 const RENAME_REQUEST_ID_LOCK_KEY: i64 = -7_010_030_001;
+pub const LIVE_DOT_REFRESH_REASON: &str = "Live-Streamer-Markierung";
 
 static QUEUE: OnceLock<RenameQueue> = OnceLock::new();
 
@@ -65,6 +66,30 @@ pub async fn enqueue_or_direct(
             ChannelId::new(channel_id),
             &json!({ "name": name }),
             Some(reason),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub async fn enqueue_live_refresh(
+    adapter: &DiscordAdapter,
+    channel_id: u64,
+    name: &str,
+) -> Result<(), String> {
+    if let Some(q) = global() {
+        return q
+            .enqueue_if_idle(channel_id, name, LIVE_DOT_REFRESH_REASON)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+    adapter
+        .http
+        .edit_channel(
+            ChannelId::new(channel_id),
+            &json!({ "name": name }),
+            Some(LIVE_DOT_REFRESH_REASON),
         )
         .await
         .map(|_| ())
@@ -131,6 +156,55 @@ impl RenameQueue {
         tx.commit().await?;
         Ok(())
     }
+
+    pub async fn enqueue_if_idle(
+        &self,
+        channel_id: u64,
+        new_name: &str,
+        reason: &str,
+    ) -> VoiceDbResult<bool> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Ok(false);
+        }
+        let channel_id = u64_to_i64("rename_requests.channel_id", channel_id)?;
+        let mut tx = self.pool.begin().await?;
+        lock_rename_request_ids(&mut tx).await?;
+        let busy: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                  FROM voice.rename_requests
+                 WHERE channel_id = $1
+                   AND status IN ('PENDING', 'PROCESSING')
+            )
+            "#,
+        )
+        .bind(channel_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if busy {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let id = next_rename_request_id(&mut tx).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO voice.rename_requests (
+                id, channel_id, new_name, reason, status, retry_count, assigned_worker_id
+            )
+            VALUES ($1, $2, $3, $4, 'PENDING', 0, 0)
+            "#,
+        )
+        .bind(id)
+        .bind(channel_id)
+        .bind(name)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
 }
 
 /// Führt die eigentliche Discord-Umbenennung aus (vom Worker genutzt).
@@ -141,6 +215,9 @@ pub trait RenameExec: Send + Sync {
     /// Benennt den Channel um. `Err` = Fehler (wird ggf. erneut versucht).
     async fn edit_name(&self, channel_id: u64, name: &str, reason: &str)
         -> Result<(), RenameError>;
+    fn decorate(&self, _channel_id: u64, name: &str, _current: &str) -> String {
+        name.to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,20 +325,22 @@ pub fn spawn_worker(pool: PgPool, exec: Arc<dyn RenameExec>) {
                 }
             }
 
-            match exec.current_name(claimed.channel_id).await {
-                None => {
-                    let _ = set_failed(&q.pool, claimed.id, "Channel nicht gefunden").await;
-                    continue;
-                }
-                Some(cur) if cur == claimed.new_name => {
-                    let _ = set_done(&q.pool, claimed.id).await;
-                    continue;
-                }
-                Some(_) => {}
+            let Some(current) = exec.current_name(claimed.channel_id).await else {
+                let _ = set_failed(&q.pool, claimed.id, "Channel nicht gefunden").await;
+                continue;
+            };
+            let target = exec.decorate(
+                claimed.channel_id,
+                requested_name(&claimed, &current),
+                &current,
+            );
+            if current == target {
+                let _ = set_done(&q.pool, claimed.id).await;
+                continue;
             }
 
             match exec
-                .edit_name(claimed.channel_id, &claimed.new_name, &claimed.reason)
+                .edit_name(claimed.channel_id, &target, &claimed.reason)
                 .await
             {
                 Ok(()) => {
@@ -283,6 +362,14 @@ pub fn spawn_worker(pool: PgPool, exec: Arc<dyn RenameExec>) {
             }
         }
     });
+}
+
+fn requested_name<'a>(claimed: &'a Claimed, current: &'a str) -> &'a str {
+    if claimed.reason == LIVE_DOT_REFRESH_REASON {
+        current
+    } else {
+        &claimed.new_name
+    }
 }
 
 async fn claim_next(pool: &PgPool) -> VoiceDbResult<Option<Claimed>> {

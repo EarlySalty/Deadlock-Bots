@@ -42,7 +42,7 @@ pub const CONFIRMATION_REPLY: &str =
     "Steht drin. Wenn jemand joint, lösch ich den Post wieder — du musst dich um nichts kümmern.";
 pub const LATER_REPLY: &str =
     "Alles gut. Wenn du magst, klick einfach nochmal, wenn du länger sitzt.";
-pub const NEVER_REPLY: &str = "Erledigt, ich frag dich nicht mehr. Eintragen kannst du dich trotzdem jederzeit selbst in <#1376335502919335936>.";
+pub const NEVER_REPLY: &str = dl_discord::dm_gate::DM_OPTOUT_CONFIRMATION;
 pub const INVALID_REPLY: &str =
     "Das ist schon abgelaufen. Wenn du noch allein sitzt, meld ich mich gleich nochmal.";
 pub const POST_ERROR_REPLY: &str = "Da ist beim Posten was schiefgelaufen, tut mir leid. Probier es gleich nochmal, oder schreib direkt in <#1376335502919335936>.";
@@ -174,15 +174,25 @@ pub struct SoloWatch {
     pending: tokio::sync::Mutex<HashMap<u64, PendingSolo>>,
     posts: tokio::sync::Mutex<HashMap<u64, ActivePost>>,
     daily: tokio::sync::Mutex<DailyCounters>,
+    prompts_enabled: bool,
 }
 
 impl SoloWatch {
     pub fn new(port: Arc<dyn SoloWatchPort>) -> Arc<Self> {
+        Self::build(port, true)
+    }
+
+    pub fn without_prompts(port: Arc<dyn SoloWatchPort>) -> Arc<Self> {
+        Self::build(port, false)
+    }
+
+    fn build(port: Arc<dyn SoloWatchPort>, prompts_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             port,
             pending: tokio::sync::Mutex::new(HashMap::new()),
             posts: tokio::sync::Mutex::new(HashMap::new()),
             daily: tokio::sync::Mutex::new(DailyCounters::default()),
+            prompts_enabled,
         })
     }
 
@@ -245,6 +255,9 @@ impl SoloWatch {
         self.count_checked().await;
         let snapshot = self.port.lane_snapshot(guild_id, channel_id).await;
         self.reconcile_posts(channel_id, snapshot.as_ref()).await;
+        if !self.prompts_enabled {
+            return;
+        }
 
         let Some(lane) = snapshot else {
             self.log_cleared_pending(channel_id, "kanal_nicht_im_cache")
@@ -1964,6 +1977,34 @@ mod tests {
             .await;
 
         assert_eq!(port.state.lock().expect("lock").deletes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ohne_ansprache_kein_dm_aber_posts_werden_aufgeraeumt() {
+        let port = Arc::new(MockPort::default());
+        create_post(&SoloWatch::new(port.clone()), &port).await;
+        let cleanup_only = SoloWatch::without_prompts(port.clone());
+        cleanup_only.restore_at(now()).await;
+
+        prompt(&cleanup_only, &port).await;
+        assert_eq!(port.dms(), 0);
+
+        port.set_lane(CHILL, &[USER, 43]);
+        cleanup_only
+            .handle_event_at(
+                VoiceEvent::Join {
+                    guild_id: GUILD,
+                    user_id: 43,
+                    channel_id: CHANNEL,
+                },
+                now(),
+            )
+            .await;
+
+        assert_eq!(
+            port.state.lock().expect("lock").deletes,
+            vec![(LFG_CHANNEL_ID, 701, "zweite_person_beigetreten".to_string())]
+        );
     }
 
     #[tokio::test]

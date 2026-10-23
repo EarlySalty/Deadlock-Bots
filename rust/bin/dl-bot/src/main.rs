@@ -548,6 +548,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         anyhow::bail!("DISCORD_TOKEN fehlt — dl-bot kann ohne Bot-Token nichts ausrichten");
     };
     let adapter = dl_discord::DiscordAdapter::new(&discord_token);
+    adapter.link_dm_gate(central_pool.clone());
     // Application-ID auf dem REST-Http-Client setzen — sonst scheitern
     // Interaction-Followups nach einem Defer (POST /webhooks/{app_id}/{token})
     // mit „Application id was expected but missing", und der User sieht nichts.
@@ -597,6 +598,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
+    dl_discord::dm_gate::register(&mut router, central_pool.clone());
     // Modellwahl bleibt bei TURNIER_AI_MODEL; der Weg zum Modell laeuft jetzt
     // ueber das Compliance-Gate statt am Gate vorbei.
     let turnier_model = model_from_lookup(env, "TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
@@ -747,7 +749,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::nudge::register(&mut router, nudge.clone());
 
     let solo_watch =
-        dl_voice::solo_watch::SoloWatch::new(Arc::new(dl_voice::glue::SoloWatchGlue {
+        dl_voice::solo_watch::SoloWatch::without_prompts(Arc::new(dl_voice::glue::SoloWatchGlue {
             adapter: adapter.clone(),
             pool: central_pool.clone(),
             log_channel_id: dl_voice::solo_watch::LOG_CHANNEL_ID,
@@ -1181,6 +1183,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .map_err(anyhow::Error::msg)
             .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
         concierge.ensure_pate_leitfaden(&repository_root).await;
+        concierge.ensure_pate_panel(&repository_root).await;
         let paten_inventar = concierge.paten_inventar(our_guild_id).await;
         tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));
     }
@@ -1540,12 +1543,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker
         // drainiert FIFO mit >=360s Abstand pro Channel.
         dl_voice::rename_queue::init(central_pool.clone());
+        let live_dot = dl_voice::live_dot::LiveDot::new(
+            adapter.clone(),
+            dl_voice::live_dot::LiveDotConfig::new(our_guild_id, operating_value),
+        );
         dl_voice::rename_queue::spawn_worker(
             central_pool.clone(),
             Arc::new(dl_voice::glue::RenameExecGlue {
                 adapter: adapter.clone(),
+                live_dot: Some(live_dot.clone()),
             }),
         );
+        dl_voice::live_dot::spawn(live_dot, &dispatcher);
 
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
         let voice_tracker =
