@@ -1063,13 +1063,6 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
-        "turnier_solo_balance_waitlist",
-        "discord_id",
-        "turnier.solo_balance_waitlist",
-        "discord_id",
-        ColumnType::I64,
-    ),
-    TableSpec::new(
         "turnier_team_applications",
         "discord_id",
         "turnier.team_applications",
@@ -9278,6 +9271,20 @@ mod tests {
                 "{relation} fehlt in USER_TABLES"
             );
         }
+    }
+
+    #[test]
+    fn user_tables_have_unique_count_keys() {
+        let mut seen = BTreeSet::new();
+        let duplicates: Vec<String> = USER_TABLES
+            .iter()
+            .map(|spec| spec.count_key())
+            .filter(|key| !seen.insert(key.clone()))
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "duplicate USER_TABLES entries: {duplicates:?}"
+        );
     }
 
     #[tokio::test]
