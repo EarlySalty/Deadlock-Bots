@@ -15,6 +15,7 @@ mod chat_provider;
 mod chat_text;
 mod configured_chat;
 mod selected_chat;
+pub mod tool_chat;
 mod transparency;
 mod transparency_log;
 pub mod usage;

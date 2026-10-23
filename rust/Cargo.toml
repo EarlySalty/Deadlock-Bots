@@ -39,6 +39,7 @@ members = [
     "bin/dl-central-sync",
     "bin/dl-infisical-env",
     "bin/dl-unit-failure-notify",
+    "bin/dl-ai-gateway",
 ]
 exclude = ["vendor/uplink-infisical-transport", "vendor/fireworks-model-selection"]
 

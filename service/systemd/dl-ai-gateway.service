@@ -1,0 +1,16 @@
+[Unit]
+Description=Deadlock KI-Gateway (zentrale Slots, nur Loopback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/deadlock/bots/current
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/dl-ai-gateway/work
+ExecStart=/usr/bin/sudo -n /opt/deadlock/bots/current/dl-infisical-env --token-pipe --child-no-new-privileges --config /etc/deadlock-turniere/infisical-launcher.json --uid 1000 --gid 1000 -- /usr/bin/env HOME=/home/nathanael USER=nathanael LANG=C.UTF-8 XDG_RUNTIME_DIR=/run/user/1000 PATH=/home/nathanael/.local/bin:/usr/local/bin:/usr/bin:/bin /opt/deadlock/bots/current/dl-ai-gateway --config /home/nathanael/.config/deadlock-bots/dl-ai-gateway.toml
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

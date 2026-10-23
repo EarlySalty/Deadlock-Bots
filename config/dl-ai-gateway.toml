@@ -1,0 +1,24 @@
+listen = "127.0.0.1:18790"
+max_request_bytes = 4194304
+
+[providers.claude_plan]
+kind = "claude_plan"
+concurrency = 2
+queue_timeout_ms = 30000
+claude_bin = "/home/nathanael/.local/bin/claude"
+work_dir = "/home/nathanael/.local/state/dl-ai-gateway/work"
+max_output_bytes = 4194304
+
+[providers.codex_plan]
+kind = "codex_plan"
+concurrency = 2
+queue_timeout_ms = 30000
+base_url = "http://127.0.0.1:18769/v1"
+request_timeout_ms = 120000
+
+[slots.brain_answer]
+provider = "claude_plan"
+model = "claude-haiku-5-5"
+timeout_ms = 120000
+max_tokens = 4096
+fallback = []

@@ -1316,6 +1316,26 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dl-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "dl-ai",
+ "dl-central-db",
+ "dl-core",
+ "serde",
+ "serde_json",
+ "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",

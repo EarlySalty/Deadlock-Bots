@@ -1,4 +1,3 @@
-//! Dauerhafte Verbrauchsbelege ohne Nachrichten oder Zugangsdaten.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,7 +37,6 @@ pub fn initialize(pool: PgPool, service: &'static str) -> Result<(), &'static st
     Ok(())
 }
 
-/// Liest ausschließlich technische Abschlussbelege des eigenen Dienstes.
 pub async fn replay_pending() -> Result<usize, sqlx::Error> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let Some((pool, service)) = LEDGER.get() else {
@@ -50,6 +48,7 @@ pub async fn replay_pending() -> Result<usize, sqlx::Error> {
         "dl-brain-feeder" => "dl-brain-feeder.service",
         "dl-knowledge" => "dl-knowledge.service",
         "dl-verbinder" => "dl-verbinder.service",
+        "dl-ai-gateway" => "dl-ai-gateway.service",
         _ => return Ok(0),
     };
     let since: Option<String> = sqlx::query_scalar("SELECT min(ts) FROM public.llm_usage WHERE project='Deadlock-Bots' AND service=$1 AND attempt_state='started'")
@@ -103,8 +102,6 @@ pub async fn replay_pending() -> Result<usize, sqlx::Error> {
             "Journal konnte nicht gelesen werden".into(),
         ));
     }
-    // Laufende Aufrufe haben fünf Minuten Zeit; ältere offene Versuche ohne
-    // Journalbeleg bleiben unbekannt und müssen ebenfalls sichtbar gemeldet werden.
     let outstanding: i64 = sqlx::query_scalar("SELECT count(*) FROM public.llm_usage WHERE project='Deadlock-Bots' AND service=$1 AND attempt_state='started' AND ts::timestamptz < now() - interval '5 minutes'")
         .bind(service).fetch_one(pool).await?;
     unresolved_count = unresolved_count.max(usize::try_from(outstanding).unwrap_or(usize::MAX));
@@ -187,26 +184,29 @@ impl Attempt {
                 started: Instant::now(),
             });
         }
-        let unavailable = || {
-            ChatProviderError::Provider(
-                "Verbrauchserfassung nicht bereit; KI-Aufruf angehalten".into(),
-            )
-        };
-        let (pool, service) = LEDGER.get().ok_or_else(unavailable)?;
         let model = request
             .body()
             .and_then(reqwest::Body::as_bytes)
             .and_then(|body| serde_json::from_slice::<Value>(body).ok())
             .and_then(|body| body["model"].as_str().map(str::to_owned))
-            .ok_or_else(unavailable)?;
+            .ok_or_else(ledger_unavailable)?;
         let purpose = PURPOSE
             .try_with(Clone::clone)
             .unwrap_or_else(|_| "direct_chat".into());
-        let id = sqlx::query_scalar("INSERT INTO public.llm_usage (ts,source,purpose,model,tokens_in,tokens_out,total,success,project,service,provider,attempt_state) VALUES ($1,'deadlock-bots',$2,$3,NULL,NULL,NULL,0,'Deadlock-Bots',$4,'fireworks','started') RETURNING id")
-            .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false)).bind(purpose).bind(model).bind(service)
+        Self::begin_call("fireworks", &purpose, &model).await
+    }
+
+    pub async fn begin_call(
+        provider: &str,
+        purpose: &str,
+        model: &str,
+    ) -> Result<Self, ChatProviderError> {
+        let (pool, service) = LEDGER.get().ok_or_else(ledger_unavailable)?;
+        let id = sqlx::query_scalar("INSERT INTO public.llm_usage (ts,source,purpose,model,tokens_in,tokens_out,total,success,project,service,provider,attempt_state) VALUES ($1,'deadlock-bots',$2,$3,NULL,NULL,NULL,0,'Deadlock-Bots',$4,$5,'started') RETURNING id")
+            .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false)).bind(purpose).bind(model).bind(service).bind(provider)
             .fetch_one(pool).await.map_err(|_| {
                 tracing::error!("LLM_USAGE_BLOCKED: Aufrufstart konnte nicht gespeichert werden");
-                unavailable()
+                ledger_unavailable()
             })?;
         Ok(Self {
             completion: Some(Completion {
@@ -261,6 +261,33 @@ impl Attempt {
         }
     }
 
+    pub async fn finish_call(
+        mut self,
+        tokens: Option<(u64, u64)>,
+        request_id: Option<&str>,
+        error_code: Option<&str>,
+    ) {
+        if let Some(completion) = &mut self.completion {
+            completion.latency_ms =
+                i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
+            completion.success = error_code.is_none();
+            completion.error_code = error_code.map(str::to_owned);
+            if let Some((tokens_in, tokens_out)) = tokens {
+                let tokens_in = i64::try_from(tokens_in).ok();
+                let tokens_out = i64::try_from(tokens_out).ok();
+                completion.tokens_in = tokens_in;
+                completion.tokens_out = tokens_out;
+                completion.total = tokens_in
+                    .zip(tokens_out)
+                    .and_then(|(a, b)| a.checked_add(b));
+            }
+            completion.request_id = request_id.filter(|value| safe_id(value)).map(str::to_owned);
+            recovery_log(completion);
+            let _ = recover(completion).await;
+            self.completion = None;
+        }
+    }
+
     pub async fn finish_before(
         self,
         body: Option<&Value>,
@@ -288,6 +315,10 @@ impl Drop for Attempt {
             }
         }
     }
+}
+
+fn ledger_unavailable() -> ChatProviderError {
+    ChatProviderError::Provider("Verbrauchserfassung nicht bereit; KI-Aufruf angehalten".into())
 }
 
 fn safe_id(value: &str) -> bool {
@@ -335,6 +366,9 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
                     | "invalid_json"
                     | "response_body"
                     | "invalid_output"
+                    | "rate_limited"
+                    | "busy"
+                    | "invalid_request"
             )
         })
     {
@@ -472,7 +506,6 @@ mod tests {
         .await
         .unwrap();
         initialize(pool.clone(), "test-fixture").unwrap();
-        // Die URL wird nur als Metadatum gebaut; dieser Test sendet keine Anfrage.
         let request = reqwest::Client::new()
             .post("https://api.fireworks.ai/inference/v1/chat/completions")
             .json(&json!({"model":"fixture-model","messages":[{"content":"nicht speichern"}]}))
