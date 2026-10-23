@@ -43,8 +43,6 @@ pub const COACHING_FEEDBACK_CHANNEL_ID: u64 = 1494756126644895885;
 /// Reward-Rolle gilt 5 Tage (wie Python: `5 * 24 * 60 * 60`).
 pub const REWARD_ROLE_DURATION_SECS: i64 = 5 * 24 * 60 * 60;
 pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
-/// Coaches die NICHT automatisch per Round-Robin zugewiesen werden (claimen bleibt erlaubt).
-pub const AUTO_ASSIGN_OPTOUT_IDS: &[u64] = &[907263048715239456];
 /// Discord-ID des Coaches aus `coaching.sessions`.
 ///
 /// Die Spalte `coach_id` ist Text und trägt je nach Herkunft zwei Formate: der
@@ -84,16 +82,6 @@ Blödsinn), antworte AUSSCHLIESSLICH mit dem Wort: INVALID_REQUEST
 Keine Erklärung, kein weiterer Text."#;
 
 // ── Pure Bausteine ─────────────────────────────────────────────────────────
-
-/// Fairste Coach-Wahl (wie pick_fair_coach): am längsten nicht zugewiesen,
-/// dann kleinste ID. Owner/Bots filtert
-/// der Aufrufer beim Kandidaten-Sammeln.
-pub fn pick_fair_coach(candidates: &[(u64, i64)]) -> Option<u64> {
-    candidates
-        .iter()
-        .min_by_key(|(id, last_assigned_at)| (*last_assigned_at, *id))
-        .map(|(id, _)| *id)
-}
 
 pub fn normalize_inline(value: &str, fallback: &str, limit: usize) -> String {
     let cleaned: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1002,31 +990,6 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         }
     }
 
-    async fn auto_assign_stats(&self) -> Vec<(u64, i64)> {
-        let mut coach_ids = self.port.coach_member_ids(self.guild_id).await;
-        coach_ids.retain(|id| !AUTO_ASSIGN_OPTOUT_IDS.contains(id));
-        let mut result = Vec::new();
-        for id in coach_ids {
-            let coach_id = id.to_string();
-            let last_assigned_at = sqlx::query_scalar!(
-                r#"
-                SELECT last_assigned_at
-                  FROM coaching.coach_rotation
-                 WHERE coach_id = $1
-                "#,
-                coach_id,
-            )
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten()
-            .map(unix_from_utc)
-            .unwrap_or(0);
-            result.push((id, last_assigned_at));
-        }
-        result
-    }
-
     async fn post_request_to_channel(
         &self,
         request: &mut RequestData,
@@ -1035,21 +998,8 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         components: Value,
     ) -> Result<(), String> {
         request.ai_summary = ai_summary.clone();
-        let now_ts = chrono::Utc::now().timestamp();
-        // Kandidaten + Rotations-Daten
-        let stats = self.auto_assign_stats().await;
-        let assigned = pick_fair_coach(&stats);
-        let reserved_until = assigned.map(|_| now_ts + CLAIM_RESERVATION_HOURS * 3600);
-        let (status_line, accent) = match assigned {
-            Some(coach) => (
-                format!("🎯 reserviert für <@{coach}> ({CLAIM_RESERVATION_HOURS}h)"),
-                COACHING_ACCENT_ACTIVE,
-            ),
-            None => (
-                "🟢 offen für alle Coaches".to_string(),
-                COACHING_ACCENT_OPEN,
-            ),
-        };
+        let status_line = "🟢 offen für alle Coaches".to_string();
+        let accent = COACHING_ACCENT_OPEN;
         let body = request_body_v2(
             request,
             &RequestView {
@@ -1057,9 +1007,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 status_line,
                 accent,
                 include_ai,
-                reserved: assigned
-                    .zip(reserved_until)
-                    .filter(|(_, until)| now_ts < *until),
+                reserved: None,
                 components,
             },
         );
@@ -1068,15 +1016,10 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .send_request_message(REQUEST_CHANNEL_ID, body, request_banner_attachments())
             .await?;
         let request_id = request.id;
-        let assigned_coach_id = assigned.map(|coach| coach.to_string());
         let request_id_i32 = i64_to_i32(request_id, "request_id").map_err(|err| err.to_string())?;
         let message_id_i64 = u64_to_i64(message_id, "message_id").map_err(|err| err.to_string())?;
         let channel_id_i64 =
             u64_to_i64(REQUEST_CHANNEL_ID, "REQUEST_CHANNEL_ID").map_err(|err| err.to_string())?;
-        let reserved_until_dt = reserved_until
-            .map(utc_from_unix)
-            .transpose()
-            .map_err(|err| err.to_string())?;
         let updated_at = chrono::Utc::now();
         let role_expires_at = updated_at + chrono::Duration::hours(ROLE_EXPIRY_HOURS);
         sqlx::query(
@@ -1086,19 +1029,17 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                    channel_id = $2,
                    ai_summary = $3,
                    status = 'analyzed',
-                   assigned_coach_id = $4,
-                   reserved_until = $5,
-                   role_assigned_at = COALESCE(role_assigned_at, $6),
-                   role_expires_at = COALESCE(role_expires_at, $7),
-                   updated_at = $6
-             WHERE bot_request_id = $8
+                   assigned_coach_id = NULL,
+                   reserved_until = NULL,
+                   role_assigned_at = COALESCE(role_assigned_at, $4),
+                   role_expires_at = COALESCE(role_expires_at, $5),
+                   updated_at = $4
+             WHERE bot_request_id = $6
             "#,
         )
         .bind(message_id_i64)
         .bind(channel_id_i64)
         .bind(ai_summary)
-        .bind(assigned_coach_id)
-        .bind(reserved_until_dt)
         .bind(updated_at)
         .bind(role_expires_at)
         .bind(request_id_i32)
@@ -1112,38 +1053,14 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             "Coaching-Anfrage analysiert",
         )
         .await;
-        if let Some(coach) = assigned {
-            sqlx::query!(
-                r#"
-                INSERT INTO coaching.coach_rotation(coach_id, last_assigned_at)
-                VALUES ($1, $2)
-                ON CONFLICT(coach_id) DO UPDATE SET
-                  last_assigned_at = excluded.last_assigned_at
-                "#,
-                coach.to_string(),
-                updated_at,
-            )
-            .execute(&self.pool)
-            .await
-            .map_err(|err| err.to_string())?;
-        }
-        // Website-Mirror (Python `_post_request_to_channel`:852) — mit
-        // dem Display-Namen des reservierten Coaches, falls einer
-        // zugewiesen wurde.
-        let assigned_coach_username = match assigned {
-            Some(coach) => Some(self.port.member_display_name(self.guild_id, coach).await),
-            None => None,
-        };
         self.mirror_to_website(MirrorOpts {
             request_id: request.id,
-            assigned_coach_username,
             ..MirrorOpts::default()
         });
         Ok(())
     }
 
-    /// Anfrage posten (wie _post_request_to_channel): faire Rotation +
-    /// 24-h-Reservierung.
+    /// Anfrage posten (wie _post_request_to_channel): offen für alle Coaches.
     async fn post_request(&self, request: &mut RequestData, ai_summary: String) {
         let components = claim_components(request.id, request.user_id);
         if let Err(err) = self
@@ -3362,10 +3279,7 @@ mod pg_tests {
     async fn test_coaching() -> (TestDb, Arc<MockCoachingPort>, Arc<CoachingRequests>) {
         let db = test_pool().await.expect("test pool");
         let port = Arc::new(MockCoachingPort::default());
-        port.coach_ids
-            .lock()
-            .expect("coach_ids lock")
-            .extend([AUTO_ASSIGN_OPTOUT_IDS[0], 12345]);
+        port.coach_ids.lock().expect("coach_ids lock").push(12345);
         port.role_ids
             .lock()
             .expect("role_ids lock")
@@ -3655,7 +3569,7 @@ mod pg_tests {
     }
 
     #[tokio::test]
-    async fn post_request_to_channel_schreibt_rotation_und_post_status() {
+    async fn post_request_to_channel_postet_offen_ohne_reservierung() {
         let (db, port, coaching) = test_coaching().await;
         let data = notification("web-post", 900);
         let upsert = coaching
@@ -3684,9 +3598,9 @@ mod pg_tests {
         let body = &messages[0].body;
         assert_eq!(body["flags"], json!(COACHING_COMPONENTS_V2_FLAG));
         let text = container_text(body);
-        assert!(text.contains("reserviert"), "{text}");
+        assert!(text.contains("offen für alle Coaches"), "{text}");
         assert!(text.contains("## 🎮 Neue Coaching-Anfrage"), "{text}");
-        assert_eq!(container_accent(body), COACHING_ACCENT_ACTIVE);
+        assert_eq!(container_accent(body), COACHING_ACCENT_OPEN);
         assert!(
             body["components"][0]["components"]
                 .as_array()
@@ -3718,25 +3632,12 @@ mod pg_tests {
             Some(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id"))
         );
         assert_eq!(row.status, "analyzed");
-        assert_eq!(row.assigned_coach_id.as_deref(), Some("12345"));
+        assert_eq!(row.assigned_coach_id, None);
         assert_eq!(
             row.ai_summary,
             Some("**Analyse:** Map Movement".to_string())
         );
-        assert!(row.reserved_until.is_some());
-
-        let rotation = sqlx::query!(
-            r#"
-            SELECT coach_id, last_assigned_at
-              FROM coaching.coach_rotation
-             WHERE coach_id = '12345'
-            "#
-        )
-        .fetch_one(db.pool())
-        .await
-        .expect("rotation row");
-        assert_eq!(rotation.coach_id, "12345");
-        assert!(rotation.last_assigned_at <= chrono::Utc::now());
+        assert!(row.reserved_until.is_none());
     }
 
     #[tokio::test]
