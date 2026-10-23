@@ -10,6 +10,9 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const ROOT: &str = "/opt/deadlock/bots";
+const GATEWAY_CONFIG: &str = "/home/nathanael/.config/deadlock-bots/dl-ai-gateway.toml";
+const OWNER_UID: u32 = 1000;
+const REBUILT: [&str; 2] = ["dl-bot", "dl-ai-gateway"];
 
 fn run(program: &str, arguments: &[&str]) -> Result<String> {
     let output = Command::new(program)
@@ -81,20 +84,59 @@ fn hash(path: &Path) -> Result<String> {
         .ok_or_else(|| "Ungültiger Dateihash".into())
 }
 
+fn as_owner(command: &[&str]) -> Result<String> {
+    let mut arguments = vec![
+        "-u",
+        "nathanael",
+        "--",
+        "/usr/bin/env",
+        "XDG_RUNTIME_DIR=/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+    ];
+    arguments.extend_from_slice(command);
+    run("/usr/sbin/runuser", &arguments)
+}
+
 fn restart() -> Result<()> {
+    as_owner(&["/usr/local/bin/bot-restart", "dl-bot"])?;
+    as_owner(&[
+        "/usr/bin/systemctl",
+        "--user",
+        "restart",
+        "dl-ai-gateway.service",
+    ])?;
+    Ok(())
+}
+
+fn install_gateway_config(source: &Path, gateway: &Path, target: &Path) -> Result<()> {
+    let origin = source.join("config/dl-ai-gateway.toml");
+    if !fs::symlink_metadata(&origin)?.is_file() {
+        return Err("Die Gateway-Konfiguration im Quellstand fehlt".into());
+    }
+    let directory = target.parent().ok_or("Ungültiger Konfigurationspfad")?;
+    owned(directory, true, OWNER_UID)?;
+    if fs::symlink_metadata(target).is_ok() {
+        owned(target, false, OWNER_UID)?;
+    }
+    let staged = directory.join(".dl-ai-gateway.toml.install");
     run(
-        "/usr/sbin/runuser",
+        "/usr/bin/install",
         &[
-            "-u",
+            "-o",
             "nathanael",
-            "--",
-            "/usr/bin/env",
-            "XDG_RUNTIME_DIR=/run/user/1000",
-            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
-            "/usr/local/bin/bot-restart",
-            "dl-bot",
+            "-g",
+            "nathanael",
+            "-m",
+            "0600",
+            text(&origin)?,
+            text(&staged)?,
         ],
     )?;
+    if let Err(error) = as_owner(&[text(gateway)?, "--check-config", "--config", text(&staged)?]) {
+        fs::remove_file(&staged)?;
+        return Err(error);
+    }
+    fs::rename(&staged, target)?;
     Ok(())
 }
 
@@ -131,6 +173,7 @@ struct Provenance {
     source_sha: String,
     rebuilt_binaries: Vec<String>,
     dl_bot_sha256: String,
+    dl_ai_gateway_sha256: String,
     retained_from_release: String,
     retained_provenance: String,
 }
@@ -139,12 +182,13 @@ fn reusable_candidate(
     candidate: &Path,
     previous: &Path,
     sha: &str,
-    expected_hash: &str,
+    expected: &[(&str, &str); 2],
     uid: u32,
 ) -> Result<()> {
     owned(candidate, true, uid)?;
     for name in [
         "dl-bot",
+        "dl-ai-gateway",
         "dl-web",
         "dl-infisical-env",
         "BUILD-PROVENANCE.toml",
@@ -155,18 +199,22 @@ fn reusable_candidate(
         candidate.join("BUILD-PROVENANCE.toml"),
     )?)?;
     if manifest.source_sha != sha
-        || manifest.dl_bot_sha256 != expected_hash
-        || manifest.rebuilt_binaries.len() != 1
-        || manifest.rebuilt_binaries[0] != "dl-bot"
+        || manifest.dl_bot_sha256 != expected[0].1
+        || manifest.dl_ai_gateway_sha256 != expected[1].1
+        || manifest.rebuilt_binaries != REBUILT
         || !valid_hex(&manifest.retained_from_release, 40)
         || manifest.retained_provenance
             != format!(
                 "BASE-BUILD-PROVENANCE-{}.toml",
                 manifest.retained_from_release
             )
-        || hash(&candidate.join("dl-bot"))? != expected_hash
     {
         return Err("Der vorhandene Release passt nicht zum geprüften Artefakt".into());
+    }
+    for (name, checksum) in expected {
+        if hash(&candidate.join(name))? != *checksum {
+            return Err("Der vorhandene Release passt nicht zum geprüften Artefakt".into());
+        }
     }
     owned(&candidate.join(&manifest.retained_provenance), false, uid)?;
     if previous != candidate
@@ -207,20 +255,27 @@ fn refresh_assets(source: &Path, stage: &Path) -> Result<()> {
     owned(&assets, true, fs::metadata(stage)?.uid())
 }
 
-fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Result<()> {
+fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 2]) -> Result<()> {
     if run("/usr/bin/id", &["-u"])? != "0" {
         return Err("Der Releasewechsel benötigt root".into());
     }
-    if !valid_hex(sha, 40) || !valid_hex(expected_hash, 64) {
+    if !valid_hex(sha, 40)
+        || !artifacts
+            .iter()
+            .all(|(_, checksum)| valid_hex(checksum, 64))
+    {
         return Err("Ungültiger Commit oder Dateihash".into());
     }
     let source = source.canonicalize()?;
     if !source.starts_with("/home/nathanael/.worktrees") {
         return Err("Die Quelle muss ein eigener Worktree sein".into());
     }
-    if !fs::symlink_metadata(artifact)?.is_file() {
-        return Err("Das Artefakt muss eine reguläre Datei sein".into());
+    for (artifact, _) in artifacts {
+        if !fs::symlink_metadata(artifact)?.is_file() {
+            return Err("Das Artefakt muss eine reguläre Datei sein".into());
+        }
     }
+    let expected = [(REBUILT[0], artifacts[0].1), (REBUILT[1], artifacts[1].1)];
     for path in ["/opt", "/opt/deadlock", ROOT, "/opt/deadlock/bots/releases"] {
         owned(Path::new(path), true, 0)?;
     }
@@ -268,7 +323,7 @@ fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Re
     let candidate = root.join("releases").join(sha);
     let switch = TemporaryDirectory::new(&format!("{ROOT}/.switch-discord-XXXXXXXX"))?;
     if candidate.try_exists()? || fs::symlink_metadata(&candidate).is_ok() {
-        reusable_candidate(&candidate, &previous, sha, expected_hash, 0)?;
+        reusable_candidate(&candidate, &previous, sha, &expected, 0)?;
     } else {
         let stage =
             TemporaryDirectory::new(&format!("{ROOT}/releases/.stage-discord-{sha}-XXXXXXXX"))?;
@@ -294,21 +349,25 @@ fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Re
             return Err("Der Herkunftsnachweis des Ausgangsreleases existiert bereits".into());
         }
         fs::copy(stage.0.join("BUILD-PROVENANCE.toml"), &base)?;
-        run(
-            "/usr/bin/install",
-            &[
-                "-o",
-                "root",
-                "-g",
-                "root",
-                "-m",
-                "0755",
-                text(artifact)?,
-                text(&stage.0.join("dl-bot"))?,
-            ],
-        )?;
-        if hash(&stage.0.join("dl-bot"))? != expected_hash {
-            return Err("Der kopierte Bot stimmt nicht mit dem geprüften Artefakt überein".into());
+        for ((artifact, checksum), name) in artifacts.iter().zip(REBUILT) {
+            run(
+                "/usr/bin/install",
+                &[
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    "-m",
+                    "0755",
+                    text(artifact)?,
+                    text(&stage.0.join(name))?,
+                ],
+            )?;
+            if hash(&stage.0.join(name))? != *checksum {
+                return Err(
+                    "Das kopierte Binary stimmt nicht mit dem geprüften Artefakt überein".into(),
+                );
+            }
         }
         refresh_assets(&source, &stage.0)?;
         for name in ["dl-web", "dl-infisical-env"] {
@@ -317,11 +376,12 @@ fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Re
             }
         }
         fs::write(
-        stage.0.join("BUILD-PROVENANCE.toml"),
-        format!(
-            "source_sha = \"{sha}\"\nrebuilt_binaries = [\"dl-bot\"]\ndl_bot_sha256 = \"{expected_hash}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord Concierge und FAQ über den Brain-Aufgabenvertrag; Begleitbinaries unverändert übernommen; keine Konfigurations- oder Migrationsänderung\"\n"
-        ),
-    )?;
+            stage.0.join("BUILD-PROVENANCE.toml"),
+            format!(
+                "source_sha = \"{sha}\"\nrebuilt_binaries = [\"dl-bot\", \"dl-ai-gateway\"]\ndl_bot_sha256 = \"{}\"\ndl_ai_gateway_sha256 = \"{}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot und KI-Gateway aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration aus dem Repository; keine Migrationsänderung\"\n",
+                artifacts[0].1, artifacts[1].1
+            ),
+        )?;
         source_matches(&source, sha)?;
         if current.canonicalize()? != previous || fs::read_link(&current)? != previous_link {
             return Err("Der Ausgangsrelease hat sich vor dem Wechsel verändert".into());
@@ -332,6 +392,11 @@ fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Re
     if current.canonicalize()? != previous || fs::read_link(&current)? != previous_link {
         return Err("Der Ausgangsrelease hat sich vor dem Wechsel verändert".into());
     }
+    install_gateway_config(
+        &source,
+        &candidate.join("dl-ai-gateway"),
+        Path::new(GATEWAY_CONFIG),
+    )?;
     activate(&current, &Path::new("releases").join(sha), &switch.0)?;
     if let Err(error) = restart() {
         activate(&current, &previous_link, &switch.0)?;
@@ -340,16 +405,29 @@ fn install(source: &Path, artifact: &Path, sha: &str, expected_hash: &str) -> Re
         }
         return Err(error);
     }
-    println!("Discord-Release aktiviert: {sha}; dl-bot SHA256 {expected_hash}");
+    println!(
+        "Discord-Release aktiviert: {sha}; dl-bot SHA256 {}; dl-ai-gateway SHA256 {}",
+        artifacts[0].1, artifacts[1].1
+    );
     Ok(())
 }
 
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let [source, artifact, sha, expected_hash] = arguments.as_slice() else {
-        return Err("Aufruf: install_discord_release QUELLE ARTEFAKT SHA SHA256".into());
+    let [source, bot, sha, bot_hash, gateway, gateway_hash] = arguments.as_slice() else {
+        return Err(
+            "Aufruf: install_discord_release QUELLE ARTEFAKT SHA SHA256 GATEWAY_ARTEFAKT GATEWAY_SHA256"
+                .into(),
+        );
     };
-    install(Path::new(source), Path::new(artifact), sha, expected_hash)
+    install(
+        Path::new(source),
+        sha,
+        &[
+            (Path::new(bot), bot_hash.as_str()),
+            (Path::new(gateway), gateway_hash.as_str()),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -390,8 +468,17 @@ mod tests {
         previous: PathBuf,
         candidate: PathBuf,
         sha: String,
-        checksum: String,
+        checksums: [String; 2],
         uid: u32,
+    }
+
+    impl CandidateFixture {
+        fn expected(&self) -> [(&str, &str); 2] {
+            [
+                (REBUILT[0], self.checksums[0].as_str()),
+                (REBUILT[1], self.checksums[1].as_str()),
+            ]
+        }
     }
 
     fn candidate_fixture() -> Result<CandidateFixture> {
@@ -403,12 +490,15 @@ mod tests {
         for path in [&previous, &candidate] {
             fs::create_dir(path)?;
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-            for name in ["dl-bot", "dl-web", "dl-infisical-env"] {
+            for name in ["dl-bot", "dl-ai-gateway", "dl-web", "dl-infisical-env"] {
                 fs::write(path.join(name), name.as_bytes())?;
                 fs::set_permissions(path.join(name), fs::Permissions::from_mode(0o600))?;
             }
         }
-        let checksum = hash(&candidate.join("dl-bot"))?;
+        let checksums = [
+            hash(&candidate.join("dl-bot"))?,
+            hash(&candidate.join("dl-ai-gateway"))?,
+        ];
         let base_name = format!("BASE-BUILD-PROVENANCE-{previous_sha}.toml");
         fs::write(candidate.join(&base_name), "source_sha = 'fixture'\n")?;
         fs::set_permissions(
@@ -417,7 +507,7 @@ mod tests {
         )?;
         fs::write(
             candidate.join("BUILD-PROVENANCE.toml"),
-            format!("source_sha = '{sha}'\nrebuilt_binaries = ['dl-bot']\ndl_bot_sha256 = '{checksum}'\nretained_from_release = '{previous_sha}'\nretained_provenance = '{base_name}'\n"),
+            format!("source_sha = '{sha}'\nrebuilt_binaries = ['dl-bot', 'dl-ai-gateway']\ndl_bot_sha256 = '{}'\ndl_ai_gateway_sha256 = '{}'\nretained_from_release = '{previous_sha}'\nretained_provenance = '{base_name}'\n", checksums[0], checksums[1]),
         )?;
         fs::set_permissions(
             candidate.join("BUILD-PROVENANCE.toml"),
@@ -429,7 +519,7 @@ mod tests {
             previous,
             candidate,
             sha,
-            checksum,
+            checksums,
             uid,
         })
     }
@@ -447,14 +537,14 @@ mod tests {
             &fixture.candidate,
             &fixture.previous,
             &fixture.sha,
-            &fixture.checksum,
+            &fixture.expected(),
             fixture.uid,
         )?;
         reusable_candidate(
             &fixture.candidate,
             &fixture.candidate,
             &fixture.sha,
-            &fixture.checksum,
+            &fixture.expected(),
             fixture.uid,
         )?;
         Ok(())
@@ -468,17 +558,27 @@ mod tests {
             &fixture.candidate,
             &fixture.previous,
             &fixture.sha,
-            &fixture.checksum,
+            &fixture.expected(),
             fixture.uid
         )
         .is_err());
         fs::write(fixture.candidate.join("dl-bot"), b"dl-bot")?;
+        fs::write(fixture.candidate.join("dl-ai-gateway"), b"changed")?;
+        assert!(reusable_candidate(
+            &fixture.candidate,
+            &fixture.previous,
+            &fixture.sha,
+            &fixture.expected(),
+            fixture.uid
+        )
+        .is_err());
+        fs::write(fixture.candidate.join("dl-ai-gateway"), b"dl-ai-gateway")?;
         fs::write(fixture.candidate.join("dl-web"), b"changed")?;
         assert!(reusable_candidate(
             &fixture.candidate,
             &fixture.previous,
             &fixture.sha,
-            &fixture.checksum,
+            &fixture.expected(),
             fixture.uid
         )
         .is_err());
