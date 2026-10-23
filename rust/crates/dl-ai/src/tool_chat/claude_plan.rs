@@ -1,6 +1,7 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
@@ -13,6 +14,35 @@ use super::types::{ToolChatRequest, ToolChatResponse, Usage};
 
 const PASSED_ENV: [&str; 5] = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"];
 const ENVELOPE_TOKENS: u32 = 512;
+
+static PROMPT_FILES: AtomicU64 = AtomicU64::new(0);
+
+struct PromptFile(PathBuf);
+
+impl PromptFile {
+    async fn write(dir: &Path, text: &str) -> Result<Self, BackendError> {
+        let failed = |_| BackendError::new(FailureKind::Unavailable, "prompt_file");
+        let id = PROMPT_FILES.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("system-{}-{id}.txt", std::process::id()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .await
+            .map_err(failed)?;
+        let prompt = Self(path);
+        file.write_all(text.as_bytes()).await.map_err(failed)?;
+        file.flush().await.map_err(failed)?;
+        Ok(prompt)
+    }
+}
+
+impl Drop for PromptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 
 pub struct ClaudePlanBackend {
     binary: PathBuf,
@@ -42,7 +72,7 @@ impl ClaudePlanBackend {
         }
     }
 
-    fn command(&self, model: &str, system: &str, schema: &str, max_tokens: u32) -> Command {
+    fn command(&self, model: &str, system: &Path, schema: &str, max_tokens: u32) -> Command {
         let mut command = Command::new(&self.binary);
         command
             .args([
@@ -56,8 +86,6 @@ impl ClaudePlanBackend {
                 schema,
                 "--model",
                 model,
-                "--system-prompt",
-                system,
                 "--tools",
                 "",
                 "--strict-mcp-config",
@@ -65,7 +93,9 @@ impl ClaudePlanBackend {
                 "project",
                 "--disable-slash-commands",
                 "--no-session-persistence",
+                "--system-prompt-file",
             ])
+            .arg(system)
             .current_dir(&self.work_dir)
             .env_clear()
             .envs(self.env.iter().map(|(name, value)| (*name, value)))
@@ -95,8 +125,9 @@ impl ClaudePlanBackend {
         }))
         .map_err(|_| BackendError::new(FailureKind::InvalidRequest, "content"))?;
         input.push(b'\n');
+        let system = PromptFile::write(&self.work_dir, &prompt.system).await?;
         let mut child = self
-            .command(model, &prompt.system, &schema, max_tokens)
+            .command(model, &system.0, &schema, max_tokens)
             .spawn()
             .map_err(|_| unavailable("spawn_failed"))?;
         let mut stdin = child.stdin.take().ok_or_else(|| unavailable("no_stdin"))?;
@@ -302,7 +333,7 @@ mod tests {
         let script = dir.join("claude");
         std::fs::write(
             &script,
-            "#!/bin/sh\ncat >/dev/null\nif [ -n \"$DL_SECRET_PROBE\" ]; then leak=1; else leak=0; fi\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":\"leak=%s max=%s\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":2},\"modelUsage\":{\"claude-haiku-5-5\":{}}}\\n' \"$leak\" \"$CLAUDE_CODE_MAX_OUTPUT_TOKENS\"\n",
+            "#!/bin/sh\ncat >/dev/null\nif [ -n \"$DL_SECRET_PROBE\" ]; then leak=1; else leak=0; fi\neval last=\\${$#}\nif grep -q sys \"$last\"; then file=1; else file=0; fi\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":\"leak=%s max=%s file=%s\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":2},\"modelUsage\":{\"claude-haiku-5-5\":{}}}\\n' \"$leak\" \"$CLAUDE_CODE_MAX_OUTPUT_TOKENS\" \"$file\"\n",
         )
         .expect("script");
         use std::os::unix::fs::PermissionsExt;
@@ -331,10 +362,16 @@ mod tests {
         assert_eq!(
             response.content,
             vec![super::super::types::ContentBlock::Text {
-                text: "leak=0 max=833".into()
+                text: "leak=0 max=833 file=1".into()
             }]
         );
         assert_eq!(response.usage.map(|u| u.input_tokens), Some(5));
+        let leftover = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("system-"))
+            .count();
+        assert_eq!(leftover, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
