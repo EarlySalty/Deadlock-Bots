@@ -50,6 +50,8 @@ pub(crate) fn check_cooldown(stamps: &mut Vec<f64>, now: f64) -> Option<String> 
 
 pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const KNOWLEDGE_UNAVAILABLE_TEXT: &str =
+    "Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.";
 pub const CONCIERGE_OWNER_TOPIC_PREFIX: &str = "dl-concierge-owner:";
 pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
 pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
@@ -1490,6 +1492,14 @@ fn with_response_components(
     };
     components.extend(rows.iter().cloned());
     body
+}
+
+fn private_error_reply(
+    outcome: ConciergeAnswerOutcome,
+    allow_personal_actions: bool,
+) -> Option<String> {
+    (allow_personal_actions && outcome == ConciergeAnswerOutcome::Error)
+        .then(|| KNOWLEDGE_UNAVAILABLE_TEXT.to_owned())
 }
 
 fn answer_body(
@@ -4894,6 +4904,25 @@ impl Concierge {
         }
     }
 
+    pub async fn owns_message(&self, event: &dl_discord::MessageEvent) -> bool {
+        if !self.enabled() || !self.config.user_allowed(event.author_id) {
+            return false;
+        }
+        let control_text = event.content.trim();
+        let is_public_support = event.guild_id == Some(self.config.main_guild_id)
+            && event.channel_id == SERVER_BOT_FRAGEN_CHANNEL_ID;
+        if event.guild_id == Some(self.config.main_guild_id) && !is_public_support {
+            if let Some(question) = self.bot_mention_question(control_text) {
+                if self.is_pate_knowledge_channel(event.channel_id).await {
+                    return !parse_brain_command(&question).1.is_empty();
+                }
+            }
+        }
+        self.effective_guild_id(event.channel_id, event.guild_id, event.author_id)
+            .await
+            .is_some()
+    }
+
     async fn handle_user_message_inner(
         &self,
         channel_id: u64,
@@ -5252,7 +5281,11 @@ impl Concierge {
         let source = answer.source;
         let knowledge_hit = answer.knowledge_hit;
         let answer_outcome = answer.outcome;
-        let Some(reply) = answer.answer.reply else {
+        let Some(reply) = answer
+            .answer
+            .reply
+            .or_else(|| private_error_reply(answer_outcome, allow_personal_actions))
+        else {
             let outcome = match delivery_tx.commit().await {
                 Ok(()) => answer_outcome,
                 Err(err) => {
@@ -5735,7 +5768,11 @@ impl Concierge {
             ),
             Err(error) => {
                 tracing::warn!(%error, "Concierge: gemeinsame Wissensantwort fehlgeschlagen");
-                ("Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into(), false, ConciergeAnswerOutcome::Error)
+                (
+                    KNOWLEDGE_UNAVAILABLE_TEXT.into(),
+                    false,
+                    ConciergeAnswerOutcome::Error,
+                )
             }
         };
         let decision = AnswerDecision {
@@ -5937,7 +5974,11 @@ impl Concierge {
         let knowledge_hit = decision.knowledge_hit;
         let outcome = decision.outcome;
         let pate_request = decision.answer.pate_request;
-        let Some(reply) = decision.answer.reply else {
+        let Some(reply) = decision
+            .answer
+            .reply
+            .or_else(|| private_error_reply(outcome, allow_personal_actions))
+        else {
             return AnswerTerminal {
                 source,
                 knowledge_hit,
@@ -10947,7 +10988,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn brain_only_concierge_preserves_docs_links_and_sends_no_failure_reply() {
+    async fn brain_only_concierge_sends_one_reply_per_question_and_errors_only_privately() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("Concierge-Testdatenbank");
@@ -10991,20 +11032,44 @@ mod tests {
                 .await;
             assert_eq!(calls.load(Ordering::SeqCst), 2);
             let answered = status == "answered";
+            let failed = matches!(
+                status,
+                "budget_exceeded"
+                    | "provider_error"
+                    | "unavailable"
+                    | "invalid_contract"
+                    | "http_error"
+            );
             assert_eq!(terminal.message_id.is_some(), answered, "{status}");
             {
                 let sent = port.sent_channel_v2.lock().expect("Nachrichtenrecorder");
-                assert_eq!(sent.len(), if answered { 2 } else { 0 }, "{status}");
+                let expected = match (answered, failed) {
+                    (true, _) => 2,
+                    (false, true) => 1,
+                    (false, false) => 0,
+                };
+                assert_eq!(sent.len(), expected, "{status}");
                 for body in sent.iter() {
-                    assert!(serde_json::to_string(body)
-                        .expect("Discord-Body")
-                        .contains(crate::faq::BRAIN_DOCS_FIXTURE_URL));
+                    assert_eq!(body["flags"], json!(CONCIERGE_COMPONENTS_V2_FLAG));
+                    assert_eq!(
+                        body["components"][0]["accent_color"],
+                        json!(CONCIERGE_ACCENT_GOLD)
+                    );
+                    assert!(!body.contains_key("content"));
+                    assert!(!body.contains_key("embeds"));
+                    if failed {
+                        assert_eq!(sent_v2_content(body), KNOWLEDGE_UNAVAILABLE_TEXT);
+                    } else {
+                        assert!(serde_json::to_string(body)
+                            .expect("Discord-Body")
+                            .contains(crate::faq::BRAIN_DOCS_FIXTURE_URL));
+                    }
                 }
             }
             assert!(provider.requests().is_empty());
             let assistant_count: i64 = sqlx::query_scalar("SELECT count(*) FROM bot.concierge_conversations WHERE user_id = 42 AND role = 'assistant'")
                 .fetch_one(db.pool()).await.expect("Concierge-Verlauf");
-            assert_eq!(assistant_count, i64::from(answered));
+            assert_eq!(assistant_count, i64::from(answered || failed));
             sqlx::query("DELETE FROM bot.concierge_conversations WHERE user_id = 42")
                 .execute(db.pool())
                 .await

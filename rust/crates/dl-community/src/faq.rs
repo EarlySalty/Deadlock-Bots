@@ -1149,10 +1149,17 @@ impl FaqChat {
         if self.answers.is_some() {
             match lookup {
                 #[cfg(test)]
-                KnowledgeLookup::Timeout => return Some("Das Nachschlagen dauert gerade zu lange. Versuch es bitte gleich noch einmal.".into()),
+                KnowledgeLookup::Timeout => return Some(
+                    "Das Nachschlagen dauert gerade zu lange. Versuch es bitte gleich noch einmal."
+                        .into(),
+                ),
                 #[cfg(test)]
-                KnowledgeLookup::InvalidResponse => return Some("Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into()),
-                KnowledgeLookup::Transport => return Some("Ich komme gerade nicht zuverlässig an mein Wissen. Versuch es bitte später noch einmal.".into()),
+                KnowledgeLookup::InvalidResponse => {
+                    return Some(crate::concierge::KNOWLEDGE_UNAVAILABLE_TEXT.into())
+                }
+                KnowledgeLookup::Transport => {
+                    return Some(crate::concierge::KNOWLEDGE_UNAVAILABLE_TEXT.into())
+                }
                 _ => {}
             }
         }
@@ -1411,6 +1418,20 @@ impl FaqChat {
         let action = self.chat_action_lock(channel_id);
         let _guard = action.lock().await;
         self.handle_chat_message_inner(guild_id, channel_id, author_id, author_name, content)
+            .await
+    }
+
+    pub async fn owns_message(&self, event: &dl_discord::MessageEvent) -> bool {
+        let guild_id = event.guild_id.unwrap_or_default();
+        if let Ok(Some(_)) = self
+            .store
+            .active_session_in_channel_checked(event.channel_id)
+            .await
+        {
+            return true;
+        }
+        self.port
+            .private_faq_channel_owned_by_user(guild_id, event.channel_id, event.author_id)
             .await
     }
 

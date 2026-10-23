@@ -1107,6 +1107,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 emoji_index: Arc::new(modglue::BrainEmojiIndex::default()),
                 guide_pending: Default::default(),
                 conversations: Default::default(),
+                message_owners: Default::default(),
             }))
         }
     };
@@ -1176,6 +1177,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Verify-Panel (Dashboard, /internal/v1/discord/twitch-link/initiate).
     concierge.install_twitch_link_source(Arc::new(concierge_twitch_link));
     dl_community::concierge::register(&mut router, concierge.clone());
+    if let Some(handler) = &brain_handler {
+        let owners: Vec<Arc<dyn modglue::BrainMessageOwner>> = vec![concierge.clone(), faq.clone()];
+        if handler.message_owners.set(owners).is_err() {
+            tracing::warn!("Brain-Nachrichtenzuständigkeit war bereits gesetzt");
+        }
+    }
     if concierge.enabled() {
         concierge
             .import_legacy_pate_requests()
