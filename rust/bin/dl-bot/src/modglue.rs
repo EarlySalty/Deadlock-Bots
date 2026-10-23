@@ -1,10 +1,7 @@
 //! Discord-Glue für dl-moderation (ModPort + aimod:*-Review-Buttons).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
@@ -18,8 +15,7 @@ use serenity::all::{
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
 use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const INVITE_CACHE_MAX_ENTRIES: usize = 256;
@@ -36,20 +32,16 @@ const BRAIN_DAILY_LIMIT: &str =
     "Deine Brain-Fragen für heute sind aufgebraucht. Morgen geht es weiter.";
 const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅. Pack deine Frage in unter {max} Zeichen.";
-#[allow(dead_code)]
-const BRAIN_WORKING: &str = "🧠 Moment, ich wühl kurz im Brain…";
-const BRAIN_THINKING_FRAMES: [&str; 3] = ["💭 .", "💭 . .", "💭 . . ."];
-const BRAIN_THINKING_INTERVAL: Duration = Duration::from_millis(1200);
-const BRAIN_THINKING_MAX_TICKS: usize = 40;
 const BRAIN_CONVERSATION_TTL: Duration = Duration::from_secs(10 * 60);
-const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad. Probier's in ein paar Sekunden nochmal.";
+const BRAIN_BACKEND_ERR: &str = dl_community::concierge::KNOWLEDGE_UNAVAILABLE_TEXT;
 const BRAIN_PRIVATE_HELP: &str = "Private Fragen kann ich gerade nicht sicher beantworten. Für persönliche Hilfe öffne ein Ticket in <#1459628609705738539>. Allgemeine Fragen zum Server kannst du in <#1426220702054355077> stellen, ohne persönliche Angaben.";
 const BRAIN_SLASH_NO_ANSWER: &str = "Dazu habe ich gerade keine gesicherte Antwort.";
 const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain";
-const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
-const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
-const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
+const BRAIN_V2_FLAG: u64 = 1 << 15;
+const BRAIN_EPHEMERAL_FLAG: u64 = 1 << 6;
+const BRAIN_V2_TEXT_LIMIT: usize = 4000;
+const BRAIN_SOURCE_MARKER: &str = "\n\nQuelle: <https://github.com/EarlySalty/Deadlock-Docs/blob/";
 
 #[derive(Debug, Clone, Default)]
 pub struct BrainEmojiIndex {
@@ -259,6 +251,26 @@ pub struct BrainHandler {
     pub emoji_index: Arc<BrainEmojiIndex>,
     pub guide_pending: tokio::sync::Mutex<Option<(u64, u64)>>,
     pub conversations: Mutex<BrainConversations>,
+    pub message_owners: std::sync::OnceLock<Vec<Arc<dyn BrainMessageOwner>>>,
+}
+
+#[async_trait::async_trait]
+pub trait BrainMessageOwner: Send + Sync {
+    async fn claims_message(&self, event: &dl_discord::MessageEvent) -> bool;
+}
+
+#[async_trait::async_trait]
+impl BrainMessageOwner for dl_community::concierge::Concierge {
+    async fn claims_message(&self, event: &dl_discord::MessageEvent) -> bool {
+        self.owns_message(event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl BrainMessageOwner for dl_community::faq::FaqChat {
+    async fn claims_message(&self, event: &dl_discord::MessageEvent) -> bool {
+        self.owns_message(event).await
+    }
 }
 
 #[derive(Default)]
@@ -626,13 +638,7 @@ fn guide_question(event: &dl_discord::MessageEvent, bot_id: u64) -> bool {
 }
 
 fn direct_brain_reply_body(event: &dl_discord::MessageEvent, text: &str) -> Map<String, Value> {
-    let mut body = if text.encode_utf16().count() <= dl_brain::DISCORD_MESSAGE_LIMIT {
-        brain_public_message_body(text)
-    } else {
-        let mut body = brain_public_message_body("");
-        body.insert("embeds".into(), json!([{"description": text}]));
-        body
-    };
+    let mut body = brain_public_message_body(text);
     body.insert(
         "message_reference".into(),
         json!({
@@ -743,10 +749,15 @@ impl BrainHandler {
         self.public_bodies_for_outcome(question, outcome).pop()
     }
 
-    async fn send_public_bodies(&self, channel_id: u64, bodies: &[Map<String, Value>]) {
+    async fn send_public_bodies(
+        &self,
+        event: &dl_discord::MessageEvent,
+        replies: &dyn BrainDirectReplyPort,
+        bodies: &[Map<String, Value>],
+    ) {
         for body in bodies {
-            if let Err(err) = self.adapter.send_raw_public(channel_id, body).await {
-                tracing::warn!(%err, channel_id, "Brain-Antwort konnte nicht gesendet werden");
+            if let Err(err) = replies.reply(event, body).await {
+                tracing::warn!(%err, channel_id = event.channel_id, "Brain-Antwort konnte nicht gesendet werden");
                 break;
             }
         }
@@ -754,19 +765,21 @@ impl BrainHandler {
 
     async fn handle_brain_question(
         &self,
-        channel_id: u64,
+        event: &dl_discord::MessageEvent,
         context: &dl_brain::DiscordQueryContext,
         question: &str,
+        replies: &dyn BrainDirectReplyPort,
     ) {
         match self
             .cooldowns
-            .reserve_discord(context.user_id, channel_id)
+            .reserve_discord(context.user_id, event.channel_id)
             .await
         {
             dl_brain::DiscordReservation::Accepted => {}
             dl_brain::DiscordReservation::DailyLimit => {
                 self.send_public_bodies(
-                    channel_id,
+                    event,
+                    replies,
                     &[brain_public_message_body(BRAIN_DAILY_LIMIT)],
                 )
                 .await;
@@ -776,65 +789,21 @@ impl BrainHandler {
         }
         if question.trim().is_empty() {
             let bodies = vec![brain_public_message_body(BRAIN_USAGE)];
-            self.send_public_bodies(channel_id, &bodies).await;
+            self.send_public_bodies(event, replies, &bodies).await;
             return;
         }
-
-        let placeholder = brain_public_message_body(thinking_frame(0));
-        let message_id = match self.adapter.send_raw_public(channel_id, &placeholder).await {
-            Ok(message_id) => message_id,
-            Err(err) => {
-                tracing::warn!(%err, channel_id, "Brain-Denk-Platzhalter konnte nicht gesendet werden");
-                let outcome = self.reserved_outcome_for_question(question, context).await;
-                let bodies = self.public_bodies_for_outcome(question, outcome);
-                self.send_public_bodies(channel_id, &bodies).await;
-                return;
-            }
-        };
-
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let animation = spawn_brain_thinking_animation(
-            self.adapter.clone(),
-            channel_id,
-            message_id,
-            cancelled.clone(),
-        );
 
         let outcome = self.reserved_outcome_for_question(question, context).await;
-        cancelled.store(true, Ordering::SeqCst);
-        if let Err(err) = animation.await {
-            tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation Task fehlgeschlagen");
-        }
-
-        let Some(body) = self.public_body_for_outcome(question, outcome) else {
-            self.remove_thinking_placeholder(channel_id, message_id)
-                .await;
+        if matches!(outcome, dl_brain::BrainOutcome::BackendError) {
+            tracing::warn!(channel_id = event.channel_id, "brain_public_backend_fehler");
             return;
-        };
-        if let Err(err) = self
-            .adapter
-            .edit_raw_public(channel_id, message_id, &body)
-            .await
-        {
-            tracing::warn!(%err, channel_id, message_id, "Brain-Antwort konnte nicht editiert werden");
-            self.send_public_bodies(channel_id, &[body]).await;
         }
-    }
-
-    async fn remove_thinking_placeholder(&self, channel_id: u64, message_id: u64) {
-        tracing::info!(channel_id, message_id, "brain_public_ohne_antwort");
-        if let Err(err) = self
-            .adapter
-            .http
-            .delete_message(
-                ChannelId::new(channel_id),
-                MessageId::new(message_id),
-                Some("Brain ohne gesicherte Antwort"),
-            )
-            .await
-        {
-            tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Platzhalter konnte nicht entfernt werden");
+        let bodies = self.public_bodies_for_outcome(question, outcome);
+        if bodies.is_empty() {
+            tracing::info!(channel_id = event.channel_id, "brain_public_ohne_antwort");
+            return;
         }
+        self.send_public_bodies(event, replies, &bodies).await;
     }
 
     #[cfg(test)]
@@ -890,6 +859,15 @@ impl BrainHandler {
         replies: &dyn BrainDirectReplyPort,
         proactive: bool,
     ) {
+        if self.claimed_by_other_owner(event).await {
+            tracing::debug!(
+                message_id = event.message_id,
+                channel_id = event.channel_id,
+                "brain_direct_owned_elsewhere"
+            );
+            self.clear_guide_pending(event, proactive).await;
+            return;
+        }
         if self
             .handle_direct_message_event(event, bot_id, replies)
             .await
@@ -920,8 +898,20 @@ impl BrainHandler {
             allow_discord_reads: true,
             answer_context: replies.answer_context(event),
         };
-        self.handle_brain_question(event.channel_id, &context, &question)
+        self.handle_brain_question(event, &context, &question, replies)
             .await;
+    }
+
+    async fn claimed_by_other_owner(&self, event: &dl_discord::MessageEvent) -> bool {
+        let Some(owners) = self.message_owners.get() else {
+            return false;
+        };
+        for owner in owners {
+            if owner.claims_message(event).await {
+                return true;
+            }
+        }
+        false
     }
 
     async fn handle_direct_message_event(
@@ -954,9 +944,11 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
+        let is_public = replies.is_public(event);
+        let feedback = !proactive && !is_public;
         let context = dl_brain::DiscordQueryContext {
             user_id: event.author_id,
-            allow_discord_reads: replies.is_public(event),
+            allow_discord_reads: is_public,
             answer_context: replies.answer_context(event),
         };
         let reservation = self
@@ -967,7 +959,7 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
-        if !proactive {
+        if feedback {
             let reacted = replies.reaction(event, "👀", true).await.is_ok();
             tracing::info!(
                 message_id = event.message_id,
@@ -1009,7 +1001,18 @@ impl BrainHandler {
             dl_brain::BrainOutcome::TooLong { .. } => {
                 BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())
             }
-            dl_brain::BrainOutcome::BackendError => BRAIN_BACKEND_ERR.to_owned(),
+            dl_brain::BrainOutcome::BackendError if feedback || proactive => {
+                BRAIN_BACKEND_ERR.to_owned()
+            }
+            dl_brain::BrainOutcome::BackendError => {
+                tracing::warn!(
+                    message_id = event.message_id,
+                    channel_id = event.channel_id,
+                    "brain_direct_backend_fehler"
+                );
+                self.clear_guide_pending(event, proactive).await;
+                return;
+            }
             dl_brain::BrainOutcome::NoAnswer
             | dl_brain::BrainOutcome::OutOfDomain
             | dl_brain::BrainOutcome::Answer(_)
@@ -1019,7 +1022,7 @@ impl BrainHandler {
                     channel_id = event.channel_id,
                     "brain_direct_ohne_antwort"
                 );
-                if !proactive {
+                if feedback {
                     let _ = replies.reaction(event, "👀", false).await;
                 }
                 self.clear_guide_pending(event, proactive).await;
@@ -1058,7 +1061,7 @@ impl BrainHandler {
         } else {
             failed = true;
         }
-        if !proactive {
+        if feedback {
             let _ = replies.reaction(event, "👀", false).await;
             if failed {
                 let _ = replies.reaction(event, "❌", true).await;
@@ -1087,10 +1090,10 @@ impl BrainHandler {
 impl InteractionHandler for BrainHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         if interaction.guild_id == 0 {
-            return BridgeReply::ephemeral_text("Der Brain-Test ist nur auf dem Server verfügbar.");
+            return brain_ephemeral_reply("Der Brain-Test ist nur auf dem Server verfügbar.");
         }
         if !self.channel_allowed(interaction.channel_id) {
-            return BridgeReply::ephemeral_text(
+            return brain_ephemeral_reply(
                 "Der Brain-Test ist in diesem Kanal nicht freigeschaltet.",
             );
         }
@@ -1099,7 +1102,7 @@ impl InteractionHandler for BrainHandler {
             interaction.guild_id,
             interaction.channel_id,
         ) {
-            return BridgeReply::ephemeral_text(BRAIN_PRIVATE_HELP);
+            return brain_ephemeral_reply(BRAIN_PRIVATE_HELP);
         }
         let question = interaction
             .options
@@ -1125,41 +1128,66 @@ impl InteractionHandler for BrainHandler {
             .outcome_for_question(&question, &context, interaction.channel_id)
             .await
         else {
-            return BridgeReply::ephemeral_text(BRAIN_DAILY_LIMIT);
+            return brain_ephemeral_reply(BRAIN_DAILY_LIMIT);
         };
         match self.public_body_for_outcome(&question, outcome) {
-            Some(body) => brain_bridge_reply_from_body(body),
-            None => BridgeReply::ephemeral_text(BRAIN_SLASH_NO_ANSWER),
+            Some(body) => brain_bridge_reply_from_body(body, false),
+            None => brain_ephemeral_reply(BRAIN_SLASH_NO_ANSWER),
         }
     }
 }
 
-fn brain_bridge_reply_from_body(mut body: Map<String, Value>) -> BridgeReply {
-    let content = body
-        .remove("content")
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .filter(|value| !value.is_empty());
-    let embeds = body
-        .remove("embeds")
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    let allowed_mentions = body.remove("allowed_mentions");
+fn brain_bridge_reply_from_body(body: Map<String, Value>, ephemeral: bool) -> BridgeReply {
+    let flags = if ephemeral {
+        BRAIN_V2_FLAG | BRAIN_EPHEMERAL_FLAG
+    } else {
+        BRAIN_V2_FLAG
+    };
     BridgeReply {
-        content,
-        embeds,
-        allowed_mentions,
+        components: body.get("components").cloned(),
+        ephemeral,
+        message_flags: Some(flags),
+        allowed_mentions: body.get("allowed_mentions").cloned(),
         ..BridgeReply::default()
     }
 }
 
-fn brain_public_message_body(message: &str) -> Map<String, Value> {
+fn brain_ephemeral_reply(text: &str) -> BridgeReply {
+    brain_bridge_reply_from_body(brain_public_message_body(text), true)
+}
+
+fn brain_v2_body(blocks: &[String], rows: Vec<Value>) -> Map<String, Value> {
+    let mut remaining = BRAIN_V2_TEXT_LIMIT;
+    let mut components = Vec::new();
+    for block in blocks {
+        let block = block.trim();
+        if block.is_empty() || remaining <= " …".encode_utf16().count() {
+            continue;
+        }
+        let text = truncate_brain_chars(block, remaining, " …");
+        remaining = remaining.saturating_sub(text.encode_utf16().count());
+        components.push(json!({ "type": 10, "content": text }));
+    }
+    components.extend(rows);
     let mut body = Map::new();
-    body.insert("content".into(), json!(message));
+    body.insert("flags".into(), json!(BRAIN_V2_FLAG));
     body.insert(
         "allowed_mentions".into(),
         json!({ "parse": [], "replied_user": false }),
     );
+    body.insert(
+        "components".into(),
+        json!([{
+            "type": 17,
+            "accent_color": dl_community::concierge::CONCIERGE_ACCENT_GOLD,
+            "components": components,
+        }]),
+    );
     body
+}
+
+fn brain_public_message_body(message: &str) -> Map<String, Value> {
+    brain_v2_body(&[message.to_owned()], Vec::new())
 }
 
 fn brain_answer_embed_body(
@@ -1168,74 +1196,40 @@ fn brain_answer_embed_body(
     emoji_index: &BrainEmojiIndex,
 ) -> Option<Map<String, Value>> {
     let cleaned = clean_brain_markdown(raw_answer);
-    let description = truncate_brain_description(&emoji_index.annotate_inline(&cleaned));
-    if description.trim().is_empty() {
+    let (answer, sources) = match cleaned.find(BRAIN_SOURCE_MARKER) {
+        Some(start) => cleaned.split_at(start),
+        None => (cleaned.as_str(), ""),
+    };
+    let sources = sources.trim();
+    let heading = brain_answer_heading(question);
+    let footer = format!("-# {BRAIN_EMBED_FOOTER}");
+    let reserved: usize = [heading.as_str(), sources, footer.as_str()]
+        .iter()
+        .map(|block| block.encode_utf16().count())
+        .sum();
+    let budget = BRAIN_V2_TEXT_LIMIT.checked_sub(reserved)?;
+    if budget <= " …".encode_utf16().count() {
         return None;
     }
-
-    let embed = json!({
-        "title": brain_embed_title(question),
-        "description": description,
-        "color": BRAIN_EMBED_COLOR,
-        "footer": { "text": BRAIN_EMBED_FOOTER },
-    });
-    let mut body = Map::new();
-    body.insert("content".into(), json!(""));
-    body.insert("embeds".into(), json!([embed]));
-    body.insert(
-        "allowed_mentions".into(),
-        json!({ "parse": [], "replied_user": false }),
-    );
-    Some(body)
-}
-
-fn spawn_brain_thinking_animation(
-    adapter: Arc<DiscordAdapter>,
-    channel_id: u64,
-    message_id: u64,
-    cancelled: Arc<AtomicBool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        for tick in 1..=BRAIN_THINKING_MAX_TICKS {
-            sleep(BRAIN_THINKING_INTERVAL).await;
-            if cancelled.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let body = brain_public_message_body(thinking_frame(tick));
-            if let Err(err) = adapter.edit_raw_public(channel_id, message_id, &body).await {
-                tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation konnte nicht editiert werden");
-                break;
-            }
-        }
-    })
-}
-
-fn thinking_frame(tick: usize) -> &'static str {
-    BRAIN_THINKING_FRAMES[tick % BRAIN_THINKING_FRAMES.len()]
-}
-
-fn brain_embed_title(question: &str) -> String {
-    format!(
-        "🧠 {}",
-        truncate_brain_chars(question.trim(), BRAIN_EMBED_TITLE_QUESTION_LIMIT, "…")
-    )
-}
-
-fn truncate_brain_description(description: &str) -> String {
-    let description = description.trim();
-    if description.chars().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
-        return description.to_string();
+    let answer = truncate_brain_chars(emoji_index.annotate_inline(answer).trim(), budget, " …");
+    if answer.trim().is_empty() {
+        return None;
     }
+    Some(brain_v2_body(
+        &[heading, answer, sources.to_owned(), footer],
+        Vec::new(),
+    ))
+}
 
-    let mut truncated = description
-        .chars()
-        .take(BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT)
-        .collect::<String>();
-    let trimmed_len = truncated.trim_end().len();
-    truncated.truncate(trimmed_len);
-    truncated.push_str(" …");
-    truncated
+fn brain_answer_heading(question: &str) -> String {
+    let question = question.trim();
+    if question.is_empty() {
+        return String::new();
+    }
+    format!(
+        "### {}",
+        truncate_brain_chars(question, BRAIN_EMBED_TITLE_QUESTION_LIMIT, "…")
+    )
 }
 
 fn truncate_brain_chars(value: &str, max_chars: usize, suffix: &str) -> String {
@@ -1256,6 +1250,8 @@ fn truncate_brain_chars(value: &str, max_chars: usize, suffix: &str) -> String {
             true
         })
         .collect();
+    let trimmed_len = truncated.trim_end().len();
+    truncated.truncate(trimmed_len);
     truncated.push_str(suffix);
     truncated
 }
@@ -2806,21 +2802,13 @@ impl dl_broker::clips::ClipSubmitPort for ClipSubmitGlue {
 
 // ── FAQ-Chat-Anbindung ─────────────────────────────────────────────────────
 
-/// Gemeinsamer Payload für alle sichtbaren FAQ/Knowledge/Shadow-Nachrichten (rohe Nutzerfrage,
-/// Modelltext, Shadow-Ausgabe). Ein Sendepfad, ein Kontrakt.
 fn faq_message_body(content: &str, components: Option<serde_json::Value>) -> Map<String, Value> {
-    let mut body = Map::new();
-    body.insert("content".into(), json!(content));
-    if let Some(components) = components {
-        body.insert("components".into(), components);
-    }
-    // Rohe Nutzerfrage, Modelltext und Shadow-Ausgabe dürfen niemals Rollen, @everyone oder
-    // einzelne User pingen: leeres parse, kein replied_user.
-    body.insert(
-        "allowed_mentions".into(),
-        json!({ "parse": [], "replied_user": false }),
-    );
-    body
+    let rows = match components {
+        Some(Value::Array(rows)) => rows,
+        Some(row) => vec![row],
+        None => Vec::new(),
+    };
+    brain_v2_body(&[content.to_owned()], rows)
 }
 
 pub struct FaqGlue {
@@ -4569,7 +4557,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     use dl_answer::Retriever as _;
@@ -4838,7 +4826,55 @@ mod tests {
             emoji_index: Arc::new(BrainEmojiIndex::default()),
             guide_pending: Default::default(),
             conversations: Default::default(),
+            message_owners: Default::default(),
         }
+    }
+
+    fn brain_v2_text(body: &Map<String, Value>) -> String {
+        body.get("components")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|container| container.get("components").and_then(Value::as_array))
+            .flatten()
+            .filter(|component| component.get("type") == Some(&json!(10)))
+            .filter_map(|component| component.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn assert_brain_v2(body: &Map<String, Value>) {
+        assert_eq!(body.get("flags"), Some(&json!(BRAIN_V2_FLAG)));
+        let containers = body["components"].as_array().expect("components");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0]["type"], 17);
+        assert_eq!(
+            containers[0]["accent_color"],
+            json!(dl_community::concierge::CONCIERGE_ACCENT_GOLD)
+        );
+        assert_eq!(
+            body.get("allowed_mentions"),
+            Some(&json!({ "parse": [], "replied_user": false }))
+        );
+    }
+
+    fn v2_blocks(body: &Map<String, Value>) -> Vec<String> {
+        body["components"][0]["components"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|component| component["type"] == 10)
+            .filter_map(|component| component["content"].as_str().map(ToOwned::to_owned))
+            .collect()
+    }
+
+    fn reply_v2_blocks(reply: &BridgeReply) -> Vec<String> {
+        let mut body = Map::new();
+        body.insert(
+            "components".into(),
+            reply.components.clone().unwrap_or(Value::Null),
+        );
+        v2_blocks(&body)
     }
 
     fn test_message_event(guild_id: Option<u64>, content: &str) -> dl_discord::MessageEvent {
@@ -4931,6 +4967,7 @@ mod tests {
         fail: bool,
         private: bool,
         classification: Option<Arc<DiscordAdapter>>,
+        reply_attempts: AtomicUsize,
         sent: Mutex<Vec<RecordedBrainReply>>,
         reactions: Mutex<Vec<(u64, u64, String, bool)>>,
         fail_reactions: bool,
@@ -4979,6 +5016,7 @@ mod tests {
             event: &dl_discord::MessageEvent,
             body: &Map<String, Value>,
         ) -> Result<u64, String> {
+            self.reply_attempts.fetch_add(1, Ordering::Relaxed);
             if self.fail {
                 return Err("Zustellung fehlgeschlagen".into());
             }
@@ -4999,6 +5037,38 @@ mod tests {
         );
         handler.answerer = answerer.clone();
         (handler, answerer)
+    }
+
+    struct ClaimingOwner;
+
+    #[async_trait::async_trait]
+    impl BrainMessageOwner for ClaimingOwner {
+        async fn claims_message(&self, _event: &dl_discord::MessageEvent) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn beanspruchte_nachricht_bekommt_keine_zweite_brain_antwort() {
+        let (handler, answerer) = direct_test_handler();
+        let owners: Vec<Arc<dyn BrainMessageOwner>> = vec![Arc::new(ClaimingOwner)];
+        assert!(handler.message_owners.set(owners).is_ok());
+        let replies = RecordingBrainReplies {
+            private: true,
+            ..Default::default()
+        };
+        for event in [
+            test_message_event(None, "Wie spiele ich Abrams?"),
+            test_message_event(Some(1), "<@42> Frage"),
+        ] {
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+        }
+        assert!(replies.sent.lock().await.is_empty());
+        assert!(replies.reactions.lock().await.is_empty());
+        assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 0);
+        assert!(answerer.calls.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -5078,9 +5148,7 @@ mod tests {
         let sent = replies.sent.lock().await;
         assert_eq!(sent.len(), 3);
         for (index, (_, _, body)) in sent.iter().enumerate() {
-            let answer = body["content"]
-                .as_str()
-                .expect("Synthetische Brain-Antwort");
+            let answer = brain_v2_text(body);
             assert!(!answer.starts_with("Ungeprüft:"));
             if index > 0 {
                 assert!(
@@ -5122,7 +5190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brain_reaktion_steht_vor_antwort_und_verschwindet_danach() {
+    async fn brain_public_answer_waits_without_reactions() {
         let (mut handler, _) = direct_test_handler();
         let answerer = Arc::new(PendingGuideAnswerer::default());
         handler.answerer = answerer.clone();
@@ -5131,100 +5199,162 @@ mod tests {
         let handle = handler.handle_message_event_with_replies(&event, 42, &replies);
         let verify = async {
             answerer.started.notified().await;
-            assert_eq!(
-                *replies.reactions.lock().await,
-                vec![(event.channel_id, event.message_id, "👀".into(), true)]
-            );
+            assert!(replies.reactions.lock().await.is_empty());
             assert!(replies.sent.lock().await.is_empty());
+            assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 0);
             answerer.release.notify_one();
         };
         tokio::join!(handle, verify);
-        assert_eq!(replies.sent.lock().await.len(), 1);
-        assert_eq!(
-            *replies.reactions.lock().await,
-            vec![
-                (event.channel_id, event.message_id, "👀".into(), true),
-                (event.channel_id, event.message_id, "👀".into(), false),
-            ]
-        );
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(brain_v2_text(&sent[0].2), "Antwort");
+        assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 1);
+        assert!(replies.reactions.lock().await.is_empty());
     }
 
     #[tokio::test]
-    async fn brain_reaktion_unterscheidet_fehler_von_stiller_leermeldung() {
-        let backend = dl_brain::BrainOutcome::BackendError;
-        let no_answer = dl_brain::BrainOutcome::NoAnswer;
-        for (outcome, fail, revoke, fail_reactions, expected_error, expected_sent) in [
-            (backend.clone(), false, false, false, true, 1),
-            (backend.clone(), true, false, false, true, 0),
-            (backend, false, true, false, true, 0),
-            (no_answer.clone(), false, false, false, false, 0),
-            (
-                dl_brain::BrainOutcome::OutOfDomain,
-                false,
-                false,
-                false,
-                false,
-                0,
-            ),
-            (
-                dl_brain::BrainOutcome::Answer(" ".into()),
-                false,
-                false,
-                false,
-                false,
-                0,
-            ),
-            (no_answer.clone(), true, false, false, false, 0),
-            (no_answer.clone(), false, true, false, false, 0),
-            (no_answer, false, false, true, false, 0),
-        ] {
-            let (mut handler, _) = direct_test_handler();
-            handler.answerer = Arc::new(RecordingDiscordAnswerer {
-                outcome: Some(outcome),
-                ..Default::default()
-            });
-            let replies = RecordingBrainReplies {
-                fail,
-                revoke_after_first: revoke,
-                fail_reactions,
-                ..Default::default()
-            };
-            let event = test_message_event(Some(1), "<@42> Frage");
-            handler
-                .handle_message_event_with_replies(&event, 42, &replies)
-                .await;
-            let mut expected = vec![
-                (event.channel_id, event.message_id, "👀".into(), true),
-                (event.channel_id, event.message_id, "👀".into(), false),
-            ];
-            if expected_error {
-                expected.push((event.channel_id, event.message_id, "❌".into(), true));
+    async fn brain_direct_feedback_preserves_private_errors_and_public_silence() {
+        for private in [false, true] {
+            let backend = dl_brain::BrainOutcome::BackendError;
+            let no_answer = dl_brain::BrainOutcome::NoAnswer;
+            let answer = dl_brain::BrainOutcome::Answer("Gesicherte Antwort".into());
+            for (outcome, fail, revoke, fail_reactions, expected_error, expected_sent) in [
+                (backend.clone(), false, false, false, true, 1),
+                (backend.clone(), true, false, false, true, 0),
+                (backend, false, true, false, true, 0),
+                (no_answer.clone(), false, false, false, false, 0),
+                (
+                    dl_brain::BrainOutcome::OutOfDomain,
+                    false,
+                    false,
+                    false,
+                    false,
+                    0,
+                ),
+                (
+                    dl_brain::BrainOutcome::Answer(" ".into()),
+                    false,
+                    false,
+                    false,
+                    false,
+                    0,
+                ),
+                (no_answer.clone(), true, false, false, false, 0),
+                (no_answer.clone(), false, true, false, false, 0),
+                (no_answer, false, false, true, false, 0),
+                (answer.clone(), false, false, false, false, 1),
+                (answer.clone(), true, false, false, true, 0),
+                (answer.clone(), false, true, false, true, 0),
+                (answer, false, false, true, false, 1),
+            ] {
+                let backend = matches!(outcome, dl_brain::BrainOutcome::BackendError);
+                let (mut handler, _) = direct_test_handler();
+                let answerer = Arc::new(RecordingDiscordAnswerer {
+                    outcome: Some(outcome),
+                    ..Default::default()
+                });
+                handler.answerer = answerer.clone();
+                let replies = RecordingBrainReplies {
+                    private,
+                    fail,
+                    revoke_after_first: revoke,
+                    fail_reactions,
+                    ..Default::default()
+                };
+                let event = test_message_event(Some(1), "<@42> Frage");
+                handler
+                    .handle_message_event_with_replies(&event, 42, &replies)
+                    .await;
+                let mut expected = Vec::new();
+                if private {
+                    expected.extend([
+                        (event.channel_id, event.message_id, "👀".into(), true),
+                        (event.channel_id, event.message_id, "👀".into(), false),
+                    ]);
+                    if expected_error {
+                        expected.push((event.channel_id, event.message_id, "❌".into(), true));
+                    }
+                }
+                assert_eq!(*replies.reactions.lock().await, expected);
+                assert_eq!(
+                    replies.reply_attempts.load(Ordering::Relaxed),
+                    if !private && backend {
+                        0
+                    } else if fail && expected_error {
+                        1
+                    } else {
+                        expected_sent
+                    }
+                );
+                let sent = replies.sent.lock().await;
+                assert_eq!(
+                    sent.len(),
+                    if !private && backend {
+                        0
+                    } else {
+                        expected_sent
+                    }
+                );
+                if let Some((_, _, body)) = sent.first() {
+                    assert_brain_v2(body);
+                    assert_eq!(
+                        brain_v2_text(body),
+                        if backend {
+                            BRAIN_BACKEND_ERR
+                        } else {
+                            "Gesicherte Antwort"
+                        }
+                    );
+                    assert_eq!(body["message_reference"]["message_id"], "2");
+                    assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+                }
+                assert_eq!(answerer.calls.lock().await.len(), 1);
+                assert_eq!(*answerer.read_access.lock().await, vec![!private]);
+                assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
             }
-            assert_eq!(*replies.reactions.lock().await, expected);
-            assert_eq!(replies.sent.lock().await.len(), expected_sent);
         }
     }
 
     #[tokio::test]
-    async fn brain_reaktion_markiert_folgefragen_aber_keine_abbrechbare_guide_hilfe() {
+    async fn brain_followup_feedback_is_private_and_guide_stays_reaction_free() {
+        for private in [false, true] {
+            for reply in [false, true] {
+                let (handler, answerer) = direct_test_handler();
+                let replies = RecordingBrainReplies {
+                    private,
+                    ..Default::default()
+                };
+                let mut event = test_message_event(Some(1), "Und welche Items passen dazu?");
+                handler
+                    .conversations
+                    .lock()
+                    .await
+                    .record(&event, 999, Instant::now());
+                if reply {
+                    event.is_reply = true;
+                    event.reply_message_id = Some(999);
+                    event.reply_channel_id = Some(event.channel_id);
+                }
+                handler
+                    .handle_message_event_with_replies(&event, 42, &replies)
+                    .await;
+                let expected = if private {
+                    vec![
+                        (event.channel_id, event.message_id, "👀".into(), true),
+                        (event.channel_id, event.message_id, "👀".into(), false),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(*replies.reactions.lock().await, expected);
+                assert_eq!(replies.sent.lock().await.len(), 1);
+                assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 1);
+                assert_eq!(answerer.calls.lock().await.len(), 1);
+                assert_eq!(*answerer.read_access.lock().await, vec![!private]);
+                assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+            }
+        }
         let (handler, _) = direct_test_handler();
-        let replies = RecordingBrainReplies::default();
-        let event = test_message_event(Some(1), "Und welche Items passen dazu?");
-        handler
-            .conversations
-            .lock()
-            .await
-            .record(&event, 999, Instant::now());
-        handler
-            .handle_message_event_with_replies(&event, 42, &replies)
-            .await;
-        assert_eq!(
-            *replies.reactions.lock().await,
-            vec![
-                (event.channel_id, event.message_id, "👀".into(), true),
-                (event.channel_id, event.message_id, "👀".into(), false),
-            ]
-        );
         let replies = RecordingBrainReplies::default();
         handler
             .handle_message_event_with_replies(
@@ -5247,7 +5377,7 @@ mod tests {
             .await;
         assert!(answerer.calls.lock().await.is_empty());
         assert_eq!(
-            replies.sent.lock().await[0].2["content"],
+            brain_v2_text(&replies.sent.lock().await[0].2),
             "Was möchtest du wissen?"
         );
         assert_eq!(handler.conversations.lock().await.entries.len(), 1);
@@ -5268,7 +5398,7 @@ mod tests {
         );
         let sent = replies.sent.lock().await;
         assert_eq!(sent.len(), 2);
-        assert_eq!(sent[1].2["content"], "Antwort: Welche Lanes gibt es?");
+        assert_eq!(brain_v2_text(&sent[1].2), "Antwort: Welche Lanes gibt es?");
         assert_eq!(sent[1].2["message_reference"]["message_id"], "2");
     }
 
@@ -5282,7 +5412,7 @@ mod tests {
                 .handle_message_event_with_replies(&mention, 42, &replies)
                 .await;
             assert_eq!(
-                replies.sent.lock().await[0].2["content"],
+                brain_v2_text(&replies.sent.lock().await[0].2),
                 "Antwort: Welche Lanes gibt es?"
             );
             let mut followup = test_message_event(Some(1), "Und für neue Spieler?");
@@ -5357,7 +5487,7 @@ mod tests {
         assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
         let sent = replies.sent.lock().await;
         assert_eq!(sent.len(), 51);
-        assert_eq!(sent[50].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(brain_v2_text(&sent[50].2), BRAIN_DAILY_LIMIT);
         assert_eq!(
             sent[50].2["message_reference"]["message_id"],
             followup.message_id.to_string()
@@ -5600,37 +5730,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gespraech_fortsetzung_schweigt_ohne_antwort_und_ohne_minutensperre() {
-        let (mut handler, _) = direct_test_handler();
-        let answerer = Arc::new(RecordingDiscordAnswerer {
-            outcome: Some(dl_brain::BrainOutcome::NoAnswer),
-            ..Default::default()
-        });
-        handler.answerer = answerer.clone();
-        let replies = RecordingBrainReplies::default();
-        let event = test_message_event(Some(1), "Folgefrage ohne Belege");
-        handler
-            .conversations
-            .lock()
-            .await
-            .record(&event, 999, Instant::now());
-        handler
-            .handle_message_event_with_replies(&event, 42, &replies)
-            .await;
-        assert!(replies.sent.lock().await.is_empty());
-        handler
-            .handle_message_event_with_replies(&event, 42, &replies)
-            .await;
-        assert!(replies.sent.lock().await.is_empty());
-        assert_eq!(answerer.calls.lock().await.len(), 2);
-        assert_eq!(
-            handler.conversations.lock().await.entries[&(1, 1, 3)]
-                .turns
-                .last()
-                .expect("Letzter Gesprächszug")
-                .0,
-            999
-        );
+    async fn brain_public_followup_silence_keeps_history_and_reservation() {
+        for reply in [false, true] {
+            for outcome in [
+                dl_brain::BrainOutcome::NoAnswer,
+                dl_brain::BrainOutcome::BackendError,
+                dl_brain::BrainOutcome::OutOfDomain,
+                dl_brain::BrainOutcome::Answer(" \n".into()),
+                dl_brain::BrainOutcome::Cooldown { remaining_secs: 1 },
+            ] {
+                let (mut handler, _) = direct_test_handler();
+                handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(2));
+                let answerer = Arc::new(RecordingDiscordAnswerer {
+                    outcome: Some(outcome),
+                    ..Default::default()
+                });
+                handler.answerer = answerer.clone();
+                let replies = RecordingBrainReplies::default();
+                let mut event = test_message_event(Some(1), "Folgefrage ohne Belege");
+                let last = Instant::now() - Duration::from_secs(120);
+                handler.conversations.lock().await.record(&event, 999, last);
+                if reply {
+                    event.is_reply = true;
+                    event.reply_message_id = Some(999);
+                    event.reply_channel_id = Some(event.channel_id);
+                }
+                for _ in 0..2 {
+                    handler
+                        .handle_message_event_with_replies(&event, 42, &replies)
+                        .await;
+                    assert!(replies.sent.lock().await.is_empty());
+                    assert!(replies.reactions.lock().await.is_empty());
+                    assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 0);
+                }
+                assert_eq!(answerer.calls.lock().await.len(), 2);
+                assert_eq!(*answerer.read_access.lock().await, vec![true, true]);
+                assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+                handler
+                    .handle_message_event_with_replies(&event, 42, &replies)
+                    .await;
+                let sent = replies.sent.lock().await;
+                assert_eq!(sent.len(), 1);
+                assert_eq!(brain_v2_text(&sent[0].2), BRAIN_DAILY_LIMIT);
+                drop(sent);
+                handler
+                    .handle_message_event_with_replies(&event, 42, &replies)
+                    .await;
+                assert_eq!(replies.sent.lock().await.len(), 1);
+                assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 1);
+                assert!(replies.reactions.lock().await.is_empty());
+                assert_eq!(answerer.calls.lock().await.len(), 2);
+                let conversations = handler.conversations.lock().await;
+                let conversation = &conversations.entries[&(1, 1, 3)];
+                assert_eq!(conversation.last_reply, last);
+                assert_eq!(
+                    conversation.turns.last().expect("Letzter Gesprächszug").0,
+                    999
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -5730,7 +5888,7 @@ mod tests {
         assert_eq!(*answerer.read_access.lock().await, vec![true, false]);
         assert_eq!(replies.sent.lock().await.len(), 2);
         assert_eq!(
-            replies.sent.lock().await[1].2["content"],
+            brain_v2_text(&replies.sent.lock().await[1].2),
             "Antwort: Andere Frage"
         );
         assert!(handler.guide_pending.lock().await.is_none());
@@ -6110,7 +6268,7 @@ mod tests {
                 );
                 let reply = sent.last().expect("Antwort am Eingangsort");
                 assert_eq!((reply.0, reply.1), (event.channel_id, event.message_id));
-                assert_eq!(reply.2["content"], question);
+                assert_eq!(brain_v2_text(&reply.2), question);
                 assert_eq!(
                     reply.2["message_reference"]["channel_id"],
                     channel_id.to_string()
@@ -6214,9 +6372,9 @@ mod tests {
             let sent = replies.sent.lock().await;
             assert_eq!(sent.len(), 1);
             assert_eq!((sent[0].0, sent[0].1), (event.channel_id, event.message_id));
-            assert_eq!(sent[0].2["content"], "");
-            assert_eq!(sent[0].2["embeds"][0]["description"], text);
-            assert!(text.encode_utf16().count() <= 4096);
+            assert_brain_v2(&sent[0].2);
+            assert_eq!(brain_v2_text(&sent[0].2), text);
+            assert!(text.encode_utf16().count() <= BRAIN_V2_TEXT_LIMIT);
             assert_eq!(sent[0].2["message_reference"]["message_id"], "2");
             assert_eq!(sent[0].2["message_reference"]["channel_id"], "1");
             assert_eq!(sent[0].2["message_reference"]["fail_if_not_exists"], true);
@@ -6227,7 +6385,9 @@ mod tests {
             assert_eq!(replies.checks.load(Ordering::Relaxed), 2);
         }
         let body = direct_brain_reply_body(&test_message_event(None, "Frage"), "Kurze Antwort");
-        assert_eq!(body["content"], "Kurze Antwort");
+        assert_brain_v2(&body);
+        assert_eq!(brain_v2_text(&body), "Kurze Antwort");
+        assert!(!body.contains_key("content"));
         assert!(!body.contains_key("embeds"));
     }
 
@@ -6306,7 +6466,7 @@ mod tests {
             assert_eq!(*answerer.read_access.lock().await, vec![guild_id.is_some()]);
             assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
             let sent = replies.sent.lock().await;
-            assert_eq!(sent[0].2["content"], format!("Antwort: {expected}"));
+            assert_eq!(brain_v2_text(&sent[0].2), format!("Antwort: {expected}"));
             if guild_id.is_none() {
                 assert!(handler.conversations.lock().await.entries.is_empty());
             }
@@ -6347,7 +6507,7 @@ mod tests {
             assert_eq!(*answerer.read_access.lock().await, vec![false]);
             assert_eq!(replies.sent.lock().await.len(), 1);
             assert_eq!(
-                replies.sent.lock().await[0].2["content"],
+                brain_v2_text(&replies.sent.lock().await[0].2),
                 "Antwort: Private Frage"
             );
             assert_eq!(handler.conversations.lock().await.entries.len(), 1);
@@ -6363,7 +6523,7 @@ mod tests {
                 ..BridgeInteraction::default()
             })
             .await;
-        assert_eq!(reply.content.as_deref(), Some(BRAIN_PRIVATE_HELP));
+        assert_eq!(reply_v2_blocks(&reply), vec![BRAIN_PRIVATE_HELP.to_owned()]);
         assert!(answerer.calls.lock().await.is_empty());
         assert!(brain_channel_is_public(handler.adapter.as_ref(), 1, 1));
         assert!(!brain_channel_is_public(handler.adapter.as_ref(), 0, 1));
@@ -6402,7 +6562,10 @@ mod tests {
         }
         assert_eq!(answerer.calls.lock().await.len(), 50);
         assert_eq!(public.sent.lock().await.len(), 1);
-        assert_eq!(public.sent.lock().await[0].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(
+            brain_v2_text(&public.sent.lock().await[0].2),
+            BRAIN_DAILY_LIMIT
+        );
         assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -6461,17 +6624,23 @@ mod tests {
         assert_eq!(answerer.calls.lock().await.len(), 1);
         assert_eq!(replies.sent.lock().await.len(), 2);
         assert_eq!(
-            replies.sent.lock().await[0].2["content"],
+            brain_v2_text(&replies.sent.lock().await[0].2),
             "Antwort: Wie finde ich eine Lane?"
         );
-        assert_eq!(replies.sent.lock().await[1].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(
+            brain_v2_text(&replies.sent.lock().await[1].2),
+            BRAIN_DAILY_LIMIT
+        );
         assert_eq!(*answerer.read_access.lock().await, vec![false]);
         handler
             .handle_message_event_with_replies(&server, 42, &replies)
             .await;
         assert_eq!(answerer.calls.lock().await.len(), 1);
         assert_eq!(replies.sent.lock().await.len(), 2);
-        assert_eq!(replies.sent.lock().await[1].2["content"], BRAIN_DAILY_LIMIT);
+        assert_eq!(
+            brain_v2_text(&replies.sent.lock().await[1].2),
+            BRAIN_DAILY_LIMIT
+        );
         server.channel_id = 56;
         handler
             .handle_message_event_with_replies(&server, 42, &replies)
@@ -6572,8 +6741,10 @@ mod tests {
 
         assert_eq!(answerer_calls.load(Ordering::Relaxed), 1);
         assert_eq!(retriever_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(reply.embeds.len(), 1);
-        assert_eq!(reply.embeds[0]["description"], json!("Antwort"));
+        assert!(reply.embeds.is_empty());
+        assert!(!reply.ephemeral);
+        assert_eq!(reply.message_flags, Some(BRAIN_V2_FLAG));
+        assert!(reply_v2_blocks(&reply).contains(&"Antwort".to_owned()));
         assert_eq!(
             reply.allowed_mentions,
             Some(json!({ "parse": [], "replied_user": false }))
@@ -6622,7 +6793,16 @@ mod tests {
             .await;
         assert!(reply.ephemeral);
         assert!(reply.embeds.is_empty());
-        assert_eq!(reply.content.as_deref(), Some(BRAIN_SLASH_NO_ANSWER));
+        assert!(reply.content.is_none());
+        assert_eq!(
+            reply.message_flags,
+            Some(BRAIN_V2_FLAG | BRAIN_EPHEMERAL_FLAG)
+        );
+        assert_eq!(
+            reply_v2_blocks(&reply),
+            vec![BRAIN_SLASH_NO_ANSWER.to_owned()]
+        );
+        assert!(reply.fallback.is_none());
     }
 
     #[tokio::test]
@@ -6646,7 +6826,7 @@ mod tests {
                 ..BridgeInteraction::default()
             })
             .await;
-        assert_eq!(reply.embeds[0]["description"], json!("Antwort"));
+        assert!(reply_v2_blocks(&reply).contains(&"Antwort".to_owned()));
         assert_eq!(answerer_calls.load(Ordering::Relaxed), 1);
 
         let dm = handler
@@ -6660,8 +6840,8 @@ mod tests {
             })
             .await;
         assert_eq!(
-            dm.content.as_deref(),
-            Some("Der Brain-Test ist nur auf dem Server verfügbar.")
+            reply_v2_blocks(&dm),
+            vec!["Der Brain-Test ist nur auf dem Server verfügbar.".to_owned()]
         );
         assert_eq!(answerer_calls.load(Ordering::Relaxed), 1);
     }
@@ -6812,96 +6992,194 @@ mod tests {
     }
 
     #[test]
-    fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
-        let bounded = "🧠".repeat(1900);
-        let payload =
-            brain_answer_embed_body(&"🧠".repeat(300), &bounded, &BrainEmojiIndex::default())
-                .expect("embed");
-        let embed = &payload["embeds"][0];
-        assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
-        assert!(
-            embed["title"]
-                .as_str()
-                .expect("title")
-                .encode_utf16()
-                .count()
-                <= 256
-        );
-        assert!(bounded.encode_utf16().count() <= 4096);
+    fn brain_answer_body_ist_goldener_v2_container_ohne_mentions() {
         let body = brain_answer_embed_body(
             "Wie spiel ich Seven?",
             "### Build\n\n✅ **Seven** startet stabil.",
             &BrainEmojiIndex::default(),
         )
-        .unwrap_or_else(|| panic!("answer should create embed body"));
+        .unwrap_or_else(|| panic!("answer should create body"));
 
-        assert_eq!(body.get("content"), Some(&json!("")));
+        assert_brain_v2(&body);
+        assert!(!body.contains_key("content"));
+        assert!(!body.contains_key("embeds"));
         assert_eq!(
-            body.get("allowed_mentions"),
-            Some(&json!({ "parse": [], "replied_user": false }))
-        );
-        let embeds = body
-            .get("embeds")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("embeds array missing"));
-        assert_eq!(embeds.len(), 1);
-        let embed = &embeds[0];
-        assert_eq!(embed.get("title"), Some(&json!("🧠 Wie spiel ich Seven?")));
-        assert_eq!(
-            embed.get("description"),
-            Some(&json!("**Build**\n\n✅ **Seven** startet stabil."))
-        );
-        assert_eq!(embed.get("color"), Some(&json!(BRAIN_EMBED_COLOR)));
-        assert_eq!(
-            embed.get("footer").and_then(|footer| footer.get("text")),
-            Some(&json!(BRAIN_EMBED_FOOTER))
+            v2_blocks(&body),
+            vec![
+                "### Wie spiel ich Seven?".to_owned(),
+                "**Build**\n\n✅ **Seven** startet stabil.".to_owned(),
+                format!("-# {BRAIN_EMBED_FOOTER}"),
+            ]
         );
     }
 
     #[test]
-    fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
+    fn brain_answer_body_kuerzt_lange_antworten_in_einer_nachricht() {
+        let source = "Quelle: <https://github.com/EarlySalty/Deadlock-Docs/blob/abc/public/heroes/Warden.html#L1-L2>";
+        for answer in ["ä".repeat(5000), "🧠".repeat(3000)] {
+            let raw = format!("{answer}\n\n{source}");
+            let body =
+                brain_answer_embed_body(&"🧠".repeat(300), &raw, &BrainEmojiIndex::default())
+                    .unwrap_or_else(|| panic!("long answer should create body"));
+            assert_brain_v2(&body);
+            let blocks = v2_blocks(&body);
+            assert_eq!(blocks.len(), 4);
+            assert!(blocks[0].starts_with("### "));
+            assert!(blocks[0].ends_with('…'));
+            assert!(blocks[1].ends_with(" …"));
+            assert_eq!(blocks[2], source);
+            assert_eq!(blocks[3], format!("-# {BRAIN_EMBED_FOOTER}"));
+            let total: usize = blocks
+                .iter()
+                .map(|block| block.encode_utf16().count())
+                .sum();
+            assert!(total <= BRAIN_V2_TEXT_LIMIT, "{total}");
+        }
+    }
+
+    #[test]
+    fn brain_answer_body_erhaelt_stichpunkt_newlines() {
         let body = brain_answer_embed_body("Items?", "- a\n- b\n- c", &BrainEmojiIndex::default())
-            .unwrap_or_else(|| panic!("answer should create embed body"));
-        let description = body
-            .get("embeds")
-            .and_then(Value::as_array)
-            .and_then(|embeds| embeds.first())
-            .and_then(|embed| embed.get("description"))
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("description missing"));
+            .unwrap_or_else(|| panic!("answer should create body"));
+        let blocks = v2_blocks(&body);
 
-        assert_eq!(description, "- a\n- b\n- c");
-        assert!(!description.contains("- a - b"));
+        assert_eq!(blocks[1], "- a\n- b\n- c");
+        assert!(!blocks[1].contains("- a - b"));
+    }
+
+    #[tokio::test]
+    async fn brain_question_dispatch_preserves_docs_citation_after_emoji_expansion() {
+        let url = "https://github.com/EarlySalty/Deadlock-Docs/blob/7b0f0e645f026214f28b99dddbb18bd477bc2819/public/heroes/Warden.html#L35-L38";
+        let source = format!("\n\nQuelle: <{url}>");
+        let answer = format!("{}{source}", "Warden ".repeat(500));
+        assert!(answer.encode_utf16().count() <= 3800);
+        let (mut handler, _) = direct_test_handler();
+        handler.channel_allowlist = Some(HashSet::from([1]));
+        handler.emoji_index = Arc::new(BrainEmojiIndex {
+            entries: vec![("Warden".into(), "<:dlh_warden:7>".into())],
+        });
+        handler.answerer = Arc::new(RecordingDiscordAnswerer {
+            outcome: Some(dl_brain::BrainOutcome::Answer(answer)),
+            ..Default::default()
+        });
+        let replies = RecordingBrainReplies::default();
+        handler
+            .handle_message_event_with_replies(
+                &test_message_event(Some(1), "!brain Wie spiele ich Warden?"),
+                42,
+                &replies,
+            )
+            .await;
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_brain_v2(&sent[0].2);
+        let blocks = v2_blocks(&sent[0].2);
+        let text = brain_v2_text(&sent[0].2);
+        let total: usize = blocks
+            .iter()
+            .map(|block| block.encode_utf16().count())
+            .sum();
+        assert!(total <= BRAIN_V2_TEXT_LIMIT, "{total}");
+        assert!(blocks[1].starts_with("<:dlh_warden:7> Warden"));
+        assert_eq!(blocks[2], source.trim());
+        assert_eq!(text.matches(url).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn brain_question_dispatch_waits_for_answer_before_sending() {
+        use std::future::Future;
+
+        let (mut handler, _) = direct_test_handler();
+        handler.channel_allowlist = Some(HashSet::from([1]));
+        let answerer = Arc::new(PendingGuideAnswerer::default());
+        handler.answerer = answerer.clone();
+        let replies = RecordingBrainReplies::default();
+        let event = test_message_event(Some(1), "!brain Welche Lanes gibt es?");
+        let mut handle =
+            std::pin::pin!(handler.handle_message_event_with_replies(&event, 42, &replies));
+        std::future::poll_fn(|cx| {
+            assert!(handle.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(replies.sent.lock().await.is_empty());
+        assert!(replies.reactions.lock().await.is_empty());
+        answerer.release.notify_one();
+        handle.await;
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, event.channel_id);
+        assert_brain_v2(&sent[0].2);
+        assert!(v2_blocks(&sent[0].2).contains(&"Antwort".to_owned()));
+        assert_eq!(
+            sent[0].2["allowed_mentions"],
+            json!({ "parse": [], "replied_user": false })
+        );
+        assert!(!sent[0].2.contains_key("message_reference"));
+        assert!(replies.reactions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn brain_question_dispatch_is_silent_without_answer_and_keeps_reservation() {
+        for outcome in [
+            dl_brain::BrainOutcome::NoAnswer,
+            dl_brain::BrainOutcome::BackendError,
+            dl_brain::BrainOutcome::OutOfDomain,
+            dl_brain::BrainOutcome::Answer(" \n".into()),
+            dl_brain::BrainOutcome::Cooldown { remaining_secs: 1 },
+        ] {
+            let (mut handler, _) = direct_test_handler();
+            handler.channel_allowlist = Some(HashSet::from([1]));
+            handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(1));
+            let answerer = Arc::new(RecordingDiscordAnswerer {
+                outcome: Some(outcome),
+                ..Default::default()
+            });
+            handler.answerer = answerer.clone();
+            let replies = RecordingBrainReplies::default();
+            let event = test_message_event(Some(1), "!brain Welche Lanes gibt es?");
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            assert!(replies.sent.lock().await.is_empty());
+            assert!(replies.reactions.lock().await.is_empty());
+            assert_eq!(
+                *answerer.calls.lock().await,
+                vec![("Welche Lanes gibt es?".to_owned(), event.author_id)]
+            );
+            assert_eq!(*answerer.read_access.lock().await, vec![true]);
+            assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            let sent = replies.sent.lock().await;
+            assert_eq!(sent.len(), 1);
+            assert_eq!(brain_v2_text(&sent[0].2), json!(BRAIN_DAILY_LIMIT));
+            drop(sent);
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            assert_eq!(replies.sent.lock().await.len(), 1);
+            assert_eq!(answerer.calls.lock().await.len(), 1);
+        }
     }
 
     #[test]
-    fn thinking_frame_rotiert_ueber_alle_frames() {
-        assert_eq!(thinking_frame(0), BRAIN_THINKING_FRAMES[0]);
-        assert_eq!(thinking_frame(1), BRAIN_THINKING_FRAMES[1]);
-        assert_eq!(thinking_frame(2), BRAIN_THINKING_FRAMES[2]);
-        assert_eq!(thinking_frame(3), BRAIN_THINKING_FRAMES[0]);
-        assert_eq!(thinking_frame(4), BRAIN_THINKING_FRAMES[1]);
-    }
-
-    #[test]
-    fn brain_embed_truncation_bleibt_char_boundary_sicher() {
-        let title = brain_embed_title(&"ä".repeat(BRAIN_EMBED_TITLE_QUESTION_LIMIT + 5));
+    fn brain_heading_truncation_bleibt_char_boundary_sicher() {
+        let heading = brain_answer_heading(&"ä".repeat(BRAIN_EMBED_TITLE_QUESTION_LIMIT + 5));
         assert_eq!(
-            title.chars().count(),
-            "🧠 ".chars().count() + BRAIN_EMBED_TITLE_QUESTION_LIMIT
+            heading.chars().count(),
+            "### ".chars().count() + BRAIN_EMBED_TITLE_QUESTION_LIMIT
         );
-        assert!(title.ends_with('…'));
-        let emoji_title = brain_embed_title(&"🧠".repeat(300));
-        assert!(emoji_title.encode_utf16().count() <= 256);
-        assert!(emoji_title.ends_with('…'));
+        assert!(heading.ends_with('…'));
 
-        let description =
-            truncate_brain_description(&"ä".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT + 1));
-        assert_eq!(
-            description.chars().count(),
-            BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT + " …".chars().count()
+        let text = truncate_brain_chars(
+            &"ä".repeat(BRAIN_V2_TEXT_LIMIT + 1),
+            BRAIN_V2_TEXT_LIMIT,
+            " …",
         );
-        assert!(description.ends_with(" …"));
+        assert_eq!(text.chars().count(), BRAIN_V2_TEXT_LIMIT);
+        assert!(text.ends_with(" …"));
     }
 
     #[tokio::test]
@@ -7088,10 +7366,8 @@ mod tests {
     fn brain_public_message_body_deaktiviert_mentions() {
         let body = brain_public_message_body("@everyone <@123> <@&456>");
 
-        assert_eq!(
-            body.get("content"),
-            Some(&json!("@everyone <@123> <@&456>"))
-        );
+        assert_brain_v2(&body);
+        assert_eq!(brain_v2_text(&body), "@everyone <@123> <@&456>");
         assert_eq!(
             body.get("allowed_mentions"),
             Some(&json!({ "parse": [], "replied_user": false }))
@@ -7099,34 +7375,39 @@ mod tests {
     }
 
     #[test]
+    fn brain_fehlertext_ist_v2_ohne_klartext() {
+        let body = brain_public_message_body(BRAIN_BACKEND_ERR);
+        assert_brain_v2(&body);
+        assert!(!body.contains_key("content"));
+        assert_eq!(v2_blocks(&body), vec![BRAIN_BACKEND_ERR.to_owned()]);
+        assert!(!BRAIN_BACKEND_ERR.contains("Hirn hakt"));
+    }
+
+    #[test]
     fn faq_message_body_deaktiviert_mentions() {
         let bounded = "🧠".repeat(900);
         let payload = faq_message_body(&bounded, None);
-        assert_eq!(payload["content"].as_str(), Some(bounded.as_str()));
-        assert!(bounded.encode_utf16().count() <= 2000);
-        // Rohe Nutzerfrage, Modelltext und Shadow-Ausgabe laufen alle durch diesen einen
-        // Sendepfad: er muss standardmäßig Rollen, @everyone und User-Pings unterbinden.
+        assert_brain_v2(&payload);
+        assert_eq!(brain_v2_text(&payload), bounded);
         let body = faq_message_body("@everyone <@123> <@&456>", None);
-        assert_eq!(
-            body.get("content"),
-            Some(&json!("@everyone <@123> <@&456>"))
-        );
+        assert_eq!(brain_v2_text(&body), "@everyone <@123> <@&456>");
         assert_eq!(
             body.get("allowed_mentions"),
             Some(&json!({ "parse": [], "replied_user": false }))
         );
-        assert!(body.get("components").is_none());
+        assert_eq!(
+            body["components"][0]["components"].as_array().map(Vec::len),
+            Some(1)
+        );
 
-        // Mit Components (z. B. Close-Button) bleibt der Mention-Schutz erhalten.
-        let with_components = faq_message_body("Antwort", Some(json!([{ "type": 1 }])));
+        let row = json!({ "type": 1, "components": [] });
+        let with_components = faq_message_body("Antwort", Some(json!([row.clone()])));
+        assert_brain_v2(&with_components);
         assert_eq!(
             with_components.get("allowed_mentions"),
             Some(&json!({ "parse": [], "replied_user": false }))
         );
-        assert_eq!(
-            with_components.get("components"),
-            Some(&json!([{ "type": 1 }]))
-        );
+        assert_eq!(with_components["components"][0]["components"][1], row);
     }
 
     fn private_overwrite_fixture() -> Vec<serenity::all::PermissionOverwrite> {

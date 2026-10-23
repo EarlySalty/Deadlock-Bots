@@ -9273,6 +9273,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn user_tables_have_unique_count_keys() {
+        let mut seen = BTreeSet::new();
+        let duplicates: Vec<String> = USER_TABLES
+            .iter()
+            .map(|spec| spec.count_key())
+            .filter(|key| !seen.insert(key.clone()))
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "duplicate USER_TABLES entries: {duplicates:?}"
+        );
+    }
+
     #[tokio::test]
     async fn delete_rollbackt_purge_grabstein_und_redactions_bei_spaetem_fehler() {
         let db = mk_db().await;
