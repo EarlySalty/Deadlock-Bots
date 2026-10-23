@@ -66,12 +66,7 @@ impl BrainApiAnswerer {
     }
 
     fn query(&self, question: &str) -> Result<Query, BrainError> {
-        let sequence = self
-            .sequence
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .map_err(|_| backend_error())?;
+        let sequence = next_sequence(&self.sequence).ok_or_else(backend_error)?;
         let id = format!("{}-{sequence}", self.namespace);
         Ok(Query {
             answer_context: None,
@@ -137,6 +132,17 @@ impl BrainApiAnswerer {
 
 fn backend_error() -> BrainError {
     BrainError::Backend("Brain API nicht verfügbar oder Vertrag ungültig".into())
+}
+
+fn next_sequence(counter: &AtomicU64) -> Option<u64> {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1)?;
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(previous) => return Some(previous),
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 fn classified_backend_error(class: &'static str) -> BrainError {
