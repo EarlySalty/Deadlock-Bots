@@ -135,14 +135,21 @@ impl ClaudePlanBackend {
             .stdout
             .take()
             .ok_or_else(|| unavailable("no_stdout"))?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|_| unavailable("stdin_failed"))?;
-        drop(stdin);
-        let outcome = last_result(BufReader::new(stdout), self.line_limit, model).await;
+        let feed = async move {
+            let written = stdin.write_all(&input).await;
+            drop(stdin);
+            written
+        };
+        let (written, outcome) = tokio::join!(
+            feed,
+            last_result(BufReader::new(stdout), self.line_limit, model)
+        );
         let status = child.wait().await.map_err(|_| unavailable("wait_failed"))?;
-        match outcome? {
+        let outcome = outcome?;
+        if written.is_err() && outcome.is_none() {
+            return Err(unavailable("stdin_failed"));
+        }
+        match outcome {
             Some(result) => result,
             None if status.success() => Err(unavailable("no_result")),
             None => Err(unavailable("exit_failure")),

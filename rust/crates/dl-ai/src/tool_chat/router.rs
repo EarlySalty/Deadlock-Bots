@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::config::Target;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
+
+const LEDGER_FINISH_BUDGET: Duration = Duration::from_secs(2);
 
 pub struct LedgerOutcome<'a> {
     pub usage: Option<Usage>,
@@ -146,7 +149,8 @@ impl SlotRouter {
                 FailureKind::Unavailable,
                 "unknown_provider",
             ))?;
-        let _permit = tokio::time::timeout(
+        let deadline = Instant::now() + target.timeout;
+        let permit = tokio::time::timeout(
             handle.queue_timeout.min(target.timeout),
             Arc::clone(&handle.permits).acquire_owned(),
         )
@@ -163,17 +167,21 @@ impl SlotRouter {
             None
         } else {
             Some(
-                self.ledger
-                    .begin(slot, &target.provider, &target.model)
-                    .await?,
+                tokio::time::timeout_at(
+                    deadline,
+                    self.ledger.begin(slot, &target.provider, &target.model),
+                )
+                .await
+                .map_err(|_| BackendError::new(FailureKind::Timeout, "ledger_timeout"))??,
             )
         };
         let result = crate::usage::with_purpose(
             slot,
-            tokio::time::timeout(target.timeout, handle.backend.complete(request, &call)),
+            tokio::time::timeout_at(deadline, handle.backend.complete(request, &call)),
         )
         .await
         .unwrap_or(Err(BackendError::new(FailureKind::Timeout, "slot_timeout")));
+        drop(permit);
         if let Some(entry) = entry {
             let outcome = match &result {
                 Ok(response) => LedgerOutcome {
@@ -187,7 +195,16 @@ impl SlotRouter {
                     error_code: Some(error.kind.ledger_code()),
                 },
             };
-            entry.finish(outcome).await;
+            if tokio::time::timeout(LEDGER_FINISH_BUDGET, entry.finish(outcome))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    slot,
+                    provider = %target.provider,
+                    "AI_GATEWAY_LEDGER_FINISH_LATE"
+                );
+            }
         }
         result
     }
@@ -310,6 +327,67 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 key: (slot.into(), provider.into(), model.into()),
             }))
+        }
+    }
+
+    struct StalledLedger {
+        stall_begin: bool,
+    }
+
+    struct StalledEntry;
+
+    #[async_trait]
+    impl LedgerEntry for StalledEntry {
+        async fn finish(self: Box<Self>, _outcome: LedgerOutcome<'_>) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[async_trait]
+    impl UsageLedger for StalledLedger {
+        async fn begin(
+            &self,
+            _slot: &str,
+            _provider: &str,
+            _model: &str,
+        ) -> Result<Box<dyn LedgerEntry>, BackendError> {
+            if self.stall_begin {
+                std::future::pending::<()>().await;
+            }
+            Ok(Box::new(StalledEntry))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_ledger_neither_outlives_the_slot_timeout_nor_holds_the_permit() {
+        for stall_begin in [true, false] {
+            let backend = FakeBackend::new(vec![Ok(answer("one")), Ok(answer("two"))]);
+            let router = SlotRouter::new(
+                BTreeMap::from([("slot_a".to_owned(), vec![target("p", "m")])]),
+                BTreeMap::from([(
+                    "p".to_owned(),
+                    ProviderHandle::new(backend, 1, Duration::from_millis(50)),
+                )]),
+                Arc::new(StalledLedger { stall_begin }),
+            );
+            let asked = request(None);
+            let started = Instant::now();
+            let (first, second) = tokio::join!(
+                router.complete("slot_a", &asked),
+                router.complete("slot_a", &asked)
+            );
+            let elapsed = started.elapsed();
+            if stall_begin {
+                assert!(matches!(
+                    first,
+                    Err(RouteError::Failed { ref last, .. }) if last.kind == FailureKind::Timeout
+                ));
+                assert!(elapsed <= Duration::from_secs(5));
+            } else {
+                assert!(first.is_ok());
+                assert!(second.is_ok());
+                assert!(elapsed <= LEDGER_FINISH_BUDGET);
+            }
         }
     }
 
