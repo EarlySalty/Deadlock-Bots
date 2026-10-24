@@ -653,6 +653,74 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_timed_out_primary_leaves_the_default_deadline_to_the_fallback() {
+        let config = crate::tool_chat::config::GatewayConfig::parse(
+            r#"
+listen = "127.0.0.1:18790"
+max_request_bytes = 1024
+
+[providers.plan]
+kind = "codex_plan"
+concurrency = 1
+queue_timeout_ms = 1000
+base_url = "http://127.0.0.1:1/v1"
+request_timeout_ms = 1000
+
+[providers.fake]
+kind = "codex_plan"
+concurrency = 1
+queue_timeout_ms = 1000
+base_url = "http://127.0.0.1:1/v1"
+request_timeout_ms = 1000
+
+[slots.slot_a]
+provider = "plan"
+model = "m1"
+timeout_ms = 1000
+max_tokens = 10
+fallback = [{ provider = "fake", model = "m2", timeout_ms = 1000 }]
+"#,
+        )
+        .expect("config");
+        let chain = config.targets(&config.slots["slot_a"]);
+        let stalled = Arc::new(StalledBackend);
+        let second = FakeBackend::new(vec![Ok(answer("second"))]);
+        let router = SlotRouter::new(
+            BTreeMap::from([("slot_a".to_owned(), chain)]),
+            BTreeMap::from([
+                (
+                    "plan".to_owned(),
+                    ProviderHandle::new(stalled, 1, Duration::from_millis(50)),
+                ),
+                (
+                    "fake".to_owned(),
+                    ProviderHandle::new(second.clone(), 1, Duration::from_millis(50)),
+                ),
+            ]),
+            Arc::new(FakeLedger::default()),
+        );
+        let routed = router
+            .complete("slot_a", &request(None))
+            .await
+            .expect("fallback serves after the primary timeout");
+        assert_eq!(routed.provider, "fake");
+        assert_eq!(second.calls().len(), 1);
+    }
+
+    struct StalledBackend;
+
+    #[async_trait]
+    impl ToolBackend for StalledBackend {
+        async fn complete(
+            &self,
+            _request: &ToolChatRequest,
+            _target: &CallTarget,
+        ) -> Result<ToolChatResponse, BackendError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn queued_requests_wait_for_a_permit_without_losing_their_call_time() {
         let backend = FakeBackend::new(vec![Ok(answer("one")), Ok(answer("two"))]);
         let short = Target {

@@ -153,7 +153,12 @@ impl GatewayConfig {
     }
 
     pub fn targets(&self, slot: &SlotConfig) -> Vec<Target> {
-        let deadline = Duration::from_millis(slot.deadline_ms.unwrap_or(slot.timeout_ms));
+        let chain_ms = slot
+            .fallback
+            .iter()
+            .map(|fallback| fallback.timeout_ms.unwrap_or(slot.timeout_ms))
+            .fold(slot.timeout_ms, u64::saturating_add);
+        let deadline = Duration::from_millis(slot.deadline_ms.unwrap_or(chain_ms));
         let primary = Target {
             provider: slot.provider.clone(),
             model: slot.model.clone(),
@@ -289,6 +294,8 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
         assert_eq!(targets[1].max_tokens, 4096);
         assert_eq!(targets[0].attempts, 1);
         assert_eq!(targets[0].retry_backoff, Duration::ZERO);
+        assert_eq!(targets[0].deadline, Duration::from_secs(150));
+        assert_eq!(targets[1].deadline, Duration::from_secs(150));
     }
 
     #[test]
