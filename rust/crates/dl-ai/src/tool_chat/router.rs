@@ -92,7 +92,7 @@ impl SlotRouter {
         let targets = self.slots.get(slot).ok_or(RouteError::UnknownSlot)?;
         let mut last = BackendError::new(FailureKind::Unavailable, "no_target");
         for (index, target) in targets.iter().enumerate() {
-            match self.attempt(slot, target, request).await {
+            match self.attempt_with_retries(slot, target, request).await {
                 Ok(response) => {
                     if index > 0 {
                         tracing::warn!(
@@ -136,6 +136,36 @@ impl SlotRouter {
         })
     }
 
+    async fn attempt_with_retries(
+        &self,
+        slot: &str,
+        target: &Target,
+        request: &ToolChatRequest,
+    ) -> Result<ToolChatResponse, BackendError> {
+        let mut tries = 1;
+        loop {
+            match self.attempt(slot, target, request).await {
+                Err(error) if error.kind.retryable() && tries < target.attempts => {
+                    let wait = target
+                        .retry_backoff
+                        .saturating_mul(2u32.saturating_pow(tries - 1));
+                    tracing::warn!(
+                        slot,
+                        provider = %target.provider,
+                        attempt = tries,
+                        kind = error.kind.as_str(),
+                        reason = error.reason,
+                        wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                        "AI_GATEWAY_RETRY"
+                    );
+                    tokio::time::sleep(wait).await;
+                    tries += 1;
+                }
+                outcome => return outcome,
+            }
+        }
+    }
+
     async fn attempt(
         &self,
         slot: &str,
@@ -149,14 +179,14 @@ impl SlotRouter {
                 FailureKind::Unavailable,
                 "unknown_provider",
             ))?;
-        let deadline = Instant::now() + target.timeout;
         let permit = tokio::time::timeout(
-            handle.queue_timeout.min(target.timeout),
+            handle.queue_timeout,
             Arc::clone(&handle.permits).acquire_owned(),
         )
         .await
         .map_err(|_| BackendError::new(FailureKind::Busy, "queue_timeout"))?
         .map_err(|_| BackendError::new(FailureKind::Unavailable, "pool_closed"))?;
+        let deadline = Instant::now() + target.timeout;
         let call = CallTarget {
             model: target.model.clone(),
             max_tokens: request
@@ -423,6 +453,8 @@ mod tests {
             model: model.into(),
             timeout: Duration::from_secs(5),
             max_tokens: 500,
+            attempts: 1,
+            retry_backoff: Duration::ZERO,
         }
     }
 
@@ -518,6 +550,97 @@ mod tests {
             chained.complete("missing", &request(None)).await.err(),
             Some(RouteError::UnknownSlot)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upstream_overload_is_retried_within_the_configured_attempts() {
+        let overloaded = || {
+            Err(BackendError::new(
+                FailureKind::Overloaded,
+                "upstream_overloaded",
+            ))
+        };
+        let retried = Target {
+            attempts: 3,
+            retry_backoff: Duration::from_millis(100),
+            ..target("plan", "m1")
+        };
+        let backend = FakeBackend::new(vec![overloaded(), overloaded(), Ok(answer("third"))]);
+        let ledger = Arc::new(FakeLedger::default());
+        let served = router(
+            vec![retried.clone()],
+            vec![("plan", backend.clone())],
+            ledger.clone(),
+        );
+        let started = Instant::now();
+        let routed = served
+            .complete("slot_a", &request(None))
+            .await
+            .expect("third attempt serves");
+        assert_eq!(backend.calls().len(), 3);
+        assert_eq!(started.elapsed(), Duration::from_millis(300));
+        assert_eq!(routed.provider, "plan");
+        let exhausted = FakeBackend::new(vec![overloaded(), overloaded(), overloaded()]);
+        let failing = router(
+            vec![retried],
+            vec![("plan", exhausted.clone())],
+            ledger.clone(),
+        );
+        assert_eq!(
+            failing.complete("slot_a", &request(None)).await.err(),
+            Some(RouteError::Failed {
+                last: BackendError::new(FailureKind::Overloaded, "upstream_overloaded"),
+                attempts: 1
+            })
+        );
+        assert_eq!(exhausted.calls().len(), 3);
+        let limited = FakeBackend::new(vec![
+            Err(BackendError::new(FailureKind::Limit, "usage_limit")),
+            Ok(answer("never")),
+        ]);
+        let once = router(
+            vec![Target {
+                attempts: 3,
+                ..target("plan", "m1")
+            }],
+            vec![("plan", limited.clone())],
+            ledger,
+        );
+        assert!(once.complete("slot_a", &request(None)).await.is_err());
+        assert_eq!(limited.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_requests_wait_for_a_permit_without_losing_their_call_time() {
+        let backend = FakeBackend::new(vec![Ok(answer("one")), Ok(answer("two"))]);
+        let short = Target {
+            timeout: Duration::from_millis(100),
+            ..target("plan", "m1")
+        };
+        let router = SlotRouter::new(
+            BTreeMap::from([("slot_a".to_owned(), vec![short])]),
+            BTreeMap::from([(
+                "plan".to_owned(),
+                ProviderHandle::new(backend.clone(), 1, Duration::from_secs(60)),
+            )]),
+            Arc::new(FakeLedger::default()),
+        );
+        let permit = router
+            .providers
+            .get("plan")
+            .map(|handle| Arc::clone(&handle.permits))
+            .expect("plan handle")
+            .acquire_owned()
+            .await
+            .expect("permit");
+        let release = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(permit);
+        };
+        let asked = request(None);
+        let (routed, ()) = tokio::join!(router.complete("slot_a", &asked), release);
+        assert!(routed.is_ok());
+        assert_eq!(backend.calls().len(), 1);
     }
 
     #[tokio::test]

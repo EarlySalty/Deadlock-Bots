@@ -245,7 +245,13 @@ fn parse_result(line: &Value, requested_model: &str) -> Option<Result<Outcome, B
     }
     let failure = |kind, reason| Some(Err(BackendError::new(kind, reason)));
     if line.get("is_error").and_then(Value::as_bool) != Some(false) {
-        let limited = line.get("api_error_status").and_then(Value::as_u64) == Some(429)
+        let status = line.get("api_error_status").and_then(Value::as_u64);
+        let overloaded = status == Some(529)
+            || line
+                .get("result")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.to_ascii_lowercase().contains("overloaded"));
+        let limited = status == Some(429)
             || line
                 .get("result")
                 .and_then(Value::as_str)
@@ -254,7 +260,9 @@ fn parse_result(line: &Value, requested_model: &str) -> Option<Result<Outcome, B
             .get("result")
             .and_then(Value::as_str)
             .is_some_and(|text| text.contains("output token maximum"));
-        return if limited {
+        return if overloaded {
+            failure(FailureKind::Overloaded, "upstream_overloaded")
+        } else if limited {
             failure(FailureKind::Limit, "usage_limit")
         } else if truncated {
             failure(FailureKind::InvalidOutput, "output_token_maximum")
@@ -330,6 +338,17 @@ mod tests {
             .map(|e| e.kind),
             Some(FailureKind::Unavailable)
         );
+        for line in [
+            json!({"type": "result", "is_error": true, "api_error_status": 529}),
+            json!({"type": "result", "is_error": true, "result": "API Error: Repeated 529 Overloaded errors"}),
+        ] {
+            assert_eq!(
+                parse_result(&line, MODEL)
+                    .and_then(Result::err)
+                    .map(|e| e.kind),
+                Some(FailureKind::Overloaded)
+            );
+        }
         assert!(parse_result(&json!({"type": "assistant"}), MODEL).is_none());
     }
 

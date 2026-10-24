@@ -7,6 +7,7 @@ pub enum FailureKind {
     Limit,
     Unavailable,
     Busy,
+    Overloaded,
     Timeout,
     InvalidRequest,
     InvalidOutput,
@@ -18,10 +19,15 @@ impl FailureKind {
             Self::Limit => "limit",
             Self::Unavailable => "unavailable",
             Self::Busy => "busy",
+            Self::Overloaded => "overloaded",
             Self::Timeout => "timeout",
             Self::InvalidRequest => "invalid_request",
             Self::InvalidOutput => "invalid_output",
         }
+    }
+
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Overloaded)
     }
 
     pub fn allows_fallback(self) -> bool {
@@ -32,7 +38,7 @@ impl FailureKind {
         match self {
             Self::Limit => "rate_limited",
             Self::Unavailable => "transport",
-            Self::Busy => "busy",
+            Self::Busy | Self::Overloaded => "busy",
             Self::Timeout => "timeout",
             Self::InvalidRequest => "invalid_request",
             Self::InvalidOutput => "invalid_output",

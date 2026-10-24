@@ -127,7 +127,7 @@ fn failure_response(failure: RouteError) -> Response {
         RouteError::Failed { last, .. } => {
             let (status, kind) = match last.kind {
                 FailureKind::Limit => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
-                FailureKind::Busy => (
+                FailureKind::Busy | FailureKind::Overloaded => (
                     StatusCode::from_u16(529).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
                     "overloaded_error",
                 ),
@@ -319,6 +319,8 @@ mod tests {
                     model: "fake-model".into(),
                     timeout: Duration::from_secs(5),
                     max_tokens: 100,
+                    attempts: 1,
+                    retry_backoff: Duration::ZERO,
                 }],
             )]),
             BTreeMap::from([(
