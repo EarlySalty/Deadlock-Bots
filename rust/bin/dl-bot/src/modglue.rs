@@ -596,6 +596,23 @@ fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Optio
     Some(question.trim().to_owned())
 }
 
+fn explicit_guild_brain_request(event: &dl_discord::MessageEvent, bot_id: u64) -> bool {
+    event.guild_id.is_some()
+        && (direct_brain_question(event, bot_id).is_some() || event.reply_message_id.is_some())
+}
+
+fn brain_error_reply_due(outcome: &dl_brain::BrainOutcome, feedback: bool, explicit: bool) -> bool {
+    match outcome {
+        dl_brain::BrainOutcome::BackendError => feedback || explicit,
+        dl_brain::BrainOutcome::NoAnswer | dl_brain::BrainOutcome::OutOfDomain => explicit,
+        dl_brain::BrainOutcome::Answer(answer) => explicit && answer.trim().is_empty(),
+        dl_brain::BrainOutcome::DailyLimit
+        | dl_brain::BrainOutcome::Cooldown { .. }
+        | dl_brain::BrainOutcome::Usage
+        | dl_brain::BrainOutcome::TooLong { .. } => false,
+    }
+}
+
 fn guide_channel(event: &dl_discord::MessageEvent) -> bool {
     event.guild_id == Some(1289721245281292288) && event.channel_id == 1426220702054355077
 }
@@ -875,7 +892,7 @@ impl BrainHandler {
             return;
         }
         if proactive {
-            self.answer_discord_event(event, replies, event.content.trim(), true)
+            self.answer_discord_event(event, replies, event.content.trim(), true, false)
                 .await;
             return;
         }
@@ -889,7 +906,7 @@ impl BrainHandler {
             return;
         };
         if !replies.is_public(event) {
-            self.answer_discord_event(event, replies, &question, false)
+            self.answer_discord_event(event, replies, &question, false, false)
                 .await;
             return;
         }
@@ -923,7 +940,8 @@ impl BrainHandler {
         let Some(question) = self.conversation_question(event, bot_id).await else {
             return false;
         };
-        self.answer_discord_event(event, replies, &question, false)
+        let explicit = explicit_guild_brain_request(event, bot_id);
+        self.answer_discord_event(event, replies, &question, false, explicit)
             .await;
         true
     }
@@ -934,6 +952,7 @@ impl BrainHandler {
         replies: &dyn BrainDirectReplyPort,
         question: &str,
         proactive: bool,
+        explicit: bool,
     ) {
         if proactive
             && *self.guide_pending.lock().await != Some((event.author_id, event.message_id))
@@ -992,17 +1011,17 @@ impl BrainHandler {
             dl_brain::DiscordReservation::DailyLimit => dl_brain::BrainOutcome::DailyLimit,
             dl_brain::DiscordReservation::Suppressed => unreachable!(),
         };
-        let mut failed = matches!(outcome, dl_brain::BrainOutcome::BackendError);
-        let extend_conversation = !matches!(outcome, dl_brain::BrainOutcome::DailyLimit);
+        let error_reply = brain_error_reply_due(&outcome, feedback, explicit);
+        let mut failed = error_reply || matches!(outcome, dl_brain::BrainOutcome::BackendError);
+        let extend_conversation =
+            !error_reply && !matches!(outcome, dl_brain::BrainOutcome::DailyLimit);
         let text = match outcome {
+            _ if error_reply => BRAIN_BACKEND_ERR.to_owned(),
             dl_brain::BrainOutcome::DailyLimit => BRAIN_DAILY_LIMIT.to_owned(),
             dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => answer,
             dl_brain::BrainOutcome::Usage => "Was möchtest du wissen?".to_owned(),
             dl_brain::BrainOutcome::TooLong { .. } => {
                 BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())
-            }
-            dl_brain::BrainOutcome::BackendError if feedback || proactive => {
-                BRAIN_BACKEND_ERR.to_owned()
             }
             dl_brain::BrainOutcome::BackendError => {
                 tracing::warn!(
@@ -5213,41 +5232,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brain_direct_feedback_preserves_private_errors_and_public_silence() {
+    async fn brain_guild_mention_bekommt_genau_eine_antwort_oder_fehlermeldung() {
         for private in [false, true] {
             let backend = dl_brain::BrainOutcome::BackendError;
             let no_answer = dl_brain::BrainOutcome::NoAnswer;
             let answer = dl_brain::BrainOutcome::Answer("Gesicherte Antwort".into());
-            for (outcome, fail, revoke, fail_reactions, expected_error, expected_sent) in [
-                (backend.clone(), false, false, false, true, 1),
-                (backend.clone(), true, false, false, true, 0),
-                (backend, false, true, false, true, 0),
-                (no_answer.clone(), false, false, false, false, 0),
-                (
-                    dl_brain::BrainOutcome::OutOfDomain,
-                    false,
-                    false,
-                    false,
-                    false,
-                    0,
-                ),
+            for (outcome, fail, revoke, fail_reactions) in [
+                (backend.clone(), false, false, false),
+                (backend.clone(), true, false, false),
+                (backend, false, true, false),
+                (no_answer.clone(), false, false, false),
+                (dl_brain::BrainOutcome::OutOfDomain, false, false, false),
                 (
                     dl_brain::BrainOutcome::Answer(" ".into()),
                     false,
                     false,
                     false,
-                    false,
-                    0,
                 ),
-                (no_answer.clone(), true, false, false, false, 0),
-                (no_answer.clone(), false, true, false, false, 0),
-                (no_answer, false, false, true, false, 0),
-                (answer.clone(), false, false, false, false, 1),
-                (answer.clone(), true, false, false, true, 0),
-                (answer.clone(), false, true, false, true, 0),
-                (answer, false, false, true, false, 1),
+                (no_answer.clone(), true, false, false),
+                (no_answer.clone(), false, true, false),
+                (no_answer, false, false, true),
+                (answer.clone(), false, false, false),
+                (answer.clone(), true, false, false),
+                (answer.clone(), false, true, false),
+                (answer, false, false, true),
             ] {
-                let backend = matches!(outcome, dl_brain::BrainOutcome::BackendError);
+                let answered = matches!(
+                    &outcome,
+                    dl_brain::BrainOutcome::Answer(text) if !text.trim().is_empty()
+                );
                 let (mut handler, _) = direct_test_handler();
                 let answerer = Arc::new(RecordingDiscordAnswerer {
                     outcome: Some(outcome),
@@ -5271,38 +5284,25 @@ mod tests {
                         (event.channel_id, event.message_id, "👀".into(), true),
                         (event.channel_id, event.message_id, "👀".into(), false),
                     ]);
-                    if expected_error {
-                        expected.push((event.channel_id, event.message_id, "❌".into(), true));
+                    if !answered || fail || revoke {
+                        expected.extend([(event.channel_id, event.message_id, "❌".into(), true)]);
                     }
                 }
                 assert_eq!(*replies.reactions.lock().await, expected);
                 assert_eq!(
                     replies.reply_attempts.load(Ordering::Relaxed),
-                    if !private && backend {
-                        0
-                    } else if fail && expected_error {
-                        1
-                    } else {
-                        expected_sent
-                    }
+                    usize::from(!revoke)
                 );
                 let sent = replies.sent.lock().await;
-                assert_eq!(
-                    sent.len(),
-                    if !private && backend {
-                        0
-                    } else {
-                        expected_sent
-                    }
-                );
+                assert_eq!(sent.len(), usize::from(!fail && !revoke));
                 if let Some((_, _, body)) = sent.first() {
                     assert_brain_v2(body);
                     assert_eq!(
                         brain_v2_text(body),
-                        if backend {
-                            BRAIN_BACKEND_ERR
-                        } else {
+                        if answered {
                             "Gesicherte Antwort"
+                        } else {
+                            BRAIN_BACKEND_ERR
                         }
                     );
                     assert_eq!(body["message_reference"]["message_id"], "2");
@@ -5311,7 +5311,75 @@ mod tests {
                 assert_eq!(answerer.calls.lock().await.len(), 1);
                 assert_eq!(*answerer.read_access.lock().await, vec![!private]);
                 assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
+                if !answered {
+                    assert!(handler.conversations.lock().await.entries.is_empty());
+                }
             }
+        }
+    }
+
+    #[test]
+    fn brain_fehlermeldung_nur_bei_expliziter_guild_anfrage_oder_privat() {
+        let mention = test_message_event(Some(1), "<@42> Frage");
+        let mut reply = test_message_event(Some(1), "Und dann?");
+        reply.is_reply = true;
+        reply.reply_message_id = Some(999);
+        let passive = test_message_event(Some(1), "Und dann?");
+        let dm = test_message_event(None, "Frage");
+        assert!(explicit_guild_brain_request(&mention, 42));
+        assert!(explicit_guild_brain_request(&reply, 42));
+        assert!(!explicit_guild_brain_request(&passive, 42));
+        assert!(!explicit_guild_brain_request(&dm, 42));
+        for outcome in [
+            dl_brain::BrainOutcome::BackendError,
+            dl_brain::BrainOutcome::NoAnswer,
+            dl_brain::BrainOutcome::OutOfDomain,
+            dl_brain::BrainOutcome::Answer(" ".into()),
+        ] {
+            assert!(brain_error_reply_due(&outcome, false, true));
+            assert!(!brain_error_reply_due(&outcome, false, false));
+        }
+        assert!(brain_error_reply_due(
+            &dl_brain::BrainOutcome::BackendError,
+            true,
+            false
+        ));
+        assert!(!brain_error_reply_due(
+            &dl_brain::BrainOutcome::NoAnswer,
+            true,
+            false
+        ));
+        for outcome in [
+            dl_brain::BrainOutcome::Answer("Antwort".into()),
+            dl_brain::BrainOutcome::DailyLimit,
+            dl_brain::BrainOutcome::Cooldown { remaining_secs: 1 },
+            dl_brain::BrainOutcome::Usage,
+        ] {
+            assert!(!brain_error_reply_due(&outcome, true, true));
+        }
+    }
+
+    #[tokio::test]
+    async fn brain_guide_ohne_erwaehnung_bleibt_bei_fehler_still() {
+        for outcome in [
+            dl_brain::BrainOutcome::BackendError,
+            dl_brain::BrainOutcome::NoAnswer,
+        ] {
+            let (mut handler, _) = direct_test_handler();
+            let answerer = Arc::new(RecordingDiscordAnswerer {
+                outcome: Some(outcome),
+                ..Default::default()
+            });
+            handler.answerer = answerer.clone();
+            let replies = RecordingBrainReplies::default();
+            let event = guide_test_event("Wie finde ich eine Lane?");
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+            assert_eq!(answerer.calls.lock().await.len(), 1);
+            assert!(replies.sent.lock().await.is_empty());
+            assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 0);
+            assert!(handler.guide_pending.lock().await.is_none());
         }
     }
 
@@ -5739,6 +5807,7 @@ mod tests {
                 dl_brain::BrainOutcome::Answer(" \n".into()),
                 dl_brain::BrainOutcome::Cooldown { remaining_secs: 1 },
             ] {
+                let errors = reply && !matches!(outcome, dl_brain::BrainOutcome::Cooldown { .. });
                 let (mut handler, _) = direct_test_handler();
                 handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(2));
                 let answerer = Arc::new(RecordingDiscordAnswerer {
@@ -5755,14 +5824,23 @@ mod tests {
                     event.reply_message_id = Some(999);
                     event.reply_channel_id = Some(event.channel_id);
                 }
-                for _ in 0..2 {
+                for round in 1..=2 {
                     handler
                         .handle_message_event_with_replies(&event, 42, &replies)
                         .await;
-                    assert!(replies.sent.lock().await.is_empty());
+                    let expected = if errors { round } else { 0 };
+                    let sent = replies.sent.lock().await;
+                    assert_eq!(sent.len(), expected);
+                    for (_, _, body) in sent.iter() {
+                        assert_brain_v2(body);
+                        assert_eq!(brain_v2_text(body), BRAIN_BACKEND_ERR);
+                        assert_eq!(body["message_reference"]["message_id"], "2");
+                    }
+                    drop(sent);
                     assert!(replies.reactions.lock().await.is_empty());
-                    assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 0);
+                    assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), expected);
                 }
+                let error_count = if errors { 2 } else { 0 };
                 assert_eq!(answerer.calls.lock().await.len(), 2);
                 assert_eq!(*answerer.read_access.lock().await, vec![true, true]);
                 assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
@@ -5770,14 +5848,17 @@ mod tests {
                     .handle_message_event_with_replies(&event, 42, &replies)
                     .await;
                 let sent = replies.sent.lock().await;
-                assert_eq!(sent.len(), 1);
-                assert_eq!(brain_v2_text(&sent[0].2), BRAIN_DAILY_LIMIT);
+                assert_eq!(sent.len(), error_count + 1);
+                assert_eq!(brain_v2_text(&sent[error_count].2), BRAIN_DAILY_LIMIT);
                 drop(sent);
                 handler
                     .handle_message_event_with_replies(&event, 42, &replies)
                     .await;
-                assert_eq!(replies.sent.lock().await.len(), 1);
-                assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 1);
+                assert_eq!(replies.sent.lock().await.len(), error_count + 1);
+                assert_eq!(
+                    replies.reply_attempts.load(Ordering::Relaxed),
+                    error_count + 1
+                );
                 assert!(replies.reactions.lock().await.is_empty());
                 assert_eq!(answerer.calls.lock().await.len(), 2);
                 let conversations = handler.conversations.lock().await;

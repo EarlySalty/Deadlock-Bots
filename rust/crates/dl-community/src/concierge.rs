@@ -1494,12 +1494,19 @@ fn with_response_components(
     body
 }
 
-fn private_error_reply(
+fn unanswered_error_reply(
     outcome: ConciergeAnswerOutcome,
-    allow_personal_actions: bool,
+    options: AnswerOptions<'_>,
 ) -> Option<String> {
-    (allow_personal_actions && outcome == ConciergeAnswerOutcome::Error)
-        .then(|| KNOWLEDGE_UNAVAILABLE_TEXT.to_owned())
+    let private_error = options.allow_personal_actions && outcome == ConciergeAnswerOutcome::Error;
+    let mention_unanswered = options.explicit_mention
+        && matches!(
+            outcome,
+            ConciergeAnswerOutcome::Error
+                | ConciergeAnswerOutcome::NoAnswer
+                | ConciergeAnswerOutcome::Timeout
+        );
+    (private_error || mention_unanswered).then(|| KNOWLEDGE_UNAVAILABLE_TEXT.to_owned())
 }
 
 fn answer_body(
@@ -1645,6 +1652,7 @@ impl AnswerRoute {
 #[derive(Clone, Copy)]
 struct AnswerOptions<'a> {
     allow_personal_actions: bool,
+    explicit_mention: bool,
     route: AnswerRoute,
     response_components: Option<&'a Value>,
 }
@@ -4767,6 +4775,7 @@ impl Concierge {
             now,
             AnswerOptions {
                 allow_personal_actions: true,
+                explicit_mention: false,
                 route: AnswerRoute::OnboardingTour,
                 response_components: Some(response_components),
             },
@@ -4937,6 +4946,7 @@ impl Concierge {
         let is_public_support = guild_id == Some(self.config.main_guild_id)
             && channel_id == SERVER_BOT_FRAGEN_CHANNEL_ID;
         let control_text = content.trim();
+        let explicit_mention = !is_direct_dm && self.bot_mention_question(control_text).is_some();
         let now = Utc::now();
         if guild_id == Some(self.config.main_guild_id) && !is_public_support {
             if let Some(question) = self.bot_mention_question(control_text) {
@@ -4954,6 +4964,7 @@ impl Concierge {
                             now,
                             AnswerOptions {
                                 allow_personal_actions: false,
+                                explicit_mention: true,
                                 route: AnswerRoute::Concierge,
                                 response_components: None,
                             },
@@ -5002,8 +5013,18 @@ impl Concierge {
                 return true;
             }
             let _support_turn = acquire_stateful_support_turn().await;
-            self.send_stateless_reply(channel_id, effective_guild_id, user_id, trimmed, false)
-                .await;
+            self.send_stateless_reply(
+                channel_id,
+                user_id,
+                trimmed,
+                AnswerOptions {
+                    allow_personal_actions: false,
+                    explicit_mention,
+                    route: AnswerRoute::Concierge,
+                    response_components: None,
+                },
+            )
+            .await;
             return true;
         }
         let _ = self
@@ -5015,6 +5036,7 @@ impl Concierge {
                 now,
                 AnswerOptions {
                     allow_personal_actions: is_direct_dm,
+                    explicit_mention,
                     route: AnswerRoute::Concierge,
                     response_components: None,
                 },
@@ -5036,20 +5058,14 @@ impl Concierge {
             allow_personal_actions,
             route,
             response_components,
+            ..
         } = options;
         let db_guild_id = match u64_to_i64(effective_guild_id, "concierge_conversations.guild_id") {
             Ok(guild_id) => guild_id,
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Guild-ID fuer Antwort ungueltig");
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5061,14 +5077,7 @@ impl Concierge {
                 self.clear_user_runtime(user_id);
                 drop(stateful_turn);
                 return self
-                    .send_stateless_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_stateless_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::PrivacyStateless);
             }
@@ -5076,14 +5085,7 @@ impl Concierge {
                 tracing::warn!(%err, user_id, "Concierge: Privacy-Status vor Antwort nicht pruefbar");
                 drop(stateful_turn);
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5103,14 +5105,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_stateless_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_stateless_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::PrivacyStateless);
             }
@@ -5119,14 +5114,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5147,14 +5135,7 @@ impl Concierge {
             drop(delivery_tx);
             drop(stateful_turn);
             return self
-                .send_internal_error_reply_inner(
-                    channel_id,
-                    user_id,
-                    trimmed,
-                    allow_personal_actions,
-                    route,
-                    response_components,
-                )
+                .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                 .await
                 .override_outcome(ConciergeAnswerOutcome::Error);
         }
@@ -5205,7 +5186,16 @@ impl Concierge {
                 )
                 .await;
             }
-            if message_id.is_none() || !committed {
+            if message_id.is_none() {
+                return AnswerTerminal {
+                    source: "cooldown",
+                    knowledge_hit: false,
+                    stateful: true,
+                    outcome: ConciergeAnswerOutcome::Uncertain,
+                    message_id: None,
+                };
+            }
+            if !committed {
                 let notice_id = self
                     .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
                     .await;
@@ -5232,14 +5222,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5253,14 +5236,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5284,7 +5260,7 @@ impl Concierge {
         let Some(reply) = answer
             .answer
             .reply
-            .or_else(|| private_error_reply(answer_outcome, allow_personal_actions))
+            .or_else(|| unanswered_error_reply(answer_outcome, options))
         else {
             let outcome = match delivery_tx.commit().await {
                 Ok(()) => answer_outcome,
@@ -5315,14 +5291,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5343,14 +5312,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_stateless_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_stateless_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::PrivacyStateless);
             }
@@ -5359,14 +5321,7 @@ impl Concierge {
                 drop(delivery_tx);
                 drop(stateful_turn);
                 return self
-                    .send_internal_error_reply_inner(
-                        channel_id,
-                        user_id,
-                        trimmed,
-                        allow_personal_actions,
-                        route,
-                        response_components,
-                    )
+                    .send_internal_error_reply_inner(channel_id, user_id, trimmed, options)
                     .await
                     .override_outcome(ConciergeAnswerOutcome::Error);
             }
@@ -5388,15 +5343,12 @@ impl Concierge {
                 tracing::warn!(%err, user_id, channel_id, "Concierge: Antwort-Zustellung fehlgeschlagen oder unsicher");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                let message_id = self
-                    .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
-                    .await;
                 return AnswerTerminal {
                     source,
                     knowledge_hit,
                     stateful: true,
                     outcome: ConciergeAnswerOutcome::Uncertain,
-                    message_id,
+                    message_id: None,
                 };
             }
             Err(_) => {
@@ -5408,15 +5360,12 @@ impl Concierge {
                 );
                 drop(delivery_tx);
                 drop(stateful_turn);
-                let message_id = self
-                    .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
-                    .await;
                 return AnswerTerminal {
                     source,
                     knowledge_hit,
                     stateful: true,
                     outcome: ConciergeAnswerOutcome::Uncertain,
-                    message_id,
+                    message_id: None,
                 };
             }
         };
@@ -5897,20 +5846,12 @@ impl Concierge {
     async fn send_stateless_reply(
         &self,
         channel_id: u64,
-        _guild_id: u64,
         user_id: u64,
         question: &str,
-        allow_personal_actions: bool,
+        options: AnswerOptions<'_>,
     ) {
         let _ = self
-            .send_stateless_reply_inner(
-                channel_id,
-                user_id,
-                question,
-                allow_personal_actions,
-                AnswerRoute::Concierge,
-                None,
-            )
+            .send_stateless_reply_inner(channel_id, user_id, question, options)
             .await;
     }
 
@@ -5919,25 +5860,16 @@ impl Concierge {
         channel_id: u64,
         user_id: u64,
         question: &str,
-        allow_personal_actions: bool,
-        route: AnswerRoute,
-        response_components: Option<&Value>,
+        options: AnswerOptions<'_>,
     ) -> AnswerTerminal {
-        if route == AnswerRoute::Concierge {
+        if options.route == AnswerRoute::Concierge {
             return self
-                .send_stateless_reply_inner(
-                    channel_id,
-                    user_id,
-                    question,
-                    allow_personal_actions,
-                    route,
-                    response_components,
-                )
+                .send_stateless_reply_inner(channel_id, user_id, question, options)
                 .await
                 .override_outcome(ConciergeAnswerOutcome::Error);
         }
         let message_id = self
-            .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+            .send_answer_uncertain_notice_inner(channel_id, user_id, options.response_components)
             .await;
         AnswerTerminal {
             source: "internal_error",
@@ -5953,10 +5885,14 @@ impl Concierge {
         channel_id: u64,
         user_id: u64,
         question: &str,
-        allow_personal_actions: bool,
-        route: AnswerRoute,
-        response_components: Option<&Value>,
+        options: AnswerOptions<'_>,
     ) -> AnswerTerminal {
+        let AnswerOptions {
+            allow_personal_actions,
+            route,
+            response_components,
+            ..
+        } = options;
         let decision = self
             .answer_bound_decision(
                 AnswerBinding {
@@ -5977,7 +5913,7 @@ impl Concierge {
         let Some(reply) = decision
             .answer
             .reply
-            .or_else(|| private_error_reply(outcome, allow_personal_actions))
+            .or_else(|| unanswered_error_reply(outcome, options))
         else {
             return AnswerTerminal {
                 source,
@@ -6002,15 +5938,7 @@ impl Concierge {
             Ok(Ok(message_id)) => (Some(message_id), false),
             Ok(Err(err)) => {
                 tracing::warn!(%err, channel_id, "Concierge: Stateless-Antwort-Zustellung fehlgeschlagen oder unsicher");
-                (
-                    self.send_answer_uncertain_notice_inner(
-                        channel_id,
-                        user_id,
-                        response_components,
-                    )
-                    .await,
-                    true,
-                )
+                (None, true)
             }
             Err(_) => {
                 tracing::warn!(
@@ -6018,15 +5946,7 @@ impl Concierge {
                     timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
                     "Concierge: Stateless-Antwort-Zustellung hat Zeitlimit ueberschritten"
                 );
-                (
-                    self.send_answer_uncertain_notice_inner(
-                        channel_id,
-                        user_id,
-                        response_components,
-                    )
-                    .await,
-                    true,
-                )
+                (None, true)
             }
         };
         AnswerTerminal {
@@ -10051,6 +9971,7 @@ mod tests {
                             Utc::now(),
                             AnswerOptions {
                                 allow_personal_actions: true,
+                                explicit_mention: false,
                                 route: AnswerRoute::Concierge,
                                 response_components: None,
                             },
@@ -10062,9 +9983,12 @@ mod tests {
                             10,
                             42,
                             question,
-                            true,
-                            AnswerRoute::Concierge,
-                            None,
+                            AnswerOptions {
+                                allow_personal_actions: true,
+                                explicit_mention: false,
+                                route: AnswerRoute::Concierge,
+                                response_components: None,
+                            },
                         )
                         .await
                 };
@@ -11025,9 +10949,12 @@ mod tests {
                     10,
                     42,
                     "Wie funktioniert Parry?",
-                    false,
-                    AnswerRoute::Concierge,
-                    None,
+                    AnswerOptions {
+                        allow_personal_actions: false,
+                        explicit_mention: false,
+                        route: AnswerRoute::Concierge,
+                        response_components: None,
+                    },
                 )
                 .await;
             assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -11075,6 +11002,69 @@ mod tests {
                 .await
                 .expect("Synthetischen Verlauf leeren");
             server.abort();
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn brain_only_guild_erwaehnung_bekommt_genau_eine_fehlermeldung() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("Concierge-Testdatenbank");
+        for status in [
+            "insufficient_evidence",
+            "build_rejected",
+            "unverified",
+            "unauthorized_evidence",
+            "budget_exceeded",
+            "provider_error",
+            "unavailable",
+            "invalid_contract",
+            "http_error",
+        ] {
+            for explicit_mention in [true, false] {
+                let (brain, calls, server) = crate::faq::brain_answer_fixture(status).await;
+                let port = mock_port();
+                let concierge = Concierge::brain_only(
+                    db.pool().clone(),
+                    port.clone(),
+                    None,
+                    test_config(true, &[]),
+                    brain,
+                );
+                let terminal = concierge
+                    .send_stateless_reply_inner(
+                        10,
+                        42,
+                        "Wie funktioniert Parry?",
+                        AnswerOptions {
+                            allow_personal_actions: false,
+                            explicit_mention,
+                            route: AnswerRoute::Concierge,
+                            response_components: None,
+                        },
+                    )
+                    .await;
+                assert_eq!(calls.load(Ordering::SeqCst), 1, "{status}");
+                assert_eq!(terminal.message_id.is_some(), explicit_mention, "{status}");
+                {
+                    let sent = port.sent_channel_v2.lock().expect("Nachrichtenrecorder");
+                    assert_eq!(sent.len(), usize::from(explicit_mention), "{status}");
+                    for body in sent.iter() {
+                        assert_eq!(body["flags"], json!(CONCIERGE_COMPONENTS_V2_FLAG));
+                        assert_eq!(
+                            body["components"][0]["accent_color"],
+                            json!(CONCIERGE_ACCENT_GOLD)
+                        );
+                        assert_eq!(sent_v2_content(body), KNOWLEDGE_UNAVAILABLE_TEXT);
+                    }
+                }
+                sqlx::query("DELETE FROM bot.concierge_conversations WHERE user_id = 42")
+                    .execute(db.pool())
+                    .await
+                    .expect("Synthetischen Verlauf leeren");
+                server.abort();
+            }
         }
     }
 
@@ -12088,7 +12078,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn tour_frage_optout_zustellfehler_sendet_unsicherheit_mit_buttons() {
+    async fn tour_frage_optout_zustellfehler_sendet_keine_zweite_nachricht() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -12121,10 +12111,7 @@ mod tests {
         server.await.expect("knowledge server");
 
         assert_eq!(outcome, ConciergeAnswerOutcome::Uncertain);
-        let sent = port.sent_channel_v2.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent_v2_content(&sent[0]), ANSWER_UNCERTAIN_TEXT);
-        assert_has_tour_components(&sent[0]);
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "testing")]
@@ -12200,7 +12187,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn tour_frage_zustellfehler_ist_uncertain_und_hinweis_hat_buttons() {
+    async fn tour_frage_zustellfehler_ist_uncertain_ohne_zweite_nachricht() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -12228,9 +12215,7 @@ mod tests {
         server.await.expect("knowledge server");
 
         assert_eq!(outcome, ConciergeAnswerOutcome::Uncertain);
-        let sent = port.sent_channel_v2.lock().unwrap();
-        assert_eq!(sent_v2_content(&sent[0]), ANSWER_UNCERTAIN_TEXT);
-        assert_has_tour_components(&sent[0]);
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
