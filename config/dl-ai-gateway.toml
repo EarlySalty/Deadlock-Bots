@@ -23,4 +23,5 @@ timeout_ms = 180000
 max_tokens = 16384
 attempts = 4
 retry_backoff_ms = 2000
+deadline_ms = 240000
 fallback = []

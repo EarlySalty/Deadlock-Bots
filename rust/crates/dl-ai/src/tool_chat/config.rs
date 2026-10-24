@@ -60,6 +60,8 @@ pub struct SlotConfig {
     #[serde(default)]
     pub retry_backoff_ms: u64,
     #[serde(default)]
+    pub deadline_ms: Option<u64>,
+    #[serde(default)]
     pub fallback: Vec<FallbackConfig>,
 }
 
@@ -84,6 +86,7 @@ pub struct Target {
     pub max_tokens: u32,
     pub attempts: u32,
     pub retry_backoff: Duration,
+    pub deadline: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +128,9 @@ impl GatewayConfig {
             if !valid_name(name) {
                 return invalid(format!("slot name {name} is invalid"));
             }
+            if slot.deadline_ms == Some(0) {
+                return invalid(format!("slot {name} needs a positive deadline_ms"));
+            }
             if !(1..=8).contains(&slot.attempts) || slot.retry_backoff_ms > 60_000 {
                 return invalid(format!(
                     "slot {name} needs 1 to 8 attempts and a backoff up to 60000 ms"
@@ -147,6 +153,7 @@ impl GatewayConfig {
     }
 
     pub fn targets(&self, slot: &SlotConfig) -> Vec<Target> {
+        let deadline = Duration::from_millis(slot.deadline_ms.unwrap_or(slot.timeout_ms));
         let primary = Target {
             provider: slot.provider.clone(),
             model: slot.model.clone(),
@@ -154,6 +161,7 @@ impl GatewayConfig {
             max_tokens: slot.max_tokens,
             attempts: slot.attempts,
             retry_backoff: Duration::from_millis(slot.retry_backoff_ms),
+            deadline,
         };
         std::iter::once(primary)
             .chain(slot.fallback.iter().map(|fallback| Target {
@@ -163,6 +171,7 @@ impl GatewayConfig {
                 max_tokens: fallback.max_tokens.unwrap_or(slot.max_tokens),
                 attempts: slot.attempts,
                 retry_backoff: Duration::from_millis(slot.retry_backoff_ms),
+                deadline,
             }))
             .collect()
     }
@@ -292,6 +301,7 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nsurprise = 1"),
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nattempts = 0"),
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nattempts = 9"),
+            SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\ndeadline_ms = 0"),
         ] {
             assert!(GatewayConfig::parse(&broken).is_err(), "{broken}");
         }
@@ -309,6 +319,7 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
         assert_eq!(slot.model, "claude-haiku-5-5");
         assert!(slot.fallback.is_empty());
         assert!(slot.attempts > 1);
+        assert!(slot.deadline_ms.is_some_and(|ms| ms < 300_000));
         assert!(slot.retry_backoff_ms > 0);
     }
 }

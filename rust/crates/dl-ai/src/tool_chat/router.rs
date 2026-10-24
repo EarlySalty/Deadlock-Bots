@@ -90,9 +90,16 @@ impl SlotRouter {
         request: &ToolChatRequest,
     ) -> Result<Routed, RouteError> {
         let targets = self.slots.get(slot).ok_or(RouteError::UnknownSlot)?;
+        let deadline = Instant::now()
+            + targets
+                .first()
+                .map_or(Duration::ZERO, |target| target.deadline);
         let mut last = BackendError::new(FailureKind::Unavailable, "no_target");
         for (index, target) in targets.iter().enumerate() {
-            match self.attempt_with_retries(slot, target, request).await {
+            match self
+                .attempt_with_retries(slot, target, request, deadline)
+                .await
+            {
                 Ok(response) => {
                     if index > 0 {
                         tracing::warn!(
@@ -141,14 +148,19 @@ impl SlotRouter {
         slot: &str,
         target: &Target,
         request: &ToolChatRequest,
+        deadline: Instant,
     ) -> Result<ToolChatResponse, BackendError> {
         let mut tries = 1;
         loop {
-            match self.attempt(slot, target, request).await {
-                Err(error) if error.kind.retryable() && tries < target.attempts => {
-                    let wait = target
-                        .retry_backoff
-                        .saturating_mul(2u32.saturating_pow(tries - 1));
+            let wait = target
+                .retry_backoff
+                .saturating_mul(2u32.saturating_pow(tries - 1));
+            match self.attempt(slot, target, request, deadline).await {
+                Err(error)
+                    if error.kind.retryable()
+                        && tries < target.attempts
+                        && Instant::now() + wait < deadline =>
+                {
                     tracing::warn!(
                         slot,
                         provider = %target.provider,
@@ -171,7 +183,11 @@ impl SlotRouter {
         slot: &str,
         target: &Target,
         request: &ToolChatRequest,
+        deadline: Instant,
     ) -> Result<ToolChatResponse, BackendError> {
+        if Instant::now() >= deadline {
+            return Err(BackendError::new(FailureKind::Timeout, "request_deadline"));
+        }
         let handle = self
             .providers
             .get(&target.provider)
@@ -179,14 +195,13 @@ impl SlotRouter {
                 FailureKind::Unavailable,
                 "unknown_provider",
             ))?;
-        let permit = tokio::time::timeout(
-            handle.queue_timeout,
-            Arc::clone(&handle.permits).acquire_owned(),
-        )
-        .await
-        .map_err(|_| BackendError::new(FailureKind::Busy, "queue_timeout"))?
-        .map_err(|_| BackendError::new(FailureKind::Unavailable, "pool_closed"))?;
-        let deadline = Instant::now() + target.timeout;
+        let queue_deadline = deadline.min(Instant::now() + handle.queue_timeout);
+        let permit =
+            tokio::time::timeout_at(queue_deadline, Arc::clone(&handle.permits).acquire_owned())
+                .await
+                .map_err(|_| BackendError::new(FailureKind::Busy, "queue_timeout"))?
+                .map_err(|_| BackendError::new(FailureKind::Unavailable, "pool_closed"))?;
+        let deadline = deadline.min(Instant::now() + target.timeout);
         let call = CallTarget {
             model: target.model.clone(),
             max_tokens: request
@@ -455,6 +470,7 @@ mod tests {
             max_tokens: 500,
             attempts: 1,
             retry_backoff: Duration::ZERO,
+            deadline: Duration::from_secs(60),
         }
     }
 
@@ -608,6 +624,32 @@ mod tests {
         );
         assert!(once.complete("slot_a", &request(None)).await.is_err());
         assert_eq!(limited.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_stop_at_the_request_deadline() {
+        let overloaded = || {
+            Err(BackendError::new(
+                FailureKind::Overloaded,
+                "upstream_overloaded",
+            ))
+        };
+        let bounded = Target {
+            attempts: 8,
+            retry_backoff: Duration::from_secs(1),
+            deadline: Duration::from_secs(3),
+            ..target("plan", "m1")
+        };
+        let backend = FakeBackend::new((0..8).map(|_| overloaded()).collect());
+        let router = router(
+            vec![bounded],
+            vec![("plan", backend.clone())],
+            Arc::new(FakeLedger::default()),
+        );
+        let started = Instant::now();
+        assert!(router.complete("slot_a", &request(None)).await.is_err());
+        assert_eq!(backend.calls().len(), 2);
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[tokio::test(start_paused = true)]

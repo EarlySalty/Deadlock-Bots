@@ -321,6 +321,7 @@ mod tests {
                     max_tokens: 100,
                     attempts: 1,
                     retry_backoff: Duration::ZERO,
+                    deadline: Duration::from_secs(5),
                 }],
             )]),
             BTreeMap::from([(
