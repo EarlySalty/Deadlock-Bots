@@ -40,6 +40,12 @@ static INVITE_TERM_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 static QUESTION_SIGNAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(r"(?iu)\b(?:wer|mag|kann|könnte|koennte|jemand|würde|wuerde|hätte|haette)\b").ok()
 });
+static IMPERSONAL_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b(?:kann|könnte|koennte|darf)\s+man\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie|denn|wohl)\s+)*(?:(?:ein(?:en|e)?|nen?)\s+)?(?:invite|einladung|playtest|beta)\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie)\s+)*(?:bekommen|kriegen|erhalten|haben)\b",
+    )
+    .expect("valid impersonal invite request expression")
+});
 
 #[derive(Debug, Clone)]
 pub struct LoungeMessage {
@@ -884,7 +890,8 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     if is_offer(content) {
         return None;
     }
-    let folded = fold_german_umlauts(&content.to_lowercase());
+    let lower = content.to_lowercase();
+    let folded = fold_german_umlauts(&lower);
     let words: Vec<&str> = folded
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -906,7 +913,8 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
             matches!(*word, "mich" | "mcih" | "mir" | "uns" | "me")
                 || (word.starts_with('m') && word.len() >= 3 && close_word(word, "mich", 1))
         });
-    if !invite || !self_request {
+    let impersonal_request = IMPERSONAL_REQUEST_RE.is_match(&lower);
+    if !invite || !(self_request || impersonal_request) {
         return None;
     }
     let room_address = words.iter().any(|word| {
@@ -924,7 +932,7 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     });
     if bot_mention || (!room_address && (direct_verb || words.contains(&"du"))) {
         Some(RequestKind::Direct)
-    } else if has_question_signal(&content.to_lowercase()) || room_address || asks {
+    } else if has_question_signal(&lower) || room_address || asks || impersonal_request {
         Some(RequestKind::Room)
     } else {
         None

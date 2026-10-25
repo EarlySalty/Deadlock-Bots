@@ -7,6 +7,7 @@ const NOW: i64 = 1_790_000_000;
 const BOT: u64 = 99;
 const GUILD: u64 = 42;
 const USER: u64 = 7;
+const IMPERSONAL_REQUEST: &str = "Jo, kann man hier einen Invite bekommen, wenn man nett fragt?😅";
 const AUDIT_REPLY: &str = "ℹ️ Dieser Steam-Account wurde schon eingeladen, am <t:1700000000:D>. Hier ist nichts mehr zu tun.";
 const RUNNING_REPLY: &str = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung. Ich schicke sie nicht doppelt, sonst zählt sie zweimal gegen das Tageslimit.";
 
@@ -279,6 +280,77 @@ async fn direkte_bitte_nutzt_bekannten_code() {
         .await
         .iter()
         .any(|(_, text)| text == INVITE_LOUNGE_HINT_TEXT));
+}
+
+#[test]
+fn impersonal_invite_requests_are_room_requests() {
+    for content in [
+        IMPERSONAL_REQUEST,
+        "Kann man hier einen Invite bekommen?",
+        "Könnte man bitte eine Einladung erhalten?",
+        "Koennte man hier noch nen Invite kriegen?",
+        "Darf man vielleicht einen Invite haben?",
+        "kann man hier noch einen invite bekommen",
+        "Kann man eine Einladung hier bekommen?",
+        "Kann man hier ein Invite bekommen?",
+        "Kann man hier Invite bekommen?",
+    ] {
+        assert_eq!(
+            request_kind(content, BOT),
+            Some(RequestKind::Room),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn impersonal_invite_discussion_is_not_a_request() {
+    for content in [
+        "Man kann hier einen Invite bekommen, wenn man nett fragt.",
+        "Früher konnte man hier einen Invite bekommen.",
+        "Ich habe einen Invite bekommen, danke!",
+        "Kann man hier andere Leute einladen?",
+        "Wie kann man einen Invite verschicken?",
+        "Kann man Einladungen zurücknehmen?",
+        "Kann man hier einen Invite verschenken?",
+        "Kann man hier Hilfe bekommen? Der Invite ist schon da.",
+        "Ich kann dich einladen, wenn du einen Invite bekommen willst.",
+        "Warum kann man hier keinen Invite bekommen?",
+    ] {
+        assert_eq!(request_kind(content, BOT), None, "{content}");
+    }
+}
+
+#[tokio::test]
+async fn impersonal_request_without_code_gets_one_hint_without_dispatch() {
+    let (watcher, store, port, invite) = setup();
+    let event = message(1, NOW, IMPERSONAL_REQUEST);
+    watcher
+        .handle_message(event.clone(), NOW, None)
+        .await
+        .expect("request is recorded and hint is sent");
+    watcher
+        .handle_message(event, NOW, None)
+        .await
+        .expect("duplicate request is ignored");
+    watcher
+        .handle_message(message(2, NOW + 20, IMPERSONAL_REQUEST), NOW + 20, None)
+        .await
+        .expect("repeated request respects hint cooldown");
+    assert_eq!(
+        port.replies.lock().await.as_slice(),
+        &[(1, INVITE_LOUNGE_HINT_TEXT.into())]
+    );
+    assert!(invite.calls.lock().await.is_empty());
+    let request = store
+        .load(USER)
+        .await
+        .expect("state can be read")
+        .expect("request state exists")
+        .request
+        .expect("request is waiting for a code");
+    assert_eq!(request.phase, Phase::WaitingForCode);
+    assert!(!request.direct);
 }
 
 #[tokio::test]
