@@ -42,7 +42,7 @@ static QUESTION_SIGNAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 });
 static IMPERSONAL_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\b(?:kann|könnte|koennte|darf)\s+man\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie|denn|wohl)\s+)*(?:(?:ein(?:en|e)?|nen?)\s+)?(?:invite|einladung|playtest|beta)\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie)\s+)*(?:bekommen|kriegen|erhalten|haben)\b",
+        r"(?:^|[.!?])\s*(?:(?:jo|hey|hi|hallo|moin|servus|guten\s+(?:morgen|tag|abend))(?:\s+(?:zusammen|leute|allerseits))?(?:,\s*|\s+))?(?:kann|könnte|koennte|darf)\s+man\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie|denn|wohl)\s+)*(?:(?:ein(?:en|e)?|nen?)\s+)?(?:invite|einladung|playtest|beta)\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie)\s+)*(?:bekommen|kriegen|erhalten|haben)\b",
     )
     .expect("valid impersonal invite request expression")
 });

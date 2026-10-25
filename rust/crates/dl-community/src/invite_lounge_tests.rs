@@ -294,6 +294,12 @@ fn impersonal_invite_requests_are_room_requests() {
         "Kann man eine Einladung hier bekommen?",
         "Kann man hier ein Invite bekommen?",
         "Kann man hier Invite bekommen?",
+        "Hallo zusammen, kann man hier einen Invite bekommen?",
+        "Hey Leute, könnte man bitte eine Einladung erhalten?",
+        "Moin! Kann man hier einen Invite bekommen?",
+        "Guten Abend, darf man einen Invite haben?",
+        "Hallo\nkann man hier einen Invite bekommen?",
+        "Bin neu hier. Kann man einen Invite bekommen?",
     ] {
         assert_eq!(
             request_kind(content, BOT),
@@ -307,6 +313,14 @@ fn impersonal_invite_requests_are_room_requests() {
 fn impersonal_invite_discussion_is_not_a_request() {
     for content in [
         "Man kann hier einen Invite bekommen, wenn man nett fragt.",
+        "Hier kann man einen Invite bekommen, wenn man nett fragt.",
+        "Bei Max kann man hier einen Invite bekommen.",
+        "Bei Max\nkann man hier einen Invite bekommen.",
+        "Mit etwas Geduld könnte man hier eine Einladung erhalten.",
+        "Wenn man nett fragt, kann man hier einen Invite bekommen.",
+        "Hallo zusammen, hier kann man einen Invite bekommen.",
+        "Gut zu wissen. Bei Max kann man einen Invite bekommen.",
+        "Die Frage lautet: Kann man hier einen Invite bekommen?",
         "Früher konnte man hier einen Invite bekommen.",
         "Ich habe einen Invite bekommen, danke!",
         "Kann man hier andere Leute einladen?",
