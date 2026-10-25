@@ -40,6 +40,7 @@ pub const UNVERIFIED_RANK_ROLES: [(u64, i64); 4] = [
 pub const ELIGIBLE_STAGING_IDS: [u64; 2] = [1501089974093873232, 1412804671432818890];
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
 pub const CHILL_CATEGORY_ID: u64 = 1289721245281292290;
+pub use crate::solo_watch::NEW_PLAYER_CATEGORY_ID;
 pub const COMP_RANKED_CATEGORY_ID: u64 = 1412804540994162789;
 pub const CASUAL_STAGING_ID: u64 = 1501089974093873232;
 pub const PERMANENT_CHILL_ID: u64 = 1493690350580138114;
@@ -406,7 +407,7 @@ impl AdaptiveLanes {
         // Ziel: vollste verwaltete Lane unter der Schwelle (Anker zählt mit)
         let channels = self
             .port
-            .category_channels(guild_id, CHILL_CATEGORY_ID)
+            .category_channels(guild_id, NEW_PLAYER_CATEGORY_ID)
             .await;
         let mut candidates: Vec<&(u64, String, usize, i64)> = channels
             .iter()
@@ -440,7 +441,7 @@ impl AdaptiveLanes {
     pub async fn sync_new_player(&self, guild_id: u64) {
         self.sync_managed(
             guild_id,
-            CHILL_CATEGORY_ID,
+            NEW_PLAYER_CATEGORY_ID,
             NP_ANCHOR_CHANNEL_ID,
             NP_LANE_BASE_NAME,
             NP_EXPAND_THRESHOLD,
@@ -1006,7 +1007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_new_player_erzeugt_lanes_in_chill_kategorie() {
+    async fn sync_new_player_erzeugt_lanes_in_neue_spieler_kategorie() {
         let port = Arc::new(
             MockAdaptivePort::new(vec![(
                 NP_ANCHOR_CHANNEL_ID,
@@ -1022,7 +1023,7 @@ mod tests {
 
         let creates = port.create_calls.lock().expect("lock").clone();
         assert_eq!(creates.len(), 1);
-        assert_eq!(creates[0].category_id, CHILL_CATEGORY_ID);
+        assert_eq!(creates[0].category_id, NEW_PLAYER_CATEGORY_ID);
         assert_eq!(creates[0].anchor_id, NP_ANCHOR_CHANNEL_ID);
         assert_eq!(creates[0].name, "🆕Neue Spieler Lane 2");
     }
