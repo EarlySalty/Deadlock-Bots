@@ -16,6 +16,7 @@
 //! (`coaching-survey-senden`, `coaching-session-beenden`) sind manuelle
 //! Overrides des Automatik-Flows und bleiben vorerst aus.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike};
@@ -100,6 +101,8 @@ pub fn normalize_inline(value: &str, fallback: &str, limit: usize) -> String {
 }
 
 const MAX_SLOT_LINES: usize = 8;
+const MAX_SLOT_CHARS: usize = 700;
+const MAX_SLOT_NOTE_CHARS: usize = 80;
 
 fn berlin_unix(date: NaiveDate, time: NaiveTime) -> Option<i64> {
     Berlin
@@ -121,10 +124,19 @@ fn date_tag(date: NaiveDate) -> Option<String> {
     berlin_unix(date, noon).map(|ts| format!("<t:{ts}:D>"))
 }
 
-fn split_note(value: &str) -> (&str, &str) {
+fn split_note(value: &str) -> (&str, String) {
     match value.find(" (") {
-        Some(index) if value.ends_with(')') => (&value[..index], &value[index..]),
-        _ => (value, ""),
+        Some(index) if value.ends_with(')') => {
+            let note =
+                normalize_inline(&value[index + 2..value.len() - 1], "", MAX_SLOT_NOTE_CHARS);
+            let note = if note.is_empty() {
+                String::new()
+            } else {
+                format!(" ({note})")
+            };
+            (&value[..index], note)
+        }
+        _ => (value, String::new()),
     }
 }
 
@@ -136,52 +148,141 @@ fn iso_slot(value: &str) -> Option<String> {
         .map(|ts| format!("<t:{ts}:F>"))
 }
 
-fn window_slot(value: &str) -> Option<(NaiveDate, String)> {
+fn window_slot(value: &str) -> Option<SlotPart> {
     let (date, times) = value.split_once(", ")?;
     let date = parse_german_date(date)?;
     let (from, to) = times.strip_suffix(" Uhr")?.split_once(" bis ")?;
     let start = berlin_unix(date, parse_clock(from)?)?;
     let end = berlin_unix(date, parse_clock(to)?)?;
-    Some((date, format!("<t:{start}:F> bis <t:{end}:t>")))
+    Some(SlotPart::Window {
+        date,
+        text: format!("<t:{start}:F> bis <t:{end}:t>"),
+    })
 }
 
-fn day_slot(value: &str) -> Option<(NaiveDate, String)> {
+fn day_slot(value: &str) -> Option<SlotPart> {
     let (dates, note) = split_note(value);
-    match dates.split_once(" bis ") {
-        Some((first, last)) => {
-            let first = parse_german_date(first)?;
-            let last = parse_german_date(last)?;
-            let range = if first == last {
-                date_tag(first)?
-            } else {
-                format!("{} bis {}", date_tag(first)?, date_tag(last)?)
-            };
-            Some((first, format!("{range}{note}")))
-        }
+    let (first, last) = match dates.split_once(" bis ") {
+        Some((first, last)) => (parse_german_date(first)?, parse_german_date(last)?),
         None => {
             let date = parse_german_date(dates)?;
-            Some((date, format!("{}{note}", date_tag(date)?)))
+            (date, date)
         }
-    }
+    };
+    let range = if first == last {
+        date_tag(first)?
+    } else {
+        format!("{} bis {}", date_tag(first)?, date_tag(last)?)
+    };
+    Some(SlotPart::Day {
+        first,
+        last,
+        text: format!("{range}{note}"),
+    })
 }
 
 enum SlotPart {
-    Window(NaiveDate, String),
-    Day(NaiveDate, String),
+    Window {
+        date: NaiveDate,
+        text: String,
+    },
+    Day {
+        first: NaiveDate,
+        last: NaiveDate,
+        text: String,
+    },
     Other(String),
+}
+
+impl SlotPart {
+    fn text(&self) -> &str {
+        match self {
+            SlotPart::Window { text, .. } | SlotPart::Day { text, .. } | SlotPart::Other(text) => {
+                text
+            }
+        }
+    }
+
+    fn is_covered_by(&self, windows: &BTreeSet<NaiveDate>) -> bool {
+        match self {
+            SlotPart::Day { first, last, .. } => {
+                first <= last
+                    && first
+                        .iter_days()
+                        .take_while(|day| day <= last)
+                        .all(|day| windows.contains(&day))
+            }
+            SlotPart::Window { .. } | SlotPart::Other(_) => false,
+        }
+    }
 }
 
 fn classify_slot(part: &str) -> SlotPart {
     if let Some(text) = iso_slot(part) {
         return SlotPart::Other(text);
     }
-    if let Some((date, text)) = window_slot(part) {
-        return SlotPart::Window(date, text);
+    if let Some(window) = window_slot(part) {
+        return window;
     }
-    if let Some((date, text)) = day_slot(part) {
-        return SlotPart::Day(date, text);
+    if let Some(day) = day_slot(part) {
+        return day;
     }
     SlotPart::Other(normalize_inline(part, "", 160))
+}
+
+struct SlotSelection<'a> {
+    lines: Vec<&'a str>,
+    hidden: usize,
+    windows: BTreeSet<NaiveDate>,
+}
+
+fn overflow_line(hidden: usize) -> String {
+    format!("… und {hidden} weitere")
+}
+
+fn select_slot_lines<'a>(
+    parts: &'a [SlotPart],
+    covered: &BTreeSet<NaiveDate>,
+) -> SlotSelection<'a> {
+    let candidates: Vec<&SlotPart> = parts
+        .iter()
+        .filter(|part| !part.is_covered_by(covered))
+        .collect();
+    let reserve = overflow_line(candidates.len()).chars().count() + 1;
+    let mut lines = Vec::new();
+    let mut windows = BTreeSet::new();
+    let mut used = 0;
+    for (index, part) in candidates.iter().enumerate() {
+        let text = part.text();
+        let length = text.chars().count() + 1;
+        let is_last = index + 1 == candidates.len();
+        let needed = if is_last { length } else { length + reserve };
+        if lines.len() >= MAX_SLOT_LINES || used + needed > MAX_SLOT_CHARS {
+            break;
+        }
+        used += length;
+        lines.push(text);
+        if let SlotPart::Window { date, .. } = part {
+            windows.insert(*date);
+        }
+    }
+    SlotSelection {
+        hidden: candidates.len() - lines.len(),
+        lines,
+        windows,
+    }
+}
+
+fn render_slot_selection(selection: &SlotSelection<'_>) -> String {
+    let mut lines: Vec<String> = selection
+        .lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    if selection.hidden > 0 {
+        lines.push(overflow_line(selection.hidden));
+    }
+    lines.join("\n")
 }
 
 pub fn format_scheduled_slot_for_embed(value: &str) -> String {
@@ -191,24 +292,21 @@ pub fn format_scheduled_slot_for_embed(value: &str) -> String {
         .filter(|part| !part.is_empty())
         .map(classify_slot)
         .collect();
-    let window_dates: Vec<NaiveDate> = parts
+    let mut covered: BTreeSet<NaiveDate> = parts
         .iter()
         .filter_map(|part| match part {
-            SlotPart::Window(date, _) => Some(*date),
-            _ => None,
+            SlotPart::Window { date, .. } => Some(*date),
+            SlotPart::Day { .. } | SlotPart::Other(_) => None,
         })
         .collect();
-    parts
-        .into_iter()
-        .filter_map(|part| match part {
-            SlotPart::Day(date, _) if window_dates.contains(&date) => None,
-            SlotPart::Window(_, text) | SlotPart::Day(_, text) | SlotPart::Other(text) => {
-                Some(text)
-            }
-        })
-        .take(MAX_SLOT_LINES)
-        .collect::<Vec<_>>()
-        .join("\n")
+    for _ in 0..parts.len() {
+        let selection = select_slot_lines(&parts, &covered);
+        if selection.windows == covered {
+            return render_slot_selection(&selection);
+        }
+        covered = selection.windows;
+    }
+    render_slot_selection(&select_slot_lines(&parts, &BTreeSet::new()))
 }
 
 fn slot_block(scheduled_slot: &str) -> String {
@@ -3141,6 +3239,63 @@ mod tests {
             format_scheduled_slot_for_embed("2026-07-17T21:52:13"),
             "<t:1784317920:F>"
         );
+    }
+
+    #[test]
+    fn scheduled_slot_behaelt_wochenende_bei_einzelnem_zeitfenster() {
+        let raw = "31.10.2026 bis 01.11.2026 (Wochenende, Uhrzeit nach Absprache); 31.10.2026, 18:00 bis 20:00 Uhr";
+        let rendered = format_scheduled_slot_for_embed(raw);
+        assert_eq!(
+            rendered,
+            "<t:1793444400:D> bis <t:1793530800:D> (Wochenende, Uhrzeit nach Absprache)\n<t:1793466000:F> bis <t:1793473200:t>"
+        );
+    }
+
+    #[test]
+    fn scheduled_slot_begrenzt_lange_notiz() {
+        let raw = format!("28.10.2026 ({})", "sehr lange Notiz ".repeat(60));
+        let rendered = format_scheduled_slot_for_embed(&raw);
+        assert!(rendered.starts_with("<t:1793185200:D> (sehr lange Notiz"));
+        assert!(rendered.ends_with("…)"));
+        assert!(rendered.chars().count() <= "<t:1793185200:D> ()".len() + MAX_SLOT_NOTE_CHARS);
+    }
+
+    #[test]
+    fn scheduled_slot_kuerzt_viele_eintraege_mit_hinweiszeile() {
+        let note = "x".repeat(200);
+        let raw: Vec<String> = (1..=20)
+            .map(|day| format!("{day:02}.11.2026 ({note})"))
+            .collect();
+        let rendered = format_scheduled_slot_for_embed(&raw.join("; "));
+        let lines: Vec<&str> = rendered.lines().collect();
+        let last = lines.last().copied().unwrap_or_default();
+        assert_eq!(last, format!("… und {} weitere", 21 - lines.len()));
+        assert!(lines.len() <= MAX_SLOT_LINES + 1);
+        assert!(rendered.chars().count() <= MAX_SLOT_CHARS);
+        assert!(lines[..lines.len() - 1]
+            .iter()
+            .all(|line| line.starts_with("<t:") && line.ends_with("…)")));
+
+        let windows: Vec<String> = (1..=12)
+            .map(|day| format!("{day:02}.11.2026, 18:00 bis 20:00 Uhr"))
+            .collect();
+        let rendered = format_scheduled_slot_for_embed(&windows.join("; "));
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), MAX_SLOT_LINES + 1);
+        assert_eq!(lines[MAX_SLOT_LINES], "… und 4 weitere");
+    }
+
+    #[test]
+    fn scheduled_slot_unterdrueckt_tag_nur_bei_sichtbarem_zeitfenster() {
+        let mut parts: Vec<String> = (1..=8)
+            .map(|day| format!("{day:02}.11.2026, 18:00 bis 20:00 Uhr"))
+            .collect();
+        parts.insert(0, "20.11.2026 (Uhrzeit nach Absprache)".to_string());
+        parts.push("20.11.2026, 18:00 bis 20:00 Uhr".to_string());
+        let rendered = format_scheduled_slot_for_embed(&parts.join("; "));
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines[0].ends_with("(Uhrzeit nach Absprache)"));
+        assert_eq!(lines.last().copied(), Some("… und 2 weitere"));
     }
 
     #[test]
