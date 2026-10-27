@@ -29,13 +29,14 @@ const EPHEMERAL_FLAG: u64 = 64;
 const DEFER_THRESHOLD: Duration = Duration::from_secs(2);
 const DEFER_HTTP_TIMEOUT: Duration = Duration::from_secs(1);
 
-fn aimod_needs_immediate_defer(custom_id: &str) -> bool {
+fn needs_immediate_defer(custom_id: &str) -> bool {
     [
         "aimod:accept:",
         "aimod:ban:",
         "aimod:denysubmit:",
         "aimod:untimeout:",
         "aimod:unban:",
+        "coach_claim_",
     ]
     .iter()
     .any(|prefix| custom_id.starts_with(prefix))
@@ -161,7 +162,7 @@ async fn dispatch_component(
         }
         _ => Vec::new(),
     };
-    let defer_immediately = aimod_needs_immediate_defer(&custom_id);
+    let defer_immediately = needs_immediate_defer(&custom_id);
     let bridge = BridgeInteraction {
         custom_id,
         values,
@@ -234,7 +235,7 @@ async fn dispatch_modal(
         tracing::debug!(%custom_id, "Kein Handler für Modal");
         return;
     };
-    let defer_immediately = aimod_needs_immediate_defer(&custom_id);
+    let defer_immediately = needs_immediate_defer(&custom_id);
     // Eingabefelder: custom_id → Wert
     let mut options = std::collections::HashMap::new();
     for row in &modal.data.components {
@@ -821,11 +822,12 @@ mod tests {
             "aimod:denysubmit:case-1",
             "aimod:untimeout:case-1",
             "aimod:unban:case-1",
+            "coach_claim_42",
         ] {
-            assert!(aimod_needs_immediate_defer(custom_id), "{custom_id}");
+            assert!(needs_immediate_defer(custom_id), "{custom_id}");
         }
-        assert!(!aimod_needs_immediate_defer("aimod:deny:case-1"));
-        assert!(!aimod_needs_immediate_defer("other:accept:case-1"));
+        assert!(!needs_immediate_defer("aimod:deny:case-1"));
+        assert!(!needs_immediate_defer("other:accept:case-1"));
     }
 
     #[test]

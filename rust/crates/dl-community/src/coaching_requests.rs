@@ -18,7 +18,8 @@
 
 use std::sync::Arc;
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike};
+use chrono_tz::Europe::Berlin;
 use dl_ai::{GenerateRequest, TextGenerator};
 use dl_central_db::kv;
 use dl_discord::{
@@ -98,14 +99,128 @@ pub fn normalize_inline(value: &str, fallback: &str, limit: usize) -> String {
     }
 }
 
-pub fn format_scheduled_slot_for_embed(value: &str) -> String {
-    let trimmed = value.trim();
-    for format in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(slot) = NaiveDateTime::parse_from_str(trimmed, format) {
-            return slot.format("%d.%m.%Y %H:%M Uhr").to_string();
+const MAX_SLOT_LINES: usize = 8;
+
+fn berlin_unix(date: NaiveDate, time: NaiveTime) -> Option<i64> {
+    Berlin
+        .from_local_datetime(&date.and_time(time))
+        .earliest()
+        .map(|moment| moment.timestamp())
+}
+
+fn parse_german_date(value: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(value.trim(), "%d.%m.%Y").ok()
+}
+
+fn parse_clock(value: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(value.trim(), "%H:%M").ok()
+}
+
+fn date_tag(date: NaiveDate) -> Option<String> {
+    let noon = NaiveTime::from_hms_opt(12, 0, 0)?;
+    berlin_unix(date, noon).map(|ts| format!("<t:{ts}:D>"))
+}
+
+fn split_note(value: &str) -> (&str, &str) {
+    match value.find(" (") {
+        Some(index) if value.ends_with(')') => (&value[..index], &value[index..]),
+        _ => (value, ""),
+    }
+}
+
+fn iso_slot(value: &str) -> Option<String> {
+    ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"]
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+        .and_then(|slot| berlin_unix(slot.date(), slot.time().with_second(0)?))
+        .map(|ts| format!("<t:{ts}:F>"))
+}
+
+fn window_slot(value: &str) -> Option<(NaiveDate, String)> {
+    let (date, times) = value.split_once(", ")?;
+    let date = parse_german_date(date)?;
+    let (from, to) = times.strip_suffix(" Uhr")?.split_once(" bis ")?;
+    let start = berlin_unix(date, parse_clock(from)?)?;
+    let end = berlin_unix(date, parse_clock(to)?)?;
+    Some((date, format!("<t:{start}:F> bis <t:{end}:t>")))
+}
+
+fn day_slot(value: &str) -> Option<(NaiveDate, String)> {
+    let (dates, note) = split_note(value);
+    match dates.split_once(" bis ") {
+        Some((first, last)) => {
+            let first = parse_german_date(first)?;
+            let last = parse_german_date(last)?;
+            let range = if first == last {
+                date_tag(first)?
+            } else {
+                format!("{} bis {}", date_tag(first)?, date_tag(last)?)
+            };
+            Some((first, format!("{range}{note}")))
+        }
+        None => {
+            let date = parse_german_date(dates)?;
+            Some((date, format!("{}{note}", date_tag(date)?)))
         }
     }
-    value.to_string()
+}
+
+enum SlotPart {
+    Window(NaiveDate, String),
+    Day(NaiveDate, String),
+    Other(String),
+}
+
+fn classify_slot(part: &str) -> SlotPart {
+    if let Some(text) = iso_slot(part) {
+        return SlotPart::Other(text);
+    }
+    if let Some((date, text)) = window_slot(part) {
+        return SlotPart::Window(date, text);
+    }
+    if let Some((date, text)) = day_slot(part) {
+        return SlotPart::Day(date, text);
+    }
+    SlotPart::Other(normalize_inline(part, "", 160))
+}
+
+pub fn format_scheduled_slot_for_embed(value: &str) -> String {
+    let parts: Vec<SlotPart> = value
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(classify_slot)
+        .collect();
+    let window_dates: Vec<NaiveDate> = parts
+        .iter()
+        .filter_map(|part| match part {
+            SlotPart::Window(date, _) => Some(*date),
+            _ => None,
+        })
+        .collect();
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            SlotPart::Day(date, _) if window_dates.contains(&date) => None,
+            SlotPart::Window(_, text) | SlotPart::Day(_, text) | SlotPart::Other(text) => {
+                Some(text)
+            }
+        })
+        .take(MAX_SLOT_LINES)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn slot_block(scheduled_slot: &str) -> String {
+    let lines = format_scheduled_slot_for_embed(scheduled_slot);
+    if lines.is_empty() {
+        "📅 **Bevorzugter Slot** Nicht angegeben".to_string()
+    } else if lines.contains('\n') {
+        let bullets: Vec<String> = lines.lines().map(|line| format!("• {line}")).collect();
+        format!("📅 **Bevorzugter Slot**\n{}", bullets.join("\n"))
+    } else {
+        format!("📅 **Bevorzugter Slot** {lines}")
+    }
 }
 
 pub fn format_ai_summary(value: &str) -> String {
@@ -485,14 +600,7 @@ pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String,
                     "🎮 **Games / Stunden** {}",
                     normalize_inline(&request.games_played, "N/A", 256)
                 ),
-                format!(
-                    "📅 **Bevorzugter Slot** {}",
-                    normalize_inline(
-                        &format_scheduled_slot_for_embed(&request.scheduled_slot),
-                        "Nicht angegeben",
-                        256
-                    )
-                ),
+                slot_block(&request.scheduled_slot),
             ]
             .join("\n"),
         ),
@@ -3027,12 +3135,32 @@ mod tests {
     fn scheduled_slot_formatiert_datetime_local_fuer_discord() {
         assert_eq!(
             format_scheduled_slot_for_embed("2026-07-17T21:52"),
-            "17.07.2026 21:52 Uhr"
+            "<t:1784317920:F>"
         );
         assert_eq!(
             format_scheduled_slot_for_embed("2026-07-17T21:52:13"),
-            "17.07.2026 21:52 Uhr"
+            "<t:1784317920:F>"
         );
+    }
+
+    #[test]
+    fn scheduled_slot_zeigt_website_zeitfenster_als_discord_zeitstempel() {
+        let raw = "27.10.2026 (heute Abend, Uhrzeit nach Absprache); 28.10.2026 (Uhrzeit nach Absprache); 27.10.2026, 19:30 bis 22:00 Uhr; 28.10.2026, 19:30 bis 22:00 Uhr";
+        assert_eq!(
+            format_scheduled_slot_for_embed(raw),
+            "<t:1793125800:F> bis <t:1793134800:t>\n<t:1793212200:F> bis <t:1793221200:t>"
+        );
+        assert_eq!(
+            format_scheduled_slot_for_embed(
+                "31.10.2026 bis 01.11.2026 (Wochenende, Uhrzeit nach Absprache)"
+            ),
+            "<t:1793444400:D> bis <t:1793530800:D> (Wochenende, Uhrzeit nach Absprache)"
+        );
+        assert_eq!(
+            slot_block("28.10.2026 (Uhrzeit nach Absprache)"),
+            "📅 **Bevorzugter Slot** <t:1793185200:D> (Uhrzeit nach Absprache)"
+        );
+        assert_eq!(slot_block(""), "📅 **Bevorzugter Slot** Nicht angegeben");
     }
 
     #[test]
