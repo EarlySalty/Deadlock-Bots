@@ -17,7 +17,7 @@ PASS="$(openssl rand -hex 16)"
 CONFIG_DIR="$(mktemp -d)"
 
 cleanup() {
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker rm -fv "$NAME" >/dev/null 2>&1 || true
   rm -f "$CONFIG_DIR/bot.toml" "$CONFIG_DIR/infisical.json"
   rmdir "$CONFIG_DIR"
 }
@@ -34,6 +34,7 @@ trap 'finish 143' TERM
 
 docker run --rm -d \
   --name "$NAME" \
+  --tmpfs /var/lib/postgresql/data \
   --label io.earlysalty.cargo-test=throwaway-only \
   -e POSTGRES_DB="$DB" \
   -e POSTGRES_USER="$USER" \
