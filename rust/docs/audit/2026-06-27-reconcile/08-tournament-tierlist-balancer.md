@@ -1,5 +1,8 @@
 # Reconcile 08: Tournament + Tierlist + Team-Balancer
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Datum: 2026-06-27  
 Scope: `cogs/customgames/turnier.py`, `cogs/customgames/tournament_store.py`, `cogs/deadlock_team_balancer.py`, `cogs/tierlist_public_cog.py`, `cogs/turnier_public_cog.py`, `service/turnier_public.py`, `service/tierlist_public.py` gegen `rust/crates/dl-tournament`, `rust/crates/dl-tierlist`, `rust/bin/dl-bot`, `rust/bin/dl-web`.
 

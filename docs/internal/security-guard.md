@@ -1,5 +1,8 @@
 # Security Guard
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 `SecurityGuard` schuetzt den Server vor Scam-Bursts, Mehrkanal-Spam und verdächtigen Finanz-/Referral-Nachrichten. Das Modul ist bewusst aggressiv gegen frische Accounts, geht bei etablierten Accounts aber vorsichtiger vor, weil dort eher ein gehackter Account als klassischer Wegwerf-Spam vermutet wird.
 

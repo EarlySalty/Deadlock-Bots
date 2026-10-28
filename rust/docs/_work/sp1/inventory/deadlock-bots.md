@@ -1,5 +1,8 @@
 # Inventar — Deadlock-Bots (`data/deadlock.sqlite3`)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 DB: `/home/naniadm/Documents/Deadlock-Bots/data/deadlock.sqlite3` — 124 Tabellen. Quelle: lebende DB + Rust-Consumer-Grep (crates+bin).
 Gate: `rust/scripts/sp1_inventory_gate.py`. Schema-Vorschlaege nach Eltern-Spec §5.2 (OFFEN = in Phase 1 entscheiden).
 

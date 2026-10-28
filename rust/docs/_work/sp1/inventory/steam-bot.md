@@ -1,5 +1,8 @@
 # Steam-Bot SP1 Phase 0 Inventory
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 - Projekt: Steam-Bot
 - Live-DB: `/home/naniadm/Documents/Deadlock-Bots/data/deadlock.sqlite3`
 - DB-Tech: rusqlite

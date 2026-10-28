@@ -1,5 +1,8 @@
 # Spec: Website-Coaching-Anfragen in Discord spiegeln (+ Claim)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Datum:** 2026-06-29
 **Repos:** Website (FastAPI-Backend) + Deadlock-Bots (Rust dl-bot)
 **Status:** Design freigegeben (User), Implementierung an Codex.

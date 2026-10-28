@@ -1,5 +1,8 @@
 # Finaler Cutover-Bericht — 2026-07-02
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Wartungsfenster 03:51–04:09 CEST. Reconciliation-Apply-Report:
 `rust/docs/_work/sp1/reconciliation/2026-07-02-final-apply-report.json`.
 

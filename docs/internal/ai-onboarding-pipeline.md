@@ -1,5 +1,8 @@
 # AI-Onboarding-Pipeline
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 `AIOnboarding` erzeugt eine personalisierte Starter-Tour fuer neue Server-Mitglieder. Anders als das klassische Regel-/Welcome-Onboarding fragt diese Pipeline drei kurze Freitext-Antworten ab und laesst daraus eine kompakte Empfehlungsliste generieren. Das Modul ist technisch relevant, weil es UI, LLM-Fallbacks, Datenschutz und Persistenz kombiniert.
 

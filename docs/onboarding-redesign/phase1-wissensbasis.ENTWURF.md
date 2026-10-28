@@ -1,5 +1,8 @@
 # Server-Wissensbasis v1 — GERÜST (Phase 1)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Status: FAQ-PROSA FINAL (F1–F15 von Claude geschrieben, 2026-07-02) —
 Struktur-Teil 1 wartet auf Generator (Server-as-Code), Pflege-Owner offen (Phase 3).
 Quellen: `docs/onboarding-redesign/2026-07-02-konzept.md` (§5.4, §4.1, §4.2),

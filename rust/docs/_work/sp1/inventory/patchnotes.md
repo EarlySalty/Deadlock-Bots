@@ -1,5 +1,8 @@
 # Inventar - Patchnotes
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Scope: `/home/naniadm/Documents/Deadlock--Patchnotes-Bot`
 
 Scan: `*.db`, `*.sqlite`, `*.sqlite3`, `*.db3`, `*.json`, `*.yaml`, `*.yml`, `*.csv` unter dem Repo plus alle Dateien unter `data/`; ausgeschlossen wurden `.git`, `node_modules`, `__pycache__`, `venv`, `.venv` und Cache-Verzeichnisse.

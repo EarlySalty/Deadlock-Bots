@@ -1,5 +1,8 @@
 # Reconcile 04 — Voice-Tracking + Nudge + Rename + Reaction-DM
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Datum: 2026-06-27  
 Python-Referenz: `cogs/voice_activity_tracker.py`, `cogs/steam_link_voice_nudge.py`, `cogs/rename_manager.py`, `cogs/voice_reaction_dm.py`  
 Rust-Referenz: `rust/crates/dl-voice/src/{tracker.rs,feedback.rs,stats.rs,nudge.rs,rename_queue.rs}`

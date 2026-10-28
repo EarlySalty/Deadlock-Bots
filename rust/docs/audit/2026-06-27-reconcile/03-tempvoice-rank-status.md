@@ -1,5 +1,8 @@
 # Reconcile Audit: TempVoice + Rank + Voice-Status
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Datum: 2026-06-27  
 Scope: `cogs/tempvoice/*`, `cogs/rank_voice_manager.py`, `cogs/deadlock_voice_status.py` gegen `rust/crates/dl-voice/src/*`.
 

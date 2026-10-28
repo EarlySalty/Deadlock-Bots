@@ -1,5 +1,8 @@
 # Phase 3: dl-bridges — Steam-Brücke, Twitch-Live-Bridge, Interaction-Dispatch, Matcher
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Status: KOMPLETT (3a #73, 3b #74, 3c #75). Stand: 2026-06-10
 
 ## Was existiert

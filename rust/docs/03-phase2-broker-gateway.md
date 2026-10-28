@@ -1,5 +1,8 @@
 # Phase 2: dl-bot-Gerüst — Broker, Changelog-Empfänger, Dispatcher, Gateway
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Status: Code-komplett, verifiziert; KEIN Cutover (Bedingungen unten). Stand: 2026-06-10
 
 ## Architektur: Ports & Adapter

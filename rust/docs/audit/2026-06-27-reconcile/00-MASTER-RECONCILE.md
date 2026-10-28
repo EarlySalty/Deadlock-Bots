@@ -1,5 +1,8 @@
 # Master — Re-Konziliations-Audit Py→Rust (2026-06-27)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Methode:** 9 Subsystem-Worker (gpt-5.5/xhigh) vergleichen zeilengenau Python-live (`cogs/`, `bot_core/`, `service/`) ↔ aktueller Rust-Port (`rust/`). Bereits umgesetzte Wellen W1–W7 wurden **am Code + via `cargo test`** verifiziert (nicht am Commit-Text — Stale-Cache-Regel). Bewusste Rust-Änderungen (#17/#18, `bug_reporter`, blocklisted Cogs, Rang-Permission-Auslagerung) sind als DELIBERATE klassifiziert, nicht als Lücke.
 
 **Referenz:** Python = LIVE & Source-of-Truth. Rust-Port = INAKTIV (`deadlock-bot-rust.service` aus). Ziel: volle Parität, damit Rust Python ablösen *kann*. Cutover bleibt separate User-Entscheidung.

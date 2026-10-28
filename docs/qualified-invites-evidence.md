@@ -1,5 +1,8 @@
 # Prüfprotokoll: qualifizierte Einladungen
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Arbeitsbasis: `42175e5fd68a1c83bf4201b4c40cca1099f00652`. Branch: `codex/qualified-discord-invites`. Fachlicher Vertrag, Graphify-Befund, Discord-Quellen, Dateikonfiguration und Grenzen stehen in `qualified-invites.md`.
 
 PR: https://github.com/EarlySalty/Deadlock-Bots/pull/466

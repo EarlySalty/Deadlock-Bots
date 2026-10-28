@@ -1,5 +1,8 @@
 # SP1 Phase 0 - Kritikerbefund
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Stand: 2026-06-30. Modus: read-only gegen Code/DB/Services; einzige Aenderung ist dieser Bericht. Kein Git. `WORKFLOW.md` nicht angefasst.
 
 ## 1) GATE-ZAEHNE: PASS

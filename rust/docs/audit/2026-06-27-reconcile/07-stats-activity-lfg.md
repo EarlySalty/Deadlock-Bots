@@ -1,5 +1,8 @@
 # Reconcile Audit 07 — Stats + Activity + LFG
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Datum: 2026-06-27
 Scope: `cogs/user_activity_analyzer.py`, `cogs/lfg.py`, `cogs/public_stats_cog.py`, `cogs/dashboard_cog.py` gegen `dl-activity` und `dl-stats`.
 

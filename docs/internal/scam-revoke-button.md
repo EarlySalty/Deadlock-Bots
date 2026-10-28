@@ -1,5 +1,8 @@
 # Scam-Revoke-Button (Conversation-Scam-Guard, Phase C)
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Der Twitch-Bot (Rust) betreibt einen LLM-gestützten Conversation-Scam-Guard. Erkennt er
 einen Scam, postet er die Aktion (Auto-Bann / Moderationsvorschlag) über den Master-Broker

@@ -1,5 +1,8 @@
 # Claim-System
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Das Claim-System ist ein kleiner Spezial-Cog fuer Coaching-Threads. Es nimmt externe Zuweisungsdaten ueber einen lokalen TCP-Socket an, fuegt den zugewiesenen User in den Thread ein und postet dort eine persistente Claim-/Release-View fuer das Staff-Team.
 

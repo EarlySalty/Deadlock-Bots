@@ -1,5 +1,8 @@
 # Reaction-Roles (generisch) + Dashboard-Verwaltung — Design & Implementierungs-Spec
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Datum:** 2026-06-28
 **Branch:** `rust/reaction-roles-2026-06-28` (Basis: `origin/rust/parity-reconcile-welle2-2026-06-28`)
 **Sprache:** Rust only (kein Python-Cog). Handler in `dl-bot`/`dl-discord`/`dl-community`, Verwaltung in `dl-dashboard` + `service/static/dashboard.html`.

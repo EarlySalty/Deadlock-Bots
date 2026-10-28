@@ -1,5 +1,8 @@
 # Build Publisher
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Der `BuildPublisher` ist der Python-Worker, der vorbereitete Hero-Build-Klone aus der Datenbank nimmt und ueber die Steam-Bridge in Deadlock veroeffentlicht. Er ist kein User-Feature und keine Admin-Oberflaeche, sondern das letzte Stueck einer automatisierten Publishing-Pipeline.
 

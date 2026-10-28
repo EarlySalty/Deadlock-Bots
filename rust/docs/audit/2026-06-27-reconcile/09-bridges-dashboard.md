@@ -1,5 +1,8 @@
 # Reconcile 09 - Bridges / Dashboard (2026-06-27)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Scope: Steam-/Twitch-Bridges, Build-Publisher, Changelog-Publisher, Dashboard und Broker-Bridge-Infrastruktur.
 
 Basis: `00-SHARED-BRIEF.md`, Alt-Audit `2026-06-21-py-rust-discord-parity-audit.md`, Python-Referenzen in `cogs/`, `service/`, Rust-Referenzen in `rust/crates/dl-bridges`, `rust/crates/dl-changelog`, `rust/crates/dl-dashboard`, `rust/crates/dl-broker`, plus `rust/bin/dl-bot`.

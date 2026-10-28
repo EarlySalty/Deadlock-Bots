@@ -1,5 +1,8 @@
 # Tournament-Removal REMOVE/KEEP Map (2026-06-28)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Scope: read-only discovery for removing the old in-bot tournament signup/admin surface and `!balance` from Deadlock-Bots. No source deletion, no code edits, no DB drops were done here.
 
 Important split:

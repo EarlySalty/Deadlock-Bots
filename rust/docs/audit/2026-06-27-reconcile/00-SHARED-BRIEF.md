@@ -1,5 +1,8 @@
 # Re-Konziliations-Audit Py→Rust — Gemeinsames Briefing (2026-06-27)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Repo:** `/home/naniadm/Documents/Deadlock-Bots` (bereits dein cwd).
 **Lies dieses Dokument zuerst, dann bearbeite deinen Subsystem-Auftrag.**
 

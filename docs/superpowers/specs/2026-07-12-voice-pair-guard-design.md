@@ -1,5 +1,8 @@
 # Bidirektionaler Voice-Pair-Guard
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 ## Ziel
 
 Die Discord-Nutzer `887664726421671976` und `279971744964542464` dürfen sich in keinem Voice-Channel des Servers gleichzeitig aufhalten. Kanalbesitz, TempVoice-Owner-Bans und Unban-Aktionen dürfen diese Regel nicht aushebeln.

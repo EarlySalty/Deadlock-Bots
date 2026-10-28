@@ -1,5 +1,8 @@
 # Bot-Pate: KI-Charakter-Design (Session 2026-07-02)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Ergebnis der KI-Charakter-Design-Session (Konzept §4.1 „eigene Session",
 Vorbereitung Phase 4). Owner + Claude; Ton-Bake-off mit 6 Modellen auf
 ausschließlich synthetischen Daten (§5.6-Übergangsregel eingehalten).

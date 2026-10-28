@@ -1,5 +1,8 @@
 # Reconcile Audit 06 - FAQ/Tags/Privacy/Community
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Stand: 2026-06-27  
 Worker: Parallel Worker 6  
 Scope: FAQ Chat, Server-FAQ, Tags, Privacy, Retention, Clips, Leave-Survey, Invites, Rules, Feedback-Hub

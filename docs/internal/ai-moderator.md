@@ -1,5 +1,8 @@
 # AI-Moderator
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Der AI-Moderator scannt einen dedizierten Chat-Channel automatisiert auf harte Policy-Verstöße und auf wiederholtes Ragebait. Ziel ist nicht "strenger Chat", sondern das gezielte Herausfiltern von NSFW/CSAM/Hass-Spitzen sowie das strukturierte Vorsortieren fuer menschliche Moderation.
 

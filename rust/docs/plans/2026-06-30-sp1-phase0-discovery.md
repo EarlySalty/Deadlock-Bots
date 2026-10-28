@@ -1,5 +1,8 @@
 # SP1 Phase 0 — Daten-Landschaft-Discovery — Implementierungsplan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **Für ausführende Worker (Codex):** Jedes Ticket = exakter Scope + Dateien + Gate + Definition of Done. **Codex implementiert, verifiziert sich SELBST (führt Gates/Tests selbst aus) und reviewt SELBST (frischer Codex-Kritiker → Rework). Claude organisiert nur den DAG, committet/pusht als Orchestrator und schreibt ausschließlich die user-sichtbaren Texte (UI/UX, deutsche Copy).** **WORKFLOW.md NIE anfassen.** User-sichtbare deutsche Texte = nur `"Platzhalter"` + Datei:Zeile melden, Claude finalisiert. Dieser Plan ist **read-only Inventarisierung** — er ändert KEINE Produktions-Schemas, migriert KEINE Daten, schaltet KEINEN Dienst um.

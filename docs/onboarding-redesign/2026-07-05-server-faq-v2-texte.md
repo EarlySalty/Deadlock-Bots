@@ -1,5 +1,8 @@
 # Server-FAQ V2 — finale Texte (Claude, 2026-07-05)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Quelle: docs/onboarding-redesign/phase1-wissensbasis.ENTWURF.md F1–F15,
 redigiert auf den Live-Stand 2026-07-05. Bewusst ENTFERNT (nicht live):
 Bot-Pate/Paten-Angebot (Phase 3/4), Status-Abfrage per Bot-DM, 24h-Erinnerung,

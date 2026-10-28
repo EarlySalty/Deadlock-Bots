@@ -1,5 +1,8 @@
 # Central DB Final Reconciliation + Cutover Plan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Datum: 2026-07-01
 Status: Plan, keine Implementierung
 Scope: Finaler Delta-Abgleich und Cutover der verbliebenen SQLite-Writer nach `central-postgres-sp1`.

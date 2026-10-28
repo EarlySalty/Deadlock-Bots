@@ -1,5 +1,8 @@
 # Voice Pair Guard Implementation Plan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Die Discord-Nutzer `887664726421671976` und `279971744964542464` können regulär nie in denselben Voice-Channel verbinden; die Sperre gilt serverweit, bidirektional und ohne Disconnect.

@@ -1,5 +1,9 @@
 # Central DB Architektur
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+> This page describes the central DB at the SP0 stage. Current state is in `README.md`.
+
+
 ## Instanz
 
 Eine eigene TimescaleDB-Instanz, bewusst getrennt von der Twitch-Analytics-DB (`:5433`) und der TradingBot-DB. Sie lauscht nur auf dem Loopback-Interface — von außen ist nichts erreichbar, der Zugriff läuft ausschließlich lokal über die DSN aus Infisical. Hochgefahren wird sie über die Compose-Datei bzw. den `up.sh`-Wrapper, der das Passwort aus der DSN zieht, ohne es je zu loggen.

@@ -1,5 +1,8 @@
 # Ticket-Shadow Two-Stage Candidate Implementation Plan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Der Ticket-Helfer beansprucht die erste gültige Nachricht eines Tickets restartfest, bewertet sie weiterhin über `dl-knowledge`, versucht davon unabhängig immer einen natürlich formulierten deutschen Antwortkandidaten zu erzeugen und veröffentlicht beides ausschließlich im festen internen Shadow-Kanal.

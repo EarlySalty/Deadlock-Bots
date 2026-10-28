@@ -1,5 +1,8 @@
 # Rename Manager
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Der `RenameManagerCog` serialisiert Voice-Channel-Umbenennungen ueber eine SQLite-Queue. Er existiert, weil Discord Channel-Renames stark ratelimitiert und stoeranfaellig sind. Anstatt dass beliebige Cogs direkt `channel.edit(name=...)` feuern, sollen sie Rename-Wuensche in eine Queue stellen.
 

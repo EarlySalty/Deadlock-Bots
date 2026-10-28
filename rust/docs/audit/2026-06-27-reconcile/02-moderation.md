@@ -1,5 +1,8 @@
 # Reconcile Audit: Moderation (Security Guard / AI Moderator / AI Connector)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Datum: 2026-06-27  
 Scope: `cogs/security_guard.py`, `cogs/ai_moderator.py`, `cogs/ai_connector.py` gegen `rust/crates/dl-moderation/src/`, `rust/crates/dl-ai/src/lib.rs` und Discord-Glue in `rust/bin/dl-bot/src/`.
 

@@ -1,5 +1,8 @@
 # Design: Fremd-Invite-Erkennung + Neu-Account-Eskalation (Security Guard)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Datum:** 2026-06-21
 **Status:** Entwurf zur Review
 **Betrifft:** Rust-Port `rust/crates/dl-moderation` (+ Glue `rust/bin/dl-bot/src/modglue.rs`, `rust/crates/dl-discord`). Python-Referenz `cogs/security_guard.py` bleibt unverändert.

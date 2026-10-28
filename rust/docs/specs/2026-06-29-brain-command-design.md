@@ -1,5 +1,8 @@
 # Spec: `!brain <Frage>` — Deadlock-Brain Q&A im Discord-Bot
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Datum:** 2026-06-29 · **Branch:** `rust/brain-command-2026-06-29` · **Status:** Design freigegeben, Implementierung delegiert
 
 ## Ziel

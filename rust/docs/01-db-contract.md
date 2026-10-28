@@ -1,5 +1,9 @@
 # DB-Vertrag: data/deadlock.sqlite3
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+> The SQLite contract below is superseded by the central Postgres database described in `rust/docs/central-db/`.
+
+
 Die SQLite-Datei `data/deadlock.sqlite3` (WAL-Modus) ist der gemeinsame Vertrag zwischen:
 
 1. dem laufenden **Python-Bot** (Schema-Besitzer bis zum jeweiligen Domänen-Cutover),

@@ -1,5 +1,8 @@
 # Steam-Bridge-Watchdog
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Der Steam-Bridge-Watchdog ist ein externer Python-Prozess ausserhalb des Discord-Cog-Lifecycles. Er ueberwacht, ob der Steam-Host fachlich gesund ist, und startet den Host-Service neu, wenn die Bridge zwar laeuft, aber logisch haengt. Die bestehende Doku unter `docs/steam-bridge-watchdog.md` war noch grob korrekt; diese Fassung zieht die Details direkt aus `standalone/steam_bridge_watchdog.py`.
 

@@ -1,5 +1,8 @@
 # Regelwerk-Neufassung (Welle 2b) — ENTWURF (Owner-Review vor Versand)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Ziel-Kanal: `regelwerk` (nach Rename aus `⚖️hier-starten-regelwerk`), read-only,
 reines Nachschlagewerk (§4.6). Das alte Panel („Hier starten ➤" → 10-Schritte-
 Wizard) und die 195 Zombie-Threads sterben mit Welle 2b — Einstieg übernimmt

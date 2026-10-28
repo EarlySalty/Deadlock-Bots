@@ -1,5 +1,8 @@
 # Welle 3 — Server-Modernisierung (Konzept)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Stand: 2026-07-03, Grillme-Session mit Owner. Welle 2b (natives Onboarding, Regelwerk, Archiv) ist komplett live — dieses Dokument definiert den nächsten Ausbau.
 
 ## Ziel & Leitsätze

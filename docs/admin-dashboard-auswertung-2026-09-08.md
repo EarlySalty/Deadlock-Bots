@@ -1,5 +1,8 @@
 # Admin-Dashboard: Betriebsbefund und Umbau
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Messung am 08.09.2026 zwischen 18:00 und 18:09 Uhr Europe/Berlin. Nur lesende
 Abfragen der Produktionsdatenbank `deadlock`, aggregiert ohne einzelne Nutzer,
 Nachrichten oder Zugangsdaten; zusätzlich Journal des Insights-Syncs.

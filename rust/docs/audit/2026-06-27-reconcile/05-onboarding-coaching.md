@@ -1,5 +1,8 @@
 # Onboarding / Welcome-DM / Coaching Reconcile (2026-06-27)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 ## Kurz-Summary
 
 Aktueller Stand: Der statische Onboarding-Wizard, der Welcome-DM-Assistent und die Coaching-Website-CTA sind im Rust-Code weitgehend vorhanden. Die alten Coaching-Panel-Befunde sind im aktuellen Code nicht mehr gueltig: Das Panel wird idempotent gepostet und verweist per Link auf die Website. Echte Cutover-Risiken bleiben bei AI-Onboarding, automatischem Rules-Channel-Start, Legacy-Coaching-Buttons sowie nicht gestarteten Coaching-Survey-/Rollenloops.

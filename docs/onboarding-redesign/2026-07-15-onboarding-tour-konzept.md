@@ -1,5 +1,8 @@
 # Umsetzungskonzept: Mini-Server-Tour per DM
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 ## Scope und Annahmen
 
 Dieses Konzept ergänzt das native Onboarding um eine opt-in-basierte, interaktive DM-Tour. **Die bestehende Rang-Frage und ihre Brücke bleiben unverändert bestehen** (Owner-Entscheid 2026-07-15: nicht jeder will eine Tour, und beides zusammen auswählen ist ausdrücklich erlaubt). Es beschreibt nur diesen Zubau; andere Migrations- und Phasenpläne im Repository sind nicht Teil des Scopes.

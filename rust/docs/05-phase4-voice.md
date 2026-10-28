@@ -1,5 +1,8 @@
 # Phase 4: dl-voice — der Voice-Cluster
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Status: Kern KOMPLETT (4a #76, 4b #77, 4c/1–4 #78–#81). Stand: 2026-06-10
 
 Querschnitts-Redesign umgesetzt: Statt fünf unkoordinierter

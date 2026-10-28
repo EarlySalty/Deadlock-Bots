@@ -1,5 +1,8 @@
 # Soll-Rechte-Modell „Deutsche Deadlock Community" — ENTWURF (Phase 1, Owner-Review)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Status: **Entwurf zur Review** (Arbeitspaket „Soll-Rechte-Modell dokumentieren", Konzept §5.1/§5.3; Owner-Review = Definition of Done).
 Quellen: Live-Snapshot `discord-live/channels.json` + `roles.json` (Stand 2026-07-01 23:50) und Konzept `docs/onboarding-redesign/2026-07-02-konzept.md` (§3, §4.6, §4.7, §5.1, §5.3).
 Hinweis: Der Snapshot ist vor den P0-Fixes gezogen — die beiden „Rassist"-Rollen sind inzwischen umbenannt (P0-⑧), die Rechte-Lage ist davon unberührt.

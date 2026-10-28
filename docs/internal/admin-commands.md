@@ -1,5 +1,8 @@
 # Admin-Commands
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## Zweck
 Diese Datei ist die interne Sammelstelle fuer Moderations-, Admin- und Owner-Commands des Master-Bots. Grundlage sind die Legacy-Uebersicht in `docs/admin_commands.md` sowie ein Code-Scan nach explizit admin- oder owner-gebundenen Commands. Sie dient als schnelle Referenz fuer Betrieb, Incident-Handling und Moderation.
 

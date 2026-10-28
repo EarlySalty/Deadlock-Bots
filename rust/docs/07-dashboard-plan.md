@@ -1,5 +1,8 @@
 # Phase 9: Dashboard (:8766) — Inventar und Schnitt-Plan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Stand: 2026-06-10. `service/dashboard.py` (7615 Zeilen, aiohttp) ist der
 letzte nicht portierte Block. Ein 1:1-Port wäre falsch — gut die Hälfte
 der Routen steuert die **Python-Runtime**, die nach dem Vollumstieg nicht

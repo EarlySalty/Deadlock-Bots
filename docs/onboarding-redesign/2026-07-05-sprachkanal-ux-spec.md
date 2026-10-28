@@ -1,5 +1,8 @@
 # W3.4c — Sprachkanal-UX: Reorder + Router-VC-Panels + Voreinstellungen ohne Lane
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Owner-Entscheide (2026-07-05):
 - Panels zusätzlich in den TEXT-CHAT DES ROUTER-VC (1513468587195633674), NICHT in erstellte Lanes.
 - Ankündigung = Lesart A: nur erklären, wie das Design funktioniert (kein Auto-Route-Feature), mit Kanal-Link.

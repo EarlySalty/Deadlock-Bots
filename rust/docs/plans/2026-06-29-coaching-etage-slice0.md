@@ -1,5 +1,8 @@
 # Coaching-Etage Slice 0 — Auto-Sammeln + Roster-Import (Implementierungsplan)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **Für Worker (Codex):** TDD pro Task (Red→Green→Refactor). Schritte als Checkboxen. Spec: `rust/docs/specs/2026-06-29-coaching-scrim-program-design.md`. Seed: `rust/docs/specs/seed-roster-2026-06-29.json`.
 
 **Goal:** Der dl-bot sammelt Scrim-Anmeldungen automatisch (Rollen-Reaktion → Pool-Eintrag) und der aktuelle Roster/Team-Stand wird einmalig in die DB importiert. Rein Rust, kein Frontend.

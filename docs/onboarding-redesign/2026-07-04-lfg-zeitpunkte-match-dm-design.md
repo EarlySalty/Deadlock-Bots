@@ -1,5 +1,8 @@
 # LFG: Zeitpunkte im Gesuch + Match-Benachrichtigung (DM)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Datum:** 2026-07-04
 **Repo:** Deadlock-Bots (`rust/crates/dl-voice`)
 **Kontext:** Onboarding-Redesign Welle 3, LFG-Forum „Mitspieler suchen"

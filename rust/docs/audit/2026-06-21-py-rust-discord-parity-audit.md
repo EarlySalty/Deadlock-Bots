@@ -1,5 +1,8 @@
 # Py→Rust Parity-Audit — Deadlock-Discord-Bot
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Datum:** 2026-06-21  
 **Methode:** 28 Subsystem-Agenten (zeilengenauer Vergleich Python-live ↔ Rust-Port), kritische/hohe Befunde adversarial gegengeprüft.  
 **Referenz:** Python (`cogs/`, `bot_core/`) = live & Source-of-Truth. **Geprüft:** Rust-Port (`rust/`, ~50% Parität).  

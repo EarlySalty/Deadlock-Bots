@@ -1,5 +1,9 @@
 # Rust-Rewrite der Deadlock-Bots — Plan und Verträge
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+> The SQLite database and Python-era layout described below are superseded by the central Postgres database and the current release layout.
+
+
 Stand: 2026-06-10 · Status: vom Betreiber freigegeben (Scope, Cutover-Strategie, Architektur)
 
 > **Update 2026-06-28:** Die Turnier-Domäne (Phase 8 / `dl-tournament`, altes `/turnier`-Admin,

@@ -1,5 +1,8 @@
 # Autonomer Betrieb - Deadlock Build-Publishing
 
+> **Historical (legacy Python implementation).** This page describes the Python cogs that the Rust port replaced. The `cogs/` paths, line numbers and `!` commands below do not exist on `origin/main`. Use it as a behaviour reference only and check `rust/bin/dl-bot/src/` before relying on any detail.
+
+
 ## ✅ System ist KOMPLETT AUTONOM!
 
 Das Build-Publishing-System ist **vollständig für autonomen Betrieb konfiguriert** und benötigt **KEINE manuellen Eingriffe**.

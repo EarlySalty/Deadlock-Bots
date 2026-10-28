@@ -1,5 +1,8 @@
 # SP1 Phase 0 Inventory: WEBSITE-COACHING
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Read-only Inventar der GOLDEN Website-Coaching-DB.
 
 ## Live-DB

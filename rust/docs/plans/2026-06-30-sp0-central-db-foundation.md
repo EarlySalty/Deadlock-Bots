@@ -1,5 +1,8 @@
 # SP0 — Fundament der zentralen Postgres/TimescaleDB — Implementierungsplan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **Für ausführende Worker (Codex):** Dieser Plan ist ein Ticket-DAG. Jedes Ticket = exakter Scope + Dateien + Test-Vertrag + Definition of Done. **Codex implementiert den Code; Claude orchestriert, verifiziert extern, committet.** Schritte tragen `- [ ]` zum Abhaken. **WORKFLOW.md NIE anfassen.** User-sichtbare deutsche Texte (Fehlertexte, Doku-Prosa fürs UI) = nur `"Platzhalter"` setzen + Datei:Zeile melden, Claude finalisiert.
 
 **Ziel:** Die tragfähigen „Schienen" für die zentrale DB bauen — dedizierte TimescaleDB-Instanz, kanonischer Migrations-Owner mit `core`-Schema + 7 Domänen-Namespaces, sqlx-Anbindung mit compile-checked Queries + committetem Offline-Cache, sowie ein ETL-/Verifikations-Harness und ein Vier-Säulen-Test-Harness mit echten Zähnen. **SP0 migriert KEINE Echtdaten und schneidet KEINEN Dienst um** — null Datenrisiko; reale ETL beginnt erst SP1.

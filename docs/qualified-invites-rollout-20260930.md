@@ -1,5 +1,8 @@
 # Gemeinsamer Rollout der persönlichen Einladungen
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Der Auftrag vom 30. September umfasst jetzt den Live-Abschluss. Der alte Draft-Vertrag bleibt als historischer Prüfstand erhalten.
 
 Dieser Gate-Fix basiert auf `428ec16597067c3650ea6fac2b5fae73e7ddc7aa`. Er ergänzt die Migrationen `2026092701_qualified_twitch_invites.sql`, `2026093001_twitch_effort_read_access.sql`, `2026093002_twitch_invite_qualification_readiness.sql`, `2026093003_twitch_invite_identity.sql` und `2026093004_twitch_invite_code_history.sql`. Die Identitätsmigration ergänzt einen partiellen eindeutigen Index für nicht-null Twitch-IDs. Die Historienmigration speichert beobachtete Besitzer-/Code-/Guild-/Kanalintervalle mittels Trigger; unbekannte Altzuordnungen erhalten keine erfundene Besitzer-ID. Die vorhandenen Mappingzeilen und historischen Zuordnungen werden dabei nicht umgeschrieben.

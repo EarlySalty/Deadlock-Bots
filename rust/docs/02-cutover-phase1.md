@@ -1,5 +1,8 @@
 # Cutover-Checkliste Phase 1: Public-Stats (:8768) + Tierlist (:8771)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Status: BEREIT, wartet auf Freigabe des Betreibers. Bis dahin bedient Python beide Ports.
 
 ## Verifikations-Stand (10.6.2026)

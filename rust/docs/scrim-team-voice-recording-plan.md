@@ -1,5 +1,8 @@
 # Scrim-Team-Voice-Recording — Implementierungsplan für Codex
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 **Scope-Hinweis für den Worker:** Halte dich exakt an diesen Auftrag. Ignoriere andere
 Doku/Pläne im Repo (z. B. tempvoice-umbau, turnier-automatik) — die betreffen andere Features.
 

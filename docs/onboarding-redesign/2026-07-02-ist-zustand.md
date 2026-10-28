@@ -1,5 +1,8 @@
 # Onboarding-Redesign — Ist-Zustand (Stand 2026-07-01/02)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Vollaufnahme des Servers „Deutsche Deadlock Community" (Guild `1289721245281292288`)
 vor dem Onboarding-Neubau. Datenquellen: Discord-API-Snapshot über den Bot (Guild,
 Kanäle, Rollen, natives Onboarding, Threads, letzte 50 Nachrichten aller 75 Textkanäle),

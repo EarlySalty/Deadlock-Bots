@@ -1,5 +1,8 @@
 # Interaktion und Bindung: Ursachen und Korrektur
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Stand: 08.09.2026, Untersuchung ab 18:40 Uhr Europe/Berlin.
 
 ## Zwei tatsächliche Messfehler

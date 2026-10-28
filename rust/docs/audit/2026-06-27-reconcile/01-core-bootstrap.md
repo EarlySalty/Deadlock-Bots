@@ -1,5 +1,8 @@
 # Core / Bootstrap / Dispatch / Owner-Admin Reconcile (2026-06-27)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 ## Kurz-Summary
 
 Aktueller Stand: Die alten Core-Befunde sind im aktuellen Rust-Code groesstenteils weiterhin offen. Event-Normalisierung, zentraler Dispatcher und Interaction-Routing sind vorhanden und absichtlich anders als Python strukturiert. Die portierbaren Owner-Admin- und Bootstrap-Defaults fehlen aber weiter.

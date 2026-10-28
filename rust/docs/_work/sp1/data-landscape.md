@@ -1,5 +1,8 @@
 # SP1 Daten-Landschaft
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 Stand: 2026-06-30. Quelle sind die vier SQLite-Tabelleninventare und das Patchnotes-Inventar unter `rust/docs/_work/sp1/inventory/`. Dieses Dokument zaehlt `deadlock.sqlite3` nur einmal; `steam-bot.tables.json` ist die Steam-Bot-Konsumenten-Sicht auf dieselbe physische Datei, keine zweite Datenbank. Patchnotes hat keine eigene SQLite-Datei, nutzt aber zur Laufzeit ebenfalls die geteilte `deadlock.sqlite3`. Referenzen: Issues #385, #386, #387; Eltern-Spec §5.2 und §7.
 
 ## 1. Physische DB-Uebersicht

@@ -1,5 +1,8 @@
 # SP1 Phase 1 — Unified Schema + Ledger (Implementierungsplan)
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **Für Codex-Worker:** Dies ist der Orchestrierungs-Plan. Jedes Ticket wird von **einem Codex-Worker** implementiert, der seine DoD **selbst verifiziert** (Gates/Tests selbst ausführen) und **selbst reviewt** (frischer Codex-Kritiker im Anschluss). Claude organisiert nur (DAG, Datei-Ownership, commit/push, `changed_files`-Plausibilität) und schreibt ausschließlich user-sichtbare Texte. Kein Claude-Implementierungscode, kein Claude-Review, keine Claude-Verifikation.
 
 **Goal:** Ein einziges kanonisches Postgres-Schema, das **alle 178 unique Quell-Tabellen** (deadlock.sqlite3 124 / tournament.db 38 / Website deadlock.db 21, physisch dedupliziert) abdeckt, plus ein **vollständiges TOML-Ledger** (jede Quellspalte `mapped{to}` oder `dropped{reason}`) als Null-Datenverlust-Vertrag.

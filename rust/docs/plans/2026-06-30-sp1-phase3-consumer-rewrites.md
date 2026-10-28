@@ -1,5 +1,8 @@
 # SP1 Phase 3 — Consumer-Query-Rewrites (rusqlite → zentrale Postgres) Implementation Plan
 
+> **Historical.** This document is a plan, audit or snapshot from the 2026 Rust rewrite period. It records the state and decisions at the time of writing and is not maintained. The current system is described in `README.md` at the repository root.
+
+
 > **Für ausführende Worker:** Dieser Plan wird **vollständig an Codex (gpt-5.5 / xhigh) delegiert** — Codex implementiert, verifiziert sich selbst und reviewt sich selbst (frischer Kritiker). Claude orchestriert nur (DAG, commit/push, `changed_files`-Plausi) und schreibt user-sichtbare Texte. KEINE nativen Sub-Agents. Schritte mit Checkbox (`- [ ]`) für Fortschritt.
 
 **Goal:** Alle 13 Consumer-Crates/Binaries von `dl-db`/rusqlite (synchron, SQLite) auf die zentrale Postgres umschreiben — compile-checked via `sqlx::query!`/`query_as!`, `.sqlx`-Offline-Cache, fully-qualified `schema.table`, pro Crate verifiziert. Danach ist der Code PG-only; der atomare Cutover (Dienste umschalten) ist **P4**, nicht Teil von P3.
