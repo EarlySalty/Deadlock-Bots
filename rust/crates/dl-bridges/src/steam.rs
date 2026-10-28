@@ -83,6 +83,8 @@ fn component_forward_timeout(custom_id: &str) -> Duration {
     }
 }
 
+const POSTED_IN_CHANNEL_MSG: &str = "✅ Antwort im Kanal gepostet.";
+
 const UNREACHABLE_MSG: &str =
     "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte versuche es in wenigen Sekunden erneut.";
 
@@ -295,6 +297,26 @@ fn render(result: Option<Value>) -> BridgeReply {
         .map(|embed| vec![Value::Object(embed.clone())])
         .unwrap_or_default();
     let components = build_components(&result);
+    let post_in_channel = result
+        .get("post_in_channel")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if post_in_channel && content.is_some() {
+        return BridgeReply {
+            channel_message: Some(ChannelMessage {
+                target_channel_id: None,
+                content,
+                embeds,
+                components,
+                edit_message_id: None,
+                confirmation: POSTED_IN_CHANNEL_MSG.to_string(),
+                response_message_hook: None,
+            }),
+            ephemeral: true,
+            ..BridgeReply::default()
+        };
+    }
 
     BridgeReply {
         content,
@@ -1011,6 +1033,20 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::Mutex;
+
+    #[test]
+    fn post_in_channel_reply_goes_to_channel_with_ephemeral_confirmation() {
+        let reply = render(Some(json!({
+            "reply_text": "<@1> abgelehnt",
+            "ephemeral": true,
+            "post_in_channel": true
+        })));
+        assert!(reply.content.is_none());
+        let message = reply.channel_message.expect("channel message");
+        assert_eq!(message.content.as_deref(), Some("<@1> abgelehnt"));
+        assert_eq!(message.target_channel_id, None);
+        assert_eq!(message.confirmation, POSTED_IN_CHANNEL_MSG);
+    }
 
     /// Mock-Steam-Bot: zeichnet Requests auf, antwortet vorgegeben.
     async fn mock_steam_bot(
