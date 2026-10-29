@@ -436,6 +436,32 @@ fn matching_channels(raw: &[Value], readable: &[Value], terms: &[String]) -> Vec
         .collect()
 }
 
+fn requested_channels(
+    channel_id: Option<u64>,
+    access: &Access,
+    raw: &[Value],
+    readable: &[Value],
+    terms: &[String],
+) -> Vec<u64> {
+    let mut ids: Vec<u64> = channel_id
+        .filter(|id| {
+            access.user_id.is_none()
+                && raw.iter().any(|c| {
+                    c["id"].as_str() == Some(id.to_string().as_str())
+                        && matches!(c["type"].as_u64(), Some(0 | 5))
+                        && readable.contains(&c["id"])
+                })
+        })
+        .into_iter()
+        .collect();
+    ids.extend(
+        matching_channels(raw, readable, terms)
+            .into_iter()
+            .filter(|id| channel_id != Some(*id)),
+    );
+    ids
+}
+
 fn public_channels(channels: &[Value], access: &Access) -> Vec<Value> {
     let allowed: HashSet<&str> = channels
         .iter()
@@ -600,11 +626,8 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
     let arguments: FactsArgs = serde_json::from_value(args.clone())?;
     let terms = normalized_terms(&arguments.channel_terms)?;
     let personal = arguments.channel_id.is_some() || !arguments.channel_terms.is_empty();
-    if !terms.is_empty() && access.user_id.is_none() {
-        bail!("Kanalsuche benötigt eine aufgelöste fragende Person");
-    }
     let mut messages: Vec<ReadResult> = Vec::new();
-    if let Some(channel_id) = arguments.channel_id {
+    if let Some(channel_id) = arguments.channel_id.filter(|_| access.user_id.is_some()) {
         messages.push(serde_json::from_value(
             request_tool(
                 st,
@@ -646,10 +669,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
         })
         .map(|c| c["id"].clone())
         .collect();
-    for channel_id in matching_channels(&raw, &readable, &terms) {
-        if arguments.channel_id == Some(channel_id) {
-            continue;
-        }
+    for channel_id in requested_channels(arguments.channel_id, access, &raw, &readable, &terms) {
         messages.push(serde_json::from_value(
             request_tool(
                 st,
@@ -889,6 +909,57 @@ mod tests {
         let hidden = vec![json!("14")];
         assert!(matching_channels(&raw, &hidden, &terms).is_empty());
         assert!(normalized_terms(&vec!["a".to_owned(); MAX_TERMS + 1]).is_err());
+    }
+
+    #[test]
+    fn anonyme_kanalsuche_liest_nur_oeffentlich_lesbare_kanaele() {
+        let raw = vec![
+            json!({"id":"20","name":"frag-die-community","type":0,"position":0,"last_message_id":"100","permission_overwrites":[]}),
+            json!({"id":"21","name":"mod-community","type":0,"position":1,"last_message_id":"900","permission_overwrites":[{"id":"1","type":0,"deny":VIEW.to_string(),"allow":"0"},{"id":"2","type":0,"deny":"0","allow":VIEW.to_string()}]}),
+            json!({"id":"22","name":"ticket-community","type":0,"position":2,"last_message_id":"800","permission_overwrites":[{"id":"1","type":0,"deny":VIEW.to_string(),"allow":"0"},{"id":"99","type":1,"deny":"0","allow":(VIEW | HISTORY).to_string()}]}),
+            json!({"id":"23","name":"Team","type":4,"position":3,"permission_overwrites":[{"id":"1","type":0,"deny":VIEW.to_string(),"allow":"0"}]}),
+            json!({"id":"24","name":"team-community","type":0,"parent_id":"23","position":4,"last_message_id":"700","permission_overwrites":[]}),
+        ];
+        let access = Access {
+            user_id: None,
+            guild: "1".into(),
+            roles: vec!["3".into()],
+            base: VIEW | HISTORY,
+            timed_out: false,
+        };
+        let readable: Vec<Value> = public_channels(&raw, &access)
+            .iter()
+            .filter(|c| {
+                raw.iter()
+                    .find(|r| r["id"] == c["id"])
+                    .and_then(|r| effective_permissions(r, &access))
+                    .is_some_and(|p| p & HISTORY != 0)
+            })
+            .map(|c| c["id"].clone())
+            .collect();
+        let terms = normalized_terms(&["frag die community".into()]).expect("Begriffe");
+        assert_eq!(
+            requested_channels(None, &access, &raw, &readable, &terms),
+            [20]
+        );
+        for private in [21, 22, 24] {
+            assert_eq!(
+                requested_channels(Some(private), &access, &raw, &readable, &[]),
+                Vec::<u64>::new()
+            );
+        }
+        assert_eq!(
+            requested_channels(Some(20), &access, &raw, &readable, &[]),
+            [20]
+        );
+        let requester = Access {
+            user_id: Some(99),
+            ..access
+        };
+        assert_eq!(
+            requested_channels(Some(20), &requester, &raw, &readable, &terms),
+            Vec::<u64>::new()
+        );
     }
 
     #[test]
