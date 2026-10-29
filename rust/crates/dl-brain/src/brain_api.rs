@@ -106,7 +106,12 @@ impl BrainApiAnswerer {
             let response = match user_id {
                 Some(user_id) if !user_questions.is_empty() => {
                     self.client
-                        .answer_for_discord_with_history(&query, user_id, user_questions)
+                        .answer_for_discord_with_history_and_read_access(
+                            &query,
+                            user_id,
+                            user_questions,
+                            allow_discord_reads,
+                        )
                         .await
                 }
                 Some(user_id) => {
@@ -545,9 +550,12 @@ mod tests {
                         assert!(headers
                             .to_ascii_lowercase()
                             .contains("x-discord-user-id: 3"));
-                        assert!(headers
-                            .to_ascii_lowercase()
-                            .contains("x-discord-read-access: disabled"));
+                        assert_eq!(
+                            headers
+                                .to_ascii_lowercase()
+                                .contains("x-discord-read-access: disabled"),
+                            task_request
+                        );
                         assert!(!String::from_utf8_lossy(body).contains("Dieser Ortskontext"));
                         let envelope: serde_json::Value =
                             serde_json::from_slice(body).expect("Lokaler Kontextvertrag");
