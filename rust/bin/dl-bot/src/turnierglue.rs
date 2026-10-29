@@ -327,18 +327,30 @@ impl TurnierProposalService {
         {
             (proposal, current)
         } else {
-            let mut config = self.plan_config(&proposal, None).await?;
-            config["_ai_planned"] = json!(true);
-            let stored = self
-                .client
-                .planned(
-                    proposal_id,
-                    &PlannedRequest {
-                        config_json: config.to_string(),
-                    },
-                )
-                .await?;
-            (stored, config)
+            match self.plan_config(&proposal, None).await {
+                Ok(mut config) => {
+                    config["_ai_planned"] = json!(true);
+                    let stored = self
+                        .client
+                        .planned(
+                            proposal_id,
+                            &PlannedRequest {
+                                config_json: config.to_string(),
+                            },
+                        )
+                        .await?;
+                    (stored, config)
+                }
+                Err(error) => {
+                    validate_plan(&current)?;
+                    tracing::warn!(
+                        proposal_id,
+                        %error,
+                        "Turniervorschlag ohne KI-Planung mit gespeichertem Plan veröffentlicht"
+                    );
+                    (proposal, current)
+                }
+            }
         };
         let body = proposal_send_body(&proposal, &config)?;
         let message_id = self.adapter.send_raw_public(channel_id, &body).await?;
