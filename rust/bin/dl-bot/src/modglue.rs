@@ -1046,16 +1046,6 @@ impl BrainHandler {
                     channel_id = event.channel_id,
                     "brain_direct_backend_fehler"
                 );
-                if feedback {
-                    let _ = replies.reaction(event, "👀", false).await;
-                    let _ = replies.reaction(event, "❌", true).await;
-                    tracing::info!(
-                        message_id = event.message_id,
-                        channel_id = event.channel_id,
-                        failed = true,
-                        "brain_direct_reaction_finished"
-                    );
-                }
                 self.clear_guide_pending(event, proactive).await;
                 return;
             }
