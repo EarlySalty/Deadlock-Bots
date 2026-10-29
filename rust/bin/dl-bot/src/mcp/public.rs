@@ -14,6 +14,10 @@ const HISTORY: u64 = 1 << 16;
 const ADMIN: u64 = 1 << 3;
 const SEND: u64 = 1 << 11;
 const TTL: Duration = Duration::from_secs(60);
+const MAX_TERMS: usize = 16;
+const MAX_TERM_CHARS: usize = 64;
+const MIN_MATCH_CHARS: usize = 4;
+const MAX_MATCHED_CHANNELS: usize = 4;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +39,8 @@ pub(super) struct Facts {
 struct FactsArgs {
     #[serde(default)]
     channel_id: Option<u64>,
+    #[serde(default)]
+    channel_terms: Vec<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -304,15 +310,20 @@ pub(super) async fn request_tool(
             .await?;
             let mut messages = Vec::new();
             for message in raw.as_array().context("Nachrichtenformat ist unbekannt")? {
+                let text = without_mentions(
+                    message["content"]
+                        .as_str()
+                        .context("Nachrichtentext fehlt")?,
+                );
+                if text.is_empty() {
+                    continue;
+                }
                 messages.push(Message {
                     id: message["id"]
                         .as_str()
                         .context("Nachrichten-ID fehlt")?
                         .into(),
-                    text: message["content"]
-                        .as_str()
-                        .context("Nachrichtentext fehlt")?
-                        .into(),
+                    text,
                 });
             }
             Ok(serde_json::to_value(ReadResult {
@@ -345,6 +356,84 @@ pub(super) async fn request_tool(
         }
         _ => bail!("Werkzeug ist nicht freigegeben"),
     }
+}
+
+fn without_mentions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<@") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let body = tail.trim_start_matches(['!', '&']);
+        let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 && body[digits..].starts_with('>') {
+            rest = &body[digits + 1..];
+        } else {
+            out.push_str("<@");
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn name_tokens(name: &str) -> Vec<String> {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.chars().count() >= MIN_MATCH_CHARS)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn normalized_terms(terms: &[String]) -> Result<Vec<String>> {
+    if terms.len() > MAX_TERMS {
+        bail!("Zu viele Kanalbegriffe");
+    }
+    let mut result = Vec::new();
+    for term in terms {
+        if term.chars().count() > MAX_TERM_CHARS {
+            bail!("Kanalbegriff ist zu lang");
+        }
+        result.extend(name_tokens(term));
+    }
+    Ok(result)
+}
+
+fn term_matches(term: &str, token: &str) -> bool {
+    term.starts_with(token) || token.starts_with(term)
+}
+
+fn matching_channels(raw: &[Value], readable: &[Value], terms: &[String]) -> Vec<u64> {
+    let parent_name = |channel: &Value| {
+        raw.iter()
+            .find(|parent| !channel["parent_id"].is_null() && parent["id"] == channel["parent_id"])
+            .and_then(|parent| parent["name"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut matched: Vec<(u64, usize, u64)> = raw
+        .iter()
+        .filter(|c| matches!(c["type"].as_u64(), Some(0 | 5)) && readable.contains(&c["id"]))
+        .filter_map(|c| {
+            let id = c["id"].as_str()?.parse::<u64>().ok()?;
+            let mut tokens = name_tokens(c["name"].as_str().unwrap_or_default());
+            tokens.extend(name_tokens(&parent_name(c)));
+            let score = terms
+                .iter()
+                .filter(|term| tokens.iter().any(|token| term_matches(term, token)))
+                .count();
+            let recency = c["last_message_id"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            (score > 0).then_some((recency, score, id))
+        })
+        .collect();
+    matched.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    matched
+        .into_iter()
+        .take(MAX_MATCHED_CHANNELS)
+        .map(|(_, _, id)| id)
+        .collect()
 }
 
 fn public_channels(channels: &[Value], access: &Access) -> Vec<Value> {
@@ -509,6 +598,11 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Facts> {
 
 pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> Result<Facts> {
     let arguments: FactsArgs = serde_json::from_value(args.clone())?;
+    let terms = normalized_terms(&arguments.channel_terms)?;
+    let personal = arguments.channel_id.is_some() || !arguments.channel_terms.is_empty();
+    if !terms.is_empty() && access.user_id.is_none() {
+        bail!("Kanalsuche benötigt eine aufgelöste fragende Person");
+    }
     let mut messages: Vec<ReadResult> = Vec::new();
     if let Some(channel_id) = arguments.channel_id {
         messages.push(serde_json::from_value(
@@ -552,11 +646,25 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
         })
         .map(|c| c["id"].clone())
         .collect();
+    for channel_id in matching_channels(&raw, &readable, &terms) {
+        if arguments.channel_id == Some(channel_id) {
+            continue;
+        }
+        messages.push(serde_json::from_value(
+            request_tool(
+                st,
+                "read_messages",
+                &json!({"channel_id":channel_id}),
+                access,
+            )
+            .await?,
+        )?);
+    }
     let channels_value = json!({"channels": channels, "readable": readable});
     let mut cache = st.public_cache.lock().await;
     if let Some(cached) = cache.as_ref().filter(|c| {
         access.user_id.is_none()
-            && arguments.channel_id.is_none()
+            && !personal
             && c.guild == guild_id
             && c.channels == channels_value
             && c.created.elapsed() < TTL
@@ -669,7 +777,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
     let result: Facts = serde_json::from_value(
         json!({"schema": "discord.public-facts.v2", "guild_id": guild_id, "observed_at": chrono::Utc::now().to_rfc3339(), "cache_seconds": 60, "audience": if access.user_id.is_some() { "requester" } else { "verified_members" }, "channels": channels, "voice_counts": voice_counts, "bot_infos": infos, "tempvoice":tempvoice,"messages":messages}),
     )?;
-    if access.user_id.is_none() && arguments.channel_id.is_none() {
+    if access.user_id.is_none() && !personal {
         *cache = Some(CachedFacts {
             guild: guild_id,
             channels: channels_value,
@@ -756,6 +864,39 @@ mod tests {
             }
         )
         .is_empty());
+    }
+
+    #[test]
+    fn kanalsuche_trifft_nur_lesbare_kanaele_neueste_zuerst() {
+        let raw = vec![
+            json!({"id":"10","name":"Scrims","type":4}),
+            json!({"id":"11","name":"scrim-channel","type":0,"parent_id":"10","last_message_id":"500"}),
+            json!({"id":"12","name":"announcement-scrims","type":0,"parent_id":"10","last_message_id":"300"}),
+            json!({"id":"13","name":"urn-runners","type":0,"parent_id":"10","last_message_id":"900"}),
+            json!({"id":"14","name":"allgemein","type":0,"last_message_id":"999"}),
+            json!({"id":"15","name":"Scrim Voice","type":2,"parent_id":"10","last_message_id":"950"}),
+        ];
+        let terms = normalized_terms(&["Was ist bei den Scrims von uns passiert".into()])
+            .expect("Begriffe");
+        let readable = vec![
+            json!("11"),
+            json!("12"),
+            json!("13"),
+            json!("14"),
+            json!("15"),
+        ];
+        assert_eq!(matching_channels(&raw, &readable, &terms), [13, 11, 12]);
+        let hidden = vec![json!("14")];
+        assert!(matching_channels(&raw, &hidden, &terms).is_empty());
+        assert!(normalized_terms(&vec!["a".to_owned(); MAX_TERMS + 1]).is_err());
+    }
+
+    #[test]
+    fn nachrichtentext_ohne_personen_und_rollenerwaehnungen() {
+        assert_eq!(
+            without_mentions("Match 1 <@&1520849762851618817> \n\nSieger <@!42> und <@7> <@x>"),
+            "Match 1 Sieger und <@x>"
+        );
     }
 
     #[test]

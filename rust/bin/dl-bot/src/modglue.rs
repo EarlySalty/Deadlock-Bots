@@ -368,6 +368,9 @@ trait BrainDirectReplyPort: Send + Sync {
     async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool;
     async fn can_reply(&self, event: &dl_discord::MessageEvent) -> bool;
     fn is_public(&self, event: &dl_discord::MessageEvent) -> bool;
+    fn is_direct_message_from_member(&self, _event: &dl_discord::MessageEvent) -> bool {
+        false
+    }
     fn answer_context(
         &self,
         _event: &dl_discord::MessageEvent,
@@ -453,6 +456,20 @@ impl BrainDirectReplyPort for DiscordAdapter {
         event
             .guild_id
             .is_some_and(|guild_id| brain_channel_is_public(self, guild_id, event.channel_id))
+    }
+
+    fn is_direct_message_from_member(&self, event: &dl_discord::MessageEvent) -> bool {
+        event.guild_id.is_none()
+            && event.author_id != 0
+            && self
+                .cache()
+                .guild(GuildId::new(crate::serversync::GUILD_ID))
+                .is_some_and(|guild| {
+                    guild
+                        .members
+                        .get(&UserId::new(event.author_id))
+                        .is_some_and(|member| !member.user.bot)
+                })
     }
 
     async fn reaction(
@@ -967,7 +984,7 @@ impl BrainHandler {
         let feedback = !proactive && !is_public;
         let context = dl_brain::DiscordQueryContext {
             user_id: event.author_id,
-            allow_discord_reads: is_public,
+            allow_discord_reads: is_public || replies.is_direct_message_from_member(event),
             answer_context: replies.answer_context(event),
         };
         let reservation = self
@@ -6532,6 +6549,32 @@ mod tests {
             unknown.author_id = 4;
             assert!(!adapter.can_reply(&unknown).await);
         }
+    }
+
+    #[tokio::test]
+    async fn dm_lesezugriff_nur_fuer_aufgeloeste_servermitglieder() {
+        let adapter = DiscordAdapter::new("test-token");
+        let cache = Arc::new(serenity::all::Cache::new());
+        let mut guild = serenity::all::Guild::default();
+        guild.id = GuildId::new(crate::serversync::GUILD_ID);
+        guild.owner_id = UserId::new(99);
+        let mut member = serenity::all::Member::default();
+        member.user.id = UserId::new(3);
+        member.guild_id = guild.id;
+        guild.members.insert(member.user.id, member);
+        let mut update: serenity::all::GuildCreateEvent =
+            serde_json::from_value(serde_json::to_value(guild).expect("Testguild"))
+                .expect("Testcacheereignis");
+        cache.update(&mut update);
+        adapter.link_cache(cache);
+        let dm = test_message_event(None, "Was ist bei den Scrims passiert?");
+        assert_eq!(dm.author_id, 3);
+        assert!(adapter.is_direct_message_from_member(&dm));
+        let mut stranger = test_message_event(None, "Was ist bei den Scrims passiert?");
+        stranger.author_id = 4;
+        assert!(!adapter.is_direct_message_from_member(&stranger));
+        let guild_message = test_message_event(Some(crate::serversync::GUILD_ID), "Frage");
+        assert!(!adapter.is_direct_message_from_member(&guild_message));
     }
 
     #[tokio::test]
