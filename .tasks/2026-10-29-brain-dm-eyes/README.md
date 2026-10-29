@@ -15,17 +15,16 @@ That path never reacted, so users saw nothing for 15 to 70 s. The old 👀/❌ f
   Privacy overrides and missing notice ids no longer count as failure.
 - After the user action, `finish_brain_feedback` removes 👀 and adds ❌ only when failed (log `brain_concierge_reaction_finished`).
   Feedback that never started (local answers, controls) gets no reaction.
-- Text is sent only for Answered; insufficient_evidence in DMs stays silent. The explicit guild mention fallback text for NoAnswer was kept
-  as before, because existing tests pin it; this conflicts with the silence rule and is left for a product decision.
+- Text is sent only for Answered. NoAnswer (insufficient_evidence, build_rejected, unverified, unauthorized_evidence) stays silent,
+  also on explicit guild mentions; only technical Error and Timeout still post the short unavailable notice there.
 - No double reaction: messages claimed by the concierge are skipped by the direct handler (`claimed_by_other_owner`), and Discord reaction PUTs are idempotent.
 
 ## Verification
 - `cargo-slot clippy -p dl-community -p dl-bot --all-targets --features dl-community/testing`: no new findings (only the repo-wide async_trait `double_must_use` baseline).
 - `cargo fmt --check -p dl-community -p dl-bot`: clean.
-- `cargo-slot test -p dl-community`: 356 passed, 3 failed (all `CENTRAL_TEST_DSN` harness).
-- `test-db-run deadlock_test -- cargo-slot test -p dl-community --features testing`: 365 passed, 290 failed, all with
-  `role "deadlock" does not exist` in migration 2026092801 on the ionos test DB (infrastructure baseline, unrelated).
-- `cargo-slot test -p dl-bot modglue`: 75 passed.
+- `test-db-run deadlock_test -- cargo-slot test -p dl-community --features testing`: 655 passed (needs `CREATE ROLE deadlock` on the
+  throwaway ionos DB first, migration 2026092801 grants to it; wrapper in the task log).
+- `test-db-run deadlock_test -- cargo-slot test -p dl-bot`: 346 passed, 7 ignored.
 - New test `brain_question_shows_eyes_while_working_and_cross_only_on_failure` covers answered, insufficient and backend error.
 
 ## Live proof

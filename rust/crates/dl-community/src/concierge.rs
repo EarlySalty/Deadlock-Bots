@@ -1506,9 +1506,7 @@ fn unanswered_error_reply(
     let mention_unanswered = options.explicit_mention
         && matches!(
             outcome,
-            ConciergeAnswerOutcome::Error
-                | ConciergeAnswerOutcome::NoAnswer
-                | ConciergeAnswerOutcome::Timeout
+            ConciergeAnswerOutcome::Error | ConciergeAnswerOutcome::Timeout
         );
     (private_error || mention_unanswered).then(|| KNOWLEDGE_UNAVAILABLE_TEXT.to_owned())
 }
@@ -11263,7 +11261,7 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn brain_only_guild_erwaehnung_bekommt_genau_eine_fehlermeldung() {
+    async fn brain_only_guild_erwaehnung_bekommt_nur_bei_technischem_fehler_eine_meldung() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("Concierge-Testdatenbank");
@@ -11303,10 +11301,19 @@ mod tests {
                     )
                     .await;
                 assert_eq!(calls.load(Ordering::SeqCst), 1, "{status}");
-                assert_eq!(terminal.message_id.is_some(), explicit_mention, "{status}");
+                let failed = matches!(
+                    status,
+                    "budget_exceeded"
+                        | "provider_error"
+                        | "unavailable"
+                        | "invalid_contract"
+                        | "http_error"
+                );
+                let notified = explicit_mention && failed;
+                assert_eq!(terminal.message_id.is_some(), notified, "{status}");
                 {
                     let sent = port.sent_channel_v2.lock().expect("Nachrichtenrecorder");
-                    assert_eq!(sent.len(), usize::from(explicit_mention), "{status}");
+                    assert_eq!(sent.len(), usize::from(notified), "{status}");
                     for body in sent.iter() {
                         assert_eq!(body["flags"], json!(CONCIERGE_COMPONENTS_V2_FLAG));
                         assert_eq!(
