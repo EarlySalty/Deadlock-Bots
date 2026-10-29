@@ -78,6 +78,10 @@ pub const DEFAULT_ROUTER_VOICE_ID: u64 = 1513468587195633674;
 #[cfg(test)]
 const KNOWLEDGE_TIMEOUT: StdDuration = StdDuration::from_secs(8);
 const CONCIERGE_DISCORD_IO_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const BRAIN_TYPING_REFRESH: StdDuration = StdDuration::from_secs(8);
+const BRAIN_PENDING_REACTION: &str = "👀";
+const BRAIN_FAILED_REACTION: &str = "❌";
+const BRAIN_TASK_SOURCE: &str = "brain_task";
 const CONCIERGE_DISCORD_CLEANUP_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 /// Notbremse fuer den LLM-Aufruf, kein Qualitaetsziel. Der alte Wert von 8 Sekunden
 /// lag unter der normalen Antwortzeit: mit Systemprompt und JSON-Modus braucht
@@ -1502,11 +1506,19 @@ fn unanswered_error_reply(
     let mention_unanswered = options.explicit_mention
         && matches!(
             outcome,
-            ConciergeAnswerOutcome::Error
-                | ConciergeAnswerOutcome::NoAnswer
-                | ConciergeAnswerOutcome::Timeout
+            ConciergeAnswerOutcome::Error | ConciergeAnswerOutcome::Timeout
         );
     (private_error || mention_unanswered).then(|| KNOWLEDGE_UNAVAILABLE_TEXT.to_owned())
+}
+
+fn brain_feedback_failed(terminal: &AnswerTerminal) -> bool {
+    match terminal.outcome {
+        ConciergeAnswerOutcome::Error | ConciergeAnswerOutcome::Timeout => true,
+        ConciergeAnswerOutcome::Uncertain => terminal.message_id.is_none(),
+        ConciergeAnswerOutcome::Answered
+        | ConciergeAnswerOutcome::NoAnswer
+        | ConciergeAnswerOutcome::PrivacyStateless => false,
+    }
 }
 
 fn answer_body(
@@ -1655,6 +1667,7 @@ struct AnswerOptions<'a> {
     explicit_mention: bool,
     route: AnswerRoute,
     response_components: Option<&'a Value>,
+    feedback_message_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1731,6 +1744,8 @@ pub trait ConciergePort: Send + Sync {
     async fn delete_channel(&self, channel_id: u64) -> Result<(), String>;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
     async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str);
+    async fn remove_reaction(&self, channel_id: u64, message_id: u64, emoji: &str);
+    async fn send_typing(&self, channel_id: u64);
     async fn reply_to_message(
         &self,
         channel_id: u64,
@@ -4682,9 +4697,21 @@ impl Concierge {
         user_id: u64,
         content: &str,
     ) -> bool {
+        self.handle_user_message_locked(channel_id, guild_id, user_id, content, None)
+            .await
+    }
+
+    async fn handle_user_message_locked(
+        &self,
+        channel_id: u64,
+        guild_id: Option<u64>,
+        user_id: u64,
+        content: &str,
+        feedback_message_id: Option<u64>,
+    ) -> bool {
         let action = self.user_action_lock(user_id);
         let _guard = action.lock().await;
-        self.handle_user_message_inner(channel_id, guild_id, user_id, content)
+        self.handle_user_message_inner(channel_id, guild_id, user_id, content, feedback_message_id)
             .await
     }
 
@@ -4699,11 +4726,12 @@ impl Concierge {
             }
         }
         let handled = self
-            .handle_user_message(
+            .handle_user_message_locked(
                 event.channel_id,
                 event.guild_id,
                 event.author_id,
                 &event.content,
+                Some(event.message_id),
             )
             .await;
         if handled {
@@ -4778,6 +4806,7 @@ impl Concierge {
                 explicit_mention: false,
                 route: AnswerRoute::OnboardingTour,
                 response_components: Some(response_components),
+                feedback_message_id: None,
             },
         )
         .await
@@ -4938,6 +4967,7 @@ impl Concierge {
         guild_id: Option<u64>,
         user_id: u64,
         content: &str,
+        feedback_message_id: Option<u64>,
     ) -> bool {
         if !self.config.user_allowed(user_id) {
             return false;
@@ -4955,7 +4985,7 @@ impl Concierge {
                     if trimmed.is_empty() {
                         return false;
                     }
-                    let _ = self
+                    let terminal = self
                         .answer_dm_question_inner(
                             channel_id,
                             self.config.main_guild_id,
@@ -4967,8 +4997,11 @@ impl Concierge {
                                 explicit_mention: true,
                                 route: AnswerRoute::Concierge,
                                 response_components: None,
+                                feedback_message_id,
                             },
                         )
+                        .await;
+                    self.finish_brain_feedback(channel_id, feedback_message_id, &terminal)
                         .await;
                     return true;
                 }
@@ -5013,21 +5046,25 @@ impl Concierge {
                 return true;
             }
             let _support_turn = acquire_stateful_support_turn().await;
-            self.send_stateless_reply(
-                channel_id,
-                user_id,
-                trimmed,
-                AnswerOptions {
-                    allow_personal_actions: false,
-                    explicit_mention,
-                    route: AnswerRoute::Concierge,
-                    response_components: None,
-                },
-            )
-            .await;
+            let terminal = self
+                .send_stateless_reply_inner(
+                    channel_id,
+                    user_id,
+                    trimmed,
+                    AnswerOptions {
+                        allow_personal_actions: false,
+                        explicit_mention,
+                        route: AnswerRoute::Concierge,
+                        response_components: None,
+                        feedback_message_id,
+                    },
+                )
+                .await;
+            self.finish_brain_feedback(channel_id, feedback_message_id, &terminal)
+                .await;
             return true;
         }
-        let _ = self
+        let terminal = self
             .answer_dm_question_inner(
                 channel_id,
                 effective_guild_id,
@@ -5039,10 +5076,83 @@ impl Concierge {
                     explicit_mention,
                     route: AnswerRoute::Concierge,
                     response_components: None,
+                    feedback_message_id,
                 },
             )
             .await;
+        self.finish_brain_feedback(channel_id, feedback_message_id, &terminal)
+            .await;
         true
+    }
+
+    async fn start_brain_feedback(&self, channel_id: u64, message_id: u64) {
+        let reacted = tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port
+                .add_reaction(channel_id, message_id, BRAIN_PENDING_REACTION),
+        )
+        .await
+        .is_ok();
+        tracing::info!(
+            message_id,
+            channel_id,
+            reacted,
+            "brain_concierge_reaction_started"
+        );
+    }
+
+    async fn with_brain_typing<T>(
+        &self,
+        channel_id: u64,
+        work: impl std::future::Future<Output = T>,
+    ) -> T {
+        tokio::pin!(work);
+        loop {
+            let _ = tokio::time::timeout(
+                CONCIERGE_DISCORD_IO_TIMEOUT,
+                self.port.send_typing(channel_id),
+            )
+            .await;
+            if let Ok(output) = tokio::time::timeout(BRAIN_TYPING_REFRESH, &mut work).await {
+                return output;
+            }
+        }
+    }
+
+    async fn finish_brain_feedback(
+        &self,
+        channel_id: u64,
+        feedback_message_id: Option<u64>,
+        terminal: &AnswerTerminal,
+    ) {
+        let Some(message_id) = feedback_message_id else {
+            return;
+        };
+        if terminal.source != BRAIN_TASK_SOURCE {
+            return;
+        }
+        let failed = brain_feedback_failed(terminal);
+        let _ = tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port
+                .remove_reaction(channel_id, message_id, BRAIN_PENDING_REACTION),
+        )
+        .await;
+        if failed {
+            let _ = tokio::time::timeout(
+                CONCIERGE_DISCORD_IO_TIMEOUT,
+                self.port
+                    .add_reaction(channel_id, message_id, BRAIN_FAILED_REACTION),
+            )
+            .await;
+        }
+        tracing::info!(
+            message_id,
+            channel_id,
+            failed,
+            outcome = terminal.outcome.as_str(),
+            "brain_concierge_reaction_finished"
+        );
     }
 
     async fn answer_dm_question_inner(
@@ -5246,6 +5356,7 @@ impl Concierge {
                 AnswerBinding {
                     user_id,
                     channel_id,
+                    feedback_message_id: options.feedback_message_id,
                 },
                 trimmed,
                 Some(&history),
@@ -5506,9 +5617,20 @@ impl Concierge {
         };
         let user_questions =
             dl_brain::bounded_user_questions(history.unwrap_or_default(), question);
-        let result = brain
-            .answer_discord_task_with_history(question, binding.user_id, &task, &user_questions)
-            .await;
+        let request = brain.answer_discord_task_with_history(
+            question,
+            binding.user_id,
+            &task,
+            &user_questions,
+        );
+        let result = match binding.feedback_message_id {
+            Some(message_id) => {
+                self.start_brain_feedback(binding.channel_id, message_id)
+                    .await;
+                self.with_brain_typing(binding.channel_id, request).await
+            }
+            None => request.await,
+        };
         let (reply, hit, outcome) = match result {
             Ok(dl_brain::BrainOutcome::Answer(text)) if !text.trim().is_empty() => {
                 (Some(text), true, ConciergeAnswerOutcome::Answered)
@@ -5527,7 +5649,7 @@ impl Concierge {
                         explicit_pate_request(question)
                     },
             },
-            source: "brain_task",
+            source: BRAIN_TASK_SOURCE,
             knowledge_hit: hit,
             outcome,
         };
@@ -5843,18 +5965,6 @@ impl Concierge {
         }
     }
 
-    async fn send_stateless_reply(
-        &self,
-        channel_id: u64,
-        user_id: u64,
-        question: &str,
-        options: AnswerOptions<'_>,
-    ) {
-        let _ = self
-            .send_stateless_reply_inner(channel_id, user_id, question, options)
-            .await;
-    }
-
     async fn send_internal_error_reply_inner(
         &self,
         channel_id: u64,
@@ -5898,6 +6008,7 @@ impl Concierge {
                 AnswerBinding {
                     user_id,
                     channel_id,
+                    feedback_message_id: options.feedback_message_id,
                 },
                 question,
                 None,
@@ -8001,6 +8112,7 @@ struct LlmAnswer {
 struct AnswerBinding {
     user_id: u64,
     channel_id: u64,
+    feedback_message_id: Option<u64>,
 }
 
 struct AnswerDecision {
@@ -9539,6 +9651,7 @@ mod tests {
                     AnswerBinding {
                         user_id: 42,
                         channel_id: 10,
+                        feedback_message_id: None,
                     },
                     "Hallo",
                     Some(&["Gespeicherter privater Verlauf".into()]),
@@ -9550,6 +9663,101 @@ mod tests {
             assert_eq!(decision.source, "brain_task");
             assert_eq!(decision.knowledge_hit, available);
             assert!(provider.requests().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn brain_question_shows_eyes_while_working_and_cross_only_on_failure() {
+        struct FeedbackBrain {
+            available: bool,
+            insufficient: bool,
+        }
+        #[async_trait]
+        impl dl_brain::AiAnswerer for FeedbackBrain {
+            async fn answer(
+                &self,
+                _: &str,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                panic!("Untypisierter Antwortpfad")
+            }
+            async fn answer_discord_task(
+                &self,
+                _: &str,
+                _: u64,
+                _: &dl_brain::DiscordAnswerTask,
+            ) -> Result<dl_brain::BrainOutcome, dl_brain::BrainError> {
+                if self.insufficient {
+                    Ok(dl_brain::BrainOutcome::NoAnswer)
+                } else if self.available {
+                    Ok(dl_brain::BrainOutcome::Answer("Brain-Testantwort".into()))
+                } else {
+                    Err(dl_brain::BrainError::Backend("HTTP 503".into()))
+                }
+            }
+        }
+        for (available, insufficient) in [(true, false), (false, true), (false, false)] {
+            let port = mock_port();
+            let concierge = Concierge::with_brain(
+                lazy_pool(),
+                port.clone(),
+                None,
+                test_config(true, &[]),
+                Arc::new(dl_answer::AnswerEngine::new(
+                    None,
+                    Arc::new(answer_fixture::CommunityRetriever {
+                        base_url: "http://127.0.0.1:1".into(),
+                        timeout: KNOWLEDGE_TIMEOUT,
+                    }),
+                    None,
+                    StdDuration::from_secs(1),
+                )),
+                Arc::new(FeedbackBrain {
+                    available,
+                    insufficient,
+                }),
+            );
+            let question = "Wie funktioniert Parry in Deadlock?";
+            let decision = concierge
+                .answer_bound_decision(
+                    AnswerBinding {
+                        user_id: 42,
+                        channel_id: 10,
+                        feedback_message_id: Some(77),
+                    },
+                    question,
+                    None,
+                    None,
+                    AnswerRoute::Concierge,
+                    None,
+                )
+                .await;
+            assert_eq!(decision.source, "brain_task");
+            assert_eq!(
+                port.reactions.lock().unwrap().as_slice(),
+                &[(10, 77, "👀".to_string(), true)]
+            );
+            assert_eq!(port.typing.lock().unwrap().as_slice(), &[10]);
+            let terminal = AnswerTerminal {
+                source: decision.source,
+                knowledge_hit: decision.knowledge_hit,
+                stateful: true,
+                outcome: decision.outcome,
+                message_id: decision.answer.reply.as_ref().map(|_| 5),
+            };
+            concierge
+                .finish_brain_feedback(10, Some(77), &terminal)
+                .await;
+            let mut expected = vec![
+                (10, 77, "👀".to_string(), true),
+                (10, 77, "👀".to_string(), false),
+            ];
+            if !available && !insufficient {
+                expected.push((10, 77, "❌".to_string(), true));
+            }
+            assert_eq!(
+                port.reactions.lock().unwrap().as_slice(),
+                expected.as_slice()
+            );
         }
     }
 
@@ -9698,6 +9906,7 @@ mod tests {
                 AnswerBinding {
                     user_id: 42,
                     channel_id: 10,
+                    feedback_message_id: None,
                 },
                 "Wie funktioniert Parry in Deadlock?",
                 None,
@@ -9746,6 +9955,7 @@ mod tests {
                 AnswerBinding {
                     user_id: 42,
                     channel_id: 10,
+                    feedback_message_id: None,
                 },
                 "Bist du ein Bot?",
                 None,
@@ -9782,6 +9992,7 @@ mod tests {
                 AnswerBinding {
                     user_id: 42,
                     channel_id: 10,
+                    feedback_message_id: None,
                 },
                 "Wie geht es dir?",
                 None,
@@ -9818,6 +10029,7 @@ mod tests {
                 AnswerBinding {
                     user_id: 42,
                     channel_id: 10,
+                    feedback_message_id: None,
                 },
                 "Hallo",
                 None,
@@ -9875,6 +10087,7 @@ mod tests {
                         AnswerBinding {
                             user_id: 42,
                             channel_id: 10,
+                            feedback_message_id: None,
                         },
                         question,
                         stateful.then_some(history.as_slice()),
@@ -9974,6 +10187,7 @@ mod tests {
                                 explicit_mention: false,
                                 route: AnswerRoute::Concierge,
                                 response_components: None,
+                                feedback_message_id: None,
                             },
                         )
                         .await
@@ -9988,6 +10202,7 @@ mod tests {
                                 explicit_mention: false,
                                 route: AnswerRoute::Concierge,
                                 response_components: None,
+                                feedback_message_id: None,
                             },
                         )
                         .await
@@ -10069,6 +10284,7 @@ mod tests {
                             AnswerBinding {
                                 user_id: 42,
                                 channel_id: 10,
+                                feedback_message_id: None,
                             },
                             question,
                             None,
@@ -10169,6 +10385,7 @@ mod tests {
                             AnswerBinding {
                                 user_id: 42,
                                 channel_id: 10,
+                                feedback_message_id: None,
                             },
                             question,
                             None,
@@ -10323,6 +10540,7 @@ mod tests {
                             AnswerBinding {
                                 user_id: 42,
                                 channel_id: 10,
+                                feedback_message_id: None,
                             },
                             question,
                             None,
@@ -10560,6 +10778,7 @@ mod tests {
                             AnswerBinding {
                                 user_id: 42,
                                 channel_id: 10,
+                                feedback_message_id: None,
                             },
                             question,
                             None,
@@ -10610,6 +10829,7 @@ mod tests {
                             AnswerBinding {
                                 user_id: 42,
                                 channel_id: 10,
+                                feedback_message_id: None,
                             },
                             question,
                             None,
@@ -10689,6 +10909,7 @@ mod tests {
                             AnswerBinding {
                                 user_id: 42,
                                 channel_id: 10,
+                                feedback_message_id: None,
                             },
                             question,
                             None,
@@ -10766,6 +10987,7 @@ mod tests {
                     AnswerBinding {
                         user_id: 42,
                         channel_id: 10,
+                        feedback_message_id: None,
                     },
                     question,
                     None,
@@ -10839,6 +11061,7 @@ mod tests {
                         AnswerBinding {
                             user_id: 42,
                             channel_id: 10,
+                            feedback_message_id: None,
                         },
                         question,
                         None,
@@ -10894,6 +11117,7 @@ mod tests {
                     AnswerBinding {
                         user_id: 42,
                         channel_id: 10,
+                        feedback_message_id: None,
                     },
                     "Wie funktioniert Parry in Deadlock?",
                     None,
@@ -10954,6 +11178,7 @@ mod tests {
                         explicit_mention: false,
                         route: AnswerRoute::Concierge,
                         response_components: None,
+                        feedback_message_id: None,
                     },
                 )
                 .await;
@@ -11042,6 +11267,7 @@ mod tests {
                             explicit_mention,
                             route: AnswerRoute::Concierge,
                             response_components: None,
+                            feedback_message_id: None,
                         },
                     )
                     .await;
@@ -11434,6 +11660,8 @@ mod tests {
         port_started: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         port_release: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         read_only_channels: std::sync::Mutex<Vec<(u64, Vec<u64>)>>,
+        reactions: std::sync::Mutex<Vec<(u64, u64, String, bool)>>,
+        typing: std::sync::Mutex<Vec<u64>>,
     }
 
     const MOCK_STECKBRIEF_MESSAGE_ID: u64 = 101;
@@ -11570,7 +11798,23 @@ mod tests {
             Ok(())
         }
 
-        async fn add_reaction(&self, _channel_id: u64, _message_id: u64, _emoji: &str) {}
+        async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) {
+            self.reactions
+                .lock()
+                .unwrap()
+                .push((channel_id, message_id, emoji.to_string(), true));
+        }
+
+        async fn remove_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) {
+            self.reactions
+                .lock()
+                .unwrap()
+                .push((channel_id, message_id, emoji.to_string(), false));
+        }
+
+        async fn send_typing(&self, channel_id: u64) {
+            self.typing.lock().unwrap().push(channel_id);
+        }
 
         async fn reply_to_message(
             &self,

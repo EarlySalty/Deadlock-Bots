@@ -1046,6 +1046,16 @@ impl BrainHandler {
                     channel_id = event.channel_id,
                     "brain_direct_backend_fehler"
                 );
+                if feedback {
+                    let _ = replies.reaction(event, "👀", false).await;
+                    let _ = replies.reaction(event, "❌", true).await;
+                    tracing::info!(
+                        message_id = event.message_id,
+                        channel_id = event.channel_id,
+                        failed = true,
+                        "brain_direct_reaction_finished"
+                    );
+                }
                 self.clear_guide_pending(event, proactive).await;
                 return;
             }
@@ -3344,6 +3354,32 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             .await
         {
             tracing::warn!(%err, channel_id, message_id, emoji, "Concierge-Reaktion fehlgeschlagen");
+        }
+    }
+
+    async fn remove_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) {
+        if let Err(err) = self
+            .adapter
+            .http
+            .delete_reaction_me(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &ReactionType::Unicode(emoji.to_string()),
+            )
+            .await
+        {
+            tracing::warn!(%err, channel_id, message_id, emoji, "Concierge-Reaktion konnte nicht entfernt werden");
+        }
+    }
+
+    async fn send_typing(&self, channel_id: u64) {
+        if let Err(err) = self
+            .adapter
+            .http
+            .broadcast_typing(ChannelId::new(channel_id))
+            .await
+        {
+            tracing::debug!(%err, channel_id, "Concierge-Tippanzeige fehlgeschlagen");
         }
     }
 
