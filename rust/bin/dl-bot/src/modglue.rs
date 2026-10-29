@@ -3577,6 +3577,25 @@ impl dl_community::reaction_roles::ReactionRolePort for ReactionRoleGlue {
             .map_err(reaction_role_port_err)
     }
 
+    async fn grant_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), dl_community::reaction_roles::PortErr> {
+        self.adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                RoleId::new(role_id),
+                Some(reason),
+            )
+            .await
+            .map_err(reaction_role_port_err)
+    }
+
     async fn remove_role(
         &self,
         guild_id: u64,

@@ -13,6 +13,7 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 
 use crate::db::{advisory_lock, u64_to_i64, CommunityDbError, CommunityDbResult};
+use crate::reaction_roles::{ReactionRolePort, SCRIM_SIGNUP_ROLE_ID};
 
 pub const SCRIM_SIGNUP_OPEN_CUSTOM_ID: &str = "scrim_signup:open";
 pub const SCRIM_SIGNUP_MODAL_CUSTOM_ID: &str = "scrim_signup:submit";
@@ -22,6 +23,7 @@ const RANK_SOURCE_ROLE: &str = "discord_role";
 const RANK_SOURCE_SELF: &str = "self";
 const STATUS_NEW: &str = "new";
 const SOURCE_DISCORD_MODAL: &str = "discord_modal";
+const SCRIM_SIGNUP_ROLE_REASON: &str = "scrim-signup:teilnehmer-rolle";
 
 const SCRIM_SIGNUP_COMMAND_DESCRIPTION: &str =
     "Trag dich für die Scrims ein: Rang, Rolle und wann du kannst.";
@@ -33,10 +35,14 @@ const SCRIM_SIGNUP_ROLE_PLACEHOLDER: &str = "z. B. Support, Frontline, Carry, Mi
 const SCRIM_SIGNUP_AVAILABILITY_LABEL: &str = "Wann kannst du?";
 const SCRIM_SIGNUP_AVAILABILITY_PLACEHOLDER: &str = "z. B. Mo-Fr ab 19 Uhr, Wochenende ganzer Tag";
 const SCRIM_SIGNUP_REPLY_SAVED: &str = "✅ Deine Scrim-Anmeldung ist gespeichert. Viel Erfolg!";
+const SCRIM_SIGNUP_REPLY_SAVED_WITH_ROLE: &str =
+    "✅ Deine Scrim-Anmeldung ist gespeichert und du hast jetzt die Rolle **Scrims Teilnehmer**. Damit siehst du jetzt den Scrim-Channel und die Scrimregeln. Viel Erfolg!";
+const SCRIM_SIGNUP_REPLY_SAVED_ROLE_FAILED: &str =
+    "✅ Deine Scrim-Anmeldung ist gespeichert. Die Rolle **Scrims Teilnehmer** konnte ich dir gerade nicht geben. Starte `/scrim-signup` einfach später noch einmal oder melde dich bei der Scrim-Orga.";
 const SCRIM_SIGNUP_REPLY_INVALID: &str =
-    "⚠️ Das konnte ich nicht lesen. Beispiel für die Zeiten: Mo-Fr ab 19 Uhr — und gib bitte eine Rolle an.";
+    "⚠️ Das konnte ich nicht lesen. Beispiel für die Zeiten: Mo-Fr ab 19 Uhr. Gib bitte auch eine Rolle an.";
 const SCRIM_SIGNUP_REPLY_FAILED: &str =
-    "⚠️ Da ist was schiefgelaufen — bitte gleich nochmal versuchen.";
+    "⚠️ Da ist was schiefgelaufen. Bitte versuch es gleich noch einmal.";
 const SCRIM_SIGNUP_REPLY_RUNTIME_DENIED: &str =
     "Deine Anmeldung wurde nicht gespeichert. Die Scrim-Verwaltung wird gerade umgestellt und nimmt hier keine Einträge an. Bitte versuche es später noch einmal.";
 
@@ -101,13 +107,67 @@ enum ScrimSignupInputError {
     AvailabilityInvalid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoleGrant {
+    AlreadyPresent,
+    Granted,
+    Failed,
+    NotInGuild,
+}
+
 pub struct ScrimSignup {
     pool: PgPool,
+    role_port: Arc<dyn ReactionRolePort>,
 }
 
 impl ScrimSignup {
-    pub fn new(pool: PgPool) -> Arc<Self> {
-        Arc::new(Self { pool })
+    pub fn new(pool: PgPool, role_port: Arc<dyn ReactionRolePort>) -> Arc<Self> {
+        Arc::new(Self { pool, role_port })
+    }
+
+    async fn grant_participant_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_ids: &[u64],
+    ) -> RoleGrant {
+        if guild_id == 0 {
+            return RoleGrant::NotInGuild;
+        }
+        if role_ids.contains(&SCRIM_SIGNUP_ROLE_ID) {
+            return RoleGrant::AlreadyPresent;
+        }
+        match self
+            .role_port
+            .grant_role(
+                guild_id,
+                user_id,
+                SCRIM_SIGNUP_ROLE_ID,
+                SCRIM_SIGNUP_ROLE_REASON,
+            )
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    guild_id,
+                    user_id,
+                    role_id = SCRIM_SIGNUP_ROLE_ID,
+                    reason = SCRIM_SIGNUP_ROLE_REASON,
+                    "Scrim-Signup: Teilnehmer-Rolle vergeben"
+                );
+                RoleGrant::Granted
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    guild_id,
+                    user_id,
+                    role_id = SCRIM_SIGNUP_ROLE_ID,
+                    "Scrim-Signup: Teilnehmer-Rolle konnte nicht vergeben werden"
+                );
+                RoleGrant::Failed
+            }
+        }
     }
 
     async fn handle_submit(&self, interaction: BridgeInteraction) -> Result<(), ScrimSignupError> {
@@ -161,8 +221,20 @@ impl InteractionHandler for ScrimSignup {
         if interaction.custom_id != SCRIM_SIGNUP_MODAL_CUSTOM_ID {
             return BridgeReply::ephemeral_text(SCRIM_SIGNUP_REPLY_FAILED);
         }
+        let guild_id = interaction.guild_id;
+        let user_id = interaction.user_id;
+        let role_ids = interaction.role_ids.clone();
         match self.handle_submit(interaction).await {
-            Ok(()) => BridgeReply::ephemeral_text(SCRIM_SIGNUP_REPLY_SAVED),
+            Ok(()) => BridgeReply::ephemeral_text(
+                match self
+                    .grant_participant_role(guild_id, user_id, &role_ids)
+                    .await
+                {
+                    RoleGrant::Granted => SCRIM_SIGNUP_REPLY_SAVED_WITH_ROLE,
+                    RoleGrant::Failed => SCRIM_SIGNUP_REPLY_SAVED_ROLE_FAILED,
+                    RoleGrant::AlreadyPresent | RoleGrant::NotInGuild => SCRIM_SIGNUP_REPLY_SAVED,
+                },
+            ),
             Err(ScrimSignupError::Input(err)) => {
                 tracing::info!(%err, "Scrim-Signup: ungueltige Modal-Eingabe");
                 BridgeReply::ephemeral_text(SCRIM_SIGNUP_REPLY_INVALID)
@@ -646,9 +718,65 @@ async fn upsert_structured_participant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reaction_roles::{DmErr, PortErr, ReactedUser};
     use dl_central_db::testing::{
         set_scrim_runtime_inconsistent, set_scrim_runtime_turniere, test_pool,
     };
+    use serenity::all::ReactionType;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingPort {
+        grants: Mutex<Vec<(u64, u64, u64, String)>>,
+        fail: bool,
+    }
+
+    impl RecordingPort {
+        fn grants(&self) -> Vec<(u64, u64, u64, String)> {
+            self.grants.lock().map(|g| g.clone()).unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReactionRolePort for RecordingPort {
+        async fn add_role(&self, _: u64, _: u64, _: u64) -> Result<(), PortErr> {
+            Err(PortErr::Discord("add_role ohne Grund".to_string()))
+        }
+        async fn remove_role(&self, _: u64, _: u64, _: u64) -> Result<(), PortErr> {
+            Ok(())
+        }
+        async fn grant_role(
+            &self,
+            guild_id: u64,
+            user_id: u64,
+            role_id: u64,
+            reason: &str,
+        ) -> Result<(), PortErr> {
+            if self.fail {
+                return Err(PortErr::Discord("missing access".to_string()));
+            }
+            if let Ok(mut grants) = self.grants.lock() {
+                grants.push((guild_id, user_id, role_id, reason.to_string()));
+            }
+            Ok(())
+        }
+        async fn send_dm(&self, _: u64, _: &str) -> Result<(), DmErr> {
+            Ok(())
+        }
+        async fn reaction_users(
+            &self,
+            _: u64,
+            _: u64,
+            _: &ReactionType,
+            _: Option<u64>,
+        ) -> Result<Vec<ReactedUser>, PortErr> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn signup(pool: &PgPool, port: &Arc<RecordingPort>) -> Arc<ScrimSignup> {
+        ScrimSignup::new(pool.clone(), port.clone())
+    }
 
     fn signup_interaction(user_id: u64, display_name: &str) -> BridgeInteraction {
         BridgeInteraction {
@@ -663,6 +791,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            guild_id: 900,
             ..BridgeInteraction::default()
         }
     }
@@ -676,16 +805,20 @@ mod tests {
     #[tokio::test]
     async fn self_service_signup_schreibt_nur_im_legacy_runtime(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let port = Arc::new(RecordingPort::default());
         let legacy = test_pool().await?;
-        let reply = ScrimSignup::new(legacy.pool().clone())
+        let reply = signup(legacy.pool(), &port)
             .handle(signup_interaction(1, "Legacy"))
             .await;
-        assert_eq!(reply.content.as_deref(), Some(SCRIM_SIGNUP_REPLY_SAVED));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(SCRIM_SIGNUP_REPLY_SAVED_WITH_ROLE)
+        );
         assert_eq!(participant_count(legacy.pool()).await?, 1);
 
         let turniere = test_pool().await?;
         set_scrim_runtime_turniere(turniere.pool()).await?;
-        let reply = ScrimSignup::new(turniere.pool().clone())
+        let reply = signup(turniere.pool(), &port)
             .handle(signup_interaction(2, "Turniere"))
             .await;
         assert_eq!(
@@ -696,7 +829,7 @@ mod tests {
 
         let inconsistent = test_pool().await?;
         set_scrim_runtime_inconsistent(inconsistent.pool()).await?;
-        let reply = ScrimSignup::new(inconsistent.pool().clone())
+        let reply = signup(inconsistent.pool(), &port)
             .handle(signup_interaction(3, "Widerspruch"))
             .await;
         assert_eq!(
@@ -704,6 +837,41 @@ mod tests {
             Some(SCRIM_SIGNUP_REPLY_RUNTIME_DENIED)
         );
         assert_eq!(participant_count(inconsistent.pool()).await?, 0);
+        assert_eq!(
+            port.grants(),
+            vec![(
+                900,
+                1,
+                SCRIM_SIGNUP_ROLE_ID,
+                SCRIM_SIGNUP_ROLE_REASON.to_string()
+            )]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signup_vergibt_teilnehmer_rolle_nur_wenn_sie_fehlt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = test_pool().await?;
+        let port = Arc::new(RecordingPort::default());
+        let mut has_role = signup_interaction(7, "Hat Rolle");
+        has_role.role_ids = vec![SCRIM_SIGNUP_ROLE_ID];
+        let reply = signup(db.pool(), &port).handle(has_role).await;
+        assert_eq!(reply.content.as_deref(), Some(SCRIM_SIGNUP_REPLY_SAVED));
+        assert!(port.grants().is_empty());
+
+        let failing = Arc::new(RecordingPort {
+            fail: true,
+            ..RecordingPort::default()
+        });
+        let reply = signup(db.pool(), &failing)
+            .handle(signup_interaction(8, "Fehlt"))
+            .await;
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(SCRIM_SIGNUP_REPLY_SAVED_ROLE_FAILED)
+        );
+        assert_eq!(participant_count(db.pool()).await?, 2);
         Ok(())
     }
 

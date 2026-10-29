@@ -588,13 +588,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let serversync_service: serversync::SharedServerSync = serversync_concrete.clone();
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
-    let reaction_roles = dl_community::reaction_roles::ReactionRoleService::new(
-        central_pool.clone(),
+    let reaction_role_port: Arc<dyn dl_community::reaction_roles::ReactionRolePort> =
         Arc::new(modglue::ReactionRoleGlue {
             adapter: adapter.clone(),
-        }),
+        });
+    let reaction_roles = dl_community::reaction_roles::ReactionRoleService::new(
+        central_pool.clone(),
+        reaction_role_port.clone(),
     );
-    let scrim_signup = dl_community::scrim_signup::ScrimSignup::new(central_pool.clone());
+    let scrim_signup =
+        dl_community::scrim_signup::ScrimSignup::new(central_pool.clone(), reaction_role_port);
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();

@@ -68,6 +68,15 @@ struct ApplyMappingAddOutcome {
 pub trait ReactionRolePort: Send + Sync {
     async fn add_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> Result<(), PortErr>;
     async fn remove_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> Result<(), PortErr>;
+    async fn grant_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        _reason: &str,
+    ) -> Result<(), PortErr> {
+        self.add_role(guild_id, user_id, role_id).await
+    }
     async fn send_dm(&self, user_id: u64, content: &str) -> Result<(), DmErr>;
     /// Liefert eine rohe Discord-Seite Reaktoren, maximal 100 User pro Seite.
     async fn reaction_users(
