@@ -56,8 +56,7 @@ struct Handler {
     invite_tracker: Arc<InviteTracker>,
     core_user_sync: Arc<CoreUserSync>,
     reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
-    feature_module_count: usize,
-    command_prefix: String,
+    presence_status: String,
     recording_readiness: Arc<AtomicBool>,
     recording_guild_id: u64,
 }
@@ -99,8 +98,10 @@ fn is_image_attachment(content_type: Option<&str>, filename: &str) -> bool {
             .any(|ext| filename.ends_with(ext))
 }
 
-pub fn presence_activity_name(feature_module_count: usize, command_prefix: &str) -> String {
-    format!("{feature_module_count} Cogs | {command_prefix}help")
+pub const DEFAULT_PRESENCE_STATUS: &str = "💬 Schreib mir per DM, ich helfe dir!";
+
+pub fn presence_activity(status: &str) -> ActivityData {
+    ActivityData::custom(status)
 }
 
 fn screening_completed_from_member_update(
@@ -297,8 +298,7 @@ impl EventHandler for Handler {
             ),
             Ordering::Release,
         );
-        let activity_name = presence_activity_name(self.feature_module_count, &self.command_prefix);
-        ctx.set_activity(Some(ActivityData::watching(activity_name)));
+        ctx.set_activity(Some(presence_activity(&self.presence_status)));
         self.dispatcher.publish_gateway(GatewayEvent::Ready {
             guild_count: ready.guilds.len(),
         });
@@ -794,8 +794,7 @@ impl EventHandler for VoiceWorkerHandler {
 pub struct GatewayClientOptions {
     pub reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
     pub pool: sqlx::PgPool,
-    pub feature_module_count: usize,
-    pub command_prefix: String,
+    pub presence_status: String,
     pub enable_presence_intent: bool,
     pub recording_readiness: Arc<AtomicBool>,
     pub recording_guild_id: u64,
@@ -836,8 +835,7 @@ pub async fn build_client(
             invite_tracker,
             core_user_sync: Arc::new(CoreUserSync::new(options.pool)),
             reaction_roles: options.reaction_roles,
-            feature_module_count: options.feature_module_count,
-            command_prefix: options.command_prefix,
+            presence_status: options.presence_status,
             recording_readiness: options.recording_readiness,
             recording_guild_id: options.recording_guild_id,
         })
@@ -894,8 +892,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ready_presence_name_matches_python_style() {
-        assert_eq!(presence_activity_name(47, "!"), "47 Cogs | !help");
+    fn ready_presence_is_custom_dm_status() {
+        let activity = presence_activity(DEFAULT_PRESENCE_STATUS);
+        assert_eq!(activity.kind, serenity::all::ActivityType::Custom);
+        assert_eq!(activity.state.as_deref(), Some(DEFAULT_PRESENCE_STATUS));
+        assert!(!activity.name.contains("Cogs"));
     }
 
     #[test]

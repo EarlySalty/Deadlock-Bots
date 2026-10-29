@@ -1953,9 +1953,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     service: reaction_roles.clone(),
                 })),
                 pool: central_pool.clone(),
-                feature_module_count: master::FEATURE_MODULES.len(),
-                command_prefix: operating_value("COMMAND_PREFIX")
-                    .unwrap_or_else(|| "!".to_string()),
+                presence_status: operating_value("DL_BOT_PRESENCE_STATUS")
+                    .unwrap_or_else(|| dl_discord::gateway::DEFAULT_PRESENCE_STATUS.to_string()),
                 enable_presence_intent: presence_intent_enabled,
                 recording_readiness: recording_main_readiness.clone(),
                 recording_guild_id: dl_server_as_code::DEFAULT_GUILD_ID,

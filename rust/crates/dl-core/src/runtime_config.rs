@@ -52,6 +52,7 @@ section!(StartOptions {
     log_filter: String => "RUST_LOG",
     owner_id: u64 => "OWNER_ID",
     command_prefix: String => "COMMAND_PREFIX",
+    presence_status: String => "DL_BOT_PRESENCE_STATUS",
     command_sync: bool => "DL_BOT_COMMAND_SYNC" | "COMMAND_SYNC_ON_START",
     command_scope: String => "DL_BOT_COMMAND_START_SCOPE" | "DL_BOT_COMMAND_SCOPE" | "COMMAND_SYNC_START_SCOPE",
     command_guild_id: u64 => "DL_BOT_COMMAND_GUILD_ID" | "GUILD_ID",
@@ -321,6 +322,11 @@ impl RuntimeConfig {
                 .command_prefix
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+            || self.start.presence_status.as_deref().is_some_and(|value| {
+                value.trim().is_empty()
+                    || value.chars().count() > 128
+                    || value.chars().any(char::is_control)
+            })
         {
             return Err(invalid());
         }
