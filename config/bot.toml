@@ -20,7 +20,7 @@ changelog_port = 8899
 [runtime.start]
 # Der MCP-Connector bindet fest an 127.0.0.1. Authentisierung nutzt einen
 # bestehenden TWITCH_INTERNAL_API_TOKEN aus Infisical; hier stehen nur Betriebswerte.
-presence_status = "💬 Schreib mir per DM, ich helfe dir!"
+presence_status = "DM Support"
 mcp_port = 8890
 mcp_verified_role_id = 1304216250649415771
 

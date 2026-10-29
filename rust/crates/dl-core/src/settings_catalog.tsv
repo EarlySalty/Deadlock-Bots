@@ -20,7 +20,7 @@ schema_version	u32	Infrastruktur	Konfigurationsversion	protected	Geschützte Inf
 runtime.start.log_filter	Option<String>	Bot-Start & Befehle	Protokollierung	edit	„Dienststandard“ entfernt den optionalen Override. Ein eigener leerer Wert ist davon zu unterscheiden. Wirksam nach Neustart.
 runtime.start.owner_id	Option<u64>	Bot-Start & Befehle	Betreiber-ID	protected	Geschützte Infrastruktur: Änderung über die Betriebsdatei bzw. Infisical, nicht über den Browser. Der Wert wird nicht ausgeliefert.
 runtime.start.command_prefix	Option<String>	Bot-Start & Befehle	Befehlspräfix	edit	„Dienststandard“ entfernt den optionalen Override. Ein eigener leerer Wert ist davon zu unterscheiden. Wirksam nach Neustart.
-runtime.start.presence_status	Option<String>	Bot-Start & Befehle	Statustext des Bots	edit	„Dienststandard“ zeigt „💬 Schreib mir per DM, ich helfe dir!“. Höchstens 128 Zeichen. Wirksam nach Neustart.
+runtime.start.presence_status	Option<String>	Bot-Start & Befehle	Statustext des Bots	edit	„Dienststandard“ zeigt „DM Support“. Höchstens 128 Zeichen. Wirksam nach Neustart.
 runtime.start.command_sync	Option<bool>	Bot-Start & Befehle	Befehle beim Start synchronisieren	edit	„Dienststandard“ entfernt den optionalen Override. Ein eigener leerer Wert ist davon zu unterscheiden. Wirksam nach Neustart.
 runtime.start.command_scope	Option<CommandScope>	Bot-Start & Befehle	Gültigkeitsbereich der Befehle	edit	„Dienststandard“ entfernt den optionalen Override. Ein eigener leerer Wert ist davon zu unterscheiden. Wirksam nach Neustart.
 runtime.start.command_guild_id	Option<u64>	Bot-Start & Befehle	Server für Befehle	edit	„Dienststandard“ entfernt den optionalen Override. Ein eigener leerer Wert ist davon zu unterscheiden. Wirksam nach Neustart.

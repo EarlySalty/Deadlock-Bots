@@ -98,7 +98,7 @@ fn is_image_attachment(content_type: Option<&str>, filename: &str) -> bool {
             .any(|ext| filename.ends_with(ext))
 }
 
-pub const DEFAULT_PRESENCE_STATUS: &str = "💬 Schreib mir per DM, ich helfe dir!";
+pub const DEFAULT_PRESENCE_STATUS: &str = "DM Support";
 
 pub fn presence_activity(status: &str) -> ActivityData {
     ActivityData::custom(status)
