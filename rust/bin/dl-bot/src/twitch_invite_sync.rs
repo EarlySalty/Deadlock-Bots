@@ -11,7 +11,7 @@
 //! Bucket aber **nie** auf `twitch` — der Twitch-Override fehlte. Folge: solche
 //! Joins zählten dauerhaft nicht als Twitch.
 //!
-//! ## Was dieses Bin tut
+//! ## Was dieser Task tut
 //! 1. **Populate:** Holt alle Zuordnungen über `/internal/twitch/v1/streamer-
 //!    invites` und spiegelt sie über die Twitch-User-ID; der Login bleibt
 //!    veränderliches Anzeige-Metadatum.
@@ -26,20 +26,25 @@
 //! ihre Alt-Joins werden beim nächsten Lauf nachgezogen.
 //!
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dl_activity::join_source::classify;
 use dl_core::bot_config::BotConfig;
+use dl_discord::DiscordAdapter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
+const SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const SYNC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const ALERT_AFTER_FAILURES: u32 = 4;
+const ALERT_REPEAT: Duration = Duration::from_secs(24 * 60 * 60);
+const ALERT_TEXT: &str = "Twitch-Invite-Sync läuft seit mindestens einer Stunde nicht durch. Details stehen im Journal von `deadlock-bot-rust`.";
+
 /// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`). Ein Invite, der
 /// einer Website-Quelle zuordenbar ist, darf nie als Twitch geflippt werden
 /// (Website-Override gewinnt in `classify`).
-const SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
-
 const WEBSITE_SLUGS: [&str; 6] = [
     "landing",
     "streamer",
@@ -392,7 +397,7 @@ async fn sync_invites_and_reclassify(
     })
 }
 
-fn validated_base(base: &str) -> anyhow::Result<()> {
+fn ensure_loopback_base(base: &str) -> anyhow::Result<()> {
     let parsed = reqwest::Url::parse(base)?;
     if !matches!(parsed.scheme(), "http" | "https")
         || !parsed.host_str().is_some_and(|host| {
@@ -414,7 +419,7 @@ fn validated_base(base: &str) -> anyhow::Result<()> {
 }
 
 async fn run_once(pool: &PgPool, base: &str, token: &str, dry_run: bool) -> anyhow::Result<()> {
-    validated_base(base)?;
+    ensure_loopback_base(base)?;
     let url = format!(
         "{}/internal/twitch/v1/streamer-invites",
         base.trim_end_matches('/')
@@ -447,7 +452,32 @@ async fn run_once(pool: &PgPool, base: &str, token: &str, dry_run: bool) -> anyh
     Ok(())
 }
 
-pub fn spawn(pool: PgPool, config: &BotConfig) -> Option<tokio::task::JoinHandle<()>> {
+async fn run_guarded(
+    pool: PgPool,
+    base: String,
+    token: String,
+    dry_run: bool,
+) -> Result<(), String> {
+    let run = tokio::spawn(async move {
+        tokio::time::timeout(SYNC_TIMEOUT, run_once(&pool, &base, &token, dry_run)).await
+    });
+    match run.await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(format!("{error:#}")),
+        Ok(Err(_)) => Err("Zeitlimit überschritten".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn alert_due(failures: u32, last_alert: Option<std::time::Instant>) -> bool {
+    failures >= ALERT_AFTER_FAILURES && last_alert.is_none_or(|sent| sent.elapsed() >= ALERT_REPEAT)
+}
+
+pub fn spawn(
+    pool: PgPool,
+    adapter: Arc<DiscordAdapter>,
+    config: &BotConfig,
+) -> Option<tokio::task::JoinHandle<()>> {
     let Some(token) = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN") else {
         tracing::warn!("TWITCH_INTERNAL_API_TOKEN fehlt, Twitch-Invite-Sync inaktiv");
         return None;
@@ -462,20 +492,30 @@ pub fn spawn(pool: PgPool, config: &BotConfig) -> Option<tokio::task::JoinHandle
     Some(tokio::spawn(async move {
         let mut tick = tokio::time::interval(SYNC_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut failures = 0_u32;
+        let mut last_alert = None;
         loop {
             tick.tick().await;
-            let (pool, base, token) = (pool.clone(), base.clone(), token.clone());
-            let run = tokio::spawn(async move { run_once(&pool, &base, &token, dry_run).await });
-            match run.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        error = format!("{error:#}"),
-                        "Twitch-Invite-Sync fehlgeschlagen"
-                    );
-                }
+            match run_guarded(pool.clone(), base.clone(), token.clone(), dry_run).await {
+                Ok(()) => failures = 0,
                 Err(error) => {
-                    tracing::warn!(%error, "Twitch-Invite-Sync abgebrochen");
+                    failures = failures.saturating_add(1);
+                    tracing::warn!(%error, failures, "Twitch-Invite-Sync fehlgeschlagen");
+                    if alert_due(failures, last_alert) {
+                        let body = serde_json::Map::from_iter([(
+                            "content".to_string(),
+                            Value::from(ALERT_TEXT),
+                        )]);
+                        match adapter
+                            .send_raw_public(dl_voice::nudge::LOG_CHANNEL_ID, &body)
+                            .await
+                        {
+                            Ok(_) => last_alert = Some(std::time::Instant::now()),
+                            Err(error) => {
+                                tracing::warn!(%error, "Twitch-Invite-Sync-Warnung nicht gesendet");
+                            }
+                        }
+                    }
                 }
             }
         }

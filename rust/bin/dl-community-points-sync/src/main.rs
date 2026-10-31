@@ -1,5 +1,5 @@
 //! Community-Punkte-Sync (Paket C). Logik in `lib.rs`; hier nur Bootstrap
-//! wie bei `dl-twitch-invite-sync`: TOML-Konfiguration, Token aus dem
+//! wie beim Twitch-Invite-Sync in `dl-bot`: TOML-Konfiguration, Token aus dem
 //! privaten Infisical-Snapshot über FD3, wie beim Hauptbot.
 
 use dl_central_db::community_points::{import_clip_contest_ledger, import_qualified_join_ledger};

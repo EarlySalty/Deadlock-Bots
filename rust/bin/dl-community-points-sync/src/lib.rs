@@ -11,7 +11,7 @@
 //!
 //! URL aus `runtime.bridges.twitch_api_url`, nur numerisches Loopback, keine
 //! Redirects, Token `TWITCH_INTERNAL_API_TOKEN` aus dem Infisical-Bootstrap
-//! (wie `dl-twitch-invite-sync`).
+//! (wie der Twitch-Invite-Sync in `dl-bot`).
 
 use chrono::{DateTime, NaiveDate, Utc};
 use dl_central_db::community_points::{

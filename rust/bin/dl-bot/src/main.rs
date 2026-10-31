@@ -1751,6 +1751,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _qualified_invites = twitch_invites.clone().spawn();
         let _twitch_invite_sync = twitch_invite_sync::spawn(
             central_pool.clone(),
+            adapter.clone(),
             &dl_core::config::process_bot_config()?.snapshot(),
         );
         dl_activity::analyzer::spawn_member_events(central_pool.clone(), &dispatcher);
