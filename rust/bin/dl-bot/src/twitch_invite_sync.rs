@@ -22,14 +22,15 @@
 //!    konsistenten Twitch-Feldsatz, damit das Live-Python-Dashboard (liest den
 //!    gespeicherten Bucket) es sofort korrekt zählt.
 //!
-//! Per systemd-Timer periodisch lauffähig: neue Streamer landen in der Tabelle,
+//! Läuft alle 15 Minuten als Task in dl-bot: neue Streamer landen in der Tabelle,
 //! ihre Alt-Joins werden beim nächsten Lauf nachgezogen.
 //!
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dl_activity::join_source::classify;
+use dl_core::bot_config::BotConfig;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -37,6 +38,8 @@ use sqlx::PgPool;
 /// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`). Ein Invite, der
 /// einer Website-Quelle zuordenbar ist, darf nie als Twitch geflippt werden
 /// (Website-Override gewinnt in `classify`).
+const SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
 const WEBSITE_SLUGS: [&str; 6] = [
     "landing",
     "streamer",
@@ -389,19 +392,8 @@ async fn sync_invites_and_reclassify(
     })
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let config = dl_core::config::process_bot_config()?.snapshot();
-    let base = config
-        .runtime
-        .bridges
-        .twitch_api_url
-        .clone()
-        .unwrap_or_else(|| "http://127.0.0.1:8776".to_string());
-    let token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN")
-        .ok_or_else(|| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt im Infisical-Bootstrap"))?;
-    let dry_run = config.twitch_invites.sync_dry_run;
-    let parsed = reqwest::Url::parse(&base)?;
+fn validated_base(base: &str) -> anyhow::Result<()> {
+    let parsed = reqwest::Url::parse(base)?;
     if !matches!(parsed.scheme(), "http" | "https")
         || !parsed.host_str().is_some_and(|host| {
             host.trim_matches(['[', ']'])
@@ -418,9 +410,11 @@ async fn main() -> anyhow::Result<()> {
             "Twitch-Sync benötigt eine numerische Loopback-Adresse ohne Zugangsdaten oder Pfad"
         );
     }
-    let central_dsn = dl_central_db::dsn_from_env()?;
-    let pool = dl_central_db::connect_pool(&central_dsn).await?;
+    Ok(())
+}
 
+async fn run_once(pool: &PgPool, base: &str, token: &str, dry_run: bool) -> anyhow::Result<()> {
+    validated_base(base)?;
     let url = format!(
         "{}/internal/twitch/v1/streamer-invites",
         base.trim_end_matches('/')
@@ -428,11 +422,11 @@ async fn main() -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(Duration::from_secs(15))
         .build()?;
     let entries: Vec<InviteEntry> = client
         .get(&url)
-        .header("X-Internal-Token", &token)
+        .header("X-Internal-Token", token)
         .send()
         .await?
         .error_for_status()?
@@ -440,25 +434,55 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let fetched = entries.len();
 
-    let summary = sync_invites_and_reclassify(&pool, entries, dry_run).await?;
+    let summary = sync_invites_and_reclassify(pool, entries, dry_run).await?;
 
-    println!(
-        "twitch_streamer_invites: {fetched} geholt, {} Zeilen in zentraler DB",
-        summary.table_rows
+    tracing::info!(
+        fetched,
+        table_rows = summary.table_rows,
+        flipped = summary.flipped,
+        dry_run = summary.dry_run,
+        from_buckets = ?summary.from_buckets,
+        "Twitch-Invite-Sync abgeschlossen"
     );
-    let verb = if summary.dry_run {
-        "würden geflippt (DRY_RUN)"
-    } else {
-        "auf twitch korrigiert"
-    };
-    println!("Reclassify: {} Join-Events {verb}", summary.flipped);
-    for (bucket, n) in &summary.from_buckets {
-        println!("    aus {bucket:12} {n}");
-    }
     Ok(())
 }
 
-#[cfg(all(test, feature = "testing"))]
+pub fn spawn(pool: PgPool, config: &BotConfig) -> Option<tokio::task::JoinHandle<()>> {
+    let Some(token) = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN") else {
+        tracing::warn!("TWITCH_INTERNAL_API_TOKEN fehlt, Twitch-Invite-Sync inaktiv");
+        return None;
+    };
+    let base = config
+        .runtime
+        .bridges
+        .twitch_api_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8776".to_string());
+    let dry_run = config.twitch_invites.sync_dry_run;
+    Some(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SYNC_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let (pool, base, token) = (pool.clone(), base.clone(), token.clone());
+            let run = tokio::spawn(async move { run_once(&pool, &base, &token, dry_run).await });
+            match run.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "Twitch-Invite-Sync fehlgeschlagen"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Twitch-Invite-Sync abgebrochen");
+                }
+            }
+        }
+    }))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::Row as _;

@@ -1864,22 +1864,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dl-twitch-invite-sync"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dl-activity",
- "dl-central-db",
- "dl-core",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
-]
-
-[[package]]
 name = "dl-unit-failure-notify"
 version = "0.1.0"
 dependencies = [

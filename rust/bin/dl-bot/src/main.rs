@@ -18,6 +18,7 @@ mod scrim_adapter;
 mod scrimglue;
 mod serversync;
 mod turnierglue;
+mod twitch_invite_sync;
 mod twitch_invites;
 mod vanity;
 
@@ -1748,6 +1749,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
         let _qualified_invites = twitch_invites.clone().spawn();
+        let _twitch_invite_sync = twitch_invite_sync::spawn(
+            central_pool.clone(),
+            &dl_core::config::process_bot_config()?.snapshot(),
+        );
         dl_activity::analyzer::spawn_member_events(central_pool.clone(), &dispatcher);
         // Der Task wartet intern auf READY + Cache-Guilds und retryt leere
         // Member-Snapshots, statt nach einem fixen Startup-Fenster aufzugeben.
