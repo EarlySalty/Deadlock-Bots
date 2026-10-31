@@ -89,11 +89,7 @@ pub struct KnowledgeSource {
 pub(crate) enum KnowledgeLookup {
     Answer(KnowledgeAnswer),
     Unanswerable,
-    #[cfg(test)]
-    Timeout,
     Transport,
-    #[cfg(test)]
-    InvalidResponse,
 }
 
 #[cfg(test)]
@@ -149,5 +145,135 @@ mod tests {
 
         release.notify_one();
         fifth.await.expect("fifth stateful turn");
+    }
+}
+
+pub(crate) fn fits_discord_content(text: &str) -> bool {
+    !text.trim().is_empty() && text.encode_utf16().count() <= 2000
+}
+
+#[cfg(test)]
+pub(crate) mod test_brain {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use dl_brain::{
+        AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker,
+        DiscordConversation, DiscordConversationRequest,
+    };
+    use tokio::sync::Notify;
+
+    pub(crate) type ScriptedReply = Result<ConversationReply, BrainError>;
+
+    pub(crate) fn evidence_reply(json: &str) -> ScriptedReply {
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+        Ok(parsed["evidence"][0]["text"]
+            .as_str()
+            .map_or(ConversationReply::Silent, |text| {
+                ConversationReply::Answered(text.to_owned())
+            }))
+    }
+
+    #[derive(Default)]
+    pub(crate) struct ScriptedBrain {
+        replies: Mutex<VecDeque<ScriptedReply>>,
+        default_reply: Option<ConversationReply>,
+        gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+        pub(crate) calls: Arc<AtomicUsize>,
+        pub(crate) bodies: Arc<Mutex<Vec<String>>>,
+        pub(crate) requests: Mutex<Vec<DiscordConversationRequest>>,
+    }
+
+    impl ScriptedBrain {
+        pub(crate) fn replying(replies: Vec<ScriptedReply>) -> Arc<Self> {
+            Arc::new(Self {
+                replies: Mutex::new(replies.into()),
+                ..Self::default()
+            })
+        }
+
+        pub(crate) fn answering(text: &str) -> Arc<Self> {
+            Self::replying(vec![Ok(ConversationReply::Answered(text.to_owned()))])
+        }
+
+        pub(crate) fn always(text: &str) -> Arc<Self> {
+            Arc::new(Self {
+                default_reply: Some(ConversationReply::Answered(text.to_owned())),
+                ..Self::default()
+            })
+        }
+
+        pub(crate) fn failing() -> Arc<Self> {
+            Self::replying(vec![Err(BrainError::Backend("scripted".into()))])
+        }
+
+        pub(crate) fn gate_first_call(&self) -> (Arc<Notify>, Arc<Notify>) {
+            let gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+            *self.gate.lock().expect("gate") = Some(gate.clone());
+            gate
+        }
+
+        pub(crate) fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    fn joined_question(task: &DiscordConversation) -> String {
+        let (question, history) = match task {
+            DiscordConversation::Concierge {
+                question, history, ..
+            }
+            | DiscordConversation::Faq { question, history } => (question, history.as_slice()),
+            DiscordConversation::PassiveHelp { message, .. }
+            | DiscordConversation::VoiceHint { message }
+            | DiscordConversation::InviteLounge { message } => (message, [].as_slice()),
+        };
+        history
+            .iter()
+            .filter(|entry| matches!(entry.speaker, DialogSpeaker::User))
+            .map(|entry| entry.text.as_str())
+            .chain([question.as_str()])
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[async_trait]
+    impl AiAnswerer for ScriptedBrain {
+        async fn answer(&self, _: &str) -> Result<BrainOutcome, BrainError> {
+            Err(BrainError::Backend("untyped path".into()))
+        }
+
+        async fn converse(
+            &self,
+            request: &DiscordConversationRequest,
+        ) -> Result<ConversationReply, BrainError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = serde_json::json!({ "question": joined_question(&request.task) });
+            self.bodies
+                .lock()
+                .expect("bodies")
+                .extend([body.to_string()]);
+            self.requests
+                .lock()
+                .expect("requests")
+                .extend([request.clone()]);
+            let gate = self.gate.lock().expect("gate").take();
+            if let Some((started, release)) = gate {
+                started.notify_one();
+                release.notified().await;
+            }
+            self.replies
+                .lock()
+                .expect("replies")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(self
+                        .default_reply
+                        .clone()
+                        .unwrap_or(ConversationReply::Silent))
+                })
+        }
     }
 }

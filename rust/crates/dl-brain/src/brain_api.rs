@@ -1,6 +1,15 @@
-use crate::{AiAnswerer, AnswerContext, BrainError, BrainOutcome, DiscordQueryContext};
+use crate::{
+    AiAnswerer, AnswerContext, BrainError, BrainOutcome, ChatEntry, ConversationReply, DialogEntry,
+    DialogSpeaker, DiscordConversation, DiscordConversationRequest, DiscordQueryContext,
+};
 use brain_client::{
-    AnswerProfile, AnswerStatus, AsyncBrainClient, ClientError, PublicAnswerResponse, Query,
+    AnswerProfile, AnswerStatus, AsyncBrainClient, BotIdentity, BotTask, BotTaskRequest,
+    BotTaskResult, ClientError, PublicAnswerResponse, Query, BOT_TASK_VERSION,
+};
+use brain_contracts::bot_tasks::{
+    BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, MAX_CHAT_LINES,
+    MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
+    MAX_READABLE_CHANNELS,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -132,6 +141,92 @@ impl BrainApiAnswerer {
         })
         .await
         .map_err(|_| classified_backend_error("transport"))?
+    }
+}
+
+fn bounded_dialog(entries: &[DialogEntry]) -> Vec<DialogTurn> {
+    let mut used = 0;
+    let mut turns: Vec<DialogTurn> = entries
+        .iter()
+        .rev()
+        .filter(|entry| !entry.text.trim().is_empty())
+        .take(MAX_DIALOG_TURNS)
+        .take_while(|entry| {
+            used += entry.text.chars().count();
+            used <= MAX_DIALOG_CHARS
+        })
+        .map(|entry| DialogTurn {
+            role: match entry.speaker {
+                DialogSpeaker::User => DialogRole::User,
+                DialogSpeaker::Assistant => DialogRole::Assistant,
+            },
+            text: entry.text.clone(),
+        })
+        .collect();
+    turns.reverse();
+    turns
+}
+
+fn bounded_chat(entries: &[ChatEntry]) -> Vec<ChatLine> {
+    let mut lines: Vec<ChatLine> = entries
+        .iter()
+        .rev()
+        .filter(|entry| !entry.text.trim().is_empty() && !entry.author.trim().is_empty())
+        .take(MAX_CHAT_LINES)
+        .map(|entry| ChatLine {
+            author: entry.author.chars().take(MAX_LABEL_CHARS).collect(),
+            text: entry.text.chars().take(MAX_CHAT_LINE_CHARS).collect(),
+        })
+        .collect();
+    lines.reverse();
+    lines
+}
+
+fn conversation_task(task: &DiscordConversation) -> ConversationTask {
+    match task {
+        DiscordConversation::Concierge {
+            question,
+            history,
+            readable_channel_ids,
+        } => ConversationTask::DiscordConcierge {
+            question: question.clone(),
+            history: bounded_dialog(history),
+            readable_channel_ids: readable_channel_ids
+                .iter()
+                .copied()
+                .take(MAX_READABLE_CHANNELS)
+                .collect(),
+            member_facts: Vec::new(),
+        },
+        DiscordConversation::Faq { question, history } => ConversationTask::DiscordFaq {
+            question: question.clone(),
+            history: bounded_dialog(history),
+        },
+        DiscordConversation::PassiveHelp {
+            message,
+            recent_messages,
+        } => ConversationTask::DiscordPassiveHelp {
+            message: message.clone(),
+            recent_messages: bounded_chat(recent_messages),
+        },
+        DiscordConversation::VoiceHint { message } => ConversationTask::DiscordVoiceHint {
+            message: message.clone(),
+        },
+        DiscordConversation::InviteLounge { message } => ConversationTask::DiscordInviteLounge {
+            message: message.clone(),
+        },
+    }
+}
+
+fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, BrainError> {
+    match result {
+        BotTaskResult::Conversation {
+            reply: BotReply::Answered { text, .. },
+            ..
+        } if !text.trim().is_empty() => Ok(ConversationReply::Answered(text)),
+        BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
+        BotTaskResult::Failed { failure, .. } => Err(classified_backend_error(failure.as_str())),
+        _ => Err(classified_backend_error("vertrag")),
     }
 }
 
@@ -372,6 +467,39 @@ fn without_links_pass(text: &str) -> (String, bool) {
 
 #[async_trait::async_trait]
 impl AiAnswerer for BrainApiAnswerer {
+    async fn converse(
+        &self,
+        request: &DiscordConversationRequest,
+    ) -> Result<ConversationReply, BrainError> {
+        let sequence = next_sequence(&self.sequence).ok_or_else(backend_error)?;
+        let task_request = BotTaskRequest {
+            contract_version: BOT_TASK_VERSION.to_owned(),
+            request_id: format!("{}-{sequence}", self.namespace),
+            identity: BotIdentity::Discord {
+                guild_id: request.guild_id,
+                channel_id: request.channel_id,
+                user_id: request.user_id,
+            },
+            task: BotTask::Conversation(conversation_task(&request.task)),
+        };
+        tokio::time::timeout(self.timeout, async {
+            let _permit = self
+                .admission
+                .acquire()
+                .await
+                .map_err(|_| backend_error())?;
+            let response = self
+                .client
+                .task(&task_request)
+                .await
+                .map_err(client_error)?;
+            tracing::info!(request_id = %response.request_id, "Discord-Brain-Aufgabe beantwortet");
+            project_conversation(response.result)
+        })
+        .await
+        .map_err(|_| classified_backend_error("transport"))?
+    }
+
     async fn answer_discord_task(
         &self,
         question: &str,
@@ -642,6 +770,75 @@ mod tests {
         };
         server.join().expect("Testserver");
         result
+    }
+
+    #[test]
+    fn conversation_bounds_keep_newest_entries_within_contract() {
+        let history: Vec<DialogEntry> = (0..30)
+            .map(|index| DialogEntry {
+                speaker: DialogSpeaker::User,
+                text: format!("{index}{}", "x".repeat(900)),
+            })
+            .collect();
+        let recent_messages: Vec<ChatEntry> = (0..60)
+            .map(|index| ChatEntry {
+                author: "a".repeat(300),
+                text: format!("{index}{}", "y".repeat(800)),
+            })
+            .collect();
+        let tasks = [
+            DiscordConversation::Concierge {
+                question: "Frage".into(),
+                history,
+                readable_channel_ids: (1..=1500).collect(),
+            },
+            DiscordConversation::PassiveHelp {
+                message: "Frage".into(),
+                recent_messages,
+            },
+        ];
+        for task in &tasks {
+            let request = BotTaskRequest {
+                contract_version: BOT_TASK_VERSION.to_owned(),
+                request_id: "bounds-1".to_owned(),
+                identity: BotIdentity::Discord {
+                    guild_id: None,
+                    channel_id: 1,
+                    user_id: 2,
+                },
+                task: BotTask::Conversation(conversation_task(task)),
+            };
+            assert_eq!(request.validate(), Ok(()));
+        }
+        let ConversationTask::DiscordConcierge { history, .. } = conversation_task(&tasks[0])
+        else {
+            panic!("Concierge-Aufgabe erwartet");
+        };
+        assert!(history[history.len() - 1].text.starts_with("29"));
+    }
+
+    #[test]
+    fn only_answered_conversation_results_reach_discord() {
+        let capability = brain_client::BotCapability::DiscordFaq;
+        let result = |reply| BotTaskResult::Conversation {
+            capability,
+            reply,
+            model: None,
+            usage: brain_client::TaskUsage::default(),
+        };
+        assert_eq!(
+            project_conversation(result(BotReply::answered("Antwort"))).ok(),
+            Some(ConversationReply::Answered("Antwort".into()))
+        );
+        assert_eq!(
+            project_conversation(result(BotReply::answered("  "))).ok(),
+            Some(ConversationReply::Silent)
+        );
+        assert!(project_conversation(BotTaskResult::Failed {
+            capability,
+            failure: brain_client::TaskFailure::ProviderUnavailable,
+        })
+        .is_err());
     }
 
     #[tokio::test]

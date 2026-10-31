@@ -4,10 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dl_ai::{GenerateRequest, TextGenerator};
+use dl_brain::{AiAnswerer, ConversationReply, DiscordConversation, DiscordConversationRequest};
 use serde_json::{json, Map, Value};
-
-pub const VOICE_CHANGE_HINT_REPLY: &str = "Kein Bug — wir haben das Voice-System umgebaut. Die alten Sprachkanäle sind weg, jetzt gibt's **einen** Deadlock Router: rein, Modus wählen, eigene Lane. Wie's genau läuft: https://discord.com/channels/1289721245281292288/1371952264620806214/1522862733857525780";
 
 const ANNOUNCEMENTS_CHANNEL_ID: u64 = 1_371_952_264_620_806_214;
 const LOG_CHANNEL_ID: u64 = 1_374_364_800_817_303_632;
@@ -45,11 +43,6 @@ const MISSING_OR_WHERE_WORDS: &[&str] = &[
     "nicht mehr",
     "wohin",
 ];
-
-#[async_trait::async_trait]
-pub trait VoiceHintClassifier: Send + Sync {
-    async fn classify_voice_change_confusion(&self, content: &str) -> Result<bool, String>;
-}
 
 #[async_trait::async_trait]
 pub trait VoiceHintReplyPort: Send + Sync {
@@ -90,38 +83,9 @@ impl VoiceHintReplyPort for dl_discord::DiscordAdapter {
     }
 }
 
-pub struct OpenAiVoiceHintClassifier {
-    generator: Arc<dyn TextGenerator>,
-}
-
-impl OpenAiVoiceHintClassifier {
-    pub fn new(generator: Arc<dyn TextGenerator>) -> Self {
-        Self { generator }
-    }
-}
-
-#[async_trait::async_trait]
-impl VoiceHintClassifier for OpenAiVoiceHintClassifier {
-    async fn classify_voice_change_confusion(&self, content: &str) -> Result<bool, String> {
-        let raw = self
-            .generator
-            .generate_text(GenerateRequest {
-                prompt: voice_change_prompt(content),
-                system_prompt: None,
-                model: None,
-                max_output_tokens: Some(4),
-                reasoning_effort: None,
-                temperature: 0.0,
-            })
-            .await
-            .ok_or_else(|| "OpenAI lieferte keine Klassifikation".to_string())?;
-        Ok(is_yes_answer(&raw))
-    }
-}
-
 pub struct VoiceChangeHintResponder {
     enabled: bool,
-    classifier: Option<Arc<dyn VoiceHintClassifier>>,
+    brain: Arc<dyn AiAnswerer>,
     port: Arc<dyn VoiceHintReplyPort>,
     sent_by_user: Mutex<HashMap<u64, Instant>>,
     excluded_channel: Option<u64>,
@@ -130,18 +94,16 @@ pub struct VoiceChangeHintResponder {
 impl VoiceChangeHintResponder {
     pub fn new(
         enabled: bool,
-        classifier: Option<Arc<dyn VoiceHintClassifier>>,
+        brain: Arc<dyn AiAnswerer>,
         port: Arc<dyn VoiceHintReplyPort>,
     ) -> Self {
         if !enabled {
             tracing::info!("Voice-Change-Hint deaktiviert (DL_VOICE_HINT_ENABLED)");
-        } else if classifier.is_none() {
-            tracing::info!("Voice-Change-Hint inaktiv: kein OpenAI-Client konfiguriert");
         }
 
         Self {
             enabled,
-            classifier,
+            brain,
             port,
             sent_by_user: Mutex::new(HashMap::new()),
             excluded_channel: None,
@@ -165,35 +127,42 @@ impl VoiceChangeHintResponder {
         if self.user_in_cooldown(event.author_id, Instant::now()) {
             return;
         }
-        let Some(classifier) = &self.classifier else {
+        let reserved_at = Instant::now();
+        if !self.reserve_user_reply(event.author_id, reserved_at) {
             return;
+        }
+        let request = DiscordConversationRequest {
+            user_id: event.author_id,
+            channel_id: event.channel_id,
+            guild_id: event.guild_id,
+            task: DiscordConversation::VoiceHint {
+                message: event.content.clone(),
+            },
         };
-
-        match classifier
-            .classify_voice_change_confusion(&event.content)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => return,
+        let text = match self.brain.converse(&request).await {
+            Ok(ConversationReply::Answered(text))
+                if crate::answer_support::fits_discord_content(&text) =>
+            {
+                text
+            }
+            Ok(_) => {
+                self.release_user_reply(event.author_id);
+                return;
+            }
             Err(err) => {
                 tracing::debug!(
                     %err,
                     channel_id = event.channel_id,
                     message_id = event.message_id,
-                    "Voice-Change-Hint-Klassifikation fehlgeschlagen"
+                    "Voice-Change-Hint-Antwort fehlgeschlagen"
                 );
+                self.release_user_reply(event.author_id);
                 return;
             }
-        }
-
-        let reserved_at = Instant::now();
-        if !self.reserve_user_reply(event.author_id, reserved_at) {
-            return;
-        }
-
+        };
         if let Err(err) = self
             .port
-            .reply_text(event.channel_id, event.message_id, VOICE_CHANGE_HINT_REPLY)
+            .reply_text(event.channel_id, event.message_id, &text)
             .await
         {
             tracing::warn!(
@@ -275,20 +244,6 @@ pub fn passes_voice_change_prefilter(content: &str) -> bool {
             .any(|word| lower.contains(word))
 }
 
-pub fn is_yes_answer(raw: &str) -> bool {
-    let normalized: String = dl_ai::strip_think(raw)
-        .chars()
-        .filter(|ch| ch.is_alphanumeric() || ch.is_whitespace())
-        .collect();
-    normalized.trim().to_uppercase().starts_with("JA")
-}
-
-fn voice_change_prompt(content: &str) -> String {
-    format!(
-        "Kontext: Ein Discord-Server hat sein Voice-System umgebaut — die alten einzelnen Sprachkanäle wurden entfernt und durch EINEN 'Deadlock Router' ersetzt, über den man sich per Klick eine eigene Lane erstellt.\n\nAufgabe: Drückt die folgende Chat-Nachricht aus, dass die Person die alten/fehlenden Sprachkanäle sucht, sich über verschwundene Voice-Kanäle wundert oder beschwert, oder nicht weiß, wie/wo sie jetzt in Voice kommt? Antworte AUSSCHLIESSLICH mit einem einzigen Wort: JA oder NEIN.\n\nNachricht: \"{content}\""
-    )
-}
-
 fn is_ignored_channel(channel_id: u64) -> bool {
     matches!(channel_id, ANNOUNCEMENTS_CHANNEL_ID | LOG_CHANNEL_ID)
 }
@@ -305,33 +260,7 @@ fn dedup_expired(now: Instant, last_sent_at: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct StaticClassifier {
-        answer: bool,
-        calls: AtomicUsize,
-    }
-
-    impl StaticClassifier {
-        fn new(answer: bool) -> Self {
-            Self {
-                answer,
-                calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl VoiceHintClassifier for StaticClassifier {
-        async fn classify_voice_change_confusion(&self, _content: &str) -> Result<bool, String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.answer)
-        }
-    }
+    use crate::answer_support::test_brain::ScriptedBrain;
 
     #[derive(Default)]
     struct RecordingPort {
@@ -376,27 +305,11 @@ mod tests {
         assert!(!passes_voice_change_prefilter("hallo zusammen"));
     }
 
-    #[test]
-    fn ja_nein_parsing_ist_strikt_auf_ja_prefix() {
-        assert!(is_yes_answer("JA"));
-        assert!(is_yes_answer("Ja, klar"));
-        assert!(is_yes_answer("**JA**"));
-        assert!(is_yes_answer("`JA`"));
-        assert!(is_yes_answer("„JA\""));
-        assert!(!is_yes_answer("NEIN"));
-        assert!(!is_yes_answer("**NEIN**"));
-        assert!(!is_yes_answer("vielleicht"));
-    }
-
     #[tokio::test]
     async fn dedup_blockiert_zweiten_treffer_desselben_users() {
-        let classifier = Arc::new(StaticClassifier::new(true));
+        let brain = ScriptedBrain::always("Brain-Hinweis");
         let port = Arc::new(RecordingPort::default());
-        let responder = VoiceChangeHintResponder::new(
-            true,
-            Some(classifier.clone() as Arc<dyn VoiceHintClassifier>),
-            port.clone() as Arc<dyn VoiceHintReplyPort>,
-        );
+        let responder = VoiceChangeHintResponder::new(true, brain.clone(), port.clone());
 
         responder
             .handle_message(&event(10, 42, "wo sind die voice channels hin?"))
@@ -406,21 +319,17 @@ mod tests {
             .await;
 
         assert_eq!(port.count(), 1);
-        assert_eq!(classifier.calls(), 1);
+        assert_eq!(brain.call_count(), 1);
     }
 
     #[tokio::test]
     async fn sendefehler_entfernt_user_wieder_aus_dedup() {
-        let classifier = Arc::new(StaticClassifier::new(true));
+        let brain = ScriptedBrain::always("Brain-Hinweis");
         let port = Arc::new(RecordingPort {
             sent: Mutex::new(Vec::new()),
             fail_replies: true,
         });
-        let responder = VoiceChangeHintResponder::new(
-            true,
-            Some(classifier.clone() as Arc<dyn VoiceHintClassifier>),
-            port.clone() as Arc<dyn VoiceHintReplyPort>,
-        );
+        let responder = VoiceChangeHintResponder::new(true, brain.clone(), port.clone());
 
         responder
             .handle_message(&event(10, 42, "wo sind die voice channels hin?"))
@@ -430,7 +339,26 @@ mod tests {
             .await;
 
         assert_eq!(port.count(), 0);
-        assert_eq!(classifier.calls(), 2);
+        assert_eq!(brain.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn stilles_brain_sendet_nichts_und_haelt_keine_sperre() {
+        for brain in [
+            ScriptedBrain::replying(Vec::new()),
+            ScriptedBrain::failing(),
+        ] {
+            let port = Arc::new(RecordingPort::default());
+            let responder = VoiceChangeHintResponder::new(true, brain.clone(), port.clone());
+            responder
+                .handle_message(&event(10, 42, "wo sind die voice channels hin?"))
+                .await;
+            responder
+                .handle_message(&event(11, 42, "warum sind die sprachkanäle weg?"))
+                .await;
+            assert_eq!(port.count(), 0);
+            assert_eq!(brain.call_count(), 2);
+        }
     }
 
     fn event(message_id: u64, author_id: u64, content: &str) -> dl_discord::MessageEvent {
