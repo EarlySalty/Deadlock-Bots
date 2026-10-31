@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
+const INVITE_LOUNGE_HINT_TEXT: &str = "Brain-Hinweis";
 const NOW: i64 = 1_790_000_000;
 const BOT: u64 = 99;
 const GUILD: u64 = 42;
@@ -200,6 +201,7 @@ fn setup() -> (
     let port = Arc::new(RecordingPort::default());
     let invite = Arc::new(RecordingInvite::default());
     let watcher = InviteLoungeWatcher {
+        brain: crate::answer_support::test_brain::ScriptedBrain::always(INVITE_LOUNGE_HINT_TEXT),
         store: store.clone(),
         port: port.clone(),
         invite: invite.clone(),
@@ -617,6 +619,7 @@ async fn neustart_wiederholt_keinen_begonnenen_versuch() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag"));
     let restarted = InviteLoungeWatcher {
+        brain: crate::answer_support::test_brain::ScriptedBrain::always(INVITE_LOUNGE_HINT_TEXT),
         store,
         port,
         invite: invite.clone(),
@@ -862,6 +865,7 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
     let port = Arc::new(RecordingPort::default());
     let invite = Arc::new(RecordingInvite::default());
     let watcher = InviteLoungeWatcher {
+        brain: crate::answer_support::test_brain::ScriptedBrain::always(INVITE_LOUNGE_HINT_TEXT),
         store: store.clone(),
         port: port.clone(),
         invite: invite.clone(),

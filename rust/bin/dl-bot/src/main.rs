@@ -718,8 +718,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
     let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
-    concierge_config.ai_timeout =
-        std::time::Duration::from_secs(operating.concierge.timeout_seconds);
     concierge_config.bot_user_id = adapter.bot_user_id_cell();
     let concierge_memory_store = concierge_config
         .enabled
@@ -1063,20 +1061,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
-    let concierge_ai = {
-        match dl_ai::LlmProviderConfig::from_env(operating_value)
-            .map_err(anyhow::Error::from)
-            .and_then(|cfg| {
-                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, operating_value)
-                    .map_err(anyhow::Error::from)
-            }) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!(%err, "Concierge-LLM inaktiv");
-                None
-            }
-        }
-    };
     let community_brain = community_brain_for_answers(&operating.runtime.ai, || {
         dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN")
     });
@@ -1172,7 +1156,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let concierge = dl_community::concierge::Concierge::brain_only(
         central_pool.clone(),
         concierge_port,
-        concierge_ai.clone(),
         concierge_config.clone(),
         community_brain.clone(),
     );
@@ -1820,17 +1803,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let brain_help_channel_id = operating_value("DL_BRAIN_HELP_CHANNEL_ID")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|id| *id > 0);
-        let brain_help_active_channel = if let (Some(channel_id), Some(provider)) =
-            (brain_help_channel_id, concierge_ai.clone())
-        {
-            let backend = Arc::new(dl_community::passive_help::GroundedHelpBackend {
-                provider,
-                brain: community_brain.clone(),
-            });
+        let brain_help_active_channel = if let Some(channel_id) = brain_help_channel_id {
             let responder = Arc::new(dl_community::passive_help::PassiveHelpResponder::new(
                 channel_id,
                 operating_value("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
-                backend,
+                community_brain.clone(),
                 adapter.clone(),
             ));
             let _passive_help = dl_community::passive_help::spawn(responder, &dispatcher);
@@ -1840,32 +1817,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
             Some(channel_id)
         } else {
-            tracing::info!(
-                "Automatische Brain-Hilfe inaktiv: Zielkanal oder zentraler KI-Connector fehlt"
-            );
+            tracing::info!("Automatische Brain-Hilfe inaktiv: Zielkanal fehlt");
             None
         };
         let _invite_lounge_watcher = dl_community::invite_lounge::spawn(
             central_pool.clone(),
             adapter.clone(),
             steam_client.clone(),
+            community_brain.clone(),
             onboardglue::MAIN_GUILD_ID,
             &dispatcher,
         );
         let voice_hint_enabled =
             dl_community::voice_change_hint::enabled_from_lookup(operating_value);
-        let voice_hint_classifier = if voice_hint_enabled {
-            chat_text_generator(dl_ai::LlmUseCase::VoiceHint, false).map(|generator| {
-                Arc::new(dl_community::voice_change_hint::OpenAiVoiceHintClassifier::new(generator))
-                    as Arc<dyn dl_community::voice_change_hint::VoiceHintClassifier>
-            })
-        } else {
-            None
-        };
         let voice_hint_responder = Arc::new(
             dl_community::voice_change_hint::VoiceChangeHintResponder::new(
                 voice_hint_enabled,
-                voice_hint_classifier,
+                community_brain.clone(),
                 adapter.clone(),
             )
             .excluding_channel(brain_help_active_channel),
@@ -2235,7 +2203,6 @@ guild_id="1234"
 concierge_enabled=true
 concierge_proactive=true
 concierge_test_users=[55,66]
-concierge_free_voice=false
 survey_pulse=true
 survey_interval_days=30
 lfg_freetext=true
@@ -2245,8 +2212,6 @@ channel_id=888
 scan_channel_ids=[111,222]
 [runtime.ai]
 transparency_enabled=false
-[llm.use_cases.bot_pate]
-model="accounts/fireworks/models/deepseek-v4-flash-0731"
 "#,
         )
         .expect("synthetische Betriebskonfiguration");
@@ -2254,7 +2219,6 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
         assert!(concierge.enabled);
         assert!(concierge.proactive);
-        assert!(!concierge.free_voice);
         assert_eq!(concierge.main_guild_id, 1234);
         assert_eq!(concierge.test_user_allowlist.len(), 2);
         let survey = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(lookup);
@@ -2272,31 +2236,6 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             vec![111, 222]
         );
         assert!(!dl_ai::TransparencyConfig::from_env(lookup).enabled);
-        let ai = dl_ai::LlmProviderConfig::from_env(lookup).expect("bestehender Anbieter");
-        assert_eq!(
-            ai.provider_for(dl_ai::LlmUseCase::BotPate, lookup)
-                .expect("Anbieter"),
-            dl_ai::LlmProviderKind::Fireworks
-        );
-        assert_eq!(
-            lookup("DL_LLM_MODEL_BOT_PATE").as_deref(),
-            Some("accounts/fireworks/models/deepseek-v4-flash-0731")
-        );
-        assert!(lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
-        let global = dl_core::bot_config::BotConfig::parse(&format!(
-            "schema_version=1\n[llm]\ndefault_provider='openai'\n[llm.use_cases.bot_pate]\nmodel='{}'\n",
-            dl_ai::DEFAULT_OPENAI_MODEL,
-        )).expect("reiner Pin mit bestehendem globalen Override");
-        let global_lookup = |key: &str| global.runtime_value(key);
-        let global_ai =
-            dl_ai::LlmProviderConfig::from_env(global_lookup).expect("globaler Anbieter");
-        assert_eq!(
-            global_ai
-                .provider_for(dl_ai::LlmUseCase::BotPate, global_lookup)
-                .expect("Anbieter"),
-            dl_ai::LlmProviderKind::Fireworks
-        );
-        assert!(global_lookup("DL_LLM_PROVIDER_BOT_PATE").is_none());
     }
 
     use super::{
@@ -2354,7 +2293,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
             .next()
             .expect("Quelldatei enthält Produktionsbereich");
         assert_eq!(source.matches("dl_answer::AnswerEngine::new(").count(), 0);
-        assert!(source.contains("cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate"));
+        assert!(!source.contains("LlmUseCase::BotPate"));
         assert!(source.contains("FaqChat::brain_only("));
         assert!(source.contains("Concierge::brain_only("));
         for legacy in [
@@ -2375,8 +2314,8 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         assert!(source.contains("discord_brain_answerer("));
         assert!(source.contains("secret_value(\"DISCORD_BRAIN_CLIENT_TOKEN\")"));
         assert!(!source.contains("SharedBrainAnswerer"));
-        assert!(source.contains("brain: community_brain.clone()"));
-        assert!(source.contains("passive_help::GroundedHelpBackend"));
+        assert!(source.contains("passive_help::PassiveHelpResponder::new("));
+        assert!(!source.contains("passive_help::GroundedHelpBackend"));
         assert!(!source.contains("BrainAiGlue"));
         assert!(!source.contains("chat_text_generator(dl_ai::LlmUseCase::Faq"));
     }

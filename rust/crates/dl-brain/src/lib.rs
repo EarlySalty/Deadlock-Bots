@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -20,6 +20,61 @@ pub struct DiscordQueryContext {
     pub user_id: u64,
     pub allow_discord_reads: bool,
     pub answer_context: Option<DiscordAnswerContext>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogSpeaker {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogEntry {
+    pub speaker: DialogSpeaker,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatEntry {
+    pub author: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscordConversation {
+    Concierge {
+        question: String,
+        history: Vec<DialogEntry>,
+        readable_channel_ids: BTreeSet<u64>,
+    },
+    Faq {
+        question: String,
+        history: Vec<DialogEntry>,
+    },
+    PassiveHelp {
+        message: String,
+        recent_messages: Vec<ChatEntry>,
+    },
+    VoiceHint {
+        message: String,
+    },
+    InviteLounge {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordConversationRequest {
+    pub user_id: u64,
+    pub channel_id: u64,
+    pub guild_id: Option<u64>,
+    pub task: DiscordConversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationReply {
+    Answered(String),
+    Silent,
 }
 
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
@@ -133,6 +188,15 @@ pub enum BrainError {
 
 #[async_trait::async_trait]
 pub trait AiAnswerer: Send + Sync {
+    async fn converse(
+        &self,
+        _request: &DiscordConversationRequest,
+    ) -> Result<ConversationReply, BrainError> {
+        Err(BrainError::Backend(
+            "Gesprächsaufgabe für diesen Consumer nicht verfügbar".into(),
+        ))
+    }
+
     async fn answer_discord_task_with_history(
         &self,
         question: &str,

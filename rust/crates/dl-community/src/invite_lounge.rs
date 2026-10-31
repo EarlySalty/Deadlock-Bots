@@ -15,7 +15,6 @@ use sqlx::PgPool;
 /// Stabile ID von `#frag-die-community`.
 pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
 pub const COMMUNITY_CATEGORY_ID: u64 = 1_289_721_245_281_292_289;
-pub const INVITE_LOUNGE_HINT_TEXT: &str = "Pack noch deinen Steam-Freundescode dazu :) Du findest ihn in Steam unter Freunde → „Freund hinzufügen“. Einfach hier posten, dann kann dich jemand einladen.";
 
 const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
 const COOLDOWN_KV_NS: &str = "invite_lounge:cooldown";
@@ -323,6 +322,7 @@ pub struct InviteLoungeWatcher {
     store: Arc<dyn LoungeStore>,
     port: Arc<dyn InviteLoungeReplyPort>,
     invite: Arc<dyn InviteEventPort>,
+    brain: Arc<dyn dl_brain::AiAnswerer>,
     guild_id: u64,
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -332,12 +332,14 @@ impl InviteLoungeWatcher {
         pool: PgPool,
         port: Arc<dyn InviteLoungeReplyPort>,
         invite: Arc<dl_bridges::steam::SteamBotClient>,
+        brain: Arc<dyn dl_brain::AiAnswerer>,
         guild_id: u64,
     ) -> Self {
         Self {
             store: Arc::new(PgLoungeStore { pool }),
             port,
             invite,
+            brain,
             guild_id,
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
         }
@@ -427,11 +429,35 @@ impl InviteLoungeWatcher {
                     FRESHNESS_SECONDS,
                 )
             {
-                self.port
-                    .reply_text(event.channel_id, event.message_id, INVITE_LOUNGE_HINT_TEXT)
-                    .await?;
+                self.send_brain_hint(&event).await?;
             }
             return Ok(Some(event.author_id));
+        }
+    }
+
+    async fn send_brain_hint(&self, event: &LoungeMessage) -> Result<(), String> {
+        let request = dl_brain::DiscordConversationRequest {
+            user_id: event.author_id,
+            channel_id: event.channel_id,
+            guild_id: Some(self.guild_id),
+            task: dl_brain::DiscordConversation::InviteLounge {
+                message: event.content.clone(),
+            },
+        };
+        match self.brain.converse(&request).await {
+            Ok(dl_brain::ConversationReply::Answered(text))
+                if crate::answer_support::fits_discord_content(&text) =>
+            {
+                self.port
+                    .reply_text(event.channel_id, event.message_id, &text)
+                    .await
+                    .map(|_| ())
+            }
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge: Brain-Hinweis fehlgeschlagen");
+                Ok(())
+            }
         }
     }
 
@@ -689,10 +715,13 @@ pub fn spawn(
     pool: PgPool,
     port: Arc<dyn InviteLoungeReplyPort>,
     invite: Arc<dl_bridges::steam::SteamBotClient>,
+    brain: Arc<dyn dl_brain::AiAnswerer>,
     guild_id: u64,
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
-    let watcher = Arc::new(InviteLoungeWatcher::new(pool, port, invite, guild_id));
+    let watcher = Arc::new(InviteLoungeWatcher::new(
+        pool, port, invite, brain, guild_id,
+    ));
     let mut messages = dispatcher.subscribe_messages();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -963,13 +992,7 @@ fn close_word(word: &str, expected: &str, max_edits: usize) -> bool {
 fn hint_references(history: &[LoungeMessage], bot_id: u64) -> HashSet<u64> {
     history
         .iter()
-        .filter(|message| {
-            message.author_id == bot_id
-                && (message.content == INVITE_LOUNGE_HINT_TEXT
-                    || message
-                        .content
-                        .starts_with("Kleiner Tipp: pack noch deinen Steam-Freundescode dazu,"))
-        })
+        .filter(|message| message.author_id == bot_id)
         .filter_map(|message| message.reply_message_id)
         .collect()
 }

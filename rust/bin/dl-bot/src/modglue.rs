@@ -33,7 +33,6 @@ const BRAIN_DAILY_LIMIT: &str =
 const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅. Pack deine Frage in unter {max} Zeichen.";
 const BRAIN_CONVERSATION_TTL: Duration = Duration::from_secs(10 * 60);
-const BRAIN_BACKEND_ERR: &str = dl_community::concierge::KNOWLEDGE_UNAVAILABLE_TEXT;
 const BRAIN_PRIVATE_HELP: &str = "Private Fragen kann ich gerade nicht sicher beantworten. Für persönliche Hilfe öffne ein Ticket in <#1459628609705738539>. Allgemeine Fragen zum Server kannst du in <#1426220702054355077> stellen, ohne persönliche Angaben.";
 const BRAIN_SLASH_NO_ANSWER: &str = "Dazu habe ich gerade keine gesicherte Antwort.";
 const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain";
@@ -194,9 +193,6 @@ pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
 }
-
-#[cfg(test)]
-pub use dl_answer::game::CliRetriever as BrainRetrieverGlue;
 
 #[cfg(test)]
 fn format_review_build_receipt(
@@ -613,23 +609,6 @@ fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Optio
     Some(question.trim().to_owned())
 }
 
-fn explicit_guild_brain_request(event: &dl_discord::MessageEvent, bot_id: u64) -> bool {
-    event.guild_id.is_some()
-        && (direct_brain_question(event, bot_id).is_some() || event.reply_message_id.is_some())
-}
-
-fn brain_error_reply_due(outcome: &dl_brain::BrainOutcome, feedback: bool, explicit: bool) -> bool {
-    match outcome {
-        dl_brain::BrainOutcome::BackendError => feedback || explicit,
-        dl_brain::BrainOutcome::NoAnswer | dl_brain::BrainOutcome::OutOfDomain => explicit,
-        dl_brain::BrainOutcome::Answer(answer) => explicit && answer.trim().is_empty(),
-        dl_brain::BrainOutcome::DailyLimit
-        | dl_brain::BrainOutcome::Cooldown { .. }
-        | dl_brain::BrainOutcome::Usage
-        | dl_brain::BrainOutcome::TooLong { .. } => false,
-    }
-}
-
 fn guide_channel(event: &dl_discord::MessageEvent) -> bool {
     event.guild_id == Some(1289721245281292288) && event.channel_id == 1426220702054355077
 }
@@ -768,10 +747,9 @@ impl BrainHandler {
                     .into_iter()
                     .collect()
             }
-            dl_brain::BrainOutcome::OutOfDomain | dl_brain::BrainOutcome::NoAnswer => Vec::new(),
-            dl_brain::BrainOutcome::BackendError => {
-                vec![brain_public_message_body(BRAIN_BACKEND_ERR)]
-            }
+            dl_brain::BrainOutcome::OutOfDomain
+            | dl_brain::BrainOutcome::NoAnswer
+            | dl_brain::BrainOutcome::BackendError => Vec::new(),
         }
     }
 
@@ -909,7 +887,7 @@ impl BrainHandler {
             return;
         }
         if proactive {
-            self.answer_discord_event(event, replies, event.content.trim(), true, false)
+            self.answer_discord_event(event, replies, event.content.trim(), true)
                 .await;
             return;
         }
@@ -923,7 +901,7 @@ impl BrainHandler {
             return;
         };
         if !replies.is_public(event) {
-            self.answer_discord_event(event, replies, &question, false, false)
+            self.answer_discord_event(event, replies, &question, false)
                 .await;
             return;
         }
@@ -957,8 +935,7 @@ impl BrainHandler {
         let Some(question) = self.conversation_question(event, bot_id).await else {
             return false;
         };
-        let explicit = explicit_guild_brain_request(event, bot_id);
-        self.answer_discord_event(event, replies, &question, false, explicit)
+        self.answer_discord_event(event, replies, &question, false)
             .await;
         true
     }
@@ -969,7 +946,6 @@ impl BrainHandler {
         replies: &dyn BrainDirectReplyPort,
         question: &str,
         proactive: bool,
-        explicit: bool,
     ) {
         if proactive
             && *self.guide_pending.lock().await != Some((event.author_id, event.message_id))
@@ -1028,12 +1004,9 @@ impl BrainHandler {
             dl_brain::DiscordReservation::DailyLimit => dl_brain::BrainOutcome::DailyLimit,
             dl_brain::DiscordReservation::Suppressed => unreachable!(),
         };
-        let error_reply = brain_error_reply_due(&outcome, feedback, explicit);
-        let mut failed = error_reply || matches!(outcome, dl_brain::BrainOutcome::BackendError);
-        let extend_conversation =
-            !error_reply && !matches!(outcome, dl_brain::BrainOutcome::DailyLimit);
+        let mut failed = matches!(outcome, dl_brain::BrainOutcome::BackendError);
+        let extend_conversation = !matches!(outcome, dl_brain::BrainOutcome::DailyLimit);
         let text = match outcome {
-            _ if error_reply => BRAIN_BACKEND_ERR.to_owned(),
             dl_brain::BrainOutcome::DailyLimit => BRAIN_DAILY_LIMIT.to_owned(),
             dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => answer,
             dl_brain::BrainOutcome::Usage => "Was möchtest du wissen?".to_owned(),
@@ -1046,6 +1019,10 @@ impl BrainHandler {
                     channel_id = event.channel_id,
                     "brain_direct_backend_fehler"
                 );
+                if feedback {
+                    let _ = replies.reaction(event, "👀", false).await;
+                    let _ = replies.reaction(event, "❌", true).await;
+                }
                 self.clear_guide_pending(event, proactive).await;
                 return;
             }
@@ -3124,12 +3101,43 @@ impl dl_voice::feedback::FeedbackPort for VoiceFeedbackGlue {
 
 // ── Concierge-Onboarding-Anbindung ─────────────────────────────────────────
 
+fn member_readable_channel_ids(
+    adapter: &DiscordAdapter,
+    guild_id: u64,
+    user_id: u64,
+) -> std::collections::BTreeSet<u64> {
+    let Some(guild) = adapter.cache().guild(GuildId::new(guild_id)) else {
+        return std::collections::BTreeSet::new();
+    };
+    let Some(member) = guild.members.get(&UserId::new(user_id)) else {
+        return std::collections::BTreeSet::new();
+    };
+    guild
+        .channels
+        .values()
+        .filter(|channel| {
+            guild
+                .user_permissions_in(channel, member)
+                .contains(Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY)
+        })
+        .map(|channel| channel.id.get())
+        .collect()
+}
+
 pub struct ConciergeGlue {
     pub adapter: Arc<DiscordAdapter>,
 }
 
 #[async_trait::async_trait]
 impl dl_community::concierge::ConciergePort for ConciergeGlue {
+    async fn readable_channel_ids(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> std::collections::BTreeSet<u64> {
+        member_readable_channel_ids(&self.adapter, guild_id, user_id)
+    }
+
     async fn send_dm_v2(
         &self,
         user_id: u64,
@@ -4636,12 +4644,8 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
-
-    use dl_answer::Retriever as _;
 
     #[test]
     fn np_lane_in_chill_wird_als_new_player_gelabelt() {
@@ -4677,10 +4681,6 @@ mod tests {
         assert_eq!(body["message_reference"]["message_id"], "555");
         assert_eq!(body["allowed_mentions"]["parse"], json!([]));
         assert_eq!(body["allowed_mentions"]["replied_user"], false);
-    }
-
-    fn shell_quote(path: &Path) -> String {
-        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
 
     #[derive(Default)]
@@ -5259,7 +5259,7 @@ mod tests {
                 json!([first.content, second.content])
             );
             for (headers, body) in &received[1..] {
-                assert_eq!(headers["x-discord-read-access"], "disabled");
+                assert!(headers.get("x-discord-read-access").is_none());
                 assert_eq!(headers["x-discord-user-id"], "3");
                 assert!(headers.get("x-discord-answer-task").is_none());
                 assert!(body["query"]["answer_context"].is_null());
@@ -5294,7 +5294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brain_guild_mention_bekommt_genau_eine_antwort_oder_fehlermeldung() {
+    async fn brain_guild_mention_postet_nur_gesicherte_antworten() {
         for private in [false, true] {
             let backend = dl_brain::BrainOutcome::BackendError;
             let no_answer = dl_brain::BrainOutcome::NoAnswer;
@@ -5323,6 +5323,7 @@ mod tests {
                     &outcome,
                     dl_brain::BrainOutcome::Answer(text) if !text.trim().is_empty()
                 );
+                let backend_failed = matches!(&outcome, dl_brain::BrainOutcome::BackendError);
                 let (mut handler, _) = direct_test_handler();
                 let answerer = Arc::new(RecordingDiscordAnswerer {
                     outcome: Some(outcome),
@@ -5346,27 +5347,20 @@ mod tests {
                         (event.channel_id, event.message_id, "👀".into(), true),
                         (event.channel_id, event.message_id, "👀".into(), false),
                     ]);
-                    if !answered || fail || revoke {
+                    if backend_failed || (answered && (fail || revoke)) {
                         expected.extend([(event.channel_id, event.message_id, "❌".into(), true)]);
                     }
                 }
                 assert_eq!(*replies.reactions.lock().await, expected);
                 assert_eq!(
                     replies.reply_attempts.load(Ordering::Relaxed),
-                    usize::from(!revoke)
+                    usize::from(answered && !revoke)
                 );
                 let sent = replies.sent.lock().await;
-                assert_eq!(sent.len(), usize::from(!fail && !revoke));
+                assert_eq!(sent.len(), usize::from(answered && !fail && !revoke));
                 if let Some((_, _, body)) = sent.first() {
                     assert_brain_v2(body);
-                    assert_eq!(
-                        brain_v2_text(body),
-                        if answered {
-                            "Gesicherte Antwort"
-                        } else {
-                            BRAIN_BACKEND_ERR
-                        }
-                    );
+                    assert_eq!(brain_v2_text(body), "Gesicherte Antwort");
                     assert_eq!(body["message_reference"]["message_id"], "2");
                     assert_eq!(body["allowed_mentions"]["parse"], json!([]));
                 }
@@ -5377,47 +5371,6 @@ mod tests {
                     assert!(handler.conversations.lock().await.entries.is_empty());
                 }
             }
-        }
-    }
-
-    #[test]
-    fn brain_fehlermeldung_nur_bei_expliziter_guild_anfrage_oder_privat() {
-        let mention = test_message_event(Some(1), "<@42> Frage");
-        let mut reply = test_message_event(Some(1), "Und dann?");
-        reply.is_reply = true;
-        reply.reply_message_id = Some(999);
-        let passive = test_message_event(Some(1), "Und dann?");
-        let dm = test_message_event(None, "Frage");
-        assert!(explicit_guild_brain_request(&mention, 42));
-        assert!(explicit_guild_brain_request(&reply, 42));
-        assert!(!explicit_guild_brain_request(&passive, 42));
-        assert!(!explicit_guild_brain_request(&dm, 42));
-        for outcome in [
-            dl_brain::BrainOutcome::BackendError,
-            dl_brain::BrainOutcome::NoAnswer,
-            dl_brain::BrainOutcome::OutOfDomain,
-            dl_brain::BrainOutcome::Answer(" ".into()),
-        ] {
-            assert!(brain_error_reply_due(&outcome, false, true));
-            assert!(!brain_error_reply_due(&outcome, false, false));
-        }
-        assert!(brain_error_reply_due(
-            &dl_brain::BrainOutcome::BackendError,
-            true,
-            false
-        ));
-        assert!(!brain_error_reply_due(
-            &dl_brain::BrainOutcome::NoAnswer,
-            true,
-            false
-        ));
-        for outcome in [
-            dl_brain::BrainOutcome::Answer("Antwort".into()),
-            dl_brain::BrainOutcome::DailyLimit,
-            dl_brain::BrainOutcome::Cooldown { remaining_secs: 1 },
-            dl_brain::BrainOutcome::Usage,
-        ] {
-            assert!(!brain_error_reply_due(&outcome, true, true));
         }
     }
 
@@ -5869,7 +5822,6 @@ mod tests {
                 dl_brain::BrainOutcome::Answer(" \n".into()),
                 dl_brain::BrainOutcome::Cooldown { remaining_secs: 1 },
             ] {
-                let errors = reply && !matches!(outcome, dl_brain::BrainOutcome::Cooldown { .. });
                 let (mut handler, _) = direct_test_handler();
                 handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(2));
                 let answerer = Arc::new(RecordingDiscordAnswerer {
@@ -5886,23 +5838,14 @@ mod tests {
                     event.reply_message_id = Some(999);
                     event.reply_channel_id = Some(event.channel_id);
                 }
-                for round in 1..=2 {
+                for _ in 1..=2 {
                     handler
                         .handle_message_event_with_replies(&event, 42, &replies)
                         .await;
-                    let expected = if errors { round } else { 0 };
-                    let sent = replies.sent.lock().await;
-                    assert_eq!(sent.len(), expected);
-                    for (_, _, body) in sent.iter() {
-                        assert_brain_v2(body);
-                        assert_eq!(brain_v2_text(body), BRAIN_BACKEND_ERR);
-                        assert_eq!(body["message_reference"]["message_id"], "2");
-                    }
-                    drop(sent);
+                    assert!(replies.sent.lock().await.is_empty());
                     assert!(replies.reactions.lock().await.is_empty());
-                    assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), expected);
+                    assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 0);
                 }
-                let error_count = if errors { 2 } else { 0 };
                 assert_eq!(answerer.calls.lock().await.len(), 2);
                 assert_eq!(*answerer.read_access.lock().await, vec![true, true]);
                 assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
@@ -5910,17 +5853,14 @@ mod tests {
                     .handle_message_event_with_replies(&event, 42, &replies)
                     .await;
                 let sent = replies.sent.lock().await;
-                assert_eq!(sent.len(), error_count + 1);
-                assert_eq!(brain_v2_text(&sent[error_count].2), BRAIN_DAILY_LIMIT);
+                assert_eq!(sent.len(), 1);
+                assert_eq!(brain_v2_text(&sent[0].2), BRAIN_DAILY_LIMIT);
                 drop(sent);
                 handler
                     .handle_message_event_with_replies(&event, 42, &replies)
                     .await;
-                assert_eq!(replies.sent.lock().await.len(), error_count + 1);
-                assert_eq!(
-                    replies.reply_attempts.load(Ordering::Relaxed),
-                    error_count + 1
-                );
+                assert_eq!(replies.sent.lock().await.len(), 1);
+                assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 1);
                 assert!(replies.reactions.lock().await.is_empty());
                 assert_eq!(answerer.calls.lock().await.len(), 2);
                 let conversations = handler.conversations.lock().await;
@@ -6378,7 +6318,7 @@ mod tests {
                     headers
                         .get("x-discord-read-access")
                         .map(|value| value.as_bytes()),
-                    (!allow_reads || history).then_some(b"disabled".as_slice())
+                    (!allow_reads).then_some(b"disabled".as_slice())
                 );
                 if history {
                     assert!(query["answer_context"].is_null());
@@ -6854,15 +6794,6 @@ mod tests {
             dir,
             ReviewHandler::with_actions(Arc::new(FakeReviewActions)),
         )
-    }
-
-    #[cfg(unix)]
-    fn make_executable(path: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)
     }
 
     #[test]
@@ -7380,87 +7311,6 @@ mod tests {
         assert!(resolver.cache.lock().await.len() <= 256);
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn brain_retriever_uebergibt_separator_vor_dash_frage_ohne_db_flag(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let script = dir.path().join("brain-cli");
-        let argv_log = dir.path().join("argv.log");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\n{{\n  printf '%s\\n' \"$#\"\n  for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n}} > {}\nprintf '%s\\n' '{{\"intent\":\"general\",\"prompt\":\"ok\",\"sources\":[]}}'\n",
-                shell_quote(&argv_log)
-            ),
-        )?;
-        make_executable(&script)?;
-
-        let retriever = BrainRetrieverGlue { bin: script };
-        let context = retriever.retrieve("- Spirit Lifesteal?").await?;
-
-        assert!(context.evidence.is_empty());
-        let argv = fs::read_to_string(argv_log)?;
-        let lines = argv.lines().collect::<Vec<_>>();
-        assert_eq!(lines, vec!["3", "ask-context", "--", "- Spirit Lifesteal?"]);
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn brain_retriever_cancellation_killt_kindprozess(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let script = dir.path().join("slow-brain-cli");
-        let pid_file = dir.path().join("pid");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nexec sleep 5\n",
-                shell_quote(&pid_file)
-            ),
-        )?;
-        make_executable(&script)?;
-
-        let retriever = BrainRetrieverGlue { bin: script };
-        let timed_out =
-            tokio::time::timeout(Duration::from_millis(200), retriever.retrieve("frage")).await;
-        assert!(timed_out.is_err());
-
-        let started = Instant::now();
-        while !pid_file.exists() && started.elapsed() < Duration::from_secs(1) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let pid = fs::read_to_string(&pid_file)?;
-        let pid = pid.trim();
-        let mut gone = false;
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(1) {
-            if std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|status| !status.success())
-                .unwrap_or(true)
-            {
-                gone = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        if !gone {
-            let _ = std::process::Command::new("kill")
-                .arg(pid)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-        assert!(gone);
-        Ok(())
-    }
-
     #[test]
     fn brain_allowlist_invalid_config_wird_deny_all() {
         assert!(parse_brain_channel_allowlist(" \n\t").is_none());
@@ -7541,15 +7391,6 @@ mod tests {
             body.get("allowed_mentions"),
             Some(&json!({ "parse": [], "replied_user": false }))
         );
-    }
-
-    #[test]
-    fn brain_fehlertext_ist_v2_ohne_klartext() {
-        let body = brain_public_message_body(BRAIN_BACKEND_ERR);
-        assert_brain_v2(&body);
-        assert!(!body.contains_key("content"));
-        assert_eq!(v2_blocks(&body), vec![BRAIN_BACKEND_ERR.to_owned()]);
-        assert!(!BRAIN_BACKEND_ERR.contains("Hirn hakt"));
     }
 
     #[test]
