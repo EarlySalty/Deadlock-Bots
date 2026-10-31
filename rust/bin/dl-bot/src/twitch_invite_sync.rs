@@ -40,7 +40,7 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const SYNC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ALERT_AFTER_FAILURES: u32 = 4;
 const ALERT_REPEAT: Duration = Duration::from_secs(24 * 60 * 60);
-const ALERT_TEXT: &str = "Twitch-Invite-Sync läuft seit mindestens einer Stunde nicht durch. Details stehen im Journal von `deadlock-bot-rust`.";
+const ALERT_TEXT: &str = "Die letzten vier Läufe des Twitch-Invite-Sync sind fehlgeschlagen. Details stehen im Journal von `deadlock-bot-rust`.";
 
 /// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`). Ein Invite, der
 /// einer Website-Quelle zuordenbar ist, darf nie als Twitch geflippt werden
