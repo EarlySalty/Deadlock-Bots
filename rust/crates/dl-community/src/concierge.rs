@@ -1382,6 +1382,7 @@ fn mark_feedback_failed(feedback: Option<&BrainFeedback>) {
 }
 
 fn answer_body(
+    question: &str,
     reply: &str,
     pate_request: bool,
     allow_personal_actions: bool,
@@ -1389,7 +1390,7 @@ fn answer_body(
 ) -> Map<String, Value> {
     let body = if pate_request && allow_personal_actions {
         pate_offer_body(reply)
-    } else if allow_personal_actions && community_answer_offers_twitch_link(reply) {
+    } else if allow_personal_actions && question_offers_twitch_link(question) {
         v2_body(reply, vec![community::twitch_link_button()])
     } else {
         v2_body(reply, Vec::new())
@@ -1397,14 +1398,9 @@ fn answer_body(
     with_response_components(body, response_components)
 }
 
-/// Nur die festen Community-Antworten tragen den Twitch-Button, nie freie Modelltexte.
-fn community_answer_offers_twitch_link(reply: &str) -> bool {
-    [
-        community::CommunityTopic::Punkte,
-        community::CommunityTopic::TwitchVerknuepfen,
-    ]
-    .into_iter()
-    .any(|topic| topic.offers_twitch_link() && topic.answer() == reply)
+fn question_offers_twitch_link(question: &str) -> bool {
+    community::community_question(question)
+        .is_some_and(community::CommunityTopic::offers_twitch_link)
 }
 
 fn button(label: &str, style: u8, custom_id: &str) -> Value {
@@ -5173,6 +5169,7 @@ impl Concierge {
             }
         }
         let body = answer_body(
+            trimmed,
             &reply,
             pate_request,
             allow_personal_actions,
@@ -5446,6 +5443,7 @@ impl Concierge {
             };
         };
         let body = answer_body(
+            question,
             &reply,
             pate_request,
             allow_personal_actions,
@@ -8266,7 +8264,7 @@ mod tests {
     #[test]
     fn wissensantwort_utf16_budget_passt_in_v2_und_fallback() {
         let text = "🧠".repeat(900);
-        let body = super::answer_body(&text, true, true, None);
+        let body = super::answer_body("Hallo", &text, true, true, None);
         let visible = body["components"][0]["components"][0]["content"]
             .as_str()
             .expect("text display");
@@ -9572,7 +9570,7 @@ mod tests {
     }
 
     #[test]
-    fn twitch_button_nur_unter_festen_antworten_und_persoenlichen_aktionen() {
+    fn twitch_button_nur_bei_passender_frage_und_persoenlichen_aktionen() {
         let has_twitch_button = |body: &Map<String, Value>| {
             body["components"][0]["components"]
                 .as_array()
@@ -9580,18 +9578,35 @@ mod tests {
                 .iter()
                 .any(|row| row["components"][0]["custom_id"] == community::TWITCH_LINK_CUSTOM_ID)
         };
-        let punkte = community::CommunityTopic::Punkte.answer();
-        assert!(has_twitch_button(&answer_body(punkte, false, true, None)));
-        assert!(!has_twitch_button(&answer_body(punkte, false, false, None)));
-        let clip = community::CommunityTopic::ClipContest.answer();
-        assert!(!has_twitch_button(&answer_body(clip, false, true, None)));
+        let frage = "Wie bekomme ich Punkte?";
+        let antwort = "Freier Brain-Text zu den Punkten.";
+        assert!(has_twitch_button(&answer_body(
+            frage, antwort, false, true, None
+        )));
         assert!(!has_twitch_button(&answer_body(
+            frage, antwort, false, false, None
+        )));
+        assert!(!has_twitch_button(&answer_body(
+            "Wie läuft der Clip-Contest?",
+            antwort,
+            false,
+            true,
+            None
+        )));
+        assert!(!has_twitch_button(&answer_body(
+            "Hallo",
             "Verknüpf doch Twitch, dann gibt es Punkte.",
             false,
             true,
             None
         )));
-        let with_tour = answer_body(punkte, false, true, Some(&tour_response_components()));
+        let with_tour = answer_body(
+            frage,
+            antwort,
+            false,
+            true,
+            Some(&tour_response_components()),
+        );
         assert!(has_twitch_button(&with_tour));
         assert_has_tour_components(&with_tour);
     }

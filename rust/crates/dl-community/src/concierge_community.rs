@@ -43,7 +43,6 @@ pub const ANSWER_STREAMER_VORSCHLAGEN: &str = "Du kennst jemanden, der Deadlock 
 
 pub const ANSWER_STREAMER_VORTEILE: &str = "Als Partner-Streamer bekommst du Zuschauer aus einer Community, die gezielt bei Partnern reinschaut. Wer bei dir zum ersten Mal vorbeikommt, bekommt sogar einen Bonus fürs Entdecken.\n\nDu sammelst auch selbst Punkte für das Streamer-Leaderboard: 1 Punkt für alle 30 Minuten, die verknüpfte Community-Mitglieder bei dir zuschauen, 25 Punkte für jeden Raid an einen anderen Partner und 50 Punkte für jede Person, die über deine Einladung auf den Server kommt und hier wirklich aktiv wird. Im wöchentlichen Clip-Contest gibt es 100, 60 oder 40 Punkte für die Plätze 1 bis 3, und die Links und Credits der Top 3 werden dach_lock zur kuratierten Auswahl bereitgestellt.\n\nPunkte sind Anerkennung aus der Community, kein Geld. Follows und Subs werden nicht belohnt. Wenn du Partner werden willst, lass dich über \"Streamer vorschlagen\" in <#1425215762460835931> vorschlagen oder frag in <#1491953161747955853>.";
 
-/// Themen, die der Concierge ohne Sprachmodell und ohne Wissensdienst beantwortet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommunityTopic {
     Punkte,
@@ -127,9 +126,6 @@ fn any_word_starts(words: &[&str], prefixes: &[&str]) -> bool {
         .any(|word| prefixes.iter().any(|prefix| word.starts_with(prefix)))
 }
 
-/// Erkennt eng umrissene Fragen zu Punkten, Twitch-Verknüpfung, Clip-Contest,
-/// Streamer-Vorschlag und Streamer-Vorteilen. Bewusst konservativ: Was hier nicht
-/// greift, geht wie bisher an den Wissensdienst.
 pub fn community_question(text: &str) -> Option<CommunityTopic> {
     let folded = fold(text.trim());
     let words = words(&folded);
@@ -140,7 +136,6 @@ pub fn community_question(text: &str) -> Option<CommunityTopic> {
     let mentions_twitch = has(&["twitch"]);
     let mentions_streamer = has(&["streamer", "streamerin", "partnerprogramm"]);
     let mentions_clip = has(&["clip"]);
-    // Einrichtungsfragen von Streamern (Dashboard, Bot, Overlay) gehören zum Wissensdienst.
     if has(&["dashboard", "overlay", "obs", "bot"]) {
         return None;
     }
