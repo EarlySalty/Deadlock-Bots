@@ -370,6 +370,35 @@ async fn impersonal_request_without_code_gets_one_hint_without_dispatch() {
 }
 
 #[tokio::test]
+async fn brain_ausfall_verbraucht_den_hinweis_nicht() {
+    let (mut watcher, store, port, _invite) = setup();
+    watcher.brain = crate::answer_support::test_brain::ScriptedBrain::failing();
+    watcher
+        .handle_message(message(1, NOW, IMPERSONAL_REQUEST), NOW, None)
+        .await
+        .expect("Brain-Ausfall ist kein Verarbeitungsfehler");
+    let state = store
+        .load(USER)
+        .await
+        .expect("state can be read")
+        .expect("request state exists");
+    assert!(!state.hint_sent);
+    assert_eq!(state.last_hint_at, None);
+    assert!(port.replies.lock().await.is_empty());
+
+    watcher.brain =
+        crate::answer_support::test_brain::ScriptedBrain::always(INVITE_LOUNGE_HINT_TEXT);
+    watcher
+        .handle_message(message(2, NOW + 20, IMPERSONAL_REQUEST), NOW + 20, None)
+        .await
+        .expect("Wiederholung bekommt den Hinweis");
+    assert_eq!(
+        port.replies.lock().await.as_slice(),
+        &[(2, INVITE_LOUNGE_HINT_TEXT.into())]
+    );
+}
+
+#[tokio::test]
 async fn direkte_bitte_fragt_einmal_code_und_fortsetzung_geht_sofort() {
     let (watcher, _, port, invite) = setup();
     watcher

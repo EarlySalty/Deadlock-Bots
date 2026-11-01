@@ -398,6 +398,7 @@ impl InviteLoungeWatcher {
             if code.is_none() && next.friend_code.is_none() && kind == Some(RequestKind::Direct) {
                 next.friend_code = self.store.known_code(event.author_id).await?;
             }
+            let hint_before = (next.hint_sent, next.last_hint_at);
             let mut wants_hint = update_state(
                 &mut next,
                 &event,
@@ -429,13 +430,17 @@ impl InviteLoungeWatcher {
                     FRESHNESS_SECONDS,
                 )
             {
-                self.send_brain_hint(&event).await?;
+                let delivered = self.send_brain_hint(&event).await?;
+                if !delivered {
+                    self.release_hint(event.author_id, &next, hint_before)
+                        .await?;
+                }
             }
             return Ok(Some(event.author_id));
         }
     }
 
-    async fn send_brain_hint(&self, event: &LoungeMessage) -> Result<(), String> {
+    async fn send_brain_hint(&self, event: &LoungeMessage) -> Result<bool, String> {
         let request = dl_brain::DiscordConversationRequest {
             user_id: event.author_id,
             channel_id: event.channel_id,
@@ -451,16 +456,38 @@ impl InviteLoungeWatcher {
                         .port
                         .reply_text(event.channel_id, event.message_id, &content)
                         .await
-                        .map(|_| ()),
-                    None => Ok(()),
+                        .map(|_| true),
+                    None => Ok(false),
                 }
             }
-            Ok(dl_brain::ConversationReply::Silent) => Ok(()),
+            Ok(dl_brain::ConversationReply::Silent) => Ok(false),
             Err(error) => {
                 tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge: Brain-Hinweis fehlgeschlagen");
-                Ok(())
+                Ok(false)
             }
         }
+    }
+
+    async fn release_hint(
+        &self,
+        user_id: u64,
+        claimed: &LoungeState,
+        (hint_sent, last_hint_at): (bool, Option<i64>),
+    ) -> Result<(), String> {
+        let mut released = claimed.clone();
+        released.hint_sent = hint_sent;
+        released.last_hint_at = last_hint_at;
+        if !self
+            .store
+            .compare_exchange(user_id, Some(claimed), &released)
+            .await?
+        {
+            tracing::warn!(
+                user_id,
+                "Invite-Lounge: Hinweis-Anspruch nach Brain-Ausfall nicht freigegeben"
+            );
+        }
+        Ok(())
     }
 
     async fn has_hint(

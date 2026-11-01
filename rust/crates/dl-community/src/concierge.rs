@@ -276,6 +276,10 @@ impl ConciergeConfig {
     }
 }
 
+fn signalled_intent(text: &str) -> Option<ConciergeIntent> {
+    Some(classify_intent(text)).filter(|intent| *intent != ConciergeIntent::Casual)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConciergeIntent {
     Improve,
@@ -5366,7 +5370,7 @@ impl Concierge {
         let decision = AnswerDecision {
             answer: LlmAnswer {
                 reply,
-                intent: hit.then(|| classify_intent(question)),
+                intent: hit.then(|| signalled_intent(question)).flatten(),
                 pate_request: hit && pure_pate_request(question),
             },
             source: BRAIN_TASK_SOURCE,
@@ -9011,6 +9015,15 @@ mod tests {
             .set_pate_requested(user_id, config.main_guild_id, Utc::now())
             .await
             .expect("aktuellen Patenwunsch speichern"));
+    }
+
+    #[test]
+    fn nachricht_ohne_signal_ueberschreibt_den_intent_nicht() {
+        assert_eq!(signalled_intent("danke"), None);
+        assert_eq!(
+            signalled_intent("will lernen"),
+            Some(ConciergeIntent::Learn)
+        );
     }
 
     fn mock_port() -> Arc<MockConciergePort> {
