@@ -9411,7 +9411,6 @@ mod tests {
 
     #[tokio::test]
     async fn join_ohne_proaktiv_schickt_keine_begruessung() {
-        // test_config setzt DL_CONCIERGE_PROACTIVE nicht -> proactive = false (Default).
         let config = test_config(true, &[]);
         assert!(!config.proactive);
         let guild = config.main_guild_id;
@@ -9422,7 +9421,6 @@ mod tests {
             .handle_native_onboarding_completed(guild, 123)
             .await;
 
-        // Kein ungefragter Kontakt: weder DM noch Fallback-Kanal (bricht vor jedem DB-Zugriff ab).
         assert!(port.sent_dm_v2.lock().unwrap().is_empty());
         assert!(port.sent_channel_v2.lock().unwrap().is_empty());
     }
@@ -10341,9 +10339,6 @@ mod tests {
 
     #[tokio::test]
     async fn injektion_plus_belegte_frage_nutzt_wissenspfad_statt_selbstoffenlegung() {
-        // B07: Vorangestellte Manipulation, dahinter eine belegte Supportfrage. Die grobe
-        // lokale Selbstoffenlegungs-Sperre wuerde hier faelschlich blocken; stattdessen fragt
-        // der Concierge zuerst den Wissensdienst und liefert den belegten legitimen Teil.
         let port = mock_port();
         let config = fast_knowledge_config();
         let (brain, _requests, handle) = knowledge_server(
