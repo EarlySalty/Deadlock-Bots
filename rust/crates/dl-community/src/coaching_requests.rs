@@ -609,7 +609,6 @@ pub struct RequestView<'a> {
     pub include_ai: bool,
     /// (Coach, Claim-Deadline) — nur solange die Reservierung läuft.
     pub reserved: Option<(u64, i64)>,
-    /// Coaches, die diese Anfrage sichtbar abgegeben haben.
     pub unavailable: &'a [u64],
     /// Action-Rows; leeres Array = keine Buttons mehr (Endzustand).
     pub components: Value,
@@ -1224,8 +1223,18 @@ impl CoachingRequests {
         )
         .bind(request_id_i32)
         .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
+        .await;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    request_id,
+                    "Coaching-Opt-outs konnten nicht geladen werden"
+                );
+                return Vec::new();
+            }
+        };
         rows.into_iter()
             .filter_map(|row| {
                 row.try_get::<i64, _>("coach_discord_id")
@@ -2601,7 +2610,6 @@ impl InteractionHandler for CoachingHandler {
             );
         }
 
-        // coach_notime_{id} / coach_claim_{id} / coaching_complete_{id} / coach_release_{id}_{author} / coach_cancel_{session}_{author}
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_notime_") {
             let request_id: i64 = rest.parse().unwrap_or(0);
             let roles = c
@@ -2630,6 +2638,7 @@ impl InteractionHandler for CoachingHandler {
                     );
                 }
             };
+            let mut release_failed = false;
             let released = if opted_out && assigned == Some(interaction.user_id) {
                 match c
                     .clear_own_reservation(request_id, interaction.user_id)
@@ -2642,6 +2651,7 @@ impl InteractionHandler for CoachingHandler {
                             request_id,
                             "Coaching-Reservierung konnte nicht aufgehoben werden"
                         );
+                        release_failed = true;
                         false
                     }
                 }
@@ -2651,6 +2661,8 @@ impl InteractionHandler for CoachingHandler {
             c.refresh_open_request_message(request_id).await;
             let message = if !opted_out {
                 "Du stehst nicht mehr als keine Zeit auf der Anfrage."
+            } else if release_failed {
+                "Du stehst als keine Zeit auf der Anfrage. Die Reservierung ist noch da. Drück auf Freigeben, damit andere übernehmen können."
             } else if released {
                 "Du stehst als keine Zeit auf der Anfrage. Die Reservierung ist aufgehoben, andere Coaches können übernehmen."
             } else {
