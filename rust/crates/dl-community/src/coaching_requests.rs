@@ -609,6 +609,8 @@ pub struct RequestView<'a> {
     pub include_ai: bool,
     /// (Coach, Claim-Deadline) — nur solange die Reservierung läuft.
     pub reserved: Option<(u64, i64)>,
+    /// Coaches, die diese Anfrage sichtbar abgegeben haben.
+    pub unavailable: &'a [u64],
     /// Action-Rows; leeres Array = keine Buttons mehr (Endzustand).
     pub components: Value,
 }
@@ -635,6 +637,18 @@ fn section_with_thumbnail(content: String, filename: &str) -> Value {
         "components": [text_display(content)],
         "accessory": { "type": 11, "media": { "url": format!("attachment://{filename}") } }
     })
+}
+
+fn unavailable_line(coaches: &[u64]) -> Option<String> {
+    if coaches.is_empty() {
+        return None;
+    }
+    let mentions = coaches
+        .iter()
+        .map(|coach_id| format!("<@{coach_id}>"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("⏸️ **Keine Zeit** {mentions}"))
 }
 
 /// Baut die komplette Anfrage-Nachricht als Components-V2-Body zum **Senden**.
@@ -674,17 +688,17 @@ pub fn request_body_v2(request: &RequestData, view: &RequestView) -> Map<String,
         ));
     }
 
+    let mut header_lines = vec![
+        format!("## {}", view.headline),
+        format!("**{}** · <@{}>", request.username, request.user_id),
+        view.status_line.clone(),
+    ];
+    if let Some(line) = unavailable_line(view.unavailable) {
+        header_lines.push(line);
+    }
     let mut container = vec![
         media_gallery(REQUEST_BANNER_FILENAME),
-        section_with_thumbnail(
-            [
-                format!("## {}", view.headline),
-                format!("**{}** · <@{}>", request.username, request.user_id),
-                view.status_line.clone(),
-            ]
-            .join("\n"),
-            REQUEST_LOGO_FILENAME,
-        ),
+        section_with_thumbnail(header_lines.join("\n"), REQUEST_LOGO_FILENAME),
         separator(),
         text_display(rank_line),
         separator(),
@@ -749,13 +763,39 @@ pub fn request_edit_body_v2(request: &RequestData, view: &RequestView) -> Map<St
     body
 }
 
+fn claim_action_buttons(request_id: i64, author_id: u64) -> Vec<Value> {
+    vec![
+        json!({
+            "type": 2,
+            "style": 3,
+            "label": "Coaching übernehmen",
+            "custom_id": format!("coach_claim_{request_id}")
+        }),
+        json!({
+            "type": 2,
+            "style": 2,
+            "label": "Keine Zeit",
+            "emoji": { "name": "⏸️" },
+            "custom_id": format!("coach_notime_{request_id}")
+        }),
+        json!({
+            "type": 2,
+            "style": 2,
+            "label": "Freigeben",
+            "custom_id": format!("coach_release_{request_id}_{author_id}")
+        }),
+    ]
+}
+
 pub fn claim_components(request_id: i64, author_id: u64) -> Value {
-    json!([{ "type": 1, "components": [
-        { "type": 2, "style": 3, "label": "Coaching übernehmen",
-          "custom_id": format!("coach_claim_{request_id}") },
-        { "type": 2, "style": 2, "label": "Freigeben",
-          "custom_id": format!("coach_release_{request_id}_{author_id}") },
-    ]}])
+    json!([{ "type": 1, "components": claim_action_buttons(request_id, author_id) }])
+}
+
+pub fn open_request_components(request_id: i64, author_id: u64, coachee_id: Option<&str>) -> Value {
+    match coachee_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(coachee_id) => claim_components_with_website_link(request_id, author_id, coachee_id),
+        None => claim_components(request_id, author_id),
+    }
 }
 
 pub fn coachee_website_url(coachee_id: &str) -> String {
@@ -768,14 +808,14 @@ pub fn claim_components_with_website_link(
     author_id: u64,
     coachee_id: &str,
 ) -> Value {
-    json!([{ "type": 1, "components": [
-        { "type": 2, "style": 3, "label": "Coaching übernehmen",
-          "custom_id": format!("coach_claim_{request_id}") },
-        { "type": 2, "style": 2, "label": "Freigeben",
-          "custom_id": format!("coach_release_{request_id}_{author_id}") },
-        { "type": 2, "style": 5, "label": COACHING_WEBSITE_OPEN_BUTTON_LABEL,
-          "url": coachee_website_url(coachee_id) },
-    ]}])
+    let mut buttons = claim_action_buttons(request_id, author_id);
+    buttons.push(json!({
+        "type": 2,
+        "style": 5,
+        "label": COACHING_WEBSITE_OPEN_BUTTON_LABEL,
+        "url": coachee_website_url(coachee_id),
+    }));
+    json!([{ "type": 1, "components": buttons }])
 }
 
 pub fn active_session_components(session_id: &str, request_id: i64, author_id: u64) -> Value {
@@ -1152,6 +1192,159 @@ impl CoachingRequests {
         ))
     }
 
+    async fn coachee_id(&self, request_id: i64) -> Option<String> {
+        let request_id_i32 = i64_to_i32(request_id, "request_id").ok()?;
+        sqlx::query_scalar(
+            r#"
+            SELECT coachee_id
+              FROM coaching.requests
+             WHERE bot_request_id = $1
+            "#,
+        )
+        .bind(request_id_i32)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .filter(|id: &String| !id.trim().is_empty())
+    }
+
+    async fn unavailable_coaches(&self, request_id: i64) -> Vec<u64> {
+        let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") else {
+            return Vec::new();
+        };
+        let rows = sqlx::query(
+            r#"
+            SELECT coach_discord_id
+              FROM coaching.request_opt_outs
+             WHERE bot_request_id = $1
+             ORDER BY created_at ASC, coach_discord_id ASC
+            "#,
+        )
+        .bind(request_id_i32)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| {
+                row.try_get::<i64, _>("coach_discord_id")
+                    .ok()
+                    .and_then(|value| pg_i64_to_u64(value, "coach_discord_id").ok())
+            })
+            .collect()
+    }
+
+    async fn toggle_unavailable(&self, request_id: i64, coach_id: u64) -> Result<bool, String> {
+        let request_id_i32 = i64_to_i32(request_id, "request_id").map_err(|err| err.to_string())?;
+        let coach_id_i64 = u64_to_i64(coach_id, "coach_id").map_err(|err| err.to_string())?;
+        let mut tx = self.pool.begin().await.map_err(|err| err.to_string())?;
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM coaching.request_opt_outs
+             WHERE bot_request_id = $1
+               AND coach_discord_id = $2
+            "#,
+        )
+        .bind(request_id_i32)
+        .bind(coach_id_i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| err.to_string())?
+        .rows_affected();
+        let opted_out = if deleted == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO coaching.request_opt_outs(
+                    bot_request_id, coach_discord_id, created_at
+                )
+                VALUES ($1, $2, $3)
+                "#,
+            )
+            .bind(request_id_i32)
+            .bind(coach_id_i64)
+            .bind(chrono::Utc::now())
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| err.to_string())?;
+            true
+        } else {
+            false
+        };
+        tx.commit().await.map_err(|err| err.to_string())?;
+        Ok(opted_out)
+    }
+
+    async fn clear_own_reservation(&self, request_id: i64, coach_id: u64) -> Result<bool, String> {
+        let request_id_i32 = i64_to_i32(request_id, "request_id").map_err(|err| err.to_string())?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE coaching.requests
+               SET assigned_coach_id = NULL,
+                   reserved_until = NULL,
+                   updated_at = $1
+             WHERE bot_request_id = $2
+               AND status = 'analyzed'
+               AND assigned_coach_id = $3
+            "#,
+        )
+        .bind(chrono::Utc::now())
+        .bind(request_id_i32)
+        .bind(coach_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?
+        .rows_affected();
+        Ok(updated > 0)
+    }
+
+    async fn refresh_open_request_message(&self, request_id: i64) {
+        let Some((request, status, assigned, reserved_until, message_id, _)) =
+            self.load_request(request_id).await
+        else {
+            return;
+        };
+        let (Some(message_id), true) = (message_id, status == "analyzed") else {
+            return;
+        };
+        let unavailable = self.unavailable_coaches(request_id).await;
+        let now = chrono::Utc::now().timestamp();
+        let reserved = match (assigned, reserved_until) {
+            (Some(coach), Some(until)) if now < until => Some((coach, until)),
+            _ => None,
+        };
+        let coachee_id = self.coachee_id(request_id).await;
+        let status_line = if reserved.is_some() {
+            "🎯 reserviert".to_string()
+        } else {
+            "🟢 offen für alle Coaches".to_string()
+        };
+        let body = request_edit_body_v2(
+            &request,
+            &RequestView {
+                headline: "🎮 Neue Coaching-Anfrage",
+                status_line,
+                accent: COACHING_ACCENT_OPEN,
+                include_ai: !request.ai_summary.trim().is_empty(),
+                reserved,
+                unavailable: &unavailable,
+                components: open_request_components(
+                    request.id,
+                    request.user_id,
+                    coachee_id.as_deref(),
+                ),
+            },
+        );
+        self.port
+            .edit_request_message(
+                REQUEST_CHANNEL_ID,
+                message_id,
+                body,
+                request_banner_attachments(),
+            )
+            .await;
+    }
+
     /// AI-Analyse (Prompt wie _analyze_with_ai); "" = INVALID_REQUEST.
     async fn analyze(&self, request: &RequestData) -> String {
         let Some(ai) = &self.ai else {
@@ -1214,6 +1407,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 accent,
                 include_ai,
                 reserved: None,
+                unavailable: &[],
                 components,
             },
         );
@@ -1489,6 +1683,8 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         } else {
             "🟢 Freigegeben – "
         };
+        let unavailable = self.unavailable_coaches(request_id).await;
+        let coachee_id = self.coachee_id(request_id).await;
         let body = request_edit_body_v2(
             &request,
             &RequestView {
@@ -1497,7 +1693,12 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 accent: COACHING_ACCENT_OPEN,
                 include_ai: !request.ai_summary.trim().is_empty(),
                 reserved: None,
-                components: claim_components(request.id, request.user_id),
+                unavailable: &unavailable,
+                components: open_request_components(
+                    request.id,
+                    request.user_id,
+                    coachee_id.as_deref(),
+                ),
             },
         );
         self.port
@@ -1540,6 +1741,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 accent,
                 include_ai: !request.ai_summary.trim().is_empty(),
                 reserved: None,
+                unavailable: &[],
                 components: json!([]),
             },
         );
@@ -2399,7 +2601,64 @@ impl InteractionHandler for CoachingHandler {
             );
         }
 
-        // coach_claim_{id} / coaching_complete_{id} / coach_release_{id}_{author} / coach_cancel_{session}_{author}
+        // coach_notime_{id} / coach_claim_{id} / coaching_complete_{id} / coach_release_{id}_{author} / coach_cancel_{session}_{author}
+        if let Some(rest) = interaction.custom_id.strip_prefix("coach_notime_") {
+            let request_id: i64 = rest.parse().unwrap_or(0);
+            let roles = c
+                .port
+                .member_role_ids(interaction.guild_id, interaction.user_id)
+                .await;
+            if !roles.contains(&COACH_ROLE_ID) {
+                return BridgeReply::ephemeral_text("❌ Nur Coaches können eine Anfrage abgeben.");
+            }
+            let Some((_, status, assigned, _, _, _)) = c.load_request(request_id).await else {
+                return BridgeReply::ephemeral_text("❌ Request nicht gefunden.");
+            };
+            if status != "analyzed" {
+                return BridgeReply::ephemeral_text("ℹ️ Diese Anfrage ist nicht mehr offen.");
+            }
+            let opted_out = match c.toggle_unavailable(request_id, interaction.user_id).await {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        request_id,
+                        "Coaching-Opt-out konnte nicht gespeichert werden"
+                    );
+                    return BridgeReply::ephemeral_text(
+                        "❌ Das konnte gerade nicht gespeichert werden. Bitte versuch es in einem Moment erneut.",
+                    );
+                }
+            };
+            let released = if opted_out && assigned == Some(interaction.user_id) {
+                match c
+                    .clear_own_reservation(request_id, interaction.user_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::warn!(
+                            %err,
+                            request_id,
+                            "Coaching-Reservierung konnte nicht aufgehoben werden"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            c.refresh_open_request_message(request_id).await;
+            let message = if !opted_out {
+                "Du stehst nicht mehr als keine Zeit auf der Anfrage."
+            } else if released {
+                "Du stehst als keine Zeit auf der Anfrage. Die Reservierung ist aufgehoben, andere Coaches können übernehmen."
+            } else {
+                "Du stehst als keine Zeit auf der Anfrage. Andere sehen das, die Anfrage bleibt offen."
+            };
+            return BridgeReply::ephemeral_text(message);
+        }
+
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_claim_") {
             let request_id: i64 = rest.parse().unwrap_or(0);
             let roles = c
@@ -2558,6 +2817,7 @@ impl InteractionHandler for CoachingHandler {
                         accent: COACHING_ACCENT_ACTIVE,
                         include_ai: !request.ai_summary.trim().is_empty(),
                         reserved: None,
+                        unavailable: &[],
                         components: active_session_components(
                             &session_id,
                             request_id,
@@ -3059,6 +3319,7 @@ mod tests {
                 accent: COACHING_ACCENT_OPEN,
                 include_ai: false,
                 reserved: None,
+                unavailable: &[],
                 components: claim_components(7, 4242),
             },
         );
@@ -3106,6 +3367,33 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1, "genau eine Action-Row");
         assert_eq!(rows[0]["components"][0]["custom_id"], "coach_claim_7");
+        assert_eq!(rows[0]["components"][1]["custom_id"], "coach_notime_7");
+        assert_eq!(rows[0]["components"][1]["label"], "Keine Zeit");
+        assert!(
+            !text.contains("Keine Zeit"),
+            "ohne Opt-out bleibt die Karte still, {text}"
+        );
+    }
+
+    #[test]
+    fn keine_zeit_steht_im_kopf_der_offenen_karte() {
+        let coaches = [111_u64, 222];
+        let body = request_body_v2(
+            &demo_request(),
+            &RequestView {
+                headline: "🎮 Neue Coaching-Anfrage",
+                status_line: "🟢 offen für alle Coaches".to_string(),
+                accent: COACHING_ACCENT_OPEN,
+                include_ai: false,
+                reserved: None,
+                unavailable: &coaches,
+                components: claim_components(7, 4242),
+            },
+        );
+        let text = v2_text(&body);
+        assert!(text.contains("⏸️ **Keine Zeit** <@111>, <@222>"), "{text}");
+        assert!(text.contains("🟢 offen für alle Coaches"), "{text}");
+        assert_eq!(body["components"][0]["accent_color"], COACHING_ACCENT_OPEN);
     }
 
     /// Beim Editieren gilt die umgekehrte Regel: nur wenn content und embeds
@@ -3119,6 +3407,7 @@ mod tests {
             accent: COACHING_ACCENT_ACTIVE,
             include_ai: false,
             reserved: None,
+            unavailable: &[],
             components: json!([]),
         };
         let send = request_body_v2(&demo_request(), &view);
@@ -3141,6 +3430,7 @@ mod tests {
                 accent: COACHING_ACCENT_DONE,
                 include_ai: false,
                 reserved: None,
+                unavailable: &[],
                 components: json!([]),
             },
         );
@@ -5065,6 +5355,281 @@ mod pg_tests {
                 .is_empty(),
             "request edit was not synced"
         );
+    }
+
+    fn last_request_edit(port: &MockCoachingPort) -> Map<String, Value> {
+        port.request_edits
+            .lock()
+            .expect("request_edits lock")
+            .last()
+            .expect("request edit")
+            .body
+            .clone()
+    }
+
+    async fn opt_out_count(db: &TestDb, request_id: i32) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM coaching.request_opt_outs WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("opt-out count")
+    }
+
+    #[tokio::test]
+    async fn keine_zeit_bleibt_auf_der_karte_und_blockiert_den_claim_nicht() {
+        let (db, port, coaching) = test_coaching().await;
+        let data = notification("notime-1", 100);
+        let upsert = coaching
+            .upsert_request_created_notification(&data)
+            .await
+            .expect("upsert");
+        let request_id = i32::try_from(upsert.local_request_id).expect("request id fits i32");
+        sqlx::query(
+            r#"
+            UPDATE coaching.requests
+               SET status = 'analyzed',
+                   message_id = $1,
+                   channel_id = $2,
+                   updated_at = now()
+             WHERE bot_request_id = $3
+            "#,
+        )
+        .bind(8804_i64)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .bind(request_id)
+        .execute(db.pool())
+        .await
+        .expect("mark request analyzed");
+        let other_coach = 222_u64;
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((other_coach, vec![COACH_ROLE_ID]));
+        let handler = CoachingHandler {
+            coaching: coaching.clone(),
+        };
+
+        let added = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            added.content.as_deref(),
+            Some(
+                "Du stehst als keine Zeit auf der Anfrage. Andere sehen das, die Anfrage bleibt offen."
+            )
+        );
+        assert_eq!(opt_out_count(&db, request_id).await, 1);
+        let body = last_request_edit(&port);
+        let text = container_text(&body);
+        assert!(text.contains("⏸️ **Keine Zeit** <@12345>"), "{text}");
+        assert!(text.contains("🟢 offen für alle Coaches"), "{text}");
+        let serialized = serde_json::to_string(&body).expect("edit serialisiert");
+        assert!(serialized.contains(&format!("coach_notime_{request_id}")));
+        assert!(serialized.contains("Auf der Website öffnen"));
+
+        let second = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: other_coach,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            second.content.as_deref(),
+            Some(
+                "Du stehst als keine Zeit auf der Anfrage. Andere sehen das, die Anfrage bleibt offen."
+            )
+        );
+        let text = container_text(&last_request_edit(&port));
+        assert!(text.contains("<@12345>"), "{text}");
+        assert!(text.contains("<@222>"), "{text}");
+
+        let removed = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: other_coach,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            removed.content.as_deref(),
+            Some("Du stehst nicht mehr als keine Zeit auf der Anfrage.")
+        );
+        assert_eq!(opt_out_count(&db, request_id).await, 1);
+        let text = container_text(&last_request_edit(&port));
+        assert!(text.contains("<@12345>"), "{text}");
+        assert!(!text.contains("<@222>"), "{text}");
+
+        let stranger = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: 999,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            stranger.content.as_deref(),
+            Some("❌ Nur Coaches können eine Anfrage abgeben.")
+        );
+        assert_eq!(opt_out_count(&db, request_id).await, 1);
+
+        let claimed = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_claim_{request_id}"),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert!(
+            claimed
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("✅ Session mit "),
+            "{:?}",
+            claimed.content
+        );
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("status");
+        assert_eq!(status, "matched");
+
+        let closed = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            closed.content.as_deref(),
+            Some("ℹ️ Diese Anfrage ist nicht mehr offen.")
+        );
+        assert_eq!(opt_out_count(&db, request_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn keine_zeit_des_reservierten_coaches_gibt_die_anfrage_frei() {
+        let (db, port, coaching) = test_coaching().await;
+        let data = notification("notime-reserved", 101);
+        let upsert = coaching
+            .upsert_request_created_notification(&data)
+            .await
+            .expect("upsert");
+        let request_id = i32::try_from(upsert.local_request_id).expect("request id fits i32");
+        let reserved_until = chrono::Utc::now() + chrono::Duration::hours(2);
+        sqlx::query(
+            r#"
+            UPDATE coaching.requests
+               SET status = 'analyzed',
+                   message_id = $1,
+                   channel_id = $2,
+                   assigned_coach_id = '12345',
+                   reserved_until = $3,
+                   updated_at = now()
+             WHERE bot_request_id = $4
+            "#,
+        )
+        .bind(8805_i64)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .bind(reserved_until)
+        .bind(request_id)
+        .execute(db.pool())
+        .await
+        .expect("reserve request");
+        let other_coach = 222_u64;
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((other_coach, vec![COACH_ROLE_ID]));
+        let handler = CoachingHandler { coaching };
+
+        let other = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: other_coach,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            other.content.as_deref(),
+            Some(
+                "Du stehst als keine Zeit auf der Anfrage. Andere sehen das, die Anfrage bleibt offen."
+            )
+        );
+        let text = container_text(&last_request_edit(&port));
+        assert!(text.contains("🎯 reserviert"), "{text}");
+        assert!(text.contains("**Reserviert für** <@12345>"), "{text}");
+        assert!(text.contains("<@222>"), "{text}");
+        let still_assigned = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT assigned_coach_id FROM coaching.requests WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("assigned coach");
+        assert_eq!(still_assigned.as_deref(), Some("12345"));
+
+        let released = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_notime_{request_id}"),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            released.content.as_deref(),
+            Some(
+                "Du stehst als keine Zeit auf der Anfrage. Die Reservierung ist aufgehoben, andere Coaches können übernehmen."
+            )
+        );
+        let text = container_text(&last_request_edit(&port));
+        assert!(text.contains("🟢 offen für alle Coaches"), "{text}");
+        assert!(text.contains("<@12345>"), "{text}");
+        assert!(text.contains("<@222>"), "{text}");
+        assert!(!text.contains("Reserviert für"), "{text}");
+        let assigned = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT assigned_coach_id FROM coaching.requests WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("assigned coach");
+        assert_eq!(assigned, None);
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("status");
+        assert_eq!(status, "analyzed");
     }
 
     #[tokio::test]
