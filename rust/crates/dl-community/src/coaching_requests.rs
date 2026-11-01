@@ -932,11 +932,18 @@ pub trait CoachingPort: Send + Sync {
     async fn send_dm_embed(&self, user_id: u64, embed: Value) -> bool;
 }
 
+const REQUEST_MESSAGE_LOCKS: usize = 32;
+
+fn request_message_stripe(request_id: i64) -> usize {
+    (request_id.unsigned_abs() % (REQUEST_MESSAGE_LOCKS as u64)) as usize
+}
+
 pub struct CoachingRequests {
     pub pool: PgPool,
     pub port: Arc<dyn CoachingPort>,
     pub ai: Option<Arc<dyn TextGenerator>>,
     pub guild_id: u64,
+    message_locks: [tokio::sync::Mutex<()>; REQUEST_MESSAGE_LOCKS],
     /// Website-Spiegelung der Anfrage-/Session-Zustände (Python
     /// `_mirror_to_website`). `None` = inaktiv (kein interner Token), genau
     /// wie wenn `website_client._token()` leer ist.
@@ -957,6 +964,7 @@ impl CoachingRequests {
             ai,
             guild_id,
             website,
+            message_locks: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
         })
     }
 
@@ -1308,6 +1316,7 @@ impl CoachingRequests {
     }
 
     async fn refresh_open_request_message(&self, request_id: i64) {
+        let _message_guard = self.lock_request_message(request_id).await;
         let Some((request, status, assigned, reserved_until, message_id, _)) =
             self.load_request(request_id).await
         else {
@@ -1662,12 +1671,19 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     }
 
     /// Reservierung aufheben + Nachricht aktualisieren (wie _open_request_to_all).
+    async fn lock_request_message(&self, request_id: i64) -> tokio::sync::MutexGuard<'_, ()> {
+        self.message_locks[request_message_stripe(request_id)]
+            .lock()
+            .await
+    }
+
     pub async fn open_request_to_all(&self, request_id: i64, reason: &str) {
         let now = chrono::Utc::now();
         let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") else {
             return;
         };
-        let _ = sqlx::query!(
+        let _message_guard = self.lock_request_message(request_id).await;
+        let updated = sqlx::query!(
             r#"
             UPDATE coaching.requests
                SET assigned_coach_id = NULL,
@@ -1679,7 +1695,12 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             request_id_i32,
         )
         .execute(&self.pool)
-        .await;
+        .await
+        .map(|result| result.rows_affected())
+        .unwrap_or(0);
+        if updated == 0 {
+            return;
+        }
         let Some((request, status, _, _, message_id, _)) = self.load_request(request_id).await
         else {
             return;
@@ -1736,6 +1757,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         status_line: &str,
         accent: u64,
     ) {
+        let _message_guard = self.lock_request_message(request_id).await;
         let Some((request, _, _, _, message_id, _)) = self.load_request(request_id).await else {
             return;
         };
@@ -2821,6 +2843,7 @@ impl InteractionHandler for CoachingHandler {
                 )
                 .await;
             if let Some(message_id) = message_id {
+                let _message_guard = c.lock_request_message(request_id).await;
                 let body = request_edit_body_v2(
                     &request,
                     &RequestView {
@@ -3725,6 +3748,9 @@ mod pg_tests {
         request_messages: Mutex<Vec<RequestMessageCall>>,
         request_edits: Mutex<Vec<RequestMessageEdit>>,
         request_edit_notify: tokio::sync::Notify,
+        block_next_edit: std::sync::atomic::AtomicBool,
+        edit_arrived: tokio::sync::Notify,
+        edit_release: tokio::sync::Notify,
         role_ids: Mutex<Vec<(u64, Vec<u64>)>>,
         channel_texts: Mutex<Vec<(u64, String)>>,
         dm_texts: Mutex<Vec<(u64, String)>>,
@@ -3801,6 +3827,13 @@ mod pg_tests {
             body: Map<String, Value>,
             _files: Vec<RequestAttachment>,
         ) {
+            if self
+                .block_next_edit
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.edit_arrived.notify_one();
+                self.edit_release.notified().await;
+            }
             self.request_edits
                 .lock()
                 .expect("request_edits lock")
@@ -5642,6 +5675,127 @@ mod pg_tests {
         .await
         .expect("status");
         assert_eq!(status, "analyzed");
+    }
+
+    #[tokio::test]
+    async fn opt_out_verschwindet_mit_der_anfrage_und_klebt_nicht_an_der_naechsten_id() {
+        let (db, _port, coaching) = test_coaching().await;
+        let first = coaching
+            .upsert_request_created_notification(&notification("reuse-1", 100))
+            .await
+            .expect("first request");
+        let first_id = i32::try_from(first.local_request_id).expect("request id fits i32");
+        sqlx::query(
+            "INSERT INTO coaching.request_opt_outs(bot_request_id, coach_discord_id, created_at)
+             VALUES ($1, 12345, now())",
+        )
+        .bind(first_id)
+        .execute(db.pool())
+        .await
+        .expect("opt-out");
+        sqlx::query("DELETE FROM coaching.requests WHERE bot_request_id = $1")
+            .bind(first_id)
+            .execute(db.pool())
+            .await
+            .expect("delete request");
+        assert_eq!(opt_out_count(&db, first_id).await, 0);
+
+        let second = coaching
+            .upsert_request_created_notification(&notification("reuse-2", 101))
+            .await
+            .expect("second request");
+        let second_id = i32::try_from(second.local_request_id).expect("request id fits i32");
+        assert_eq!(second_id, first_id);
+        assert_eq!(opt_out_count(&db, second_id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn offene_karte_ueberschreibt_den_claim_nicht() {
+        let (db, port, coaching) = test_coaching().await;
+        let upsert = coaching
+            .upsert_request_created_notification(&notification("lock-1", 100))
+            .await
+            .expect("upsert");
+        let request_id = i32::try_from(upsert.local_request_id).expect("request id fits i32");
+        sqlx::query(
+            r#"
+            UPDATE coaching.requests
+               SET status = 'analyzed',
+                   message_id = $1,
+                   channel_id = $2,
+                   updated_at = now()
+             WHERE bot_request_id = $3
+            "#,
+        )
+        .bind(8810_i64)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .bind(request_id)
+        .execute(db.pool())
+        .await
+        .expect("mark request analyzed");
+        port.block_next_edit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let arrived = port.edit_arrived.notified();
+        tokio::pin!(arrived);
+        let opt_out = CoachingHandler {
+            coaching: coaching.clone(),
+        };
+        let claim = CoachingHandler { coaching };
+        let opt_out_task = tokio::spawn(async move {
+            opt_out
+                .handle(BridgeInteraction {
+                    custom_id: format!("coach_notime_{request_id}"),
+                    user_id: 12345,
+                    guild_id: 1,
+                    channel_id: 500,
+                    ..BridgeInteraction::default()
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+            .await
+            .expect("open card edit reached");
+        let claim_task = tokio::spawn(async move {
+            claim
+                .handle(BridgeInteraction {
+                    custom_id: format!("coach_claim_{request_id}"),
+                    user_id: 12345,
+                    guild_id: 1,
+                    channel_id: 500,
+                    ..BridgeInteraction::default()
+                })
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            port.request_edits
+                .lock()
+                .expect("request_edits lock")
+                .is_empty(),
+            "claim edited while the open card edit was still in progress"
+        );
+        port.edit_release.notify_one();
+        let opt_out_reply = opt_out_task.await.expect("opt-out task");
+        let claim_reply = claim_task.await.expect("claim task");
+        assert_eq!(
+            opt_out_reply.content.as_deref(),
+            Some(
+                "Du stehst als keine Zeit auf der Anfrage. Andere sehen das, die Anfrage bleibt offen."
+            )
+        );
+        assert!(
+            claim_reply
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("✅ Session mit "),
+            "{claim_reply:?}"
+        );
+        let edits = port.request_edits.lock().expect("request_edits lock");
+        assert_eq!(edits.len(), 2);
+        let last = container_text(&edits[1].body);
+        assert!(last.contains("geclaimt"), "{last}");
+        assert!(!last.contains("Keine Zeit"), "{last}");
     }
 
     #[tokio::test]

@@ -818,6 +818,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "coaching_request_opt_outs",
+        "coach_discord_id",
+        "coaching.request_opt_outs",
+        "coach_discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "coaching_requests",
         "discord_user_id",
         "coaching.requests",
@@ -4945,6 +4952,15 @@ mod privacy_contract_tests {
     }
 
     #[test]
+    fn coaching_opt_out_ist_im_privacy_vertrag() {
+        assert!(USER_TABLES.iter().any(|spec| {
+            spec.relation == "coaching.request_opt_outs"
+                && spec.col == "coach_discord_id"
+                && spec.col_type == ColumnType::I64
+        }));
+    }
+
+    #[test]
     fn alle_migration_user_id_spalten_sind_im_privacy_vertrag() {
         let schema_tables = migration_user_id_columns();
         let privacy_tables = privacy_user_table_columns();
@@ -5051,6 +5067,69 @@ mod tests {
 
     async fn mk_db() -> TestDb {
         test_pool().await.expect("test_pool")
+    }
+
+    #[tokio::test]
+    async fn coaching_opt_out_wird_exportiert_und_mit_dem_coach_geloescht() {
+        let db = mk_db().await;
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42), (99)")
+            .execute(db.pool())
+            .await
+            .expect("users");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, current_problems, status,
+                created_at, updated_at
+            ) VALUES (
+                'opt-out-privacy', 77, 'opt-out-privacy-web', 99,
+                'Keep', 'Phantom', 'III', 'problem', 'analyzed', now(), now()
+            )
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("request");
+        sqlx::query(
+            "INSERT INTO coaching.request_opt_outs(bot_request_id, coach_discord_id, created_at)
+             VALUES (77, 42, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("opt-out");
+
+        let exported = export_user_data(db.pool(), 42, 1_700_000_000)
+            .await
+            .expect("export");
+        let rows = exported["tables"]["coaching_request_opt_outs.coach_discord_id"]
+            .as_array()
+            .expect("opt-out export");
+        assert_eq!(rows.len(), 1);
+
+        let summary = delete_user_data(db.pool(), 42, "test".into(), 1_700_000_000)
+            .await
+            .expect("delete");
+        assert_eq!(
+            summary
+                .counts
+                .get("coaching_request_opt_outs.coach_discord_id")
+                .copied(),
+            Some(1)
+        );
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM coaching.request_opt_outs WHERE coach_discord_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("opt-out count");
+        assert_eq!(left, 0);
+        let request_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM coaching.requests WHERE bot_request_id = 77")
+                .fetch_one(db.pool())
+                .await
+                .expect("request count");
+        assert_eq!(request_left, 1);
     }
 
     fn privacy_viewer_row(twitch_user_id: &str) -> dl_central_db::community_points::ViewerDailyRow {
