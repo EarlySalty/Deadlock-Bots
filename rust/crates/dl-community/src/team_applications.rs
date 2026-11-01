@@ -119,9 +119,9 @@ impl Default for PanelText {
     fn default() -> Self {
         Self {
             title: "🤝 Werde Teil unseres Teams".to_string(),
-            intro: "Du möchtest die Deutsche Deadlock Community mitgestalten? Wähle den Bereich, der zu dir passt, und erzähl uns kurz, wie du dich einbringen möchtest. Erfahrung ist hilfreich, aber kein Muss — wichtiger sind Verlässlichkeit, ein respektvoller Umgang und Lust, gemeinsam etwas aufzubauen.".to_string(),
+            intro: "Du möchtest die Deutsche Deadlock Community mitgestalten? Wähle den Bereich, der zu dir passt, und erzähl uns kurz, wie du dich einbringen möchtest. Erfahrung ist hilfreich, aber kein Muss; wichtiger sind Verlässlichkeit, ein respektvoller Umgang und Lust, gemeinsam etwas aufzubauen.".to_string(),
             process: "Deine Bewerbung landet ausschließlich im internen Moderationsbereich. Wir lesen jede Bewerbung und melden uns per Discord-DM bei dir. Bitte teile keine sensiblen oder privaten Daten.".to_string(),
-            footer: "Du findest dich in keinem Bereich wieder? Nutze „Eigene Idee“ — gute Ideen müssen nicht in eine Schublade passen.".to_string(),
+            footer: "Du findest dich in keinem Bereich wieder? Nutze „Eigene Idee“: gute Ideen müssen nicht in eine Schublade passen.".to_string(),
         }
     }
 }
