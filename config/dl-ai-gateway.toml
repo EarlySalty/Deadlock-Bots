@@ -25,3 +25,13 @@ attempts = 4
 retry_backoff_ms = 2000
 deadline_ms = 240000
 fallback = []
+
+[slots.brain_bot_task]
+provider = "claude_plan"
+model = "claude-haiku-5-5"
+timeout_ms = 180000
+max_tokens = 16384
+attempts = 4
+retry_backoff_ms = 2000
+deadline_ms = 240000
+fallback = []
