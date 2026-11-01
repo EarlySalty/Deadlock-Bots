@@ -140,14 +140,18 @@ impl VoiceChangeHintResponder {
             },
         };
         let text = match self.brain.converse(&request).await {
-            Ok(ConversationReply::Answered(text))
-                if crate::answer_support::fits_discord_content(&text) =>
-            {
-                text
-            }
-            Ok(_) => {
-                self.release_user_reply(event.author_id);
-                return;
+            Ok(reply) => {
+                let content = match reply {
+                    ConversationReply::Answered(text) => {
+                        crate::answer_support::discord_content(&text, "voice_hint")
+                    }
+                    ConversationReply::Silent => None,
+                };
+                let Some(content) = content else {
+                    self.release_user_reply(event.author_id);
+                    return;
+                };
+                content
             }
             Err(err) => {
                 tracing::debug!(

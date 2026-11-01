@@ -39,6 +39,7 @@ pub struct PassiveHelpResponder {
     port: Arc<dyn VoiceHintReplyPort>,
     state: Mutex<State>,
     admission: tokio::sync::Semaphore,
+    timeout: Duration,
 }
 
 impl PassiveHelpResponder {
@@ -47,6 +48,7 @@ impl PassiveHelpResponder {
         command_prefix: String,
         brain: Arc<dyn AiAnswerer>,
         port: Arc<dyn VoiceHintReplyPort>,
+        timeout: Duration,
     ) -> Self {
         Self {
             channel_id,
@@ -55,6 +57,7 @@ impl PassiveHelpResponder {
             port,
             state: Mutex::new(State::default()),
             admission: tokio::sync::Semaphore::new(1),
+            timeout,
         }
     }
 
@@ -156,8 +159,7 @@ impl PassiveHelpResponder {
                 recent_messages,
             },
         };
-        let result =
-            tokio::time::timeout(Duration::from_secs(55), self.brain.converse(&request)).await;
+        let result = tokio::time::timeout(self.timeout, self.brain.converse(&request)).await;
         let text = match result {
             Ok(Ok(ConversationReply::Answered(text)))
                 if !text.trim().is_empty()
@@ -346,7 +348,13 @@ mod tests {
     fn responder(brain: Arc<ScriptedBrain>) -> (PassiveHelpResponder, Arc<Port>) {
         let port = Arc::new(Port::default());
         (
-            PassiveHelpResponder::new(123, "!".into(), brain, port.clone()),
+            PassiveHelpResponder::new(
+                123,
+                "!".into(),
+                brain,
+                port.clone(),
+                Duration::from_secs(55),
+            ),
             port,
         )
     }

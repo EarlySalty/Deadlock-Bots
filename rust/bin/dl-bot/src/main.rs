@@ -1815,6 +1815,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 operating_value("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
                 community_brain.clone(),
                 adapter.clone(),
+                std::time::Duration::from_secs(operating.concierge.timeout_seconds),
             ));
             let _passive_help = dl_community::passive_help::spawn(responder, &dispatcher);
             tracing::info!(

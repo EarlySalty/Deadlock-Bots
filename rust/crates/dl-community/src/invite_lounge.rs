@@ -445,15 +445,17 @@ impl InviteLoungeWatcher {
             },
         };
         match self.brain.converse(&request).await {
-            Ok(dl_brain::ConversationReply::Answered(text))
-                if crate::answer_support::fits_discord_content(&text) =>
-            {
-                self.port
-                    .reply_text(event.channel_id, event.message_id, &text)
-                    .await
-                    .map(|_| ())
+            Ok(dl_brain::ConversationReply::Answered(text)) => {
+                match crate::answer_support::discord_content(&text, "invite_lounge") {
+                    Some(content) => self
+                        .port
+                        .reply_text(event.channel_id, event.message_id, &content)
+                        .await
+                        .map(|_| ()),
+                    None => Ok(()),
+                }
             }
-            Ok(_) => Ok(()),
+            Ok(dl_brain::ConversationReply::Silent) => Ok(()),
             Err(error) => {
                 tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge: Brain-Hinweis fehlgeschlagen");
                 Ok(())

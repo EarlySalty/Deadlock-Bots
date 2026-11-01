@@ -6567,12 +6567,6 @@ impl Concierge {
         now: DateTime<Utc>,
     ) -> CommunityDbResult<Option<(String, SteckbriefRoute)>> {
         let _stateful_turn = acquire_stateful_support_turn().await;
-        // Erste Transaktion: nur lesen. Sie endet vor dem LLM-Aufruf, denn
-        // begin_privacy_action haelt ein Row-Lock auf user_privacy. Bliebe sie
-        // ueber den Aufruf offen, haengt jeder parallele Loeschauftrag oder
-        // Opt-out desselben Nutzers bis zum Zeitlimit, und Migrationen mit
-        // lock_timeout = 2s brechen ab. Gespeichert wird unten in einer zweiten
-        // Transaktion, die den Zugang erneut prueft.
         let Some((db_user_id, mut tx)) = self.store.begin_privacy_action(user_id).await? else {
             return Ok(None);
         };
@@ -6591,10 +6585,6 @@ impl Concierge {
             route.channel_id(),
             "concierge_profiles.pending_steckbrief_channel_id",
         )?;
-        // Zweite Transaktion, kurz und ohne Netzaufruf darin. Der Zugang wird
-        // erneut geprueft: wer waehrend des LLM-Aufrufs geloescht oder
-        // widersprochen hat, bekommt hier kein Lock mehr und nichts wird
-        // gespeichert.
         let Some((db_user_id_jetzt, mut tx)) = self.store.begin_privacy_action(user_id).await?
         else {
             return Ok(None);
@@ -9027,9 +9017,6 @@ mod tests {
         Arc::new(MockConciergePort::default())
     }
 
-    /// Bewusst ohne `cfg(feature = "testing")`: der Geduldshinweis-Test braucht
-    /// keine Datenbank und soll deshalb auch im Lauf ohne das Feature
-    /// mitlaufen.
     fn block_next_port_call(
         port: &MockConciergePort,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
@@ -9830,8 +9817,6 @@ mod tests {
 
     #[tokio::test]
     async fn brain_plus_belegte_wissensantwort_wird_weiter_geliefert() {
-        // Exaktes !brain vor einer belegten Frage: der Wissenspfad bleibt der einzige Faktenpfad
-        // und liefert die belegte Antwort. Das Brain wird nicht gefragt.
         let port = mock_port();
         let config = fast_knowledge_config();
         let (brain, _requests, handle) = knowledge_server(
@@ -11019,9 +11004,6 @@ mod tests {
 
     #[tokio::test]
     async fn stopp_mit_satzzeichen_ohne_persistenz_meldet_fehler_statt_optout() {
-        // "Stopp!" ist ein echtes Opt-out und geht sofort in den Opt-out-Pfad, kein Cooldown-,
-        // Wissens- oder LLM-Pfad. Der Test-Pool ist unerreichbar: fail-closed meldet ehrlich den
-        // Persistenzfehler und bestätigt gerade KEIN Opt-out.
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(lazy_pool(), port.clone(), test_config(true, &[]));
 

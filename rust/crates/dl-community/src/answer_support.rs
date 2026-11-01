@@ -148,8 +148,96 @@ mod tests {
     }
 }
 
-pub(crate) fn fits_discord_content(text: &str) -> bool {
-    !text.trim().is_empty() && text.encode_utf16().count() <= 2000
+fn discord_units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn longest_fitting_prefix(text: &str) -> &str {
+    let mut units = 0;
+    for (index, character) in text.char_indices() {
+        units += character.len_utf16();
+        if units > dl_brain::DISCORD_MESSAGE_LIMIT {
+            return &text[..index];
+        }
+    }
+    text
+}
+
+fn sentence_end(prefix: &str, rest: &str) -> Option<usize> {
+    let mut end = None;
+    for (index, character) in prefix.char_indices() {
+        let after = index + character.len_utf8();
+        let followed_by_break = prefix[after..]
+            .chars()
+            .next()
+            .or_else(|| rest.chars().next())
+            .is_none_or(char::is_whitespace);
+        if matches!(character, '.' | '!' | '?') && followed_by_break {
+            end = Some(after);
+        }
+    }
+    end
+}
+
+fn truncated_for_discord(text: &str) -> &str {
+    let prefix = longest_fitting_prefix(text);
+    let end = sentence_end(prefix, &text[prefix.len()..])
+        .or_else(|| prefix.rfind(char::is_whitespace))
+        .filter(|end| !prefix[..*end].trim().is_empty())
+        .unwrap_or(prefix.len());
+    prefix[..end].trim_end()
+}
+
+pub(crate) fn discord_content(text: &str, source: &'static str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if discord_units(text) <= dl_brain::DISCORD_MESSAGE_LIMIT {
+        return Some(text.to_owned());
+    }
+    let truncated = truncated_for_discord(text);
+    tracing::warn!(
+        source,
+        original_units = discord_units(text),
+        kept_units = discord_units(truncated),
+        "Brain-Antwort auf das Discord-Limit gekürzt"
+    );
+    Some(truncated.to_owned())
+}
+
+#[cfg(test)]
+mod discord_content_tests {
+    use super::discord_content;
+
+    #[test]
+    fn lange_antwort_endet_am_letzten_satz_innerhalb_des_limits() {
+        let text = format!("{} Zweiter Satz. {}", "a".repeat(1900), "b".repeat(200));
+        let kept = discord_content(&text, "test").expect("Inhalt");
+        assert!(kept.ends_with("Zweiter Satz."));
+        assert!(kept.encode_utf16().count() <= dl_brain::DISCORD_MESSAGE_LIMIT);
+    }
+
+    #[test]
+    fn antwort_ohne_satzende_bleibt_im_limit_und_geht_nicht_verloren() {
+        let kept = discord_content(&"😀".repeat(1500), "test").expect("Inhalt");
+        assert_eq!(kept.encode_utf16().count(), 2000);
+        let words = "wort ".repeat(600);
+        let kept = discord_content(&words, "test").expect("Inhalt");
+        assert!(kept.ends_with("wort"));
+    }
+
+    #[test]
+    fn leere_antwort_bleibt_leer_und_passende_bleibt_unveraendert() {
+        assert_eq!(discord_content("  \n", "test"), None);
+        assert_eq!(discord_content("Hallo.", "test").as_deref(), Some("Hallo."));
+    }
+
+    #[test]
+    fn punkt_in_einer_url_ist_kein_satzende() {
+        let text = format!("Hallo. https://a.example/{}", "x".repeat(2100));
+        assert_eq!(discord_content(&text, "test").as_deref(), Some("Hallo."));
+    }
 }
 
 #[cfg(test)]
