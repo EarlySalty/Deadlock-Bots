@@ -194,11 +194,24 @@ impl DiscordAdapter {
         self.cache().guilds().first().copied()
     }
 
-    /// view_spec → Discord-Komponenten (Action-Row mit einem Button).
+    const STREAMER_PARTNER_BUTTON_LABEL: &str = "Streamer-Partner werden";
+    const STREAMER_PARTNER_URL: &str = "https://deutsche-deadlock-community.de/streamer/";
+
+    fn streamer_partner_button() -> Value {
+        json!({
+            "type": 2,
+            "style": 5,
+            "label": Self::STREAMER_PARTNER_BUTTON_LABEL,
+            "url": Self::STREAMER_PARTNER_URL,
+        })
+    }
+
+    /// view_spec → Discord-Komponenten (Action-Row).
     ///
-    /// twitch_live_tracking baut die custom_id EXAKT wie
-    /// TwitchLiveTrackingView.build_custom_id — der Klick wird vom
-    /// Gateway-Besitzer verarbeitet (Kopplung siehe rust/docs/03-phase2.md).
+    /// Live- und VOD-Buttons bleiben an erster Stelle. Dahinter hängt immer
+    /// der statische Streamer-Partner-Link. twitch_live_tracking baut die
+    /// custom_id EXAKT wie TwitchLiveTrackingView.build_custom_id — der Klick
+    /// wird vom Gateway-Besitzer verarbeitet (Kopplung siehe rust/docs/03-phase2.md).
     fn view_components(spec: &ViewSpec) -> Value {
         match spec {
             ViewSpec::LinkButton { label, url } => json!([{
@@ -208,7 +221,7 @@ impl DiscordAdapter {
                     "style": 5,
                     "label": label,
                     "url": url,
-                }],
+                }, Self::streamer_partner_button()],
             }]),
             ViewSpec::TwitchLiveTracking {
                 streamer_login,
@@ -245,7 +258,7 @@ impl DiscordAdapter {
                         "style": 1,
                         "label": label.chars().take(80).collect::<String>(),
                         "custom_id": format!("twitch-live:{login_part}:{token_part}"),
-                    }],
+                    }, Self::streamer_partner_button()],
                 }])
             }
             ViewSpec::ScamRevoke { verdict_id, .. } => json!([{
@@ -1379,6 +1392,35 @@ mod tests {
     }
 
     #[test]
+    fn view_components_stellt_partner_link_immer_an_zweite_stelle() {
+        let live = DiscordAdapter::view_components(&twitch_tracking_spec());
+        let live_buttons = live[0]["components"].as_array().expect("live buttons");
+        assert_eq!(live_buttons.len(), 2);
+        assert_eq!(live_buttons[0]["style"], 1);
+        assert_eq!(live_buttons[1]["style"], 5);
+        assert_eq!(
+            live_buttons[1]["label"],
+            DiscordAdapter::STREAMER_PARTNER_BUTTON_LABEL
+        );
+        assert_eq!(live_buttons[1]["url"], DiscordAdapter::STREAMER_PARTNER_URL);
+
+        let vod = DiscordAdapter::view_components(&ViewSpec::LinkButton {
+            label: "VOD anschauen".to_string(),
+            url: "https://www.twitch.tv/videos/1".to_string(),
+        });
+        let vod_buttons = vod[0]["components"].as_array().expect("vod buttons");
+        assert_eq!(vod_buttons.len(), 2);
+        assert_eq!(vod_buttons[0]["label"], "VOD anschauen");
+        assert_eq!(vod_buttons[0]["url"], "https://www.twitch.tv/videos/1");
+        assert_eq!(vod_buttons[0]["style"], 5);
+        assert_eq!(
+            vod_buttons[1]["label"],
+            DiscordAdapter::STREAMER_PARTNER_BUTTON_LABEL
+        );
+        assert_eq!(vod_buttons[1]["url"], DiscordAdapter::STREAMER_PARTNER_URL);
+    }
+
+    #[test]
     fn view_components_rendern_scam_revoke_button_wie_python() {
         let spec = ViewSpec::ScamRevoke {
             verdict_id: 42,
@@ -1448,6 +1490,11 @@ mod tests {
                     "style": 1,
                     "label": "Auf Twitch ansehen",
                     "custom_id": "twitch-live:deadlocktv:token-123",
+                }, {
+                    "type": 2,
+                    "style": 5,
+                    "label": DiscordAdapter::STREAMER_PARTNER_BUTTON_LABEL,
+                    "url": DiscordAdapter::STREAMER_PARTNER_URL,
                 }],
             })
         );
@@ -1485,6 +1532,11 @@ mod tests {
                         "style": 1,
                         "label": "Auf Twitch ansehen",
                         "custom_id": "twitch-live:deadlocktv:token-123",
+                    }, {
+                        "type": 2,
+                        "style": 5,
+                        "label": DiscordAdapter::STREAMER_PARTNER_BUTTON_LABEL,
+                        "url": DiscordAdapter::STREAMER_PARTNER_URL,
                     }],
                 }],
             })
