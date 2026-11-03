@@ -91,6 +91,9 @@ pub fn wire_request(request: &ToolChatRequest, target: &CallTarget) -> Value {
     if !request.tools.is_empty() {
         body["tools"] = json!(request.tools);
     }
+    if let Some(schema) = &request.output_schema {
+        body["output_config"] = json!({"format": {"type": "json_schema", "schema": schema}});
+    }
     body
 }
 
@@ -256,6 +259,31 @@ mod tests {
         );
     }
 
+    fn plain_request(output_schema: Option<Value>) -> ToolChatRequest {
+        ToolChatRequest {
+            system: "sys".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: None,
+            output_schema,
+        }
+    }
+
+    #[test]
+    fn wire_request_adds_output_config_only_when_schema_is_set() {
+        let target = CallTarget {
+            model: "m".into(),
+            max_tokens: 7,
+        };
+        let schema = json!({"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"], "additionalProperties": false});
+        let body = wire_request(&plain_request(Some(schema.clone())), &target);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["output_config"]["format"]["schema"], schema);
+        assert_eq!(body["system"], "sys");
+        let plain = wire_request(&plain_request(None), &target);
+        assert!(plain.get("output_config").is_none());
+    }
+
     #[test]
     fn api_key_backend_sends_key_and_version_headers() {
         let backend = AnthropicHttpBackend::with_api_key(
@@ -270,6 +298,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             max_tokens: None,
+            output_schema: None,
         };
         let target = CallTarget {
             model: "m".into(),
@@ -299,6 +328,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             max_tokens: None,
+            output_schema: None,
         };
         let target = CallTarget {
             model: "m".into(),

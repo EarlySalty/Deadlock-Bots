@@ -459,6 +459,7 @@ mod tests {
             }],
             tools: Vec::new(),
             max_tokens,
+            output_schema: None,
         }
     }
 

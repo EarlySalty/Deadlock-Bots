@@ -126,6 +126,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }],
             max_tokens: None,
+            output_schema: None,
         };
         let response = backend
             .complete(

@@ -268,6 +268,7 @@ mod tests {
             }],
             tools: Vec::new(),
             max_tokens: None,
+            output_schema: None,
         };
         let rendered = prompt(&single).expect("prompt");
         assert_eq!(rendered.user, "hi");

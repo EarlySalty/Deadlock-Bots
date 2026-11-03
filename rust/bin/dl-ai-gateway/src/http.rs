@@ -31,6 +31,8 @@ struct WireRequest {
     stream: bool,
     #[serde(default)]
     slot: Option<String>,
+    #[serde(default)]
+    output_schema: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +120,7 @@ fn into_request(wire: WireRequest) -> Result<ToolChatRequest, &'static str> {
         messages: wire.messages,
         tools,
         max_tokens: wire.max_tokens,
+        output_schema: wire.output_schema,
     })
 }
 
@@ -394,6 +397,22 @@ mod tests {
         assert_eq!(seen[0].system, "sys");
         assert_eq!(seen[0].max_tokens, Some(50));
         assert_eq!(seen[0].tools.len(), 1);
+        assert_eq!(seen[0].output_schema, None);
+    }
+
+    #[tokio::test]
+    async fn output_schema_is_optional_and_forwarded_when_present() {
+        let (app, backend) = test_app();
+        let schema = json!({"type": "object", "required": ["answer"]});
+        let (status, _, _) = post(
+            &app,
+            Some("brain_answer"),
+            json!({"max_tokens": 5, "messages": [{"role": "user", "content": "q"}], "output_schema": schema}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let seen = backend.seen.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen[0].output_schema, Some(schema));
     }
 
     #[tokio::test]

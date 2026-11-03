@@ -374,6 +374,7 @@ mod tests {
             }],
             tools: Vec::new(),
             max_tokens: None,
+            output_schema: None,
         };
         let response = backend
             .complete(
