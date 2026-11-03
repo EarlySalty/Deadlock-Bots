@@ -28,6 +28,8 @@ pub use types::{
 
 use crate::{ChatProvider, OpenAiChatProvider, RetryConfig};
 
+const ANTHROPIC_API_BASE_URL: &str = "https://api.anthropic.com/v1";
+
 fn retry(timeout_ms: Option<u64>) -> RetryConfig {
     RetryConfig {
         request_timeout: Duration::from_millis(timeout_ms.unwrap_or(60_000)),
@@ -63,6 +65,27 @@ fn backend(
                 .ok_or_else(|| missing("base_url"))?,
             Duration::from_millis(provider.request_timeout_ms.unwrap_or(60_000)),
         )),
+        ProviderKind::AnthropicApi => {
+            let key_name = provider
+                .api_key_env
+                .as_deref()
+                .ok_or_else(|| missing("api_key_env"))?;
+            let key = lookup(key_name)
+                .filter(|key| !key.trim().is_empty())
+                .ok_or_else(|| missing("its API key in the environment"))?;
+            Arc::new(AnthropicHttpBackend::with_api_key(
+                provider
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(ANTHROPIC_API_BASE_URL),
+                Duration::from_millis(
+                    provider
+                        .request_timeout_ms
+                        .ok_or_else(|| missing("request_timeout_ms"))?,
+                ),
+                &key,
+            )?)
+        }
         ProviderKind::Fireworks => {
             let chat =
                 OpenAiChatProvider::from_fireworks_env(lookup, retry(provider.request_timeout_ms))

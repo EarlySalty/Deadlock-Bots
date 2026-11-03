@@ -21,6 +21,7 @@ pub enum ProviderKind {
     CodexPlan,
     Fireworks,
     OpenaiCompatible,
+    AnthropicApi,
 }
 
 impl ProviderKind {
@@ -30,6 +31,7 @@ impl ProviderKind {
             Self::CodexPlan => "codex_plan",
             Self::Fireworks => "fireworks",
             Self::OpenaiCompatible => "openai_compatible",
+            Self::AnthropicApi => "anthropic_api",
         }
     }
 }
@@ -231,6 +233,14 @@ impl ProviderConfig {
                     return missing("request_timeout_ms");
                 }
             }
+            ProviderKind::AnthropicApi => {
+                if self.api_key_env.is_none() {
+                    return missing("api_key_env");
+                }
+                if self.request_timeout_ms.is_none() {
+                    return missing("request_timeout_ms");
+                }
+            }
         }
         Ok(())
     }
@@ -315,18 +325,40 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
     }
 
     #[test]
-    fn shipped_gateway_config_keeps_brain_answer_on_haiku_without_fallback() {
+    fn anthropic_api_provider_needs_key_env_and_timeout() {
+        let provider = "\n[providers.anthropic_api]\nkind = \"anthropic_api\"\nconcurrency = 4\nqueue_timeout_ms = 1000\napi_key_env = \"ANTHROPIC_API_KEY\"\nrequest_timeout_ms = 60000\n";
+        let with_api = format!("{SAMPLE}{provider}");
+        assert!(GatewayConfig::parse(&with_api).is_ok());
+        for field in [
+            "api_key_env = \"ANTHROPIC_API_KEY\"\n",
+            "request_timeout_ms = 60000\n",
+        ] {
+            let broken = format!("{SAMPLE}{}", provider.replace(field, ""));
+            assert!(GatewayConfig::parse(&broken).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn shipped_gateway_config_serves_brain_slots_over_api_with_plan_fallback() {
         let shipped = include_str!("../../../../../config/dl-ai-gateway.toml");
         let config = GatewayConfig::parse(shipped).expect("shipped config");
-        let slot = &config.slots["brain_answer"];
-        assert_eq!(
-            config.providers[&slot.provider].kind,
-            ProviderKind::ClaudePlan
-        );
-        assert_eq!(slot.model, "claude-haiku-5-5");
-        assert!(slot.fallback.is_empty());
-        assert!(slot.attempts > 1);
-        assert!(slot.deadline_ms.is_some_and(|ms| ms < 300_000));
-        assert!(slot.retry_backoff_ms > 0);
+        for name in ["brain_answer", "brain_bot_task"] {
+            let slot = &config.slots[name];
+            let targets = config.targets(slot);
+            let kinds: Vec<_> = targets
+                .iter()
+                .map(|target| config.providers[&target.provider].kind)
+                .collect();
+            assert_eq!(
+                kinds,
+                [ProviderKind::AnthropicApi, ProviderKind::ClaudePlan],
+                "{name}"
+            );
+            assert!(
+                targets.iter().all(|t| t.model == "claude-haiku-5-5"),
+                "{name}"
+            );
+            assert!(slot.deadline_ms.is_some_and(|ms| ms < 300_000), "{name}");
+        }
     }
 }

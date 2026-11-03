@@ -16,22 +16,30 @@ queue_timeout_ms = 30000
 base_url = "http://127.0.0.1:18769/v1"
 request_timeout_ms = 120000
 
+[providers.anthropic_api]
+kind = "anthropic_api"
+concurrency = 4
+queue_timeout_ms = 60000
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+request_timeout_ms = 120000
+
 [slots.brain_answer]
-provider = "claude_plan"
+provider = "anthropic_api"
 model = "claude-haiku-5-5"
 timeout_ms = 180000
 max_tokens = 16384
 attempts = 4
 retry_backoff_ms = 2000
 deadline_ms = 240000
-fallback = []
+fallback = [{ provider = "claude_plan", model = "claude-haiku-5-5" }]
 
 [slots.brain_bot_task]
-provider = "claude_plan"
+provider = "anthropic_api"
 model = "claude-haiku-5-5"
 timeout_ms = 180000
 max_tokens = 16384
 attempts = 4
 retry_backoff_ms = 2000
 deadline_ms = 240000
-fallback = []
+fallback = [{ provider = "claude_plan", model = "claude-haiku-5-5" }]

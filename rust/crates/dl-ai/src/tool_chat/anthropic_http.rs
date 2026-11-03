@@ -3,7 +3,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use reqwest::header::HeaderValue;
+
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
+use super::config::ConfigError;
 use super::types::{ContentBlock, StopReason, ToolChatRequest, ToolChatResponse, Usage};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -11,10 +14,22 @@ const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub struct AnthropicHttpBackend {
     http: reqwest::Client,
     messages_url: String,
+    api_key: Option<HeaderValue>,
 }
 
 impl AnthropicHttpBackend {
     pub fn new(base_url: &str, timeout: Duration) -> Self {
+        Self::build(base_url, timeout, None)
+    }
+
+    pub fn with_api_key(base_url: &str, timeout: Duration, key: &str) -> Result<Self, ConfigError> {
+        let mut value = HeaderValue::from_str(key.trim())
+            .map_err(|_| ConfigError::Invalid("API key is not a valid header value".into()))?;
+        value.set_sensitive(true);
+        Ok(Self::build(base_url, timeout, Some(value)))
+    }
+
+    fn build(base_url: &str, timeout: Duration, api_key: Option<HeaderValue>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -23,6 +38,19 @@ impl AnthropicHttpBackend {
         Self {
             http,
             messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
+            api_key,
+        }
+    }
+
+    fn request(&self, request: &ToolChatRequest, target: &CallTarget) -> reqwest::RequestBuilder {
+        let builder = self
+            .http
+            .post(&self.messages_url)
+            .header("anthropic-version", "2023-06-01")
+            .json(&wire_request(request, target));
+        match &self.api_key {
+            Some(key) => builder.header("x-api-key", key.clone()),
+            None => builder,
         }
     }
 }
@@ -78,12 +106,39 @@ pub fn parse_response(body: &Value) -> Result<ToolChatResponse, BackendError> {
     })
 }
 
-fn status_error(status: reqwest::StatusCode) -> BackendError {
+fn status_error(status: reqwest::StatusCode, body: &[u8]) -> BackendError {
     match status.as_u16() {
         429 => BackendError::new(FailureKind::Limit, "http_429"),
+        529 => BackendError::new(FailureKind::Unavailable, "http_529"),
+        400 | 402 | 403 if is_billing_error(body) => {
+            BackendError::new(FailureKind::Limit, "billing")
+        }
         400 | 404 | 413 | 422 => BackendError::new(FailureKind::InvalidRequest, "http_4xx"),
         _ => BackendError::new(FailureKind::Unavailable, "http_status"),
     }
+}
+
+fn is_billing_error(body: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let error = &body["error"];
+    if error["type"].as_str() == Some("billing_error") {
+        return true;
+    }
+    let message = error["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        "credit balance",
+        "billing",
+        "spend limit",
+        "usage limit",
+        "budget",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, BackendError> {
@@ -112,10 +167,7 @@ impl ToolBackend for AnthropicHttpBackend {
         target: &CallTarget,
     ) -> Result<ToolChatResponse, BackendError> {
         let response = self
-            .http
-            .post(&self.messages_url)
-            .header("anthropic-version", "2023-06-01")
-            .json(&wire_request(request, target))
+            .request(request, target)
             .send()
             .await
             .map_err(|error| {
@@ -125,8 +177,10 @@ impl ToolBackend for AnthropicHttpBackend {
                     BackendError::new(FailureKind::Unavailable, "transport")
                 }
             })?;
-        if !response.status().is_success() {
-            return Err(status_error(response.status()));
+        let status = response.status();
+        if !status.is_success() {
+            let body = bounded_body(response).await.unwrap_or_default();
+            return Err(status_error(status, &body));
         }
         let body = bounded_body(response).await?;
         let body: Value = serde_json::from_slice(&body)
@@ -150,13 +204,58 @@ mod tests {
         assert_eq!(parsed.stop_reason, StopReason::ToolUse);
         assert_eq!(parsed.content.len(), 1);
         assert_eq!(parsed.usage.map(|u| u.output_tokens), Some(4));
+    }
+
+    #[test]
+    fn api_failures_that_another_provider_can_serve_allow_fallback() {
+        let billing = br#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+        for (status, body) in [
+            (429, &b""[..]),
+            (529, b""),
+            (500, b""),
+            (503, b""),
+            (401, b""),
+            (400, billing),
+            (400, br#"{"error":{"type":"billing_error","message":"x"}}"#),
+        ] {
+            let status = reqwest::StatusCode::from_u16(status).expect("status");
+            assert!(
+                status_error(status, body).kind.allows_fallback(),
+                "{status}"
+            );
+        }
+        let invalid =
+            br#"{"error":{"type":"invalid_request_error","message":"max_tokens too large"}}"#;
         assert_eq!(
-            status_error(reqwest::StatusCode::TOO_MANY_REQUESTS).kind,
-            FailureKind::Limit
+            status_error(reqwest::StatusCode::BAD_REQUEST, invalid).kind,
+            FailureKind::InvalidRequest
         );
-        assert_eq!(
-            status_error(reqwest::StatusCode::BAD_GATEWAY).kind,
-            FailureKind::Unavailable
-        );
+    }
+
+    #[test]
+    fn api_key_backend_sends_key_and_version_headers() {
+        let backend = AnthropicHttpBackend::with_api_key(
+            "https://api.example/v1/",
+            Duration::from_secs(5),
+            "sk-test",
+        )
+        .expect("backend");
+        let request = ToolChatRequest {
+            system: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: None,
+        };
+        let target = CallTarget {
+            model: "m".into(),
+            max_tokens: 1,
+        };
+        let built = backend.request(&request, &target).build().expect("request");
+        assert_eq!(built.url().as_str(), "https://api.example/v1/messages");
+        assert_eq!(built.headers()["anthropic-version"], "2023-06-01");
+        let key = &built.headers()["x-api-key"];
+        assert_eq!(key, "sk-test");
+        assert!(key.is_sensitive());
+        assert!(!format!("{:?}", built.headers()).contains("sk-test"));
     }
 }
