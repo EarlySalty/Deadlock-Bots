@@ -108,7 +108,12 @@ fn restart() -> Result<()> {
     Ok(())
 }
 
-fn install_gateway_config(source: &Path, gateway: &Path, target: &Path) -> Result<()> {
+fn gateway_config_backup(target: &Path) -> Result<PathBuf> {
+    let directory = target.parent().ok_or("Ungültiger Konfigurationspfad")?;
+    Ok(directory.join(".dl-ai-gateway.toml.previous"))
+}
+
+fn install_gateway_config(source: &Path, gateway: &Path, target: &Path) -> Result<bool> {
     let origin = source.join("config/dl-ai-gateway.toml");
     if !fs::symlink_metadata(&origin)?.is_file() {
         return Err("Die Gateway-Konfiguration im Quellstand fehlt".into());
@@ -136,8 +141,33 @@ fn install_gateway_config(source: &Path, gateway: &Path, target: &Path) -> Resul
         fs::remove_file(&staged)?;
         return Err(error);
     }
+    let backup = gateway_config_backup(target)?;
+    if fs::symlink_metadata(&backup).is_ok() {
+        owned(&backup, false, OWNER_UID)?;
+        fs::remove_file(&backup)?;
+    }
+    let existed = fs::symlink_metadata(target).is_ok();
+    if existed {
+        fs::hard_link(target, &backup)?;
+    }
     fs::rename(&staged, target)?;
+    Ok(existed)
+}
+
+fn restore_gateway_config(existed: bool, target: &Path) -> Result<()> {
+    if existed {
+        fs::rename(gateway_config_backup(target)?, target)?;
+    } else {
+        fs::remove_file(target)?;
+    }
     Ok(())
+}
+
+fn discard_gateway_config_backup(target: &Path) -> Result<()> {
+    match fs::remove_file(gateway_config_backup(target)?) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
 }
 
 struct TemporaryDirectory(PathBuf);
@@ -392,19 +422,21 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 2]) -> Result<(
     if current.canonicalize()? != previous || fs::read_link(&current)? != previous_link {
         return Err("Der Ausgangsrelease hat sich vor dem Wechsel verändert".into());
     }
-    install_gateway_config(
-        &source,
-        &candidate.join("dl-ai-gateway"),
-        Path::new(GATEWAY_CONFIG),
-    )?;
-    activate(&current, &Path::new("releases").join(sha), &switch.0)?;
+    let config = Path::new(GATEWAY_CONFIG);
+    let config_existed = install_gateway_config(&source, &candidate.join("dl-ai-gateway"), config)?;
+    if let Err(error) = activate(&current, &Path::new("releases").join(sha), &switch.0) {
+        restore_gateway_config(config_existed, config)?;
+        return Err(error);
+    }
     if let Err(error) = restart() {
+        restore_gateway_config(config_existed, config)?;
         activate(&current, &previous_link, &switch.0)?;
         if let Err(rollback_error) = restart() {
             eprintln!("Neustart nach Rücknahme fehlgeschlagen: {rollback_error}");
         }
         return Err(error);
     }
+    discard_gateway_config_backup(config)?;
     println!(
         "Discord-Release aktiviert: {sha}; dl-bot SHA256 {}; dl-ai-gateway SHA256 {}",
         artifacts[0].1, artifacts[1].1
@@ -615,6 +647,23 @@ mod tests {
         assert_eq!(fs::read_link(&current)?, PathBuf::from("releases/new"));
         activate(&current, Path::new("releases/old"), &switch)?;
         assert_eq!(fs::read_link(&current)?, PathBuf::from("releases/old"));
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_restores_or_removes_the_gateway_config() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("dl-ai-gateway.toml");
+        fs::write(&target, b"old")?;
+        fs::hard_link(&target, gateway_config_backup(&target)?)?;
+        fs::write(directory.path().join("new"), b"new")?;
+        fs::rename(directory.path().join("new"), &target)?;
+        restore_gateway_config(true, &target)?;
+        assert_eq!(fs::read(&target)?, b"old");
+        assert!(fs::symlink_metadata(gateway_config_backup(&target)?).is_err());
+        discard_gateway_config_backup(&target)?;
+        restore_gateway_config(false, &target)?;
+        assert!(fs::symlink_metadata(&target).is_err());
         Ok(())
     }
 }
