@@ -73,6 +73,19 @@ fn backend(
             let key = lookup(key_name)
                 .filter(|key| !key.trim().is_empty())
                 .ok_or_else(|| missing("its API key in the environment"))?;
+            let workspace_id = provider
+                .workspace_id_env
+                .as_deref()
+                .map(|env| {
+                    lookup(env)
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| {
+                            ConfigError::Invalid(format!(
+                                "provider {name} needs {env} set to the Anthropic workspace id"
+                            ))
+                        })
+                })
+                .transpose()?;
             Arc::new(AnthropicHttpBackend::with_api_key(
                 provider
                     .base_url
@@ -84,6 +97,7 @@ fn backend(
                         .ok_or_else(|| missing("request_timeout_ms"))?,
                 ),
                 &key,
+                workspace_id.as_deref(),
             )?)
         }
         ProviderKind::Fireworks => {

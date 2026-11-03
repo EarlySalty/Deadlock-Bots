@@ -15,21 +15,33 @@ pub struct AnthropicHttpBackend {
     http: reqwest::Client,
     messages_url: String,
     api_key: Option<HeaderValue>,
+    workspace_id: Option<HeaderValue>,
 }
 
 impl AnthropicHttpBackend {
     pub fn new(base_url: &str, timeout: Duration) -> Self {
-        Self::build(base_url, timeout, None)
+        Self::build(base_url, timeout, None, None)
     }
 
-    pub fn with_api_key(base_url: &str, timeout: Duration, key: &str) -> Result<Self, ConfigError> {
-        let mut value = HeaderValue::from_str(key.trim())
-            .map_err(|_| ConfigError::Invalid("API key is not a valid header value".into()))?;
-        value.set_sensitive(true);
-        Ok(Self::build(base_url, timeout, Some(value)))
+    pub fn with_api_key(
+        base_url: &str,
+        timeout: Duration,
+        key: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let api_key = sensitive_header(key, "API key")?;
+        let workspace_id = workspace_id
+            .map(|id| sensitive_header(id, "workspace id"))
+            .transpose()?;
+        Ok(Self::build(base_url, timeout, Some(api_key), workspace_id))
     }
 
-    fn build(base_url: &str, timeout: Duration, api_key: Option<HeaderValue>) -> Self {
+    fn build(
+        base_url: &str,
+        timeout: Duration,
+        api_key: Option<HeaderValue>,
+        workspace_id: Option<HeaderValue>,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -39,6 +51,7 @@ impl AnthropicHttpBackend {
             http,
             messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
             api_key,
+            workspace_id,
         }
     }
 
@@ -48,11 +61,22 @@ impl AnthropicHttpBackend {
             .post(&self.messages_url)
             .header("anthropic-version", "2023-06-01")
             .json(&wire_request(request, target));
-        match &self.api_key {
+        let builder = match &self.api_key {
             Some(key) => builder.header("x-api-key", key.clone()),
+            None => builder,
+        };
+        match &self.workspace_id {
+            Some(id) => builder.header("anthropic-workspace-id", id.clone()),
             None => builder,
         }
     }
+}
+
+fn sensitive_header(value: &str, label: &str) -> Result<HeaderValue, ConfigError> {
+    let mut header = HeaderValue::from_str(value.trim())
+        .map_err(|_| ConfigError::Invalid(format!("{label} is not a valid header value")))?;
+    header.set_sensitive(true);
+    Ok(header)
 }
 
 pub fn wire_request(request: &ToolChatRequest, target: &CallTarget) -> Value {
@@ -238,6 +262,7 @@ mod tests {
             "https://api.example/v1/",
             Duration::from_secs(5),
             "sk-test",
+            None,
         )
         .expect("backend");
         let request = ToolChatRequest {
@@ -257,5 +282,31 @@ mod tests {
         assert_eq!(key, "sk-test");
         assert!(key.is_sensitive());
         assert!(!format!("{:?}", built.headers()).contains("sk-test"));
+        assert!(built.headers().get("anthropic-workspace-id").is_none());
+    }
+
+    #[test]
+    fn api_key_backend_sends_workspace_header_when_configured() {
+        let backend = AnthropicHttpBackend::with_api_key(
+            "https://api.example/v1",
+            Duration::from_secs(5),
+            "sk-test",
+            Some("wrkspc_test"),
+        )
+        .expect("backend");
+        let request = ToolChatRequest {
+            system: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: None,
+        };
+        let target = CallTarget {
+            model: "m".into(),
+            max_tokens: 1,
+        };
+        let built = backend.request(&request, &target).build().expect("request");
+        let workspace = &built.headers()["anthropic-workspace-id"];
+        assert_eq!(workspace, "wrkspc_test");
+        assert!(workspace.is_sensitive());
     }
 }

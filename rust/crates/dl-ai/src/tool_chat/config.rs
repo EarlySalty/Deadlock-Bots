@@ -47,6 +47,7 @@ pub struct ProviderConfig {
     pub max_output_bytes: Option<usize>,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
+    pub workspace_id_env: Option<String>,
     pub request_timeout_ms: Option<u64>,
 }
 
