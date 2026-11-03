@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
     dl_ai::usage::initialize(pool, "dl-ai-gateway").map_err(anyhow::Error::msg)?;
     let router = build_router(
         &config,
-        |key| std::env::var(key).ok(),
+        |key| {
+            dl_core::token_snapshot::value(key)
+                .map(str::to_owned)
+                .or_else(|| std::env::var(key).ok())
+        },
         Arc::new(PostgresLedger),
     )?;
     let listener = tokio::net::TcpListener::bind(config.listen)
