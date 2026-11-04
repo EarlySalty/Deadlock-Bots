@@ -4890,6 +4890,7 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
                 match_request_summaries: Array.isArray(data.match_request_summaries) ? data.match_request_summaries : [],
                 suggested_block: data.suggested_block || null,
                 lagebilder: Array.isArray(data.lagebilder) ? data.lagebilder : [],
+                lagebild_enabled: data.lagebild_enabled !== false,
             };
             scrimDefaults = {
                 templates: Array.isArray(defaults.templates) ? defaults.templates : [],

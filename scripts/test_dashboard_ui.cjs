@@ -119,7 +119,7 @@ function payload(url) {
     if (uri.pathname === '/api/server-stats') return {member_sources:{tracked_joins:3,known_joins:3,bucket_counts:{website:1,twitch:2}}};
     if (uri.pathname === '/api/co-player-network') return {nodes:[{id:ID_A,name:'Philipp <img src=x>'},{id:ID_B,name:'Alex'}],links:[{source:ID_A,target:ID_B,minutes:60,shared_seconds:3600,last_played:'2026-09-07T18:00:00Z'}],meta:{range_days:30,generated_at:'2026-09-08T10:00:00Z'}};
     if (uri.pathname === '/api/scrim-runtime-control') return {mode:'legacy',operational_writer:'dl-bots',epoch:1,updated_at:1788850000};
-    if (uri.pathname === '/api/scrims') return {teams:[{id:1,name:'Erstes Team',members:[]},{id:2,name:'Zweites Team',members:[]}],matches:[{id:12,team_a_id:1,team_b_id:2,status:'planned',lobby_state:'planned',scheduled_at:1788850000}],participants:[],match_request_summaries:[],lagebilder:[]};
+    if (uri.pathname === '/api/scrims') return {teams:[{id:1,name:'Erstes Team',members:[]},{id:2,name:'Zweites Team',members:[]}],matches:[{id:12,team_a_id:1,team_b_id:2,status:'planned',lobby_state:'planned',scheduled_at:1788850000}],participants:[],match_request_summaries:[],lagebilder:[],lagebild_enabled:false};
     if (uri.pathname === '/api/scrims/match-requests/defaults') return {templates:[],presets:[]};
     if (uri.pathname === '/api/reaction-roles') return [];
     if (uri.pathname === '/api/deadlock/heroes') return {heroes:[]};
@@ -181,7 +181,7 @@ async function tab(name) {document.querySelector('.tab-btn[data-tab="'+name+'"]'
 (async()=>{
     await wait(60);
     assert.equal(document.querySelector('.tab-panel.active').dataset.tab,'insights','direct Insights link opens correct tab');
-    assert.equal(document.querySelectorAll('.tab-panel').length,8);
+    assert.equal(document.querySelectorAll('.tab-panel').length,9);
     assert.equal(new Set([...document.querySelectorAll('[id]')].map(x=>x.id)).size,document.querySelectorAll('[id]').length,'all IDs unique');
     assert.equal(document.querySelectorAll('.tab-panel').length,document.querySelectorAll('#dashboard-main > .tab-panel').length,'panels share shell');
     const voiceChartBox=window.getComputedStyle($('voice-hourly-chart').parentElement);
@@ -195,6 +195,7 @@ async function tab(name) {document.querySelector('.tab-btn[data-tab="'+name+'"]'
     assert.ok(!html.includes('member-source-twitch-links'),'unused Twitch links removed');
     assert.ok(!html.includes('d3@'),'removed graph dependency');
     await tab('scrims');
+    assert.equal($('scrim-lagebild-section').hidden,true,'disabled Lagebild hides its section');
     $('scrim-team-a').value='1';$('scrim-team-b').value='2';
     $('scrim-create-form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
     assert.ok(!calls.some(call=>call.method==='POST'),'mutation waits while initial authentication is loading');

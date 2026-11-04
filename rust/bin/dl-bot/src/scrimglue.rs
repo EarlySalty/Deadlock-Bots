@@ -2327,6 +2327,7 @@ async fn handle_result(
             }
             let queue_state = set_result_state_after_attempt(pool, claim.match_id, true).await?;
             if queue_state == ResultQueueState::Finished
+                && matches!(lagebild, LagebildMode::On(_))
                 && !has_match_lagebild_snapshot(pool, claim.match_id).await?
             {
                 generate_lagebilder_after_result(pool, adapter, lagebild, claim.match_id).await;
