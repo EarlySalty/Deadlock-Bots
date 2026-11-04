@@ -51,7 +51,7 @@ pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap
     if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
-    match load_overview(app.pool()).await {
+    match load_overview(app.pool(), app.lagebild_enabled()).await {
         Ok(data) => ok_json(data),
         Err(err) => {
             tracing::error!(%err, "scrims_overview fehlgeschlagen");
@@ -716,6 +716,9 @@ pub async fn scrims_create_lagebild_correction(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    if !app.lagebild_enabled() {
+        return err_text(404, "Scrim-Lagebild ist deaktiviert");
+    }
     let team_id = match parse_path_i32(&team_id, "team_id") {
         Ok(id) => id,
         Err(resp) => return resp,
@@ -1510,13 +1513,17 @@ async fn load_runtime_control(pool: &PgPool) -> DashboardDbResult<Value> {
     }))
 }
 
-async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
+async fn load_overview(pool: &PgPool, lagebild_enabled: bool) -> DashboardDbResult<Value> {
     let participants = load_participants(pool).await?;
     let teams = load_teams(pool).await?;
     let matches = load_matches(pool).await?;
     let match_request_summaries = load_recent_match_request_summaries(pool).await?;
     let suggested_block = load_suggested_block(pool, &teams).await?;
-    let lagebilder = load_lagebilder(pool).await?;
+    let lagebilder = if lagebild_enabled {
+        load_lagebilder(pool).await?
+    } else {
+        Vec::new()
+    };
     Ok(json!({
         "teams": teams,
         "participants": participants,
@@ -1524,6 +1531,7 @@ async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
         "match_request_summaries": match_request_summaries,
         "suggested_block": suggested_block,
         "lagebilder": lagebilder,
+        "lagebild_enabled": lagebild_enabled,
     }))
 }
 

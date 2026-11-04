@@ -19,6 +19,16 @@ const PRIVATE_CHAT_AUTHOR_KIND: &str = "author_name";
 /// Format der Lagebildkarte. Wird die Karte umgebaut, macht eine neue Version
 /// alle alten Snapshots sofort fällig, statt sie eine Woche stehen zu lassen.
 pub const REPORT_VERSION: &str = "5";
+pub const ENABLED_KEY: &str = "DL_SCRIM_LAGEBILD_ENABLED";
+
+pub fn enabled(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    lookup(ENABLED_KEY).is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
 const CHANNEL_HISTORY_LIMIT: usize = 200;
 /// Höchstzahl der Teamkanal-Belege je Karte. Die AI sieht weiterhin alle
 /// gelesenen Nachrichten als Fakten; gespeichert und ausgeliefert wird nur eine

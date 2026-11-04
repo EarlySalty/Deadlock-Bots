@@ -139,6 +139,7 @@ section!(CommunityOptions {
     survey_interval_days: i64 => "SURVEY_PULSE_INTERVAL_DAYS",
     scrim_visible_vcs: bool => "DL_SCRIM_VISIBLE_VCS_ENABLED",
     scrim_category_id: u64 => "DL_SCRIM_VISIBLE_VCS_CATEGORY_ID",
+    scrim_lagebild: bool => "DL_SCRIM_LAGEBILD_ENABLED",
     player_finder: bool => "PLAYER_FINDER_ENABLED",
     lfg_freetext: bool => "DL_LFG_FREITEXT_ENABLED",
     lfg_freetext_channel_id: u64 => "DL_LFG_FREITEXT_CHANNEL_ID",

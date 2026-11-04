@@ -2119,7 +2119,7 @@ details[open] > summary { margin-bottom: 18px; }
             <div id="scrim-teams" class="scrim-team-list" style="margin-top:1rem;"></div>
         </section>
 
-        <section>
+        <section id="scrim-lagebild-section">
             <div class="section-header">
                 <h2>Team-Lagebilder</h2>
             </div>
@@ -4684,6 +4684,10 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     function renderScrimLagebilder() {
         if (!scrimLagebilderContainer) return;
         scrimLagebilderContainer.innerHTML = '';
+        const section = document.getElementById('scrim-lagebild-section');
+        const enabled = scrimData.lagebild_enabled !== false;
+        if (section) section.hidden = !enabled;
+        if (!enabled) return;
         const items = scrimData.lagebilder || [];
         if (!items.length) {
             const empty = document.createElement('div');

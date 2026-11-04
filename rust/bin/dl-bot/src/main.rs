@@ -1341,7 +1341,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
     );
 
+    let scrim_lagebild_enabled = dl_squads::lagebild::enabled(env);
+    if !scrim_lagebild_enabled {
+        tracing::info!("Scrim-Lagebild deaktiviert (DL_SCRIM_LAGEBILD_ENABLED)");
+    }
     let scrim_lagebild_ai = match dl_ai::LlmProviderConfig::from_env(operating_value) {
+        _ if !scrim_lagebild_enabled => None,
         Ok(cfg) => {
             match cfg.build_provider_for_env(dl_ai::LlmUseCase::ScrimLagebild, operating_value) {
                 Ok(provider) => Some(provider),
@@ -1387,39 +1392,41 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tracing::info!(addr = %broker_addr, "Master-Broker gebunden");
     let lagebild_token = env("TURNIER_INTERNAL_API_TOKEN").unwrap_or_default();
     warn_if_lagebild_token_empty(&lagebild_token);
+    let mut broker_app = dl_broker::router(broker.clone())
+        .merge(dl_broker::twitch_invites::router(
+            broker.clone(),
+            twitch_invites.clone(),
+        ))
+        .merge(dl_broker::twitch_links_router(Arc::new(
+            CentralTwitchLinks {
+                pool: central_pool.clone(),
+            },
+        )))
+        .merge(dl_broker::clips::router(
+            broker,
+            Arc::new(modglue::ClipSubmitGlue {
+                clips: clips.clone(),
+            }),
+        ))
+        .merge(turnierglue::publisher_router(
+            turnier_proposals,
+            broker_token,
+        ));
+    if scrim_lagebild_enabled {
+        broker_app = broker_app.merge(scrim_adapter::lagebild_router(
+            scrim_adapter::LagebildApiState {
+                provider: scrim_lagebild_ai.clone(),
+                channel_history: Some(Arc::new(scrim_adapter::DiscordChannelHistory::new(
+                    adapter.as_ref(),
+                ))),
+                token: lagebild_token,
+                pool: central_pool.clone(),
+            },
+        ));
+    }
     let broker_server = axum::serve(
         broker_listener,
-        dl_broker::router(broker.clone())
-            .merge(dl_broker::twitch_invites::router(
-                broker.clone(),
-                twitch_invites.clone(),
-            ))
-            .merge(dl_broker::twitch_links_router(Arc::new(
-                CentralTwitchLinks {
-                    pool: central_pool.clone(),
-                },
-            )))
-            .merge(dl_broker::clips::router(
-                broker,
-                Arc::new(modglue::ClipSubmitGlue {
-                    clips: clips.clone(),
-                }),
-            ))
-            .merge(turnierglue::publisher_router(
-                turnier_proposals,
-                broker_token,
-            ))
-            .merge(scrim_adapter::lagebild_router(
-                scrim_adapter::LagebildApiState {
-                    provider: scrim_lagebild_ai.clone(),
-                    channel_history: Some(Arc::new(scrim_adapter::DiscordChannelHistory::new(
-                        adapter.as_ref(),
-                    ))),
-                    token: lagebild_token,
-                    pool: central_pool.clone(),
-                },
-            ))
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        broker_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
     // Changelog-Empfänger :8899
@@ -1486,6 +1493,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         tempvoice.clone(),
         scrim_voice_config,
         scrim_runtime_gate,
+        scrim_lagebild_enabled,
         scrim_lagebild_ai,
     );
 

@@ -68,6 +68,7 @@ struct Inner {
     lookup: Arc<dyn MemberLookup>,
     names: Arc<dyn NameResolver>,
     ai: Option<Arc<dyn dl_ai::ChatProvider>>,
+    lagebild_enabled: bool,
     /// In-Memory-States des Admin-Logins (≠ DB-gestützte delegierte States).
     login_states: Mutex<HashMap<String, LoginState>>,
     /// Per-IP-Zeitstempel für die Callback-Ratenbegrenzung.
@@ -121,6 +122,17 @@ impl DashboardApp {
         names: Arc<dyn NameResolver>,
         ai: Option<Arc<dyn dl_ai::ChatProvider>>,
     ) -> Result<Self, DashboardDbError> {
+        Self::build(cfg, pool, lookup, names, ai, true).await
+    }
+
+    async fn build(
+        cfg: DashboardConfig,
+        pool: PgPool,
+        lookup: Arc<dyn MemberLookup>,
+        names: Arc<dyn NameResolver>,
+        ai: Option<Arc<dyn dl_ai::ChatProvider>>,
+        lagebild_enabled: bool,
+    ) -> Result<Self, DashboardDbError> {
         let oauth = OAuthClient::new(
             cfg.discord_client_id.clone(),
             cfg.discord_client_secret.clone(),
@@ -141,6 +153,7 @@ impl DashboardApp {
                 lookup,
                 names,
                 ai,
+                lagebild_enabled,
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
                 guild_stats_cache: Mutex::new(None),
@@ -153,8 +166,13 @@ impl DashboardApp {
     pub async fn from_config(cfg: DashboardConfig, pool: PgPool) -> Result<Self, DashboardDbError> {
         let lookup = Arc::new(BrokerMemberLookup::new(cfg.broker_base.clone()));
         let names = Arc::new(BrokerNameResolver::new(cfg.broker_base.clone()));
-        let ai = build_scrim_lagebild_ai();
-        Self::new_with_ai(cfg, pool, lookup, names, ai).await
+        let lagebild_enabled = dl_squads::lagebild::enabled(dl_core::runtime_config::lookup);
+        let ai = if lagebild_enabled {
+            build_scrim_lagebild_ai()
+        } else {
+            None
+        };
+        Self::build(cfg, pool, lookup, names, ai, lagebild_enabled).await
     }
 
     fn cfg(&self) -> &DashboardConfig {
@@ -175,6 +193,10 @@ impl DashboardApp {
 
     pub(crate) fn names(&self) -> &Arc<dyn NameResolver> {
         &self.inner.names
+    }
+
+    pub(crate) fn lagebild_enabled(&self) -> bool {
+        self.inner.lagebild_enabled
     }
 
     pub(crate) fn ai_provider(&self) -> Option<Arc<dyn dl_ai::ChatProvider>> {
@@ -3336,6 +3358,7 @@ mod visual_brain_route_tests {
                 lookup: Arc::new(BrokerMemberLookup::new("http://127.0.0.1:1")),
                 names: Arc::new(BrokerNameResolver::new("http://127.0.0.1:1")),
                 ai: None,
+                lagebild_enabled: true,
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
                 guild_stats_cache: Mutex::new(None),

@@ -381,12 +381,19 @@ impl dl_discord::InteractionHandler for MatchRequestResponseHandler {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LagebildMode<'a> {
+    Off,
+    On(Option<&'a dyn dl_ai::ChatProvider>),
+}
+
 pub fn spawn(
     pool: PgPool,
     adapter: Arc<dl_discord::DiscordAdapter>,
     tempvoice: Arc<dl_voice::tempvoice::TempVoiceEngine>,
     voice_config: ScrimVoiceConfig,
     runtime_gate: ScrimRuntimeGate,
+    lagebild_enabled: bool,
     lagebild_ai: Option<Arc<dyn dl_ai::ChatProvider>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -400,7 +407,11 @@ pub fn spawn(
                 tempvoice.as_ref(),
                 voice_config,
                 &runtime_gate,
-                lagebild_ai.as_deref(),
+                if lagebild_enabled {
+                    LagebildMode::On(lagebild_ai.as_deref())
+                } else {
+                    LagebildMode::Off
+                },
             )
             .await
             {
@@ -416,7 +427,7 @@ async fn process_one_pending(
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     voice_config: ScrimVoiceConfig,
     _runtime_gate: &ScrimRuntimeGate,
-    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+    lagebild: LagebildMode<'_>,
 ) -> anyhow::Result<()> {
     process_one_discord_outbox(pool, adapter).await?;
     let tick_guard = match begin_legacy_operational_tick(pool).await? {
@@ -425,7 +436,7 @@ async fn process_one_pending(
     };
     cleanup_terminal_scrim_voice_channels(pool, tempvoice).await?;
     if let Some(claim) = claim_next_pending_match(pool).await? {
-        handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild_ai, &claim).await?;
+        handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild, &claim).await?;
     }
     if let Some(reminder) = claim_next_pending_match_request_reminder(pool).await? {
         handle_match_request_reminder(pool, adapter, reminder).await?;
@@ -434,9 +445,21 @@ async fn process_one_pending(
     } else if let Some(batch) = claim_next_pending_match_request_batch(pool).await? {
         handle_match_request_batch(pool, adapter, batch).await?;
     } else if let Some(claim) = claim_next_pending_match_or_result_retry(pool).await? {
-        handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild_ai, &claim).await?;
+        handle_claimed_match(pool, adapter, tempvoice, voice_config, lagebild, &claim).await?;
     }
 
+    if let LagebildMode::On(lagebild_ai) = lagebild {
+        generate_weekly_lagebilder(pool, adapter, lagebild_ai).await;
+    }
+    tick_guard.commit().await?;
+    Ok(())
+}
+
+async fn generate_weekly_lagebilder(
+    pool: &PgPool,
+    adapter: &dl_discord::DiscordAdapter,
+    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+) {
     let channel_history = scrim_adapter::DiscordChannelHistory::new(adapter);
     match dl_squads::lagebild::generate_due_lagebilder(pool, lagebild_ai, Some(&channel_history), 1)
         .await
@@ -449,8 +472,6 @@ async fn process_one_pending(
             tracing::error!(%err, "Scrim-Lagebild-Wochenlauf fehlgeschlagen");
         }
     }
-    tick_guard.commit().await?;
-    Ok(())
 }
 
 async fn begin_legacy_operational_tick(
@@ -599,7 +620,7 @@ async fn handle_claimed_match(
     adapter: &dl_discord::DiscordAdapter,
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     voice_config: ScrimVoiceConfig,
-    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+    lagebild: LagebildMode<'_>,
     claim: &ClaimedMatch,
 ) -> anyhow::Result<()> {
     match claim.action {
@@ -608,7 +629,7 @@ async fn handle_claimed_match(
             handle_start(pool, adapter, tempvoice, voice_config, claim).await
         }
         ScrimDriverAction::FetchResult => {
-            handle_result(pool, adapter, tempvoice, claim, lagebild_ai).await
+            handle_result(pool, adapter, tempvoice, claim, lagebild).await
         }
     }
 }
@@ -2238,7 +2259,7 @@ async fn handle_result(
     adapter: &dl_discord::DiscordAdapter,
     tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     claim: &ClaimedMatch,
-    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+    lagebild: LagebildMode<'_>,
 ) -> anyhow::Result<()> {
     let claimed_ref = claim_next_pending_match_result_ref(pool, claim.match_id).await?;
     let result = if let Some(result_ref) = claimed_ref.as_ref() {
@@ -2296,7 +2317,7 @@ async fn handle_result(
             if set_result_state_after_attempt(pool, claim.match_id, false).await?
                 == ResultQueueState::Finished
             {
-                generate_lagebilder_after_result(pool, adapter, lagebild_ai, claim.match_id).await;
+                generate_lagebilder_after_result(pool, adapter, lagebild, claim.match_id).await;
             }
         }
         Err(err) => {
@@ -2308,7 +2329,7 @@ async fn handle_result(
             if queue_state == ResultQueueState::Finished
                 && !has_match_lagebild_snapshot(pool, claim.match_id).await?
             {
-                generate_lagebilder_after_result(pool, adapter, lagebild_ai, claim.match_id).await;
+                generate_lagebilder_after_result(pool, adapter, lagebild, claim.match_id).await;
             }
             post_log(
                 adapter,
@@ -2324,9 +2345,12 @@ async fn handle_result(
 async fn generate_lagebilder_after_result(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
-    lagebild_ai: Option<&dyn dl_ai::ChatProvider>,
+    lagebild: LagebildMode<'_>,
     match_id: i64,
 ) {
+    let LagebildMode::On(lagebild_ai) = lagebild else {
+        return;
+    };
     let channel_history = scrim_adapter::DiscordChannelHistory::new(adapter);
     match dl_squads::lagebild::generate_match_lagebilder(
         pool,
