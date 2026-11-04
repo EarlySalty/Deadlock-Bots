@@ -90,7 +90,7 @@ impl ClaudePlanBackend {
                 "",
                 "--strict-mcp-config",
                 "--setting-sources",
-                "project",
+                "",
                 "--disable-slash-commands",
                 "--no-session-persistence",
                 "--system-prompt-file",
@@ -359,7 +359,7 @@ mod tests {
         let script = dir.join("claude");
         std::fs::write(
             &script,
-            "#!/bin/sh\ncat >/dev/null\nif [ -n \"$DL_SECRET_PROBE\" ]; then leak=1; else leak=0; fi\neval last=\\${$#}\nif grep -q sys \"$last\"; then file=1; else file=0; fi\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":\"leak=%s max=%s file=%s\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":2},\"modelUsage\":{\"claude-haiku-5-5\":{}}}\\n' \"$leak\" \"$CLAUDE_CODE_MAX_OUTPUT_TOKENS\" \"$file\"\n",
+            "#!/bin/sh\ncat >/dev/null\nif [ -n \"$DL_SECRET_PROBE\" ]; then leak=1; else leak=0; fi\neval last=\\${$#}\nif grep -q sys \"$last\"; then file=1; else file=0; fi\nsettings=missing; prev=; penult=\nfor a in \"$@\"; do if [ \"$prev\" = --setting-sources ]; then settings=\"[$a]\"; fi; penult=\"$prev\"; prev=\"$a\"; done\nif [ \"$penult\" = --system-prompt-file ]; then prompt_last=1; else prompt_last=0; fi\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"structured_output\":{\"answer\":\"leak=%s max=%s file=%s settings=%s prompt_last=%s\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":2},\"modelUsage\":{\"claude-haiku-5-5\":{}}}\\n' \"$leak\" \"$CLAUDE_CODE_MAX_OUTPUT_TOKENS\" \"$file\" \"$settings\" \"$prompt_last\"\n",
         )
         .expect("script");
         use std::os::unix::fs::PermissionsExt;
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(
             response.content,
             vec![super::super::types::ContentBlock::Text {
-                text: "leak=0 max=833 file=1".into()
+                text: "leak=0 max=833 file=1 settings=[] prompt_last=1".into()
             }]
         );
         assert_eq!(response.usage.map(|u| u.input_tokens), Some(5));
