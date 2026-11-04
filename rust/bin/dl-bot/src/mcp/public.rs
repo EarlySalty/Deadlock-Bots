@@ -111,8 +111,14 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
             None,
         )
         .await
-        .ok()
-        .filter(|member| member["user"]["id"].as_str() == Some(user.to_string().as_str()))
+        .context("Mitglied ist nicht abrufbar")
+        .and_then(|member| {
+            if member["user"]["id"].as_str() == Some(user.to_string().as_str()) {
+                Ok(Some(member))
+            } else {
+                bail!("Mitglied ist uneindeutig")
+            }
+        })?
     } else {
         None
     };
@@ -125,6 +131,9 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
                 .map(|role| role.as_str().map(str::to_owned))
                 .collect::<Option<Vec<_>>>()
         });
+    if requested_user.is_some() && member_roles.is_none() {
+        bail!("Mitgliedsrollen sind unbekannt");
+    }
     let raw_roles = discord_call(
         st,
         "GET",
@@ -232,10 +241,64 @@ pub(super) struct CachedFacts {
     facts: Facts,
 }
 
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum Order {
+    #[default]
+    Newest,
+    Oldest,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
     channel_id: u64,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    order: Order,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    channel_id: u64,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    after: Option<Value>,
+    #[serde(default)]
+    before: Option<Value>,
+    #[serde(default)]
+    order: Order,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct FoundMessage {
+    id: String,
+    timestamp: String,
+    author: String,
+    text: String,
+    bot: bool,
+}
+
+#[derive(Serialize)]
+struct ReadOutput {
+    channel_id: String,
+    messages: Vec<FoundMessage>,
+}
+
+#[derive(Serialize)]
+struct SearchOutput {
+    channel_id: String,
+    order: Order,
+    messages: Vec<FoundMessage>,
+    scanned: usize,
+    truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -298,38 +361,44 @@ pub(super) async fn request_tool(
     match tool {
         "read_messages" => {
             let args: ReadArgs = serde_json::from_value(args.clone())?;
+            let limit = message_limit(args.limit)?;
             channel_permission(st, access, args.channel_id, VIEW | HISTORY).await?;
+            let mut query = vec![("limit".to_owned(), limit.to_string())];
+            if args.order == Order::Oldest {
+                query.push(("after".into(), "0".into()));
+            }
             let raw = discord_call(
                 st,
                 "GET",
                 &format!("/channels/{}/messages", args.channel_id),
-                &[("limit".into(), "20".into())],
+                &query,
                 None,
                 None,
             )
             .await?;
+            let mut page = raw
+                .as_array()
+                .context("Nachrichtenformat ist unbekannt")?
+                .clone();
+            sort_page(&mut page, args.order)?;
             let mut messages = Vec::new();
-            for message in raw.as_array().context("Nachrichtenformat ist unbekannt")? {
-                let text = without_mentions(
-                    message["content"]
-                        .as_str()
-                        .context("Nachrichtentext fehlt")?,
-                );
-                if text.is_empty() {
-                    continue;
+            for message in &page {
+                if let Some(found) = found_message(st, message)? {
+                    messages.push(found);
                 }
-                messages.push(Message {
-                    id: message["id"]
-                        .as_str()
-                        .context("Nachrichten-ID fehlt")?
-                        .into(),
-                    text,
-                });
             }
-            Ok(serde_json::to_value(ReadResult {
+            Ok(serde_json::to_value(ReadOutput {
                 channel_id: args.channel_id.to_string(),
                 messages,
             })?)
+        }
+        "search_messages" => {
+            let args: SearchArgs = serde_json::from_value(args.clone())?;
+            let filter = SearchFilter::new(&args)?;
+            channel_permission(st, access, args.channel_id, VIEW | HISTORY).await?;
+            Ok(serde_json::to_value(
+                search_messages(st, args.channel_id, &filter).await?,
+            )?)
         }
         "send_message" => {
             if access.user_id.is_none() {
@@ -356,6 +425,279 @@ pub(super) async fn request_tool(
         }
         _ => bail!("Werkzeug ist nicht freigegeben"),
     }
+}
+
+const MAX_LIMIT: u64 = 50;
+const DEFAULT_LIMIT: u64 = 20;
+const SEARCH_PAGE: usize = 50;
+const SEARCH_MAX_PAGES: usize = 10;
+const SEARCH_MAX_SCANNED: usize = 500;
+const SEARCH_MAX_TEXT: usize = 200;
+const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+
+fn message_limit(limit: Option<u64>) -> Result<u64> {
+    match limit.unwrap_or(DEFAULT_LIMIT) {
+        value @ 1..=MAX_LIMIT => Ok(value),
+        _ => bail!("Nachrichtenlimit ist ungültig"),
+    }
+}
+
+fn bound_snowflake(value: &Value) -> Result<u64> {
+    let text = match value {
+        Value::Number(number) => return number.as_u64().context("Zeitgrenze ist ungültig"),
+        Value::String(text) => text.trim(),
+        _ => bail!("Zeitgrenze ist ungültig"),
+    };
+    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+        return text.parse::<u64>().context("Zeitgrenze ist ungültig");
+    }
+    let millis = if let Ok(time) = chrono::DateTime::parse_from_rfc3339(text) {
+        time.timestamp_millis()
+    } else {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+            .context("Zeitgrenze ist ungültig")?
+            .and_hms_opt(0, 0, 0)
+            .context("Zeitgrenze ist ungültig")?
+            .and_utc()
+            .timestamp_millis()
+    };
+    let millis = u64::try_from(millis).context("Zeitgrenze ist ungültig")?;
+    Ok(millis.saturating_sub(DISCORD_EPOCH_MS) << 22)
+}
+
+fn message_id(message: &Value) -> Result<u64> {
+    message["id"]
+        .as_str()
+        .context("Nachrichten-ID fehlt")?
+        .parse::<u64>()
+        .context("Nachrichten-ID ist ungültig")
+}
+
+fn sort_page(page: &mut [Value], order: Order) -> Result<()> {
+    for message in page.iter() {
+        message_id(message)?;
+    }
+    page.sort_by_key(|message| message_id(message).unwrap_or_default());
+    if order == Order::Newest {
+        page.reverse();
+    }
+    Ok(())
+}
+
+fn message_timestamp(message: &Value, id: u64) -> Result<String> {
+    if let Some(time) = message["timestamp"]
+        .as_str()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+    {
+        return Ok(time.with_timezone(&chrono::Utc).to_rfc3339());
+    }
+    let millis =
+        i64::try_from((id >> 22) + DISCORD_EPOCH_MS).context("Nachrichtenzeit ist ungültig")?;
+    Ok(chrono::DateTime::from_timestamp_millis(millis)
+        .context("Nachrichtenzeit ist ungültig")?
+        .to_rfc3339())
+}
+
+fn cached_nick(st: &McpState, user: &str) -> Option<String> {
+    let (adapter, _, guild) = st.public_source.as_ref()?;
+    let user = serenity::all::UserId::new(user.parse::<u64>().ok().filter(|id| *id != 0)?);
+    let guild = adapter.cache().guild(GuildId::new(*guild))?;
+    guild.members.get(&user)?.nick.clone()
+}
+
+fn author_names(message: &Value, nick: Option<String>) -> Vec<String> {
+    let author = &message["author"];
+    [
+        message["member"]["nick"].as_str().map(str::to_owned),
+        nick,
+        author["global_name"].as_str().map(str::to_owned),
+        author["username"].as_str().map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|name| without_mentions(&name))
+    .filter(|name| !name.is_empty())
+    .collect()
+}
+
+fn message_names(st: &McpState, message: &Value) -> Vec<String> {
+    let nick = message["author"]["id"]
+        .as_str()
+        .and_then(|user| cached_nick(st, user));
+    author_names(message, nick)
+}
+
+fn found_with_names(message: &Value, names: &[String]) -> Result<Option<FoundMessage>> {
+    let text = without_mentions(
+        message["content"]
+            .as_str()
+            .context("Nachrichtentext fehlt")?,
+    );
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let id = message_id(message)?;
+    Ok(Some(FoundMessage {
+        id: id.to_string(),
+        timestamp: message_timestamp(message, id)?,
+        author: names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Unbekannt".to_owned()),
+        text,
+        bot: message["author"]["bot"].as_bool() == Some(true),
+    }))
+}
+
+fn found_message(st: &McpState, message: &Value) -> Result<Option<FoundMessage>> {
+    found_with_names(message, &message_names(st, message))
+}
+
+struct SearchFilter {
+    query: Option<String>,
+    author: Option<String>,
+    after: Option<u64>,
+    before: Option<u64>,
+    order: Order,
+    limit: usize,
+}
+
+fn search_text(value: Option<&str>) -> Result<Option<String>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value.chars().count() > SEARCH_MAX_TEXT => bail!("Suchtext ist zu lang"),
+        Some(value) => Ok(Some(value.to_lowercase())),
+        None => Ok(None),
+    }
+}
+
+impl SearchFilter {
+    fn new(args: &SearchArgs) -> Result<Self> {
+        let after = args.after.as_ref().map(bound_snowflake).transpose()?;
+        let before = args.before.as_ref().map(bound_snowflake).transpose()?;
+        if let (Some(after), Some(before)) = (after, before) {
+            if after >= before {
+                bail!("Zeitraum ist leer");
+            }
+        }
+        Ok(Self {
+            query: search_text(args.query.as_deref())?,
+            author: search_text(args.author.as_deref())?,
+            after,
+            before,
+            order: args.order,
+            limit: usize::try_from(message_limit(args.limit)?)?,
+        })
+    }
+
+    fn in_range(&self, id: u64) -> bool {
+        self.after.is_none_or(|after| id > after) && self.before.is_none_or(|before| id < before)
+    }
+
+    fn advances(&self, cursor: Option<u64>, id: u64) -> bool {
+        match (self.order, cursor) {
+            (_, None) => true,
+            (Order::Newest, Some(cursor)) => id < cursor,
+            (Order::Oldest, Some(cursor)) => id > cursor,
+        }
+    }
+
+    fn text_matches(&self, text: &str) -> bool {
+        let Some(query) = &self.query else {
+            return true;
+        };
+        let text = text.to_lowercase();
+        text.contains(query.as_str()) || query.split_whitespace().all(|word| text.contains(word))
+    }
+
+    fn author_matches(&self, names: &[String]) -> bool {
+        let Some(author) = &self.author else {
+            return true;
+        };
+        names
+            .iter()
+            .any(|name| name.to_lowercase().contains(author.as_str()))
+    }
+
+    fn page_query(&self, cursor: Option<u64>, size: usize) -> Vec<(String, String)> {
+        let mut query = vec![("limit".to_owned(), size.to_string())];
+        let key = match self.order {
+            Order::Newest => "before",
+            Order::Oldest => "after",
+        };
+        if let Some(cursor) = cursor {
+            query.push((key.to_owned(), cursor.to_string()));
+        }
+        query
+    }
+
+    fn matched(&self, st: &McpState, message: &Value) -> Result<Option<FoundMessage>> {
+        let names = message_names(st, message);
+        if !self.author_matches(&names) {
+            return Ok(None);
+        }
+        Ok(found_with_names(message, &names)?.filter(|found| self.text_matches(&found.text)))
+    }
+}
+
+async fn search_messages(
+    st: &McpState,
+    channel_id: u64,
+    filter: &SearchFilter,
+) -> Result<SearchOutput> {
+    let mut cursor = match filter.order {
+        Order::Newest => filter.before,
+        Order::Oldest => Some(filter.after.unwrap_or(0)),
+    };
+    let mut messages = Vec::new();
+    let mut scanned = 0;
+    let mut exhausted = false;
+    'pages: for _ in 0..SEARCH_MAX_PAGES {
+        let size = SEARCH_PAGE.min(SEARCH_MAX_SCANNED - scanned);
+        if size == 0 {
+            break;
+        }
+        let raw = discord_call(
+            st,
+            "GET",
+            &format!("/channels/{channel_id}/messages"),
+            &filter.page_query(cursor, size),
+            None,
+            None,
+        )
+        .await?;
+        let mut page = raw
+            .as_array()
+            .context("Nachrichtenformat ist unbekannt")?
+            .clone();
+        sort_page(&mut page, filter.order)?;
+        for message in &page {
+            let id = message_id(message)?;
+            if !filter.in_range(id) || !filter.advances(cursor, id) {
+                exhausted = true;
+                break 'pages;
+            }
+            scanned += 1;
+            cursor = Some(id);
+            if let Some(found) = filter.matched(st, message)? {
+                messages.push(found);
+                if messages.len() >= filter.limit {
+                    exhausted = true;
+                    break 'pages;
+                }
+            }
+        }
+        if page.len() < size {
+            exhausted = true;
+            break;
+        }
+    }
+    Ok(SearchOutput {
+        channel_id: channel_id.to_string(),
+        order: filter.order,
+        messages,
+        scanned,
+        truncated: !exhausted,
+    })
 }
 
 fn without_mentions(text: &str) -> String {
@@ -811,6 +1153,68 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suchgrenzen_und_anzeigenamen_folgen_dem_vertrag() {
+        assert_eq!(
+            bound_snowflake(&json!("2015-01-01T00:00:01Z")).expect("ISO"),
+            1000 << 22
+        );
+        assert_eq!(
+            bound_snowflake(&json!("2015-01-02")).expect("Datum"),
+            86_400_000 << 22
+        );
+        assert_eq!(
+            bound_snowflake(&json!("4194304000")).expect("ID"),
+            4_194_304_000
+        );
+        assert!(bound_snowflake(&json!("gestern")).is_err());
+        assert!(message_limit(Some(0)).is_err());
+        assert!(message_limit(Some(51)).is_err());
+        assert_eq!(message_limit(None).expect("Standard"), 20);
+        let message = json!({"id":"4194304000","content":"Hallo <@123> Welt","author":{"id":"77","username":"nutzer","global_name":"Globaler Name","bot":true}});
+        let names = author_names(&message, Some("Spitzname".into()));
+        let found = found_with_names(&message, &names)
+            .expect("Treffer")
+            .expect("Text");
+        assert_eq!(found.author, "Spitzname");
+        assert_eq!(found.text, "Hallo Welt");
+        assert!(found.bot);
+        assert_eq!(found.timestamp, "2015-01-01T00:00:01+00:00");
+        let anonymous = json!({"id":"1","content":"x","author":{"id":"77"}});
+        assert_eq!(
+            found_with_names(&anonymous, &author_names(&anonymous, None))
+                .expect("Treffer")
+                .expect("Text")
+                .author,
+            "Unbekannt"
+        );
+        let filter = SearchFilter::new(&SearchArgs {
+            channel_id: 1,
+            query: Some("Welt hallo".into()),
+            author: Some("GLOBAL".into()),
+            after: Some(json!("2015-01-01")),
+            before: None,
+            order: Order::Oldest,
+            limit: None,
+        })
+        .expect("Filter");
+        assert!(filter.author_matches(&names));
+        assert!(filter.text_matches(&found.text));
+        assert!(!filter.text_matches("nur hallo"));
+        assert!(filter.in_range(4_194_304_000));
+        assert!(!filter.in_range(0));
+        assert!(SearchFilter::new(&SearchArgs {
+            channel_id: 1,
+            query: None,
+            author: None,
+            after: Some(json!("2015-01-02")),
+            before: Some(json!("2015-01-01")),
+            order: Order::Newest,
+            limit: None,
+        })
+        .is_err());
+    }
 
     #[test]
     fn router_und_staging_einstiege_verlangen_erlaubte_sicht() {

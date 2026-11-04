@@ -175,7 +175,7 @@ async fn public_post(
         .filter(|id| *id != 0 && request_id.is_some());
     let result = match req["method"].as_str() {
         Some("tools/list") => {
-            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
+            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"search_messages","description":SEARCH_MESSAGES_DESCRIPTION,"inputSchema":search_messages_schema()},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
         }
         Some("tools/call") if req["params"]["name"] == "self_invite_status" => {
             let Ok(access) = public::access(&st, user).await else {
@@ -215,7 +215,7 @@ async fn public_post(
         Some("tools/call")
             if matches!(
                 req["params"]["name"].as_str(),
-                Some("read_messages" | "send_message")
+                Some("read_messages" | "search_messages" | "send_message")
             ) =>
         {
             let request_id = headers
@@ -250,6 +250,25 @@ async fn public_post(
         StatusCode::OK,
         json!({"jsonrpc":"2.0","id":req["id"],"result":result}),
     )
+}
+
+const SEARCH_MESSAGES_DESCRIPTION: &str = "Sucht Nachrichten in einem lesbaren Kanal nach Text, Autor und Zeitraum. Liefert je Treffer ID, Zeitpunkt, Anzeigename und Text, höchstens 50 Treffer und höchstens 500 durchsuchte Nachrichten je Aufruf.";
+
+fn search_messages_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "integer", "description": "ID des Textkanals"},
+            "query": {"type": "string", "description": "Text, der in der Nachricht vorkommen soll"},
+            "author": {"type": "string", "description": "Teil des Anzeige- oder Benutzernamens"},
+            "after": {"type": "string", "description": "Nur Nachrichten nach diesem Zeitpunkt (ISO-Zeit oder Nachrichten-ID)"},
+            "before": {"type": "string", "description": "Nur Nachrichten vor diesem Zeitpunkt (ISO-Zeit oder Nachrichten-ID)"},
+            "order": {"type": "string", "enum": ["newest", "oldest"], "description": "newest liefert die neuesten Treffer zuerst, oldest die ältesten"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+        },
+        "required": ["channel_id"],
+        "additionalProperties": false
+    })
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -1429,7 +1448,11 @@ mod tests {
             ("42", 11, "read_messages", 200),
             ("43", 12, "read_messages", 403),
             ("42", 12, "read_messages", 200),
-            ("999", 10, "read_messages", 200),
+            ("999", 10, "read_messages", 403),
+            ("42", 10, "search_messages", 200),
+            ("42", 11, "search_messages", 200),
+            ("43", 11, "search_messages", 403),
+            ("999", 10, "search_messages", 403),
             ("999", 11, "read_messages", 403),
             ("999", 10, "send_message", 403),
             ("43", 10, "send_message", 403),
@@ -1446,6 +1469,27 @@ mod tests {
                 "{user} {channel} {tool}"
             );
         }
+        for (query, hits) in [("ANTWORT", 1), ("diese antwort", 1), ("fehlt", 0)] {
+            let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"search_messages","arguments":{"channel_id":10,"query":query,"order":"oldest","limit":5}}})).send().await.expect("HTTP-Antwort");
+            let body: Value = response.json().await.expect("JSON-Antwort");
+            let result: Value = serde_json::from_str(
+                body["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("Ergebnistext"),
+            )
+            .expect("Suchergebnis");
+            assert_eq!(result["scanned"], 1, "{query}");
+            assert_eq!(result["truncated"], false, "{query}");
+            let messages = result["messages"].as_array().expect("Treffer");
+            assert_eq!(messages.len(), hits, "{query}");
+            if let Some(message) = messages.first() {
+                assert_eq!(message["author"], "Unbekannt");
+                assert_eq!(message["timestamp"], "2015-01-01T00:00:00+00:00");
+                assert_eq!(message["text"], "Nur für diese Antwort");
+            }
+        }
+        let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"search_messages","arguments":{"channel_id":10,"limit":51}}})).send().await.expect("HTTP-Antwort");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let response = client.post(format!("http://{addr}/mcp")).bearer_auth("brain-only").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10}}})).send().await.expect("HTTP-Antwort");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","43").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10,"user_id":42}}})).send().await.expect("HTTP-Antwort");
