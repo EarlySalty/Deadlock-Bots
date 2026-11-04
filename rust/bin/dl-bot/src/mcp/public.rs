@@ -352,6 +352,21 @@ async fn channel_permission(
     Ok(())
 }
 
+pub(super) fn check_arguments(tool: &str, args: &Value) -> Result<()> {
+    match tool {
+        "read_messages" => {
+            let args: ReadArgs = serde_json::from_value(args.clone())?;
+            message_limit(args.limit)?;
+        }
+        "search_messages" => {
+            let args: SearchArgs = serde_json::from_value(args.clone())?;
+            SearchFilter::new(&args)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(super) async fn request_tool(
     st: &McpState,
     tool: &str,
@@ -431,7 +446,6 @@ const MAX_LIMIT: u64 = 50;
 const DEFAULT_LIMIT: u64 = 20;
 const SEARCH_PAGE: usize = 50;
 const SEARCH_MAX_PAGES: usize = 10;
-const SEARCH_MAX_SCANNED: usize = 500;
 const SEARCH_MAX_TEXT: usize = 200;
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
@@ -451,18 +465,35 @@ fn bound_snowflake(value: &Value) -> Result<u64> {
     if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
         return text.parse::<u64>().context("Zeitgrenze ist ungültig");
     }
-    let millis = if let Ok(time) = chrono::DateTime::parse_from_rfc3339(text) {
-        time.timestamp_millis()
-    } else {
-        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .context("Zeitgrenze ist ungültig")?
-            .and_hms_opt(0, 0, 0)
-            .context("Zeitgrenze ist ungültig")?
-            .and_utc()
-            .timestamp_millis()
-    };
+    let millis = bound_millis(text)?;
     let millis = u64::try_from(millis).context("Zeitgrenze ist ungültig")?;
-    Ok(millis.saturating_sub(DISCORD_EPOCH_MS) << 22)
+    let elapsed = millis.saturating_sub(DISCORD_EPOCH_MS);
+    if elapsed > u64::MAX >> 22 {
+        bail!("Zeitgrenze liegt zu weit in der Zukunft");
+    }
+    Ok(elapsed << 22)
+}
+
+fn bound_millis(text: &str) -> Result<i64> {
+    if let Ok(time) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Ok(time.timestamp_millis());
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(time) = chrono::NaiveDateTime::parse_from_str(text, format) {
+            return Ok(time.and_utc().timestamp_millis());
+        }
+    }
+    Ok(chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .context("Zeitgrenze ist ungültig")?
+        .and_hms_opt(0, 0, 0)
+        .context("Zeitgrenze ist ungültig")?
+        .and_utc()
+        .timestamp_millis())
 }
 
 fn message_id(message: &Value) -> Result<u64> {
@@ -650,30 +681,35 @@ async fn search_messages(
     };
     let mut messages = Vec::new();
     let mut scanned = 0;
-    let mut exhausted = false;
-    'pages: for _ in 0..SEARCH_MAX_PAGES {
-        let size = SEARCH_PAGE.min(SEARCH_MAX_SCANNED - scanned);
-        if size == 0 {
-            break;
-        }
-        let raw = discord_call(
+    let mut truncated = true;
+    'pages: for round in 0..SEARCH_MAX_PAGES {
+        let raw = match discord_call(
             st,
             "GET",
             &format!("/channels/{channel_id}/messages"),
-            &filter.page_query(cursor, size),
+            &filter.page_query(cursor, SEARCH_PAGE),
             None,
             None,
         )
-        .await?;
+        .await
+        {
+            Ok(raw) => raw,
+            Err(error) if round == 0 => return Err(error),
+            Err(_) => break,
+        };
         let mut page = raw
             .as_array()
             .context("Nachrichtenformat ist unbekannt")?
             .clone();
         sort_page(&mut page, filter.order)?;
-        for message in &page {
+        let last_page = page.len() < SEARCH_PAGE;
+        for (index, message) in page.iter().enumerate() {
             let id = message_id(message)?;
-            if !filter.in_range(id) || !filter.advances(cursor, id) {
-                exhausted = true;
+            if !filter.advances(cursor, id) {
+                break 'pages;
+            }
+            if !filter.in_range(id) {
+                truncated = false;
                 break 'pages;
             }
             scanned += 1;
@@ -681,13 +717,13 @@ async fn search_messages(
             if let Some(found) = filter.matched(st, message)? {
                 messages.push(found);
                 if messages.len() >= filter.limit {
-                    exhausted = true;
+                    truncated = !(last_page && index + 1 == page.len());
                     break 'pages;
                 }
             }
         }
-        if page.len() < size {
-            exhausted = true;
+        if last_page {
+            truncated = false;
             break;
         }
     }
@@ -696,7 +732,7 @@ async fn search_messages(
         order: filter.order,
         messages,
         scanned,
-        truncated: !exhausted,
+        truncated,
     })
 }
 

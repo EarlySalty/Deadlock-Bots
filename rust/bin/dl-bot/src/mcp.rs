@@ -175,7 +175,7 @@ async fn public_post(
         .filter(|id| *id != 0 && request_id.is_some());
     let result = match req["method"].as_str() {
         Some("tools/list") => {
-            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages"},{"name":"search_messages","description":SEARCH_MESSAGES_DESCRIPTION,"inputSchema":search_messages_schema()},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
+            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages","inputSchema":read_messages_schema()},{"name":"search_messages","description":SEARCH_MESSAGES_DESCRIPTION,"inputSchema":search_messages_schema()},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
         }
         Some("tools/call") if req["params"]["name"] == "self_invite_status" => {
             let Ok(access) = public::access(&st, user).await else {
@@ -225,6 +225,17 @@ async fn public_post(
             if request_id.is_none() {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             }
+            if public::check_arguments(
+                req["params"]["name"].as_str().unwrap_or_default(),
+                &req["params"]["arguments"],
+            )
+            .is_err()
+            {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":"invalid_arguments"}),
+                );
+            }
             let Ok(access) = public::access(&st, user).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
@@ -254,6 +265,19 @@ async fn public_post(
 
 const SEARCH_MESSAGES_DESCRIPTION: &str = "Sucht Nachrichten in einem lesbaren Kanal nach Text, Autor und Zeitraum. Liefert je Treffer ID, Zeitpunkt, Anzeigename und Text, höchstens 50 Treffer und höchstens 500 durchsuchte Nachrichten je Aufruf.";
 
+fn read_messages_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "channel_id": {"type": "integer", "description": "ID des Textkanals"},
+            "order": {"type": "string", "enum": ["newest", "oldest"], "description": "newest liefert die neuesten Nachrichten, oldest die ältesten"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+        },
+        "required": ["channel_id"],
+        "additionalProperties": false
+    })
+}
+
 fn search_messages_schema() -> Value {
     json!({
         "type": "object",
@@ -261,8 +285,8 @@ fn search_messages_schema() -> Value {
             "channel_id": {"type": "integer", "description": "ID des Textkanals"},
             "query": {"type": "string", "description": "Text, der in der Nachricht vorkommen soll"},
             "author": {"type": "string", "description": "Teil des Anzeige- oder Benutzernamens"},
-            "after": {"type": "string", "description": "Nur Nachrichten nach diesem Zeitpunkt (ISO-Zeit oder Nachrichten-ID)"},
-            "before": {"type": "string", "description": "Nur Nachrichten vor diesem Zeitpunkt (ISO-Zeit oder Nachrichten-ID)"},
+            "after": {"type": "string", "description": "Nur Nachrichten nach diesem Zeitpunkt (ISO-Zeit, ohne Zeitzone gilt UTC, oder Nachrichten-ID)"},
+            "before": {"type": "string", "description": "Nur Nachrichten vor diesem Zeitpunkt (ISO-Zeit, ohne Zeitzone gilt UTC, oder Nachrichten-ID)"},
             "order": {"type": "string", "enum": ["newest", "oldest"], "description": "newest liefert die neuesten Treffer zuerst, oldest die ältesten"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50}
         },
@@ -1340,6 +1364,8 @@ mod tests {
             (10, json!([{"id":"3","type":0,"deny":"0","allow":"1024"}])),
             (11, json!([{"id":"4","type":0,"deny":"0","allow":"1024"}])),
             (12, json!([{"id":"42","type":1,"deny":"0","allow":"1024"}])),
+            (14, json!([{"id":"3","type":0,"deny":"0","allow":"1024"}])),
+            (15, json!([{"id":"3","type":0,"deny":"0","allow":"1024"}])),
         ] {
             let channel: serenity::all::GuildChannel = serde_json::from_value(json!({"id":id.to_string(),"guild_id":"1","name":"Kanal","type":0,"position":0,"permission_overwrites":overwrites})).expect("Testkanal");
             guild.channels.insert(channel.id, channel);
@@ -1375,8 +1401,10 @@ mod tests {
                 axum::Json(json!([{"id":"1","permissions":"65536"},{"id":"3","permissions":"65536"},{"id":"4","permissions":"65536"}])).into_response()
             } else if path == "/channels/13" {
                 axum::Json(json!({"guild_id":"1","type":0,"permission_overwrites":[{"id":"3","type":0,"deny":"0","allow":"3072"}]})).into_response()
-            } else if matches!(path, "/channels/10" | "/channels/11" | "/channels/12") {
-                let (id, kind) = match path { "/channels/10" => ("3",0), "/channels/11" => ("4",0), _ => ("42",1) };
+            } else if matches!(path, "/channels/14/messages" | "/channels/15/messages") {
+                paged_messages(path == "/channels/15/messages", request.uri().query().unwrap_or_default())
+            } else if matches!(path, "/channels/10" | "/channels/11" | "/channels/12" | "/channels/14" | "/channels/15") {
+                let (id, kind) = match path { "/channels/10" | "/channels/14" | "/channels/15" => ("3",0), "/channels/11" => ("4",0), _ => ("42",1) };
                 axum::Json(json!({"guild_id":"1","type":0,"permission_overwrites":[{"id":id,"type":kind,"deny":"0","allow":"1024"}]})).into_response()
             } else if request.method() == axum::http::Method::POST && path == "/channels/13/messages" {
                 sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1488,14 +1516,188 @@ mod tests {
                 assert_eq!(message["text"], "Nur für diese Antwort");
             }
         }
-        let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"search_messages","arguments":{"channel_id":10,"limit":51}}})).send().await.expect("HTTP-Antwort");
+        for arguments in [
+            json!({"channel_id":10,"limit":51}),
+            json!({"channel_id":10,"limit":0}),
+            json!({"channel_id":10,"before":"2300-01-01"}),
+            json!({"channel_id":10,"after":"gestern"}),
+            json!({"channel_id":10,"after":"2026-11-02","before":"2026-11-01"}),
+            json!({"channel_id":10,"query":"x".repeat(201)}),
+        ] {
+            let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"search_messages","arguments":arguments}})).send().await.expect("HTTP-Antwort");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{arguments}");
+        }
+        for (arguments, hits, first, last, scanned, truncated) in [
+            (
+                json!({"channel_id":14,"query":"turnier","limit":5}),
+                5,
+                1119,
+                1107,
+                14,
+                true,
+            ),
+            (
+                json!({"channel_id":14,"limit":50,"order":"oldest"}),
+                50,
+                1001,
+                1050,
+                50,
+                true,
+            ),
+            (
+                json!({"channel_id":14,"query":"Turnier","limit":50}),
+                40,
+                1119,
+                1002,
+                120,
+                false,
+            ),
+            (
+                json!({"channel_id":14,"query":"Turnier","limit":40,"order":"oldest"}),
+                40,
+                1002,
+                1119,
+                119,
+                true,
+            ),
+            (
+                json!({"channel_id":14,"after":"1100","before":"1111","order":"oldest"}),
+                10,
+                1101,
+                1110,
+                10,
+                false,
+            ),
+            (
+                json!({"channel_id":14,"after":"1100","before":"1111"}),
+                10,
+                1110,
+                1101,
+                10,
+                false,
+            ),
+            (
+                json!({"channel_id":15,"query":"Turnier","limit":50}),
+                17,
+                1119,
+                1071,
+                50,
+                true,
+            ),
+        ] {
+            let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"search_messages","arguments":arguments}})).send().await.expect("HTTP-Antwort");
+            assert_eq!(response.status(), StatusCode::OK, "{arguments}");
+            let body: Value = response.json().await.expect("JSON-Antwort");
+            let result: Value = serde_json::from_str(
+                body["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("Ergebnistext"),
+            )
+            .expect("Suchergebnis");
+            let ids: Vec<u64> = result["messages"]
+                .as_array()
+                .expect("Treffer")
+                .iter()
+                .map(|message| {
+                    message["id"]
+                        .as_str()
+                        .and_then(|id| id.parse().ok())
+                        .expect("Treffer-ID")
+                })
+                .collect();
+            assert_eq!(ids.len(), hits, "{arguments}");
+            assert_eq!(
+                (ids.first().copied(), ids.last().copied()),
+                (Some(first), Some(last)),
+                "{arguments}"
+            );
+            assert_eq!(result["scanned"], scanned, "{arguments}");
+            assert_eq!(result["truncated"], truncated, "{arguments}");
+        }
+        let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"search_messages","arguments":{"channel_id":14,"after":"2026-11-01T00:00:00"}}})).send().await.expect("HTTP-Antwort");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","42").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":14,"limit":3,"order":"oldest"}}})).send().await.expect("HTTP-Antwort");
+        let body: Value = response.json().await.expect("JSON-Antwort");
+        let result: Value = serde_json::from_str(
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .expect("Ergebnistext"),
+        )
+        .expect("Leseergebnis");
+        let ids: Vec<&str> = result["messages"]
+            .as_array()
+            .expect("Nachrichten")
+            .iter()
+            .filter_map(|message| message["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["1001", "1002", "1003"]);
+        let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","999").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"public_server_facts","arguments":{}}})).send().await.expect("HTTP-Antwort");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = client
+            .post(format!("http://{addr}/mcp/public"))
+            .bearer_auth("brain-only")
+            .json(&json!({"id":1,"method":"tools/list"}))
+            .send()
+            .await
+            .expect("HTTP-Antwort");
+        let body: Value = response.json().await.expect("JSON-Antwort");
+        let read = body["result"]["tools"]
+            .as_array()
+            .expect("Werkzeuge")
+            .iter()
+            .find(|tool| tool["name"] == "read_messages")
+            .expect("read_messages");
+        assert_eq!(
+            read["inputSchema"]["properties"]["order"]["enum"],
+            json!(["newest", "oldest"])
+        );
         let response = client.post(format!("http://{addr}/mcp")).bearer_auth("brain-only").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10}}})).send().await.expect("HTTP-Antwort");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let response = client.post(format!("http://{addr}/mcp/public")).bearer_auth("brain-only").header("x-discord-user-id","43").header("x-discord-request-id","synthetic-request").json(&json!({"id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"channel_id":10,"user_id":42}}})).send().await.expect("HTTP-Antwort");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         task.abort();
         mock_task.abort();
+    }
+
+    fn paged_messages(failing: bool, query: &str) -> Response {
+        let mut limit = 50;
+        let mut before = None;
+        let mut after = None;
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let value = value.parse::<u64>().ok();
+            match key {
+                "limit" => limit = value.unwrap_or(50),
+                "before" => before = value,
+                "after" => after = value,
+                _ => {}
+            }
+        }
+        if failing && before.is_some() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        let ids: Vec<u64> = match after {
+            Some(after) => ((after + 1).max(1001)..=1120)
+                .take(limit as usize)
+                .collect(),
+            None => (1001..before.unwrap_or(1121).min(1121))
+                .rev()
+                .take(limit as usize)
+                .collect(),
+        };
+        let messages: Vec<Value> = ids
+            .into_iter()
+            .rev()
+            .map(|id| {
+                let text = if id % 3 == 0 {
+                    format!("Turnier {id}")
+                } else {
+                    format!("Plauderei {id}")
+                };
+                json!({"id":id.to_string(),"content":text,"author":{"id":"42","username":"nani"}})
+            })
+            .collect();
+        axum::Json(json!(messages)).into_response()
     }
 
     fn state(token: Option<&str>) -> Result<McpState> {
