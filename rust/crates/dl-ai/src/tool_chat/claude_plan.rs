@@ -119,9 +119,15 @@ impl ClaudePlanBackend {
         let unavailable = |reason| BackendError::new(FailureKind::Unavailable, reason);
         let schema = serde_json::to_string(&prompt.schema)
             .map_err(|_| BackendError::new(FailureKind::InvalidRequest, "schema"))?;
+        let mut content: Vec<Value> = prompt
+            .images
+            .iter()
+            .map(|source| json!({"type": "image", "source": source}))
+            .collect();
+        content.push(json!({"type": "text", "text": prompt.user}));
         let mut input = serde_json::to_vec(&json!({
             "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": prompt.user}]},
+            "message": {"role": "user", "content": content},
         }))
         .map_err(|_| BackendError::new(FailureKind::InvalidRequest, "content"))?;
         input.push(b'\n');

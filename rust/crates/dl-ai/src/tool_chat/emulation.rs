@@ -4,13 +4,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Value};
 
 use super::backend::{BackendError, FailureKind};
-use super::types::{ContentBlock, Message, Role, StopReason, ToolChatRequest, ToolSpec};
+use super::types::{
+    ContentBlock, ImageSource, Message, Role, StopReason, ToolChatRequest, ToolSpec,
+};
 
 static TOOL_USE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct EmulatedPrompt {
     pub system: String,
     pub user: String,
+    pub images: Vec<ImageSource>,
     pub schema: Value,
 }
 
@@ -21,9 +24,12 @@ pub fn prompt(request: &ToolChatRequest) -> Result<EmulatedPrompt, BackendError>
             "last_message_not_user",
         ));
     }
+    let mut images = Vec::new();
+    let user = transcript(&request.messages, &mut images)?;
     Ok(EmulatedPrompt {
         system: system_prompt(&request.system, &request.tools)?,
-        user: transcript(&request.messages)?,
+        user,
+        images,
         schema: schema(&request.tools),
     })
 }
@@ -48,13 +54,20 @@ fn system_prompt(system: &str, tools: &[ToolSpec]) -> Result<String, BackendErro
     Ok(prompt)
 }
 
-fn transcript(messages: &[Message]) -> Result<String, BackendError> {
+fn transcript(messages: &[Message], images: &mut Vec<ImageSource>) -> Result<String, BackendError> {
     if let [Message {
         role: Role::User,
         content,
     }] = messages
     {
-        if let [ContentBlock::Text { text }] = content.as_slice() {
+        let (attached, rest): (Vec<_>, Vec<_>) = content
+            .iter()
+            .partition(|block| matches!(block, ContentBlock::Image { .. }));
+        if let [ContentBlock::Text { text }] = rest.as_slice() {
+            images.extend(attached.into_iter().filter_map(|block| match block {
+                ContentBlock::Image { source } => Some(source.clone()),
+                _ => None,
+            }));
             return Ok(text.clone());
         }
     }
@@ -66,7 +79,7 @@ fn transcript(messages: &[Message]) -> Result<String, BackendError> {
         };
         let _ = writeln!(out, "<{tag}>");
         for block in &message.content {
-            render_block(&mut out, block)?;
+            render_block(&mut out, block, images)?;
         }
         let _ = writeln!(out, "</{tag}>");
     }
@@ -74,8 +87,16 @@ fn transcript(messages: &[Message]) -> Result<String, BackendError> {
     Ok(out)
 }
 
-fn render_block(out: &mut String, block: &ContentBlock) -> Result<(), BackendError> {
+fn render_block(
+    out: &mut String,
+    block: &ContentBlock,
+    images: &mut Vec<ImageSource>,
+) -> Result<(), BackendError> {
     match block {
+        ContentBlock::Image { source } => {
+            images.push(source.clone());
+            let _ = writeln!(out, "<image index=\"{}\"/>", images.len());
+        }
         ContentBlock::Text { text } => {
             let _ = writeln!(out, "{text}");
         }

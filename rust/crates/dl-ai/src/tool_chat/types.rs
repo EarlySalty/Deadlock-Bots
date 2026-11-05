@@ -26,6 +26,34 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    Image {
+        source: ImageSource,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSourceKind {
+    Base64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub kind: ImageSourceKind,
+    pub media_type: String,
+    pub data: String,
+}
+
+impl std::fmt::Debug for ImageSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ImageSource")
+            .field("media_type", &self.media_type)
+            .field("data_len", &self.data.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

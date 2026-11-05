@@ -50,6 +50,12 @@ impl ToolBackend for ChatProviderBackend {
         target: &CallTarget,
     ) -> Result<ToolChatResponse, BackendError> {
         let prompt = emulation::prompt(request)?;
+        if !prompt.images.is_empty() {
+            return Err(BackendError::new(
+                FailureKind::Unavailable,
+                "image_input_unsupported",
+            ));
+        }
         let system = format!(
             "{}\n\nReturn exactly one JSON object that matches this JSON schema: {}",
             prompt.system, prompt.schema
@@ -100,6 +106,45 @@ mod tests {
     use crate::tool_chat::types::{ContentBlock, Message, Role, StopReason, ToolSpec};
     use crate::{ChatResponse, MockChatProvider, TokenUsage};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn chat_provider_rejects_image_input_instead_of_dropping_it() {
+        let mock = MockChatProvider::new(Vec::new());
+        let backend = ChatProviderBackend::new(mock.clone(), true);
+        let request = ToolChatRequest {
+            system: String::new(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Image {
+                        source: crate::tool_chat::types::ImageSource {
+                            kind: crate::tool_chat::types::ImageSourceKind::Base64,
+                            media_type: "image/png".into(),
+                            data: "iVBORw0KGgo=".into(),
+                        },
+                    },
+                    ContentBlock::Text { text: "q".into() },
+                ],
+            }],
+            tools: Vec::new(),
+            max_tokens: None,
+            output_schema: None,
+        };
+        let error = backend
+            .complete(
+                &request,
+                &CallTarget {
+                    model: "configured-model".into(),
+                    max_tokens: 99,
+                },
+            )
+            .await
+            .expect_err("image input must fail");
+        assert_eq!(error.kind, FailureKind::Unavailable);
+        assert!(error.kind.allows_fallback());
+        assert_eq!(error.reason, "image_input_unsupported");
+        assert!(mock.requests().is_empty());
+    }
 
     #[tokio::test]
     async fn existing_chat_provider_emulates_a_tool_round_with_the_slot_model() {

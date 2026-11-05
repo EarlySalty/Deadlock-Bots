@@ -359,6 +359,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_blocks_reach_the_backend_and_the_anthropic_wire_unchanged() {
+        let (app, backend) = test_app();
+        let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}});
+        let (status, _, _) = post(
+            &app,
+            Some("brain_answer"),
+            json!({"max_tokens": 50, "messages": [{"role": "user", "content": [image.clone(), {"type": "text", "text": "q"}]}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let seen = backend.seen.lock().map(|s| s.clone()).unwrap_or_default();
+        assert!(matches!(
+            seen[0].messages[0].content[0],
+            ContentBlock::Image { .. }
+        ));
+        let wire = dl_ai::tool_chat::wire_request(
+            &seen[0],
+            &CallTarget {
+                model: "m".into(),
+                max_tokens: 5,
+            },
+        );
+        assert_eq!(wire["messages"][0]["content"][0], image);
+        assert!(!format!("{:?}", seen[0]).contains("iVBORw0KGgo="));
+    }
+
+    #[tokio::test]
     async fn messages_api_runs_a_tool_round_on_the_requested_slot() {
         let (app, backend) = test_app();
         let tools = json!([{"name": "lookup", "description": "d", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}]);

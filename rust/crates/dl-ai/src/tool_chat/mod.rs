@@ -23,7 +23,8 @@ pub use router::{
     UsageLedger,
 };
 pub use types::{
-    ContentBlock, Message, Role, StopReason, ToolChatRequest, ToolChatResponse, ToolSpec, Usage,
+    ContentBlock, ImageSource, ImageSourceKind, Message, Role, StopReason, ToolChatRequest,
+    ToolChatResponse, ToolSpec, Usage,
 };
 
 use crate::{ChatProvider, OpenAiChatProvider, RetryConfig};
