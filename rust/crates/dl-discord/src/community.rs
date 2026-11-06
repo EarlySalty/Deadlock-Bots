@@ -41,7 +41,7 @@ impl GatewayFreshness {
 }
 
 pub(crate) const GUILD: u64 = 1289721245281292288;
-const STREAMER_VC: u64 = 1326984426906714236;
+pub const STREAMER_VC: u64 = 1326984426906714236;
 // Same categories as dl-voice::status::TARGET_CATEGORY_IDS. No dependency on
 // dl-voice here (it already depends on dl-discord).
 const CATEGORIES: [u64; 3] = [

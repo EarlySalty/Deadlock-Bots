@@ -1,10 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
-use dl_discord::{DiscordAdapter, Dispatcher, GatewayEvent, RoleEvent, VoiceEvent};
+use dl_discord::{DiscordAdapter, Dispatcher, GatewayEvent, RoleEvent, VoiceEvent, STREAMER_VC};
 use serenity::all::{
     ChannelId, ChannelType, Guild, GuildId, Permissions, RoleId, UserId, VoiceState,
 };
 use tokio::sync::broadcast::error::RecvError;
+
+use crate::router::ROUTER_VC_ID;
 
 pub const LIVE_PREFIX: &str = "🟣 ";
 pub const DEFAULT_LIVE_STREAMER_ROLE_ID: u64 = 1_560_993_753_643_098_153;
@@ -32,6 +34,7 @@ pub fn decorate_name(name: &str, live: bool) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveState {
     Ineligible,
+    Excluded,
     Unknown,
     Known(bool),
 }
@@ -40,9 +43,14 @@ pub fn has_live_prefix(name: &str) -> bool {
     name.starts_with(LIVE_PREFIX)
 }
 
+fn is_excluded_channel(channel_id: u64) -> bool {
+    channel_id == ROUTER_VC_ID || channel_id == STREAMER_VC
+}
+
 pub fn decorate_for_state(name: &str, current: &str, state: LiveState) -> String {
     match state {
         LiveState::Ineligible => name.to_string(),
+        LiveState::Excluded => strip_live_prefix(name).to_string(),
         LiveState::Unknown => decorate_name(name, has_live_prefix(current)),
         LiveState::Known(live) => decorate_name(name, live),
     }
@@ -119,6 +127,9 @@ impl LiveDot {
         {
             return LiveState::Ineligible;
         }
+        if is_excluded_channel(channel_id) {
+            return LiveState::Excluded;
+        }
         let role = RoleId::new(self.config.role_id);
         fold_member_states(
             guild
@@ -166,8 +177,10 @@ impl LiveDot {
     }
 
     pub async fn refresh(&self, channel_id: u64) {
-        let LiveState::Known(live) = self.channel_live(channel_id) else {
-            return;
+        let live = match self.channel_live(channel_id) {
+            LiveState::Known(live) => live,
+            LiveState::Excluded => false,
+            LiveState::Ineligible | LiveState::Unknown => return,
         };
         let Some(current) = self.current_name(channel_id) else {
             return;
@@ -321,6 +334,25 @@ mod tests {
             decorate_for_state("Lane 3", "🟣 Lane 2", LiveState::Ineligible),
             "Lane 3"
         );
+    }
+
+    #[test]
+    fn excluded_channels_never_show_the_dot() {
+        assert_eq!(
+            decorate_for_state("Team Kekse", "🟣 Team Kekse", LiveState::Excluded),
+            "Team Kekse"
+        );
+        assert_eq!(
+            decorate_for_state("Team Kekse", "Team Kekse", LiveState::Excluded),
+            "Team Kekse"
+        );
+    }
+
+    #[test]
+    fn router_and_streamer_channels_are_excluded() {
+        assert!(is_excluded_channel(ROUTER_VC_ID));
+        assert!(is_excluded_channel(STREAMER_VC));
+        assert!(!is_excluded_channel(1));
     }
 
     #[test]
