@@ -49,6 +49,8 @@ pub(crate) mod test_support {
     }
 }
 
+pub const REPORTED_SCREENSHOT_TRIGGER: &str = "ticket_scam_report";
+
 pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer für einen Gaming-Server.
 Analysiere Text und Bilder knapp und konservativ.
 Gib eine Kategorie, Confidence und eine kurze Begründung auf Deutsch zurück.
@@ -317,6 +319,23 @@ impl ContentModerationPipeline {
                 verification,
                 trigger: input.trigger_preview(),
             }),
+        }
+    }
+
+    pub async fn evaluate_reported_screenshots(
+        &self,
+        image_urls: Vec<String>,
+    ) -> ModerationVerdict {
+        let input = ModerationInput::new(String::new(), image_urls);
+        let analysis = self.analyzer.analyze(&input).await;
+        let verification = self
+            .verifier
+            .verify_behavior_trigger(&input, &analysis, REPORTED_SCREENSHOT_TRIGGER)
+            .await;
+        ModerationVerdict {
+            analysis,
+            verification,
+            trigger: input.trigger_preview(),
         }
     }
 }

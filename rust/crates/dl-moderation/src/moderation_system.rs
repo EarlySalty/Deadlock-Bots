@@ -100,6 +100,12 @@ impl ModerationCaseStore for ModerationStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportedScreenshotReview {
+    pub verdict: ModerationVerdict,
+    pub decision: PolicyDecision,
+}
+
 pub struct ModerationSystem<S: ModerationCaseStore = ModerationStore> {
     pub store: S,
     pipeline: ContentModerationPipeline,
@@ -160,6 +166,18 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
 
     pub fn config(&self) -> &ModerationSystemConfig {
         &self.config
+    }
+
+    pub async fn review_reported_screenshots(
+        &self,
+        image_urls: Vec<String>,
+    ) -> ReportedScreenshotReview {
+        let verdict = self
+            .pipeline
+            .evaluate_reported_screenshots(image_urls)
+            .await;
+        let decision = self.policy.decide(&verdict);
+        ReportedScreenshotReview { verdict, decision }
     }
 
     pub async fn handle_message(self: &Arc<Self>, event: &dl_discord::MessageEvent) {

@@ -1346,6 +1346,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         _ => None,
     };
+    if let Some(moderator) = &moderator {
+        faq.install_screenshot_reviewer(moderator.clone());
+    }
 
     let router = Arc::new(router);
     let command_sync_config = master::CommandSyncStartupConfig::from_lookup(operating_value);

@@ -30,4 +30,5 @@ pub mod streamer_suggest;
 pub mod tags;
 pub mod tags_ui;
 pub mod team_applications;
+pub mod ticket_triage;
 pub mod voice_change_hint;

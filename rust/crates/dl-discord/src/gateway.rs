@@ -513,6 +513,7 @@ impl EventHandler for Handler {
                 url: attachment.url.clone(),
                 content_type: attachment.content_type.clone().unwrap_or_default(),
                 filename: attachment.filename.clone(),
+                size: u64::from(attachment.size),
             })
             .collect();
         let image_attachment_count = image_attachment_urls.len() as u32;

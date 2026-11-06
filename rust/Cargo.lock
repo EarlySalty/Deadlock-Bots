@@ -1578,6 +1578,7 @@ dependencies = [
  "dl-bridges",
  "dl-central-db",
  "dl-discord",
+ "dl-moderation",
  "dl-squads",
  "dl-stats",
  "rand 0.8.6",

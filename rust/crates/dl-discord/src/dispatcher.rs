@@ -91,6 +91,7 @@ pub struct MessageAttachment {
     pub url: String,
     pub content_type: String,
     pub filename: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone)]

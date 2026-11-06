@@ -3189,6 +3189,70 @@ impl dl_community::faq::FaqPort for FaqGlue {
             )
             .await;
     }
+
+    async fn member_by_id(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> dl_community::ticket_triage::MemberLookup {
+        use dl_community::ticket_triage::MemberLookup;
+        if guild_id == 0 {
+            return MemberLookup::Unknown;
+        }
+        let gid = GuildId::new(guild_id);
+        let uid = UserId::new(user_id);
+        let cached = self
+            .adapter
+            .cache()
+            .guild(gid)
+            .is_some_and(|guild| guild.members.contains_key(&uid));
+        if cached {
+            return MemberLookup::Member(user_id);
+        }
+        match self.adapter.http.get_member(gid, uid).await {
+            Ok(_) => MemberLookup::Member(user_id),
+            Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(resp)))
+                if resp.status_code.as_u16() == 404 =>
+            {
+                MemberLookup::NotMember
+            }
+            Err(_) => MemberLookup::Unknown,
+        }
+    }
+
+    async fn member_by_name(
+        &self,
+        guild_id: u64,
+        name: &str,
+    ) -> dl_community::ticket_triage::MemberLookup {
+        use dl_community::ticket_triage::MemberLookup;
+        if guild_id == 0 {
+            return MemberLookup::Unknown;
+        }
+        match self
+            .adapter
+            .http
+            .search_guild_members(GuildId::new(guild_id), name, Some(10))
+            .await
+        {
+            Ok(members) => exact_member_by_name(&members, name)
+                .map(MemberLookup::Member)
+                .unwrap_or(MemberLookup::NotMember),
+            Err(_) => MemberLookup::Unknown,
+        }
+    }
+}
+
+fn exact_member_by_name(members: &[serenity::all::Member], name: &str) -> Option<u64> {
+    let matches: Vec<u64> = members
+        .iter()
+        .filter(|member| member.user.name.eq_ignore_ascii_case(name))
+        .map(|member| member.user.id.get())
+        .collect();
+    match matches.as_slice() {
+        [id] => Some(*id),
+        _ => None,
+    }
 }
 
 // ── Voice-DM-Anbindung mit Concierge-Gedächtnis ───────────────────────────

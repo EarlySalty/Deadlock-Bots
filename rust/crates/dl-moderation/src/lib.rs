@@ -1267,6 +1267,7 @@ mod tests {
                 url: "https://img".into(),
                 content_type: "image/png".into(),
                 filename: "img.png".into(),
+                size: 1,
             }],
             author_created_at: 0,
             author_joined_at: None,
