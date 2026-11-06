@@ -101,6 +101,42 @@ impl BrainApiAnswerer {
         })
     }
 
+    async fn answer_ticket(
+        &self,
+        question: &str,
+        user_id: u64,
+        task: &crate::DiscordAnswerTask,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
+        if question.trim().is_empty() || question.chars().count() > 4000 || user_id == 0 {
+            return Err(classified_backend_error("anfrage"));
+        }
+        tokio::time::timeout(self.timeout, async {
+            let _permit = self
+                .admission
+                .acquire()
+                .await
+                .map_err(|_| backend_error())?;
+            let query = self.query(question)?;
+            let response = if user_questions.is_empty() {
+                self.client.answer_discord_task(&query, user_id, task).await
+            } else {
+                self.client
+                    .answer_discord_task_with_history(&query, user_id, task, user_questions)
+                    .await
+            }
+            .map_err(client_error)?;
+            tracing::info!(
+                request_id = %response.request_id,
+                status = ?response.status,
+                "Discord-Brain-Aufgabe empfangen"
+            );
+            project_bounded(response, 1800)
+        })
+        .await
+        .map_err(|_| classified_backend_error("transport"))?
+    }
+
     async fn answer_query(
         &self,
         question: &str,
@@ -187,6 +223,7 @@ fn bounded_dialog(entries: &[DialogEntry]) -> Vec<DialogTurn> {
                 DialogSpeaker::Assistant => DialogRole::Assistant,
             },
             text: entry.text.clone(),
+            sent_at_unix: entry.sent_at_unix.filter(|sent| *sent > 0),
         })
         .collect();
     turns.reverse();
@@ -279,9 +316,9 @@ fn conversation_task(
 fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, BrainError> {
     match result {
         BotTaskResult::Conversation {
-            reply: BotReply::Answered { text, .. },
+            reply: BotReply::Answered { text, actions, .. },
             ..
-        } if !text.trim().is_empty() => Ok(ConversationReply::Answered(text)),
+        } if !text.trim().is_empty() => Ok(ConversationReply::Answered { text, actions }),
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed { failure, .. } => Err(classified_backend_error(failure.as_str())),
         _ => Err(classified_backend_error("vertrag")),
@@ -327,34 +364,39 @@ fn project_bounded(
     response: PublicAnswerResponse,
     max_units: usize,
 ) -> Result<BrainOutcome, BrainError> {
-    project_bounded_with_unverified(response, max_units, false)
-}
-
-fn project_bounded_with_unverified(
-    response: PublicAnswerResponse,
-    max_units: usize,
-    accept_unverified: bool,
-) -> Result<BrainOutcome, BrainError> {
-    let unverified = accept_unverified
-        && matches!(
-            response.status,
-            AnswerStatus::InsufficientEvidence | AnswerStatus::Unverified
-        )
-        && response
-            .text
-            .starts_with(brain_contracts::public_api::UNVERIFIED_PREFIX);
-    if unverified {
-        let text = response
-            .text
-            .strip_prefix(brain_contracts::public_api::UNVERIFIED_PREFIX)
-            .unwrap_or(&response.text);
-        return project_answer_text(&response, text, max_units);
-    }
     match response.status {
         AnswerStatus::InsufficientEvidence | AnswerStatus::BuildRejected => {
             Ok(BrainOutcome::NoAnswer)
         }
-        AnswerStatus::Answered => project_answer_text(&response, &response.text, max_units),
+        AnswerStatus::Answered => {
+            let (text, had_links) = without_links(&response.text);
+            if had_links {
+                tracing::warn!(klasse = "link", "Links aus Brain-Antwort entfernt");
+            }
+            let text = text.replace("[[coaching]]", COACHING_CHANNEL_REFERENCE);
+            let text = text.trim();
+            if text.is_empty() {
+                return Ok(BrainOutcome::NoAnswer);
+            }
+            let first_units = text.chars().next().map_or(0, char::len_utf16);
+            let links = public_links(&response, max_units.saturating_sub(first_units));
+            let budget = max_units.saturating_sub(links.encode_utf16().count());
+            let mut units = 0;
+            let end = text.char_indices().find_map(|(index, character)| {
+                units += character.len_utf16();
+                (units > budget).then_some(index)
+            });
+            let text = if let Some(end) = end {
+                tracing::warn!(klasse = "laenge", "Brain-Antwort gekürzt");
+                &text[..end]
+            } else {
+                text
+            };
+            if text.is_empty() {
+                return Ok(BrainOutcome::NoAnswer);
+            }
+            Ok(BrainOutcome::Answer(format!("{text}{links}")))
+        }
         AnswerStatus::Unverified | AnswerStatus::UnauthorizedEvidence => {
             tracing::warn!(status = ?response.status, "Brain hat keine verwendbare Antwort geliefert");
             Ok(BrainOutcome::NoAnswer)
@@ -363,40 +405,6 @@ fn project_bounded_with_unverified(
             Err(classified_backend_error("vertrag"))
         }
     }
-}
-
-fn project_answer_text(
-    response: &PublicAnswerResponse,
-    raw: &str,
-    max_units: usize,
-) -> Result<BrainOutcome, BrainError> {
-    let (text, had_links) = without_links(raw);
-    if had_links {
-        tracing::warn!(klasse = "link", "Links aus Brain-Antwort entfernt");
-    }
-    let text = text.replace("[[coaching]]", COACHING_CHANNEL_REFERENCE);
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(BrainOutcome::NoAnswer);
-    }
-    let first_units = text.chars().next().map_or(0, char::len_utf16);
-    let links = public_links(response, max_units.saturating_sub(first_units));
-    let budget = max_units.saturating_sub(links.encode_utf16().count());
-    let mut units = 0;
-    let end = text.char_indices().find_map(|(index, character)| {
-        units += character.len_utf16();
-        (units > budget).then_some(index)
-    });
-    let text = if let Some(end) = end {
-        tracing::warn!(klasse = "laenge", "Brain-Antwort gekürzt");
-        &text[..end]
-    } else {
-        text
-    };
-    if text.is_empty() {
-        return Ok(BrainOutcome::NoAnswer);
-    }
-    Ok(BrainOutcome::Answer(format!("{text}{links}")))
 }
 
 fn public_links(response: &PublicAnswerResponse, max_units: usize) -> String {
@@ -615,41 +623,23 @@ impl AiAnswerer for BrainApiAnswerer {
         task: &crate::DiscordAnswerTask,
         user_questions: &[String],
     ) -> Result<BrainOutcome, BrainError> {
-        if !task.valid()
-            || question.trim().is_empty()
-            || question.chars().count() > 4000
-            || user_id == 0
-        {
+        if !task.valid() {
             return Err(classified_backend_error("anfrage"));
         }
-        tokio::time::timeout(self.timeout, async {
-            let _permit = self
-                .admission
-                .acquire()
-                .await
-                .map_err(|_| backend_error())?;
-            let query = self.query(question)?;
-            let response = if user_questions.is_empty() {
-                self.client.answer_discord_task(&query, user_id, task).await
-            } else {
-                self.client
-                    .answer_discord_task_with_history(&query, user_id, task, user_questions)
-                    .await
-            }
-            .map_err(client_error)?;
-            tracing::info!(
-                request_id = %response.request_id,
-                status = ?response.status,
-                "Discord-Brain-Aufgabe empfangen"
-            );
-            project_bounded_with_unverified(
-                response,
-                1800,
-                task.capability == crate::DiscordAnswerCapability::Ticket,
-            )
-        })
+        if task.capability == crate::DiscordAnswerCapability::Ticket {
+            return self
+                .answer_ticket(question, user_id, task, user_questions)
+                .await;
+        }
+        self.answer_query(
+            question,
+            Some((user_id, &AttachedImages::default())),
+            false,
+            None,
+            user_questions,
+            1800,
+        )
         .await
-        .map_err(|_| classified_backend_error("transport"))?
     }
 
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
@@ -758,7 +748,8 @@ mod tests {
         let status = status.to_owned();
         let text = text.to_owned();
         let recorded_history = user_questions.to_vec();
-        let task_request = task.is_some();
+        let discord_task = task.is_some();
+        let ticket_request = task == Some(crate::DiscordAnswerCapability::Ticket);
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("Testverbindung");
             stream
@@ -793,7 +784,7 @@ mod tests {
                         if invalid_contract {
                             answer["contract_version"] = json!("falscher-vertrag");
                         }
-                        let (request_id, response) = if task_request {
+                        let (request_id, response) = if ticket_request {
                             assert!(headers.starts_with("POST /v1/task HTTP/1.1"));
                             assert!(!headers.to_ascii_lowercase().contains("x-discord-"));
                             let envelope: BotTaskRequest =
@@ -844,7 +835,7 @@ mod tests {
                                     headers
                                         .to_ascii_lowercase()
                                         .contains("x-discord-read-access: disabled"),
-                                    task_request
+                                    discord_task
                                 );
                                 let query: Query =
                                     serde_json::from_slice(body).expect("Anfragevertrag");
@@ -863,7 +854,7 @@ mod tests {
                                     headers
                                         .to_ascii_lowercase()
                                         .contains("x-discord-read-access: disabled"),
-                                    task_request
+                                    discord_task
                                 );
                                 assert!(
                                     !String::from_utf8_lossy(body).contains("Dieser Ortskontext")
@@ -957,6 +948,7 @@ mod tests {
             .map(|index| DialogEntry {
                 speaker: DialogSpeaker::User,
                 text: format!("{index}{}", "x".repeat(900)),
+                sent_at_unix: None,
             })
             .collect();
         let recent_messages: Vec<ChatEntry> = (0..60)
@@ -1008,7 +1000,18 @@ mod tests {
         };
         assert_eq!(
             project_conversation(result(BotReply::answered("Antwort"))).ok(),
-            Some(ConversationReply::Answered("Antwort".into()))
+            Some(ConversationReply::answered("Antwort"))
+        );
+        let mut linked = BotReply::answered("Antwort");
+        if let BotReply::Answered { actions, .. } = &mut linked {
+            *actions = vec![crate::AnswerAction::TwitchLink];
+        }
+        assert_eq!(
+            project_conversation(result(linked)).ok(),
+            Some(ConversationReply::Answered {
+                text: "Antwort".into(),
+                actions: vec![crate::AnswerAction::TwitchLink],
+            })
         );
         assert_eq!(
             project_conversation(result(BotReply::answered("  "))).ok(),
@@ -1148,34 +1151,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ticket_akzeptiert_ungeprueften_text_ohne_anzeigepraefix() {
-        for status in ["insufficient_evidence", "unverified"] {
-            let outcome = fixture_answer_with_task(
-                status,
-                "Ungeprüft: Bitte schick uns die genaue Fehlermeldung.",
-                false,
-                false,
-                Some(crate::DiscordAnswerCapability::Ticket),
-            )
-            .await
-            .expect("Ticket-Text");
-            assert_eq!(
-                outcome,
-                BrainOutcome::Answer("Bitte schick uns die genaue Fehlermeldung.".into())
-            );
-        }
+    async fn ticket_antwortet_nur_mit_belegter_antwort() {
         assert_eq!(
             fixture_answer_with_task(
-                "insufficient_evidence",
-                "Keine gesicherte Antwort",
+                "answered",
+                "Bitte schick uns die genaue Fehlermeldung.",
                 false,
                 false,
                 Some(crate::DiscordAnswerCapability::Ticket),
             )
             .await
-            .expect("Fehlendes Wissen"),
-            BrainOutcome::NoAnswer
+            .expect("Ticket-Text"),
+            BrainOutcome::Answer("Bitte schick uns die genaue Fehlermeldung.".into())
         );
+        for status in ["insufficient_evidence", "unverified"] {
+            assert_eq!(
+                fixture_answer_with_task(
+                    status,
+                    "Ungeprüft: Bitte schick uns die genaue Fehlermeldung.",
+                    false,
+                    false,
+                    Some(crate::DiscordAnswerCapability::Ticket),
+                )
+                .await
+                .expect("Ticket ohne Beleg"),
+                BrainOutcome::NoAnswer
+            );
+        }
     }
 
     #[tokio::test]
@@ -1427,6 +1429,7 @@ mod tests {
             .await
             .expect("Unabhängige Testtask");
             let response = |text: String| PublicAnswerResponse {
+                actions: Vec::new(),
                 contract_version: brain_client::PUBLIC_API_VERSION.into(),
                 request_id: "private-request-id".into(),
                 knowledge_release: "test-release".into(),
@@ -1559,6 +1562,7 @@ mod tests {
                 artifact.page_url
             );
             let response = PublicAnswerResponse {
+                actions: Vec::new(),
                 contract_version: brain_client::PUBLIC_API_VERSION.into(),
                 request_id: "artifact-title-projection".into(),
                 knowledge_release: "test-release".into(),
@@ -1606,6 +1610,7 @@ mod tests {
     #[test]
     fn projection_without_body_budget_is_silent() {
         let response = PublicAnswerResponse {
+            actions: Vec::new(),
             contract_version: brain_client::PUBLIC_API_VERSION.into(),
             request_id: "bounded-projection".into(),
             knowledge_release: "test-release".into(),
@@ -1650,6 +1655,7 @@ mod tests {
             assert!(!valid_docs_url(&invalid), "{invalid}");
         }
         let response = PublicAnswerResponse {
+            actions: Vec::new(),
             contract_version: brain_client::PUBLIC_API_VERSION.into(),
             request_id: "docs-projection".into(),
             knowledge_release: "test-release".into(),

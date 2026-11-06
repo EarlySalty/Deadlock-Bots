@@ -12,7 +12,7 @@ pub mod brain_api;
 pub mod images;
 pub use brain_client::bounded_user_questions;
 pub use brain_client::{
-    AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
+    AnswerAction, AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
 };
 pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
@@ -35,6 +35,7 @@ pub enum DialogSpeaker {
 pub struct DialogEntry {
     pub speaker: DialogSpeaker,
     pub text: String,
+    pub sent_at_unix: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,8 +78,20 @@ pub struct DiscordConversationRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationReply {
-    Answered(String),
+    Answered {
+        text: String,
+        actions: Vec<AnswerAction>,
+    },
     Silent,
+}
+
+impl ConversationReply {
+    pub fn answered(text: impl Into<String>) -> Self {
+        Self::Answered {
+            text: text.into(),
+            actions: Vec::new(),
+        }
+    }
 }
 
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;

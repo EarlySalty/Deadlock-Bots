@@ -165,7 +165,7 @@ impl PassiveHelpResponder {
         };
         let result = tokio::time::timeout(self.timeout, self.brain.converse(&request)).await;
         let text = match result {
-            Ok(Ok(ConversationReply::Answered(text)))
+            Ok(Ok(ConversationReply::Answered { text, .. }))
                 if !text.trim().is_empty()
                     && answer_body(&text).chars().count() <= 650
                     && !has_forbidden_pause(&text) =>
@@ -175,15 +175,15 @@ impl PassiveHelpResponder {
             Ok(Ok(reply)) => {
                 let reason = match reply {
                     ConversationReply::Silent => "still",
-                    ConversationReply::Answered(ref text)
+                    ConversationReply::Answered { ref text, .. }
                         if answer_body(text).chars().count() > 650 =>
                     {
                         "Antwort überschreitet das Kurzbudget"
                     }
-                    ConversationReply::Answered(ref text) if has_forbidden_pause(text) => {
+                    ConversationReply::Answered { ref text, .. } if has_forbidden_pause(text) => {
                         "Antwort enthält verbotene Gedankenstrichpausen"
                     }
-                    ConversationReply::Answered(_) => "leere Antwort",
+                    ConversationReply::Answered { .. } => "leere Antwort",
                 };
                 tracing::info!(
                     message_id = event.message_id,
@@ -396,7 +396,7 @@ mod tests {
             (ScriptedBrain::replying(Vec::new()), 0),
             (ScriptedBrain::failing(), 0),
             (
-                ScriptedBrain::replying(vec![Ok(ConversationReply::Answered(" ".into()))]),
+                ScriptedBrain::replying(vec![Ok(ConversationReply::answered(" "))]),
                 0,
             ),
         ] {

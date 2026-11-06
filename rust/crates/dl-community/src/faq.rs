@@ -805,7 +805,7 @@ impl FaqChat {
             images: images.clone(),
         };
         match self.brain.converse(&request).await {
-            Ok(dl_brain::ConversationReply::Answered(text)) => {
+            Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
                 KnowledgeLookup::Answer(KnowledgeAnswer {
                     answerable: true,
                     answer: Some(truncate_utf16(&text, 1900)),
@@ -1101,10 +1101,11 @@ impl FaqChat {
         if inserted_user != 1 {
             return Ok(FaqMessageWrite::Inactive);
         }
-        let history = sqlx::query_as::<_, (String, String)>(
-            "SELECT role, content
+        let history = sqlx::query_as::<_, (String, Option<i64>)>(
+            "SELECT content, sent_at_unix
                FROM (
-                     SELECT role, content, id
+                     SELECT content, id,
+                            EXTRACT(EPOCH FROM created_at)::BIGINT AS sent_at_unix
                        FROM bot.faq_chat_messages
                       WHERE session_id = $1 AND role = 'user'
                       ORDER BY id DESC
@@ -1117,9 +1118,10 @@ impl FaqChat {
         .await?;
         let mut dialog: Vec<dl_brain::DialogEntry> = history
             .into_iter()
-            .map(|(_, text)| dl_brain::DialogEntry {
+            .map(|(text, sent_at_unix)| dl_brain::DialogEntry {
                 speaker: dl_brain::DialogSpeaker::User,
                 text,
+                sent_at_unix,
             })
             .collect();
         dialog.pop();
@@ -2272,7 +2274,7 @@ mod tests {
             Ok(value) if status == 200 && value.get("answer").is_some() => Ok(value["answer"]
                 .as_str()
                 .map_or(dl_brain::ConversationReply::Silent, |text| {
-                    dl_brain::ConversationReply::Answered(text.to_owned())
+                    dl_brain::ConversationReply::answered(text)
                 })),
             Ok(_) if status == 200 => evidence_reply(body),
             _ => Err(dl_brain::BrainError::Backend("scripted".into())),

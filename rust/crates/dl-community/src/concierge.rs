@@ -1382,7 +1382,7 @@ fn mark_feedback_failed(feedback: Option<&BrainFeedback>) {
 }
 
 fn answer_body(
-    question: &str,
+    actions: &[dl_brain::AnswerAction],
     reply: &str,
     pate_request: bool,
     allow_personal_actions: bool,
@@ -1390,17 +1390,22 @@ fn answer_body(
 ) -> Map<String, Value> {
     let body = if pate_request && allow_personal_actions {
         pate_offer_body(reply)
-    } else if allow_personal_actions && question_offers_twitch_link(question) {
-        v2_body(reply, vec![community::twitch_link_button()])
+    } else if allow_personal_actions {
+        v2_body(reply, action_buttons(actions))
     } else {
         v2_body(reply, Vec::new())
     };
     with_response_components(body, response_components)
 }
 
-fn question_offers_twitch_link(question: &str) -> bool {
-    community::community_question(question)
-        .is_some_and(community::CommunityTopic::offers_twitch_link)
+fn action_buttons(actions: &[dl_brain::AnswerAction]) -> Vec<Value> {
+    actions
+        .iter()
+        .map(|action| match action {
+            dl_brain::AnswerAction::TwitchLink => community::twitch_link_button(),
+            dl_brain::AnswerAction::SteamLink => community::steam_link_button(),
+        })
+        .collect()
 }
 
 fn button(label: &str, style: u8, custom_id: &str) -> Value {
@@ -1700,9 +1705,10 @@ async fn recent_dialog_tx(
     limit: i64,
 ) -> CommunityDbResult<Vec<dl_brain::DialogEntry>> {
     let rows = sqlx::query(
-        "SELECT role, content
+        "SELECT role, content, sent_at_unix
            FROM (
-                 SELECT role, content, id
+                 SELECT role, content, id,
+                        EXTRACT(EPOCH FROM created_at)::BIGINT AS sent_at_unix
                    FROM bot.concierge_conversations
                   WHERE user_id = $1
                   ORDER BY id DESC
@@ -1724,7 +1730,12 @@ async fn recent_dialog_tx(
                 "assistant" => dl_brain::DialogSpeaker::Assistant,
                 _ => return None,
             };
-            Some(dl_brain::DialogEntry { speaker, text })
+            let sent_at_unix: Option<i64> = row.try_get("sent_at_unix").ok().flatten();
+            Some(dl_brain::DialogEntry {
+                speaker,
+                text,
+                sent_at_unix,
+            })
         })
         .collect())
 }
@@ -5175,6 +5186,7 @@ impl Concierge {
             }
         }
         let pate_request = answer.answer.pate_request;
+        let actions = answer.answer.actions;
         match record_conversation_tx(
             &mut delivery_tx,
             db_user_id,
@@ -5205,7 +5217,7 @@ impl Concierge {
             }
         }
         let body = answer_body(
-            trimmed,
+            &actions,
             &reply,
             pate_request,
             allow_personal_actions,
@@ -5395,15 +5407,23 @@ impl Concierge {
             mark_feedback_failed(binding.feedback);
         }
         let (reply, hit, outcome) = match result {
-            Ok(dl_brain::ConversationReply::Answered(text)) if !text.trim().is_empty() => {
-                (Some(text), true, ConciergeAnswerOutcome::Answered)
+            Ok(dl_brain::ConversationReply::Answered { text, actions })
+                if !text.trim().is_empty() =>
+            {
+                (
+                    Some((text, actions)),
+                    true,
+                    ConciergeAnswerOutcome::Answered,
+                )
             }
             Ok(_) => (None, false, ConciergeAnswerOutcome::NoAnswer),
             Err(_) => (None, false, ConciergeAnswerOutcome::Error),
         };
+        let (reply, actions) = reply.unzip();
         let decision = AnswerDecision {
             answer: LlmAnswer {
                 reply,
+                actions: actions.unwrap_or_default(),
                 intent: hit.then(|| signalled_intent(question)).flatten(),
                 pate_request: hit && pure_pate_request(question),
             },
@@ -5471,6 +5491,7 @@ impl Concierge {
         let knowledge_hit = decision.knowledge_hit;
         let outcome = decision.outcome;
         let pate_request = decision.answer.pate_request;
+        let actions = decision.answer.actions;
         let Some(reply) = decision.answer.reply else {
             return AnswerTerminal {
                 source,
@@ -5481,7 +5502,7 @@ impl Concierge {
             };
         };
         let body = answer_body(
-            question,
+            &actions,
             &reply,
             pate_request,
             allow_personal_actions,
@@ -7489,6 +7510,7 @@ fn short_digest(profile: &ConciergeProfile) -> String {
 #[derive(Default)]
 struct LlmAnswer {
     reply: Option<String>,
+    actions: Vec<dl_brain::AnswerAction>,
     intent: Option<ConciergeIntent>,
     pate_request: bool,
 }
@@ -8303,7 +8325,7 @@ mod tests {
     #[test]
     fn wissensantwort_utf16_budget_passt_in_v2_und_fallback() {
         let text = "🧠".repeat(900);
-        let body = super::answer_body("Hallo", &text, true, true, None);
+        let body = super::answer_body(&[], &text, true, true, None);
         let visible = body["components"][0]["components"][0]["content"]
             .as_str()
             .expect("text display");
@@ -8376,6 +8398,7 @@ mod tests {
             let history = [dl_brain::DialogEntry {
                 speaker: dl_brain::DialogSpeaker::User,
                 text: "Gespeicherter privater Verlauf".into(),
+                sent_at_unix: None,
             }];
             let decision = concierge
                 .answer_bound_decision(
@@ -9612,44 +9635,44 @@ mod tests {
     }
 
     #[test]
-    fn twitch_button_nur_bei_passender_frage_und_persoenlichen_aktionen() {
-        let has_twitch_button = |body: &Map<String, Value>| {
+    fn aktionsknoepfe_nur_aus_brain_aktionen_und_persoenlichen_aktionen() {
+        let custom_ids = |body: &Map<String, Value>| -> Vec<Value> {
             body["components"][0]["components"]
                 .as_array()
                 .expect("V2 container components")
                 .iter()
-                .any(|row| row["components"][0]["custom_id"] == community::TWITCH_LINK_CUSTOM_ID)
+                .filter_map(|row| row["components"].as_array())
+                .flatten()
+                .map(|button| button["custom_id"].clone())
+                .collect()
         };
-        let frage = "Wie bekomme ich Punkte?";
+        let twitch = json!(community::TWITCH_LINK_CUSTOM_ID);
+        let steam = json!(community::STEAM_LINK_CUSTOM_ID);
         let antwort = "Freier Brain-Text zu den Punkten.";
-        assert!(has_twitch_button(&answer_body(
-            frage, antwort, false, true, None
-        )));
-        assert!(!has_twitch_button(&answer_body(
-            frage, antwort, false, false, None
-        )));
-        assert!(!has_twitch_button(&answer_body(
-            "Wie läuft der Clip-Contest?",
-            antwort,
-            false,
-            true,
-            None
-        )));
-        assert!(!has_twitch_button(&answer_body(
-            "Hallo",
+        let beide = [
+            dl_brain::AnswerAction::TwitchLink,
+            dl_brain::AnswerAction::SteamLink,
+        ];
+        let ids = custom_ids(&answer_body(&beide, antwort, false, true, None));
+        assert!(ids.contains(&twitch) && ids.contains(&steam));
+        let ids = custom_ids(&answer_body(&beide, antwort, false, false, None));
+        assert!(!ids.contains(&twitch) && !ids.contains(&steam));
+        let ids = custom_ids(&answer_body(
+            &[],
             "Verknüpf doch Twitch, dann gibt es Punkte.",
             false,
             true,
-            None
-        )));
+            None,
+        ));
+        assert!(!ids.contains(&twitch) && !ids.contains(&steam));
         let with_tour = answer_body(
-            frage,
+            &[dl_brain::AnswerAction::TwitchLink],
             antwort,
             false,
             true,
             Some(&tour_response_components()),
         );
-        assert!(has_twitch_button(&with_tour));
+        assert!(custom_ids(&with_tour).contains(&twitch));
         assert_has_tour_components(&with_tour);
     }
 

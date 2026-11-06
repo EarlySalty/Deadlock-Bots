@@ -260,7 +260,7 @@ pub(crate) mod test_brain {
         Ok(parsed["evidence"][0]["text"]
             .as_str()
             .map_or(ConversationReply::Silent, |text| {
-                ConversationReply::Answered(text.to_owned())
+                ConversationReply::answered(text)
             }))
     }
 
@@ -283,12 +283,12 @@ pub(crate) mod test_brain {
         }
 
         pub(crate) fn answering(text: &str) -> Arc<Self> {
-            Self::replying(vec![Ok(ConversationReply::Answered(text.to_owned()))])
+            Self::replying(vec![Ok(ConversationReply::answered(text))])
         }
 
         pub(crate) fn always(text: &str) -> Arc<Self> {
             Arc::new(Self {
-                default_reply: Some(ConversationReply::Answered(text.to_owned())),
+                default_reply: Some(ConversationReply::answered(text)),
                 ..Self::default()
             })
         }
@@ -366,7 +366,7 @@ pub(crate) mod test_brain {
                         .unwrap_or(ConversationReply::Silent))
                 })?;
             Ok(match reply {
-                ConversationReply::Answered(text) => BrainOutcome::Answer(text),
+                ConversationReply::Answered { text, .. } => BrainOutcome::Answer(text),
                 ConversationReply::Silent => BrainOutcome::NoAnswer,
             })
         }

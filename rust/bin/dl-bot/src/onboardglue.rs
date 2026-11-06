@@ -1,11 +1,6 @@
-//! Übrig gebliebene Onboarding-Buttons.
-//!
-//! Die alten custom_ids bleiben registriert, damit Discord nicht
-//! "Interaction failed" zeigt. Sie vergeben keine Rolle mehr.
-//! Steam-Login bleibt, das ist Account-Verknüpfung und kein Einstiegs-Flow.
-
 use std::sync::Arc;
 
+use dl_community::concierge_community::STEAM_LINK_CUSTOM_ID;
 use dl_community::onboarding::LEGACY_ONBOARDING_RETIRED_HINT;
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler};
 use serde_json::json;
@@ -20,7 +15,7 @@ pub struct OnboardingHandler {
 impl InteractionHandler for OnboardingHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         match interaction.custom_id.as_str() {
-            "steam:openid" => match self.steam.fetch_steam_link_url(interaction.user_id).await {
+            STEAM_LINK_CUSTOM_ID => match self.steam.fetch_steam_link_url(interaction.user_id).await {
                 Some(url) => BridgeReply {
                     content: Some(
                         "Melde dich kurz bei Steam an (OpenID, kein Passwort nötig):".to_string(),
@@ -46,7 +41,7 @@ pub fn register(
     steam: Arc<dl_bridges::steam::SteamBotClient>,
 ) {
     let handler = Arc::new(OnboardingHandler { steam });
-    router.on_custom_id("steam:openid", handler.clone());
+    router.on_custom_id(STEAM_LINK_CUSTOM_ID, handler.clone());
     router.on_custom_id("steam:next", handler.clone());
     router.on_custom_id("rp:panel:start", handler.clone());
     router.on_prefix("wdm:", handler.clone());
