@@ -451,7 +451,7 @@ impl InviteLoungeWatcher {
             images: dl_brain::AttachedImages::default(),
         };
         match self.brain.converse(&request).await {
-            Ok(dl_brain::ConversationReply::Answered(text)) => {
+            Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
                 match crate::answer_support::discord_content(&text, "invite_lounge") {
                     Some(content) => self
                         .port

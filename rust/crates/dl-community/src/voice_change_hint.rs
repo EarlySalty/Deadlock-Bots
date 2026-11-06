@@ -143,7 +143,7 @@ impl VoiceChangeHintResponder {
         let text = match self.brain.converse(&request).await {
             Ok(reply) => {
                 let content = match reply {
-                    ConversationReply::Answered(text) => {
+                    ConversationReply::Answered { text, .. } => {
                         crate::answer_support::discord_content(&text, "voice_hint")
                     }
                     ConversationReply::Silent => None,

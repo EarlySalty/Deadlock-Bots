@@ -753,7 +753,7 @@ impl FaqChat {
             images: images.clone(),
         };
         match self.brain.converse(&request).await {
-            Ok(dl_brain::ConversationReply::Answered(text)) => {
+            Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
                 KnowledgeLookup::Answer(KnowledgeAnswer {
                     answerable: true,
                     answer: Some(truncate_utf16(&text, 1900)),
@@ -2107,7 +2107,7 @@ mod tests {
             Ok(value) if status == 200 && value.get("answer").is_some() => Ok(value["answer"]
                 .as_str()
                 .map_or(dl_brain::ConversationReply::Silent, |text| {
-                    dl_brain::ConversationReply::Answered(text.to_owned())
+                    dl_brain::ConversationReply::answered(text)
                 })),
             Ok(_) if status == 200 => evidence_reply(body),
             _ => Err(dl_brain::BrainError::Backend("scripted".into())),

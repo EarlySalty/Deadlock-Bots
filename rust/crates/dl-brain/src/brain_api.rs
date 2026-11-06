@@ -279,9 +279,9 @@ fn conversation_task(
 fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, BrainError> {
     match result {
         BotTaskResult::Conversation {
-            reply: BotReply::Answered { text, .. },
+            reply: BotReply::Answered { text, actions, .. },
             ..
-        } if !text.trim().is_empty() => Ok(ConversationReply::Answered(text)),
+        } if !text.trim().is_empty() => Ok(ConversationReply::Answered { text, actions }),
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed { failure, .. } => Err(classified_backend_error(failure.as_str())),
         _ => Err(classified_backend_error("vertrag")),
@@ -910,7 +910,18 @@ mod tests {
         };
         assert_eq!(
             project_conversation(result(BotReply::answered("Antwort"))).ok(),
-            Some(ConversationReply::Answered("Antwort".into()))
+            Some(ConversationReply::answered("Antwort"))
+        );
+        let mut linked = BotReply::answered("Antwort");
+        if let BotReply::Answered { actions, .. } = &mut linked {
+            *actions = vec![crate::AnswerAction::TwitchLink];
+        }
+        assert_eq!(
+            project_conversation(result(linked)).ok(),
+            Some(ConversationReply::Answered {
+                text: "Antwort".into(),
+                actions: vec![crate::AnswerAction::TwitchLink],
+            })
         );
         assert_eq!(
             project_conversation(result(BotReply::answered("  "))).ok(),
@@ -1298,6 +1309,7 @@ mod tests {
             .await
             .expect("Unabhängige Testtask");
             let response = |text: String| PublicAnswerResponse {
+                actions: Vec::new(),
                 contract_version: brain_client::PUBLIC_API_VERSION.into(),
                 request_id: "private-request-id".into(),
                 knowledge_release: "test-release".into(),
@@ -1430,6 +1442,7 @@ mod tests {
                 artifact.page_url
             );
             let response = PublicAnswerResponse {
+                actions: Vec::new(),
                 contract_version: brain_client::PUBLIC_API_VERSION.into(),
                 request_id: "artifact-title-projection".into(),
                 knowledge_release: "test-release".into(),
@@ -1477,6 +1490,7 @@ mod tests {
     #[test]
     fn projection_without_body_budget_is_silent() {
         let response = PublicAnswerResponse {
+            actions: Vec::new(),
             contract_version: brain_client::PUBLIC_API_VERSION.into(),
             request_id: "bounded-projection".into(),
             knowledge_release: "test-release".into(),
@@ -1521,6 +1535,7 @@ mod tests {
             assert!(!valid_docs_url(&invalid), "{invalid}");
         }
         let response = PublicAnswerResponse {
+            actions: Vec::new(),
             contract_version: brain_client::PUBLIC_API_VERSION.into(),
             request_id: "docs-projection".into(),
             knowledge_release: "test-release".into(),

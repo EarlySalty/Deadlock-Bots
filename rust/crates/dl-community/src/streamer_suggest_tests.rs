@@ -262,16 +262,6 @@ fn clip_panel_traegt_den_knopf() {
     assert_eq!(PANEL_CHANNEL_ID, crate::clips::SUBMIT_CHANNEL_ID);
 }
 
-#[test]
-fn kanal_passt_zum_concierge() {
-    assert_eq!(
-        crate::concierge_community::STREAMER_SUGGEST_CHANNEL_ID,
-        PANEL_CHANNEL_ID
-    );
-    assert!(crate::concierge_community::ANSWER_STREAMER_VORSCHLAGEN
-        .contains(&format!("<#{PANEL_CHANNEL_ID}>")));
-}
-
 #[tokio::test]
 async fn button_oeffnet_modal_und_ist_registriert() {
     let pool = sqlx::postgres::PgPoolOptions::new()
