@@ -187,6 +187,7 @@ fn bounded_dialog(entries: &[DialogEntry]) -> Vec<DialogTurn> {
                 DialogSpeaker::Assistant => DialogRole::Assistant,
             },
             text: entry.text.clone(),
+            sent_at_unix: entry.sent_at_unix.filter(|sent| *sent > 0),
         })
         .collect();
     turns.reverse();
@@ -859,6 +860,7 @@ mod tests {
             .map(|index| DialogEntry {
                 speaker: DialogSpeaker::User,
                 text: format!("{index}{}", "x".repeat(900)),
+                sent_at_unix: None,
             })
             .collect();
         let recent_messages: Vec<ChatEntry> = (0..60)
