@@ -501,7 +501,7 @@ impl InviteLoungeWatcher {
             return Ok(None);
         }
         if kind.is_none() && friend_code(&event.content).is_none() {
-            return self.record_check_in_answer(&event).await;
+            return self.record_check_in_answer(&event, bot_id).await;
         }
         loop {
             let previous = self.store.load(event.author_id).await?;
@@ -566,7 +566,11 @@ impl InviteLoungeWatcher {
             .is_some_and(|since| created_at >= since))
     }
 
-    async fn record_check_in_answer(&self, event: &LoungeMessage) -> Result<Option<u64>, String> {
+    async fn record_check_in_answer(
+        &self,
+        event: &LoungeMessage,
+        bot_id: u64,
+    ) -> Result<Option<u64>, String> {
         let Some(answer) = check_in_answer(&event.content) else {
             return Ok(None);
         };
@@ -575,7 +579,7 @@ impl InviteLoungeWatcher {
                 return Ok(None);
             };
             let mut next = previous.clone();
-            let Some(notice) = answer_check_in(&mut next, event, answer) else {
+            let Some(notice) = answer_check_in(&mut next, event, answer, bot_id) else {
                 return Ok(None);
             };
             if !self
@@ -1296,6 +1300,7 @@ fn answer_check_in(
     state: &mut LoungeState,
     event: &LoungeMessage,
     answer: bool,
+    bot_id: u64,
 ) -> Option<Option<Notice>> {
     let request = state.request.as_mut()?;
     let open = request.phase == Phase::Pending
@@ -1303,6 +1308,8 @@ fn answer_check_in(
         && state.status.asked()
         && state.status.wait.is_none()
         && !state.status.invite_now
+        && state.status.channel_id == Some(event.channel_id)
+        && (event.reply_message_id.is_some() || mentions_user(&event.content, bot_id))
         && state
             .status
             .check_in_at
@@ -1324,8 +1331,11 @@ fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64) -> bo
     message.message_id > request_id
         && message.author_id != user_id
         && (message.reply_message_id == Some(request_id)
-            || message.content.contains(&format!("<@{user_id}>"))
-            || message.content.contains(&format!("<@!{user_id}>")))
+            || mentions_user(&message.content, user_id))
+}
+
+fn mentions_user(content: &str, user_id: u64) -> bool {
+    content.contains(&format!("<@{user_id}>")) || content.contains(&format!("<@!{user_id}>"))
 }
 
 fn friend_code(content: &str) -> Option<String> {

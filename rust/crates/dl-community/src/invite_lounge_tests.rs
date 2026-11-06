@@ -770,12 +770,10 @@ async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
     }
     assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
     assert!(invite.calls.lock().await.is_empty());
+    let mut answer = message(2, NOW + 1900, "nein, noch nichts");
+    answer.reply_message_id = Some(1);
     watcher
-        .handle_message(
-            message(2, NOW + 1900, "nein, noch nichts"),
-            NOW + 1900,
-            Some(false),
-        )
+        .handle_message(answer, NOW + 1900, Some(false))
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 1);
@@ -806,12 +804,10 @@ async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
         .poll_due(NOW + CHECK_IN_SECONDS)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let mut answer = message(2, NOW + 1900, "ja, ist angekommen");
+    answer.reply_message_id = Some(1);
     watcher
-        .handle_message(
-            message(2, NOW + 1900, "ja, ist angekommen"),
-            NOW + 1900,
-            Some(false),
-        )
+        .handle_message(answer, NOW + 1900, Some(false))
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
@@ -838,6 +834,42 @@ async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
         Phase::Attempted
     );
     assert_mentions_request(&port, 2).await;
+}
+
+#[tokio::test]
+async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
+    let (watcher, _, _, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .handle_message(message(2, NOW + 1900, "ja"), NOW + 1900, Some(false))
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    let mut answer = message(3, NOW + 1901, "ja");
+    answer.reply_message_id = Some(2);
+    watcher
+        .handle_message(answer, NOW + 1901, Some(false))
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(invite.calls.lock().await.is_empty());
+    assert_eq!(
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            InviteLoungeUpdate::UserConfirmed
+        ]
+    );
 }
 
 #[tokio::test]

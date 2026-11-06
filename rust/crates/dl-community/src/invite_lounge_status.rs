@@ -221,6 +221,9 @@ pub(super) fn check_in_window(age: i64, room_wait: i64) -> bool {
 }
 
 pub(super) fn check_in_answer(content: &str) -> Option<bool> {
+    if content.contains('?') {
+        return None;
+    }
     let lower = content.to_lowercase();
     let words: Vec<&str> = lower
         .split(|ch: char| !ch.is_alphanumeric())
@@ -228,7 +231,7 @@ pub(super) fn check_in_answer(content: &str) -> Option<bool> {
         .collect();
     let any = |candidates: &[&str]| words.iter().any(|word| candidates.contains(word));
     if any(&[
-        "nein", "no", "nope", "nee", "ne", "nicht", "nix", "nichts", "kein", "keine", "leider",
+        "nein", "no", "nope", "nee", "ne", "nicht", "nix", "nichts", "keine", "leider",
     ]) {
         Some(false)
     } else if any(&[
@@ -241,8 +244,6 @@ pub(super) fn check_in_answer(content: &str) -> Option<bool> {
         "yep",
         "angekommen",
         "geklappt",
-        "danke",
-        "hab",
         "habs",
         "drin",
     ]) {
@@ -463,7 +464,13 @@ mod tests {
 
     #[test]
     fn antwort_auf_die_nachfrage() {
-        for yes in ["ja", "Jo danke!", "ist angekommen", "hat geklappt 👍"] {
+        for yes in [
+            "ja",
+            "Jo danke!",
+            "ist angekommen",
+            "hat geklappt 👍",
+            "bin drin",
+        ] {
             assert_eq!(check_in_answer(yes), Some(true), "{yes}");
         }
         for no in [
@@ -471,10 +478,21 @@ mod tests {
             "ne noch nicht",
             "leider nichts bekommen",
             "hab keine",
+            "ja, aber nicht drin",
+            "nein danke, bin drin",
         ] {
             assert_eq!(check_in_answer(no), Some(false), "{no}");
         }
-        assert_eq!(check_in_answer("wie lange dauert das?"), None);
+        for unclear in [
+            "wie lange dauert das?",
+            "ist sie angekommen?",
+            "ist die Einladung drin?",
+            "Kein Problem, danke",
+            "Danke!",
+            "hab noch eine Frage",
+        ] {
+            assert_eq!(check_in_answer(unclear), None, "{unclear}");
+        }
         assert_eq!(
             Notice::Confirmed.update(),
             InviteLoungeUpdate::UserConfirmed
