@@ -35,6 +35,7 @@ pub enum DialogSpeaker {
 pub struct DialogEntry {
     pub speaker: DialogSpeaker,
     pub text: String,
+    pub sent_at_unix: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

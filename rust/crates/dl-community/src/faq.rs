@@ -932,10 +932,11 @@ impl FaqChat {
         if inserted_user != 1 {
             return Ok(FaqMessageWrite::Inactive);
         }
-        let history = sqlx::query_as::<_, (String, String)>(
-            "SELECT role, content
+        let history = sqlx::query_as::<_, (String, Option<i64>)>(
+            "SELECT content, sent_at_unix
                FROM (
-                     SELECT role, content, id
+                     SELECT content, id,
+                            EXTRACT(EPOCH FROM created_at)::BIGINT AS sent_at_unix
                        FROM bot.faq_chat_messages
                       WHERE session_id = $1 AND role = 'user'
                       ORDER BY id DESC
@@ -948,9 +949,10 @@ impl FaqChat {
         .await?;
         let mut dialog: Vec<dl_brain::DialogEntry> = history
             .into_iter()
-            .map(|(_, text)| dl_brain::DialogEntry {
+            .map(|(text, sent_at_unix)| dl_brain::DialogEntry {
                 speaker: dl_brain::DialogSpeaker::User,
                 text,
+                sent_at_unix,
             })
             .collect();
         dialog.pop();

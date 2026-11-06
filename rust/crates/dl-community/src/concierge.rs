@@ -1705,9 +1705,10 @@ async fn recent_dialog_tx(
     limit: i64,
 ) -> CommunityDbResult<Vec<dl_brain::DialogEntry>> {
     let rows = sqlx::query(
-        "SELECT role, content
+        "SELECT role, content, sent_at_unix
            FROM (
-                 SELECT role, content, id
+                 SELECT role, content, id,
+                        EXTRACT(EPOCH FROM created_at)::BIGINT AS sent_at_unix
                    FROM bot.concierge_conversations
                   WHERE user_id = $1
                   ORDER BY id DESC
@@ -1729,7 +1730,12 @@ async fn recent_dialog_tx(
                 "assistant" => dl_brain::DialogSpeaker::Assistant,
                 _ => return None,
             };
-            Some(dl_brain::DialogEntry { speaker, text })
+            let sent_at_unix: Option<i64> = row.try_get("sent_at_unix").ok().flatten();
+            Some(dl_brain::DialogEntry {
+                speaker,
+                text,
+                sent_at_unix,
+            })
         })
         .collect())
 }
@@ -8392,6 +8398,7 @@ mod tests {
             let history = [dl_brain::DialogEntry {
                 speaker: dl_brain::DialogSpeaker::User,
                 text: "Gespeicherter privater Verlauf".into(),
+                sent_at_unix: None,
             }];
             let decision = concierge
                 .answer_bound_decision(
