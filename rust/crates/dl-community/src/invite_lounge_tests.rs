@@ -1,4 +1,7 @@
+use super::status::{SteamOutcome, CHECK_IN_SECONDS, RETRY_SECONDS};
 use super::*;
+use crate::answer_support::test_brain::ScriptedBrain;
+use dl_brain::{InviteLoungeUpdate, InviteStatus};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
@@ -33,6 +36,8 @@ struct MemoryStore {
     legacy_hints: Mutex<HashMap<u64, i64>>,
     backfilled: AtomicBool,
     advance: Mutex<Option<ClockAdvance>>,
+    actions_since: AtomicI64,
+    progress: Mutex<SteamProgress>,
 }
 
 impl MemoryStore {
@@ -103,11 +108,24 @@ impl LoungeStore for MemoryStore {
         self.backfilled.store(true, Ordering::SeqCst);
         Ok(())
     }
+    async fn actions_since(&self) -> Result<Option<i64>, String> {
+        Ok(Some(self.actions_since.load(Ordering::SeqCst)))
+    }
+    async fn mark_actions_since(&self, now: i64) -> Result<(), String> {
+        let _ = self
+            .actions_since
+            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn steam_progress(&self, _code: &str, _since: i64) -> Result<SteamProgress, String> {
+        Ok(*self.progress.lock().await)
+    }
 }
 
 #[derive(Default)]
 struct RecordingPort {
     replies: Mutex<Vec<(u64, String)>>,
+    mentions: Mutex<Vec<(u64, String, u64)>>,
     history: Mutex<Vec<LoungeMessage>>,
     history_calls: AtomicUsize,
     identity_missing: AtomicBool,
@@ -148,6 +166,19 @@ impl InviteLoungeReplyPort for RecordingPort {
         self.replies.lock().await.push((id, text.into()));
         Ok(id + 100_000)
     }
+    async fn reply_mentioning(
+        &self,
+        _channel: u64,
+        id: u64,
+        text: &str,
+        user: u64,
+    ) -> Result<u64, String> {
+        self.mentions
+            .lock()
+            .await
+            .extend([(id, text.to_string(), user)]);
+        Ok(id + 200_000)
+    }
 }
 
 #[derive(Default)]
@@ -161,6 +192,7 @@ struct RecordingInvite {
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
     advance: Mutex<Option<(Arc<AtomicI64>, i64)>>,
+    reply: Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -186,6 +218,9 @@ impl InviteEventPort for RecordingInvite {
         if self.fail.load(Ordering::SeqCst) {
             return Err("Steam nicht erreichbar".into());
         }
+        if let Some(reply) = self.reply.lock().await.clone() {
+            return Ok(reply);
+        }
         self.sends.fetch_add(1, Ordering::SeqCst);
         Ok("🎮 Ihr seid schon Steam-Freunde, ich hab die Einladung direkt angestoßen.\nAntwort von Steam: OK".into())
     }
@@ -210,6 +245,41 @@ fn setup() -> (
     };
     (watcher, store, port, invite)
 }
+
+fn setup_scripted() -> (
+    InviteLoungeWatcher,
+    Arc<MemoryStore>,
+    Arc<RecordingPort>,
+    Arc<RecordingInvite>,
+    Arc<ScriptedBrain>,
+) {
+    let (mut watcher, store, port, invite) = setup();
+    let brain = ScriptedBrain::always("Brain-Status");
+    watcher.brain = brain.clone();
+    (watcher, store, port, invite, brain)
+}
+
+fn status_updates(brain: &ScriptedBrain) -> Vec<InviteLoungeUpdate> {
+    brain
+        .requests
+        .lock()
+        .expect("Brain-Anfragen lesbar")
+        .iter()
+        .filter_map(|request| match request.task {
+            dl_brain::DiscordConversation::InviteStatus { update } => Some(update),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn assert_mentions_request(port: &RecordingPort, count: usize) {
+    let mentions = port.mentions.lock().await;
+    assert_eq!(mentions.len(), count);
+    assert!(mentions
+        .iter()
+        .all(|(id, text, user)| *id == 1 && *user == USER && text == "Brain-Status"));
+}
+
 fn message(id: u64, at: i64, content: &str) -> LoungeMessage {
     LoungeMessage {
         guild_id: Some(GUILD),
@@ -569,8 +639,8 @@ async fn audit_und_dispatch_task_blocken_und_antwort_bleibt_erhalten() {
 }
 
 #[tokio::test]
-async fn fehler_bleibt_gespeichert_neue_direkte_bitte_erlaubt_einen_versuch() {
-    let (watcher, store, _, invite) = setup();
+async fn steam_ausfall_bleibt_still_offen_und_versucht_spaeter_erneut() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
     invite.fail.store(true, Ordering::SeqCst);
     watcher
         .handle_message(
@@ -580,45 +650,277 @@ async fn fehler_bleibt_gespeichert_neue_direkte_bitte_erlaubt_einen_versuch() {
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let state = store
+        .load(USER)
+        .await
+        .expect("Zustand lesbar")
+        .expect("Bitte gespeichert");
+    assert!(state
+        .last_result
+        .expect("Ergebnis gespeichert")
+        .contains("Fehlgeschlagen"));
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Pending
+    );
     watcher
-        .poll_due(NOW + 3600)
+        .poll_due(NOW + RETRY_SECONDS - 1)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 1);
     watcher
-        .poll_due(NOW + 7200)
+        .poll_due(NOW + RETRY_SECONDS)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 2);
+    assert!(port.mentions.lock().await.is_empty());
+    assert!(status_updates(&brain).is_empty());
+    invite.fail.store(false, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + 2 * RETRY_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 3);
+    assert_eq!(
+        status_updates(&brain),
+        vec![InviteLoungeUpdate::Status {
+            status: InviteStatus::Sent
+        }]
+    );
+    assert_mentions_request(&port, 1).await;
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn fa_raus_wird_einmal_gemeldet_und_danach_die_einladung() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    *invite.reply.lock().await =
+        Some("📨 Freundschaftsanfrage ist raus. Sag ihm, er soll sie auf Steam annehmen.".into());
+    store.progress.lock().await.open = true;
     watcher
         .handle_message(
-            message(2, NOW + 7200, "Kann mich jemand einladen? 123456789"),
-            NOW + 7200,
+            message(1, NOW, "Kannst du mich einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    for at in [NOW + 61, NOW + 200, NOW + 400] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert_eq!(
+        status_updates(&brain),
+        vec![InviteLoungeUpdate::Status {
+            status: InviteStatus::FriendshipMissing
+        }]
+    );
+    *store.progress.lock().await = SteamProgress {
+        outcome: Some(SteamOutcome::Sent),
+        invited: true,
+        open: false,
+    };
+    watcher
+        .poll_due(NOW + 600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + 900)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 1);
+    assert_eq!(
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::Status {
+                status: InviteStatus::FriendshipMissing
+            },
+            InviteLoungeUpdate::Status {
+                status: InviteStatus::Sent
+            }
+        ]
+    );
+    assert_mentions_request(&port, 2).await;
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
+    let (watcher, _, port, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS - 1)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(port.mentions.lock().await.is_empty());
+    for at in [NOW + CHECK_IN_SECONDS, NOW + CHECK_IN_SECONDS + 60] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert!(invite.calls.lock().await.is_empty());
+    watcher
+        .handle_message(
+            message(2, NOW + 1900, "nein, noch nichts"),
+            NOW + 1900,
             Some(false),
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 1);
-    assert!(store
-        .load(USER)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
-        .last_result
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
-        .contains("Fehlgeschlagen"));
-    let retry = message(3, NOW + 7300, "Kannste mich auch einladen?");
+    assert_eq!(
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            InviteLoungeUpdate::Status {
+                status: InviteStatus::Sent
+            }
+        ]
+    );
+    assert_mentions_request(&port, 2).await;
+}
+
+#[tokio::test]
+async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
     watcher
-        .handle_message(retry.clone(), NOW + 7300, Some(false))
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
-        .handle_message(retry, NOW + 7300, Some(false))
+        .poll_due(NOW + CHECK_IN_SECONDS)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
-        .poll_due(NOW + 12_000)
+        .handle_message(
+            message(2, NOW + 1900, "ja, ist angekommen"),
+            NOW + 1900,
+            Some(false),
+        )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(invite.calls.lock().await.len(), 2);
+    watcher
+        .poll_due(NOW + ROOM_WAIT_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(invite.calls.lock().await.is_empty());
+    assert_eq!(
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            InviteLoungeUpdate::UserConfirmed
+        ]
+    );
+    assert_eq!(
+        store
+            .load(USER)
+            .await
+            .expect("Zustand lesbar")
+            .expect("Bitte gespeichert")
+            .request
+            .expect("Bitte vorhanden")
+            .phase,
+        Phase::Attempted
+    );
+    assert_mentions_request(&port, 2).await;
+}
+
+#[tokio::test]
+async fn beantwortete_raumbitte_bekommt_keine_nachfrage() {
+    for author in [8, BOT] {
+        let (watcher, _, port, _, brain) = setup_scripted();
+        watcher
+            .handle_message(
+                message(1, NOW, "Kann mich jemand einladen? 123456789"),
+                NOW,
+                Some(false),
+            )
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        let mut answer = message(2, NOW + 60, "Schick ich dir gleich");
+        answer.author_id = author;
+        answer.reply_message_id = Some(1);
+        port.history.lock().await.push(answer);
+        watcher
+            .poll_due(NOW + CHECK_IN_SECONDS)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        assert!(status_updates(&brain).is_empty());
+        assert!(port.mentions.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn bereits_eingeladen_laut_steam_bestaetigt_ohne_neue_einladung() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    store.progress.lock().await.invited = true;
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert!(invite.calls.lock().await.is_empty());
+    assert_eq!(
+        status_updates(&brain),
+        vec![InviteLoungeUpdate::Status {
+            status: InviteStatus::AlreadyHasGame
+        }]
+    );
+    assert_mentions_request(&port, 1).await;
+}
+
+#[tokio::test]
+async fn bitten_vor_dem_deploy_loesen_nichts_aus() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    store.actions_since.store(NOW, Ordering::SeqCst);
+    watcher
+        .handle_message(
+            message(1, NOW - 10, "Kannst du mich einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + ROOM_WAIT_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(status_updates(&brain).is_empty());
+    assert!(port.replies.lock().await.is_empty());
+    watcher
+        .handle_message(
+            message(2, NOW, "Kannst du mich einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -905,7 +1207,7 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         friend_code: Some("123456789".into()),
         request: Some(Request {
             message_id: 1,
-            created_at: NOW - 7200,
+            created_at: NOW - REQUEST_WINDOW_SECONDS - 1,
             direct: false,
             phase: Phase::Pending,
         }),
@@ -1261,7 +1563,11 @@ async fn verspätete_gateway_nachricht_erzeugt_weder_hinweis_noch_versand() {
     ] {
         let (watcher, store, port, invite) = setup();
         watcher
-            .handle_message(message(1, NOW - 7200, content), NOW, Some(false))
+            .handle_message(
+                message(1, NOW - REQUEST_WINDOW_SECONDS - 1, content),
+                NOW,
+                Some(false),
+            )
             .await
             .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
         assert!(store
@@ -1284,7 +1590,7 @@ async fn alter_warteauftrag_verfällt_ohne_steam_oder_antwort() {
                 friend_code: Some("123456789".into()),
                 request: Some(Request {
                     message_id: 1,
-                    created_at: NOW - 7200,
+                    created_at: NOW - REQUEST_WINDOW_SECONDS - 1,
                     direct,
                     phase: Phase::Pending,
                 }),
@@ -1378,13 +1684,17 @@ async fn langsamer_direkter_versand_speichert_ergebnis_ohne_späte_antwort() {
 
 #[test]
 fn frischefenster_hat_eine_obere_und_untere_grenze() {
-    assert!(is_fresh(NOW - FRESHNESS_SECONDS, NOW, FRESHNESS_SECONDS));
-    assert!(!is_fresh(
-        NOW - FRESHNESS_SECONDS - 1,
+    assert!(is_fresh(
+        NOW - REQUEST_WINDOW_SECONDS,
         NOW,
-        FRESHNESS_SECONDS
+        REQUEST_WINDOW_SECONDS
     ));
-    assert!(!is_fresh(NOW + 1, NOW, FRESHNESS_SECONDS));
+    assert!(!is_fresh(
+        NOW - REQUEST_WINDOW_SECONDS - 1,
+        NOW,
+        REQUEST_WINDOW_SECONDS
+    ));
+    assert!(!is_fresh(NOW + 1, NOW, REQUEST_WINDOW_SECONDS));
 }
 
 #[tokio::test]
@@ -1461,7 +1771,7 @@ async fn ablauf_waehrend_load_oder_claim_verhindert_jeden_versand() {
             let clock = Arc::new(AtomicI64::new(NOW * 1000));
             let reader = clock.clone();
             watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
-            let max_age = FRESHNESS_SECONDS + if direct { 0 } else { ROOM_WAIT_SECONDS };
+            let max_age = REQUEST_WINDOW_SECONDS;
             store.states.lock().await.insert(
                 USER,
                 LoungeState {
@@ -1517,7 +1827,7 @@ async fn ablauf_waehrend_hinweis_claim_unterdrueckt_den_hinweis() {
     });
     watcher
         .handle_message(
-            message(1, NOW - FRESHNESS_SECONDS, "Kannst du mich einladen?"),
+            message(1, NOW - REQUEST_WINDOW_SECONDS, "Kannst du mich einladen?"),
             NOW,
             Some(false),
         )

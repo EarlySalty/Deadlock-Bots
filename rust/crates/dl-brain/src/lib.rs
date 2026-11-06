@@ -15,6 +15,7 @@ pub use brain_client::{
     AnswerAction, AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
 };
+pub use brain_contracts::invite::{InviteLoungeUpdate, InviteProblem, InviteStatus};
 pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
 
 #[derive(Clone)]
@@ -64,6 +65,9 @@ pub enum DiscordConversation {
     },
     InviteLounge {
         message: String,
+    },
+    InviteStatus {
+        update: InviteLoungeUpdate,
     },
 }
 

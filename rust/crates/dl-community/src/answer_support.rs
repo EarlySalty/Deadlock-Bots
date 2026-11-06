@@ -317,6 +317,9 @@ pub(crate) mod test_brain {
             DiscordConversation::PassiveHelp { message, .. }
             | DiscordConversation::VoiceHint { message }
             | DiscordConversation::InviteLounge { message } => (message, [].as_slice()),
+            DiscordConversation::InviteStatus { update } => {
+                return serde_json::to_string(update).unwrap_or_default();
+            }
         };
         history
             .iter()

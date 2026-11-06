@@ -224,6 +224,7 @@ fn conversation_text(task: &DiscordConversation) -> &str {
         DiscordConversation::PassiveHelp { message, .. }
         | DiscordConversation::VoiceHint { message }
         | DiscordConversation::InviteLounge { message } => message,
+        DiscordConversation::InviteStatus { .. } => "",
     }
 }
 
@@ -234,7 +235,9 @@ fn conversation_task(
     if !images.is_empty()
         && matches!(
             task,
-            DiscordConversation::VoiceHint { .. } | DiscordConversation::InviteLounge { .. }
+            DiscordConversation::VoiceHint { .. }
+                | DiscordConversation::InviteLounge { .. }
+                | DiscordConversation::InviteStatus { .. }
         )
     {
         return Err(classified_backend_error("anfrage"));
@@ -274,6 +277,9 @@ fn conversation_task(
         DiscordConversation::InviteLounge { message } => ConversationTask::DiscordInviteLounge {
             message: message.clone(),
         },
+        DiscordConversation::InviteStatus { update } => {
+            ConversationTask::DiscordInviteStatus { update: *update }
+        }
     })
 }
 
