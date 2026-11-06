@@ -14,8 +14,7 @@ dl-bot supplies the timestamps.
   `EXTRACT(EPOCH FROM created_at)::BIGINT` next to the content. Row limits
   (concierge 12, FAQ 5) and the user filter are unchanged; no new data leaves
   the bot except the timestamp of turns it already sent.
-- Brain crates pinned to Deadlock-Brain `64c4134511e858f5e6a6ac2148cec2a3f34e8491`
-  (branch commit). Bump to the Brain main commit after the Brain merge.
+- Brain crates pinned to Deadlock-Brain main `7d97ae43acb46520735987a5258adf45bdf7f5d5`.
 
 ## Deploy order
 
