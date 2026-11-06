@@ -856,10 +856,17 @@ async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
-    let mut answer = message(3, NOW + 1901, "ja");
-    answer.reply_message_id = Some(2);
+    let mut reply_to_own_message = message(3, NOW + 1901, "ja");
+    reply_to_own_message.reply_message_id = Some(2);
     watcher
-        .handle_message(answer, NOW + 1901, Some(false))
+        .handle_message(reply_to_own_message, NOW + 1901, Some(false))
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    let mut answer = message(4, NOW + 1902, "ja");
+    answer.reply_message_id = Some(200_001);
+    watcher
+        .handle_message(answer, NOW + 1902, Some(false))
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());

@@ -596,11 +596,11 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn post_notice(&self, user_id: u64, state: &LoungeState, notice: Notice) {
+    async fn post_notice(&self, user_id: u64, state: &LoungeState, notice: Notice) -> Option<u64> {
         let (Some(request), Some(channel_id)) = (state.request.as_ref(), state.status.channel_id)
         else {
             tracing::warn!(user_id, ?notice, "Invite-Lounge: Statusmeldung ohne Ziel");
-            return;
+            return None;
         };
         let conversation = dl_brain::DiscordConversationRequest {
             user_id,
@@ -621,15 +621,34 @@ impl InviteLoungeWatcher {
                 None
             }
         };
-        let Some(content) = content else {
-            return;
-        };
-        if let Err(error) = self
+        let content = content?;
+        match self
             .port
             .reply_mentioning(channel_id, request.message_id, &content, user_id)
             .await
         {
-            tracing::warn!(%error, user_id, ?notice, "Invite-Lounge: Statusmeldung nicht gesendet");
+            Ok(message_id) => Some(message_id),
+            Err(error) => {
+                tracing::warn!(%error, user_id, ?notice, "Invite-Lounge: Statusmeldung nicht gesendet");
+                None
+            }
+        }
+    }
+
+    async fn remember_check_in_message(&self, user_id: u64, message_id: u64) -> Result<(), String> {
+        loop {
+            let Some(previous) = self.store.load(user_id).await? else {
+                return Ok(());
+            };
+            let mut next = previous.clone();
+            next.status.check_in_message_id = Some(message_id);
+            if self
+                .store
+                .compare_exchange(user_id, Some(&previous), &next)
+                .await?
+            {
+                return Ok(());
+            }
         }
     }
 
@@ -835,7 +854,10 @@ impl InviteLoungeWatcher {
             return Ok(());
         }
         if let Some(notice) = notice {
-            self.post_notice(user_id, &next, notice).await;
+            let posted = self.post_notice(user_id, &next, notice).await;
+            if let (Some(message_id), Notice::CheckIn) = (posted, notice) {
+                self.remember_check_in_message(user_id, message_id).await?;
+            }
         }
         Ok(())
     }
@@ -1309,7 +1331,8 @@ fn answer_check_in(
         && state.status.wait.is_none()
         && !state.status.invite_now
         && state.status.channel_id == Some(event.channel_id)
-        && (event.reply_message_id.is_some() || mentions_user(&event.content, bot_id))
+        && (replies_to_check_in(event, &state.status, request.message_id)
+            || mentions_user(&event.content, bot_id))
         && state
             .status
             .check_in_at
@@ -1332,6 +1355,12 @@ fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64) -> bo
         && message.author_id != user_id
         && (message.reply_message_id == Some(request_id)
             || mentions_user(&message.content, user_id))
+}
+
+fn replies_to_check_in(event: &LoungeMessage, status: &RequestStatus, request_id: u64) -> bool {
+    event
+        .reply_message_id
+        .is_some_and(|reply| reply == request_id || Some(reply) == status.check_in_message_id)
 }
 
 fn mentions_user(content: &str, user_id: u64) -> bool {

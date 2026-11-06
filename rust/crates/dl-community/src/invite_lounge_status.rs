@@ -58,6 +58,8 @@ pub(super) struct RequestStatus {
     pub(super) check_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) check_in_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) check_in_message_id: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) invite_now: bool,
 }
@@ -224,14 +226,14 @@ pub(super) fn check_in_answer(content: &str) -> Option<bool> {
     if content.contains('?') {
         return None;
     }
-    let lower = content.to_lowercase();
+    let lower = content.to_lowercase().replace("kein problem", " ");
     let words: Vec<&str> = lower
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect();
     let any = |candidates: &[&str]| words.iter().any(|word| candidates.contains(word));
     if any(&[
-        "nein", "no", "nope", "nee", "ne", "nicht", "nix", "nichts", "keine", "leider",
+        "nein", "no", "nope", "nee", "ne", "nicht", "nix", "nichts", "kein", "keine", "leider",
     ]) {
         Some(false)
     } else if any(&[
@@ -470,6 +472,7 @@ mod tests {
             "ist angekommen",
             "hat geklappt 👍",
             "bin drin",
+            "Kein Problem, bin drin",
         ] {
             assert_eq!(check_in_answer(yes), Some(true), "{yes}");
         }
@@ -478,6 +481,7 @@ mod tests {
             "ne noch nicht",
             "leider nichts bekommen",
             "hab keine",
+            "kein Invite angekommen",
             "ja, aber nicht drin",
             "nein danke, bin drin",
         ] {
