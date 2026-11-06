@@ -51,5 +51,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::json!({"capability": capability, "case": "synthetic_followup", "question": followup, "answer": answer})
         );
     }
+    for question in [
+        "Hi, mein Steam-Link lässt sich nicht öffnen, ich habe Deadlock über Steam gekauft.",
+        "Mir wurde gerade ein Skinscam-Link im Chat geschickt, was soll ich tun?",
+        "Ich möchte einen Spieler melden, der mich im Voice belästigt hat. Seine ID ist 123456789.",
+        "Ich wurde ohne Grund gebannt und möchte wissen, ob das geprüft wird.",
+        "Stimmt es, dass man in Deadlock mit sieben Items gleichzeitig spielt?",
+    ] {
+        let task = DiscordAnswerTask {
+            capability: DiscordAnswerCapability::Ticket,
+            channel_id,
+        };
+        let outcome = brain.answer_discord_task(question, 42, &task).await?;
+        let BrainOutcome::Answer(answer) = outcome else {
+            return Err(
+                format!("Keine Antwort auf die synthetische Ticket-Eröffnung: {question}").into(),
+            );
+        };
+        println!(
+            "{}",
+            serde_json::json!({"capability": DiscordAnswerCapability::Ticket, "case": "ticket_opening", "question": question, "answer": answer})
+        );
+    }
     Ok(())
 }

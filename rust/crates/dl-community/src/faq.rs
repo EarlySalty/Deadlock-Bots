@@ -36,6 +36,10 @@ const SHADOW_NOT_ALLOWLISTED: &str = "shadow_not_allowlisted";
 const TICKET_CLAIM_FAILED: &str = "ticket_claim_failed";
 const TICKET_CLAIM_KV_NS: &str = "faq_ticket_shadow_claims";
 const TICKET_CLAIM_VALUE: &str = "claimed";
+const TICKET_OPENING_QUIET: Duration = Duration::from_secs(45);
+const TICKET_OPENING_MAX: Duration = Duration::from_secs(180);
+const TICKET_OPENING_POLL: Duration = Duration::from_secs(2);
+const TICKET_OPENING_MAX_CHARS: usize = 3500;
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
@@ -708,12 +712,56 @@ impl TicketClaimStore for KvTicketClaimStore {
     }
 }
 
+struct TicketOpening {
+    author_id: u64,
+    messages: Vec<String>,
+    started: tokio::time::Instant,
+    last_message: tokio::time::Instant,
+}
+
+impl TicketOpening {
+    fn new(author_id: u64, content: &str, now: tokio::time::Instant) -> Self {
+        Self {
+            author_id,
+            messages: vec![content.to_owned()],
+            started: now,
+            last_message: now,
+        }
+    }
+
+    fn push(&mut self, content: &str, now: tokio::time::Instant) {
+        let content = content.trim();
+        if content.is_empty()
+            || self
+                .messages
+                .iter()
+                .map(|message| message.chars().count())
+                .sum::<usize>()
+                >= TICKET_OPENING_MAX_CHARS
+        {
+            return;
+        }
+        self.messages.push(content.to_owned());
+        self.last_message = now;
+    }
+
+    fn question(self) -> Option<String> {
+        let joined = self.messages.join("\n");
+        let question: String = joined.chars().take(TICKET_OPENING_MAX_CHARS).collect();
+        (!question.trim().is_empty()).then_some(question)
+    }
+}
+
 pub struct FaqChat {
     pub store: FaqStore,
     pub port: Arc<dyn FaqPort>,
     shadow_channel_id: Option<u64>,
     brain: Arc<dyn dl_brain::AiAnswerer>,
     ticket_claims: Arc<dyn TicketClaimStore>,
+    ticket_openings: std::sync::Mutex<HashMap<u64, TicketOpening>>,
+    ticket_opening_quiet: Duration,
+    ticket_opening_max: Duration,
+    ticket_opening_poll: Duration,
     chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -729,6 +777,10 @@ impl FaqChat {
             port,
             shadow_channel_id: Some(LOG_CHANNEL_ID),
             brain,
+            ticket_openings: std::sync::Mutex::new(HashMap::new()),
+            ticket_opening_quiet: TICKET_OPENING_QUIET,
+            ticket_opening_max: TICKET_OPENING_MAX,
+            ticket_opening_poll: TICKET_OPENING_POLL,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -762,6 +814,123 @@ impl FaqChat {
             }
             Ok(dl_brain::ConversationReply::Silent) => KnowledgeLookup::Unanswerable,
             Err(_) => KnowledgeLookup::Transport,
+        }
+    }
+
+    async fn lookup_ticket(
+        &self,
+        question: &str,
+        user_id: u64,
+        channel_id: u64,
+    ) -> KnowledgeLookup {
+        let task = dl_brain::DiscordAnswerTask {
+            capability: dl_brain::DiscordAnswerCapability::Ticket,
+            channel_id,
+        };
+        match self
+            .brain
+            .answer_discord_task_with_history(question, user_id, &task, &[])
+            .await
+        {
+            Ok(dl_brain::BrainOutcome::Answer(text)) => KnowledgeLookup::Answer(KnowledgeAnswer {
+                answerable: true,
+                answer: Some(truncate_utf16(&text, 1900)),
+                sources: Vec::new(),
+            }),
+            Ok(_) => KnowledgeLookup::Unanswerable,
+            Err(_) => KnowledgeLookup::Transport,
+        }
+    }
+
+    fn ticket_openings(&self) -> std::sync::MutexGuard<'_, HashMap<u64, TicketOpening>> {
+        self.ticket_openings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn take_ticket_question(&self, channel_id: u64) -> Option<String> {
+        self.ticket_openings()
+            .remove(&channel_id)
+            .and_then(TicketOpening::question)
+    }
+
+    async fn wait_ticket_opening(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        author_id: u64,
+        shadow_channel_id: u64,
+    ) {
+        loop {
+            tokio::time::sleep(self.ticket_opening_poll).await;
+            let question = {
+                let mut openings = self.ticket_openings();
+                let Some(opening) = openings.get(&channel_id) else {
+                    return;
+                };
+                if opening.last_message.elapsed() < self.ticket_opening_quiet
+                    && opening.started.elapsed() < self.ticket_opening_max
+                {
+                    None
+                } else {
+                    openings
+                        .remove(&channel_id)
+                        .and_then(TicketOpening::question)
+                }
+            };
+            if let Some(question) = question {
+                self.evaluate_ticket_opening(
+                    guild_id,
+                    channel_id,
+                    author_id,
+                    shadow_channel_id,
+                    question,
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
+    async fn evaluate_ticket_opening(
+        self: &Arc<Self>,
+        _guild_id: u64,
+        channel_id: u64,
+        author_id: u64,
+        shadow_channel_id: u64,
+        question: String,
+    ) {
+        let question_chars = question.chars().count();
+        let outcome = ticket_auto_outcome_from_knowledge(
+            self.lookup_ticket(&question, author_id, channel_id).await,
+        );
+        if outcome.answer.is_none() {
+            tracing::info!(channel_id, author_id, question_chars, verdict = %outcome.decision, "FAQ-Ticket: Brain hat keine belegte Antwort");
+            return;
+        }
+        let (candidate_status, candidate) = Self::ticket_candidate(&outcome);
+        tracing::info!(
+            channel_id,
+            author_id,
+            verdict = outcome.decision,
+            candidate_status,
+            "FAQ-Ticket-Shadow ausgewertet"
+        );
+        let content = shadow_ticket_message(channel_id, outcome.decision, &candidate);
+        if self
+            .port
+            .send_message(shadow_channel_id, &content, None)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                channel_id,
+                shadow_channel_id,
+                verdict = outcome.decision,
+                candidate_status,
+                shadow_send_status = "failed",
+                "FAQ-Ticket-Shadow Versand fehlgeschlagen"
+            );
         }
     }
 
@@ -1317,10 +1486,27 @@ impl FaqChat {
             );
             return;
         }
+        {
+            let mut openings = self.ticket_openings();
+            if let Some(opening) = openings.get_mut(&channel_id) {
+                if opening.author_id == author_id {
+                    opening.push(problem, tokio::time::Instant::now());
+                }
+                return;
+            }
+            openings.insert(
+                channel_id,
+                TicketOpening::new(author_id, problem, tokio::time::Instant::now()),
+            );
+        }
         match self.ticket_claims.claim(channel_id).await {
             Ok(true) => {}
-            Ok(false) => return,
+            Ok(false) => {
+                self.ticket_openings().remove(&channel_id);
+                return;
+            }
             Err(_) => {
+                self.ticket_openings().remove(&channel_id);
                 tracing::warn!(
                     guild_id,
                     channel_id,
@@ -1332,45 +1518,24 @@ impl FaqChat {
                 return;
             }
         }
-        let outcome = ticket_auto_outcome_from_knowledge(
-            self.lookup_bound(
-                problem,
-                author_id,
-                channel_id,
-                guild_id,
-                Vec::new(),
-                &dl_brain::AttachedImages::default(),
-            )
-            .await,
-        );
-        if outcome.answer.is_none() {
-            tracing::info!(channel_id, author_id, verdict = %outcome.decision, "FAQ-Ticket: Brain hat keine belegte Antwort");
+        if self.ticket_opening_quiet.is_zero() {
+            if let Some(question) = self.take_ticket_question(channel_id) {
+                self.evaluate_ticket_opening(
+                    guild_id,
+                    channel_id,
+                    author_id,
+                    shadow_channel_id,
+                    question,
+                )
+                .await;
+            }
             return;
         }
-        let (candidate_status, candidate) = Self::ticket_candidate(&outcome);
-        tracing::info!(
-            channel_id,
-            author_id,
-            verdict = outcome.decision,
-            candidate_status,
-            "FAQ-Ticket-Shadow ausgewertet"
-        );
-        let content = shadow_ticket_message(channel_id, outcome.decision, &candidate);
-        if self
-            .port
-            .send_message(shadow_channel_id, &content, None)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                channel_id,
-                shadow_channel_id,
-                verdict = outcome.decision,
-                candidate_status,
-                shadow_send_status = "failed",
-                "FAQ-Ticket-Shadow Versand fehlgeschlagen"
-            );
-        }
+        let faq = self.clone();
+        tokio::spawn(async move {
+            faq.wait_ticket_opening(guild_id, channel_id, author_id, shadow_channel_id)
+                .await;
+        });
     }
 
     /// Abgelaufene Sessions schließen (1-h-Loop).
@@ -2178,6 +2343,21 @@ mod tests {
         let fixture = Arc::get_mut(&mut faq).expect("fresh fixture");
         fixture.shadow_channel_id = shadow_channel_id;
         fixture.ticket_claims = ticket_claims;
+        fixture.ticket_opening_quiet = Duration::ZERO;
+        faq
+    }
+
+    fn ticket_faq_with_opening_window(
+        port: Arc<MockPanelPort>,
+        brain: Arc<ScriptedBrain>,
+    ) -> Arc<FaqChat> {
+        let mut faq = FaqChat::brain_only(lazy_pool(), port, brain);
+        let fixture = Arc::get_mut(&mut faq).expect("fresh fixture");
+        fixture.shadow_channel_id = Some(LOG_CHANNEL_ID);
+        fixture.ticket_claims = Arc::new(MemoryTicketClaimStore::default());
+        fixture.ticket_opening_quiet = Duration::from_millis(30);
+        fixture.ticket_opening_max = Duration::from_secs(1);
+        fixture.ticket_opening_poll = Duration::from_millis(10);
         faq
     }
 
@@ -4425,5 +4605,32 @@ mod tests {
 
         assert!(!knowledge_called.load(Ordering::SeqCst));
         assert!(port.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ticket_shadow_buendelt_nachrichten_desselben_mitglieds() {
+        let port = ticket_port();
+        let brain = ScriptedBrain::answering("Gebündelter Kandidat");
+        let faq = ticket_faq_with_opening_window(port.clone(), brain.clone());
+
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Erste Nachricht")
+            .await;
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Zweite Nachricht")
+            .await;
+        faq.handle_ticket_message(1, 222, 999999999999999999, "Fremde Nachricht")
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while brain.call_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Brain-Aufruf");
+
+        assert_eq!(brain.call_count(), 1);
+        let body: serde_json::Value =
+            serde_json::from_str(&brain.bodies.lock().unwrap()[0]).unwrap();
+        assert_eq!(body["question"], "Erste Nachricht\nZweite Nachricht");
+        assert_eq!(port.sent.lock().unwrap().len(), 1);
     }
 }
