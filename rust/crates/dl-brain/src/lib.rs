@@ -9,17 +9,20 @@ use tokio::sync::Mutex;
 
 pub mod api_ingest;
 pub mod brain_api;
+pub mod images;
 pub use brain_client::bounded_user_questions;
 pub use brain_client::{
     AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
 };
+pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
 
 #[derive(Clone)]
 pub struct DiscordQueryContext {
     pub user_id: u64,
     pub allow_discord_reads: bool,
     pub answer_context: Option<DiscordAnswerContext>,
+    pub images: AttachedImages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +72,7 @@ pub struct DiscordConversationRequest {
     pub channel_id: u64,
     pub guild_id: Option<u64>,
     pub task: DiscordConversation,
+    pub images: AttachedImages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +201,8 @@ pub trait AiAnswerer: Send + Sync {
         ))
     }
 
+    fn forget_user(&self, _user_id: u64) {}
+
     async fn answer_discord_task_with_history(
         &self,
         question: &str,
@@ -256,6 +262,11 @@ pub trait AiAnswerer: Send + Sync {
         if context.answer_context.is_some() {
             return Err(BrainError::Backend(
                 "Ortskontext für diesen Consumer nicht verfügbar".into(),
+            ));
+        }
+        if !context.images.is_empty() {
+            return Err(BrainError::Backend(
+                "Bildeingabe für diesen Consumer nicht verfügbar".into(),
             ));
         }
         self.answer_for_discord_with_read_access(
@@ -321,6 +332,7 @@ pub async fn handle_discord_query_with_read_access(
             user_id,
             allow_discord_reads,
             answer_context: None,
+            images: AttachedImages::default(),
         },
     )
     .await
@@ -366,6 +378,7 @@ pub async fn answer_discord_query_with_read_access(
             user_id,
             allow_discord_reads,
             answer_context: None,
+            images: AttachedImages::default(),
         },
     )
     .await
@@ -387,16 +400,15 @@ pub async fn answer_discord_query_with_history(
     context: &DiscordQueryContext,
     user_questions: &[String],
 ) -> BrainOutcome {
-    let question = question.trim();
-    if question.is_empty() {
+    let Some(question) = question_or_image_default(question, !context.images.is_empty()) else {
         return BrainOutcome::Usage;
-    }
+    };
     let len = question.chars().count();
     if len > max_question_len {
         return BrainOutcome::TooLong { len };
     }
     match answerer
-        .answer_for_discord_with_history(question, context, user_questions)
+        .answer_for_discord_with_history(&question, context, user_questions)
         .await
     {
         Ok(outcome) => outcome,

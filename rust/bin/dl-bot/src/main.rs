@@ -269,13 +269,38 @@ fn discord_brain_answerer(
     let token = token
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("Eigener Discord-Brain-Zugang fehlt"))?;
-    Ok(Arc::new(dl_brain::brain_api::BrainApiAnswerer::new(
-        endpoint,
-        &token,
-        std::time::Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(65_000)),
-        "dl-bot-discord".into(),
-        std::collections::BTreeSet::from(["bot.public".into()]),
-    )?))
+    Ok(Arc::new(
+        dl_brain::brain_api::BrainApiAnswerer::new(
+            endpoint,
+            &token,
+            std::time::Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(65_000)),
+            "dl-bot-discord".into(),
+            std::collections::BTreeSet::from(["bot.public".into()]),
+        )?
+        .with_image_limits(brain_image_limits(options))?,
+    ))
+}
+
+fn brain_image_limits(options: &dl_core::runtime_config::AiOptions) -> dl_brain::ImageLimits {
+    let defaults = dl_brain::ImageLimits::default();
+    dl_brain::ImageLimits {
+        max_images: options.brain_image_max_count.unwrap_or(defaults.max_images),
+        max_download_bytes: options
+            .brain_image_max_download_bytes
+            .unwrap_or(defaults.max_download_bytes),
+        max_edge: options
+            .brain_image_max_edge
+            .and_then(|edge| u32::try_from(edge).ok())
+            .unwrap_or(defaults.max_edge),
+        jpeg_quality: options
+            .brain_image_jpeg_quality
+            .and_then(|quality| u8::try_from(quality).ok())
+            .unwrap_or(defaults.jpeg_quality),
+        followup_ttl: options
+            .brain_image_followup_seconds
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(defaults.followup_ttl),
+    }
 }
 
 struct UnavailableCommunityBrain;

@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "brain-client"
 version = "0.1.0"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=5fe0e97ad9f4bfa7ffe3e913eb90e95dd559215c#5fe0e97ad9f4bfa7ffe3e913eb90e95dd559215c"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=5408929948917d376dc71cccabe0127c574ee32b#5408929948917d376dc71cccabe0127c574ee32b"
 dependencies = [
  "brain-contracts",
  "reqwest",
@@ -432,8 +432,9 @@ dependencies = [
 [[package]]
 name = "brain-contracts"
 version = "0.1.0"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=5fe0e97ad9f4bfa7ffe3e913eb90e95dd559215c#5fe0e97ad9f4bfa7ffe3e913eb90e95dd559215c"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=5408929948917d376dc71cccabe0127c574ee32b#5408929948917d376dc71cccabe0127c574ee32b"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "regex",
  "serde",
@@ -1408,6 +1409,7 @@ dependencies = [
  "brain-contracts",
  "chrono",
  "chrono-tz",
+ "image",
  "reqwest",
  "serde",
  "serde_json",
@@ -7507,7 +7509,7 @@ dependencies = [
 [[package]]
 name = "uplink-infisical-transport"
 version = "0.1.1"
-source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=5fe0e97ad9f4bfa7ffe3e913eb90e95dd559215c#5fe0e97ad9f4bfa7ffe3e913eb90e95dd559215c"
+source = "git+https://github.com/EarlySalty/Deadlock-Brain.git?rev=5408929948917d376dc71cccabe0127c574ee32b#5408929948917d376dc71cccabe0127c574ee32b"
 dependencies = [
  "reqwest",
 ]

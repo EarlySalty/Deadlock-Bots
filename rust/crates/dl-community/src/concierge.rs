@@ -1515,6 +1515,7 @@ struct AnswerOptions<'a> {
     route: AnswerRoute,
     response_components: Option<&'a Value>,
     feedback: Option<&'a BrainFeedback>,
+    images: &'a dl_brain::AttachedImages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3633,6 +3634,7 @@ impl Concierge {
             .lock()
             .expect("steckbrief revocations")
             .remove(&user_id);
+        self.brain.forget_user(user_id);
     }
 
     fn user_action_lock(&self, user_id: u64) -> Arc<tokio::sync::Mutex<()>> {
@@ -4447,8 +4449,15 @@ impl Concierge {
         user_id: u64,
         content: &str,
     ) -> bool {
-        self.handle_user_message_locked(channel_id, guild_id, user_id, content, None)
-            .await
+        self.handle_user_message_locked(
+            channel_id,
+            guild_id,
+            user_id,
+            content,
+            None,
+            &dl_brain::AttachedImages::default(),
+        )
+        .await
     }
 
     async fn handle_user_message_locked(
@@ -4458,12 +4467,25 @@ impl Concierge {
         user_id: u64,
         content: &str,
         feedback_message_id: Option<u64>,
+        images: &dl_brain::AttachedImages,
     ) -> bool {
         let action = self.user_action_lock(user_id);
         let _guard = action.lock().await;
         let feedback = feedback_message_id.map(BrainFeedback::new);
+        let content = if content.trim().is_empty() && !images.is_empty() {
+            dl_brain::IMAGE_ONLY_QUESTION
+        } else {
+            content
+        };
         let handled = self
-            .handle_user_message_inner(channel_id, guild_id, user_id, content, feedback.as_ref())
+            .handle_user_message_inner(
+                channel_id,
+                guild_id,
+                user_id,
+                content,
+                feedback.as_ref(),
+                images,
+            )
             .await;
         self.finish_brain_feedback(channel_id, feedback.as_ref())
             .await;
@@ -4487,6 +4509,10 @@ impl Concierge {
                 event.author_id,
                 &event.content,
                 Some(event.message_id),
+                &dl_brain::AttachedImages::new(
+                    event.channel_id,
+                    event.image_attachment_urls.clone(),
+                ),
             )
             .await;
         if handled {
@@ -4550,6 +4576,7 @@ impl Concierge {
         if trimmed.is_empty() {
             return AnswerTerminal::without_answer(ConciergeAnswerOutcome::NoAnswer, "empty");
         }
+        let no_images = dl_brain::AttachedImages::default();
         self.answer_dm_question_inner(
             channel_id,
             guild_id,
@@ -4562,6 +4589,7 @@ impl Concierge {
                 route: AnswerRoute::OnboardingTour,
                 response_components: Some(response_components),
                 feedback: None,
+                images: &no_images,
             },
         )
         .await
@@ -4707,7 +4735,8 @@ impl Concierge {
         if event.guild_id == Some(self.config.main_guild_id) && !is_public_support {
             if let Some(question) = self.bot_mention_question(control_text) {
                 if self.is_pate_knowledge_channel(event.channel_id).await {
-                    return !parse_brain_command(&question).1.is_empty();
+                    return !parse_brain_command(&question).1.is_empty()
+                        || !event.image_attachment_urls.is_empty();
                 }
             }
         }
@@ -4723,6 +4752,7 @@ impl Concierge {
         user_id: u64,
         content: &str,
         feedback: Option<&BrainFeedback>,
+        images: &dl_brain::AttachedImages,
     ) -> bool {
         if !self.config.user_allowed(user_id) {
             return false;
@@ -4736,9 +4766,11 @@ impl Concierge {
             if let Some(question) = self.bot_mention_question(control_text) {
                 if self.is_pate_knowledge_channel(channel_id).await {
                     let (_, trimmed) = parse_brain_command(&question);
-                    if trimmed.is_empty() {
-                        return false;
-                    }
+                    let trimmed = match trimmed {
+                        "" if images.is_empty() => return false,
+                        "" => dl_brain::IMAGE_ONLY_QUESTION,
+                        text => text,
+                    };
                     let _ = self
                         .answer_dm_question_inner(
                             channel_id,
@@ -4752,6 +4784,7 @@ impl Concierge {
                                 route: AnswerRoute::Concierge,
                                 response_components: None,
                                 feedback,
+                                images,
                             },
                         )
                         .await;
@@ -4809,6 +4842,7 @@ impl Concierge {
                         route: AnswerRoute::Concierge,
                         response_components: None,
                         feedback,
+                        images,
                     },
                 )
                 .await;
@@ -4827,6 +4861,7 @@ impl Concierge {
                     route: AnswerRoute::Concierge,
                     response_components: None,
                     feedback,
+                    images,
                 },
             )
             .await;
@@ -5094,6 +5129,7 @@ impl Concierge {
                     channel_id,
                     guild_id: options.guild_id,
                     feedback: options.feedback,
+                    images: options.images,
                 },
                 trimmed,
                 Some(&history),
@@ -5344,6 +5380,7 @@ impl Concierge {
                 history: history.unwrap_or_default().to_vec(),
                 readable_channel_ids,
             },
+            images: binding.images.clone(),
         };
         let request = self.brain.converse(&conversation);
         let result = match binding.feedback {
@@ -5423,6 +5460,7 @@ impl Concierge {
                     channel_id,
                     guild_id: options.guild_id,
                     feedback: options.feedback,
+                    images: options.images,
                 },
                 question,
                 None,
@@ -7461,6 +7499,7 @@ struct AnswerBinding<'a> {
     channel_id: u64,
     guild_id: Option<u64>,
     feedback: Option<&'a BrainFeedback>,
+    images: &'a dl_brain::AttachedImages,
 }
 
 struct AnswerDecision {
@@ -8345,6 +8384,7 @@ mod tests {
                         channel_id: 10,
                         guild_id: None,
                         feedback: None,
+                        images: &dl_brain::AttachedImages::default(),
                     },
                     "Hallo",
                     Some(&history),
@@ -8380,6 +8420,7 @@ mod tests {
                         channel_id: 10,
                         guild_id,
                         feedback: None,
+                        images: &dl_brain::AttachedImages::default(),
                     },
                     "Fass den Kanal zusammen",
                     None,
@@ -8418,6 +8459,7 @@ mod tests {
                         channel_id: 10,
                         guild_id: None,
                         feedback: Some(&feedback),
+                        images: &dl_brain::AttachedImages::default(),
                     },
                     "Wie funktioniert Parry in Deadlock?",
                     None,

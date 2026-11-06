@@ -199,6 +199,11 @@ section!(AiOptions {
     brain_api_endpoint: String => "BRAIN_API_ENDPOINT",
     brain_api_timeout_ms: u64 => "BRAIN_API_TIMEOUT_MS",
     community_brain_answers: bool => "DL_COMMUNITY_BRAIN_ANSWERS",
+    brain_image_max_count: usize => "BRAIN_IMAGE_MAX_COUNT",
+    brain_image_max_download_bytes: u64 => "BRAIN_IMAGE_MAX_DOWNLOAD_BYTES",
+    brain_image_max_edge: u64 => "BRAIN_IMAGE_MAX_EDGE",
+    brain_image_jpeg_quality: u64 => "BRAIN_IMAGE_JPEG_QUALITY",
+    brain_image_followup_seconds: u64 => "BRAIN_IMAGE_FOLLOWUP_SECONDS",
 });
 
 #[derive(Clone, Default, Deserialize, Serialize)]

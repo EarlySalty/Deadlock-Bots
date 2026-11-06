@@ -75,7 +75,8 @@ async fn dispatch_command(
     router: &Arc<InteractionRouter>,
     cmd: &CommandInteraction,
 ) {
-    let (qualified_name, options) = flatten_command(&cmd.data.name, &cmd.data.options);
+    let (qualified_name, mut options) = flatten_command(&cmd.data.name, &cmd.data.options);
+    resolve_attachments(&cmd.data.options, &cmd.data.resolved, &mut options);
     let Some(handler) = router.resolve_command(&qualified_name) else {
         tracing::warn!(command = %qualified_name, "Kein Handler für Slash-Command");
         return;
@@ -367,6 +368,35 @@ fn flatten_command(
         name.to_string(),
         options.iter().map(option_to_pair).collect(),
     )
+}
+
+fn resolve_attachments(
+    source: &[CommandDataOption],
+    resolved: &serenity::all::CommandDataResolved,
+    target: &mut std::collections::HashMap<String, Value>,
+) {
+    for option in source {
+        match &option.value {
+            CommandDataOptionValue::Attachment(id) => {
+                let value = resolved
+                    .attachments
+                    .get(id)
+                    .map(|attachment| {
+                        json!({
+                            "url": attachment.url,
+                            "content_type": attachment.content_type,
+                        })
+                    })
+                    .unwrap_or(Value::Null);
+                target.insert(option.name.clone(), value);
+            }
+            CommandDataOptionValue::SubCommand(children)
+            | CommandDataOptionValue::SubCommandGroup(children) => {
+                resolve_attachments(children, resolved, target)
+            }
+            _ => {}
+        }
+    }
 }
 
 fn option_to_pair(option: &CommandDataOption) -> (String, Value) {

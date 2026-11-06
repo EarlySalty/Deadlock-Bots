@@ -448,6 +448,7 @@ impl InviteLoungeWatcher {
             task: dl_brain::DiscordConversation::InviteLounge {
                 message: event.content.clone(),
             },
+            images: dl_brain::AttachedImages::default(),
         };
         match self.brain.converse(&request).await {
             Ok(dl_brain::ConversationReply::Answered(text)) => {

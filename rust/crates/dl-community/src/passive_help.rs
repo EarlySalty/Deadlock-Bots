@@ -158,6 +158,10 @@ impl PassiveHelpResponder {
                 message: content.to_string(),
                 recent_messages,
             },
+            images: dl_brain::AttachedImages::new(
+                event.channel_id,
+                event.image_attachment_urls.clone(),
+            ),
         };
         let result = tokio::time::timeout(self.timeout, self.brain.converse(&request)).await;
         let text = match result {

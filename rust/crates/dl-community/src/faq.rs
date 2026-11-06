@@ -740,6 +740,7 @@ impl FaqChat {
         channel_id: u64,
         guild_id: u64,
         history: Vec<dl_brain::DialogEntry>,
+        images: &dl_brain::AttachedImages,
     ) -> KnowledgeLookup {
         let request = dl_brain::DiscordConversationRequest {
             user_id,
@@ -749,6 +750,7 @@ impl FaqChat {
                 question: question.to_string(),
                 history,
             },
+            images: images.clone(),
         };
         match self.brain.converse(&request).await {
             Ok(dl_brain::ConversationReply::Answered(text)) => {
@@ -876,9 +878,10 @@ impl FaqChat {
         user_id: u64,
         channel_id: u64,
         guild_id: u64,
+        images: &dl_brain::AttachedImages,
     ) -> Option<String> {
         self.visible_answer(
-            self.lookup_bound(question, user_id, channel_id, guild_id, Vec::new())
+            self.lookup_bound(question, user_id, channel_id, guild_id, Vec::new(), images)
                 .await,
         )
     }
@@ -889,6 +892,7 @@ impl FaqChat {
         channel_id: u64,
         guild_id: u64,
         question: &str,
+        images: &dl_brain::AttachedImages,
     ) -> Result<FaqMessageWrite, FaqAnswerDeliveryError> {
         let _stateful_turn = acquire_stateful_support_turn().await;
         let mut tx = self.store.pool.begin().await?;
@@ -957,6 +961,7 @@ impl FaqChat {
                 channel_id,
                 guild_id,
                 dialog,
+                images,
             )
             .await,
         );
@@ -1073,10 +1078,42 @@ impl FaqChat {
         author_name: &str,
         content: &str,
     ) -> bool {
+        self.handle_chat_message_with_images(
+            guild_id,
+            channel_id,
+            author_id,
+            author_name,
+            content,
+            &dl_brain::AttachedImages::default(),
+        )
+        .await
+    }
+
+    pub async fn handle_chat_message_with_images(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        author_id: u64,
+        author_name: &str,
+        content: &str,
+        images: &dl_brain::AttachedImages,
+    ) -> bool {
         let action = self.chat_action_lock(channel_id);
         let _guard = action.lock().await;
-        self.handle_chat_message_inner(guild_id, channel_id, author_id, author_name, content)
-            .await
+        let content = if content.trim().is_empty() && !images.is_empty() {
+            dl_brain::IMAGE_ONLY_QUESTION
+        } else {
+            content
+        };
+        self.handle_chat_message_inner(
+            guild_id,
+            channel_id,
+            author_id,
+            author_name,
+            content,
+            images,
+        )
+        .await
     }
 
     pub async fn owns_message(&self, event: &dl_discord::MessageEvent) -> bool {
@@ -1100,6 +1137,7 @@ impl FaqChat {
         author_id: u64,
         _author_name: &str,
         content: &str,
+        images: &dl_brain::AttachedImages,
     ) -> bool {
         let (session_id, owner_id) = match self
             .store
@@ -1121,7 +1159,9 @@ impl FaqChat {
                 let question = content.trim();
                 if !question.is_empty() {
                     if let Some(answer) = self
-                        .generate_stateless_answer(question, author_id, channel_id, guild_id)
+                        .generate_stateless_answer(
+                            question, author_id, channel_id, guild_id, images,
+                        )
                         .await
                     {
                         let _ = self.port.send_message(channel_id, &answer, None).await;
@@ -1166,13 +1206,13 @@ impl FaqChat {
             return true;
         }
         match self
-            .answer_statefully(&session_id, channel_id, guild_id, question)
+            .answer_statefully(&session_id, channel_id, guild_id, question, images)
             .await
         {
             Ok(FaqMessageWrite::Stored) => {}
             Ok(FaqMessageWrite::PrivacyBlocked | FaqMessageWrite::Missing) => {
                 if let Some(stateless_answer) = self
-                    .generate_stateless_answer(question, author_id, channel_id, guild_id)
+                    .generate_stateless_answer(question, author_id, channel_id, guild_id, images)
                     .await
                 {
                     let _ = self
@@ -1291,8 +1331,15 @@ impl FaqChat {
             }
         }
         let outcome = ticket_auto_outcome_from_knowledge(
-            self.lookup_bound(problem, author_id, channel_id, guild_id, Vec::new())
-                .await,
+            self.lookup_bound(
+                problem,
+                author_id,
+                channel_id,
+                guild_id,
+                Vec::new(),
+                &dl_brain::AttachedImages::default(),
+            )
+            .await,
         );
         if outcome.answer.is_none() {
             tracing::info!(channel_id, author_id, verdict = %outcome.decision, "FAQ-Ticket: Brain hat keine belegte Antwort");
@@ -1926,12 +1973,16 @@ pub fn spawn(
                     Ok(event) => {
                         // Bot-Nachrichten filtert bereits das Gateway
                         let handled = faq
-                            .handle_chat_message(
+                            .handle_chat_message_with_images(
                                 event.guild_id.unwrap_or_default(),
                                 event.channel_id,
                                 event.author_id,
                                 &event.author_display_name,
                                 &event.content,
+                                &dl_brain::AttachedImages::new(
+                                    event.channel_id,
+                                    event.image_attachment_urls.clone(),
+                                ),
                             )
                             .await;
                         if !handled {
@@ -2182,9 +2233,15 @@ mod tests {
                 .create_session(session_id.clone(), 42, "Test".into(), 100, 1)
                 .await
                 .expect("FAQ-Session"));
-            faq.answer_statefully(&session_id, 100, 1, "Wie funktioniert Parry?")
-                .await
-                .expect("FAQ-Antwort");
+            faq.answer_statefully(
+                &session_id,
+                100,
+                1,
+                "Wie funktioniert Parry?",
+                &Default::default(),
+            )
+            .await
+            .expect("FAQ-Antwort");
             let sent = port.sent.lock().unwrap();
             let texts: Vec<&str> = sent.iter().map(|(_, text)| text.as_str()).collect();
             assert_eq!(texts, expected);
@@ -2228,7 +2285,7 @@ mod tests {
             );
         }
         assert_eq!(
-            faq.answer_statefully("own", 100, 1, "Wie mache ich das?")
+            faq.answer_statefully("own", 100, 1, "Wie mache ich das?", &Default::default())
                 .await
                 .expect("Zustandsbehaftete FAQ-Antwort"),
             FaqMessageWrite::Stored

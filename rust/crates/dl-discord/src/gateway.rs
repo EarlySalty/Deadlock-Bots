@@ -87,7 +87,7 @@ fn permission_flags(perms: Permissions) -> PermissionFlags {
     }
 }
 
-fn is_image_attachment(content_type: Option<&str>, filename: &str) -> bool {
+pub fn is_image_attachment(content_type: Option<&str>, filename: &str) -> bool {
     let content_type_is_image = content_type
         .map(|c| c.to_ascii_lowercase().starts_with("image/"))
         .unwrap_or(false);

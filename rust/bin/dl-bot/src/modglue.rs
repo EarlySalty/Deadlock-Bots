@@ -321,8 +321,7 @@ impl BrainConversations {
 
     fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
         self.history(event, now)?;
-        let question = event.content.trim();
-        (!question.is_empty()).then(|| question.to_owned())
+        dl_brain::question_or_image_default(&event.content, !event.image_attachment_urls.is_empty())
     }
 
     fn record(&mut self, event: &dl_discord::MessageEvent, message_id: u64, now: Instant) {
@@ -342,9 +341,14 @@ impl BrainConversations {
             } else {
                 conversation.turns.clear();
             }
-            conversation
-                .turns
-                .push((message_id, event.content.trim().to_owned()));
+            conversation.turns.push((
+                message_id,
+                dl_brain::question_or_image_default(
+                    &event.content,
+                    !event.image_attachment_urls.is_empty(),
+                )
+                .unwrap_or_default(),
+            ));
             let mut characters: usize = conversation
                 .turns
                 .iter()
@@ -371,6 +375,13 @@ trait BrainDirectReplyPort: Send + Sync {
         &self,
         _event: &dl_discord::MessageEvent,
     ) -> Option<dl_brain::DiscordAnswerContext> {
+        None
+    }
+    async fn referenced_message(
+        &self,
+        _event: &dl_discord::MessageEvent,
+        _bot_id: u64,
+    ) -> Option<ReferencedMessage> {
         None
     }
     async fn reaction(
@@ -446,6 +457,51 @@ impl BrainDirectReplyPort for DiscordAdapter {
                 dl_brain::AnswerInputKind::Message
             },
         ))
+    }
+
+    async fn referenced_message(
+        &self,
+        event: &dl_discord::MessageEvent,
+        bot_id: u64,
+    ) -> Option<ReferencedMessage> {
+        let message_id = event.reply_message_id?;
+        if event
+            .reply_channel_id
+            .is_some_and(|channel| channel != event.channel_id)
+        {
+            return None;
+        }
+        let message = fetch_message(&self.http, event.channel_id, message_id).await?;
+        if message.author.id.get() == bot_id {
+            return None;
+        }
+        let later = fetch_messages(
+            &self.http,
+            event.channel_id,
+            GetMessages::new()
+                .after(MessageId::new(message_id))
+                .limit(REFERENCED_FOLLOW_UP_SCAN),
+        )
+        .await
+        .unwrap_or_default();
+        Some(ReferencedMessage {
+            text: same_author_run(
+                &channel_line(&message),
+                later.iter().map(channel_line).collect(),
+                event.message_id,
+            ),
+            image_urls: message
+                .attachments
+                .iter()
+                .filter(|attachment| {
+                    dl_discord::gateway::is_image_attachment(
+                        attachment.content_type.as_deref(),
+                        &attachment.filename,
+                    )
+                })
+                .map(|attachment| attachment.url.clone())
+                .collect(),
+        })
     }
 
     fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
@@ -607,6 +663,97 @@ fn direct_brain_question(event: &dl_discord::MessageEvent, bot_id: u64) -> Optio
         question = question.replace(&mention, " ");
     }
     Some(question.trim().to_owned())
+}
+
+fn event_images(event: &dl_discord::MessageEvent) -> dl_brain::AttachedImages {
+    dl_brain::AttachedImages::new(event.channel_id, event.image_attachment_urls.clone())
+}
+
+const REFERENCED_FOLLOW_UP_SCAN: u8 = 10;
+const REFERENCED_FOLLOW_UP_WINDOW_SECS: i64 = 120;
+const REPLY_FILLER_MAX_CHARS: usize = 12;
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ReferencedMessage {
+    text: String,
+    image_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ChannelLine {
+    message_id: u64,
+    author_id: u64,
+    created_at: i64,
+    content: String,
+}
+
+fn channel_line(message: &Message) -> ChannelLine {
+    ChannelLine {
+        message_id: message.id.get(),
+        author_id: message.author.id.get(),
+        created_at: message.timestamp.unix_timestamp(),
+        content: strip_mentions(&message.content),
+    }
+}
+
+fn same_author_run(
+    first: &ChannelLine,
+    mut later: Vec<ChannelLine>,
+    before_message_id: u64,
+) -> String {
+    later.sort_by_key(|line| line.message_id);
+    std::iter::once(first.content.clone())
+        .chain(
+            later
+                .into_iter()
+                .filter(|line| line.message_id > first.message_id)
+                .take_while(|line| {
+                    line.message_id < before_message_id
+                        && line.author_id == first.author_id
+                        && line.created_at - first.created_at <= REFERENCED_FOLLOW_UP_WINDOW_SECS
+                })
+                .map(|line| line.content),
+        )
+        .filter(|content| !content.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_reply_filler(own: &str) -> bool {
+    let own = own.trim();
+    own.split_whitespace().count() <= 1 && own.chars().count() <= REPLY_FILLER_MAX_CHARS
+}
+
+fn reply_question(own: &str, referenced: &str, max_len: usize) -> String {
+    let referenced = referenced.trim();
+    if referenced.is_empty() {
+        return own.to_owned();
+    }
+    if is_reply_filler(own) {
+        return truncate_chars(referenced, max_len);
+    }
+    let prefix = "Nachricht, auf die ich antworte:\n";
+    let suffix = format!("\n\nMeine Frage: {}", own.trim());
+    let budget = max_len.saturating_sub(prefix.chars().count() + suffix.chars().count());
+    format!("{prefix}{}{suffix}", truncate_chars(referenced, budget))
+}
+
+async fn fetch_message(http: &Http, channel_id: u64, message_id: u64) -> Option<Message> {
+    ChannelId::new(channel_id)
+        .message(http, MessageId::new(message_id))
+        .await
+        .ok()
+}
+
+async fn fetch_messages(
+    http: &Http,
+    channel_id: u64,
+    request: GetMessages,
+) -> Option<Vec<Message>> {
+    ChannelId::new(channel_id)
+        .messages(http, request)
+        .await
+        .ok()
 }
 
 fn guide_channel(event: &dl_discord::MessageEvent) -> bool {
@@ -887,8 +1034,14 @@ impl BrainHandler {
             return;
         }
         if proactive {
-            self.answer_discord_event(event, replies, event.content.trim(), true)
-                .await;
+            self.answer_discord_event(
+                event,
+                replies,
+                event.content.trim(),
+                event_images(event),
+                true,
+            )
+            .await;
             return;
         }
         if event.guild_id.is_none() {
@@ -901,7 +1054,7 @@ impl BrainHandler {
             return;
         };
         if !replies.is_public(event) {
-            self.answer_discord_event(event, replies, &question, false)
+            self.answer_discord_event(event, replies, &question, event_images(event), false)
                 .await;
             return;
         }
@@ -909,6 +1062,7 @@ impl BrainHandler {
             user_id: event.author_id,
             allow_discord_reads: true,
             answer_context: replies.answer_context(event),
+            images: event_images(event),
         };
         self.handle_brain_question(event, &context, &question, replies)
             .await;
@@ -935,9 +1089,40 @@ impl BrainHandler {
         let Some(question) = self.conversation_question(event, bot_id).await else {
             return false;
         };
-        self.answer_discord_event(event, replies, &question, false)
+        let (question, images) = self
+            .with_referenced_message(event, bot_id, replies, question)
+            .await;
+        self.answer_discord_event(event, replies, &question, images, false)
             .await;
         true
+    }
+
+    async fn with_referenced_message(
+        &self,
+        event: &dl_discord::MessageEvent,
+        bot_id: u64,
+        replies: &dyn BrainDirectReplyPort,
+        question: String,
+    ) -> (String, dl_brain::AttachedImages) {
+        if event.guild_id.is_none()
+            || event.reply_message_id.is_none()
+            || direct_brain_question(event, bot_id).is_none()
+        {
+            return (question, event_images(event));
+        }
+        let Some(referenced) = replies.referenced_message(event, bot_id).await else {
+            return (question, event_images(event));
+        };
+        let urls: Vec<String> = event
+            .image_attachment_urls
+            .iter()
+            .chain(&referenced.image_urls)
+            .cloned()
+            .collect();
+        (
+            reply_question(&question, &referenced.text, self.config.max_question_len),
+            dl_brain::AttachedImages::new(event.channel_id, urls),
+        )
     }
 
     async fn answer_discord_event(
@@ -945,6 +1130,7 @@ impl BrainHandler {
         event: &dl_discord::MessageEvent,
         replies: &dyn BrainDirectReplyPort,
         question: &str,
+        images: dl_brain::AttachedImages,
         proactive: bool,
     ) {
         if proactive
@@ -962,6 +1148,7 @@ impl BrainHandler {
             user_id: event.author_id,
             allow_discord_reads: is_public || replies.is_direct_message_from_member(event),
             answer_context: replies.answer_context(event),
+            images,
         };
         let reservation = self
             .cooldowns
@@ -1136,6 +1323,15 @@ impl InteractionHandler for BrainHandler {
                 interaction.user_id,
                 dl_brain::AnswerInputKind::SlashCommand,
             )),
+            images: dl_brain::AttachedImages::new(
+                interaction.channel_id,
+                interaction
+                    .options
+                    .get("bild")
+                    .and_then(|value| value.get("url"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            ),
         };
         let Some(outcome) = self
             .outcome_for_question(&question, &context, interaction.channel_id)
@@ -1324,6 +1520,11 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
                 "description": "Was möchtest du wissen?",
                 "required": true,
                 "max_length": max_question_len.min(4000),
+            }, {
+                "type": 11,
+                "name": "bild",
+                "description": "Screenshot, zum Beispiel von deinem Build",
+                "required": false,
             }],
         }),
     }
@@ -1574,14 +1775,14 @@ impl dl_moderation::ModPort for ModGlue {
         limit: usize,
     ) -> Vec<String> {
         let fetch_limit = limit.saturating_add(1).min(100) as u8;
-        let Ok(mut messages) = ChannelId::new(channel_id)
-            .messages(
-                &self.adapter.http,
-                GetMessages::new()
-                    .before(MessageId::new(before_message_id))
-                    .limit(fetch_limit),
-            )
-            .await
+        let Some(mut messages) = fetch_messages(
+            &self.adapter.http,
+            channel_id,
+            GetMessages::new()
+                .before(MessageId::new(before_message_id))
+                .limit(fetch_limit),
+        )
+        .await
         else {
             return Vec::new();
         };
@@ -1631,10 +1832,7 @@ impl dl_moderation::ModPort for ModGlue {
     ) -> Option<dl_moderation::ReplyContext> {
         let message_id = reply_message_id?;
         let channel_id = reply_channel_id.unwrap_or(channel_id);
-        let message = ChannelId::new(channel_id)
-            .message(&self.adapter.http, MessageId::new(message_id))
-            .await
-            .ok()?;
+        let message = fetch_message(&self.adapter.http, channel_id, message_id).await?;
         let mut content = strip_mentions(&message.content);
         if content.is_empty() {
             content = if message.attachments.is_empty() {
@@ -5053,6 +5251,7 @@ mod tests {
         reactions: Mutex<Vec<(u64, u64, String, bool)>>,
         fail_reactions: bool,
         delivered: tokio::sync::Notify,
+        referenced: Option<ReferencedMessage>,
     }
 
     #[async_trait::async_trait]
@@ -5071,6 +5270,14 @@ mod tests {
                 || event.guild_id.is_some() && !self.private,
                 |adapter| adapter.is_public(event),
             )
+        }
+
+        async fn referenced_message(
+            &self,
+            _event: &dl_discord::MessageEvent,
+            _bot_id: u64,
+        ) -> Option<ReferencedMessage> {
+            self.referenced.clone()
         }
 
         async fn reaction(
@@ -5291,6 +5498,96 @@ mod tests {
         assert_eq!(brain_v2_text(&sent[0].2), "Antwort");
         assert_eq!(replies.reply_attempts.load(Ordering::Relaxed), 1);
         assert!(replies.reactions.lock().await.is_empty());
+    }
+
+    #[test]
+    fn reply_mention_reads_the_same_authors_follow_ups() {
+        let line = |message_id, author_id, created_at, content: &str| ChannelLine {
+            message_id,
+            author_id,
+            created_at,
+            content: content.to_owned(),
+        };
+        let first = line(
+            10,
+            7,
+            100,
+            "uhm wieviele punkte kriegt man jetzt für nen win ?",
+        );
+        let text = same_author_run(
+            &first,
+            vec![
+                line(13, 7, 150, "zu spät"),
+                line(11, 7, 130, "also für nen char ?"),
+                line(12, 8, 140, "keine ahnung"),
+            ],
+            20,
+        );
+        assert_eq!(
+            text,
+            "uhm wieviele punkte kriegt man jetzt für nen win ?\nalso für nen char ?"
+        );
+        let late = same_author_run(&first, vec![line(11, 7, 221, "später")], 20);
+        assert_eq!(late, first.content);
+        let after_asker = same_author_run(&first, vec![line(21, 7, 110, "danach")], 20);
+        assert_eq!(after_asker, first.content);
+        assert_eq!(reply_question("pls", "Frage?", 400), "Frage?");
+        assert_eq!(
+            reply_question("Stimmt das noch?", "Build X ist gut", 400),
+            "Nachricht, auf die ich antworte:\nBuild X ist gut\n\nMeine Frage: Stimmt das noch?"
+        );
+        assert_eq!(reply_question("", "", 400), "");
+    }
+
+    #[tokio::test]
+    async fn bare_reply_mention_answers_the_referenced_question() {
+        let (mut handler, _) = direct_test_handler();
+        let answerer = Arc::new(RecordingDiscordAnswerer {
+            outcome: Some(dl_brain::BrainOutcome::Answer("Antwort".into())),
+            ..Default::default()
+        });
+        handler.answerer = answerer.clone();
+        let replies = RecordingBrainReplies {
+            referenced: Some(ReferencedMessage {
+                text: "wieviele punkte für nen win ?\nalso für nen char ?".into(),
+                image_urls: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let mut event = test_message_event(Some(1), "<@42>");
+        event.is_reply = true;
+        event.reply_message_id = Some(1);
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        assert_eq!(
+            answerer.calls.lock().await.as_slice(),
+            [(
+                "wieviele punkte für nen win ?\nalso für nen char ?".to_owned(),
+                3
+            )]
+        );
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!((sent[0].0, sent[0].1), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn bare_reply_mention_without_referenced_text_keeps_the_usage_reply() {
+        let (mut handler, _) = direct_test_handler();
+        let answerer = Arc::new(RecordingDiscordAnswerer {
+            outcome: Some(dl_brain::BrainOutcome::Answer("Antwort".into())),
+            ..Default::default()
+        });
+        handler.answerer = answerer.clone();
+        let replies = RecordingBrainReplies::default();
+        let mut event = test_message_event(Some(1), "<@42>");
+        event.is_reply = true;
+        event.reply_message_id = Some(1);
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        assert!(answerer.calls.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -7576,6 +7873,7 @@ mod tests {
                     user_id: 42,
                     allow_discord_reads: true,
                     answer_context: None,
+                    images: dl_brain::AttachedImages::default(),
                 };
                 let _ = brain.outcome_for_question("Abrams?", &context, 42).await;
             }

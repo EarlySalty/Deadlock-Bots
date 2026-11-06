@@ -1,6 +1,8 @@
+use crate::images::ImageFetcher;
 use crate::{
-    AiAnswerer, AnswerContext, BrainError, BrainOutcome, ChatEntry, ConversationReply, DialogEntry,
-    DialogSpeaker, DiscordConversation, DiscordConversationRequest, DiscordQueryContext,
+    AiAnswerer, AnswerContext, AttachedImages, BrainError, BrainOutcome, ChatEntry,
+    ConversationReply, DialogEntry, DialogSpeaker, DiscordConversation, DiscordConversationRequest,
+    DiscordQueryContext, ImageLimits,
 };
 use brain_client::{
     AnswerProfile, AnswerStatus, AsyncBrainClient, BotIdentity, BotTask, BotTaskRequest,
@@ -11,6 +13,7 @@ use brain_contracts::bot_tasks::{
     MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
     MAX_READABLE_CHANNELS,
 };
+use brain_contracts::image::QueryImage;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -28,6 +31,7 @@ pub struct BrainApiAnswerer {
     sequence: AtomicU64,
     admission: tokio::sync::Semaphore,
     timeout: Duration,
+    images: ImageFetcher,
 }
 
 impl BrainApiAnswerer {
@@ -66,12 +70,18 @@ impl BrainApiAnswerer {
             sequence: AtomicU64::new(0),
             admission: tokio::sync::Semaphore::new(4),
             timeout,
+            images: ImageFetcher::new(ImageLimits::default())?,
         };
         candidate
             .query("validation")?
             .validate()
             .map_err(|_| backend_error())?;
         Ok(candidate)
+    }
+
+    pub fn with_image_limits(mut self, limits: ImageLimits) -> Result<Self, BrainError> {
+        self.images = ImageFetcher::new(limits)?;
+        Ok(self)
     }
 
     fn query(&self, question: &str) -> Result<Query, BrainError> {
@@ -87,28 +97,39 @@ impl BrainApiAnswerer {
             profile: AnswerProfile::Explain,
             patch: None,
             mode: None,
+            images: Vec::new(),
         })
     }
 
     async fn answer_query(
         &self,
         question: &str,
-        user_id: Option<u64>,
+        asker: Option<(u64, &AttachedImages)>,
         allow_discord_reads: bool,
         answer_context: Option<AnswerContext>,
         user_questions: &[String],
         max_units: usize,
     ) -> Result<BrainOutcome, BrainError> {
+        let user_id = asker.map(|(user_id, _)| user_id);
         if question.trim().is_empty() || question.chars().count() > 4000 || user_id == Some(0) {
             return Err(classified_backend_error("anfrage"));
         }
         tokio::time::timeout(self.timeout, async {
+            let images = match asker {
+                Some((user_id, images)) => {
+                    self.images
+                        .for_turn(user_id, images, !user_questions.is_empty())
+                        .await?
+                }
+                None => Vec::new(),
+            };
             let _permit = self
                 .admission
                 .acquire()
                 .await
                 .map_err(|_| backend_error())?;
             let mut query = self.query(question)?;
+            query.images = images;
             if user_questions.is_empty() {
                 query.answer_context = answer_context;
             }
@@ -182,8 +203,27 @@ fn bounded_chat(entries: &[ChatEntry]) -> Vec<ChatLine> {
     lines
 }
 
-fn conversation_task(task: &DiscordConversation) -> ConversationTask {
+fn follows_up(task: &DiscordConversation) -> bool {
     match task {
+        DiscordConversation::Concierge { history, .. }
+        | DiscordConversation::Faq { history, .. } => !history.is_empty(),
+        _ => false,
+    }
+}
+
+fn conversation_task(
+    task: &DiscordConversation,
+    images: Vec<QueryImage>,
+) -> Result<ConversationTask, BrainError> {
+    if !images.is_empty()
+        && matches!(
+            task,
+            DiscordConversation::VoiceHint { .. } | DiscordConversation::InviteLounge { .. }
+        )
+    {
+        return Err(classified_backend_error("anfrage"));
+    }
+    Ok(match task {
         DiscordConversation::Concierge {
             question,
             history,
@@ -197,10 +237,12 @@ fn conversation_task(task: &DiscordConversation) -> ConversationTask {
                 .take(MAX_READABLE_CHANNELS)
                 .collect(),
             member_facts: Vec::new(),
+            images,
         },
         DiscordConversation::Faq { question, history } => ConversationTask::DiscordFaq {
             question: question.clone(),
             history: bounded_dialog(history),
+            images,
         },
         DiscordConversation::PassiveHelp {
             message,
@@ -208,6 +250,7 @@ fn conversation_task(task: &DiscordConversation) -> ConversationTask {
         } => ConversationTask::DiscordPassiveHelp {
             message: message.clone(),
             recent_messages: bounded_chat(recent_messages),
+            images,
         },
         DiscordConversation::VoiceHint { message } => ConversationTask::DiscordVoiceHint {
             message: message.clone(),
@@ -215,7 +258,7 @@ fn conversation_task(task: &DiscordConversation) -> ConversationTask {
         DiscordConversation::InviteLounge { message } => ConversationTask::DiscordInviteLounge {
             message: message.clone(),
         },
-    }
+    })
 }
 
 fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, BrainError> {
@@ -471,18 +514,22 @@ impl AiAnswerer for BrainApiAnswerer {
         &self,
         request: &DiscordConversationRequest,
     ) -> Result<ConversationReply, BrainError> {
-        let sequence = next_sequence(&self.sequence).ok_or_else(backend_error)?;
-        let task_request = BotTaskRequest {
-            contract_version: BOT_TASK_VERSION.to_owned(),
-            request_id: format!("{}-{sequence}", self.namespace),
-            identity: BotIdentity::Discord {
-                guild_id: request.guild_id,
-                channel_id: request.channel_id,
-                user_id: request.user_id,
-            },
-            task: BotTask::Conversation(conversation_task(&request.task)),
-        };
         tokio::time::timeout(self.timeout, async {
+            let images = self
+                .images
+                .for_turn(request.user_id, &request.images, follows_up(&request.task))
+                .await?;
+            let sequence = next_sequence(&self.sequence).ok_or_else(backend_error)?;
+            let task_request = BotTaskRequest {
+                contract_version: BOT_TASK_VERSION.to_owned(),
+                request_id: format!("{}-{sequence}", self.namespace),
+                identity: BotIdentity::Discord {
+                    guild_id: request.guild_id,
+                    channel_id: request.channel_id,
+                    user_id: request.user_id,
+                },
+                task: BotTask::Conversation(conversation_task(&request.task, images)?),
+            };
             let _permit = self
                 .admission
                 .acquire()
@@ -520,13 +567,24 @@ impl AiAnswerer for BrainApiAnswerer {
         if !task.valid() {
             return Err(classified_backend_error("anfrage"));
         }
-        self.answer_query(question, Some(user_id), false, None, user_questions, 1800)
-            .await
+        self.answer_query(
+            question,
+            Some((user_id, &AttachedImages::default())),
+            false,
+            None,
+            user_questions,
+            1800,
+        )
+        .await
     }
 
     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
         self.answer_query(question, None, true, None, &[], 3800)
             .await
+    }
+
+    fn forget_user(&self, user_id: u64) {
+        self.images.forget_user(user_id);
     }
 
     async fn answer_for_discord(
@@ -555,7 +613,7 @@ impl AiAnswerer for BrainApiAnswerer {
     ) -> Result<BrainOutcome, BrainError> {
         self.answer_query(
             question,
-            Some(context.user_id),
+            Some((context.user_id, &context.images)),
             context.allow_discord_reads,
             context.answer_context.clone().map(AnswerContext::Discord),
             user_questions,
@@ -572,7 +630,7 @@ impl AiAnswerer for BrainApiAnswerer {
     ) -> Result<BrainOutcome, BrainError> {
         self.answer_query(
             question,
-            Some(user_id),
+            Some((user_id, &AttachedImages::default())),
             allow_discord_reads,
             None,
             &[],
@@ -757,6 +815,7 @@ mod tests {
                                 ),
                                 ..Default::default()
                             }),
+                            images: crate::AttachedImages::default(),
                         },
                         user_questions,
                     )
@@ -806,11 +865,12 @@ mod tests {
                     channel_id: 1,
                     user_id: 2,
                 },
-                task: BotTask::Conversation(conversation_task(task)),
+                task: BotTask::Conversation(conversation_task(task, Vec::new()).expect("Aufgabe")),
             };
             assert_eq!(request.validate(), Ok(()));
         }
-        let ConversationTask::DiscordConcierge { history, .. } = conversation_task(&tasks[0])
+        let Ok(ConversationTask::DiscordConcierge { history, .. }) =
+            conversation_task(&tasks[0], Vec::new())
         else {
             panic!("Concierge-Aufgabe erwartet");
         };
@@ -1560,6 +1620,7 @@ mod tests {
                     user_id: 3,
                     allow_discord_reads: true,
                     answer_context: Some(location.clone()),
+                    images: crate::AttachedImages::default(),
                 },
             )
             .await

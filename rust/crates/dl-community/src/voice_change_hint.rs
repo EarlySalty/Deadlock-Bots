@@ -138,6 +138,7 @@ impl VoiceChangeHintResponder {
             task: DiscordConversation::VoiceHint {
                 message: event.content.clone(),
             },
+            images: dl_brain::AttachedImages::default(),
         };
         let text = match self.brain.converse(&request).await {
             Ok(reply) => {
