@@ -115,19 +115,24 @@ impl BrainApiAnswerer {
             return Err(classified_backend_error("anfrage"));
         }
         tokio::time::timeout(self.timeout, async {
-            let images = match asker {
-                Some((user_id, images)) => {
-                    self.images
-                        .for_turn(user_id, images, !user_questions.is_empty())
-                        .await?
-                }
-                None => Vec::new(),
-            };
             let _permit = self
                 .admission
                 .acquire()
                 .await
                 .map_err(|_| backend_error())?;
+            let images = match asker {
+                Some((user_id, attached)) => {
+                    let images = self
+                        .images
+                        .for_turn(user_id, attached, !user_questions.is_empty())
+                        .await?;
+                    if crate::images::unusable_image_turn(question, attached, &images) {
+                        return Err(classified_backend_error("bild"));
+                    }
+                    images
+                }
+                None => Vec::new(),
+            };
             let mut query = self.query(question)?;
             query.images = images;
             if user_questions.is_empty() {
@@ -208,6 +213,16 @@ fn follows_up(task: &DiscordConversation) -> bool {
         DiscordConversation::Concierge { history, .. }
         | DiscordConversation::Faq { history, .. } => !history.is_empty(),
         _ => false,
+    }
+}
+
+fn conversation_text(task: &DiscordConversation) -> &str {
+    match task {
+        DiscordConversation::Concierge { question, .. }
+        | DiscordConversation::Faq { question, .. } => question,
+        DiscordConversation::PassiveHelp { message, .. }
+        | DiscordConversation::VoiceHint { message }
+        | DiscordConversation::InviteLounge { message } => message,
     }
 }
 
@@ -515,10 +530,22 @@ impl AiAnswerer for BrainApiAnswerer {
         request: &DiscordConversationRequest,
     ) -> Result<ConversationReply, BrainError> {
         tokio::time::timeout(self.timeout, async {
+            let _permit = self
+                .admission
+                .acquire()
+                .await
+                .map_err(|_| backend_error())?;
             let images = self
                 .images
                 .for_turn(request.user_id, &request.images, follows_up(&request.task))
                 .await?;
+            if crate::images::unusable_image_turn(
+                conversation_text(&request.task),
+                &request.images,
+                &images,
+            ) {
+                return Err(classified_backend_error("bild"));
+            }
             let sequence = next_sequence(&self.sequence).ok_or_else(backend_error)?;
             let task_request = BotTaskRequest {
                 contract_version: BOT_TASK_VERSION.to_owned(),
@@ -530,11 +557,6 @@ impl AiAnswerer for BrainApiAnswerer {
                 },
                 task: BotTask::Conversation(conversation_task(&request.task, images)?),
             };
-            let _permit = self
-                .admission
-                .acquire()
-                .await
-                .map_err(|_| backend_error())?;
             let response = self
                 .client
                 .task(&task_request)

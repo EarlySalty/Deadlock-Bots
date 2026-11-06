@@ -96,7 +96,7 @@ rand = "0.8"
 unicode-normalization = "0.1"
 # URL-Parsing (Dashboard-Redirect-Validierung, Sicherheits-Check)
 url = "2"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 # Tests
 tempfile = "3"

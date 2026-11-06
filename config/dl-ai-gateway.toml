@@ -1,5 +1,5 @@
 listen = "127.0.0.1:18790"
-max_request_bytes = 4194304
+max_request_bytes = 8388608
 
 [providers.claude_plan]
 kind = "claude_plan"

@@ -14,7 +14,9 @@ image input. Paths: DM, mention, `!brain`, concierge, FAQ chat, passive help and
 
 - The bot downloads and validates (Discord CDN allowlist, https, size cap, decode check) and sends
   base64 plus media type. The Brain never fetches URLs.
-- No image bytes or URLs in logs. Only the asker's own attachments.
+- No image bytes or URLs in logs. Only the asker's own attachments, plus (added scope by the
+  coordinator, 2026-11-06) the attachments of the message the asker explicitly replies to with a
+  bot mention, for that turn only.
 - Providers that cannot take images fail explicitly, they never drop images.
 - Limits live in `runtime.ai` config.
 - The build publish path is untouched.
@@ -25,5 +27,14 @@ image input. Paths: DM, mention, `!brain`, concierge, FAQ chat, passive help and
 - Chat-provider backends reject image input with `image_input_unsupported`.
 - Every Brain answer path forwards the asker's attachments; image-only messages get a default
   question; follow-ups in the same channel can reuse the last images as `earlier`.
+
+## Added scope (coordinator, 2026-11-06)
+
+A guild mention that replies to another member's message answers that message: its text plus
+the same author's directly following messages within two minutes form the question; the asker's
+own text, if more than one word, becomes the question with the reference as context. Images of
+the referenced message flow through the image path. Replies to the bot keep the conversation
+history behaviour; a failed fetch or empty reference keeps the usage reply. Reuse the existing
+message fetch code.
 
 Brain side: Deadlock-Brain branch `feat/brain-image-input-20261105`.

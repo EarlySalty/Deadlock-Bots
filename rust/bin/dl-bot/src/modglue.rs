@@ -734,7 +734,12 @@ fn reply_question(own: &str, referenced: &str, max_len: usize) -> String {
     }
     let prefix = "Nachricht, auf die ich antworte:\n";
     let suffix = format!("\n\nMeine Frage: {}", own.trim());
-    let budget = max_len.saturating_sub(prefix.chars().count() + suffix.chars().count());
+    let Some(budget) = max_len
+        .checked_sub(prefix.chars().count() + suffix.chars().count())
+        .filter(|budget| *budget > 0)
+    else {
+        return own.to_owned();
+    };
     format!("{prefix}{}{suffix}", truncate_chars(referenced, budget))
 }
 
@@ -946,7 +951,7 @@ impl BrainHandler {
             }
             dl_brain::DiscordReservation::Suppressed => return,
         }
-        if question.trim().is_empty() {
+        if question.trim().is_empty() && context.images.is_empty() {
             let bodies = vec![brain_public_message_body(BRAIN_USAGE)];
             self.send_public_bodies(event, replies, &bodies).await;
             return;
@@ -1113,15 +1118,20 @@ impl BrainHandler {
         let Some(referenced) = replies.referenced_message(event, bot_id).await else {
             return (question, event_images(event));
         };
-        let urls: Vec<String> = event
-            .image_attachment_urls
-            .iter()
-            .chain(&referenced.image_urls)
-            .cloned()
-            .collect();
+        let images = if referenced.image_urls.is_empty() {
+            event_images(event)
+        } else {
+            dl_brain::AttachedImages::transient(
+                event
+                    .image_attachment_urls
+                    .iter()
+                    .chain(&referenced.image_urls)
+                    .cloned(),
+            )
+        };
         (
             reply_question(&question, &referenced.text, self.config.max_question_len),
-            dl_brain::AttachedImages::new(event.channel_id, urls),
+            images,
         )
     }
 
@@ -5537,6 +5547,8 @@ mod tests {
             "Nachricht, auf die ich antworte:\nBuild X ist gut\n\nMeine Frage: Stimmt das noch?"
         );
         assert_eq!(reply_question("", "", 400), "");
+        let long_own = "a ".repeat(200);
+        assert_eq!(reply_question(&long_own, "Kontext", 400), long_own);
     }
 
     #[tokio::test]

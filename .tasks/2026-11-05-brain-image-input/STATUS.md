@@ -12,10 +12,15 @@ pin has to be bumped to the merged commit.
   chat-provider emulation returns `Unavailable` / `image_input_unsupported` instead of dropping.
 - dl-brain `images`: Discord CDN attachment URL allowlist, bounded download without redirects or
   proxy, decode with size limits, resize to the configured edge and re-encode as JPEG off the async
-  runtime (also strips metadata), per-image budget inside the Brain contract limits.
-  Any failure of an attached image fails the turn (`bild` class), it is never answered text-only.
+  runtime (also strips metadata), per-image budget inside the Brain contract limits. Slash
+  uploads under `/ephemeral-attachments/` are accepted too. PNG, JPEG, WebP and GIF (first
+  frame) are decoded; other formats the attachment filter lets through (AVIF, BMP, ...) are
+  skipped so a text question is still answered, and an image-only turn without a usable image
+  fails (`bild` class). Download or decode failures of a supported image fail the turn.
+  Image preparation runs inside the Brain admission slot.
 - Follow-ups: the last prepared images per (user, channel) are kept in memory for the configured
   TTL and sent as `origin = earlier` when a follow-up turn has history but no new attachment.
+  The cache holds at most 512 entries and 64 MiB of base64.
   Passive help never reuses images. `forget_user` clears them; concierge `clear_user_runtime`
   calls it.
 - Wiring: modglue DM, mention and `!brain` paths, `/brain` with the new optional `bild` attachment
@@ -28,7 +33,9 @@ pin has to be bumped to the merged commit.
   that message (same channel only) plus the same author's directly following messages within two
   minutes before the mention. A bare or one-word mention asks that text; longer own text becomes
   the question with the referenced text as labelled context, truncated to the question limit.
-  Images of the referenced message join the asker's images. A reply to the bot itself, a failed
+  If the asker's own text alone leaves no room for the reference, the own text goes unchanged.
+  Images of the referenced message join the asker's images for this turn only; they are not
+  kept for follow-ups, so no copy of another member's image sits in the cache. A reply to the bot itself, a failed
   fetch or an empty reference keep the old behaviour. Cooldown, daily limit and the reply target
   stay with the asker's mention message. The existing fetches and the new one share
   `fetch_message` and `fetch_messages`.
@@ -64,6 +71,7 @@ pin has to be bumped to the merged commit.
 ## Deploy order
 
 1. Deadlock-Brain service (accepts the additive `images` fields).
-2. dl-ai-gateway with `max_request_bytes` raised to 8 MiB (live value is 4 MiB, an image request
-   can reach about 2.9 MiB of base64 plus the grounded payload).
+2. dl-ai-gateway with `max_request_bytes` 8 MiB. The tracked `config/dl-ai-gateway.toml` now
+   ships 8 MiB, and the release installer copies it to the live path (an image request can reach
+   about 2.9 MiB of base64 plus the grounded payload).
 3. dl-bot, then re-register slash commands so `/brain` gets the `bild` option.

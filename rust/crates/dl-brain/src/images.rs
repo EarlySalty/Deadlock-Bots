@@ -17,6 +17,7 @@ const MAX_DECODE_EDGE: u32 = 12_000;
 const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 const MIN_EDGE: u32 = 384;
 const MAX_REMEMBERED: usize = 512;
+const MAX_REMEMBERED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct AttachedImages {
@@ -30,6 +31,10 @@ impl AttachedImages {
             channel_id,
             urls: urls.into_iter().collect(),
         }
+    }
+
+    pub fn transient(urls: impl IntoIterator<Item = String>) -> Self {
+        Self::new(0, urls)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -142,7 +147,16 @@ impl ImageFetcher {
         let mut prepared = Vec::with_capacity(urls.len());
         for url in urls {
             let bytes = self.download(url).await?;
-            prepared.push(self.prepare(bytes, budget).await?);
+            if let Some(image) = self.prepare(bytes, budget).await? {
+                prepared.push(image);
+            }
+        }
+        if prepared.len() < urls.len() {
+            tracing::info!(
+                attached = urls.len(),
+                used = prepared.len(),
+                "Brain-Bilder: Bildformat nicht unterstützt"
+            );
         }
         if channel_id != 0 {
             self.remember(user_id, channel_id, &prepared);
@@ -174,6 +188,17 @@ impl ImageFetcher {
         }
         if !ttl.is_zero() {
             recent.insert((user_id, channel_id), (now, images.to_vec()));
+        }
+        while remembered_bytes(&recent) > MAX_REMEMBERED_BYTES {
+            let Some(oldest) = recent
+                .iter()
+                .filter(|(key, _)| **key != (user_id, channel_id))
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            recent.remove(&oldest);
         }
     }
 
@@ -221,12 +246,34 @@ impl ImageFetcher {
         Ok(bytes)
     }
 
-    async fn prepare(&self, bytes: Vec<u8>, budget: usize) -> Result<QueryImage, BrainError> {
+    async fn prepare(
+        &self,
+        bytes: Vec<u8>,
+        budget: usize,
+    ) -> Result<Option<QueryImage>, BrainError> {
         let limits = self.limits;
         tokio::task::spawn_blocking(move || encode_for_brain(&bytes, limits, budget))
             .await
             .map_err(|_| image_error())?
     }
+}
+
+fn remembered_bytes(recent: &RecentImages) -> usize {
+    recent
+        .values()
+        .flat_map(|(_, images)| images)
+        .map(|image| image.data.len())
+        .sum()
+}
+
+pub fn unusable_image_turn(
+    question: &str,
+    attached: &AttachedImages,
+    prepared: &[QueryImage],
+) -> bool {
+    !attached.is_empty()
+        && prepared.is_empty()
+        && (question.trim().is_empty() || question.trim() == IMAGE_ONLY_QUESTION)
 }
 
 fn image_error() -> BrainError {
@@ -253,7 +300,7 @@ fn attachment_url(raw: &str) -> Option<Url> {
     }
     let segments: Vec<&str> = url.path().split('/').collect();
     let ids_ok = segments.len() == 5
-        && segments[1] == "attachments"
+        && matches!(segments[1], "attachments" | "ephemeral-attachments")
         && segments[2..4]
             .iter()
             .all(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
@@ -268,13 +315,16 @@ fn encode_for_brain(
     bytes: &[u8],
     limits: ImageLimits,
     budget: usize,
-) -> Result<QueryImage, BrainError> {
-    let decoded = decode(bytes)?;
+) -> Result<Option<QueryImage>, BrainError> {
+    let Some(decoded) = decode(bytes)? else {
+        return Ok(None);
+    };
     let mut edge = limits.max_edge;
     loop {
         let jpeg = to_jpeg(&decoded, edge, limits.jpeg_quality)?;
         if jpeg.len() <= budget {
             return QueryImage::from_bytes(ImageMediaType::Jpeg, &jpeg, ImageOrigin::Current)
+                .map(Some)
                 .map_err(|_| image_error());
         }
         if edge <= MIN_EDGE {
@@ -284,13 +334,15 @@ fn encode_for_brain(
     }
 }
 
-fn decode(bytes: &[u8]) -> Result<DynamicImage, BrainError> {
-    let format = image::guess_format(bytes).map_err(|_| image_error())?;
+fn decode(bytes: &[u8]) -> Result<Option<DynamicImage>, BrainError> {
+    let Ok(format) = image::guess_format(bytes) else {
+        return Ok(None);
+    };
     if !matches!(
         format,
-        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif
     ) {
-        return Err(image_error());
+        return Ok(None);
     }
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_DECODE_EDGE);
@@ -298,7 +350,7 @@ fn decode(bytes: &[u8]) -> Result<DynamicImage, BrainError> {
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits);
-    reader.decode().map_err(|_| image_error())
+    reader.decode().map(Some).map_err(|_| image_error())
 }
 
 fn to_jpeg(image: &DynamicImage, edge: u32, quality: u8) -> Result<Vec<u8>, BrainError> {
@@ -333,12 +385,16 @@ mod tests {
     fn only_discord_attachment_urls_are_fetched() {
         assert!(attachment_url("https://cdn.discordapp.com/attachments/1/2/a.png?ex=1").is_some());
         assert!(attachment_url("https://media.discordapp.net/attachments/1/2/a.webp").is_some());
+        assert!(
+            attachment_url("https://cdn.discordapp.com/ephemeral-attachments/1/2/a.png").is_some()
+        );
         for url in [
             "http://cdn.discordapp.com/attachments/1/2/a.png",
             "https://cdn.discordapp.com.evil.test/attachments/1/2/a.png",
             "https://u:p@cdn.discordapp.com/attachments/1/2/a.png",
             "https://cdn.discordapp.com:444/attachments/1/2/a.png",
             "https://cdn.discordapp.com/avatars/1/2/a.png",
+            "https://cdn.discordapp.com/ephemeral-attachments/x/2/a.png",
             "https://cdn.discordapp.com/attachments/1/2/a%2fb.png",
             "https://127.0.0.1/attachments/1/2/a.png",
         ] {
@@ -353,7 +409,8 @@ mod tests {
             ImageLimits::default(),
             MAX_IMAGE_BYTES / 2,
         )
-        .expect("prepared image");
+        .expect("prepared image")
+        .expect("supported format");
         assert_eq!(image.media_type, ImageMediaType::Jpeg);
         assert!(image.decoded_len().expect("valid image") <= MAX_IMAGE_BYTES / 2);
         assert!(format!("{image:?}").contains("data_len"));
@@ -363,7 +420,8 @@ mod tests {
     fn follow_up_reuses_only_the_same_users_images_as_earlier() {
         let fetcher = ImageFetcher::new(ImageLimits::default()).expect("fetcher");
         let image = encode_for_brain(&png(64, 64), ImageLimits::default(), MAX_IMAGE_BYTES)
-            .expect("prepared image");
+            .expect("prepared image")
+            .expect("supported format");
         fetcher.remember(1, 10, &[image]);
         let recalled = fetcher.recall(1, 10);
         assert_eq!(recalled.len(), 1);
@@ -372,5 +430,57 @@ mod tests {
         assert!(fetcher.recall(1, 11).is_empty());
         fetcher.forget_user(1);
         assert!(fetcher.recall(1, 10).is_empty());
+    }
+
+    #[test]
+    fn gif_is_decoded_and_unknown_formats_are_skipped_not_failed() {
+        let mut gif = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
+            .write_to(&mut gif, ImageFormat::Gif)
+            .expect("gif fixture");
+        let limits = ImageLimits::default();
+        assert!(encode_for_brain(gif.get_ref(), limits, MAX_IMAGE_BYTES)
+            .expect("gif")
+            .is_some());
+        assert!(
+            encode_for_brain(b"BM-not-supported", limits, MAX_IMAGE_BYTES)
+                .expect("unsupported is skipped")
+                .is_none()
+        );
+        assert!(encode_for_brain(b"plain text", limits, MAX_IMAGE_BYTES)
+            .expect("unknown is skipped")
+            .is_none());
+        let mut broken = png(16, 16);
+        broken.truncate(40);
+        assert!(encode_for_brain(&broken, limits, MAX_IMAGE_BYTES).is_err());
+        let attached = AttachedImages::new(1, ["u".to_owned()]);
+        assert!(unusable_image_turn(IMAGE_ONLY_QUESTION, &attached, &[]));
+        assert!(unusable_image_turn(" ", &attached, &[]));
+        assert!(!unusable_image_turn(
+            "welches item ist das?",
+            &attached,
+            &[]
+        ));
+        assert!(!unusable_image_turn(
+            IMAGE_ONLY_QUESTION,
+            &AttachedImages::default(),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn remembered_images_stay_within_the_byte_cap() {
+        let fetcher = ImageFetcher::new(ImageLimits::default()).expect("fetcher");
+        let big = QueryImage {
+            media_type: ImageMediaType::Jpeg,
+            data: "A".repeat(MAX_REMEMBERED_BYTES / 3 + 1),
+            origin: ImageOrigin::Current,
+        };
+        for user in 1..=4 {
+            fetcher.remember(user, 10, std::slice::from_ref(&big));
+        }
+        let recent = fetcher.recent.lock().expect("lock");
+        assert!(remembered_bytes(&recent) <= MAX_REMEMBERED_BYTES);
+        assert!(recent.contains_key(&(4, 10)));
     }
 }

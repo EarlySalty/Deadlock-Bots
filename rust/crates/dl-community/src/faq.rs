@@ -1156,11 +1156,12 @@ impl FaqChat {
                 {
                     return false;
                 }
-                let question = content.trim();
-                if !question.is_empty() {
+                if let Some(question) =
+                    dl_brain::question_or_image_default(content, !images.is_empty())
+                {
                     if let Some(answer) = self
                         .generate_stateless_answer(
-                            question, author_id, channel_id, guild_id, images,
+                            &question, author_id, channel_id, guild_id, images,
                         )
                         .await
                     {
@@ -1201,10 +1202,11 @@ impl FaqChat {
         if author_id != owner_id {
             return true; // Kanal gehört dem FAQ-System, aber fremde Nachricht
         }
-        let question = content.trim();
-        if question.is_empty() {
+        let Some(question) = dl_brain::question_or_image_default(content, !images.is_empty())
+        else {
             return true;
-        }
+        };
+        let question = question.as_str();
         match self
             .answer_statefully(&session_id, channel_id, guild_id, question, images)
             .await
