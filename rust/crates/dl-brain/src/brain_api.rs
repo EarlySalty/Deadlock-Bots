@@ -102,6 +102,42 @@ impl BrainApiAnswerer {
         })
     }
 
+    async fn answer_ticket(
+        &self,
+        question: &str,
+        user_id: u64,
+        task: &crate::DiscordAnswerTask,
+        user_questions: &[String],
+    ) -> Result<BrainOutcome, BrainError> {
+        if question.trim().is_empty() || question.chars().count() > 4000 || user_id == 0 {
+            return Err(classified_backend_error("anfrage"));
+        }
+        tokio::time::timeout(self.timeout, async {
+            let _permit = self
+                .admission
+                .acquire()
+                .await
+                .map_err(|_| backend_error())?;
+            let query = self.query(question)?;
+            let response = if user_questions.is_empty() {
+                self.client.answer_discord_task(&query, user_id, task).await
+            } else {
+                self.client
+                    .answer_discord_task_with_history(&query, user_id, task, user_questions)
+                    .await
+            }
+            .map_err(client_error)?;
+            tracing::info!(
+                request_id = %response.request_id,
+                status = ?response.status,
+                "Discord-Brain-Aufgabe empfangen"
+            );
+            project_bounded(response, 1800)
+        })
+        .await
+        .map_err(|_| classified_backend_error("transport"))?
+    }
+
     async fn answer_query(
         &self,
         question: &str,
@@ -619,6 +655,11 @@ impl AiAnswerer for BrainApiAnswerer {
         if !task.valid() {
             return Err(classified_backend_error("anfrage"));
         }
+        if task.capability == crate::DiscordAnswerCapability::Ticket {
+            return self
+                .answer_ticket(question, user_id, task, user_questions)
+                .await;
+        }
         self.answer_query(
             question,
             Some((user_id, &AttachedImages::default())),
@@ -736,7 +777,8 @@ mod tests {
         let status = status.to_owned();
         let text = text.to_owned();
         let recorded_history = user_questions.to_vec();
-        let task_request = task.is_some();
+        let discord_task = task.is_some();
+        let ticket_request = task == Some(crate::DiscordAnswerCapability::Ticket);
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("Testverbindung");
             stream
@@ -760,70 +802,116 @@ mod tests {
                         .expect("Inhaltslängenheader");
                     if request.len() >= end + 4 + length {
                         let body = &request[end + 4..end + 4 + length];
-                        assert!(headers.starts_with("POST /v1/answer HTTP/1.1"));
-                        assert!(!headers.contains("dl-knowledge"));
-                        assert!(!headers
-                            .to_ascii_lowercase()
-                            .contains("x-discord-answer-task"));
-                        assert!(headers
-                            .to_ascii_lowercase()
-                            .contains("x-discord-user-id: 3"));
-                        if recorded_history.is_empty() {
-                            assert_eq!(
-                                headers
-                                    .to_ascii_lowercase()
-                                    .contains("x-discord-read-access: disabled"),
-                                task_request
-                            );
-                            let query: Query =
-                                serde_json::from_slice(body).expect("Anfragevertrag");
-                            assert_eq!(
-                                query.requested_scopes,
-                                BTreeSet::from(["bot.public".into()])
-                            );
-                            assert_eq!(query.text, "Sinclairs letzter Patch?");
-                            break query.request_id;
+                        let mut answer = json!({
+                            "contract_version": brain_client::PUBLIC_API_VERSION,
+                            "request_id": "",
+                            "knowledge_release": "test-release",
+                            "status": status,
+                            "text": text,
+                            "citations": [{"citation_id": "test", "label": "Serverwissen"}],
+                        });
+                        if invalid_contract {
+                            answer["contract_version"] = json!("falscher-vertrag");
                         }
-                        assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
-                        assert!(headers
-                            .to_ascii_lowercase()
-                            .contains("x-discord-user-id: 3"));
-                        assert_eq!(
-                            headers
+                        let (request_id, response) = if ticket_request {
+                            assert!(headers.starts_with("POST /v1/task HTTP/1.1"));
+                            assert!(!headers.to_ascii_lowercase().contains("x-discord-"));
+                            let envelope: BotTaskRequest =
+                                serde_json::from_slice(body).expect("Bot-Aufgabe");
+                            let BotTask::DiscordAnswer {
+                                capability,
+                                question,
+                                user_questions,
+                            } = &envelope.task
+                            else {
+                                panic!("keine Discord-Antwortaufgabe");
+                            };
+                            assert_eq!(Some(*capability), task);
+                            if recorded_history.is_empty() {
+                                assert_eq!(question, "Sinclairs letzter Patch?");
+                                assert!(user_questions.is_empty());
+                            } else {
+                                assert_eq!(question, "Wie mache ich das?");
+                                assert_eq!(user_questions, &recorded_history);
+                            }
+                            answer["request_id"] = json!(envelope.request_id);
+                            let result = if status == "task_failed" {
+                                json!({
+                                    "kind": "failed",
+                                    "capability": capability,
+                                    "failure": "timeout",
+                                })
+                            } else {
+                                json!({"kind": "discord_answer", "answer": answer})
+                            };
+                            let response = json!({
+                                "contract_version": BOT_TASK_VERSION,
+                                "request_id": envelope.request_id,
+                                "result": result,
+                            });
+                            (envelope.request_id, response.to_string())
+                        } else {
+                            assert!(headers.starts_with("POST /v1/answer HTTP/1.1"));
+                            assert!(!headers.contains("dl-knowledge"));
+                            assert!(!headers
                                 .to_ascii_lowercase()
-                                .contains("x-discord-read-access: disabled"),
-                            task_request
-                        );
-                        assert!(!String::from_utf8_lossy(body).contains("Dieser Ortskontext"));
-                        let envelope: serde_json::Value =
-                            serde_json::from_slice(body).expect("Lokaler Kontextvertrag");
-                        assert_eq!(envelope["user_questions"], json!(recorded_history));
-                        let query: Query = serde_json::from_value(envelope["query"].clone())
-                            .expect("Getrennte aktuelle Frage");
-                        assert_eq!(query.text, "Wie mache ich das?");
-                        assert!(query.answer_context.is_none());
-                        break query.request_id;
+                                .contains("x-discord-answer-task"));
+                            assert!(headers
+                                .to_ascii_lowercase()
+                                .contains("x-discord-user-id: 3"));
+                            let request_id = if recorded_history.is_empty() {
+                                assert_eq!(
+                                    headers
+                                        .to_ascii_lowercase()
+                                        .contains("x-discord-read-access: disabled"),
+                                    discord_task
+                                );
+                                let query: Query =
+                                    serde_json::from_slice(body).expect("Anfragevertrag");
+                                assert_eq!(
+                                    query.requested_scopes,
+                                    BTreeSet::from(["bot.public".into()])
+                                );
+                                assert_eq!(query.text, "Sinclairs letzter Patch?");
+                                query.request_id
+                            } else {
+                                assert!(!headers.contains("PRIVATE_CANARY_äöüß"));
+                                assert!(headers
+                                    .to_ascii_lowercase()
+                                    .contains("x-discord-user-id: 3"));
+                                assert_eq!(
+                                    headers
+                                        .to_ascii_lowercase()
+                                        .contains("x-discord-read-access: disabled"),
+                                    discord_task
+                                );
+                                assert!(
+                                    !String::from_utf8_lossy(body).contains("Dieser Ortskontext")
+                                );
+                                let envelope: serde_json::Value =
+                                    serde_json::from_slice(body).expect("Lokaler Kontextvertrag");
+                                assert_eq!(envelope["user_questions"], json!(recorded_history));
+                                let query: Query =
+                                    serde_json::from_value(envelope["query"].clone())
+                                        .expect("Getrennte aktuelle Frage");
+                                assert_eq!(query.text, "Wie mache ich das?");
+                                assert!(query.answer_context.is_none());
+                                query.request_id
+                            };
+                            answer["request_id"] = json!(request_id);
+                            (request_id, answer.to_string())
+                        };
+                        let body = if truncated_body {
+                            &response[..response.len() / 2]
+                        } else {
+                            &response
+                        };
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", response.len()).expect("Testantwort");
+                        break request_id;
                     }
                 }
             };
-            let mut response = json!({
-                "contract_version": brain_client::PUBLIC_API_VERSION,
-                "request_id": request_id,
-                "knowledge_release": "test-release",
-                "status": status,
-                "text": text,
-                "citations": [{"citation_id": "test", "label": "Serverwissen"}],
-            });
-            if invalid_contract {
-                response["contract_version"] = json!("falscher-vertrag");
-            }
-            let response = response.to_string();
-            let body = if truncated_body {
-                &response[..response.len() / 2]
-            } else {
-                &response
-            };
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", response.len()).expect("Testantwort");
+            request_id
         });
         let answerer = BrainApiAnswerer::new(
             &endpoint,
@@ -1103,6 +1191,36 @@ mod tests {
                     Err(BrainError::Backend(_))
                 ));
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn ticket_antwortet_nur_mit_belegter_antwort() {
+        assert_eq!(
+            fixture_answer_with_task(
+                "answered",
+                "Bitte schick uns die genaue Fehlermeldung.",
+                false,
+                false,
+                Some(crate::DiscordAnswerCapability::Ticket),
+            )
+            .await
+            .expect("Ticket-Text"),
+            BrainOutcome::Answer("Bitte schick uns die genaue Fehlermeldung.".into())
+        );
+        for status in ["insufficient_evidence", "unverified"] {
+            assert_eq!(
+                fixture_answer_with_task(
+                    status,
+                    "Ungeprüft: Bitte schick uns die genaue Fehlermeldung.",
+                    false,
+                    false,
+                    Some(crate::DiscordAnswerCapability::Ticket),
+                )
+                .await
+                .expect("Ticket ohne Beleg"),
+                BrainOutcome::NoAnswer
+            );
         }
     }
 

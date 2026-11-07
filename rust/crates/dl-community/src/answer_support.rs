@@ -248,7 +248,7 @@ pub(crate) mod test_brain {
 
     use async_trait::async_trait;
     use dl_brain::{
-        AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker,
+        AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker, DiscordAnswerTask,
         DiscordConversation, DiscordConversationRequest, InviteCheckInOutcome,
     };
     use tokio::sync::Notify;
@@ -355,6 +355,44 @@ pub(crate) mod test_brain {
     impl AiAnswerer for ScriptedBrain {
         async fn answer(&self, _: &str) -> Result<BrainOutcome, BrainError> {
             Err(BrainError::Backend("untyped path".into()))
+        }
+
+        async fn answer_discord_task_with_history(
+            &self,
+            question: &str,
+            _user_id: u64,
+            _task: &DiscordAnswerTask,
+            user_questions: &[String],
+        ) -> Result<BrainOutcome, BrainError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = serde_json::json!({
+                "question": question,
+                "user_questions": user_questions,
+            });
+            self.bodies
+                .lock()
+                .expect("bodies")
+                .extend([body.to_string()]);
+            let gate = self.gate.lock().expect("gate").take();
+            if let Some((started, release)) = gate {
+                started.notify_one();
+                release.notified().await;
+            }
+            let reply = self
+                .replies
+                .lock()
+                .expect("replies")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(self
+                        .default_reply
+                        .clone()
+                        .unwrap_or(ConversationReply::Silent))
+                })?;
+            Ok(match reply {
+                ConversationReply::Answered { text, .. } => BrainOutcome::Answer(text),
+                ConversationReply::Silent => BrainOutcome::NoAnswer,
+            })
         }
 
         async fn converse(

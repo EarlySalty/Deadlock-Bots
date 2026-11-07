@@ -524,7 +524,7 @@ impl DiscordAdapter {
     }
 
     fn is_unknown_member_response(status_code: u16, discord_code: isize, message: &str) -> bool {
-        discord_code == 10007 || (status_code == 404 && message == "Unknown Member")
+        matches!(discord_code, 10007 | 10013) || (status_code == 404 && message == "Unknown Member")
     }
 }
 
@@ -1064,14 +1064,25 @@ impl DiscordPort for DiscordAdapter {
             ..Default::default()
         };
         for gid in guild_ids {
-            let Some(guild) = self.cache().guild(gid) else {
-                continue;
+            let cached = match self.cache().guild(gid) {
+                Some(guild) => guild.members.get(&target).cloned(),
+                None if guild_id.is_some() => return Err(PortError::GuildUnavailable),
+                None => continue,
             };
-            let Some(member) = guild.members.get(&target) else {
-                continue;
+            let member = match cached {
+                Some(member) => member,
+                None if guild_id.is_some() => match self.http.get_member(gid, target).await {
+                    Ok(member) => member,
+                    Err(err) if Self::is_unknown_member(&err) => continue,
+                    Err(err) => return Err(PortError::Discord(err.to_string())),
+                },
+                None => continue,
+            };
+            let Some(guild) = self.cache().guild(gid) else {
+                return Err(PortError::GuildUnavailable);
             };
             // Admin-Permission wird über ALLE Gilden ge-OR-t.
-            if guild.member_permissions(member).administrator() {
+            if guild.member_permissions(&member).administrator() {
                 access.is_administrator = true;
             }
             // Anzeigename + Rollen aus der ersten Gilde mit Treffer
@@ -1626,6 +1637,11 @@ mod tests {
             404,
             -1,
             "Unknown Member"
+        ));
+        assert!(DiscordAdapter::is_unknown_member_response(
+            404,
+            10013,
+            "Unknown User"
         ));
     }
 
