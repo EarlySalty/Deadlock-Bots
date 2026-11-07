@@ -311,7 +311,10 @@ pub async fn member_access(
                 "role_ids": access.role_ids.iter().map(u64::to_string).collect::<Vec<_>>(),
             }),
         ),
-        Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
+        Err(_) => respond(
+            503,
+            error_body(&rid, None, "unavailable", "member access unavailable"),
+        ),
     }
 }
 

@@ -1064,14 +1064,26 @@ impl DiscordPort for DiscordAdapter {
             ..Default::default()
         };
         for gid in guild_ids {
-            let Some(guild) = self.cache().guild(gid) else {
-                continue;
+            let cached = self
+                .cache()
+                .guild(gid)
+                .map(|guild| guild.members.get(&target).cloned());
+            let member = match cached {
+                Some(Some(member)) => member,
+                Some(None) | None if guild_id.is_some() => {
+                    match self.http.get_member(gid, target).await {
+                        Ok(member) => member,
+                        Err(err) if Self::is_http_404(&err) => continue,
+                        Err(err) => return Err(PortError::Discord(err.to_string())),
+                    }
+                }
+                _ => continue,
             };
-            let Some(member) = guild.members.get(&target) else {
-                continue;
+            let Some(guild) = self.cache().guild(gid) else {
+                return Err(PortError::GuildUnavailable);
             };
             // Admin-Permission wird über ALLE Gilden ge-OR-t.
-            if guild.member_permissions(member).administrator() {
+            if guild.member_permissions(&member).administrator() {
                 access.is_administrator = true;
             }
             // Anzeigename + Rollen aus der ersten Gilde mit Treffer
