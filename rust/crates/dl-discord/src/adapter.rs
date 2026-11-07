@@ -524,7 +524,7 @@ impl DiscordAdapter {
     }
 
     fn is_unknown_member_response(status_code: u16, discord_code: isize, message: &str) -> bool {
-        discord_code == 10007 || (status_code == 404 && message == "Unknown Member")
+        matches!(discord_code, 10007 | 10013) || (status_code == 404 && message == "Unknown Member")
     }
 }
 
@@ -1637,6 +1637,11 @@ mod tests {
             404,
             -1,
             "Unknown Member"
+        ));
+        assert!(DiscordAdapter::is_unknown_member_response(
+            404,
+            10013,
+            "Unknown User"
         ));
     }
 
