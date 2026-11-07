@@ -15,9 +15,8 @@ use sqlx::PgPool;
 #[path = "invite_lounge_status.rs"]
 mod status;
 use status::{
-    after_invite, after_progress, check_in_answer, check_in_step, check_in_window,
-    classify_invite_reply, steam_outcome, CheckIn, Notice, RequestStatus, SteamProgress, SteamWait,
-    Step,
+    after_invite, after_progress, check_in_step, check_in_window, classify_invite_reply,
+    steam_outcome, CheckIn, Notice, RequestStatus, SteamProgress, SteamWait, Step,
 };
 
 /// Stabile ID von `#frag-die-community`.
@@ -571,17 +570,24 @@ impl InviteLoungeWatcher {
         event: &LoungeMessage,
         bot_id: u64,
     ) -> Result<Option<u64>, String> {
-        let Some(answer) = check_in_answer(&event.content) else {
+        let Some(state) = self.store.load(event.author_id).await? else {
+            return Ok(None);
+        };
+        if !check_in_open(&state, event, bot_id) {
+            return Ok(None);
+        }
+        let Some((outcome, text)) = self.judge_check_in(event).await else {
             return Ok(None);
         };
         loop {
             let Some(previous) = self.store.load(event.author_id).await? else {
                 return Ok(None);
             };
-            let mut next = previous.clone();
-            let Some(notice) = answer_check_in(&mut next, event, answer, bot_id) else {
+            if !check_in_open(&previous, event, bot_id) {
                 return Ok(None);
-            };
+            }
+            let mut next = previous.clone();
+            let announce = apply_check_in(&mut next, event, outcome);
             if !self
                 .store
                 .compare_exchange(event.author_id, Some(&previous), &next)
@@ -589,10 +595,58 @@ impl InviteLoungeWatcher {
             {
                 continue;
             }
-            if let Some(notice) = notice {
-                self.post_notice(event.author_id, &next, notice).await;
+            if !announce {
+                return Ok(Some(event.author_id));
+            }
+            let posted = self.reply_to_request(event.author_id, &next, &text).await;
+            if let (Some(message_id), dl_brain::InviteCheckInOutcome::Unclear) = (posted, outcome) {
+                self.remember_check_in_message(event.author_id, message_id)
+                    .await?;
             }
             return Ok(Some(event.author_id));
+        }
+    }
+
+    async fn judge_check_in(
+        &self,
+        event: &LoungeMessage,
+    ) -> Option<(dl_brain::InviteCheckInOutcome, String)> {
+        let task = dl_brain::DiscordConversation::InviteCheckIn {
+            message: event.content.clone(),
+        };
+        let dl_brain::ConversationReply::Answered {
+            text,
+            check_in: Some(outcome),
+            ..
+        } = self
+            .converse(event.author_id, event.channel_id, task)
+            .await?
+        else {
+            return None;
+        };
+        let text = crate::answer_support::discord_content(&text, "invite_lounge_check_in")?;
+        Some((outcome, text))
+    }
+
+    async fn converse(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        task: dl_brain::DiscordConversation,
+    ) -> Option<dl_brain::ConversationReply> {
+        let conversation = dl_brain::DiscordConversationRequest {
+            user_id,
+            channel_id,
+            guild_id: Some(self.guild_id),
+            task,
+            images: dl_brain::AttachedImages::default(),
+        };
+        match self.brain.converse(&conversation).await {
+            Ok(reply) => Some(reply),
+            Err(error) => {
+                tracing::warn!(%error, user_id, "Invite-Lounge: Brain-Antwort fehlgeschlagen");
+                None
+            }
         }
     }
 
@@ -602,26 +656,15 @@ impl InviteLoungeWatcher {
             tracing::warn!(user_id, ?notice, "Invite-Lounge: Statusmeldung ohne Ziel");
             return None;
         };
-        let conversation = dl_brain::DiscordConversationRequest {
-            user_id,
-            channel_id,
-            guild_id: Some(self.guild_id),
-            task: dl_brain::DiscordConversation::InviteStatus {
-                update: notice.update(),
-            },
-            images: dl_brain::AttachedImages::default(),
+        let task = dl_brain::DiscordConversation::InviteStatus {
+            update: notice.update(),
         };
-        let content = match self.brain.converse(&conversation).await {
-            Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
-                crate::answer_support::discord_content(&text, "invite_lounge_status")
-            }
-            Ok(dl_brain::ConversationReply::Silent) => None,
-            Err(error) => {
-                tracing::warn!(%error, user_id, ?notice, "Invite-Lounge: Brain-Statusmeldung fehlgeschlagen");
-                None
-            }
+        let dl_brain::ConversationReply::Answered { text, .. } =
+            self.converse(user_id, channel_id, task).await?
+        else {
+            return None;
         };
-        let content = content?;
+        let content = crate::answer_support::discord_content(&text, "invite_lounge_status")?;
         match self
             .port
             .reply_mentioning(channel_id, request.message_id, &content, user_id)
@@ -630,6 +673,30 @@ impl InviteLoungeWatcher {
             Ok(message_id) => Some(message_id),
             Err(error) => {
                 tracing::warn!(%error, user_id, ?notice, "Invite-Lounge: Statusmeldung nicht gesendet");
+                None
+            }
+        }
+    }
+
+    async fn reply_to_request(
+        &self,
+        user_id: u64,
+        state: &LoungeState,
+        content: &str,
+    ) -> Option<u64> {
+        let (Some(request), Some(channel_id)) = (state.request.as_ref(), state.status.channel_id)
+        else {
+            tracing::warn!(user_id, "Invite-Lounge: Antwort ohne Ziel");
+            return None;
+        };
+        match self
+            .port
+            .reply_mentioning(channel_id, request.message_id, content, user_id)
+            .await
+        {
+            Ok(message_id) => Some(message_id),
+            Err(error) => {
+                tracing::warn!(%error, user_id, "Invite-Lounge: Antwort nicht gesendet");
                 None
             }
         }
@@ -1318,35 +1385,42 @@ fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
     state.status.claim(notice)
 }
 
-fn answer_check_in(
+fn check_in_open(state: &LoungeState, event: &LoungeMessage, bot_id: u64) -> bool {
+    state.request.as_ref().is_some_and(|request| {
+        request.phase == Phase::Pending
+            && event.message_id > state.last_seen
+            && state.status.asked()
+            && state.status.wait.is_none()
+            && !state.status.invite_now
+            && state.status.channel_id == Some(event.channel_id)
+            && (replies_to_check_in(event, &state.status, request.message_id)
+                || mentions_user(&event.content, bot_id))
+            && state
+                .status
+                .check_in_at
+                .is_some_and(|asked| event.created_at >= asked)
+    })
+}
+
+fn apply_check_in(
     state: &mut LoungeState,
     event: &LoungeMessage,
-    answer: bool,
-    bot_id: u64,
-) -> Option<Option<Notice>> {
-    let request = state.request.as_mut()?;
-    let open = request.phase == Phase::Pending
-        && event.message_id > state.last_seen
-        && state.status.asked()
-        && state.status.wait.is_none()
-        && !state.status.invite_now
-        && state.status.channel_id == Some(event.channel_id)
-        && (replies_to_check_in(event, &state.status, request.message_id)
-            || mentions_user(&event.content, bot_id))
-        && state
-            .status
-            .check_in_at
-            .is_some_and(|asked| event.created_at >= asked);
-    if !open {
-        return None;
-    }
+    outcome: dl_brain::InviteCheckInOutcome,
+) -> bool {
     state.last_seen = event.message_id;
-    if answer {
-        request.phase = Phase::Attempted;
-        Some(state.status.claim(Some(Notice::Confirmed)))
-    } else {
-        state.status.invite_now = true;
-        Some(None)
+    let Some(request) = state.request.as_mut() else {
+        return false;
+    };
+    match outcome {
+        dl_brain::InviteCheckInOutcome::Arrived => {
+            request.phase = Phase::Attempted;
+            state.status.claim(Some(Notice::Confirmed)).is_some()
+        }
+        dl_brain::InviteCheckInOutcome::NotArrived => {
+            state.status.invite_now = true;
+            true
+        }
+        dl_brain::InviteCheckInOutcome::Unclear => true,
     }
 }
 

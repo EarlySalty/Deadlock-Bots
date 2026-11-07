@@ -249,7 +249,7 @@ pub(crate) mod test_brain {
     use async_trait::async_trait;
     use dl_brain::{
         AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker,
-        DiscordConversation, DiscordConversationRequest,
+        DiscordConversation, DiscordConversationRequest, InviteCheckInOutcome,
     };
     use tokio::sync::Notify;
 
@@ -264,9 +264,18 @@ pub(crate) mod test_brain {
             }))
     }
 
+    pub(crate) fn check_in_reply(text: &str, outcome: InviteCheckInOutcome) -> ScriptedReply {
+        Ok(ConversationReply::Answered {
+            text: text.into(),
+            actions: Vec::new(),
+            check_in: Some(outcome),
+        })
+    }
+
     #[derive(Default)]
     pub(crate) struct ScriptedBrain {
         replies: Mutex<VecDeque<ScriptedReply>>,
+        check_ins: Mutex<VecDeque<ScriptedReply>>,
         default_reply: Option<ConversationReply>,
         gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
         pub(crate) calls: Arc<AtomicUsize>,
@@ -288,6 +297,17 @@ pub(crate) mod test_brain {
 
         pub(crate) fn always(text: &str) -> Arc<Self> {
             Arc::new(Self {
+                default_reply: Some(ConversationReply::answered(text)),
+                ..Self::default()
+            })
+        }
+
+        pub(crate) fn always_with_check_ins(
+            text: &str,
+            check_ins: Vec<ScriptedReply>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                check_ins: Mutex::new(check_ins.into()),
                 default_reply: Some(ConversationReply::answered(text)),
                 ..Self::default()
             })
@@ -316,7 +336,8 @@ pub(crate) mod test_brain {
             | DiscordConversation::Faq { question, history } => (question, history.as_slice()),
             DiscordConversation::PassiveHelp { message, .. }
             | DiscordConversation::VoiceHint { message }
-            | DiscordConversation::InviteLounge { message } => (message, [].as_slice()),
+            | DiscordConversation::InviteLounge { message }
+            | DiscordConversation::InviteCheckIn { message } => (message, [].as_slice()),
             DiscordConversation::InviteStatus { update } => {
                 return serde_json::to_string(update).unwrap_or_default();
             }
@@ -354,6 +375,14 @@ pub(crate) mod test_brain {
             if let Some((started, release)) = gate {
                 started.notify_one();
                 release.notified().await;
+            }
+            if matches!(request.task, DiscordConversation::InviteCheckIn { .. }) {
+                return self
+                    .check_ins
+                    .lock()
+                    .expect("check_ins")
+                    .pop_front()
+                    .unwrap_or(Ok(ConversationReply::Silent));
             }
             self.replies
                 .lock()

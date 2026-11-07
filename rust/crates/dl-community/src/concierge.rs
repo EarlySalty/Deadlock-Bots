@@ -5407,7 +5407,7 @@ impl Concierge {
             mark_feedback_failed(binding.feedback);
         }
         let (reply, hit, outcome) = match result {
-            Ok(dl_brain::ConversationReply::Answered { text, actions })
+            Ok(dl_brain::ConversationReply::Answered { text, actions, .. })
                 if !text.trim().is_empty() =>
             {
                 (

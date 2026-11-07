@@ -9,11 +9,12 @@ use brain_client::{
     BotTaskResult, ClientError, PublicAnswerResponse, Query, BOT_TASK_VERSION,
 };
 use brain_contracts::bot_tasks::{
-    BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, MAX_CHAT_LINES,
+    BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, ReplySignal, MAX_CHAT_LINES,
     MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
     MAX_READABLE_CHANNELS,
 };
 use brain_contracts::image::QueryImage;
+use brain_contracts::invite::InviteCheckInOutcome;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -223,7 +224,8 @@ fn conversation_text(task: &DiscordConversation) -> &str {
         | DiscordConversation::Faq { question, .. } => question,
         DiscordConversation::PassiveHelp { message, .. }
         | DiscordConversation::VoiceHint { message }
-        | DiscordConversation::InviteLounge { message } => message,
+        | DiscordConversation::InviteLounge { message }
+        | DiscordConversation::InviteCheckIn { message } => message,
         DiscordConversation::InviteStatus { .. } => "",
     }
 }
@@ -238,6 +240,7 @@ fn conversation_task(
             DiscordConversation::VoiceHint { .. }
                 | DiscordConversation::InviteLounge { .. }
                 | DiscordConversation::InviteStatus { .. }
+                | DiscordConversation::InviteCheckIn { .. }
         )
     {
         return Err(classified_backend_error("anfrage"));
@@ -280,19 +283,39 @@ fn conversation_task(
         DiscordConversation::InviteStatus { update } => {
             ConversationTask::DiscordInviteStatus { update: *update }
         }
+        DiscordConversation::InviteCheckIn { message } => ConversationTask::DiscordInviteCheckIn {
+            reply: message.clone(),
+        },
     })
 }
 
 fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, BrainError> {
     match result {
         BotTaskResult::Conversation {
-            reply: BotReply::Answered { text, actions, .. },
+            reply:
+                BotReply::Answered {
+                    text,
+                    actions,
+                    signals,
+                    ..
+                },
             ..
-        } if !text.trim().is_empty() => Ok(ConversationReply::Answered { text, actions }),
+        } if !text.trim().is_empty() => Ok(ConversationReply::Answered {
+            text,
+            actions,
+            check_in: check_in_outcome(&signals),
+        }),
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed { failure, .. } => Err(classified_backend_error(failure.as_str())),
         _ => Err(classified_backend_error("vertrag")),
     }
+}
+
+fn check_in_outcome(signals: &[ReplySignal]) -> Option<InviteCheckInOutcome> {
+    signals.iter().find_map(|signal| match signal {
+        ReplySignal::InviteCheckIn { outcome } => Some(*outcome),
+        _ => None,
+    })
 }
 
 fn backend_error() -> BrainError {
@@ -920,6 +943,20 @@ mod tests {
             project_conversation(result(BotReply::answered("Antwort"))).ok(),
             Some(ConversationReply::answered("Antwort"))
         );
+        let mut checked = BotReply::answered("Antwort");
+        if let BotReply::Answered { signals, .. } = &mut checked {
+            *signals = vec![ReplySignal::InviteCheckIn {
+                outcome: brain_contracts::invite::InviteCheckInOutcome::NotArrived,
+            }];
+        }
+        assert_eq!(
+            project_conversation(result(checked)).ok(),
+            Some(ConversationReply::Answered {
+                text: "Antwort".into(),
+                actions: Vec::new(),
+                check_in: Some(brain_contracts::invite::InviteCheckInOutcome::NotArrived),
+            })
+        );
         let mut linked = BotReply::answered("Antwort");
         if let BotReply::Answered { actions, .. } = &mut linked {
             *actions = vec![crate::AnswerAction::TwitchLink];
@@ -929,6 +966,7 @@ mod tests {
             Some(ConversationReply::Answered {
                 text: "Antwort".into(),
                 actions: vec![crate::AnswerAction::TwitchLink],
+                check_in: None,
             })
         );
         assert_eq!(
