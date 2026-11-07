@@ -1,6 +1,6 @@
 # TODO: Invite-Lounge Status, Brain entscheidet die Rückfrage
 
-Stand: 2026-11-07. Quota ist erschöpft, die Arbeit ist nicht abgeschlossen.
+Stand: 2026-11-07. Nicht gemergt, nicht deployt, kein Live-Test.
 
 ## Ziel und Abnahme
 
@@ -12,52 +12,48 @@ Stand: 2026-11-07. Quota ist erschöpft, die Arbeit ist nicht abgeschlossen.
 
 ## Brain (Repo Deadlock-Brain)
 
-- Branch `brain-invite-status-20261106` ist gepusht, Commit `f5348e1a8214923eedb933a9bdbbb77b6a180f19`. Die Commit-Message endet mit `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`.
+- Branch `brain-invite-status-20261106` ist gepusht, HEAD `b30f2879f9394443139cd4af2ff1006a1a55386c` (Merge mit origin/main). Enthält den Judge-Commit `f5348e1a`.
 - Enthalten: `InviteCheckInOutcome`, `ConversationTask::DiscordInviteCheckIn`, `ReplySignal::InviteCheckIn`, `persona::invite_check_in_judge`, Prompt `invite_check_in_judge.txt`, Dispatch in `conversation.rs`, Test `invite_check_in_reports_the_judged_outcome` in `brain-api/tests/conversation_task.rs`.
-- Geprüft: `cargo-slot check -p brain-api --all-targets` grün, `cargo-slot clippy -p brain-api -p brain-contracts --all-targets` ohne Meldungen.
-- NICHT gelaufen: `cargo-slot test -p brain-api --test conversation_task invite`. Grund: brain-api-Tests werden als DB-Tests klassifiziert und nur auf ionos (100.89.130.17) gefahren. ionos antwortet nicht (ssh Timeout auf Port 22). `CARGO_SLOT_REMOTE=0` wird für diese Klassifizierung abgelehnt (Exit 78). Kein Umgehen über rohes `cargo test`.
-- Nächster Schritt: sobald ionos erreichbar ist, den Test laufen lassen. Bei Fehlern im Brain fixen, neu committen, pushen, SHA in den Bots nachziehen.
+- Geprüft: `cargo-slot check -p brain-api -p brain-contracts --all-targets` grün, `cargo-slot clippy -p brain-api -p brain-contracts --all-targets` Exit 0.
+- NICHT gelaufen: `cargo-slot test -p brain-api --test conversation_task invite` und `cargo-slot test -p brain-api --lib`. Grund: brain-api-Tests werden als DB-Tests klassifiziert und nur auf ionos (100.89.130.17) gefahren. ionos ist nicht erreichbar (ssh Exit 255, cargo-slot Exit 78). Kein Umgehen über rohes `cargo test`.
+- Nächster Schritt: sobald ionos erreichbar ist, beide Testläufe ausführen. Bei Fehlern im Brain fixen, neu committen, pushen, SHA in den Bots nachziehen.
 
 ## Bots (Worktree `/home/nathanael/.worktrees/invite-lounge-status-20261106`, Branch `invite-lounge-status-20261106`)
 
-Unkommittiert, noch nicht gepusht:
+- `af9fe0f4`: Judge-Commit (Brain entscheidet).
+- `29438acb`: Merge von origin/main (d940c35a). Konflikte aufgelöst: Brain-Pin auf `b30f2879f9394443139cd4af2ff1006a1a55386c` (`dl-brain/Cargo.toml` beide Einträge, `Cargo.lock` drei Brain-Quellen), Test-Brain-Import behält `DiscordAnswerTask` und `InviteCheckInOutcome`.
+- Enthalten (Kurzfassung): `record_check_in_answer` ruft den Brain nur bei gebundener Antwort auf. `apply_check_in`: Arrived setzt Attempted und Confirmed (Post nur bei neuem Claim), NotArrived setzt `invite_now`, Unclear ändert nichts außer `last_seen`. Wortliste und `answer_check_in` entfernt.
 
-- `rust/crates/dl-brain/Cargo.toml` und `Cargo.lock`: Brain-Pin auf `f5348e1a8214923eedb933a9bdbbb77b6a180f19` gesetzt (brain-client und brain-contracts).
-- `rust/crates/dl-brain/src/lib.rs`, `brain_api.rs`: `ConversationReply::Answered { check_in }`, `DiscordConversation::InviteCheckIn`, Mapping von `ReplySignal::InviteCheckIn`.
-- `rust/crates/dl-community/src/invite_lounge.rs`: `record_check_in_answer` ruft den Brain nur bei gebundener Antwort auf (Antwort auf Anfrage- oder Rückfrage-Nachricht, oder Erwähnung). `apply_check_in` setzt Arrived auf Attempted plus Confirmed (Post nur bei neuem Claim), NotArrived setzt `invite_now`, Unclear ändert nichts außer `last_seen`. Helfer `converse`, `reply_to_request`, `post_notice`, `check_in_open`. `answer_check_in` und die Wortliste sind entfernt.
-- `rust/crates/dl-community/src/invite_lounge_status.rs`: `check_in_answer` und Wortlisten entfernt, Test `bestaetigung_meldet_den_eingang`.
-- `rust/crates/dl-community/src/invite_lounge_tests.rs`: Helfer `setup_check_ins`, `check_in_texts`, `mention_texts`. Tests angepasst: `nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus`, `ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung`, `nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an`. Neu: `unklare_antwort_bleibt_offen_und_die_rueckfrage_wird_gelesen`, `brain_fehler_bei_der_antwort_verbraucht_sie_nicht`.
-- `rust/crates/dl-community/src/answer_support.rs` (Test-Brain): `check_in_reply`, `always_with_check_ins`, Queue für InviteCheckIn.
-- `rust/crates/dl-community/src/concierge.rs`: Pattern auf `Answered { text, actions, .. }` angepasst.
+Verifiziert nach dem Merge:
 
-Verifiziert:
-
-- `cargo-slot check -p dl-brain`: grün.
-- `cargo-slot check -p dl-community --all-targets`: grün. Restwarnungen sind feature-gegatete Test-Helfer (`gate_first_call`, `gated_knowledge_server`, `block_next_port_call`, `evidence_server`), die auch in HEAD nur aus gegateten Tests genutzt werden.
-- `cargo-slot test -p dl-brain`: 36 bestanden.
+- `cargo-slot check -p dl-brain`: Exit 0.
+- `cargo-slot check -p dl-community --all-targets`: Exit 0. Fünf Warnungen sind die bekannten feature-gegateten Test-Helfer (`gate_first_call`, `gated_knowledge_server`, `gated_two_response_knowledge_server`, `block_next_port_call`, `evidence_server`).
+- `cargo-slot test -p dl-brain`: 37 bestanden.
 - `cargo-slot test -p dl-community invite_lounge`: 70 bestanden.
-- `cargo-slot test -p dl-community` gesamt: 295 bestanden, 4 fehlgeschlagen:
-  - `privacy::runtime_gate_privacy_tests::privacy_loeschung_funktioniert_im_turniere_runtime`
-  - `reaction_roles::runtime_gate_tests::reaction_role_schreibt_roster_nur_im_legacy_runtime`
-  - `scrim_signup::tests::self_service_signup_schreibt_nur_im_legacy_runtime`
-  - `scrim_signup::tests::signup_vergibt_teilnehmer_rolle_nur_wenn_sie_fehlt`
-  Diese vier liegen nicht im Invite-Lounge-Pfad. Ob sie schon in HEAD fehlschlagen, ist nicht geprüft.
+- `cargo-slot clippy -p dl-community -p dl-brain --all-targets`: Exit 0. Meldungen bei `dl-brain/src/lib.rs:217` und `concierge.rs:1572` liegen nicht in den geänderten Zeilen.
+- `rustfmt --check` auf alle gestagten Rust-Dateien: sauber.
+- `.tasks/2026-11-06-invite-lounge-status/VORSCHAU.md` und `AUFTRAG.md` auf Brain-Entscheidung umgestellt.
+
+Nicht gelaufen:
+
+- DB-backed dl-community-Tests (4 Stück, u. a. `privacy_loeschung_funktioniert_im_turniere_runtime`, `self_service_signup_schreibt_nur_im_legacy_runtime`): brauchen `CENTRAL_TEST_DSN`, also ionos. Setup-Fehler vor jeder Logik.
 
 ## Offen, in dieser Reihenfolge
 
-1. Erledigt: die vier roten Tests scheitern alle an `TestHarness("CENTRAL_TEST_DSN muss gesetzt sein; rust/scripts/central_test_db.sh richtet die Testinstanz ein")`, also am Test-Setup, bevor Testcode läuft. Es ist ein Umgebungsfehler (zentrale Test-DB fehlt), kein Logikfehler. Sie laufen nur mit Test-DB, also auf ionos (`tools/test-db/test-db-run`), das ist aktuell nicht erreichbar. Eine HEAD-Baseline bringt denselben Setup-Fehler, weil der Fehler vor jeder Logik fällt.
-2. Erledigt: `cargo-slot clippy -p dl-community --all-targets` Exit 0. Die Meldungen (`#[must_use]` in `dl-brain/src/lib.rs:217`, `concierge.rs:1572`, viele andere Crates) liegen nicht in meinen Zeilen.
-3. Erledigt: `rustfmt --check` auf alle geänderten Dateien sauber.
-4. Brain-Test auf ionos laufen lassen, sobald erreichbar (siehe Brain oben).
-5. Bots committen (Trailer `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`), pushen.
-6. `.tasks/2026-11-06-invite-lounge-status/VORSCHAU.md` und `AUFTRAG.md` prüfen. Wo sie das Wortlisten-Verhalten beschreiben, auf Brain-Entscheidung umstellen.
-7. Gate: `gate-review --repo /home/nathanael/.worktrees/invite-lounge-status-20261106 --base origin/main` mit Skill `rolle-merge-schleuse`. Bei BLOCK nach Skill `gate-learning` klassifizieren, Klasse fixen, Ledger-Zeile per flock anhängen.
-8. Reihenfolge für Deploy: Brain-Branch muss vor den Bots nach main, weil die Bots den Brain-Pin brauchen. Der Brain-Merge braucht ebenfalls das Gate.
-9. Nicht gemacht: Live-Test in Discord und Steam (AUFTRAG verbietet das ohne Freigabe). Postgres-Tests (Feature `testing`) nur auf ionos.
+1. ionos erreichbar machen oder warten. Dann Brain-Tests (siehe Brain oben) und DB-Tests laufen lassen.
+2. Gate Brain: `gate-review --repo /home/nathanael/.worktrees/brain-invite-status-20261106 --base origin/main` mit Skill `rolle-merge-schleuse`. Vor Merge.
+3. Gate Bots: `gate-review --repo /home/nathanael/.worktrees/invite-lounge-status-20261106 --base origin/main`. Erst nach Brain-Merge auf main, weil der Pin sonst nicht auf main liegt.
+4. Bei BLOCK: Skill `gate-learning` vor dem Fix, Ledger-Zeile per flock nach `/home/nathanael/.claude/gate-learning/ledger.jsonl`.
+5. Reihenfolge für Deploy: Brain-Branch nach main, dann Bots. Die Bots brauchen den Brain-Pin.
+6. Nicht gemacht: Live-Test in Discord und Steam (AUFTRAG verbietet das ohne Freigabe).
 
-## Offene Entscheidungen, die ich getroffen habe (dem Nutzer nennen)
+## Offene Punkte für den Nutzer
 
-- Arrived oder NotArrived oder Unclear kommen aus der Brain-Auswertung. Konfidenz unter 0.7 zählt als Unclear.
-- Brain-Fehler oder Silent: kein Zustandswechsel, kein Post, Nachricht bleibt unverbraucht.
+- Die Status-Notices (30-Minuten-Nachfrage, FA raus, Einladung raus, ...) laufen über den Brain. Der Claim wird vor dem Brain-Aufruf committet (`post_notice` nach CAS). Fällt der Brain bei einer Notice aus, bleibt der Zustand geclaimt und die Nachricht fehlt. Das gilt schon für die bisherigen Status-Notices und wird mit der Nachfrage relevanter. Nicht umgesetzt. Fix-Weg: Brain-Text vor dem CAS erzeugen, bei Fehler ohne Zustandswechsel abbrechen. Das ändert drei Stellen (`check_in`, `dispatch_due`, `finish_dispatch`) und die Reihenfolge der `ScriptedBrain`-Antworten in den Tests. Vor dem Live-Test umsetzen.
+- Gate-Lern-Themen noch nicht ausgewertet (`python3 -I /home/nathanael/Documents/claude-config/tools/gate-learning/ledger-themes.py`).
+
+## Entscheidungen (getroffen, dem Nutzer nennen)
+
+- Arrived, NotArrived oder Unclear kommen aus der Brain-Auswertung. Konfidenz unter 0.7 zählt als Unclear.
+- Brain-Fehler bei der Antwort des Nutzers: kein Zustandswechsel, kein Post, Nachricht bleibt unverbraucht.
 - Ein "ja" ohne Bezug auf Anfrage oder Rückfrage wird ignoriert und löst keinen Brain-Aufruf aus.
-- Die Gate-Lern-Themen sind noch nicht ausgewertet (`python3 -I /home/nathanael/Documents/claude-config/tools/gate-learning/ledger-themes.py`).

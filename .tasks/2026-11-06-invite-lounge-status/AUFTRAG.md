@@ -21,6 +21,7 @@ Wer in `#deadlock-invite` (Channel 1464736918951432222, Kategorie COMMUNITY 1289
 - Historie beim Deploy: Nur Anfragen, die nach dem Deploy-Zeitpunkt gepostet wurden, lösen Aktionen aus. Der Backfill darf keine Antworten oder Einladungen für ältere Posts auslösen. Die aktuell offenen Posts (fidelisfuchs 05.11., Patrick 06.11., S 06.11.) werden erst nach Freigabe des Nutzers bearbeitet.
 - Nachfrage-Erwähnung: Die Antwort erwähnt den Verfasser (`allowed_mentions` mit `users`). Heute steht `parse: []`, das gilt nur für die Hinweis-Antwort und bleibt dort so.
 - Keine Dauer-Fehlermeldungen: Pro Anfrage höchstens eine Nachricht je Zustand. Wiederholte Steam-Verzögerung erzeugt keine Wiederholungs-Posts.
+- Antwort des Nutzers auf die Nachfrage (Schritt 3/4): Das Brain wertet sie selbst aus (`arrived`, `not_arrived`, `unclear`, Konfidenz ab 0.7) und schreibt den Antworttext. Keine Wortliste im Bot. Bei `not_arrived` wird die Einladung erneut ausgelöst, bei `unclear` bleibt die Anfrage offen.
 
 ## Wo der Code liegt
 
