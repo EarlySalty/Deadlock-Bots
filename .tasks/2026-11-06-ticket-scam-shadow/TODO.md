@@ -42,3 +42,9 @@ BLOCK only because the reviewer quota ran out (no verified finding). Its diff-on
 - NIT 5: analyzer and verifier judge the screenshot content with trigger ticket_scam_report, no code change.
 - Checks: fmt clean; dl-community 313 passed / 4 known DB failures; dl-moderation 65; dl-discord 67 + 3; check dl-bot exit 0; clippy exit 0 with only workspace baseline lints.
 - WORKER-ERGEBNIS.md written. Next: gate-review, push, integrator review and deploy.
+
+## Gate state 2026-11-07 17:00
+- Branch feature/ticket-scam-shadow-20261107 pushed, HEAD 1ba0d376, origin/main 20c9bff4 merged.
+- gate-review run twice: "kein Modell der Kette hat geurteilt: claude-opus-5-5: ... weekly limit · resets 4am (Europe/Berlin)". No BLOCK finding; the configured chain has only Opus.
+- Wakeup scheduled for 04:05 Europe/Berlin to rerun gate-review, merge HEAD:main on ALLOW, deploy dl-bot and prove the shadow log live. Shadow only, no bans, no pings.
+- If the 04:05 gate still has no judgment: report and stop, no bypass. Only the user can push main in that case.
