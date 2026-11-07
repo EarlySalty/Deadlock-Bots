@@ -5,7 +5,7 @@ pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
 pub(super) const RETRY_SECONDS: i64 = 5 * 60;
 pub(super) const CHECK_IN_SECONDS: i64 = 30 * 60;
 pub(super) const NOTICE_LEASE_MILLIS: i64 = 120_000;
-pub(super) const NOTICE_MAX_ATTEMPTS: u32 = 8;
+pub(super) const NOTICE_MAX_AGE_MILLIS: i64 = 7 * 24 * 60 * 60_000;
 const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
 const NOTICE_MAX_BACKOFF_MILLIS: i64 = 60 * 60_000;
 
@@ -143,7 +143,8 @@ impl OutboxEntry {
         self.attempts = self.attempts.saturating_add(1);
         self.claimed_at_millis = None;
         self.next_at_millis = now_millis.saturating_add(notice_backoff(self.attempts));
-        self.attempts < NOTICE_MAX_ATTEMPTS
+        let first = self.first_attempt_at_millis.unwrap_or(now_millis);
+        now_millis.saturating_sub(first) < NOTICE_MAX_AGE_MILLIS
     }
 
     pub(super) fn remembers_check_in(&self) -> bool {
@@ -594,10 +595,11 @@ mod tests {
         assert!(entry.reschedule(2_000));
         assert_eq!(entry.next_at_millis, 2_000 + NOTICE_BACKOFF_MILLIS);
         assert_eq!(entry.first_attempt_at_millis, Some(1_000));
-        for _ in 1..NOTICE_MAX_ATTEMPTS - 1 {
+        for _ in 0..50 {
             assert!(entry.reschedule(2_000));
         }
-        assert!(!entry.reschedule(2_000));
+        assert!(entry.reschedule(1_000 + NOTICE_MAX_AGE_MILLIS - 1));
+        assert!(!entry.reschedule(1_000 + NOTICE_MAX_AGE_MILLIS));
         assert_eq!(notice_backoff(20), NOTICE_MAX_BACKOFF_MILLIS);
     }
 }

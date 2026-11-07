@@ -684,7 +684,7 @@ impl InviteLoungeWatcher {
         if let (true, Some(channel_id)) = (retrying, entry.channel_id) {
             let since = entry.first_attempt_at_millis.unwrap_or(0);
             match self
-                .bot_replied_since(channel_id, entry.request_message_id, since)
+                .bot_replied_since(channel_id, entry.request_message_id, user_id, since)
                 .await
             {
                 Ok(Some(message_id)) => return NoticeResult::Delivered(Some(message_id)),
@@ -755,6 +755,7 @@ impl InviteLoungeWatcher {
         &self,
         channel_id: u64,
         request_id: u64,
+        user_id: u64,
         since_millis: i64,
     ) -> Result<Option<u64>, String> {
         let Some(bot_id) = self.port.bot_id() else {
@@ -769,6 +770,7 @@ impl InviteLoungeWatcher {
             if let Some(reply) = page.iter().find(|message| {
                 message.author_id == bot_id
                     && message.reply_message_id == Some(request_id)
+                    && mentions_user(&message.content, user_id)
                     && message.created_at_millis >= since_millis
             }) {
                 return Ok(Some(reply.message_id));
@@ -1522,7 +1524,7 @@ fn settle_notice(state: &mut LoungeState, position: usize, result: NoticeResult,
             tracing::warn!(key = %removed.key, "Invite-Lounge: Meldung vom Broker abgelehnt");
         }
         NoticeResult::Retry => {
-            tracing::warn!(key = %removed.key, attempts = removed.attempts, "Invite-Lounge: Meldung nach allen Versuchen aufgegeben");
+            tracing::warn!(key = %removed.key, attempts = removed.attempts, "Invite-Lounge: Meldung nach sieben Tagen ohne Zustellung aufgegeben");
         }
     }
 }

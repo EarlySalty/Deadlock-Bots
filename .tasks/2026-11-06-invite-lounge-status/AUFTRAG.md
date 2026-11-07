@@ -14,6 +14,6 @@ Wer in `#deadlock-invite` (1464736918951432222) einen Steam-Freundescode postet,
 
 - Ziel: Antwort im Anfragekanal mit `allowed_mentions.users=[Verfasser]`. DM nur ohne Kanal.
 - Nachfrage nach 30 Minuten nur in `#deadlock-invite`, nur ohne echte Antwort, nie bei vermerkter Einladung.
-- Eine Meldung je Zustandswechsel. Fehler bei Brain oder Broker lassen die Meldung liegen, der nächste Versuch sendet genau einmal.
+- Eine Meldung je Zustandswechsel. Fehler bei Brain oder Broker lassen die Meldung liegen, der nächste Versuch sendet genau einmal. Verworfen wird eine Meldung nur bei Ablehnung durch den Broker oder nach sieben Tagen ohne Zustellung.
 - Keine Persona-Vorlagen, kein Fallback-Text, keine Wortlisten.
 - Keine Live-Aktion, kein Deploy. Alte Posts von fidelisfuchs, Patrick und S nicht anfassen.

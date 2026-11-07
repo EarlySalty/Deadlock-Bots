@@ -2231,3 +2231,54 @@ async fn keine_nachfrage_ausserhalb_von_deadlock_invite() {
     assert!(!status_updates(&brain).contains(&InviteLoungeUpdate::CheckIn));
     assert!(invite.calls.lock().await.is_empty());
 }
+
+#[tokio::test]
+async fn nicht_verfuegbares_brain_verliert_keine_meldung() {
+    let (mut watcher, store, _, _, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    let failures = (0..13)
+        .map(|_| {
+            Err(BrainError::Backend(
+                "discord_invite_lounge unavailable".into(),
+            ))
+        })
+        .collect();
+    brain.script_notices(failures);
+    direct_request(&watcher).await;
+    for hour in 1..=12 {
+        let at = NOW + hour * 3600;
+        clock.store(at * 1000, Ordering::SeqCst);
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert_eq!(outbox(&store).await.len(), 1);
+    clock.store((NOW + 13 * 3600) * 1000, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + 13 * 3600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(notices(&brain).len(), 14);
+    assert!(outbox(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn fremde_bot_antwort_zaehlt_nicht_als_zugestellte_meldung() {
+    let (mut watcher, store, port, _, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    brain.script_notices(vec![Err(BrainError::Backend("Zeitüberschreitung".into()))]);
+    direct_request(&watcher).await;
+    let mut hint = message(5, NOW + 1, "Den Freundescode findest du in Steam.");
+    hint.author_id = BOT;
+    hint.is_bot = true;
+    hint.reply_message_id = Some(1);
+    port.history.lock().await.extend([hint]);
+    clock.store((NOW + 120) * 1000, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + 120)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(notices(&brain).len(), 2);
+    assert!(outbox(&store).await.is_empty());
+}
