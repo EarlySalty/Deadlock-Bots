@@ -1073,7 +1073,7 @@ impl DiscordPort for DiscordAdapter {
                 Some(member) => member,
                 None if guild_id.is_some() => match self.http.get_member(gid, target).await {
                     Ok(member) => member,
-                    Err(err) if Self::is_http_404(&err) => continue,
+                    Err(err) if Self::is_unknown_member(&err) => continue,
                     Err(err) => return Err(PortError::Discord(err.to_string())),
                 },
                 None => continue,
