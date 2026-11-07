@@ -146,7 +146,7 @@ impl VoiceChangeHintResponder {
                     ConversationReply::Answered { text, .. } => {
                         crate::answer_support::discord_content(&text, "voice_hint")
                     }
-                    ConversationReply::Silent => None,
+                    _ => None,
                 };
                 let Some(content) = content else {
                     self.release_user_reply(event.author_id);

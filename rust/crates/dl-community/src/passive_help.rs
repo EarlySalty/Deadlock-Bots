@@ -184,6 +184,7 @@ impl PassiveHelpResponder {
                         "Antwort enthält verbotene Gedankenstrichpausen"
                     }
                     ConversationReply::Answered { .. } => "leere Antwort",
+                    _ => "unerwartete Antwortart",
                 };
                 tracing::info!(
                     message_id = event.message_id,

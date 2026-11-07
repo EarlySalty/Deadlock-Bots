@@ -1,9 +1,13 @@
-use dl_brain::{InviteLoungeUpdate, InviteProblem, InviteStatus};
+use dl_brain::{InviteCheckInOutcome, InviteLoungeUpdate, InviteProblem, InviteStatus};
 use serde::{Deserialize, Serialize};
 
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
 pub(super) const RETRY_SECONDS: i64 = 5 * 60;
 pub(super) const CHECK_IN_SECONDS: i64 = 30 * 60;
+pub(super) const NOTICE_LEASE_MILLIS: i64 = 120_000;
+pub(super) const NOTICE_MAX_ATTEMPTS: u32 = 8;
+const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
+const NOTICE_MAX_BACKOFF_MILLIS: i64 = 60 * 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Notice {
@@ -27,9 +31,135 @@ impl Notice {
             Self::Rejected => problem(InviteProblem::SteamRejected),
             Self::NotAccepted => problem(InviteProblem::FriendRequestNotAccepted),
             Self::CheckIn => InviteLoungeUpdate::CheckIn,
-            Self::Confirmed => InviteLoungeUpdate::UserConfirmed,
+            Self::Confirmed => InviteLoungeUpdate::CheckInAnswer {
+                outcome: InviteCheckInOutcome::Arrived,
+            },
         }
     }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::FriendRequest => "friend_request",
+            Self::Invite => "invite",
+            Self::AlreadyInvited => "already_invited",
+            Self::InvalidCode => "invalid_code",
+            Self::Rejected => "rejected",
+            Self::NotAccepted => "not_accepted",
+            Self::CheckIn => "check_in",
+            Self::Confirmed => "confirmed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct OutboxEntry {
+    pub(super) key: String,
+    pub(super) request_message_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) channel_id: Option<u64>,
+    pub(super) update: InviteLoungeUpdate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) answer: Option<String>,
+    pub(super) already_invited: bool,
+    #[serde(default)]
+    pub(super) attempts: u32,
+    #[serde(default)]
+    pub(super) next_at_millis: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) claimed_at_millis: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) first_attempt_at_millis: Option<i64>,
+}
+
+impl OutboxEntry {
+    pub(super) fn notice(
+        request_message_id: u64,
+        channel_id: Option<u64>,
+        notice: Notice,
+        already_invited: bool,
+    ) -> Self {
+        Self::new(
+            format!("invite-lounge:{request_message_id}:{}", notice.slug()),
+            request_message_id,
+            channel_id,
+            notice.update(),
+            already_invited,
+        )
+    }
+
+    pub(super) fn answer(
+        request_message_id: u64,
+        channel_id: Option<u64>,
+        answer_message_id: u64,
+        outcome: InviteCheckInOutcome,
+        answer: String,
+        already_invited: bool,
+    ) -> Self {
+        let mut entry = Self::new(
+            format!("invite-lounge:{request_message_id}:answer:{answer_message_id}"),
+            request_message_id,
+            channel_id,
+            InviteLoungeUpdate::CheckInAnswer { outcome },
+            already_invited,
+        );
+        entry.answer = Some(answer);
+        entry
+    }
+
+    fn new(
+        key: String,
+        request_message_id: u64,
+        channel_id: Option<u64>,
+        update: InviteLoungeUpdate,
+        already_invited: bool,
+    ) -> Self {
+        Self {
+            key,
+            request_message_id,
+            channel_id,
+            update,
+            answer: None,
+            already_invited,
+            attempts: 0,
+            next_at_millis: 0,
+            claimed_at_millis: None,
+            first_attempt_at_millis: None,
+        }
+    }
+
+    pub(super) fn ready(&self, now_millis: i64) -> bool {
+        now_millis >= self.next_at_millis
+            && self
+                .claimed_at_millis
+                .is_none_or(|claimed| now_millis.saturating_sub(claimed) >= NOTICE_LEASE_MILLIS)
+    }
+
+    pub(super) fn claim(&mut self, now_millis: i64) {
+        self.claimed_at_millis = Some(now_millis);
+        self.first_attempt_at_millis.get_or_insert(now_millis);
+    }
+
+    pub(super) fn reschedule(&mut self, now_millis: i64) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        self.claimed_at_millis = None;
+        self.next_at_millis = now_millis.saturating_add(notice_backoff(self.attempts));
+        self.attempts < NOTICE_MAX_ATTEMPTS
+    }
+
+    pub(super) fn remembers_check_in(&self) -> bool {
+        matches!(
+            self.update,
+            InviteLoungeUpdate::CheckIn
+                | InviteLoungeUpdate::CheckInAnswer {
+                    outcome: InviteCheckInOutcome::Unclear
+                }
+        )
+    }
+}
+
+fn notice_backoff(attempts: u32) -> i64 {
+    let shift = attempts.saturating_sub(1).min(6);
+    (NOTICE_BACKOFF_MILLIS << shift).min(NOTICE_MAX_BACKOFF_MILLIS)
 }
 
 fn status(status: InviteStatus) -> InviteLoungeUpdate {
@@ -435,7 +565,39 @@ mod tests {
     fn bestaetigung_meldet_den_eingang() {
         assert_eq!(
             Notice::Confirmed.update(),
-            InviteLoungeUpdate::UserConfirmed
+            InviteLoungeUpdate::CheckInAnswer {
+                outcome: InviteCheckInOutcome::Arrived
+            }
         );
+    }
+
+    #[test]
+    fn ausgang_hat_stabile_schluessel_und_begrenzte_wiederholungen() {
+        let entry = OutboxEntry::notice(55, Some(1), Notice::Invite, true);
+        assert_eq!(entry.key, "invite-lounge:55:invite");
+        let answer = OutboxEntry::answer(
+            55,
+            Some(1),
+            60,
+            InviteCheckInOutcome::Unclear,
+            "weiß nicht".into(),
+            false,
+        );
+        assert_eq!(answer.key, "invite-lounge:55:answer:60");
+        assert!(answer.remembers_check_in());
+        assert!(!entry.remembers_check_in());
+        let mut entry = entry;
+        assert!(entry.ready(0));
+        entry.claim(1_000);
+        assert!(!entry.ready(1_000 + NOTICE_LEASE_MILLIS - 1));
+        assert!(entry.ready(1_000 + NOTICE_LEASE_MILLIS));
+        assert!(entry.reschedule(2_000));
+        assert_eq!(entry.next_at_millis, 2_000 + NOTICE_BACKOFF_MILLIS);
+        assert_eq!(entry.first_attempt_at_millis, Some(1_000));
+        for _ in 1..NOTICE_MAX_ATTEMPTS - 1 {
+            assert!(entry.reschedule(2_000));
+        }
+        assert!(!entry.reschedule(2_000));
+        assert_eq!(notice_backoff(20), NOTICE_MAX_BACKOFF_MILLIS);
     }
 }

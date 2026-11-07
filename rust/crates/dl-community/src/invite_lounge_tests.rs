@@ -1,7 +1,10 @@
 use super::status::{SteamOutcome, CHECK_IN_SECONDS, RETRY_SECONDS};
 use super::*;
 use crate::answer_support::test_brain::{check_in_reply, ScriptedBrain, ScriptedReply};
-use dl_brain::{BrainError, InviteCheckInOutcome, InviteLoungeUpdate, InviteStatus};
+use dl_brain::{
+    BrainError, ConversationReply, InviteCheckInOutcome, InviteLoungeUpdate, InviteNotice,
+    InviteStatus, NoticeTarget,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
@@ -13,10 +16,6 @@ const GUILD: u64 = 42;
 const USER: u64 = 7;
 const IMPERSONAL_REQUEST: &str = "Jo, kann man hier einen Invite bekommen, wenn man nett fragt?😅";
 const AUDIT_REPLY: &str = "ℹ️ Dieser Steam-Account wurde schon eingeladen, am <t:1700000000:D>. Hier ist nichts mehr zu tun.";
-const CHECK_IN_ARRIVED: &str = "Super, dann bist du drin.";
-const CHECK_IN_NOT_ARRIVED: &str = "Ich löse die Einladung jetzt erneut aus.";
-const CHECK_IN_UNCLEAR: &str =
-    "Ist die Einladung unter Steam bei Freunde oder in Deadlock angekommen?";
 const RUNNING_REPLY: &str = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung. Ich schicke sie nicht doppelt, sonst zählt sie zweimal gegen das Tageslimit.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,6 +98,16 @@ impl LoungeStore for MemoryStore {
             .map(|(id, _)| *id)
             .collect())
     }
+    async fn outbox_users(&self) -> Result<Vec<u64>, String> {
+        Ok(self
+            .states
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, state)| !state.outbox.is_empty())
+            .map(|(id, _)| *id)
+            .collect())
+    }
     async fn known_code(&self, id: u64) -> Result<Option<String>, String> {
         Ok(self.known.lock().await.get(&id).cloned())
     }
@@ -129,7 +138,6 @@ impl LoungeStore for MemoryStore {
 #[derive(Default)]
 struct RecordingPort {
     replies: Mutex<Vec<(u64, String)>>,
-    mentions: Mutex<Vec<(u64, String, u64)>>,
     history: Mutex<Vec<LoungeMessage>>,
     history_calls: AtomicUsize,
     identity_missing: AtomicBool,
@@ -166,22 +174,9 @@ impl InviteLoungeReplyPort for RecordingPort {
         Ok(messages)
     }
     async fn reply_text(&self, channel: u64, id: u64, text: &str) -> Result<u64, String> {
-        assert_eq!(channel, INVITE_LOUNGE_CHANNEL_ID);
+        assert!([INVITE_LOUNGE_CHANNEL_ID, CHECK_IN_CHANNEL_ID].contains(&channel));
         self.replies.lock().await.push((id, text.into()));
         Ok(id + 100_000)
-    }
-    async fn reply_mentioning(
-        &self,
-        _channel: u64,
-        id: u64,
-        text: &str,
-        user: u64,
-    ) -> Result<u64, String> {
-        self.mentions
-            .lock()
-            .await
-            .extend([(id, text.to_string(), user)]);
-        Ok(id + 200_000)
     }
 }
 
@@ -275,17 +270,37 @@ fn setup_check_ins(
     (watcher, store, port, invite, brain)
 }
 
-fn status_updates(brain: &ScriptedBrain) -> Vec<InviteLoungeUpdate> {
+fn notices(brain: &ScriptedBrain) -> Vec<(u64, InviteNotice)> {
     brain
         .requests
         .lock()
         .expect("Brain-Anfragen lesbar")
         .iter()
-        .filter_map(|request| match request.task {
-            dl_brain::DiscordConversation::InviteStatus { update } => Some(update),
+        .filter_map(|request| match &request.task {
+            dl_brain::DiscordConversation::InviteNotice { notice } => {
+                Some((request.user_id, notice.clone()))
+            }
             _ => None,
         })
         .collect()
+}
+
+fn status_updates(brain: &ScriptedBrain) -> Vec<InviteLoungeUpdate> {
+    notices(brain)
+        .into_iter()
+        .map(|(_, notice)| notice.update)
+        .collect()
+}
+
+fn notice_answers(brain: &ScriptedBrain) -> Vec<Option<String>> {
+    notices(brain)
+        .into_iter()
+        .map(|(_, notice)| notice.answer)
+        .collect()
+}
+
+fn answer_update(outcome: InviteCheckInOutcome) -> InviteLoungeUpdate {
+    InviteLoungeUpdate::CheckInAnswer { outcome }
 }
 
 fn check_in_texts(brain: &ScriptedBrain) -> Vec<String> {
@@ -301,27 +316,27 @@ fn check_in_texts(brain: &ScriptedBrain) -> Vec<String> {
         .collect()
 }
 
-async fn mention_texts(port: &RecordingPort) -> Vec<String> {
-    port.mentions
-        .lock()
-        .await
+fn assert_notices_request(brain: &ScriptedBrain, count: usize) {
+    let notices = notices(brain);
+    assert_eq!(notices.len(), count);
+    assert!(notices.iter().all(|(user, notice)| *user == USER
+        && notice.target
+            == NoticeTarget::Reply {
+                channel_id: CHECK_IN_CHANNEL_ID,
+                message_id: 1
+            }));
+    let mut keys: Vec<_> = notices
         .iter()
-        .map(|(_, text, _)| text.clone())
-        .collect()
-}
-
-async fn assert_mentions_request(port: &RecordingPort, count: usize) {
-    let mentions = port.mentions.lock().await;
-    assert_eq!(mentions.len(), count);
-    assert!(mentions
-        .iter()
-        .all(|(id, text, user)| *id == 1 && *user == USER && text.starts_with("Brain-")));
+        .map(|(_, notice)| &notice.idempotency_key)
+        .collect();
+    keys.dedup();
+    assert_eq!(keys.len(), count);
 }
 
 fn message(id: u64, at: i64, content: &str) -> LoungeMessage {
     LoungeMessage {
         guild_id: Some(GUILD),
-        channel_id: INVITE_LOUNGE_CHANNEL_ID,
+        channel_id: CHECK_IN_CHANNEL_ID,
         message_id: id,
         author_id: USER,
         content: content.into(),
@@ -711,7 +726,7 @@ async fn steam_ausfall_bleibt_still_offen_und_versucht_spaeter_erneut() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.calls.lock().await.len(), 2);
-    assert!(port.mentions.lock().await.is_empty());
+    assert!(notices(&brain).is_empty());
     assert!(status_updates(&brain).is_empty());
     invite.fail.store(false, Ordering::SeqCst);
     watcher
@@ -725,7 +740,7 @@ async fn steam_ausfall_bleibt_still_offen_und_versucht_spaeter_erneut() {
             status: InviteStatus::Sent
         }]
     );
-    assert_mentions_request(&port, 1).await;
+    assert_notices_request(&brain, 1);
     assert!(port.replies.lock().await.is_empty());
 }
 
@@ -780,16 +795,14 @@ async fn fa_raus_wird_einmal_gemeldet_und_danach_die_einladung() {
             }
         ]
     );
-    assert_mentions_request(&port, 2).await;
+    assert_notices_request(&brain, 2);
     assert!(port.replies.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
-    let (watcher, _, port, invite, brain) = setup_check_ins(vec![check_in_reply(
-        CHECK_IN_NOT_ARRIVED,
-        InviteCheckInOutcome::NotArrived,
-    )]);
+    let (watcher, _, _, invite, brain) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::NotArrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -802,7 +815,7 @@ async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
         .poll_due(NOW + CHECK_IN_SECONDS - 1)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert!(port.mentions.lock().await.is_empty());
+    assert!(notices(&brain).is_empty());
     for at in [NOW + CHECK_IN_SECONDS, NOW + CHECK_IN_SECONDS + 60] {
         watcher
             .poll_due(at)
@@ -822,6 +835,7 @@ async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
         status_updates(&brain),
         vec![
             InviteLoungeUpdate::CheckIn,
+            answer_update(InviteCheckInOutcome::NotArrived),
             InviteLoungeUpdate::Status {
                 status: InviteStatus::Sent
             }
@@ -829,17 +843,15 @@ async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
     );
     assert_eq!(check_in_texts(&brain), ["nein, noch nichts"]);
     assert_eq!(
-        mention_texts(&port).await,
-        ["Brain-Status", CHECK_IN_NOT_ARRIVED, "Brain-Status"]
+        notice_answers(&brain),
+        [None, Some("nein, noch nichts".to_string()), None]
     );
 }
 
 #[tokio::test]
 async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
-    let (watcher, store, port, invite, brain) = setup_check_ins(vec![check_in_reply(
-        CHECK_IN_ARRIVED,
-        InviteCheckInOutcome::Arrived,
-    )]);
+    let (watcher, store, _, invite, brain) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -863,12 +875,14 @@ async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
-    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
-    assert_eq!(check_in_texts(&brain), ["ja, ist angekommen"]);
     assert_eq!(
-        mention_texts(&port).await,
-        ["Brain-Status", CHECK_IN_ARRIVED]
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            answer_update(InviteCheckInOutcome::Arrived)
+        ]
     );
+    assert_eq!(check_in_texts(&brain), ["ja, ist angekommen"]);
     assert_eq!(
         store
             .load(USER)
@@ -884,10 +898,8 @@ async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
 
 #[tokio::test]
 async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
-    let (watcher, _, _, invite, brain) = setup_check_ins(vec![check_in_reply(
-        CHECK_IN_ARRIVED,
-        InviteCheckInOutcome::Arrived,
-    )]);
+    let (watcher, _, _, invite, brain) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -921,14 +933,20 @@ async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
     assert_eq!(check_in_texts(&brain), ["ja"]);
-    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert_eq!(
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            answer_update(InviteCheckInOutcome::Arrived)
+        ]
+    );
 }
 
 #[tokio::test]
 async fn unklare_antwort_bleibt_offen_und_die_rueckfrage_wird_gelesen() {
-    let (watcher, _, port, invite, brain) = setup_check_ins(vec![
-        check_in_reply(CHECK_IN_UNCLEAR, InviteCheckInOutcome::Unclear),
-        check_in_reply(CHECK_IN_ARRIVED, InviteCheckInOutcome::Arrived),
+    let (watcher, _, _, invite, brain) = setup_check_ins(vec![
+        check_in_reply(InviteCheckInOutcome::Unclear),
+        check_in_reply(InviteCheckInOutcome::Arrived),
     ]);
     watcher
         .handle_message(
@@ -961,16 +979,20 @@ async fn unklare_antwort_bleibt_offen_und_die_rueckfrage_wird_gelesen() {
         ["wie meinst du das?", "ja, angekommen"]
     );
     assert_eq!(
-        mention_texts(&port).await,
-        ["Brain-Status", CHECK_IN_UNCLEAR, CHECK_IN_ARRIVED]
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            answer_update(InviteCheckInOutcome::Unclear),
+            answer_update(InviteCheckInOutcome::Arrived)
+        ]
     );
 }
 
 #[tokio::test]
 async fn brain_fehler_bei_der_antwort_verbraucht_sie_nicht() {
-    let (watcher, _, port, invite, brain) = setup_check_ins(vec![
+    let (watcher, _, _, invite, brain) = setup_check_ins(vec![
         Err(BrainError::Backend("scripted".into())),
-        check_in_reply(CHECK_IN_ARRIVED, InviteCheckInOutcome::Arrived),
+        check_in_reply(InviteCheckInOutcome::Arrived),
     ]);
     watcher
         .handle_message(
@@ -991,7 +1013,7 @@ async fn brain_fehler_bei_der_antwort_verbraucht_sie_nicht() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
-    assert_eq!(mention_texts(&port).await, ["Brain-Status"]);
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
     let mut second = message(3, NOW + 1901, "ja");
     second.reply_message_id = Some(1);
     watcher
@@ -1000,8 +1022,11 @@ async fn brain_fehler_bei_der_antwort_verbraucht_sie_nicht() {
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(check_in_texts(&brain), ["ja", "ja"]);
     assert_eq!(
-        mention_texts(&port).await,
-        ["Brain-Status", CHECK_IN_ARRIVED]
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            answer_update(InviteCheckInOutcome::Arrived)
+        ]
     );
 }
 
@@ -1026,13 +1051,13 @@ async fn beantwortete_raumbitte_bekommt_keine_nachfrage() {
             .await
             .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
         assert!(status_updates(&brain).is_empty());
-        assert!(port.mentions.lock().await.is_empty());
+        assert!(notices(&brain).is_empty());
     }
 }
 
 #[tokio::test]
 async fn bereits_eingeladen_laut_steam_bestaetigt_ohne_neue_einladung() {
-    let (watcher, store, port, invite, brain) = setup_scripted();
+    let (watcher, store, _, invite, brain) = setup_scripted();
     store.progress.lock().await.invited = true;
     watcher
         .handle_message(
@@ -1055,7 +1080,7 @@ async fn bereits_eingeladen_laut_steam_bestaetigt_ohne_neue_einladung() {
             status: InviteStatus::AlreadyHasGame
         }]
     );
-    assert_mentions_request(&port, 1).await;
+    assert_notices_request(&brain, 1);
 }
 
 #[tokio::test]
@@ -2058,4 +2083,151 @@ async fn gleicher_code_schiebt_die_stunde_nicht_auf() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+}
+
+fn moving_clock(watcher: &mut InviteLoungeWatcher) -> Arc<AtomicI64> {
+    let clock = Arc::new(AtomicI64::new(NOW * 1000));
+    let reader = clock.clone();
+    watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+    clock
+}
+
+async fn direct_request(watcher: &InviteLoungeWatcher) {
+    watcher
+        .handle_message(
+            message(1, NOW, "Kannst du mich einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+}
+
+async fn outbox(store: &MemoryStore) -> Vec<OutboxEntry> {
+    store
+        .load(USER)
+        .await
+        .expect("Zustand lesbar")
+        .map(|state| state.outbox)
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn statuswechsel_geht_genau_einmal_mit_allen_fakten_an_den_brain() {
+    let (watcher, store, port, _, brain) = setup_scripted();
+    store.progress.lock().await.invited = true;
+    direct_request(&watcher).await;
+    watcher
+        .poll_due(NOW + 600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_notices_request(&brain, 1);
+    let (_, notice) = notices(&brain).remove(0);
+    assert_eq!(notice.idempotency_key, "invite-lounge:1:invite");
+    assert!(notice.already_invited);
+    assert_eq!(notice.answer, None);
+    assert!(outbox(&store).await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn ohne_kanal_geht_die_meldung_als_dm() {
+    let (watcher, store, _, _, brain) = setup_scripted();
+    let state = LoungeState {
+        outbox: vec![OutboxEntry::notice(1, None, Notice::Invite, false)],
+        ..LoungeState::default()
+    };
+    assert!(store
+        .compare_exchange(USER, None, &state)
+        .await
+        .expect("Zustand schreibbar"));
+    watcher
+        .deliver_outbox(USER)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let notices = notices(&brain);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].1.target, NoticeTarget::DirectMessage);
+    assert!(outbox(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn fehlgeschlagene_meldung_bleibt_liegen_und_geht_genau_einmal_raus() {
+    let (mut watcher, store, _, _, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    brain.script_notices(vec![Err(BrainError::Backend("Broker weg".into()))]);
+    direct_request(&watcher).await;
+    let queued = outbox(&store).await;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].attempts, 1);
+    watcher
+        .poll_due(NOW + 30)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(notices(&brain).len(), 1);
+    clock.store((NOW + 61) * 1000, Ordering::SeqCst);
+    for at in [NOW + 61, NOW + 3600] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    let keys: Vec<_> = notices(&brain)
+        .into_iter()
+        .map(|(_, notice)| notice.idempotency_key)
+        .collect();
+    assert_eq!(keys, ["invite-lounge:1:invite", "invite-lounge:1:invite"]);
+    assert!(outbox(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn abgelehnte_meldung_wird_verworfen() {
+    let (mut watcher, store, _, _, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    brain.script_notices(vec![Ok(ConversationReply::Rejected)]);
+    direct_request(&watcher).await;
+    clock.store((NOW + 3600) * 1000, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + 3600)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(notices(&brain).len(), 1);
+    assert!(outbox(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn bereits_zugestellte_antwort_wird_nicht_doppelt_gesendet() {
+    let (mut watcher, store, port, _, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    brain.script_notices(vec![Err(BrainError::Backend("Zeitüberschreitung".into()))]);
+    direct_request(&watcher).await;
+    let mut delivered = message(5, NOW + 1, "<@7> Einladung ist raus.");
+    delivered.author_id = BOT;
+    delivered.is_bot = true;
+    delivered.reply_message_id = Some(1);
+    port.history.lock().await.extend([delivered]);
+    clock.store((NOW + 120) * 1000, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + 120)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(notices(&brain).len(), 1);
+    assert!(outbox(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn keine_nachfrage_ausserhalb_von_deadlock_invite() {
+    let (watcher, _, _, invite, brain) = setup_scripted();
+    let mut request = message(1, NOW, "Kann mich jemand einladen? 123456789");
+    request.channel_id = INVITE_LOUNGE_CHANNEL_ID;
+    watcher
+        .handle_message(request, NOW, Some(false))
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS + 60)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(!status_updates(&brain).contains(&InviteLoungeUpdate::CheckIn));
+    assert!(invite.calls.lock().await.is_empty());
 }

@@ -12,9 +12,9 @@ use std::sync::{Arc, OnceLock};
 use crate::dm_gate::{DmError, DmIntent};
 use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 use dl_broker::port::{
-    DiscordPort, DmPurpose, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess,
-    MemberInfo, MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo,
-    RoleMembers, ViewSpec,
+    ChannelReply, DiscordPort, DmPurpose, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo,
+    MemberAccess, MemberInfo, MemberPresence, MessageReaction, PortError, ResolvedUser,
+    RichMessage, RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -283,6 +283,24 @@ impl DiscordAdapter {
         })
     }
 
+    fn reply_body(channel_id: u64, reply: &ChannelReply, content: &str) -> Map<String, Value> {
+        let mut body = Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert(
+            "message_reference".into(),
+            json!({
+                "message_id": reply.message_id.to_string(),
+                "channel_id": channel_id.to_string(),
+                "fail_if_not_exists": false,
+            }),
+        );
+        body.insert(
+            "allowed_mentions".into(),
+            Self::allowed_mentions(&reply.allowed_user_ids, &[]),
+        );
+        body
+    }
+
     fn rich_body(message: &RichMessage) -> Map<String, Value> {
         let mut body = Map::new();
         if let Some(components) = &message.components {
@@ -537,6 +555,22 @@ impl DiscordPort for DiscordAdapter {
     async fn send_channel_message(&self, channel_id: u64, content: &str) -> Result<u64, PortError> {
         let mut body = Map::new();
         body.insert("content".into(), json!(content));
+        self.send_raw(channel_id, &body).await.map_err(|err| {
+            if Self::is_unknown_channel(&err) {
+                PortError::ChannelNotFound
+            } else {
+                PortError::Discord(err.to_string())
+            }
+        })
+    }
+
+    async fn send_channel_reply(
+        &self,
+        channel_id: u64,
+        reply: &ChannelReply,
+        content: &str,
+    ) -> Result<u64, PortError> {
+        let body = Self::reply_body(channel_id, reply, content);
         self.send_raw(channel_id, &body).await.map_err(|err| {
             if Self::is_unknown_channel(&err) {
                 PortError::ChannelNotFound

@@ -812,7 +812,7 @@ impl FaqChat {
                     sources: Vec::new(),
                 })
             }
-            Ok(dl_brain::ConversationReply::Silent) => KnowledgeLookup::Unanswerable,
+            Ok(_) => KnowledgeLookup::Unanswerable,
             Err(_) => KnowledgeLookup::Transport,
         }
     }

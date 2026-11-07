@@ -1,56 +1,19 @@
-# Invite-Lounge: Brain-Status und 30-Minuten-Nachfrage
+# Invite-Lounge: Brain schreibt und stellt Status und Nachfrage zu
 
 ## Ziel
 
-Wer in `#deadlock-invite` (Channel 1464736918951432222, Kategorie COMMUNITY 1289721245281292289) einen Steam-Freundescode postet, bekommt vom Deadlock Brain eine Antwort auf seinen Beitrag, mit Erwähnung. Die Bots erzeugen keine eigenen Antworttexte; alle Nutzertexte kommen vom Brain (Memory `ein-brain-statt-bot-antworten`).
+Wer in `#deadlock-invite` (1464736918951432222) einen Steam-Freundescode postet, bekommt vom Deadlock Brain eine Antwort auf seinen Beitrag mit Erwähnung des Verfassers. Der Bot postet diese Meldungen nicht mehr selbst. Das Brain schreibt den Text über seinen zentralen Provider und stellt über den dl-bot Master-Broker zu (`127.0.0.1:8770`, `/internal/master/v1/discord/send-message` bzw. `/send-dm`, Header `X-Internal-Token` und `X-Idempotency-Key`).
 
-## Ablauf je Anfrage (Spec des Nutzers, 06.11.2026)
+## Aufteilung
 
-1. Steam-Invite wird wie bisher über den Slash-Pfad `invite` (`SteamBotClient::invite_from_bot`) ausgelöst.
-2. Das Brain antwortet auf die Anfrage mit dem tatsächlichen Stand:
-   - "Freundschaftsanfrage ist raus" (Fa), Einladung folgt nach Annahme.
-   - "Einladung ist raus".
-   - Steam reagiert langsam: keine Fehlermeldung, Anfrage bleibt offen, es wird weiter geprüft, bis die Bots ihren Schritt gemacht haben. Erst dann kommt die nächste Antwort.
-   - Konkretes Problem, wenn eines entsteht (z. B. Steam lehnt ab), in klarer Sprache.
-3. Keine Antwort (weder Mensch noch Bot) 30 Minuten nach der Anfrage und noch keine bestätigte Einladung: das Brain fragt mit Erwähnung, ob die Einladung schon angekommen ist. Falls nicht: Einladung auslösen und nach Schritt 2 berichten.
-4. Bereits eingeladen (Steam-Status oder Bestätigung des Nutzers): das Brain bestätigt kurz, ohne neue Einladung.
+- Bot (`dl-community/src/invite_lounge*.rs`): hält den Zustand in Postgres (`bot.kv_store`, ns `invite_lounge`) und eine dauerhafte Ausgangsliste je Anfrage und Zustand. Übergibt dem Brain alle Fakten: Status, Verfasser, Kanal, Anfrage-Nachricht, Ziel, Idempotenzschlüssel, Steam-Ergebnis, bereits eingeladen, Antworttext bei der Nachfrage.
+- Brain (`brain-api`, `brain-serve/src/discord_delivery.rs`): Text über den Provider, Zustellung über den Broker. Kein Discord-Token, kein Zugriff auf Bot-Postgres.
+- Broker (`dl-broker`, `dl-discord`): `send-message` kann mit `reply_to_message_id` und `allowed_user_ids` antworten und nur den Verfasser erwähnen.
 
-## Entscheidungen (von der Hauptsession getroffen, nicht offen lassen)
+## Regeln
 
-- Spätere Anfragen: Die 5-Minuten-Frische (`FRESHNESS_SECONDS`) verwirft heute still. Neu: Anfragen innerhalb des 7-Tage-Fensters (`NEWCOMER_MAX_JOIN_SECONDS`) werden bearbeitet. Anfragen älter als 7 Tage werden nicht mehr bearbeitet.
-- Historie beim Deploy: Nur Anfragen, die nach dem Deploy-Zeitpunkt gepostet wurden, lösen Aktionen aus. Der Backfill darf keine Antworten oder Einladungen für ältere Posts auslösen. Die aktuell offenen Posts (fidelisfuchs 05.11., Patrick 06.11., S 06.11.) werden erst nach Freigabe des Nutzers bearbeitet.
-- Nachfrage-Erwähnung: Die Antwort erwähnt den Verfasser (`allowed_mentions` mit `users`). Heute steht `parse: []`, das gilt nur für die Hinweis-Antwort und bleibt dort so.
-- Keine Dauer-Fehlermeldungen: Pro Anfrage höchstens eine Nachricht je Zustand. Wiederholte Steam-Verzögerung erzeugt keine Wiederholungs-Posts.
-- Antwort des Nutzers auf die Nachfrage (Schritt 3/4): Das Brain wertet sie selbst aus (`arrived`, `not_arrived`, `unclear`, Konfidenz ab 0.7) und schreibt den Antworttext. Keine Wortliste im Bot. Bei `not_arrived` wird die Einladung erneut ausgelöst, bei `unclear` bleibt die Anfrage offen.
-
-## Wo der Code liegt
-
-Bots (Worktree `/home/nathanael/.worktrees/invite-lounge-status-20261106`, Branch `invite-lounge-status-20261106`):
-- `rust/crates/dl-community/src/invite_lounge.rs`: `record_message` (L359), `dispatch_due` (L468, Frische-Prüfung L478–497), `finish_dispatch` (L553), `record_history` (L602), `update_state` (L762), `is_fresh` (L857), Hinweis-Antwort `reply_text` (L430).
-- `rust/crates/dl-community/src/invite_lounge_tests.rs`: bestehende Tests, müssen grün bleiben.
-- `rust/bin/dl-bot/src/mcp/self_invite.rs`: Status-Evidenz für das Brain (Quelle des Eigenstatus).
-- `rust/crates/dl-bridges/src/steam.rs` (`invite_from_bot`, L225).
-
-Brain (Worktree `/home/nathanael/.worktrees/brain-invite-status-20261106`, Branch `brain-invite-status-20261106`):
-- `rust/crates/brain-contracts/src/bot_tasks.rs`: `BotTask` hat heute nur `DiscordAnswer`, `TwitchTitle`. Dort fehlt eine Aufgabe für Invite-Status.
-- `rust/crates/brain-contracts/src/invite.rs`: `SelfInviteStatus`, `InviteStatus` (Sent, Pending, FriendshipMissing, AlreadyHasGame, Error, Unknown, Unavailable) und `status_evidence`. Wiederverwenden, nicht neu erfinden.
-
-Steam-Bot-Texte (Referenz für Wortlaut und Zustände, nicht ändern): `/home/nathanael/Documents/Deadlock-Steam-Bot/rust/crates/steam-flows/src/invite.rs`, z. B. L228 "📨 Freundschaftsanfrage ist raus", L61 "schon eingeladen".
-
-## Regeln (aus CLAUDE.md und Memory)
-
-- Rust, keine Python-Erweiterungen. Keine Code-Kommentare. Kein `.unwrap()` im Produktionspfad, kein unnötiges `unsafe`. Kleine Funktionen.
-- Persistenz in Postgres (vorhandenes `kv`/`invite_lounge:*`). Keine neue SQLite-Ablage. Keine angewandten Migrationen ändern; neue nur, wenn unvermeidbar.
-- Kein hart kodierter Modellname, keine Timeouts als Modellkonstanten. Brain-Provider über die zentrale Schicht.
-- Brain-Antworttexte auf Deutsch mit echten Umlauten und ß, keine Gedankenstriche, ohne KI-Floskeln. Wortlaut wie vom Nutzer vorgegeben: "FA ist raus" bzw. "Einladung ist raus", bei Problemen die konkrete Ursache in klarer Sprache.
-- Builds nach `/home/nathanael/Documents/claude-config/machines/v50671/RUST-BUILDS.md` und Memory `cargo-slot-statt-flock-schleife`. DB-Tests nur auf ionos (Memory `postgres-disk-und-test-db-last`); lokal reicht `cargo check`, `cargo clippy`, `cargo fmt --check` und die reinen Tests ohne DB.
-- Keine Live-Aktion: kein Discord-Post, keine Steam-Freundschaftsanfrage, keine Einladung, kein Deploy, kein Restart, kein Merge nach main.
-- Nur eigene Dateien stagen. Verifizierten Zwischenstand auf dem eigenen Branch committen. Kein Force-Push, keine übersprungenen Hooks. Commit-Message auf Englisch. Jede Commit-Message endet mit der Zeile `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`.
-
-## Abnahme
-
-1. Zustandsübergänge (Fa raus, Einladung raus, Steam-Verzögerung, Problem, 30-Minuten-Nachfrage, bereits eingeladen) als reine Funktionen mit Tests, die die Spec abbilden, nicht die Implementierung.
-2. Bestehende `invite_lounge`-Tests bleiben grün.
-3. `cargo check`, `cargo clippy`, `cargo fmt --check` in beiden Repos grün (nur die jeweils betroffenen Crates).
-4. Eine Vorschau-Datei `.tasks/2026-11-06-invite-lounge-status/VORSCHAU.md` mit dem exakten deutschen Text jedes Zustands für Anfrage-Beispiele (ohne echte Freundescodes, Platzhalter nutzen).
-5. Abschlussbericht: Branches, Commits, was getestet wurde, was nicht (DB-Tests, Live-Lauf), offene Punkte.
+- Ziel: Antwort im Anfragekanal mit `allowed_mentions.users=[Verfasser]`. DM nur ohne Kanal.
+- Nachfrage nach 30 Minuten nur in `#deadlock-invite`, nur ohne echte Antwort, nie bei vermerkter Einladung.
+- Eine Meldung je Zustandswechsel. Fehler bei Brain oder Broker lassen die Meldung liegen, der nächste Versuch sendet genau einmal.
+- Keine Persona-Vorlagen, kein Fallback-Text, keine Wortlisten.
+- Keine Live-Aktion, kein Deploy. Alte Posts von fidelisfuchs, Patrick und S nicht anfassen.
