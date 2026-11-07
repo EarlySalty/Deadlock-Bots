@@ -325,6 +325,7 @@ pub fn shadow_action(
             _ => None,
         })
         .collect();
+    members.sort_unstable();
     members.dedup();
     match members.as_slice() {
         [id] => ShadowAction::WouldBan(*id),
@@ -559,6 +560,31 @@ mod tests {
         assert!(matches!(
             shadow_action(None, &[member(7)], 1),
             ShadowAction::NoBan(_)
+        ));
+    }
+
+    #[test]
+    fn derselbe_gemeldete_account_ueber_id_und_name_zaehlt_einmal() {
+        let scam = review(ModerationCategory::Scam, true, true);
+        let not_member = ResolvedAccount {
+            reference: AccountRef::Id(8),
+            lookup: MemberLookup::NotMember,
+        };
+        let by_name = ResolvedAccount {
+            reference: AccountRef::Name("scammer".to_string()),
+            lookup: MemberLookup::Member(7),
+        };
+        assert_eq!(
+            shadow_action(Some(&scam), &[member(7), not_member, by_name.clone()], 1),
+            ShadowAction::WouldBan(7)
+        );
+        let other_member = ResolvedAccount {
+            reference: AccountRef::Name("zweiter".to_string()),
+            lookup: MemberLookup::Member(8),
+        };
+        assert!(matches!(
+            shadow_action(Some(&scam), &[member(7), other_member, by_name], 1),
+            ShadowAction::NoBan("mehrere Mitglieder genannt")
         ));
     }
 
