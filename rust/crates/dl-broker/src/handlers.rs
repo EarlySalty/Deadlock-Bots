@@ -12,7 +12,7 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::payload::{self};
-use crate::port::{DmPurpose, MemberPresence, PortError, RichMessage};
+use crate::port::{ChannelReply, DmPurpose, MemberPresence, PortError, RichMessage};
 use crate::{
     authorize, error_body, payload_hash, request_id, require_loopback, respond, run_idempotent,
     success_body, SharedBroker, IDEMPOTENCY_HEADER,
@@ -311,7 +311,13 @@ pub async fn member_access(
                 "role_ids": access.role_ids.iter().map(u64::to_string).collect::<Vec<_>>(),
             }),
         ),
-        Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
+        Err(err) => {
+            tracing::error!(%err, ?guild_id, user_id, "member_access failed");
+            respond(
+                503,
+                error_body(&rid, None, "unavailable", "member access unavailable"),
+            )
+        }
     }
 }
 
@@ -562,6 +568,24 @@ fn begin_action(
     Ok((rid, payload, idem))
 }
 
+fn channel_reply(payload: &Map<String, Value>) -> Result<Option<ChannelReply>, String> {
+    let allowed_user_ids = payload::id_list(payload, "allowed_user_ids")?;
+    if payload
+        .get("reply_to_message_id")
+        .is_none_or(Value::is_null)
+    {
+        if !allowed_user_ids.is_empty() {
+            return Err("allowed_user_ids requires reply_to_message_id".to_string());
+        }
+        return Ok(None);
+    }
+    let message_id = payload::positive_int(payload, "reply_to_message_id")?;
+    Ok(Some(ChannelReply {
+        message_id,
+        allowed_user_ids,
+    }))
+}
+
 pub async fn send_message(
     State(state): State<SharedBroker>,
     peer: Peer,
@@ -575,6 +599,10 @@ pub async fn send_message(
 
     let dm_purpose = match payload::dm_purpose(&payload) {
         Ok(purpose) => purpose,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    let reply = match channel_reply(&payload) {
+        Ok(reply) => reply,
         Err(msg) => return bad_request(&rid, &msg),
     };
     let parsed = (|| -> Result<(String, Option<u64>, Option<u64>), String> {
@@ -592,6 +620,9 @@ pub async fn send_message(
         }
         if has_channel && has_user {
             return Err("channel_id and user_id are mutually exclusive".to_string());
+        }
+        if reply.is_some() && !has_channel {
+            return Err("reply_to_message_id requires channel_id".to_string());
         }
         let channel_id = if has_channel {
             Some(payload::positive_int(&payload, "channel_id")?)
@@ -631,6 +662,10 @@ pub async fn send_message(
         op.insert("user_id".into(), json!(u));
     }
     insert_dm_purpose(&mut op, dm_purpose);
+    if let Some(reply) = &reply {
+        op.insert("reply_to_message_id".into(), json!(reply.message_id));
+        op.insert("allowed_user_ids".into(), json!(reply.allowed_user_ids));
+    }
     let hash = payload_hash(&op);
 
     run_idempotent(
@@ -641,7 +676,16 @@ pub async fn send_message(
         &hash,
         || async {
             if let Some(channel_id) = channel_id {
-                match state.port.send_channel_message(channel_id, &content).await {
+                let sent = match &reply {
+                    Some(reply) => {
+                        state
+                            .port
+                            .send_channel_reply(channel_id, reply, &content)
+                            .await
+                    }
+                    None => state.port.send_channel_message(channel_id, &content).await,
+                };
+                match sent {
                     Ok(message_id) => (
                         200,
                         success_body(
@@ -2103,6 +2147,7 @@ pub(crate) mod tests {
         voice_invite_calls: Mutex<Vec<(u64, u64, u64)>>,
         voice_channel: Mutex<Option<u64>>,
         voice_invite_public: Mutex<bool>,
+        channel_reply_calls: Mutex<Vec<(u64, ChannelReply, String)>>,
     }
 
     #[async_trait::async_trait]
@@ -2172,6 +2217,20 @@ pub(crate) mod tests {
             _content: &str,
         ) -> Result<u64, PortError> {
             Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn send_channel_reply(
+            &self,
+            channel_id: u64,
+            reply: &ChannelReply,
+            content: &str,
+        ) -> Result<u64, PortError> {
+            let mut calls = self
+                .channel_reply_calls
+                .lock()
+                .map_err(|_| PortError::Discord("poisoned".to_string()))?;
+            calls.push((channel_id, reply.clone(), content.to_string()));
+            Ok(900 + calls.len() as u64)
         }
 
         async fn send_dm(
@@ -2395,6 +2454,49 @@ pub(crate) mod tests {
         assert!(!String::from_utf8(bytes.to_vec())
             .unwrap()
             .contains("user_id"));
+    }
+
+    #[tokio::test]
+    async fn send_message_reply_tags_only_allowed_users_and_keeps_idempotency() {
+        let (state, port) = reaction_test_state("42").expect("state");
+        let peer = peer("127.0.0.1:12345").expect("peer");
+        let send = |key: &str, body: &'static str| {
+            send_message(
+                State(state.clone()),
+                peer,
+                action_headers(key).expect("headers"),
+                axum::body::Bytes::from(body),
+            )
+        };
+        let reply = r#"{"channel_id":42,"content":"<@7> Einladung ist raus.","reply_to_message_id":"55","allowed_user_ids":[7]}"#;
+        for _ in 0..2 {
+            let response = send("invite-lounge:55:invite", reply).await;
+            assert_eq!(response.status(), 200);
+            let bytes = axum::body::to_bytes(response.into_body(), 10000)
+                .await
+                .expect("body");
+            let data: Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(data["result"]["message_id"], 901);
+        }
+        let changed = r#"{"channel_id":42,"content":"<@7> Anders formuliert.","reply_to_message_id":55,"allowed_user_ids":[7]}"#;
+        assert_eq!(send("invite-lounge:55:invite", changed).await.status(), 409);
+        let without_channel = r#"{"user_id":7,"content":"x","reply_to_message_id":55}"#;
+        assert_eq!(send("reply-dm", without_channel).await.status(), 400);
+        let stray_mentions = r#"{"channel_id":42,"content":"x","allowed_user_ids":[7]}"#;
+        assert_eq!(send("stray", stray_mentions).await.status(), 400);
+        let denied = r#"{"channel_id":43,"content":"x","reply_to_message_id":55}"#;
+        assert_eq!(send("denied", denied).await.status(), 403);
+        assert_eq!(
+            *port.channel_reply_calls.lock().expect("calls"),
+            vec![(
+                42,
+                ChannelReply {
+                    message_id: 55,
+                    allowed_user_ids: vec![7],
+                },
+                "<@7> Einladung ist raus.".to_string(),
+            )]
+        );
     }
 
     #[tokio::test]
@@ -2708,6 +2810,7 @@ pub(crate) mod tests {
                 voice_channel: Mutex::new(Some(42)),
                 voice_invite_public: Mutex::new(true),
                 delete_message_result: Err(PortError::Discord("unused".to_string())),
+                channel_reply_calls: Mutex::new(Vec::new()),
             }),
             Arc::new(MockChannelInfoPort),
             "secret".to_string(),
@@ -2726,6 +2829,7 @@ pub(crate) mod tests {
             voice_channel: Mutex::new(Some(42)),
             voice_invite_public: Mutex::new(true),
             delete_message_result: Err(PortError::Discord("unused".to_string())),
+            channel_reply_calls: Mutex::new(Vec::new()),
         });
         let allowed_channel_ids = allowed_channel_ids.to_string();
         let state = crate::BrokerState::new_with_channel_info(
@@ -2750,6 +2854,7 @@ pub(crate) mod tests {
             voice_channel: Mutex::new(Some(42)),
             voice_invite_public: Mutex::new(true),
             delete_message_result: result,
+            channel_reply_calls: Mutex::new(Vec::new()),
         });
         let state = crate::BrokerState::new_with_channel_info(
             port.clone(),

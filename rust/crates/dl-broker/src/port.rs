@@ -234,11 +234,23 @@ pub struct StreamerVoiceInvite {
     pub slot_added: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelReply {
+    pub message_id: u64,
+    pub allowed_user_ids: Vec<u64>,
+}
+
 #[async_trait::async_trait]
 pub trait DiscordPort: Send + Sync {
     async fn is_ready(&self) -> bool;
     /// → message_id
     async fn send_channel_message(&self, channel_id: u64, content: &str) -> Result<u64, PortError>;
+    async fn send_channel_reply(
+        &self,
+        channel_id: u64,
+        reply: &ChannelReply,
+        content: &str,
+    ) -> Result<u64, PortError>;
     async fn send_dm(
         &self,
         user_id: u64,

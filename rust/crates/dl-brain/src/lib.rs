@@ -15,6 +15,10 @@ pub use brain_client::{
     AnswerAction, AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
 };
+pub use brain_contracts::invite::{
+    InviteCheckInOutcome, InviteLoungeUpdate, InviteNotice, InviteProblem, InviteStatus,
+    NoticeTarget,
+};
 pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
 
 #[derive(Clone)]
@@ -65,6 +69,12 @@ pub enum DiscordConversation {
     InviteLounge {
         message: String,
     },
+    InviteNotice {
+        notice: InviteNotice,
+    },
+    InviteCheckIn {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +93,14 @@ pub enum ConversationReply {
         actions: Vec<AnswerAction>,
     },
     Silent,
+    Delivered {
+        content: String,
+        message_id: Option<u64>,
+    },
+    Judged {
+        outcome: InviteCheckInOutcome,
+    },
+    Rejected,
 }
 
 impl ConversationReply {

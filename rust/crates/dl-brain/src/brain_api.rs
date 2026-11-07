@@ -9,7 +9,7 @@ use brain_client::{
     BotTaskResult, ClientError, PublicAnswerResponse, Query, BOT_TASK_VERSION,
 };
 use brain_contracts::bot_tasks::{
-    BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, MAX_CHAT_LINES,
+    BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, TaskFailure, MAX_CHAT_LINES,
     MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
     MAX_READABLE_CHANNELS,
 };
@@ -259,7 +259,9 @@ fn conversation_text(task: &DiscordConversation) -> &str {
         | DiscordConversation::Faq { question, .. } => question,
         DiscordConversation::PassiveHelp { message, .. }
         | DiscordConversation::VoiceHint { message }
-        | DiscordConversation::InviteLounge { message } => message,
+        | DiscordConversation::InviteLounge { message }
+        | DiscordConversation::InviteCheckIn { message } => message,
+        DiscordConversation::InviteNotice { .. } => "",
     }
 }
 
@@ -270,7 +272,10 @@ fn conversation_task(
     if !images.is_empty()
         && matches!(
             task,
-            DiscordConversation::VoiceHint { .. } | DiscordConversation::InviteLounge { .. }
+            DiscordConversation::VoiceHint { .. }
+                | DiscordConversation::InviteLounge { .. }
+                | DiscordConversation::InviteNotice { .. }
+                | DiscordConversation::InviteCheckIn { .. }
         )
     {
         return Err(classified_backend_error("anfrage"));
@@ -310,6 +315,12 @@ fn conversation_task(
         DiscordConversation::InviteLounge { message } => ConversationTask::DiscordInviteLounge {
             message: message.clone(),
         },
+        DiscordConversation::InviteNotice { notice } => ConversationTask::DiscordInviteNotice {
+            notice: notice.clone(),
+        },
+        DiscordConversation::InviteCheckIn { message } => ConversationTask::DiscordInviteCheckIn {
+            reply: message.clone(),
+        },
     })
 }
 
@@ -319,7 +330,26 @@ fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, Brai
             reply: BotReply::Answered { text, actions, .. },
             ..
         } if !text.trim().is_empty() => Ok(ConversationReply::Answered { text, actions }),
+        BotTaskResult::Conversation {
+            reply:
+                BotReply::Delivered {
+                    content,
+                    message_id,
+                },
+            ..
+        } => Ok(ConversationReply::Delivered {
+            content,
+            message_id,
+        }),
+        BotTaskResult::Conversation {
+            reply: BotReply::Judged { outcome },
+            ..
+        } => Ok(ConversationReply::Judged { outcome }),
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
+        BotTaskResult::Failed {
+            failure: TaskFailure::DeliveryRejected,
+            ..
+        } => Ok(ConversationReply::Rejected),
         BotTaskResult::Failed { failure, .. } => Err(classified_backend_error(failure.as_str())),
         _ => Err(classified_backend_error("vertrag")),
     }
@@ -1002,6 +1032,39 @@ mod tests {
             project_conversation(result(BotReply::answered("Antwort"))).ok(),
             Some(ConversationReply::answered("Antwort"))
         );
+        assert_eq!(
+            project_conversation(result(BotReply::Judged {
+                outcome: brain_contracts::invite::InviteCheckInOutcome::NotArrived,
+            }))
+            .ok(),
+            Some(ConversationReply::Judged {
+                outcome: brain_contracts::invite::InviteCheckInOutcome::NotArrived,
+            })
+        );
+        assert_eq!(
+            project_conversation(result(BotReply::Delivered {
+                content: "<@7> Einladung ist raus.".into(),
+                message_id: Some(77),
+            }))
+            .ok(),
+            Some(ConversationReply::Delivered {
+                content: "<@7> Einladung ist raus.".into(),
+                message_id: Some(77),
+            })
+        );
+        assert_eq!(
+            project_conversation(BotTaskResult::Failed {
+                capability,
+                failure: TaskFailure::DeliveryRejected,
+            })
+            .ok(),
+            Some(ConversationReply::Rejected)
+        );
+        assert!(project_conversation(BotTaskResult::Failed {
+            capability,
+            failure: TaskFailure::DeliveryFailed,
+        })
+        .is_err());
         let mut linked = BotReply::answered("Antwort");
         if let BotReply::Answered { actions, .. } = &mut linked {
             *actions = vec![crate::AnswerAction::TwitchLink];

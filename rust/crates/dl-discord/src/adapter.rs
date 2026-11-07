@@ -12,9 +12,9 @@ use std::sync::{Arc, OnceLock};
 use crate::dm_gate::{DmError, DmIntent};
 use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
 use dl_broker::port::{
-    DiscordPort, DmPurpose, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess,
-    MemberInfo, MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo,
-    RoleMembers, ViewSpec,
+    ChannelReply, DiscordPort, DmPurpose, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo,
+    MemberAccess, MemberInfo, MemberPresence, MessageReaction, PortError, ResolvedUser,
+    RichMessage, RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -283,6 +283,24 @@ impl DiscordAdapter {
         })
     }
 
+    fn reply_body(channel_id: u64, reply: &ChannelReply, content: &str) -> Map<String, Value> {
+        let mut body = Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert(
+            "message_reference".into(),
+            json!({
+                "message_id": reply.message_id.to_string(),
+                "channel_id": channel_id.to_string(),
+                "fail_if_not_exists": false,
+            }),
+        );
+        body.insert(
+            "allowed_mentions".into(),
+            Self::allowed_mentions(&reply.allowed_user_ids, &[]),
+        );
+        body
+    }
+
     fn rich_body(message: &RichMessage) -> Map<String, Value> {
         let mut body = Map::new();
         if let Some(components) = &message.components {
@@ -524,7 +542,7 @@ impl DiscordAdapter {
     }
 
     fn is_unknown_member_response(status_code: u16, discord_code: isize, message: &str) -> bool {
-        discord_code == 10007 || (status_code == 404 && message == "Unknown Member")
+        matches!(discord_code, 10007 | 10013) || (status_code == 404 && message == "Unknown Member")
     }
 }
 
@@ -537,6 +555,22 @@ impl DiscordPort for DiscordAdapter {
     async fn send_channel_message(&self, channel_id: u64, content: &str) -> Result<u64, PortError> {
         let mut body = Map::new();
         body.insert("content".into(), json!(content));
+        self.send_raw(channel_id, &body).await.map_err(|err| {
+            if Self::is_unknown_channel(&err) {
+                PortError::ChannelNotFound
+            } else {
+                PortError::Discord(err.to_string())
+            }
+        })
+    }
+
+    async fn send_channel_reply(
+        &self,
+        channel_id: u64,
+        reply: &ChannelReply,
+        content: &str,
+    ) -> Result<u64, PortError> {
+        let body = Self::reply_body(channel_id, reply, content);
         self.send_raw(channel_id, &body).await.map_err(|err| {
             if Self::is_unknown_channel(&err) {
                 PortError::ChannelNotFound
@@ -1064,14 +1098,25 @@ impl DiscordPort for DiscordAdapter {
             ..Default::default()
         };
         for gid in guild_ids {
-            let Some(guild) = self.cache().guild(gid) else {
-                continue;
+            let cached = match self.cache().guild(gid) {
+                Some(guild) => guild.members.get(&target).cloned(),
+                None if guild_id.is_some() => return Err(PortError::GuildUnavailable),
+                None => continue,
             };
-            let Some(member) = guild.members.get(&target) else {
-                continue;
+            let member = match cached {
+                Some(member) => member,
+                None if guild_id.is_some() => match self.http.get_member(gid, target).await {
+                    Ok(member) => member,
+                    Err(err) if Self::is_unknown_member(&err) => continue,
+                    Err(err) => return Err(PortError::Discord(err.to_string())),
+                },
+                None => continue,
+            };
+            let Some(guild) = self.cache().guild(gid) else {
+                return Err(PortError::GuildUnavailable);
             };
             // Admin-Permission wird über ALLE Gilden ge-OR-t.
-            if guild.member_permissions(member).administrator() {
+            if guild.member_permissions(&member).administrator() {
                 access.is_administrator = true;
             }
             // Anzeigename + Rollen aus der ersten Gilde mit Treffer
@@ -1626,6 +1671,11 @@ mod tests {
             404,
             -1,
             "Unknown Member"
+        ));
+        assert!(DiscordAdapter::is_unknown_member_response(
+            404,
+            10013,
+            "Unknown User"
         ));
     }
 

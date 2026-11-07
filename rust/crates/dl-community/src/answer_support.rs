@@ -249,7 +249,7 @@ pub(crate) mod test_brain {
     use async_trait::async_trait;
     use dl_brain::{
         AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker, DiscordAnswerTask,
-        DiscordConversation, DiscordConversationRequest,
+        DiscordConversation, DiscordConversationRequest, InviteCheckInOutcome, NoticeTarget,
     };
     use tokio::sync::Notify;
 
@@ -264,9 +264,15 @@ pub(crate) mod test_brain {
             }))
     }
 
+    pub(crate) fn check_in_reply(outcome: InviteCheckInOutcome) -> ScriptedReply {
+        Ok(ConversationReply::Judged { outcome })
+    }
+
     #[derive(Default)]
     pub(crate) struct ScriptedBrain {
         replies: Mutex<VecDeque<ScriptedReply>>,
+        check_ins: Mutex<VecDeque<ScriptedReply>>,
+        notices: Mutex<VecDeque<ScriptedReply>>,
         default_reply: Option<ConversationReply>,
         gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
         pub(crate) calls: Arc<AtomicUsize>,
@@ -293,6 +299,17 @@ pub(crate) mod test_brain {
             })
         }
 
+        pub(crate) fn always_with_check_ins(
+            text: &str,
+            check_ins: Vec<ScriptedReply>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                check_ins: Mutex::new(check_ins.into()),
+                default_reply: Some(ConversationReply::answered(text)),
+                ..Self::default()
+            })
+        }
+
         pub(crate) fn failing() -> Arc<Self> {
             Self::replying(vec![Err(BrainError::Backend("scripted".into()))])
         }
@@ -303,8 +320,23 @@ pub(crate) mod test_brain {
             gate
         }
 
+        pub(crate) fn script_notices(&self, replies: Vec<ScriptedReply>) {
+            self.notices.lock().expect("notices").extend(replies);
+        }
+
         pub(crate) fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    fn delivered(target: &NoticeTarget) -> ConversationReply {
+        let message_id = match target {
+            NoticeTarget::Reply { message_id, .. } => message_id + 200_000,
+            NoticeTarget::DirectMessage => 300_000,
+        };
+        ConversationReply::Delivered {
+            content: "Brain-Status".into(),
+            message_id: Some(message_id),
         }
     }
 
@@ -316,7 +348,11 @@ pub(crate) mod test_brain {
             | DiscordConversation::Faq { question, history } => (question, history.as_slice()),
             DiscordConversation::PassiveHelp { message, .. }
             | DiscordConversation::VoiceHint { message }
-            | DiscordConversation::InviteLounge { message } => (message, [].as_slice()),
+            | DiscordConversation::InviteLounge { message }
+            | DiscordConversation::InviteCheckIn { message } => (message, [].as_slice()),
+            DiscordConversation::InviteNotice { notice } => {
+                return serde_json::to_string(&notice.update).unwrap_or_default();
+            }
         };
         history
             .iter()
@@ -367,7 +403,7 @@ pub(crate) mod test_brain {
                 })?;
             Ok(match reply {
                 ConversationReply::Answered { text, .. } => BrainOutcome::Answer(text),
-                ConversationReply::Silent => BrainOutcome::NoAnswer,
+                _ => BrainOutcome::NoAnswer,
             })
         }
 
@@ -389,6 +425,18 @@ pub(crate) mod test_brain {
             if let Some((started, release)) = gate {
                 started.notify_one();
                 release.notified().await;
+            }
+            if let DiscordConversation::InviteNotice { notice } = &request.task {
+                let scripted = self.notices.lock().expect("notices").pop_front();
+                return scripted.unwrap_or_else(|| Ok(delivered(&notice.target)));
+            }
+            if matches!(request.task, DiscordConversation::InviteCheckIn { .. }) {
+                return self
+                    .check_ins
+                    .lock()
+                    .expect("check_ins")
+                    .pop_front()
+                    .unwrap_or(Ok(ConversationReply::Silent));
             }
             self.replies
                 .lock()
