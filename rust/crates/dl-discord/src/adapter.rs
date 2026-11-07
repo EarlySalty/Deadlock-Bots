@@ -1064,20 +1064,19 @@ impl DiscordPort for DiscordAdapter {
             ..Default::default()
         };
         for gid in guild_ids {
-            let cached = self
-                .cache()
-                .guild(gid)
-                .map(|guild| guild.members.get(&target).cloned());
+            let cached = match self.cache().guild(gid) {
+                Some(guild) => guild.members.get(&target).cloned(),
+                None if guild_id.is_some() => return Err(PortError::GuildUnavailable),
+                None => continue,
+            };
             let member = match cached {
-                Some(Some(member)) => member,
-                Some(None) | None if guild_id.is_some() => {
-                    match self.http.get_member(gid, target).await {
-                        Ok(member) => member,
-                        Err(err) if Self::is_http_404(&err) => continue,
-                        Err(err) => return Err(PortError::Discord(err.to_string())),
-                    }
-                }
-                _ => continue,
+                Some(member) => member,
+                None if guild_id.is_some() => match self.http.get_member(gid, target).await {
+                    Ok(member) => member,
+                    Err(err) if Self::is_http_404(&err) => continue,
+                    Err(err) => return Err(PortError::Discord(err.to_string())),
+                },
+                None => continue,
             };
             let Some(guild) = self.cache().guild(gid) else {
                 return Err(PortError::GuildUnavailable);
