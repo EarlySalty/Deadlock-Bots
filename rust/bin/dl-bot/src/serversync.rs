@@ -3775,20 +3775,37 @@ impl ServerSyncOps for ServerSyncService {
         let discovered_v2_message_ids = self.fetch_support_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
         let mut adopted_from_history = false;
-        if stored_message_ids.len() != expected_message_count {
-            match discovered_v2_message_ids.len() {
-                0 => {}
-                count if count == expected_message_count => {
-                    adopt_support_message_ids(&mut output, &discovered_v2_message_ids, confirm);
-                    adopted_from_history = true;
-                }
-                count => {
-                    return Err(ServerSyncError::bad_request(format!(
-                        "Support: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Messages fuer {expected_message_count} erwartete Messages; Apply blockiert gegen Duplikate."
-                    )));
-                }
+        let extra_delete_ids = match support_publish::plan_support_history(
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+        ) {
+            support_publish::SupportHistoryPlan::Adopt(ids) => {
+                adopt_support_message_ids(&mut output, &ids, confirm);
+                adopted_from_history = true;
+                Vec::new()
             }
-        }
+            support_publish::SupportHistoryPlan::Proceed { extra_delete_ids } => {
+                if stored_message_ids.len() != expected_message_count {
+                    output.warnings.push(format!(
+                        "Support: gespeichert sind {} Nachrichten, das Panel hat jetzt {expected_message_count}. Beim Bestätigen werden die alten Nachrichten ersetzt.",
+                        stored_message_ids.len()
+                    ));
+                }
+                if stored_message_ids.is_empty() && !extra_delete_ids.is_empty() {
+                    output.warnings.push(format!(
+                        "Support: im Kanal liegen {} ältere Panel-Nachrichten ohne KV-Eintrag. Beim Bestätigen werden sie ersetzt.",
+                        extra_delete_ids.len()
+                    ));
+                }
+                extra_delete_ids
+            }
+            support_publish::SupportHistoryPlan::Blocked { found, expected } => {
+                return Err(ServerSyncError::bad_request(format!(
+                    "Support: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {found} eigene V2-Messages fuer {expected} erwartete Messages; Apply blockiert gegen Duplikate."
+                )));
+            }
+        };
 
         if !confirm {
             return Ok(output);
@@ -3840,8 +3857,14 @@ impl ServerSyncOps for ServerSyncService {
                 .await;
                 return Err(err);
             }
+            let mut delete_ids = stored_message_ids.clone();
+            for message_id in extra_delete_ids {
+                if !delete_ids.contains(&message_id) {
+                    delete_ids.push(message_id);
+                }
+            }
             let delete_outcome = self
-                .delete_support_messages(&stored_message_ids, bot_user_id)
+                .delete_support_messages(&delete_ids, bot_user_id)
                 .await?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -9225,7 +9248,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     "components": [
                         {
                             "type": 10,
-                            "content": support_publish::SUPPORT_TITLE,
+                            "content": support_publish::SUPPORT_INTRO,
                         },
                         {
                             "type": 1,
