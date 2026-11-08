@@ -92,7 +92,7 @@ Echtzeit verspreche ich nicht. Was möglich ist, hängt von Steam und dem Game C
 pub const SUPPORT_BRAIN: &str = "\
 ## Deadlock Brain\n\
 \n\
-Supporter nutzen das Deadlock Brain ohne zusätzliches Abo und ohne Nutzungslimit.\n\
+Für Supporter ist vorgesehen, das Deadlock Brain ohne zusätzliches Abo und ohne Nutzungslimit zu nutzen. Das ist noch nicht eingerichtet. Bis dahin gilt das normale Tageslimit.\n\
 \n\
 Geplant, und noch nicht fertig, ist ein Build-Helfer. Du wählst einen Helden und bekommst sinnvolle Items und Builds, dazu eine Erklärung, warum ein Item passt. Du kannst gegen bestimmte Gegner bauen. Die Vorschläge sollen sich an Patches anpassen. Der Helfer soll beim Verstehen helfen, die Entscheidung bleibt bei dir.";
 pub const SUPPORT_DISCORD: &str = "\
@@ -126,7 +126,7 @@ pub const SUPPORT_PAY: &str = "\
 \n\
 **Ko-fi.** Einmalig oder monatlich. Dafür gibt es die Unterstützer-Rolle für 31 Tage. Nach dem Eingang schalte ich sie manuell frei, in der Regel innerhalb eines Tages.\n\
 \n\
-**Stripe-Abo für den Server.** Ein eigenes Abo, getrennt von den Abos des Steam Bots und des Twitch Bots. Der Button erscheint, sobald die Zahlung deinem Discord-Account zugeordnet wird und die Rolle nach Ablauf oder Kündigung wieder entzogen wird. Vorher gibt es hier keine Kasse.\n\
+**Stripe-Abo für den Server.** Ein eigenes Abo, getrennt von den Abos des Steam Bots und des Twitch Bots. Der Button erscheint erst, wenn die Zahlung deinem Discord-Account zugeordnet wird und die Rolle nach Ablauf oder Kündigung wieder entzogen wird.\n\
 \n\
 **Twitch-Bot-Abo.** Der Twitch Bot hat eigene kostenpflichtige Abos. Wer so ein Abo hat, soll dieselben Discord-Supporter-Vorteile bekommen, ohne ein zweites Abo. Die automatische Freischaltung ist noch nicht eingerichtet. Bis dahin reicht eine kurze Nachricht, dann trage ich es manuell ein.";
 pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst.";
@@ -311,9 +311,12 @@ pub fn plan_support_history(
     expected: usize,
 ) -> SupportHistoryPlan {
     if stored.len() == expected {
-        return SupportHistoryPlan::Proceed {
-            extra_delete_ids: Vec::new(),
-        };
+        let extra_delete_ids = discovered
+            .iter()
+            .copied()
+            .filter(|message_id| !stored.contains(message_id))
+            .collect();
+        return SupportHistoryPlan::Proceed { extra_delete_ids };
     }
     if discovered.len() == expected {
         return SupportHistoryPlan::Adopt(discovered.to_vec());
@@ -564,11 +567,11 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.buttons.donate, file.buttons.donate);
         apply_optional(&mut self.buttons.stripe, file.buttons.stripe);
         if let Some(donate) = file.urls.donate {
-            if donate.starts_with("https://") {
+            if is_https_url(&donate) {
                 self.urls.donate = donate;
             } else {
                 warnings.push(
-                    "Ko-fi-Button behält die Standard-URL: [urls].donate muss mit https:// beginnen"
+                    "Ko-fi-Button behält die Standard-URL: [urls].donate muss eine https-Adresse mit Host sein"
                         .to_string(),
                 );
             }
@@ -683,7 +686,21 @@ fn pay_message(config: &ResolvedSupportConfig, warnings: &mut Vec<String>) -> Su
 }
 
 fn stripe_button(config: &ResolvedSupportConfig, warnings: &mut Vec<String>) -> Option<Value> {
-    let url = config.urls.stripe.as_deref()?;
+    let Some(url) = config
+        .urls
+        .stripe
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    else {
+        if config.stripe_enabled {
+            warnings.push(
+                "Stripe-Button aus: [stripe].enabled ist true, aber [urls].stripe fehlt."
+                    .to_string(),
+            );
+        }
+        return None;
+    };
     if !is_buy_stripe_link(url) {
         warnings.push(
             "Stripe-Button aus: [urls].stripe muss ein https://buy.stripe.com/-Payment-Link des Server-Supporter-Abos sein"
@@ -698,11 +715,23 @@ fn stripe_button(config: &ResolvedSupportConfig, warnings: &mut Vec<String>) -> 
         );
         return None;
     }
+    warnings.push(
+        "Stripe-Button ist sichtbar. Dieses Panel prüft nicht, ob die Zahlung dem Discord-Account zugeordnet wird und ob die Rolle nach Ablauf oder Kündigung entzogen wird."
+            .to_string(),
+    );
     Some(link_button(
         SUPPORT_COMPONENT_ID_STRIPE_BUTTON,
         &config.buttons.stripe,
         url,
     ))
+}
+
+fn is_https_url(url: &str) -> bool {
+    let Some(rest) = url.trim().strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && host.contains('.')
 }
 
 fn is_buy_stripe_link(url: &str) -> bool {
@@ -830,6 +859,44 @@ fn validate_support_message_budget(payload: &SupportMessagePayload) -> Result<()
             "Support-Payload ueberschreitet Attachmentbudget: {}/{SUPPORT_ATTACHMENT_BUDGET}",
             payload.attachments.len()
         ));
+    }
+    for component in &payload.components {
+        validate_component_shape(component)?;
+    }
+    Ok(())
+}
+
+fn validate_component_shape(value: &Value) -> Result<(), String> {
+    let kind = value.get("type").and_then(Value::as_u64);
+    if kind == Some(17) {
+        let empty = value
+            .get("components")
+            .and_then(Value::as_array)
+            .is_none_or(|children| children.is_empty());
+        if empty {
+            return Err("Support-Payload hat einen leeren Container".to_string());
+        }
+    }
+    if kind == Some(2) {
+        let label = value.get("label").and_then(Value::as_str).unwrap_or("");
+        let label_chars = label.trim().chars().count();
+        if label_chars == 0 || label_chars > 80 {
+            return Err(format!(
+                "Support-Button-Label muss 1 bis 80 Zeichen haben, hat {label_chars}"
+            ));
+        }
+        let url = value.get("url").and_then(Value::as_str).unwrap_or("");
+        if !is_https_url(url) || url.chars().count() > 512 {
+            return Err(
+                "Support-Button-URL muss https sein, einen Host haben und höchstens 512 Zeichen lang sein"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(children) = value.get("components").and_then(Value::as_array) {
+        for child in children {
+            validate_component_shape(child)?;
+        }
     }
     Ok(())
 }
@@ -1148,9 +1215,14 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
             .iter()
             .any(|text| text.contains("noch nicht fertig")));
         assert!(benefits.iter().any(|text| text.contains("Statlocker")));
-        assert!(!benefits
+        assert!(benefits
             .iter()
-            .any(|text| text.contains("kostenlos bleiben") && text.contains("Steam")));
+            .any(|text| text.contains("noch nicht eingerichtet")));
+        let free = benefits
+            .iter()
+            .find(|text| text.starts_with("## Was kostenlos bleibt"))
+            .expect("free section");
+        assert!(!free.to_lowercase().contains("steam"));
 
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
@@ -1227,6 +1299,9 @@ enabled = true
         );
         assert_eq!(buttons[1]["style"], json!(5));
         assert!(buttons[1].get("custom_id").is_none());
+        assert!(output.warnings.iter().any(|warning| {
+            warning.contains("prüft nicht, ob die Zahlung dem Discord-Account zugeordnet wird")
+        }));
 
         write_support_texts_file(
             temp.path(),
@@ -1270,6 +1345,26 @@ enabled = true
             .warnings
             .iter()
             .any(|warning| warning.contains("Stripe-Button aus")));
+
+        write_support_texts_file(
+            temp.path(),
+            r#"[stripe]
+enabled = true
+"#,
+        );
+        let missing = build_support_publish_output(
+            temp.path(),
+            &stored_ids(),
+            Some(SUPPORT_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("enabled without url leaves Ko-fi active");
+        assert_eq!(link_buttons(&missing.messages[2].payload).len(), 1);
+        assert!(missing
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("[urls].stripe fehlt")));
     }
 
     #[test]
@@ -1338,6 +1433,12 @@ enabled = true
             }
         );
         assert_eq!(
+            plan_support_history(&[1, 2, 3], &[1, 2, 3, 99], 3),
+            SupportHistoryPlan::Proceed {
+                extra_delete_ids: vec![99]
+            }
+        );
+        assert_eq!(
             plan_support_history(&[], &[11, 12, 13], 3),
             SupportHistoryPlan::Adopt(vec![11, 12, 13])
         );
@@ -1386,5 +1487,31 @@ enabled = true
         assert_eq!(config.urls.donate, SUPPORT_DONATE_URL_DEFAULT);
         assert_eq!(config.urls.stripe, None);
         assert!(!config.stripe_enabled);
+    }
+
+    #[test]
+    fn leere_karte_und_ueberlanges_label_werden_abgelehnt() {
+        let empty = message_from_container(1, None, Vec::new(), Vec::new());
+        let empty_error = validate_support_message_budget(&empty.payload).expect_err("empty");
+        assert!(empty_error.contains("leeren Container"));
+
+        let long_label = "x".repeat(81);
+        let overflow = message_from_container(
+            1,
+            None,
+            vec![link_button(2, &long_label, "https://ko-fi.com/x")],
+            Vec::new(),
+        );
+        let overflow_error = validate_support_message_budget(&overflow.payload).expect_err("label");
+        assert!(overflow_error.contains("1 bis 80"));
+
+        let bare = message_from_container(
+            1,
+            None,
+            vec![link_button(2, "Ko-fi", "https://")],
+            Vec::new(),
+        );
+        let bare_error = validate_support_message_budget(&bare.payload).expect_err("url");
+        assert!(bare_error.contains("https"));
     }
 }
