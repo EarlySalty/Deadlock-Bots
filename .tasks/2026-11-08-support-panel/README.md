@@ -2,7 +2,7 @@
 
 Branch `feat/support-panel-20261108`. Not applied, not deployed, no Discord post.
 
-The panel is three Components V2 messages in `#server-support` (`1483136301271355532`), built by `/serversync/support-apply`. Dry-run is the default. Confirm replaces the stored message when the stored count is not 3.
+The panel is three Components V2 messages in `#server-support` (`1483136301271355532`), built by `/serversync/support-apply`. Dry-run is the default. Confirm replaces stored messages when the stored count is not 3 and the history scan is empty, matches those stored ids, or finds exactly 3 messages to adopt. An ambiguous history blocks the apply. When 3 ids are already stored, own channel messages outside that set are deleted on confirm, including a later confirm after a failed delete.
 
 ## Messages
 
@@ -17,10 +17,11 @@ The panel is three Components V2 messages in `#server-support` (`148313630127135
 
 ## Open before a live apply
 
-- Stripe server-supporter product does not exist here. Steam Plus (`Deadlock-Steam-Bot`, checkout session with `discord_id`, Plus role) and Twitch billing (`Deadlock-Twitch-Bot` plan catalog) are different products. A bare payment link does not bind a Discord account. Grant and revoke of the supporter role on cancel are not implemented for this panel.
-- Role choice is open: `Server Unterstützer` already sees the VIP category and Streamer VC. `Plus` is the Steam Plus role (lounge, votes, no extra permissions). The panel does not name either role.
+- Stripe server-supporter product does not exist here. Steam Plus (`Deadlock-Steam-Bot`, checkout session with `discord_id`, Plus role) and Twitch billing (`Deadlock-Twitch-Bot` plan catalog) are different products. A bare payment link does not bind a Discord account. Grant and revoke of the supporter role on cancel are not implemented for this panel. Turning `[stripe].enabled` on shows the button and a warning that this panel does not check that binding.
+- Ko-fi names the Unterstützer-Rolle for 31 days. Which role a future Stripe subscription grants is still open: `Server Unterstützer` already sees the VIP category and Streamer VC. `Plus` is the Steam Plus role (lounge, votes, no extra permissions).
+- Discord server subscriptions are described as a path through the server name. This repo has no SKU button and does not grant a role from them. Check the guild settings before a live apply.
 - A paid Twitch-Bot subscription does not grant Discord supporter rights automatically.
-- The Steam Bot is not paywalled yet. The panel says it will be. The Plus panel text still says linking, rank checks and match delivery stay free (`steam-flows/src/plus/texts.rs`). Update that before publishing this panel.
-- Brain "ohne Nutzungslimit" is the offer. There is no supporter bypass of a per-user quota in this change.
+- The Steam Bot is not paywalled yet. The panel says it will be. The Plus panel in Deadlock-Steam-Bot `steam-flows/src/plus/texts.rs` still says linking, rank checks and match delivery stay free. Update that before publishing this panel.
+- Brain use without a usage limit is written as not switched on. The daily limit still applies to every user. There is no supporter bypass in this change.
 - Build helper, patch watchlist and extended match queries are described as planned. Extended queries do not promise realtime.
 - Ko-fi still grants the supporter role manually for 31 days. That is the existing panel policy, not a new webhook.

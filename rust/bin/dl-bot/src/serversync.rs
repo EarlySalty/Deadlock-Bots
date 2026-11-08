@@ -337,6 +337,24 @@ pub(crate) struct StaticV2DeleteOutcome {
     warnings: Vec<String>,
 }
 
+fn unsettled_support_deletes(requested: &[u64], outcome: &StaticV2DeleteOutcome) -> Vec<u64> {
+    requested
+        .iter()
+        .copied()
+        .filter(|message_id| {
+            if outcome.deleted.contains(message_id) {
+                return false;
+            }
+            let marker = message_id.to_string();
+            let already_gone = outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(&marker) && warning.contains("bereits weg"));
+            !already_gone
+        })
+        .collect()
+}
+
 struct RegelwerkOutputInput<'a> {
     dry_run: bool,
     thread_count: usize,
@@ -3786,7 +3804,9 @@ impl ServerSyncOps for ServerSyncService {
                 Vec::new()
             }
             support_publish::SupportHistoryPlan::Proceed { extra_delete_ids } => {
-                if stored_message_ids.len() != expected_message_count {
+                if !stored_message_ids.is_empty()
+                    && stored_message_ids.len() != expected_message_count
+                {
                     output.warnings.push(format!(
                         "Support: gespeichert sind {} Nachrichten, das Panel hat jetzt {expected_message_count}. Beim Bestätigen werden die alten Nachrichten ersetzt.",
                         stored_message_ids.len()
@@ -3795,6 +3815,14 @@ impl ServerSyncOps for ServerSyncService {
                 if stored_message_ids.is_empty() && !extra_delete_ids.is_empty() {
                     output.warnings.push(format!(
                         "Support: im Kanal liegen {} ältere Panel-Nachrichten ohne KV-Eintrag. Beim Bestätigen werden sie ersetzt.",
+                        extra_delete_ids.len()
+                    ));
+                }
+                if stored_message_ids.len() == expected_message_count
+                    && !extra_delete_ids.is_empty()
+                {
+                    output.warnings.push(format!(
+                        "Support: im Kanal liegen {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs. Beim Bestätigen werden sie gelöscht.",
                         extra_delete_ids.len()
                     ));
                 }
@@ -3858,81 +3886,45 @@ impl ServerSyncOps for ServerSyncService {
                 return Err(err);
             }
             let mut delete_ids = stored_message_ids.clone();
-            for message_id in extra_delete_ids {
-                if !delete_ids.contains(&message_id) {
-                    delete_ids.push(message_id);
+            for message_id in &extra_delete_ids {
+                if !delete_ids.contains(message_id) {
+                    delete_ids.push(*message_id);
                 }
             }
             let delete_outcome = self
                 .delete_support_messages(&delete_ids, bot_user_id)
                 .await?;
+            let unsettled = unsettled_support_deletes(&extra_delete_ids, &delete_outcome);
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
-        } else if !adopted_from_history && support_publish::support_payload_is_unchanged(&output) {
-            for message in &mut output.messages {
-                if let Some(message_id) = message.stored_message_id {
-                    message.action = "no_op".to_string();
-                    message.message_id = Some(message_id);
-                }
+            if !unsettled.is_empty() {
+                return Err(ServerSyncError::bad_request(format!(
+                    "Support: {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs bleiben im Kanal. Ein erneutes Bestätigen versucht das Löschen wieder.",
+                    unsettled.len()
+                )));
             }
-            self.store_static_v2_metadata(
-                support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                support_publish::SUPPORT_PAYLOAD_FORMAT,
-                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                &output.payload_hash,
-            )
-            .await?;
         } else {
-            let mut message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let stored_message_id = output.messages[message_index].stored_message_id;
-                if let Some(stored_message_id) = stored_message_id {
-                    if let Some(message_id) = self
-                        .edit_support_message(stored_message_id, &output.messages[message_index])
-                        .await?
-                    {
-                        message_ids.push(message_id);
-                        output.messages[message_index].action = if adopted_from_history {
-                            "adopted_edit".to_string()
-                        } else {
-                            "edited".to_string()
-                        };
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.edited_message_ids.push(message_id);
-                        continue;
-                    }
-                    output.warnings.push(format!(
-                        "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                }
-
-                let message_id = self
-                    .post_support_message(&output.messages[message_index])
+            if !extra_delete_ids.is_empty() {
+                let delete_outcome = self
+                    .delete_support_messages(&extra_delete_ids, bot_user_id)
                     .await?;
-                message_ids.push(message_id);
-                self.store_static_v2_message_id(
-                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    message_index,
-                    message_id,
-                )
-                .await?;
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
+                let unsettled = unsettled_support_deletes(&extra_delete_ids, &delete_outcome);
+                output.deleted_message_ids = delete_outcome.deleted;
+                output.warnings.extend(delete_outcome.warnings);
+                if !unsettled.is_empty() {
+                    return Err(ServerSyncError::bad_request(format!(
+                        "Support: {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs bleiben im Kanal. Ein erneutes Bestätigen versucht das Löschen wieder.",
+                        unsettled.len()
+                    )));
+                }
             }
-            if adopted_from_history {
-                self.replace_static_v2_message_ids_and_metadata(
-                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT,
-                    support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &message_ids,
-                )
-                .await?;
-            } else {
+            if !adopted_from_history && support_publish::support_payload_is_unchanged(&output) {
+                for message in &mut output.messages {
+                    if let Some(message_id) = message.stored_message_id {
+                        message.action = "no_op".to_string();
+                        message.message_id = Some(message_id);
+                    }
+                }
                 self.store_static_v2_metadata(
                     support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
                     support_publish::SUPPORT_PAYLOAD_FORMAT,
@@ -3940,6 +3932,68 @@ impl ServerSyncOps for ServerSyncService {
                     &output.payload_hash,
                 )
                 .await?;
+            } else {
+                let mut message_ids = Vec::new();
+                for message_index in 0..output.messages.len() {
+                    let stored_message_id = output.messages[message_index].stored_message_id;
+                    if let Some(stored_message_id) = stored_message_id {
+                        if let Some(message_id) = self
+                            .edit_support_message(
+                                stored_message_id,
+                                &output.messages[message_index],
+                            )
+                            .await?
+                        {
+                            message_ids.push(message_id);
+                            output.messages[message_index].action = if adopted_from_history {
+                                "adopted_edit".to_string()
+                            } else {
+                                "edited".to_string()
+                            };
+                            output.messages[message_index].message_id = Some(message_id);
+                            output.messages[message_index].stored_message_id = Some(message_id);
+                            output.edited_message_ids.push(message_id);
+                            continue;
+                        }
+                        output.warnings.push(format!(
+                        "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                    ));
+                    }
+
+                    let message_id = self
+                        .post_support_message(&output.messages[message_index])
+                        .await?;
+                    message_ids.push(message_id);
+                    self.store_static_v2_message_id(
+                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                        message_index,
+                        message_id,
+                    )
+                    .await?;
+                    output.messages[message_index].action = "posted".to_string();
+                    output.messages[message_index].message_id = Some(message_id);
+                    output.messages[message_index].stored_message_id = Some(message_id);
+                    output.posted_message_ids.push(message_id);
+                }
+                if adopted_from_history {
+                    self.replace_static_v2_message_ids_and_metadata(
+                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+                        support_publish::SUPPORT_PAYLOAD_FORMAT,
+                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                        &message_ids,
+                    )
+                    .await?;
+                } else {
+                    self.store_static_v2_metadata(
+                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+                        support_publish::SUPPORT_PAYLOAD_FORMAT,
+                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -9232,79 +9286,31 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     fn mock_support_output(dry_run: bool) -> SupportPublishOutput {
-        let payload = support_publish::SupportMessagePayload {
-            flags: support_publish::SUPPORT_COMPONENTS_V2_FLAG,
-            allowed_mentions: support_publish::SupportAllowedMentions { parse: Vec::new() },
-            components: vec![
-                json!({
-                    "type": 12,
-                    "id": support_publish::SUPPORT_COMPONENT_ID_HERO_MEDIA,
-                    "items": [{"media": {"url": "attachment://support-hero.png"}}],
-                }),
-                json!({
-                    "type": 17,
-                    "id": support_publish::SUPPORT_COMPONENT_ID_MAIN_CONTAINER,
-                    "accent_color": support_publish::SUPPORT_ACCENT_GOLD,
-                    "components": [
-                        {
-                            "type": 10,
-                            "content": support_publish::SUPPORT_INTRO,
-                        },
-                        {
-                            "type": 1,
-                            "components": [{
-                                "type": 2,
-                                "style": 5,
-                                "label": support_publish::SUPPORT_DONATE_BUTTON_LABEL,
-                                "url": support_publish::SUPPORT_DONATE_URL_DEFAULT,
-                            }],
-                        },
-                    ],
-                }),
-            ],
-            attachments: vec![support_publish::SupportPayloadAttachment {
-                id: 0,
-                filename: support_publish::SUPPORT_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    support_publish::SUPPORT_BANNER_DIR,
-                    support_publish::SUPPORT_HERO_FILENAME
-                ),
-            }],
-        };
-        SupportPublishOutput {
-            guild_id: GUILD_ID,
-            channel_id: support_publish::SUPPORT_CHANNEL_ID,
-            channel_name: support_publish::SUPPORT_CHANNEL_NAME.to_string(),
-            dry_run,
-            payload_format: support_publish::SUPPORT_PAYLOAD_FORMAT.to_string(),
-            stored_payload_format: Some(support_publish::SUPPORT_PAYLOAD_FORMAT.to_string()),
-            payload_hash: "support-hash".to_string(),
-            stored_payload_hash: Some("support-hash".to_string()),
-            repost_required: false,
-            warnings: Vec::new(),
-            messages: vec![support_publish::SupportMessageOutput {
-                message_index: 0,
-                message_key: "support".to_string(),
-                action: if dry_run { "planned_edit" } else { "no_op" }.to_string(),
-                stored_message_id: Some(8401),
-                message_id: Some(8401),
-                banner: Some(support_publish::SupportBannerOutput {
-                    filename: support_publish::SUPPORT_HERO_FILENAME.to_string(),
-                    relative_path: format!(
-                        "{}/{}",
-                        support_publish::SUPPORT_BANNER_DIR,
-                        support_publish::SUPPORT_HERO_FILENAME
-                    ),
-                    present: true,
-                }),
-                payload,
-            }],
-            stored_message_ids: vec![8401],
-            posted_message_ids: Vec::new(),
-            edited_message_ids: Vec::new(),
-            deleted_message_ids: Vec::new(),
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let stored = [8401, 8402, 8403];
+        let planned = support_publish::build_support_publish_output(
+            &repo,
+            &stored,
+            Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("support fixture");
+        let mut output = support_publish::build_support_publish_output(
+            &repo,
+            &stored,
+            Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
+            Some(planned.payload_hash.as_str()),
+            true,
+        )
+        .expect("support fixture");
+        output.dry_run = dry_run;
+        if !dry_run {
+            for message in &mut output.messages {
+                message.action = "no_op".to_string();
+            }
         }
+        output
     }
 
     fn mock_faq_output(dry_run: bool) -> FaqPublishOutput {
@@ -10838,6 +10844,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
     }
 
+    #[test]
+    fn unsettled_support_deletes_behaelt_lesefehler_und_vergisst_weg() {
+        let outcome = StaticV2DeleteOutcome {
+            deleted: vec![1],
+            warnings: vec![
+                "Support: gespeicherte Message-ID 2 war beim Delete bereits weg".to_string(),
+                "Support: gespeicherte Message-ID 3 konnte vor Delete nicht gelesen werden: timeout"
+                    .to_string(),
+            ],
+        };
+        assert_eq!(unsettled_support_deletes(&[1, 2, 3], &outcome), vec![3]);
+    }
+
     #[tokio::test]
     async fn support_apply_http_ist_dry_run_default_und_liefert_v2_payload() {
         let service = Arc::new(MockServerSync::default());
@@ -10851,7 +10870,18 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let (status, body) = response_json(dry_run).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["result"]["dry_run"], true);
-        assert_eq!(body["result"]["messages"][0]["action"], "planned_edit");
+        assert_eq!(
+            body["result"]["messages"]
+                .as_array()
+                .expect("messages")
+                .len(),
+            3
+        );
+        assert_eq!(body["result"]["messages"][0]["action"], "planned_no_op");
+        assert_eq!(
+            body["result"]["messages"][0]["payload"]["components"][0]["type"],
+            17
+        );
         assert_eq!(
             body["result"]["payload_format"],
             support_publish::SUPPORT_PAYLOAD_FORMAT
@@ -10867,9 +10897,13 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .len(),
             0
         );
+        let pay_children = body["result"]["messages"][2]["payload"]["components"][0]["components"]
+            .as_array()
+            .expect("pay children");
+        let pay_row = pay_children.last().expect("pay buttons");
+        assert_eq!(pay_row["type"], 1);
         assert_eq!(
-            body["result"]["messages"][0]["payload"]["components"][1]["components"][1]
-                ["components"][0]["url"],
+            pay_row["components"][0]["url"],
             support_publish::SUPPORT_DONATE_URL_DEFAULT
         );
 
