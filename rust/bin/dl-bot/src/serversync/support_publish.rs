@@ -311,6 +311,16 @@ pub fn plan_support_history(
     expected: usize,
 ) -> SupportHistoryPlan {
     if stored.len() == expected {
+        if !discovered.is_empty()
+            && stored
+                .iter()
+                .all(|message_id| !discovered.contains(message_id))
+        {
+            return SupportHistoryPlan::Blocked {
+                found: discovered.len(),
+                expected,
+            };
+        }
         let extra_delete_ids = discovered
             .iter()
             .copied()
@@ -567,8 +577,9 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.buttons.donate, file.buttons.donate);
         apply_optional(&mut self.buttons.stripe, file.buttons.stripe);
         if let Some(donate) = file.urls.donate {
-            if is_https_url(&donate) {
-                self.urls.donate = donate;
+            let donate = donate.trim();
+            if is_https_url(donate) {
+                self.urls.donate = donate.to_string();
             } else {
                 warnings.push(
                     "Ko-fi-Button behält die Standard-URL: [urls].donate muss eine https-Adresse mit Host sein"
@@ -730,8 +741,12 @@ fn is_https_url(url: &str) -> bool {
     let Some(rest) = url.trim().strip_prefix("https://") else {
         return false;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty() && host.contains('.')
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+    !host.is_empty()
+        && !host.contains(' ')
+        && host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
 }
 
 fn is_buy_stripe_link(url: &str) -> bool {
@@ -1436,6 +1451,13 @@ enabled = true
             plan_support_history(&[1, 2, 3], &[1, 2, 3, 99], 3),
             SupportHistoryPlan::Proceed {
                 extra_delete_ids: vec![99]
+            }
+        );
+        assert_eq!(
+            plan_support_history(&[1, 2, 3], &[4, 5, 6], 3),
+            SupportHistoryPlan::Blocked {
+                found: 3,
+                expected: 3
             }
         );
         assert_eq!(

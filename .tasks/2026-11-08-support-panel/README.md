@@ -2,7 +2,7 @@
 
 Branch `feat/support-panel-20261108`. Not applied, not deployed, no Discord post.
 
-The panel is three Components V2 messages in `#server-support` (`1483136301271355532`), built by `/serversync/support-apply`. Dry-run is the default. Confirm replaces stored messages when the stored count is not 3 and the history scan is empty, matches those stored ids, or finds exactly 3 messages to adopt. An ambiguous history blocks the apply. When 3 ids are already stored, own channel messages outside that set are deleted on confirm, including a later confirm after a failed delete.
+The panel is three Components V2 messages in `#server-support` (`1483136301271355532`), built by `/serversync/support-apply`. Dry-run is the default. Confirm follows the history plan. When three ids are stored, a non-empty scan that shares none of them blocks. Any other scan with three stored ids keeps those ids and deletes only the extra own messages, including a later confirm after a failed delete. An empty scan with three stored ids keeps those ids. A scan of exactly three messages adopts those ids whenever the stored count is not three. An empty scan with a stored count other than three replaces that stored set with the three cards, and so does a scan whose ids equal a stored count of one or two. An empty KV and one or two scanned messages deletes those messages and posts the three cards. An empty KV and an empty scan posts the three cards. Every other combination blocks.
 
 ## Messages
 
