@@ -1461,6 +1461,18 @@ enabled = true
             }
         );
         assert_eq!(
+            plan_support_history(&[1, 2, 3], &[], 3),
+            SupportHistoryPlan::Proceed {
+                extra_delete_ids: Vec::new()
+            }
+        );
+        assert_eq!(
+            plan_support_history(&[1, 2, 3], &[1, 2], 3),
+            SupportHistoryPlan::Proceed {
+                extra_delete_ids: Vec::new()
+            }
+        );
+        assert_eq!(
             plan_support_history(&[], &[11, 12, 13], 3),
             SupportHistoryPlan::Adopt(vec![11, 12, 13])
         );
