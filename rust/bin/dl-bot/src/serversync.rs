@@ -1209,6 +1209,19 @@ impl ServerSyncService {
         discord_regelwerk_json_response(response, "GET")
     }
 
+    async fn voice_ux_forum_post_exists(&self, thread_id: u64) -> ServerSyncResult<bool> {
+        let response = self
+            .discord_get_response(
+                self.discord_api_url(&format!("/channels/{thread_id}/messages/{thread_id}")),
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let _: DiscordMessage = discord_regelwerk_json_response(response, "GET")?;
+        Ok(true)
+    }
+
     async fn discord_get_response(&self, url: String) -> ServerSyncResult<DiscordRestResponse> {
         discord_regelwerk_send_with_retry(
             || {
@@ -5452,6 +5465,7 @@ impl ServerSyncOps for ServerSyncService {
 
         let mut voice_extras = Vec::new();
         let mut voice_scans = Vec::new();
+        let mut voice_adopted = Vec::new();
         for target_index in 0..output.targets.len() {
             let channel_id = output.targets[target_index].channel_id;
             let discovered = self
@@ -5483,6 +5497,7 @@ impl ServerSyncOps for ServerSyncService {
             }
             voice_extras.push(extras);
             voice_scans.push(discovered.clone());
+            let mut adopted_from_history = false;
             // Adoption nur bei komplett verlorenem KV; ein Format-/Layoutwechsel mit
             // intaktem KV (Länge ≠ erwartet) läuft über den Repost-Pfad, der die
             // gespeicherten alten Messages selbst abräumt.
@@ -5495,6 +5510,7 @@ impl ServerSyncOps for ServerSyncService {
                             &discovered,
                             confirm,
                         );
+                        adopted_from_history = true;
                         output.warnings.push(format!(
                             "Voice-UX: KV-Message-IDs fuer Kanal {channel_id} fehlen/unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered:?}"
                         ));
@@ -5506,6 +5522,7 @@ impl ServerSyncOps for ServerSyncService {
                     }
                 }
             }
+            voice_adopted.push(adopted_from_history);
         }
 
         let (legacy_candidates, legacy_warnings) = self
@@ -5513,6 +5530,19 @@ impl ServerSyncOps for ServerSyncService {
             .await?;
         output.legacy_cleanup_candidates = legacy_candidates;
         output.warnings.extend(legacy_warnings);
+
+        let mut forum_noop_proven = false;
+        if let Some(thread_id) = output.forum_post.stored_thread_id {
+            if voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post) {
+                forum_noop_proven = self.voice_ux_forum_post_exists(thread_id).await?;
+                if !forum_noop_proven {
+                    downgrade_planned_noop(&mut output.forum_post.action, false);
+                    output.warnings.push(format!(
+                        "Voice-UX: Forum-Thread {thread_id} ist nicht mehr auffindbar. Beim Bestätigen wird er bearbeitet und nur bei 404 neu gepostet."
+                    ));
+                }
+            }
+        }
 
         if !confirm {
             return Ok(output);
@@ -5597,7 +5627,8 @@ impl ServerSyncOps for ServerSyncService {
                     &output.targets[target_index].stored_message_ids,
                     &voice_scans[target_index],
                 );
-                if stored_visible
+                if !voice_adopted[target_index]
+                    && stored_visible
                     && voice_ux_publish::voice_ux_target_payload_is_unchanged(
                         &output.targets[target_index],
                     )
@@ -5695,9 +5726,7 @@ impl ServerSyncOps for ServerSyncService {
             output.targets[target_index].repost_required = false;
         }
 
-        if output.forum_post.stored_thread_id.is_some()
-            && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post)
-        {
+        if forum_noop_proven {
             if let Some(thread_id) = output.forum_post.stored_thread_id {
                 output.forum_post.thread_id = Some(thread_id);
                 output.forum_post.action = "no_op".to_string();
@@ -12585,6 +12614,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 messages.push(fake);
             }
         }
+        messages.push(voice_ux_fake_forum_starter(9401));
         let fake = spawn_fake_discord(42, messages, Vec::new()).await;
         let service = ServerSyncService::new_for_test(
             db.pool().clone(),
@@ -12611,6 +12641,85 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ]
         );
         assert_eq!(output.targets[1].pinned_message_ids, vec![9311, 9312]);
+        assert_eq!(output.forum_post.action, "no_op");
+    }
+
+    fn voice_ux_fake_forum_starter(thread_id: u64) -> Value {
+        let mut starter = fake_discord_message(thread_id, 42, 0, Vec::new(), Vec::new());
+        starter["channel_id"] = json!(thread_id.to_string());
+        starter
+    }
+
+    fn voice_ux_fake_panel_messages(
+        planned: &voice_ux_publish::VoiceUxPublishOutput,
+    ) -> Vec<Value> {
+        let mut messages = Vec::new();
+        for target in &planned.targets {
+            for message in &target.messages {
+                let mut fake = fake_discord_message(
+                    message.message_id.expect("message id"),
+                    42,
+                    voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                );
+                fake["channel_id"] = json!(target.channel_id.to_string());
+                messages.push(fake);
+            }
+        }
+        messages
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_forum_no_op_braucht_vorhandenen_thread() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let fake = spawn_fake_discord(42, voice_ux_fake_panel_messages(&planned), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let dry_run = service.router_apply(false).await.expect("dry-run");
+        assert_eq!(dry_run.forum_post.action, "planned_edit");
+        assert!(
+            dry_run
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nicht mehr auffindbar")),
+            "{:?}",
+            dry_run.warnings
+        );
+        assert!(fake
+            .state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .is_empty());
+
+        let confirm = service.router_apply(true).await.expect("confirm");
+        assert_eq!(confirm.forum_post.action, "posted");
+        assert_ne!(confirm.forum_post.thread_id, Some(9401));
+        assert_eq!(
+            fake.state
+                .patch_calls
+                .lock()
+                .expect("patch calls")
+                .as_slice(),
+            &[9401]
+        );
+        assert_eq!(
+            get_serversync_kv(
+                db.pool(),
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY
+            )
+            .await,
+            confirm.forum_post.thread_id.map(|id| id.to_string())
+        );
     }
 
     async fn seed_voice_ux_matching_panel(
@@ -12805,6 +12914,55 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .messages
                 .iter()
                 .all(|message| message.action == "no_op"));
+        }
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_adoption_speichert_ids_statt_no_op() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for index in 0..target.messages.len() {
+                dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &format!("{prefix}{index}"))
+                    .await
+                    .expect("delete serversync kv");
+            }
+        }
+        let mut messages = voice_ux_fake_panel_messages(&planned);
+        messages.push(voice_ux_fake_forum_starter(9401));
+        let fake = spawn_fake_discord(42, messages, Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let dry_run = service.router_apply(false).await.expect("dry-run");
+        for target in &dry_run.targets {
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action == "planned_adopted_edit"));
+        }
+
+        let confirm = service.router_apply(true).await.expect("confirm");
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        for (target, planned_target) in confirm.targets.iter().zip(planned.targets.iter()) {
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action == "edited"));
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for (index, message) in planned_target.messages.iter().enumerate() {
+                assert_eq!(
+                    get_serversync_kv(db.pool(), &format!("{prefix}{index}")).await,
+                    message.message_id.map(|id| id.to_string())
+                );
+            }
         }
     }
 
