@@ -97,6 +97,8 @@ pub enum ServerSyncErrorKind {
     Internal,
 }
 
+const HISTORY_SCAN_MAX_PAGES: usize = 5;
+
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
     kind: ServerSyncErrorKind,
@@ -328,13 +330,21 @@ struct RegelwerkBotMessage {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RangGuideDeleteOutcome {
     deleted: Vec<u64>,
+    already_gone: Vec<u64>,
     warnings: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct StaticV2DeleteOutcome {
     deleted: Vec<u64>,
+    already_gone: Vec<u64>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct OwnMessageScan {
+    message_ids: Vec<u64>,
+    truncated: bool,
 }
 
 fn scan_contains_every_stored_id(stored: &[u64], discovered: &[u64]) -> bool {
@@ -371,10 +381,38 @@ fn note_matched_scan_gaps(
     }
 }
 
-fn downgrade_planned_noop(action: &mut String, stored_visible: bool) {
-    if !stored_visible && action == "planned_no_op" {
+fn downgrade_planned_noop(action: &mut String) {
+    if action == "planned_no_op" {
         *action = "planned_edit".to_string();
     }
+}
+
+fn settle_scan_truncation(
+    label: &str,
+    truncated: bool,
+    decides_from_scan: bool,
+    warnings: &mut Vec<String>,
+) -> ServerSyncResult<()> {
+    if !truncated {
+        return Ok(());
+    }
+    if decides_from_scan {
+        return Err(ServerSyncError::bad_request(format!(
+            "{label}: Der History-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten, ältere eigene Panel-Nachrichten sind nicht geprüft. Apply blockiert gegen Duplikate."
+        )));
+    }
+    warnings.push(format!(
+        "{label}: Der History-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten. Ältere gespeicherte Nachrichten gelten als nicht gesehen und werden beim Bestätigen bearbeitet."
+    ));
+    Ok(())
+}
+
+fn stray_ids_outside_stored(stored: &[u64], discovered: &[u64]) -> Vec<u64> {
+    discovered
+        .iter()
+        .copied()
+        .filter(|message_id| !stored.contains(message_id))
+        .collect()
 }
 
 fn matched_count_extras(
@@ -401,32 +439,22 @@ fn require_settled_extras(
     label: &str,
     extra_delete_ids: &[u64],
     deleted: &[u64],
-    warnings: &[String],
+    already_gone: &[u64],
 ) -> ServerSyncResult<()> {
-    let unsettled = unsettled_support_deletes(extra_delete_ids, deleted, warnings);
+    let unsettled = unsettled_support_deletes(extra_delete_ids, deleted, already_gone);
     if unsettled.is_empty() {
         return Ok(());
     }
-    Err(ServerSyncError::bad_request(format!(
-        "{label}: {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs bleiben im Kanal. Ein erneutes Bestätigen versucht das Löschen wieder.",
-        unsettled.len()
+    Err(ServerSyncError::internal(format!(
+        "{label}: Löschen unvollständig, eigene Panel-Nachrichten {unsettled:?} außerhalb der gespeicherten IDs bleiben im Kanal. Bereits gespeicherte Karten bleiben gültig. Ein erneutes Bestätigen versucht das Löschen wieder."
     )))
 }
 
-fn unsettled_support_deletes(requested: &[u64], deleted: &[u64], warnings: &[String]) -> Vec<u64> {
+fn unsettled_support_deletes(requested: &[u64], deleted: &[u64], already_gone: &[u64]) -> Vec<u64> {
     requested
         .iter()
         .copied()
-        .filter(|message_id| {
-            if deleted.contains(message_id) {
-                return false;
-            }
-            let marker = message_id.to_string();
-            let already_gone = warnings
-                .iter()
-                .any(|warning| warning.contains(&marker) && warning.contains("bereits weg"));
-            !already_gone
-        })
+        .filter(|message_id| !deleted.contains(message_id) && !already_gone.contains(message_id))
         .collect()
 }
 
@@ -748,7 +776,7 @@ pub trait ServerSyncOps: Send + Sync {
         &self,
         _channel_id: u64,
         _bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<u64>> {
+    ) -> ServerSyncResult<OwnMessageScan> {
         unreachable!("only ServerSyncService uses Voice-UX internals")
     }
     async fn edit_voice_ux_message(
@@ -860,6 +888,7 @@ pub struct ServerSyncService {
     rang_guide_repo_root: PathBuf,
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
+    panel_apply_lock: tokio::sync::Mutex<()>,
 }
 
 impl ServerSyncService {
@@ -879,6 +908,7 @@ impl ServerSyncService {
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
+            panel_apply_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -898,6 +928,7 @@ impl ServerSyncService {
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
+            panel_apply_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -910,6 +941,32 @@ impl ServerSyncService {
         interface: Arc<dl_voice::lfg_panel::LfgPanelInterface>,
     ) {
         *self.lfg_panel_interface.write().await = Some(interface);
+    }
+
+    async fn apply_voice_ux_forum_post(
+        &self,
+        forum: &mut voice_ux_publish::VoiceUxForumPostOutput,
+        noop_proven: bool,
+    ) -> ServerSyncResult<()> {
+        let (thread_id, action) = match forum.stored_thread_id {
+            Some(thread_id) if noop_proven => (thread_id, "no_op"),
+            Some(thread_id) => match self.edit_voice_ux_forum_post(thread_id, forum).await? {
+                Some(_) => (thread_id, "edited"),
+                None => (self.post_voice_ux_forum_post(forum).await?, "posted"),
+            },
+            None => (self.post_voice_ux_forum_post(forum).await?, "posted"),
+        };
+        forum.thread_id = Some(thread_id);
+        forum.action = action.to_string();
+        self.store_voice_ux_forum_metadata(thread_id, &forum.payload_hash)
+            .await?;
+        match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
+            Ok(()) => forum.pinned = true,
+            Err(err) => forum.warnings.push(format!(
+                "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
+            )),
+        }
+        Ok(())
     }
 
     fn discord_api_url(&self, path: &str) -> String {
@@ -1669,6 +1726,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -1685,6 +1743,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Rang-Guide: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -1730,12 +1789,17 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Rang-Guide: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(RangGuideDeleteOutcome { deleted, warnings })
+        Ok(RangGuideDeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn cleanup_new_rang_guide_posts_best_effort(&self, message_ids: &[u64]) {
@@ -2209,18 +2273,17 @@ impl ServerSyncService {
         Ok(candidates)
     }
 
-    async fn fetch_rang_guide_v2_message_ids(
+    async fn scan_own_v2_messages(
         &self,
-        bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<u64>> {
+        channel_id: u64,
+        is_own: impl Fn(u64, u64, &DiscordMessage) -> bool + Send,
+    ) -> ServerSyncResult<OwnMessageScan> {
         let mut before: Option<u64> = None;
         let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-            );
+        let mut truncated = false;
+        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
+            let mut url =
+                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -2232,156 +2295,98 @@ impl ServerSyncService {
             for message in &page {
                 let message_id = parse_discord_id("Message-ID", &message.id)?;
                 let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                if is_own(message_id, author_id, message) {
+                    message_ids.push(message_id);
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
+        }
+        message_ids.sort_unstable();
+        message_ids.dedup();
+        Ok(OwnMessageScan {
+            message_ids,
+            truncated,
+        })
+    }
+
+    async fn fetch_rang_guide_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = rang_guide_publish::RangGuideV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if rang_guide_publish::is_rang_guide_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                rang_guide_publish::is_rang_guide_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
-    async fn fetch_regelwerk_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                regelwerk_publish::REGELWERK_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+    async fn fetch_regelwerk_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            regelwerk_publish::REGELWERK_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = regelwerk_publish::RegelwerkV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if regelwerk_publish::is_regelwerk_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                regelwerk_publish::is_regelwerk_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
-    async fn fetch_support_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                support_publish::SUPPORT_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+    async fn fetch_support_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            support_publish::SUPPORT_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = support_publish::SupportV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if support_publish::is_support_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                support_publish::is_support_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
-    async fn fetch_faq_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                faq_publish::FAQ_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+    async fn fetch_faq_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            faq_publish::FAQ_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = faq_publish::FaqV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if faq_publish::is_faq_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                faq_publish::is_faq_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
     async fn fetch_regelwerk_legacy_cleanup_candidate(
@@ -2439,6 +2444,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -2455,6 +2461,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Regelwerk: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -2500,12 +2507,17 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Regelwerk: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn delete_faq_v2_messages(
@@ -2518,6 +2530,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -2534,6 +2547,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "FAQ: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -2578,12 +2592,17 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "FAQ: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn delete_support_messages(
@@ -2596,6 +2615,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -2612,6 +2632,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Support: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -2657,12 +2678,17 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Support: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn cleanup_new_static_v2_posts_best_effort(
@@ -3752,6 +3778,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         confirm: bool,
     ) -> ServerSyncResult<regelwerk_publish::RegelwerkPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX)
             .await?;
@@ -3776,8 +3803,15 @@ impl ServerSyncOps for ServerSyncService {
         output.legacy_cleanup_candidate = legacy_candidate;
         output.warnings.extend(legacy_warnings);
 
-        let discovered_v2_message_ids = self.fetch_regelwerk_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_regelwerk_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "Regelwerk",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
         let extra_delete_ids = matched_count_extras(
             &stored_message_ids,
@@ -3817,7 +3851,7 @@ impl ServerSyncOps for ServerSyncService {
         );
         if !stored_visible {
             for message in &mut output.messages {
-                downgrade_planned_noop(&mut message.action, false);
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -3884,7 +3918,7 @@ impl ServerSyncOps for ServerSyncService {
                 "Regelwerk",
                 &extra_delete_ids,
                 &delete_outcome.deleted,
-                &delete_outcome.warnings,
+                &delete_outcome.already_gone,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -3897,7 +3931,7 @@ impl ServerSyncOps for ServerSyncService {
                     "Regelwerk",
                     &extra_delete_ids,
                     &delete_outcome.deleted,
-                    &delete_outcome.warnings,
+                    &delete_outcome.already_gone,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -3992,6 +4026,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn support_apply(&self, confirm: bool) -> ServerSyncResult<SupportPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
             .await?;
@@ -4011,8 +4046,15 @@ impl ServerSyncOps for ServerSyncService {
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
-        let discovered_v2_message_ids = self.fetch_support_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_support_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "Support",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
         let extra_delete_ids = match support_publish::plan_support_history(
             &stored_message_ids,
@@ -4065,7 +4107,7 @@ impl ServerSyncOps for ServerSyncService {
         );
         if !stored_visible {
             for message in &mut output.messages {
-                downgrade_planned_noop(&mut message.action, false);
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -4132,7 +4174,7 @@ impl ServerSyncOps for ServerSyncService {
                 "Support",
                 &extra_delete_ids,
                 &delete_outcome.deleted,
-                &delete_outcome.warnings,
+                &delete_outcome.already_gone,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -4145,7 +4187,7 @@ impl ServerSyncOps for ServerSyncService {
                     "Support",
                     &extra_delete_ids,
                     &delete_outcome.deleted,
-                    &delete_outcome.warnings,
+                    &delete_outcome.already_gone,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -4238,6 +4280,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn faq_apply(&self, confirm: bool) -> ServerSyncResult<FaqPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(faq_publish::FAQ_MESSAGE_ID_PREFIX)
             .await?;
@@ -4257,8 +4300,15 @@ impl ServerSyncOps for ServerSyncService {
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
-        let discovered_v2_message_ids = self.fetch_faq_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_faq_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "FAQ",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
         let extra_delete_ids = matched_count_extras(
             &stored_message_ids,
@@ -4298,7 +4348,7 @@ impl ServerSyncOps for ServerSyncService {
         );
         if !stored_visible {
             for message in &mut output.messages {
-                downgrade_planned_noop(&mut message.action, false);
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -4363,7 +4413,7 @@ impl ServerSyncOps for ServerSyncService {
                 "FAQ",
                 &extra_delete_ids,
                 &delete_outcome.deleted,
-                &delete_outcome.warnings,
+                &delete_outcome.already_gone,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -4376,7 +4426,7 @@ impl ServerSyncOps for ServerSyncService {
                     "FAQ",
                     &extra_delete_ids,
                     &delete_outcome.deleted,
-                    &delete_outcome.warnings,
+                    &delete_outcome.already_gone,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -4488,6 +4538,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let live = dl_server_as_code::import::fetch_live_guild_model(
             self.adapter.http.as_ref(),
             self.guild_id,
@@ -4661,6 +4712,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self.load_rang_guide_message_ids().await?;
         let stored_payload_format = self.load_rang_guide_payload_format().await?;
         let stored_payload_hash = self.load_rang_guide_payload_hash().await?;
@@ -4676,8 +4728,15 @@ impl ServerSyncOps for ServerSyncService {
         output.legacy_cleanup_candidates = self
             .fetch_rang_guide_legacy_cleanup_candidates(bot_user_id)
             .await?;
-        let discovered_v2_message_ids = self.fetch_rang_guide_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_rang_guide_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "Rang-Guide",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
         let extra_delete_ids = matched_count_extras(
             &stored_message_ids,
@@ -4721,7 +4780,7 @@ impl ServerSyncOps for ServerSyncService {
         );
         if !stored_visible {
             for message in &mut output.messages {
-                downgrade_planned_noop(&mut message.action, false);
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -4773,7 +4832,7 @@ impl ServerSyncOps for ServerSyncService {
                 "Rang-Guide",
                 &extra_delete_ids,
                 &delete_outcome.deleted,
-                &delete_outcome.warnings,
+                &delete_outcome.already_gone,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -4786,7 +4845,7 @@ impl ServerSyncOps for ServerSyncService {
                     "Rang-Guide",
                     &extra_delete_ids,
                     &delete_outcome.deleted,
-                    &delete_outcome.warnings,
+                    &delete_outcome.already_gone,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -4910,44 +4969,17 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         channel_id: u64,
         bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url =
-                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                let candidate = voice_ux_publish::VoiceUxV2Message {
-                    message_id,
-                    author_id,
-                    flags: message.flags,
-                    components: message.components.clone(),
-                };
-                if voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(channel_id, |message_id, author_id, message| {
+            let candidate = voice_ux_publish::VoiceUxV2Message {
+                message_id,
+                author_id,
+                flags: message.flags,
+                components: message.components.clone(),
+            };
+            voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id)
+        })
+        .await
     }
 
     async fn edit_voice_ux_message(
@@ -5053,6 +5085,7 @@ impl ServerSyncOps for ServerSyncService {
         message_ids.sort_unstable();
         message_ids.dedup();
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let response = match self
@@ -5070,6 +5103,7 @@ impl ServerSyncOps for ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Voice-UX: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -5113,12 +5147,17 @@ impl ServerSyncOps for ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Voice-UX: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn cleanup_new_voice_ux_posts_best_effort(&self, channel_id: u64, message_ids: &[u64]) {
@@ -5444,6 +5483,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self.load_voice_ux_message_ids().await?;
         let stored_payload_formats = self.load_voice_ux_payload_formats().await?;
         let stored_payload_hashes = self.load_voice_ux_payload_hashes().await?;
@@ -5468,16 +5508,30 @@ impl ServerSyncOps for ServerSyncService {
         let mut voice_adopted = Vec::new();
         for target_index in 0..output.targets.len() {
             let channel_id = output.targets[target_index].channel_id;
-            let discovered = self
+            let scan = self
                 .fetch_voice_ux_v2_message_ids(channel_id, bot_user_id)
                 .await?;
             let expected = output.targets[target_index].messages.len();
-            let extras = matched_count_extras(
-                &output.targets[target_index].stored_message_ids,
-                &discovered,
-                expected,
+            let stored_ids = output.targets[target_index].stored_message_ids.clone();
+            settle_scan_truncation(
                 "Voice-UX",
+                scan.truncated,
+                stored_ids.is_empty(),
+                &mut output.warnings,
             )?;
+            let discovered = scan.message_ids;
+            let extras = if !stored_ids.is_empty() && stored_ids.len() != expected {
+                let strays = stray_ids_outside_stored(&stored_ids, &discovered);
+                if !strays.is_empty() {
+                    output.warnings.push(format!(
+                        "Voice-UX: in Kanal {channel_id} liegen {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs. Beim Bestätigen werden sie gelöscht.",
+                        strays.len()
+                    ));
+                }
+                strays
+            } else {
+                matched_count_extras(&stored_ids, &discovered, expected, "Voice-UX")?
+            };
             note_matched_scan_gaps(
                 &mut output.warnings,
                 "Voice-UX",
@@ -5492,7 +5546,7 @@ impl ServerSyncOps for ServerSyncService {
             );
             if !stored_visible {
                 for message in &mut output.targets[target_index].messages {
-                    downgrade_planned_noop(&mut message.action, false);
+                    downgrade_planned_noop(&mut message.action);
                 }
             }
             voice_extras.push(extras);
@@ -5533,19 +5587,37 @@ impl ServerSyncOps for ServerSyncService {
 
         let mut forum_noop_proven = false;
         if let Some(thread_id) = output.forum_post.stored_thread_id {
-            if voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post) {
-                forum_noop_proven = self.voice_ux_forum_post_exists(thread_id).await?;
-                if !forum_noop_proven {
-                    downgrade_planned_noop(&mut output.forum_post.action, false);
-                    output.warnings.push(format!(
-                        "Voice-UX: Forum-Thread {thread_id} ist nicht mehr auffindbar. Beim Bestätigen wird er bearbeitet und nur bei 404 neu gepostet."
-                    ));
+            let thread_exists = self.voice_ux_forum_post_exists(thread_id).await?;
+            forum_noop_proven = thread_exists
+                && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post);
+            if !thread_exists {
+                downgrade_planned_noop(&mut output.forum_post.action);
+                for target in &mut output.targets {
+                    for message in &mut target.messages {
+                        downgrade_planned_noop(&mut message.action);
+                    }
                 }
+                output.warnings.push(format!(
+                    "Voice-UX: Forum-Thread {thread_id} ist nicht mehr auffindbar. Beim Bestätigen wird er bearbeitet, bei 404 neu gepostet, und die Panels verlinken danach den neuen Thread."
+                ));
             }
         }
 
         if !confirm {
             return Ok(output);
+        }
+
+        self.apply_voice_ux_forum_post(&mut output.forum_post, forum_noop_proven)
+            .await?;
+        if let Some(thread_id) = output.forum_post.thread_id {
+            if output.forum_post.stored_thread_id != Some(thread_id) {
+                voice_ux_publish::relink_voice_ux_forum_thread(
+                    &self.rang_guide_repo_root,
+                    &mut output,
+                    thread_id,
+                )
+                .map_err(ServerSyncError::bad_request)?;
+            }
         }
 
         for (target_index, extra_delete_ids) in voice_extras.iter().enumerate() {
@@ -5604,7 +5676,7 @@ impl ServerSyncOps for ServerSyncService {
                     "Voice-UX",
                     extra_delete_ids,
                     &delete_outcome.deleted,
-                    &delete_outcome.warnings,
+                    &delete_outcome.already_gone,
                 )?;
                 output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -5618,7 +5690,7 @@ impl ServerSyncOps for ServerSyncService {
                         "Voice-UX",
                         extra_delete_ids,
                         &delete_outcome.deleted,
-                        &delete_outcome.warnings,
+                        &delete_outcome.already_gone,
                     )?;
                     output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
                     output.warnings.extend(delete_outcome.warnings);
@@ -5724,70 +5796,6 @@ impl ServerSyncOps for ServerSyncService {
                 }
             }
             output.targets[target_index].repost_required = false;
-        }
-
-        if forum_noop_proven {
-            if let Some(thread_id) = output.forum_post.stored_thread_id {
-                output.forum_post.thread_id = Some(thread_id);
-                output.forum_post.action = "no_op".to_string();
-                self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
-                    .await?;
-                match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
-                    Ok(()) => output.forum_post.pinned = true,
-                    Err(err) => output.forum_post.warnings.push(format!(
-                        "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
-                    )),
-                }
-            }
-        } else if let Some(thread_id) = output.forum_post.stored_thread_id {
-            match self
-                .edit_voice_ux_forum_post(thread_id, &output.forum_post)
-                .await?
-            {
-                Some(_) => {
-                    output.forum_post.thread_id = Some(thread_id);
-                    output.forum_post.action = "edited".to_string();
-                    self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
-                        .await?;
-                    match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
-                        Ok(()) => output.forum_post.pinned = true,
-                        Err(err) => output.forum_post.warnings.push(format!(
-                            "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
-                        )),
-                    }
-                }
-                None => {
-                    let new_thread_id = self.post_voice_ux_forum_post(&output.forum_post).await?;
-                    output.forum_post.thread_id = Some(new_thread_id);
-                    output.forum_post.action = "posted".to_string();
-                    self.store_voice_ux_forum_metadata(
-                        new_thread_id,
-                        &output.forum_post.payload_hash,
-                    )
-                    .await?;
-                    match self
-                        .pin_voice_ux_forum_thread_best_effort(new_thread_id)
-                        .await
-                    {
-                        Ok(()) => output.forum_post.pinned = true,
-                        Err(err) => output.forum_post.warnings.push(format!(
-                            "Forum-Thread {new_thread_id} konnte nicht gepinnt werden: {err}"
-                        )),
-                    }
-                }
-            }
-        } else {
-            let thread_id = self.post_voice_ux_forum_post(&output.forum_post).await?;
-            output.forum_post.thread_id = Some(thread_id);
-            output.forum_post.action = "posted".to_string();
-            self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
-                .await?;
-            match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
-                Ok(()) => output.forum_post.pinned = true,
-                Err(err) => output.forum_post.warnings.push(format!(
-                    "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
-                )),
-            }
         }
 
         output.warnings.extend(output.forum_post.warnings.clone());
@@ -11297,16 +11305,38 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     fn unsettled_support_deletes_behaelt_lesefehler_und_vergisst_weg() {
         let outcome = StaticV2DeleteOutcome {
             deleted: vec![1],
+            already_gone: vec![2],
             warnings: vec![
-                "Support: gespeicherte Message-ID 2 war beim Delete bereits weg".to_string(),
                 "Support: gespeicherte Message-ID 3 konnte vor Delete nicht gelesen werden: timeout"
                     .to_string(),
             ],
         };
         assert_eq!(
-            unsettled_support_deletes(&[1, 2, 3], &outcome.deleted, &outcome.warnings),
+            unsettled_support_deletes(&[1, 2, 3], &outcome.deleted, &outcome.already_gone),
             vec![3]
         );
+        let unsettled = require_settled_extras("Support", &[3], &[], &[]).expect_err("offen");
+        assert_eq!(unsettled.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(unsettled.to_string().contains("[3]"), "{unsettled}");
+    }
+
+    #[test]
+    fn abgeschnittener_scan_blockt_nur_wenn_er_entscheidet() {
+        let mut warnings = Vec::new();
+        settle_scan_truncation("Support", false, true, &mut warnings).expect("vollstaendig");
+        assert!(warnings.is_empty());
+        settle_scan_truncation("Support", true, false, &mut warnings).expect("gespeichert");
+        assert_eq!(warnings.len(), 1);
+        let blocked =
+            settle_scan_truncation("Support", true, true, &mut warnings).expect_err("blockt");
+        assert!(blocked.to_string().contains("blockiert"), "{blocked}");
+    }
+
+    #[test]
+    fn layoutwechsel_loescht_nur_eigene_ids_ausserhalb_des_speichers() {
+        assert_eq!(stray_ids_outside_stored(&[1], &[1, 2, 3]), vec![2, 3]);
+        assert!(stray_ids_outside_stored(&[1, 2], &[1, 2]).is_empty());
+        assert!(stray_ids_outside_stored(&[1, 2], &[]).is_empty());
     }
 
     #[test]
@@ -11321,7 +11351,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(warnings[0].contains("gelöscht"));
         assert!(warnings[1].contains("fehlen im History-Scan"));
         let mut action = "planned_no_op".to_string();
-        downgrade_planned_noop(&mut action, false);
+        downgrade_planned_noop(&mut action);
         assert_eq!(action, "planned_edit");
     }
 
@@ -12423,9 +12453,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let output = service.router_apply(true).await.expect("apply");
 
         assert_eq!(output.targets.len(), 2);
-        assert_eq!(output.targets[0].posted_message_ids, vec![9201, 9202]);
-        assert_eq!(output.targets[1].posted_message_ids, vec![9203, 9204]);
-        assert_eq!(output.forum_post.thread_id, Some(9205));
+        assert_eq!(output.targets[0].posted_message_ids, vec![9202, 9203]);
+        assert_eq!(output.targets[1].posted_message_ids, vec![9204, 9205]);
+        assert_eq!(output.forum_post.thread_id, Some(9201));
         assert!(output.forum_post.pinned);
         assert_eq!(
             output.deleted_legacy_message_ids,
@@ -12435,10 +12465,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ]
         );
         for (channel_id, expected_ids) in [
-            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9201_u64, 9202]),
+            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9202_u64, 9203]),
             (
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                vec![9203_u64, 9204],
+                vec![9204_u64, 9205],
             ),
         ] {
             let prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
@@ -12471,7 +12501,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             )
             .await
             .as_deref(),
-            Some("9205")
+            Some("9201")
         );
         assert!(dl_central_db::kv::get(
             db.pool(),
@@ -12492,22 +12522,22 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(
             fake.state.post_calls.lock().expect("post calls").as_slice(),
             &[
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
                 voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
             ]
         );
-        assert_eq!(output.targets[0].pinned_message_ids, vec![9201, 9202]);
-        assert_eq!(output.targets[1].pinned_message_ids, vec![9203, 9204]);
+        assert_eq!(output.targets[0].pinned_message_ids, vec![9202, 9203]);
+        assert_eq!(output.targets[1].pinned_message_ids, vec![9204, 9205]);
         assert_eq!(
             fake.state.pin_calls.lock().expect("pin calls").as_slice(),
             &[
-                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9201),
                 (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9202),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9203),
+                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9203),
                 (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9204),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9205),
             ]
         );
         let post_bodies = fake.state.post_bodies.lock().expect("post bodies");
@@ -12525,7 +12555,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .lock()
                 .expect("patched channels")
                 .as_slice(),
-            &[(9205, json!({"pinned": true}))]
+            &[(9201, json!({"pinned": true}))]
         );
     }
 
@@ -12710,7 +12740,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .lock()
                 .expect("patch calls")
                 .as_slice(),
-            &[9401]
+            &[9401, 9301, 9302, 9311, 9312]
         );
         assert_eq!(
             get_serversync_kv(
@@ -12720,6 +12750,24 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .await,
             confirm.forum_post.thread_id.map(|id| id.to_string())
         );
+        let new_thread_id = confirm.forum_post.thread_id.expect("new thread");
+        for target in &confirm.targets {
+            let rendered = serde_json::to_string(&target.messages).expect("messages");
+            assert!(rendered.contains(&new_thread_id.to_string()), "{rendered}");
+            assert!(!rendered.contains("9401"), "{rendered}");
+            assert_eq!(target.messages[0].action, "edited");
+        }
+
+        fake.state
+            .messages
+            .lock()
+            .expect("messages")
+            .insert(new_thread_id, voice_ux_fake_forum_starter(new_thread_id));
+        let settled = service.router_apply(false).await.expect("settled dry-run");
+        assert_eq!(settled.forum_post.action, "planned_no_op");
+        for target in &settled.targets {
+            assert_eq!(target.messages[0].action, "planned_no_op");
+        }
     }
 
     async fn seed_voice_ux_matching_panel(
@@ -12885,6 +12933,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             extra["channel_id"] = json!(target.channel_id.to_string());
             messages.push(extra);
         }
+        messages.push(voice_ux_fake_forum_starter(9401));
         let extra = ServerSyncService::new_for_test(
             db.pool().clone(),
             spawn_fake_discord(42, messages, Vec::new())

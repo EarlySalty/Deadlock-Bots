@@ -98,9 +98,9 @@ Geplant, und noch nicht fertig, ist ein Build-Helfer. Du wählst einen Helden un
 pub const SUPPORT_DISCORD: &str = "\
 ## Auf Discord\n\
 \n\
-Supporter bekommen eine eigene Rolle, private Supporter-Channels, Zugang zum Streamer-VC und zusätzliche Voice-Rechte in den Bereichen, die dafür freigegeben sind.\n\
+Supporter bekommen eine eigene Rolle, private Supporter-Channels im VIP-Bereich und Zugang zum Streamer-VC.\n\
 \n\
-Dazu kommen Einblicke in das, was gerade gebaut wird, Teilnahme an Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.\n\
+Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.\n\
 \n\
 Moderatoren-Chats, interne Teambereiche und Moderationsrechte gibt es darüber nicht.";
 pub const SUPPORT_PLANNED: &str = "\
@@ -331,7 +331,7 @@ pub fn plan_support_history(
     if discovered.len() == expected {
         return SupportHistoryPlan::Adopt(discovered.to_vec());
     }
-    let stored_matches_discovered = !stored.is_empty() && stored == discovered;
+    let stored_matches_discovered = !stored.is_empty() && same_id_set(stored, discovered);
     if discovered.len() < expected
         && (discovered.is_empty() || stored.is_empty() || stored_matches_discovered)
     {
@@ -737,19 +737,33 @@ fn stripe_button(config: &ResolvedSupportConfig, warnings: &mut Vec<String>) -> 
     ))
 }
 
+fn same_id_set(left: &[u64], right: &[u64]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
+}
+
 fn is_https_url(url: &str) -> bool {
-    let Some(rest) = url.trim().strip_prefix("https://") else {
+    if url.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     !host.is_empty()
-        && !host.contains(' ')
+        && !host.contains('@')
         && host.contains('.')
         && !host.starts_with('.')
         && !host.ends_with('.')
 }
 
 fn is_buy_stripe_link(url: &str) -> bool {
+    if url.chars().count() > 512 {
+        return false;
+    }
     let Some(rest) = url.strip_prefix("https://buy.stripe.com/") else {
         return false;
     };
@@ -894,8 +908,8 @@ fn validate_component_shape(value: &Value) -> Result<(), String> {
     }
     if kind == Some(2) {
         let label = value.get("label").and_then(Value::as_str).unwrap_or("");
-        let label_chars = label.trim().chars().count();
-        if label_chars == 0 || label_chars > 80 {
+        let label_chars = label.chars().count();
+        if label.trim().is_empty() || label_chars > 80 {
             return Err(format!(
                 "Support-Button-Label muss 1 bis 80 Zeichen haben, hat {label_chars}"
             ));
@@ -1037,6 +1051,37 @@ fn link_button(id: u64, label: &str, url: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn button_prueft_genau_die_gesendeten_zeichen() {
+        for url in [
+            "https://ko-fi.com/a b",
+            " https://ko-fi.com/x",
+            "https://ko-fi.com/x\n",
+            "https://user@ko-fi.com/x",
+        ] {
+            assert!(!is_https_url(url), "{url}");
+        }
+        assert!(is_https_url("https://ko-fi.com/deutschedeadlockcommunity"));
+        let padded = serde_json::json!({
+            "type": 2,
+            "label": format!("{}   ", "a".repeat(80)),
+            "url": "https://ko-fi.com/x",
+        });
+        assert!(validate_component_shape(&padded).is_err());
+        let long_stripe = format!("https://buy.stripe.com/{}", "a".repeat(500));
+        assert!(!is_buy_stripe_link(&long_stripe));
+    }
+
+    #[test]
+    fn gleiche_ids_in_anderer_reihenfolge_werden_ersetzt() {
+        assert_eq!(
+            plan_support_history(&[2, 1], &[1, 2], 3),
+            SupportHistoryPlan::Proceed {
+                extra_delete_ids: Vec::new()
+            }
+        );
+    }
+
     use super::*;
     use std::path::Path;
 
@@ -1207,7 +1252,7 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
         assert!(why
             .components
             .iter()
-            .any(|component| component_has_type(&component, 14)));
+            .any(|component| component_has_type(component, 14)));
 
         let benefits = text_contents(&output.messages[1].payload);
         assert_eq!(

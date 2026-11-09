@@ -310,6 +310,24 @@ pub fn voice_ux_forum_payload_is_unchanged(forum: &VoiceUxForumPostOutput) -> bo
     forum.stored_payload_hash.as_deref() == Some(forum.payload_hash.as_str())
 }
 
+pub fn relink_voice_ux_forum_thread(
+    repo_root: &Path,
+    output: &mut VoiceUxPublishOutput,
+    thread_id: u64,
+) -> Result<(), String> {
+    let mut warnings = Vec::new();
+    let fresh_messages = voice_ux_messages(repo_root, Some(thread_id), &mut warnings);
+    validate_voice_ux_messages(&fresh_messages)?;
+    let payload_hash = voice_ux_payload_hash(repo_root, &fresh_messages)?;
+    for target in &mut output.targets {
+        target.payload_hash = payload_hash.clone();
+        for (message, fresh) in target.messages.iter_mut().zip(&fresh_messages) {
+            message.payload = fresh.payload.clone();
+        }
+    }
+    Ok(())
+}
+
 pub fn adopt_voice_ux_message_ids(
     target: &mut VoiceUxTargetOutput,
     discovered_message_ids: &[u64],
