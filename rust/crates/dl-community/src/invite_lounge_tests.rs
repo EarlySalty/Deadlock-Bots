@@ -41,6 +41,7 @@ struct MemoryStore {
     advance: Mutex<Option<ClockAdvance>>,
     actions_since: AtomicI64,
     progress: Mutex<SteamProgress>,
+    handled: AtomicBool,
 }
 
 impl MemoryStore {
@@ -133,6 +134,9 @@ impl LoungeStore for MemoryStore {
     async fn steam_progress(&self, _code: &str, _since: i64) -> Result<SteamProgress, String> {
         Ok(*self.progress.lock().await)
     }
+    async fn handled_since(&self, _code: &str, _since: i64) -> Result<bool, String> {
+        Ok(self.handled.load(Ordering::SeqCst))
+    }
 }
 
 #[derive(Default)]
@@ -141,6 +145,7 @@ struct RecordingPort {
     history: Mutex<Vec<LoungeMessage>>,
     history_calls: AtomicUsize,
     identity_missing: AtomicBool,
+    history_fails: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -161,6 +166,9 @@ impl InviteLoungeReplyPort for RecordingPort {
         before: Option<u64>,
     ) -> Result<Vec<LoungeMessage>, String> {
         self.history_calls.fetch_add(1, Ordering::SeqCst);
+        if self.history_fails.load(Ordering::SeqCst) {
+            return Err("Verlauf nicht lesbar".into());
+        }
         let mut messages: Vec<_> = self
             .history
             .lock()
@@ -1032,27 +1040,28 @@ async fn brain_fehler_bei_der_antwort_verbraucht_sie_nicht() {
 
 #[tokio::test]
 async fn beantwortete_raumbitte_bekommt_keine_nachfrage() {
-    for author in [8, BOT] {
-        let (watcher, _, port, _, brain) = setup_scripted();
+    let (watcher, _, port, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let mut answer = message(2, NOW + 60, "Schick ich dir gleich");
+    answer.author_id = 8;
+    answer.reply_message_id = Some(1);
+    port.history.lock().await.push(answer);
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
         watcher
-            .handle_message(
-                message(1, NOW, "Kann mich jemand einladen? 123456789"),
-                NOW,
-                Some(false),
-            )
+            .poll_due(at)
             .await
             .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-        let mut answer = message(2, NOW + 60, "Schick ich dir gleich");
-        answer.author_id = author;
-        answer.reply_message_id = Some(1);
-        port.history.lock().await.push(answer);
-        watcher
-            .poll_due(NOW + CHECK_IN_SECONDS)
-            .await
-            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-        assert!(status_updates(&brain).is_empty());
-        assert!(notices(&brain).is_empty());
     }
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(status_updates(&brain).is_empty());
+    assert!(notices(&brain).is_empty());
 }
 
 #[tokio::test]
@@ -1081,6 +1090,97 @@ async fn bereits_eingeladen_laut_steam_bestaetigt_ohne_neue_einladung() {
         }]
     );
     assert_notices_request(&brain, 1);
+}
+
+#[tokio::test]
+async fn eigene_bot_antwort_haelt_die_einladung_nicht_auf() {
+    let (watcher, _, port, invite, _) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let mut own = message(2, NOW + CHECK_IN_SECONDS, "Ist die Einladung angekommen?");
+    own.author_id = BOT;
+    own.is_bot = true;
+    own.reply_message_id = Some(1);
+    port.history.lock().await.push(own);
+    watcher
+        .poll_due(NOW + ROOM_WAIT_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn fremde_bot_antwort_haelt_die_einladung_nicht_auf() {
+    let (watcher, _, port, invite, _) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let mut other = message(2, NOW + 60, "Glückwunsch zum neuen Level!");
+    other.author_id = 77;
+    other.is_bot = true;
+    other.reply_message_id = Some(1);
+    port.history.lock().await.push(other);
+    watcher
+        .poll_due(NOW + ROOM_WAIT_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(invite.calls.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn unlesbarer_verlauf_haelt_die_einladung_nicht_auf() {
+    let (watcher, _, port, invite, _) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    port.history_fails.store(true, Ordering::SeqCst);
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert_eq!(invite.calls.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn von_hand_erledigte_bitte_bleibt_ohne_meldung() {
+    let (watcher, store, _, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    store.handled.store(true, Ordering::SeqCst);
+    store.progress.lock().await.invited = true;
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(status_updates(&brain).is_empty());
+    assert!(notices(&brain).is_empty());
 }
 
 #[tokio::test]
