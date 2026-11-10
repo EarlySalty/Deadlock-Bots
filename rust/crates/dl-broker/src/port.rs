@@ -353,6 +353,27 @@ pub trait DiscordPort: Send + Sync {
         Ok(false)
     }
 
+    async fn community_voice_candidates(&self, _guild_id: u64) -> Result<Vec<u64>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn community_voice_invite(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+    ) -> Result<Option<StreamerVoiceInvite>, PortError> {
+        Ok(None)
+    }
+
+    async fn community_voice_invite_valid(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+        _invite_url: &str,
+    ) -> Result<bool, PortError> {
+        Ok(false)
+    }
+
     async fn create_invite(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, PortError>;
     /// Diagnose: guild_id None = erste Guild des Bots.
     async fn list_roles(&self, guild_id: Option<u64>) -> Result<GuildRoles, PortError>;

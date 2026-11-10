@@ -46,7 +46,7 @@ where
     false
 }
 
-fn invite_options() -> serde_json::Value {
+pub(crate) fn invite_options() -> serde_json::Value {
     json!({"max_age": INVITE_SECONDS, "max_uses": 1, "unique": true})
 }
 
@@ -64,7 +64,7 @@ fn target_limit(limit: u32, members: usize) -> Option<u32> {
 
 /// Effective rights of an ordinary new member, not those of the streamer or
 /// bot. Role-restricted and owner-locked channels must not get public invites.
-fn everyone_permissions(
+pub(crate) fn everyone_permissions(
     base: Permissions,
     guild_id: u64,
     overwrites: &[PermissionOverwrite],
@@ -164,7 +164,7 @@ fn snapshot(
     }))
 }
 
-async fn fresh_channel(
+pub(crate) async fn fresh_channel(
     adapter: &DiscordAdapter,
     channel_id: u64,
 ) -> Result<GuildChannel, PortError> {
@@ -201,7 +201,7 @@ async fn read_after_edit_error(
 /// A failed response must not leave a usable public invite behind. Never
 /// restore a channel limit here: Discord has no conditional edit, so a
 /// read-then-write rollback could overwrite a concurrent owner change.
-async fn discard_invite(adapter: &DiscordAdapter, code: &str) {
+pub(crate) async fn discard_invite(adapter: &DiscordAdapter, code: &str) {
     if !code.is_empty() {
         if let Err(error) = adapter.http.delete_invite(code, Some(REASON)).await {
             tracing::error!(%error, "Streamer-Voice-Invite konnte nicht zurückgenommen werden");

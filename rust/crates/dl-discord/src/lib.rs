@@ -35,4 +35,5 @@ pub use invite_tracker::InviteTracker;
 mod community;
 pub use community::STREAMER_VC;
 
+mod community_voice;
 mod streamer_voice;

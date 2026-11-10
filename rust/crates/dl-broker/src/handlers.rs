@@ -852,11 +852,18 @@ async fn validate_voice_replay(
             ),
         );
     }
-    match state
-        .port
-        .streamer_voice_invite_valid(guild_id, streamer_id, channel_id, invite_url)
-        .await
-    {
+    let still_valid = if data["result"]["kind"] == "community" {
+        state
+            .port
+            .community_voice_invite_valid(guild_id, channel_id, invite_url)
+            .await
+    } else {
+        state
+            .port
+            .streamer_voice_invite_valid(guild_id, streamer_id, channel_id, invite_url)
+            .await
+    };
+    match still_valid {
         Ok(true) => Response::from_parts(parts, Body::from(bytes)),
         Ok(false) => respond(
             200,
@@ -1820,10 +1827,7 @@ pub async fn streamer_voice_invite(
                 }
             };
             let Some(channel_id) = channel_id else {
-                return (
-                    200,
-                    success_body(&rid, Some(&idem), json!({"available": false})),
-                );
+                return community_voice_fallback(&state, &rid, &idem, guild_id).await;
             };
             if !state.channel_allowlist.permits(channel_id) {
                 return (
@@ -1848,6 +1852,7 @@ pub async fn streamer_voice_invite(
                         Some(&idem),
                         json!({
                             "available": true,
+                            "kind": "streamer",
                             "invite_url": invite.invite_url,
                             "channel_id": invite.channel_id,
                             "slot_added": invite.slot_added,
@@ -1872,6 +1877,56 @@ pub async fn streamer_voice_invite(
     )
     .await;
     validate_voice_replay(&state, &rid, &idem, guild_id, streamer_id, response).await
+}
+
+async fn community_voice_fallback(
+    state: &SharedBroker,
+    rid: &str,
+    idem: &str,
+    guild_id: u64,
+) -> (u16, Value) {
+    let unavailable = || {
+        (
+            503,
+            error_body(rid, Some(idem), "unavailable", "Discord voice unavailable"),
+        )
+    };
+    let Ok(candidates) = state.port.community_voice_candidates(guild_id).await else {
+        return unavailable();
+    };
+    for channel_id in candidates
+        .into_iter()
+        .filter(|id| state.channel_allowlist.permits(*id))
+    {
+        match state
+            .port
+            .community_voice_invite(guild_id, channel_id)
+            .await
+        {
+            Ok(Some(invite)) => {
+                return (
+                    200,
+                    success_body(
+                        rid,
+                        Some(idem),
+                        json!({
+                            "available": true,
+                            "kind": "community",
+                            "invite_url": invite.invite_url,
+                            "channel_id": invite.channel_id,
+                            "slot_added": false,
+                        }),
+                    ),
+                );
+            }
+            Ok(None) => continue,
+            Err(_) => return unavailable(),
+        }
+    }
+    (
+        200,
+        success_body(rid, Some(idem), json!({"available": false})),
+    )
 }
 
 pub async fn create_invite(
@@ -2181,6 +2236,37 @@ pub(crate) mod tests {
                 slot_added: true,
             }))
         }
+        async fn community_voice_candidates(&self, _guild: u64) -> Result<Vec<u64>, PortError> {
+            Ok(vec![44, 43])
+        }
+
+        async fn community_voice_invite(
+            &self,
+            guild: u64,
+            channel: u64,
+        ) -> Result<Option<crate::port::StreamerVoiceInvite>, PortError> {
+            self.voice_invite_calls
+                .lock()
+                .expect("voice calls")
+                .push((guild, 0, channel));
+            Ok(Some(crate::port::StreamerVoiceInvite {
+                invite_url: "https://discord.gg/communityTest".into(),
+                channel_id: channel.to_string(),
+                slot_added: false,
+            }))
+        }
+
+        async fn community_voice_invite_valid(
+            &self,
+            _guild: u64,
+            channel: u64,
+            invite_url: &str,
+        ) -> Result<bool, PortError> {
+            Ok(channel == 43
+                && *self.voice_invite_public.lock().expect("voice public")
+                && invite_url == "https://discord.gg/communityTest")
+        }
+
         async fn community_lobbies(
             &self,
             _guild_id: u64,
@@ -2533,6 +2619,45 @@ pub(crate) mod tests {
             403
         );
         assert!(port.voice_invite_calls.lock().expect("calls").is_empty());
+    }
+
+    #[tokio::test]
+    async fn absent_streamer_gets_allowlisted_community_call_and_safe_replay() {
+        let (state, port) = reaction_test_state("43").expect("state");
+        *port.voice_channel.lock().expect("voice channel") = None;
+        let peer = peer("127.0.0.1:12345").expect("peer");
+        let body =
+            axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
+        let call = || {
+            streamer_voice_invite(
+                State(state.clone()),
+                peer,
+                action_headers("voice-community").expect("headers"),
+                body.clone(),
+            )
+        };
+        for _ in 0..2 {
+            let response = call().await;
+            assert_eq!(response.status(), 200);
+            let bytes = axum::body::to_bytes(response.into_body(), 10000)
+                .await
+                .expect("body");
+            let data: Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(data["result"]["available"], true);
+            assert_eq!(data["result"]["kind"], "community");
+            assert_eq!(data["result"]["channel_id"], "43");
+            assert_eq!(data["result"]["slot_added"], false);
+        }
+        assert_eq!(
+            *port.voice_invite_calls.lock().expect("calls"),
+            vec![(1289721245281292288, 0, 43)]
+        );
+        *port.voice_invite_public.lock().expect("voice public") = false;
+        let bytes = axum::body::to_bytes(call().await.into_body(), 10000)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(data["result"]["available"], false);
     }
 
     #[tokio::test]
