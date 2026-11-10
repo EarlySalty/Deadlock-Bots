@@ -1,25 +1,82 @@
-# Support V2 Texte fuer /serversync/support-apply.
-# Fehlende Felder fallen auf Compile-Defaults zurueck.
+# Support-Panel für /serversync/support-apply.
+# Drei Nachrichten: warum, Vorteile, Zahlung. Alte Felder title/boost/donation/benefits
+# werden noch gelesen, damit eine ältere Datei nicht am Parser scheitert, aber nicht mehr angezeigt.
+#
+# Der Stripe-Button bleibt aus, bis BEIDES gilt:
+# 1. [urls].stripe ist ein Payment-Link für genau das Server-Supporter-Abo
+#    (nicht Steam-Plus, nicht Twitch-Bot).
+# 2. [stripe].enabled = true, und zwar erst wenn die Zahlung dem Discord-Account
+#    zugeordnet wird und die Supporter-Rolle nach Ablauf oder Kündigung entzogen wird.
+# Ein nackter buy.stripe.com-Link kennt den Discord-Account nicht. Deshalb reicht die URL allein nicht.
 
 [texts]
-title = "**💜 Server unterstützen**"
-boost = """**Du hast Nitro?**
-Dann kannst du uns ohne Extra-Kosten mit bis zu zwei Server-Boosts unterstützen: Klick oben links auf den Servernamen → **Server Boost** → auf diesen Server boosten. Das war's schon."""
-donation = """**Kein Nitro?**
-Du kannst uns auch mit einer Spende unterstützen — sie fließt komplett in Serverkosten, Bots und unsere Website. Als Dankeschön bekommst du innerhalb von 24 Stunden nach Eingang die exklusive Unterstützer-Rolle für 31 Tage (nicht auf andere Accounts übertragbar)."""
-benefits = """**Deine Vorteile als Booster & Unterstützer**
-- Privater Text- & Voice-Bereich
-- Zugriff auf den ||geheimen|| Caster-Chat — plane Turniere & Events direkt mit
-- Lese-Zugriff auf den ||noch geheimeren|| Community-Moderatoren-Chat <:pepecrywow:1483145247319003320>
-- Platz in der Aktivitätenliste direkt unterm Team ❤️
-- Zugriff auf <#1326984426906714236>
-- Voice-Moderationsrechte (Leute moven, in volle Kanäle joinen)
-- Du streamst? Dann warten ein paar exklusive Extra-Features für den Twitch-Bot auf dich
+intro = """# Server unterstützen
 
-Danke — jede Unterstützung, egal wie groß, trägt den Server. 💜"""
+Ich baue einen großen Teil von dem, was hier läuft, selbst. Steam Bot, Twitch Bot, Patchnotes, Deadlock Brain, die Website, Turniere und die übrigen Community-Systeme. Das sind jede Woche viele Stunden, und der Betrieb kostet laufend Geld."""
+why = """## Warum ich Unterstützung brauche
+
+Server, APIs, Infrastruktur und die KI-Coding-Abos liegen je nach Monat ungefähr bei **50 bis 250 €**, manchmal auch darüber. 2026 sind bis zum 8. November schon **über 1.600 €** zusammengekommen. Meine Arbeitszeit ist darin nicht enthalten.
+
+Ich habe mir oft überlegt, wie sich das langfristig tragen lässt. So wie bisher kann ich die Kosten nicht dauerhaft alleine stemmen."""
+ai = """## Zu den KI-Abos
+
+Die Abos kosten Geld. Bei diesem Umfang sind sie aber deutlich günstiger, als dieselbe Arbeitszeit auch nur zum Mindestlohn an Entwickler zu zahlen.
+
+Die Tools entwickeln die Projekte nicht alleine. Planung, Architektur, Umsetzung, Tests, Fehlersuche und Betrieb bleiben bei mir. Die Abos machen diesen Umfang überhaupt erst bezahlbar.
+
+Was an Unterstützung reinkommt, geht zurück in Infrastruktur und Entwicklung. Gewinn ist nicht das Ziel."""
+steam = """## Steam Bot
+
+Der Steam Bot wird auf ein Supporter-Modell umgestellt. Das gilt für die Steam-Verknüpfung, die automatischen Rang-Rollen, Rang-Abfragen, Match-Abfragen und die weiteren Funktionen des Bots.
+
+Die Anbindung ist aufwendig. Deadlock ändert sich, und die Pflege läuft mit.
+
+Geplant sind erweiterte Match-Abfragen, ähnlich dem priorisierten Abruf bei der Deadlock API: https://deadlock-api.com/patron
+Echtzeit verspreche ich nicht. Was möglich ist, hängt von Steam und dem Game Coordinator ab."""
+brain = """## Deadlock Brain
+
+Für Supporter ist vorgesehen, das Deadlock Brain ohne zusätzliches Abo und ohne Nutzungslimit zu nutzen. Das ist noch nicht eingerichtet. Bis dahin gilt das normale Tageslimit.
+
+Geplant, und noch nicht fertig, ist ein Build-Helfer. Du wählst einen Helden und bekommst sinnvolle Items und Builds, dazu eine Erklärung, warum ein Item passt. Du kannst gegen bestimmte Gegner bauen. Die Vorschläge sollen sich an Patches anpassen. Der Helfer soll beim Verstehen helfen, die Entscheidung bleibt bei dir."""
+discord = """## Auf Discord
+
+Supporter bekommen eine eigene Rolle und Zugang zum Streamer-VC.
+
+Private Supporter-Channels im VIP-Bereich sind noch nicht freigeschaltet.
+
+Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests."""
+planned = """## Was noch kommt
+
+**Patch-Watchlist.** Du suchst dir Helden und Items aus und bekommst Bescheid, wenn ein Patch genau daran etwas ändert.
+
+**Weitere Match-Abfragen** im Steam Bot, soweit sie sich zuverlässig bauen lassen.
+
+Ein eigenes Spielerprofil baue ich nicht. Dafür gibt es Statlocker und ähnliche Seiten. Eine eigene Funktion für Tierlisten und Builds gibt es ebenfalls nicht."""
+free = """## Was kostenlos bleibt
+
+Der Server wird nicht kostenpflichtig. Kostenlos bleiben Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching.
+
+Bei Turnieren und Coaching bringt ein Abo keinen Vorteil."""
+pay = """## So kannst du unterstützen
+
+**Discord-Server-Abo.** Über den Servernamen, dort wo Discord die Server-Abos anbietet.
+
+**Server-Boost.** Zählt vorerst ebenfalls als Unterstützung.
+
+**Ko-fi.** Einmalig oder monatlich. Dafür gibt es die Unterstützer-Rolle für 31 Tage. Nach dem Eingang schalte ich sie manuell frei, in der Regel innerhalb eines Tages.
+
+**Stripe-Abo für den Server.** Ein eigenes Abo, getrennt von den Abos des Steam Bots und des Twitch Bots. Der Button erscheint erst, wenn die Zahlung deinem Discord-Account zugeordnet wird und die Rolle nach Ablauf oder Kündigung wieder entzogen wird.
+
+**Twitch-Bot-Abo.** Der Twitch Bot hat eigene kostenpflichtige Abos. Wer so ein Abo hat, soll dieselben Discord-Supporter-Vorteile bekommen, ohne ein zweites Abo. Die automatische Freischaltung ist noch nicht eingerichtet. Bis dahin reicht eine kurze Nachricht, dann trage ich es manuell ein."""
+thanks = "Danke, dass du den Server und die Projekte mitträgst."
 
 [buttons]
-donate = "☕ Auf Ko-fi spenden"
+donate = "Über Ko-fi unterstützen"
+stripe = "Supporter-Abo abschließen"
 
 [urls]
 donate = "https://ko-fi.com/deutschedeadlockcommunity"
+# stripe = "https://buy.stripe.com/…"
+
+[stripe]
+enabled = false

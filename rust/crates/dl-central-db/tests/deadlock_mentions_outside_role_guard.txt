@@ -1,0 +1,9 @@
+2026070410_brain_ingestion_tables.sql:4
+2026080801_steam_plus_priority_slots.sql:1
+2026081301_discord_role_connection_provider.sql:2
+2026091301_scrim_observer.sql:1
+2026092801_patchnotes_multiguild.sql:1
+20260930220100_steam_account_credentials.sql:1
+20260930220300_browser_credentials.sql:1
+20261003033000_invite_privacy_bridge.sql:2
+20261005120200_llm_usage_attempts.sql:3

@@ -97,6 +97,8 @@ pub enum ServerSyncErrorKind {
     Internal,
 }
 
+const HISTORY_SCAN_MAX_PAGES: usize = 5;
+
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
     kind: ServerSyncErrorKind,
@@ -328,13 +330,163 @@ struct RegelwerkBotMessage {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RangGuideDeleteOutcome {
     deleted: Vec<u64>,
+    already_gone: Vec<u64>,
     warnings: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct StaticV2DeleteOutcome {
     deleted: Vec<u64>,
+    already_gone: Vec<u64>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct OwnMessageScan {
+    message_ids: Vec<u64>,
+    truncated: bool,
+}
+
+fn scan_contains_every_stored_id(stored: &[u64], discovered: &[u64]) -> bool {
+    stored
+        .iter()
+        .all(|message_id| discovered.contains(message_id))
+}
+
+fn note_matched_scan_gaps(
+    warnings: &mut Vec<String>,
+    label: &str,
+    stored: &[u64],
+    discovered: &[u64],
+    expected: usize,
+    extra_delete_ids: &[u64],
+) {
+    if stored.len() != expected {
+        return;
+    }
+    if !extra_delete_ids.is_empty() {
+        warnings.push(format!(
+            "{label}: im Kanal liegen {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs. Beim Bestätigen werden sie gelöscht.",
+            extra_delete_ids.len()
+        ));
+    }
+    if !scan_contains_every_stored_id(stored, discovered) {
+        let missing = stored
+            .iter()
+            .filter(|message_id| !discovered.contains(message_id))
+            .count();
+        warnings.push(format!(
+            "{label}: {missing} gespeicherte Panel-Nachrichten fehlen im History-Scan. Beim Bestätigen werden sie bearbeitet oder neu gepostet."
+        ));
+    }
+}
+
+fn downgrade_planned_noop(action: &mut String) {
+    if action == "planned_no_op" {
+        *action = "planned_edit".to_string();
+    }
+}
+
+fn settle_voice_ux_forum_noops(
+    output: &mut voice_ux_publish::VoiceUxPublishOutput,
+    thread_exists: bool,
+) {
+    if thread_exists {
+        return;
+    }
+    downgrade_planned_noop(&mut output.forum_post.action);
+    for target in &mut output.targets {
+        for message in &mut target.messages {
+            downgrade_planned_noop(&mut message.action);
+        }
+    }
+    if let Some(thread_id) = output.forum_post.stored_thread_id {
+        output.warnings.push(format!(
+            "Voice-UX: Forum-Thread {thread_id} ist nicht mehr auffindbar. Beim Bestätigen wird er bearbeitet, bei 404 neu gepostet, und die Panels verlinken danach den neuen Thread."
+        ));
+    }
+}
+
+struct RangGuideLegacyScan {
+    candidates: Vec<rang_guide_publish::RangGuideLegacyCleanupCandidate>,
+    truncated: bool,
+}
+
+fn settle_scan_truncation(
+    label: &str,
+    truncated: bool,
+    decides_from_scan: bool,
+    warnings: &mut Vec<String>,
+) -> ServerSyncResult<()> {
+    if !truncated {
+        return Ok(());
+    }
+    if decides_from_scan {
+        return Err(ServerSyncError::bad_request(format!(
+            "{label}: Der History-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten, ältere eigene Panel-Nachrichten sind nicht geprüft. Apply blockiert gegen Duplikate."
+        )));
+    }
+    warnings.push(format!(
+        "{label}: Der History-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten. Ältere gespeicherte Nachrichten gelten als nicht gesehen und werden beim Bestätigen bearbeitet oder neu gepostet."
+    ));
+    Ok(())
+}
+
+fn stray_ids_outside_stored(stored: &[u64], discovered: &[u64]) -> Vec<u64> {
+    discovered
+        .iter()
+        .copied()
+        .filter(|message_id| !stored.contains(message_id))
+        .collect()
+}
+
+fn matched_count_extras(
+    stored: &[u64],
+    discovered: &[u64],
+    expected: usize,
+    label: &str,
+) -> ServerSyncResult<Vec<u64>> {
+    if stored.len() != expected {
+        return Ok(Vec::new());
+    }
+    match support_publish::plan_support_history(stored, discovered, expected) {
+        support_publish::SupportHistoryPlan::Proceed { extra_delete_ids } => Ok(extra_delete_ids),
+        support_publish::SupportHistoryPlan::Blocked { found, expected } => {
+            Err(ServerSyncError::bad_request(format!(
+                "{label}: gespeicherte IDs und History-Scan sind disjunkt ({found} eigene Nachrichten fuer {expected} erwartete); Apply blockiert gegen Duplikate."
+            )))
+        }
+        support_publish::SupportHistoryPlan::Adopt(_) => Ok(Vec::new()),
+    }
+}
+
+fn require_settled_extras(
+    label: &str,
+    extra_delete_ids: &[u64],
+    deleted: &[u64],
+    already_gone: &[u64],
+    delete_warnings: &[String],
+) -> ServerSyncResult<()> {
+    let unsettled = unsettled_support_deletes(extra_delete_ids, deleted, already_gone);
+    if unsettled.is_empty() {
+        return Ok(());
+    }
+    let reasons = if delete_warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" Gründe: {}", delete_warnings.join(" | "))
+    };
+    Err(ServerSyncError::internal(format!(
+        "{label}: Löschen unvollständig, eigene Panel-Nachrichten {unsettled:?} außerhalb der gespeicherten IDs bleiben im Kanal. Bereits gespeicherte Karten bleiben gültig. Ein erneutes Bestätigen versucht das Löschen wieder.{reasons}"
+    )))
+}
+
+fn unsettled_support_deletes(requested: &[u64], deleted: &[u64], already_gone: &[u64]) -> Vec<u64> {
+    requested
+        .iter()
+        .copied()
+        .filter(|message_id| !deleted.contains(message_id) && !already_gone.contains(message_id))
+        .collect()
 }
 
 struct RegelwerkOutputInput<'a> {
@@ -655,7 +807,7 @@ pub trait ServerSyncOps: Send + Sync {
         &self,
         _channel_id: u64,
         _bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<u64>> {
+    ) -> ServerSyncResult<OwnMessageScan> {
         unreachable!("only ServerSyncService uses Voice-UX internals")
     }
     async fn edit_voice_ux_message(
@@ -767,6 +919,7 @@ pub struct ServerSyncService {
     rang_guide_repo_root: PathBuf,
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
+    panel_apply_lock: tokio::sync::Mutex<()>,
 }
 
 impl ServerSyncService {
@@ -786,6 +939,7 @@ impl ServerSyncService {
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
+            panel_apply_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -805,6 +959,7 @@ impl ServerSyncService {
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
+            panel_apply_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -817,6 +972,47 @@ impl ServerSyncService {
         interface: Arc<dl_voice::lfg_panel::LfgPanelInterface>,
     ) {
         *self.lfg_panel_interface.write().await = Some(interface);
+    }
+
+    async fn apply_voice_ux_forum_post(
+        &self,
+        forum: &mut voice_ux_publish::VoiceUxForumPostOutput,
+        noop_proven: bool,
+    ) -> ServerSyncResult<()> {
+        let (thread_id, action) = match forum.stored_thread_id {
+            Some(thread_id) if noop_proven => (thread_id, "no_op"),
+            Some(thread_id) => match self.edit_voice_ux_forum_post(thread_id, forum).await? {
+                Some(_) => (thread_id, "edited"),
+                None => (self.post_voice_ux_forum_post(forum).await?, "posted"),
+            },
+            None => (self.post_voice_ux_forum_post(forum).await?, "posted"),
+        };
+        if let Err(err) = self
+            .store_voice_ux_forum_metadata(thread_id, &forum.payload_hash)
+            .await
+        {
+            if action == "posted" {
+                self.delete_new_voice_ux_forum_thread_best_effort(thread_id)
+                    .await;
+            }
+            return Err(err);
+        }
+        forum.thread_id = Some(thread_id);
+        forum.action = action.to_string();
+        match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
+            Ok(()) => forum.pinned = true,
+            Err(err) => forum.warnings.push(format!(
+                "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
+            )),
+        }
+        Ok(())
+    }
+
+    async fn delete_new_voice_ux_forum_thread_best_effort(&self, thread_id: u64) {
+        let url = self.discord_api_url(&format!("/channels/{thread_id}"));
+        if let Err(err) = self.discord_delete(url).await {
+            tracing::warn!(thread_id, error = %err, "Voice-UX: new forum thread could not be removed after a failed KV write");
+        }
     }
 
     fn discord_api_url(&self, path: &str) -> String {
@@ -1114,6 +1310,19 @@ impl ServerSyncService {
     ) -> ServerSyncResult<T> {
         let response = self.discord_get_response(url).await?;
         discord_regelwerk_json_response(response, "GET")
+    }
+
+    async fn voice_ux_forum_post_exists(&self, thread_id: u64) -> ServerSyncResult<bool> {
+        let response = self
+            .discord_get_response(
+                self.discord_api_url(&format!("/channels/{thread_id}/messages/{thread_id}")),
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let _: DiscordMessage = discord_regelwerk_json_response(response, "GET")?;
+        Ok(true)
     }
 
     async fn discord_get_response(&self, url: String) -> ServerSyncResult<DiscordRestResponse> {
@@ -1563,6 +1772,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -1579,6 +1789,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Rang-Guide: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -1624,12 +1835,17 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Rang-Guide: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(RangGuideDeleteOutcome { deleted, warnings })
+        Ok(RangGuideDeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn cleanup_new_rang_guide_posts_best_effort(&self, message_ids: &[u64]) {
@@ -2053,10 +2269,11 @@ impl ServerSyncService {
     async fn fetch_rang_guide_legacy_cleanup_candidates(
         &self,
         bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<rang_guide_publish::RangGuideLegacyCleanupCandidate>> {
+    ) -> ServerSyncResult<RangGuideLegacyScan> {
         let mut before: Option<u64> = None;
         let mut candidates = Vec::new();
-        for _ in 0..5 {
+        let mut truncated = false;
+        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
             let mut url = format!(
                 "{}/channels/{}/messages?limit=100",
                 self.discord_api_base.trim_end_matches('/'),
@@ -2097,24 +2314,27 @@ impl ServerSyncService {
             if page.len() < 100 {
                 break;
             }
+            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
         }
         candidates.sort_unstable_by_key(|candidate| candidate.message_id);
         candidates.dedup_by_key(|candidate| candidate.message_id);
-        Ok(candidates)
+        Ok(RangGuideLegacyScan {
+            candidates,
+            truncated,
+        })
     }
 
-    async fn fetch_rang_guide_v2_message_ids(
+    async fn scan_own_v2_messages(
         &self,
-        bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<u64>> {
+        channel_id: u64,
+        is_own: impl Fn(u64, u64, &DiscordMessage) -> bool + Send,
+    ) -> ServerSyncResult<OwnMessageScan> {
         let mut before: Option<u64> = None;
         let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-            );
+        let mut truncated = false;
+        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
+            let mut url =
+                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -2126,156 +2346,98 @@ impl ServerSyncService {
             for message in &page {
                 let message_id = parse_discord_id("Message-ID", &message.id)?;
                 let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                if is_own(message_id, author_id, message) {
+                    message_ids.push(message_id);
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
+        }
+        message_ids.sort_unstable();
+        message_ids.dedup();
+        Ok(OwnMessageScan {
+            message_ids,
+            truncated,
+        })
+    }
+
+    async fn fetch_rang_guide_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = rang_guide_publish::RangGuideV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if rang_guide_publish::is_rang_guide_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                rang_guide_publish::is_rang_guide_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
-    async fn fetch_regelwerk_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                regelwerk_publish::REGELWERK_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+    async fn fetch_regelwerk_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            regelwerk_publish::REGELWERK_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = regelwerk_publish::RegelwerkV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if regelwerk_publish::is_regelwerk_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                regelwerk_publish::is_regelwerk_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
-    async fn fetch_support_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                support_publish::SUPPORT_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+    async fn fetch_support_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            support_publish::SUPPORT_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = support_publish::SupportV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if support_publish::is_support_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                support_publish::is_support_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
-    async fn fetch_faq_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                faq_publish::FAQ_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+    async fn fetch_faq_v2_message_ids(&self, bot_user_id: u64) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(
+            faq_publish::FAQ_CHANNEL_ID,
+            |message_id, author_id, message| {
                 let candidate = faq_publish::FaqV2Message {
                     message_id,
                     author_id,
                     flags: message.flags,
                     components: message.components.clone(),
                 };
-                if faq_publish::is_faq_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+                faq_publish::is_faq_v2_message(&candidate, bot_user_id)
+            },
+        )
+        .await
     }
 
     async fn fetch_regelwerk_legacy_cleanup_candidate(
@@ -2333,6 +2495,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -2349,6 +2512,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Regelwerk: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -2394,12 +2558,102 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Regelwerk: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
+    }
+
+    async fn delete_faq_v2_messages(
+        &self,
+        stored_message_ids: &[u64],
+        bot_user_id: u64,
+    ) -> ServerSyncResult<StaticV2DeleteOutcome> {
+        let mut message_ids = stored_message_ids.to_vec();
+        message_ids.sort_unstable();
+        message_ids.dedup();
+
+        let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
+        let mut warnings = Vec::new();
+        for message_id in message_ids {
+            let fetch_url = self.discord_api_url(&format!(
+                "/channels/{}/messages/{message_id}",
+                faq_publish::FAQ_CHANNEL_ID
+            ));
+            let response = match self.discord_get_response(fetch_url).await {
+                Ok(response) => response,
+                Err(err) => {
+                    warnings.push(format!(
+                        "FAQ: gespeicherte Message-ID {message_id} konnte vor Delete nicht gelesen werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
+                warnings.push(format!(
+                    "FAQ: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
+                ));
+                continue;
+            }
+            let message: DiscordMessage = match discord_regelwerk_json_response(response, "GET") {
+                Ok(message) => message,
+                Err(err) => {
+                    warnings.push(format!(
+                        "FAQ: gespeicherte Message-ID {message_id} konnte vor Delete nicht validiert werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let author_id = match parse_discord_id("Message-Author-ID", &message.author.id) {
+                Ok(author_id) => author_id,
+                Err(err) => {
+                    warnings.push(format!(
+                        "FAQ: gespeicherte Message-ID {message_id} hat ungueltigen Autor und wird nicht geloescht: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let candidate = faq_publish::FaqV2Message {
+                message_id,
+                author_id,
+                flags: message.flags,
+                components: message.components,
+            };
+            if !faq_publish::is_faq_v2_message(&candidate, bot_user_id) {
+                warnings.push(format!(
+                    "FAQ: gespeicherte Message-ID {message_id} passt nicht zur eigenen V2-Signatur und wird nicht geloescht"
+                ));
+                continue;
+            }
+            if self
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{}/messages/{message_id}",
+                    faq_publish::FAQ_CHANNEL_ID
+                )))
+                .await?
+            {
+                deleted.push(message_id);
+            } else {
+                already_gone.push(message_id);
+                warnings.push(format!(
+                    "FAQ: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
+                ));
+            }
+        }
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn delete_support_messages(
@@ -2412,6 +2666,7 @@ impl ServerSyncService {
         message_ids.dedup();
 
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let fetch_url = self.discord_api_url(&format!(
@@ -2428,6 +2683,7 @@ impl ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Support: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -2473,12 +2729,17 @@ impl ServerSyncService {
             {
                 deleted.push(message_id);
             } else {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Support: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn cleanup_new_static_v2_posts_best_effort(
@@ -3482,6 +3743,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let live = dl_server_as_code::import::fetch_live_guild_model(
             self.adapter.http.as_ref(),
             self.guild_id,
@@ -3568,6 +3830,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         confirm: bool,
     ) -> ServerSyncResult<regelwerk_publish::RegelwerkPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX)
             .await?;
@@ -3592,9 +3855,22 @@ impl ServerSyncOps for ServerSyncService {
         output.legacy_cleanup_candidate = legacy_candidate;
         output.warnings.extend(legacy_warnings);
 
-        let discovered_v2_message_ids = self.fetch_regelwerk_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_regelwerk_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "Regelwerk",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
+        let extra_delete_ids = matched_count_extras(
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            "Regelwerk",
+        )?;
         if stored_message_ids.len() != expected_message_count {
             match discovered_v2_message_ids.len() {
                 0 => {}
@@ -3607,6 +3883,27 @@ impl ServerSyncOps for ServerSyncService {
                         "Regelwerk: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Messages fuer {expected_message_count} erwartete Messages; Apply blockiert gegen Duplikate."
                     )));
                 }
+            }
+        }
+
+        let ids_for_scan = if adopted_from_history {
+            discovered_v2_message_ids.clone()
+        } else {
+            stored_message_ids.clone()
+        };
+        let stored_visible =
+            scan_contains_every_stored_id(&ids_for_scan, &discovered_v2_message_ids);
+        note_matched_scan_gaps(
+            &mut output.warnings,
+            "Regelwerk",
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            &extra_delete_ids,
+        );
+        if !stored_visible {
+            for message in &mut output.messages {
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -3660,81 +3957,49 @@ impl ServerSyncOps for ServerSyncService {
                 .await;
                 return Err(err);
             }
+            let mut delete_ids = stored_message_ids.clone();
+            for message_id in &extra_delete_ids {
+                if !delete_ids.contains(message_id) {
+                    delete_ids.push(*message_id);
+                }
+            }
             let delete_outcome = self
-                .delete_regelwerk_v2_messages(&stored_message_ids, bot_user_id)
+                .delete_regelwerk_v2_messages(&delete_ids, bot_user_id)
                 .await?;
+            require_settled_extras(
+                "Regelwerk",
+                &extra_delete_ids,
+                &delete_outcome.deleted,
+                &delete_outcome.already_gone,
+                &delete_outcome.warnings,
+            )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
-        } else if !adopted_from_history
-            && regelwerk_publish::regelwerk_payload_is_unchanged(&output)
-        {
-            for message in &mut output.messages {
-                if let Some(message_id) = message.stored_message_id {
-                    message.action = "no_op".to_string();
-                    message.message_id = Some(message_id);
-                }
-            }
-            self.store_static_v2_metadata(
-                regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
-                regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
-                regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                &output.payload_hash,
-            )
-            .await?;
         } else {
-            let mut message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let stored_message_id = output.messages[message_index].stored_message_id;
-                if let Some(stored_message_id) = stored_message_id {
-                    if let Some(message_id) = self
-                        .edit_regelwerk_v2_message(
-                            stored_message_id,
-                            &output.messages[message_index],
-                        )
-                        .await?
-                    {
-                        message_ids.push(message_id);
-                        output.messages[message_index].action = if adopted_from_history {
-                            "adopted_edit".to_string()
-                        } else {
-                            "edited".to_string()
-                        };
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.edited_message_ids.push(message_id);
-                        continue;
-                    }
-                    output.warnings.push(format!(
-                        "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                }
-
-                let message_id = self
-                    .post_regelwerk_v2_message(&output.messages[message_index])
+            if !extra_delete_ids.is_empty() {
+                let delete_outcome = self
+                    .delete_regelwerk_v2_messages(&extra_delete_ids, bot_user_id)
                     .await?;
-                message_ids.push(message_id);
-                self.store_static_v2_message_id(
-                    regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
-                    message_index,
-                    message_id,
-                )
-                .await?;
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
+                require_settled_extras(
+                    "Regelwerk",
+                    &extra_delete_ids,
+                    &delete_outcome.deleted,
+                    &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
+                )?;
+                output.deleted_message_ids = delete_outcome.deleted;
+                output.warnings.extend(delete_outcome.warnings);
             }
-            if adopted_from_history {
-                self.replace_static_v2_message_ids_and_metadata(
-                    regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
-                    regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
-                    regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
-                    regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &message_ids,
-                )
-                .await?;
-            } else {
+            if !adopted_from_history
+                && stored_visible
+                && regelwerk_publish::regelwerk_payload_is_unchanged(&output)
+            {
+                for message in &mut output.messages {
+                    if let Some(message_id) = message.stored_message_id {
+                        message.action = "no_op".to_string();
+                        message.message_id = Some(message_id);
+                    }
+                }
                 self.store_static_v2_metadata(
                     regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
                     regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
@@ -3742,6 +4007,68 @@ impl ServerSyncOps for ServerSyncService {
                     &output.payload_hash,
                 )
                 .await?;
+            } else {
+                let mut message_ids = Vec::new();
+                for message_index in 0..output.messages.len() {
+                    let stored_message_id = output.messages[message_index].stored_message_id;
+                    if let Some(stored_message_id) = stored_message_id {
+                        if let Some(message_id) = self
+                            .edit_regelwerk_v2_message(
+                                stored_message_id,
+                                &output.messages[message_index],
+                            )
+                            .await?
+                        {
+                            message_ids.push(message_id);
+                            output.messages[message_index].action = if adopted_from_history {
+                                "adopted_edit".to_string()
+                            } else {
+                                "edited".to_string()
+                            };
+                            output.messages[message_index].message_id = Some(message_id);
+                            output.messages[message_index].stored_message_id = Some(message_id);
+                            output.edited_message_ids.push(message_id);
+                            continue;
+                        }
+                        output.warnings.push(format!(
+                        "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                    ));
+                    }
+
+                    let message_id = self
+                        .post_regelwerk_v2_message(&output.messages[message_index])
+                        .await?;
+                    message_ids.push(message_id);
+                    self.store_static_v2_message_id(
+                        regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                        message_index,
+                        message_id,
+                    )
+                    .await?;
+                    output.messages[message_index].action = "posted".to_string();
+                    output.messages[message_index].message_id = Some(message_id);
+                    output.messages[message_index].stored_message_id = Some(message_id);
+                    output.posted_message_ids.push(message_id);
+                }
+                if adopted_from_history {
+                    self.replace_static_v2_message_ids_and_metadata(
+                        regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
+                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+                        regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                        &message_ids,
+                    )
+                    .await?;
+                } else {
+                    self.store_static_v2_metadata(
+                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
+                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+                        regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -3753,6 +4080,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn support_apply(&self, confirm: bool) -> ServerSyncResult<SupportPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
             .await?;
@@ -3772,21 +4100,68 @@ impl ServerSyncOps for ServerSyncService {
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
-        let discovered_v2_message_ids = self.fetch_support_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_support_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "Support",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
-        if stored_message_ids.len() != expected_message_count {
-            match discovered_v2_message_ids.len() {
-                0 => {}
-                count if count == expected_message_count => {
-                    adopt_support_message_ids(&mut output, &discovered_v2_message_ids, confirm);
-                    adopted_from_history = true;
+        let extra_delete_ids = match support_publish::plan_support_history(
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+        ) {
+            support_publish::SupportHistoryPlan::Adopt(ids) => {
+                adopt_support_message_ids(&mut output, &ids, confirm);
+                adopted_from_history = true;
+                Vec::new()
+            }
+            support_publish::SupportHistoryPlan::Proceed { extra_delete_ids } => {
+                if !stored_message_ids.is_empty()
+                    && stored_message_ids.len() != expected_message_count
+                {
+                    output.warnings.push(format!(
+                        "Support: gespeichert sind {} Nachrichten, das Panel hat jetzt {expected_message_count}. Beim Bestätigen werden die alten Nachrichten ersetzt.",
+                        stored_message_ids.len()
+                    ));
                 }
-                count => {
-                    return Err(ServerSyncError::bad_request(format!(
-                        "Support: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Messages fuer {expected_message_count} erwartete Messages; Apply blockiert gegen Duplikate."
-                    )));
+                if stored_message_ids.is_empty() && !extra_delete_ids.is_empty() {
+                    output.warnings.push(format!(
+                        "Support: im Kanal liegen {} ältere Panel-Nachrichten ohne KV-Eintrag. Beim Bestätigen werden sie ersetzt.",
+                        extra_delete_ids.len()
+                    ));
                 }
+                extra_delete_ids
+            }
+            support_publish::SupportHistoryPlan::Blocked { found, expected } => {
+                return Err(ServerSyncError::bad_request(format!(
+                    "Support: History-Scan fand {found} eigene V2-Messages fuer {expected} erwartete Messages und die gespeicherten IDs passen nicht dazu; Apply blockiert gegen Duplikate."
+                )));
+            }
+        };
+
+        let ids_for_scan = if adopted_from_history {
+            discovered_v2_message_ids.clone()
+        } else {
+            stored_message_ids.clone()
+        };
+        let stored_visible =
+            scan_contains_every_stored_id(&ids_for_scan, &discovered_v2_message_ids);
+        note_matched_scan_gaps(
+            &mut output.warnings,
+            "Support",
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            &extra_delete_ids,
+        );
+        if !stored_visible {
+            for message in &mut output.messages {
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -3840,76 +4215,49 @@ impl ServerSyncOps for ServerSyncService {
                 .await;
                 return Err(err);
             }
+            let mut delete_ids = stored_message_ids.clone();
+            for message_id in &extra_delete_ids {
+                if !delete_ids.contains(message_id) {
+                    delete_ids.push(*message_id);
+                }
+            }
             let delete_outcome = self
-                .delete_support_messages(&stored_message_ids, bot_user_id)
+                .delete_support_messages(&delete_ids, bot_user_id)
                 .await?;
+            require_settled_extras(
+                "Support",
+                &extra_delete_ids,
+                &delete_outcome.deleted,
+                &delete_outcome.already_gone,
+                &delete_outcome.warnings,
+            )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
-        } else if !adopted_from_history && support_publish::support_payload_is_unchanged(&output) {
-            for message in &mut output.messages {
-                if let Some(message_id) = message.stored_message_id {
-                    message.action = "no_op".to_string();
-                    message.message_id = Some(message_id);
-                }
-            }
-            self.store_static_v2_metadata(
-                support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                support_publish::SUPPORT_PAYLOAD_FORMAT,
-                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                &output.payload_hash,
-            )
-            .await?;
         } else {
-            let mut message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let stored_message_id = output.messages[message_index].stored_message_id;
-                if let Some(stored_message_id) = stored_message_id {
-                    if let Some(message_id) = self
-                        .edit_support_message(stored_message_id, &output.messages[message_index])
-                        .await?
-                    {
-                        message_ids.push(message_id);
-                        output.messages[message_index].action = if adopted_from_history {
-                            "adopted_edit".to_string()
-                        } else {
-                            "edited".to_string()
-                        };
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.edited_message_ids.push(message_id);
-                        continue;
-                    }
-                    output.warnings.push(format!(
-                        "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                }
-
-                let message_id = self
-                    .post_support_message(&output.messages[message_index])
+            if !extra_delete_ids.is_empty() {
+                let delete_outcome = self
+                    .delete_support_messages(&extra_delete_ids, bot_user_id)
                     .await?;
-                message_ids.push(message_id);
-                self.store_static_v2_message_id(
-                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    message_index,
-                    message_id,
-                )
-                .await?;
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
+                require_settled_extras(
+                    "Support",
+                    &extra_delete_ids,
+                    &delete_outcome.deleted,
+                    &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
+                )?;
+                output.deleted_message_ids = delete_outcome.deleted;
+                output.warnings.extend(delete_outcome.warnings);
             }
-            if adopted_from_history {
-                self.replace_static_v2_message_ids_and_metadata(
-                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT,
-                    support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &message_ids,
-                )
-                .await?;
-            } else {
+            if !adopted_from_history
+                && stored_visible
+                && support_publish::support_payload_is_unchanged(&output)
+            {
+                for message in &mut output.messages {
+                    if let Some(message_id) = message.stored_message_id {
+                        message.action = "no_op".to_string();
+                        message.message_id = Some(message_id);
+                    }
+                }
                 self.store_static_v2_metadata(
                     support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
                     support_publish::SUPPORT_PAYLOAD_FORMAT,
@@ -3917,6 +4265,68 @@ impl ServerSyncOps for ServerSyncService {
                     &output.payload_hash,
                 )
                 .await?;
+            } else {
+                let mut message_ids = Vec::new();
+                for message_index in 0..output.messages.len() {
+                    let stored_message_id = output.messages[message_index].stored_message_id;
+                    if let Some(stored_message_id) = stored_message_id {
+                        if let Some(message_id) = self
+                            .edit_support_message(
+                                stored_message_id,
+                                &output.messages[message_index],
+                            )
+                            .await?
+                        {
+                            message_ids.push(message_id);
+                            output.messages[message_index].action = if adopted_from_history {
+                                "adopted_edit".to_string()
+                            } else {
+                                "edited".to_string()
+                            };
+                            output.messages[message_index].message_id = Some(message_id);
+                            output.messages[message_index].stored_message_id = Some(message_id);
+                            output.edited_message_ids.push(message_id);
+                            continue;
+                        }
+                        output.warnings.push(format!(
+                        "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                    ));
+                    }
+
+                    let message_id = self
+                        .post_support_message(&output.messages[message_index])
+                        .await?;
+                    message_ids.push(message_id);
+                    self.store_static_v2_message_id(
+                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                        message_index,
+                        message_id,
+                    )
+                    .await?;
+                    output.messages[message_index].action = "posted".to_string();
+                    output.messages[message_index].message_id = Some(message_id);
+                    output.messages[message_index].stored_message_id = Some(message_id);
+                    output.posted_message_ids.push(message_id);
+                }
+                if adopted_from_history {
+                    self.replace_static_v2_message_ids_and_metadata(
+                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+                        support_publish::SUPPORT_PAYLOAD_FORMAT,
+                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                        &message_ids,
+                    )
+                    .await?;
+                } else {
+                    self.store_static_v2_metadata(
+                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+                        support_publish::SUPPORT_PAYLOAD_FORMAT,
+                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -3926,6 +4336,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn faq_apply(&self, confirm: bool) -> ServerSyncResult<FaqPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(faq_publish::FAQ_MESSAGE_ID_PREFIX)
             .await?;
@@ -3945,9 +4356,22 @@ impl ServerSyncOps for ServerSyncService {
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
-        let discovered_v2_message_ids = self.fetch_faq_v2_message_ids(bot_user_id).await?;
+        let scan = self.fetch_faq_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "FAQ",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
+        let extra_delete_ids = matched_count_extras(
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            "FAQ",
+        )?;
         if stored_message_ids.len() != expected_message_count {
             match discovered_v2_message_ids.len() {
                 0 => {}
@@ -3960,6 +4384,27 @@ impl ServerSyncOps for ServerSyncService {
                         "FAQ: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Messages fuer {expected_message_count} erwartete Messages; Apply blockiert gegen Duplikate."
                     )));
                 }
+            }
+        }
+
+        let ids_for_scan = if adopted_from_history {
+            discovered_v2_message_ids.clone()
+        } else {
+            stored_message_ids.clone()
+        };
+        let stored_visible =
+            scan_contains_every_stored_id(&ids_for_scan, &discovered_v2_message_ids);
+        note_matched_scan_gaps(
+            &mut output.warnings,
+            "FAQ",
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            &extra_delete_ids,
+        );
+        if !stored_visible {
+            for message in &mut output.messages {
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -4011,71 +4456,49 @@ impl ServerSyncOps for ServerSyncService {
                 .await;
                 return Err(err);
             }
-        } else if !adopted_from_history && faq_publish::faq_payload_is_unchanged(&output) {
-            for message in &mut output.messages {
-                if let Some(message_id) = message.stored_message_id {
-                    message.action = "no_op".to_string();
-                    message.message_id = Some(message_id);
+            let mut delete_ids = stored_message_ids.clone();
+            for message_id in &extra_delete_ids {
+                if !delete_ids.contains(message_id) {
+                    delete_ids.push(*message_id);
                 }
             }
-            self.store_static_v2_metadata(
-                faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
-                faq_publish::FAQ_PAYLOAD_FORMAT,
-                faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                &output.payload_hash,
-            )
-            .await?;
+            let delete_outcome = self
+                .delete_faq_v2_messages(&delete_ids, bot_user_id)
+                .await?;
+            require_settled_extras(
+                "FAQ",
+                &extra_delete_ids,
+                &delete_outcome.deleted,
+                &delete_outcome.already_gone,
+                &delete_outcome.warnings,
+            )?;
+            output.deleted_message_ids = delete_outcome.deleted;
+            output.warnings.extend(delete_outcome.warnings);
         } else {
-            let mut message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let stored_message_id = output.messages[message_index].stored_message_id;
-                if let Some(stored_message_id) = stored_message_id {
-                    if let Some(message_id) = self
-                        .edit_faq_message(stored_message_id, &output.messages[message_index])
-                        .await?
-                    {
-                        message_ids.push(message_id);
-                        output.messages[message_index].action = if adopted_from_history {
-                            "adopted_edit".to_string()
-                        } else {
-                            "edited".to_string()
-                        };
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.edited_message_ids.push(message_id);
-                        continue;
-                    }
-                    output.warnings.push(format!(
-                        "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                }
-
-                let message_id = self
-                    .post_faq_message(&output.messages[message_index])
+            if !extra_delete_ids.is_empty() {
+                let delete_outcome = self
+                    .delete_faq_v2_messages(&extra_delete_ids, bot_user_id)
                     .await?;
-                message_ids.push(message_id);
-                self.store_static_v2_message_id(
-                    faq_publish::FAQ_MESSAGE_ID_PREFIX,
-                    message_index,
-                    message_id,
-                )
-                .await?;
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
+                require_settled_extras(
+                    "FAQ",
+                    &extra_delete_ids,
+                    &delete_outcome.deleted,
+                    &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
+                )?;
+                output.deleted_message_ids = delete_outcome.deleted;
+                output.warnings.extend(delete_outcome.warnings);
             }
-            if adopted_from_history {
-                self.replace_static_v2_message_ids_and_metadata(
-                    faq_publish::FAQ_MESSAGE_ID_PREFIX,
-                    faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
-                    faq_publish::FAQ_PAYLOAD_FORMAT,
-                    faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &message_ids,
-                )
-                .await?;
-            } else {
+            if !adopted_from_history
+                && stored_visible
+                && faq_publish::faq_payload_is_unchanged(&output)
+            {
+                for message in &mut output.messages {
+                    if let Some(message_id) = message.stored_message_id {
+                        message.action = "no_op".to_string();
+                        message.message_id = Some(message_id);
+                    }
+                }
                 self.store_static_v2_metadata(
                     faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
                     faq_publish::FAQ_PAYLOAD_FORMAT,
@@ -4083,6 +4506,65 @@ impl ServerSyncOps for ServerSyncService {
                     &output.payload_hash,
                 )
                 .await?;
+            } else {
+                let mut message_ids = Vec::new();
+                for message_index in 0..output.messages.len() {
+                    let stored_message_id = output.messages[message_index].stored_message_id;
+                    if let Some(stored_message_id) = stored_message_id {
+                        if let Some(message_id) = self
+                            .edit_faq_message(stored_message_id, &output.messages[message_index])
+                            .await?
+                        {
+                            message_ids.push(message_id);
+                            output.messages[message_index].action = if adopted_from_history {
+                                "adopted_edit".to_string()
+                            } else {
+                                "edited".to_string()
+                            };
+                            output.messages[message_index].message_id = Some(message_id);
+                            output.messages[message_index].stored_message_id = Some(message_id);
+                            output.edited_message_ids.push(message_id);
+                            continue;
+                        }
+                        output.warnings.push(format!(
+                        "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                    ));
+                    }
+
+                    let message_id = self
+                        .post_faq_message(&output.messages[message_index])
+                        .await?;
+                    message_ids.push(message_id);
+                    self.store_static_v2_message_id(
+                        faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                        message_index,
+                        message_id,
+                    )
+                    .await?;
+                    output.messages[message_index].action = "posted".to_string();
+                    output.messages[message_index].message_id = Some(message_id);
+                    output.messages[message_index].stored_message_id = Some(message_id);
+                    output.posted_message_ids.push(message_id);
+                }
+                if adopted_from_history {
+                    self.replace_static_v2_message_ids_and_metadata(
+                        faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                        faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
+                        faq_publish::FAQ_PAYLOAD_FORMAT,
+                        faq_publish::FAQ_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                        &message_ids,
+                    )
+                    .await?;
+                } else {
+                    self.store_static_v2_metadata(
+                        faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
+                        faq_publish::FAQ_PAYLOAD_FORMAT,
+                        faq_publish::FAQ_PAYLOAD_HASH_KEY,
+                        &output.payload_hash,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -4114,6 +4596,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let live = dl_server_as_code::import::fetch_live_guild_model(
             self.adapter.http.as_ref(),
             self.guild_id,
@@ -4287,6 +4770,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self.load_rang_guide_message_ids().await?;
         let stored_payload_format = self.load_rang_guide_payload_format().await?;
         let stored_payload_hash = self.load_rang_guide_payload_hash().await?;
@@ -4299,12 +4783,31 @@ impl ServerSyncOps for ServerSyncService {
         )
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
-        output.legacy_cleanup_candidates = self
+        let legacy_scan = self
             .fetch_rang_guide_legacy_cleanup_candidates(bot_user_id)
             .await?;
-        let discovered_v2_message_ids = self.fetch_rang_guide_v2_message_ids(bot_user_id).await?;
+        output.legacy_cleanup_candidates = legacy_scan.candidates;
+        if legacy_scan.truncated {
+            output.warnings.push(format!(
+                "Rang-Guide: Der Legacy-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten, ältere Legacy-Nachrichten sind nicht geprüft und bleiben stehen."
+            ));
+        }
+        let scan = self.fetch_rang_guide_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
+        settle_scan_truncation(
+            "Rang-Guide",
+            scan.truncated,
+            stored_message_ids.len() != expected_message_count,
+            &mut output.warnings,
+        )?;
+        let discovered_v2_message_ids = scan.message_ids;
         let mut adopted_from_history = false;
+        let extra_delete_ids = matched_count_extras(
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            "Rang-Guide",
+        )?;
         if stored_message_ids.len() != expected_message_count {
             match discovered_v2_message_ids.len() {
                 0 => {}
@@ -4321,6 +4824,27 @@ impl ServerSyncOps for ServerSyncService {
                         "Rang-Guide: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Guide-Messages fuer {expected_message_count} erwartete Messages; Apply blockiert gegen Duplikate."
                     )));
                 }
+            }
+        }
+
+        let ids_for_scan = if adopted_from_history {
+            discovered_v2_message_ids.clone()
+        } else {
+            stored_message_ids.clone()
+        };
+        let stored_visible =
+            scan_contains_every_stored_id(&ids_for_scan, &discovered_v2_message_ids);
+        note_matched_scan_gaps(
+            &mut output.warnings,
+            "Rang-Guide",
+            &stored_message_ids,
+            &discovered_v2_message_ids,
+            expected_message_count,
+            &extra_delete_ids,
+        );
+        if !stored_visible {
+            for message in &mut output.messages {
+                downgrade_planned_noop(&mut message.action);
             }
         }
 
@@ -4359,62 +4883,95 @@ impl ServerSyncOps for ServerSyncService {
                     .await;
                 return Err(err);
             }
+            let mut delete_ids = stored_message_ids.clone();
+            for message_id in &extra_delete_ids {
+                if !delete_ids.contains(message_id) {
+                    delete_ids.push(*message_id);
+                }
+            }
             let delete_outcome = self
-                .delete_rang_guide_messages(&stored_message_ids, bot_user_id)
+                .delete_rang_guide_messages(&delete_ids, bot_user_id)
                 .await?;
+            require_settled_extras(
+                "Rang-Guide",
+                &extra_delete_ids,
+                &delete_outcome.deleted,
+                &delete_outcome.already_gone,
+                &delete_outcome.warnings,
+            )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
-        } else if !adopted_from_history
-            && rang_guide_publish::rang_guide_payload_is_unchanged(&output)
-        {
-            for message in &mut output.messages {
-                if let Some(message_id) = message.stored_message_id {
-                    message.action = "no_op".to_string();
-                    message.message_id = Some(message_id);
-                }
-            }
-            self.store_rang_guide_metadata(&output).await?;
         } else {
-            let mut message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let stored_message_id = output.messages[message_index].stored_message_id;
-                if let Some(stored_message_id) = stored_message_id {
-                    if let Some(message_id) = self
-                        .edit_rang_guide_message(stored_message_id, &output.messages[message_index])
-                        .await?
-                    {
-                        message_ids.push(message_id);
-                        output.messages[message_index].action = if adopted_from_history {
-                            "adopted_edit".to_string()
-                        } else {
-                            "edited".to_string()
-                        };
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.edited_message_ids.push(message_id);
-                        continue;
+            if !extra_delete_ids.is_empty() {
+                let delete_outcome = self
+                    .delete_rang_guide_messages(&extra_delete_ids, bot_user_id)
+                    .await?;
+                require_settled_extras(
+                    "Rang-Guide",
+                    &extra_delete_ids,
+                    &delete_outcome.deleted,
+                    &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
+                )?;
+                output.deleted_message_ids = delete_outcome.deleted;
+                output.warnings.extend(delete_outcome.warnings);
+            }
+            if !adopted_from_history
+                && stored_visible
+                && rang_guide_publish::rang_guide_payload_is_unchanged(&output)
+            {
+                for message in &mut output.messages {
+                    if let Some(message_id) = message.stored_message_id {
+                        message.action = "no_op".to_string();
+                        message.message_id = Some(message_id);
                     }
-                    output.warnings.push(format!(
+                }
+                self.store_rang_guide_metadata(&output).await?;
+            } else {
+                let mut message_ids = Vec::new();
+                for message_index in 0..output.messages.len() {
+                    let stored_message_id = output.messages[message_index].stored_message_id;
+                    if let Some(stored_message_id) = stored_message_id {
+                        if let Some(message_id) = self
+                            .edit_rang_guide_message(
+                                stored_message_id,
+                                &output.messages[message_index],
+                            )
+                            .await?
+                        {
+                            message_ids.push(message_id);
+                            output.messages[message_index].action = if adopted_from_history {
+                                "adopted_edit".to_string()
+                            } else {
+                                "edited".to_string()
+                            };
+                            output.messages[message_index].message_id = Some(message_id);
+                            output.messages[message_index].stored_message_id = Some(message_id);
+                            output.edited_message_ids.push(message_id);
+                            continue;
+                        }
+                        output.warnings.push(format!(
                         "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
                     ));
-                }
+                    }
 
-                let message_id = self
-                    .post_rang_guide_message(&output.messages[message_index])
-                    .await?;
-                message_ids.push(message_id);
-                self.store_rang_guide_message_id(message_index, message_id)
-                    .await?;
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if adopted_from_history {
-                self.replace_rang_guide_message_ids_and_metadata(&output, &message_ids)
-                    .await?;
-            } else {
-                self.store_rang_guide_metadata(&output).await?;
+                    let message_id = self
+                        .post_rang_guide_message(&output.messages[message_index])
+                        .await?;
+                    message_ids.push(message_id);
+                    self.store_rang_guide_message_id(message_index, message_id)
+                        .await?;
+                    output.messages[message_index].action = "posted".to_string();
+                    output.messages[message_index].message_id = Some(message_id);
+                    output.messages[message_index].stored_message_id = Some(message_id);
+                    output.posted_message_ids.push(message_id);
+                }
+                if adopted_from_history {
+                    self.replace_rang_guide_message_ids_and_metadata(&output, &message_ids)
+                        .await?;
+                } else {
+                    self.store_rang_guide_metadata(&output).await?;
+                }
             }
         }
 
@@ -4478,44 +5035,17 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         channel_id: u64,
         bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<u64>> {
-        let mut before: Option<u64> = None;
-        let mut message_ids = Vec::new();
-        for _ in 0..5 {
-            let mut url =
-                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                let candidate = voice_ux_publish::VoiceUxV2Message {
-                    message_id,
-                    author_id,
-                    flags: message.flags,
-                    components: message.components.clone(),
-                };
-                if voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id) {
-                    message_ids.push(message_id);
-                }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-        }
-        message_ids.sort_unstable();
-        message_ids.dedup();
-        Ok(message_ids)
+    ) -> ServerSyncResult<OwnMessageScan> {
+        self.scan_own_v2_messages(channel_id, |message_id, author_id, message| {
+            let candidate = voice_ux_publish::VoiceUxV2Message {
+                message_id,
+                author_id,
+                flags: message.flags,
+                components: message.components.clone(),
+            };
+            voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id)
+        })
+        .await
     }
 
     async fn edit_voice_ux_message(
@@ -4621,6 +5151,7 @@ impl ServerSyncOps for ServerSyncService {
         message_ids.sort_unstable();
         message_ids.dedup();
         let mut deleted = Vec::new();
+        let mut already_gone = Vec::new();
         let mut warnings = Vec::new();
         for message_id in message_ids {
             let response = match self
@@ -4638,6 +5169,7 @@ impl ServerSyncOps for ServerSyncService {
                 }
             };
             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                already_gone.push(message_id);
                 warnings.push(format!(
                     "Voice-UX: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
                 ));
@@ -4680,9 +5212,18 @@ impl ServerSyncOps for ServerSyncService {
                 .await?
             {
                 deleted.push(message_id);
+            } else {
+                already_gone.push(message_id);
+                warnings.push(format!(
+                    "Voice-UX: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
+                ));
             }
         }
-        Ok(StaticV2DeleteOutcome { deleted, warnings })
+        Ok(StaticV2DeleteOutcome {
+            deleted,
+            already_gone,
+            warnings,
+        })
     }
 
     async fn cleanup_new_voice_ux_posts_best_effort(&self, channel_id: u64, message_ids: &[u64]) {
@@ -5008,6 +5549,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self.load_voice_ux_message_ids().await?;
         let stored_payload_formats = self.load_voice_ux_payload_formats().await?;
         let stored_payload_hashes = self.load_voice_ux_payload_hashes().await?;
@@ -5027,15 +5569,55 @@ impl ServerSyncOps for ServerSyncService {
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
+        let mut voice_extras = Vec::new();
+        let mut voice_scans = Vec::new();
+        let mut voice_adopted = Vec::new();
         for target_index in 0..output.targets.len() {
             let channel_id = output.targets[target_index].channel_id;
-            let discovered = self
+            let scan = self
                 .fetch_voice_ux_v2_message_ids(channel_id, bot_user_id)
                 .await?;
             let expected = output.targets[target_index].messages.len();
-            // Adoption nur bei komplett verlorenem KV; ein Format-/Layoutwechsel mit
-            // intaktem KV (Länge ≠ erwartet) läuft über den Repost-Pfad, der die
-            // gespeicherten alten Messages selbst abräumt.
+            let stored_ids = output.targets[target_index].stored_message_ids.clone();
+            settle_scan_truncation(
+                "Voice-UX",
+                scan.truncated,
+                stored_ids.is_empty(),
+                &mut output.warnings,
+            )?;
+            let discovered = scan.message_ids;
+            let extras = if !stored_ids.is_empty() && stored_ids.len() != expected {
+                let strays = stray_ids_outside_stored(&stored_ids, &discovered);
+                if !strays.is_empty() {
+                    output.warnings.push(format!(
+                        "Voice-UX: in Kanal {channel_id} liegen {} eigene Panel-Nachrichten außerhalb der gespeicherten IDs. Beim Bestätigen werden sie gelöscht.",
+                        strays.len()
+                    ));
+                }
+                strays
+            } else {
+                matched_count_extras(&stored_ids, &discovered, expected, "Voice-UX")?
+            };
+            note_matched_scan_gaps(
+                &mut output.warnings,
+                "Voice-UX",
+                &output.targets[target_index].stored_message_ids,
+                &discovered,
+                expected,
+                &extras,
+            );
+            let stored_visible = scan_contains_every_stored_id(
+                &output.targets[target_index].stored_message_ids,
+                &discovered,
+            );
+            if !stored_visible {
+                for message in &mut output.targets[target_index].messages {
+                    downgrade_planned_noop(&mut message.action);
+                }
+            }
+            voice_extras.push(extras);
+            voice_scans.push(discovered.clone());
+            let mut adopted_from_history = false;
             if output.targets[target_index].stored_message_ids.is_empty() {
                 match discovered.len() {
                     0 => {}
@@ -5045,6 +5627,7 @@ impl ServerSyncOps for ServerSyncService {
                             &discovered,
                             confirm,
                         );
+                        adopted_from_history = true;
                         output.warnings.push(format!(
                             "Voice-UX: KV-Message-IDs fuer Kanal {channel_id} fehlen/unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered:?}"
                         ));
@@ -5056,6 +5639,7 @@ impl ServerSyncOps for ServerSyncService {
                     }
                 }
             }
+            voice_adopted.push(adopted_from_history);
         }
 
         let (legacy_candidates, legacy_warnings) = self
@@ -5064,11 +5648,32 @@ impl ServerSyncOps for ServerSyncService {
         output.legacy_cleanup_candidates = legacy_candidates;
         output.warnings.extend(legacy_warnings);
 
+        let thread_exists = match output.forum_post.stored_thread_id {
+            Some(thread_id) => self.voice_ux_forum_post_exists(thread_id).await?,
+            None => false,
+        };
+        let forum_noop_proven = thread_exists
+            && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post);
+        settle_voice_ux_forum_noops(&mut output, thread_exists);
+
         if !confirm {
             return Ok(output);
         }
 
-        for target_index in 0..output.targets.len() {
+        self.apply_voice_ux_forum_post(&mut output.forum_post, forum_noop_proven)
+            .await?;
+        if let Some(thread_id) = output.forum_post.thread_id {
+            if output.forum_post.stored_thread_id != Some(thread_id) {
+                voice_ux_publish::relink_voice_ux_forum_thread(
+                    &self.rang_guide_repo_root,
+                    &mut output,
+                    thread_id,
+                )
+                .map_err(ServerSyncError::bad_request)?;
+            }
+        }
+
+        for (target_index, extra_delete_ids) in voice_extras.iter().enumerate() {
             if output.targets[target_index].repost_required {
                 let channel_id = output.targets[target_index].channel_id;
                 let old_ids = output.targets[target_index].stored_message_ids.clone();
@@ -5111,74 +5716,115 @@ impl ServerSyncOps for ServerSyncService {
                         .await;
                     return Err(err);
                 }
+                let mut delete_ids = old_ids;
+                for message_id in extra_delete_ids {
+                    if !delete_ids.contains(message_id) {
+                        delete_ids.push(*message_id);
+                    }
+                }
                 let delete_outcome = self
-                    .delete_voice_ux_messages(channel_id, &old_ids, bot_user_id)
+                    .delete_voice_ux_messages(channel_id, &delete_ids, bot_user_id)
                     .await?;
+                require_settled_extras(
+                    "Voice-UX",
+                    extra_delete_ids,
+                    &delete_outcome.deleted,
+                    &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
+                )?;
                 output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
-            } else if voice_ux_publish::voice_ux_target_payload_is_unchanged(
-                &output.targets[target_index],
-            ) {
-                for message in &mut output.targets[target_index].messages {
-                    if let Some(message_id) = message.stored_message_id {
-                        message.action = "no_op".to_string();
-                        message.message_id = Some(message_id);
-                    }
-                }
-                self.store_voice_ux_target_metadata(&output.targets[target_index])
-                    .await?;
             } else {
-                let channel_id = output.targets[target_index].channel_id;
-                let mut message_ids = Vec::new();
-                for message_index in 0..output.targets[target_index].messages.len() {
-                    let stored_message_id =
-                        output.targets[target_index].messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_voice_ux_message(
-                                channel_id,
-                                stored_message_id,
-                                &output.targets[target_index].messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            let message = &mut output.targets[target_index].messages[message_index];
-                            message.action = "edited".to_string();
+                if !extra_delete_ids.is_empty() {
+                    let channel_id = output.targets[target_index].channel_id;
+                    let delete_outcome = self
+                        .delete_voice_ux_messages(channel_id, extra_delete_ids, bot_user_id)
+                        .await?;
+                    require_settled_extras(
+                        "Voice-UX",
+                        extra_delete_ids,
+                        &delete_outcome.deleted,
+                        &delete_outcome.already_gone,
+                        &delete_outcome.warnings,
+                    )?;
+                    output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
+                    output.warnings.extend(delete_outcome.warnings);
+                }
+                let stored_visible = scan_contains_every_stored_id(
+                    &output.targets[target_index].stored_message_ids,
+                    &voice_scans[target_index],
+                );
+                if !voice_adopted[target_index]
+                    && stored_visible
+                    && voice_ux_publish::voice_ux_target_payload_is_unchanged(
+                        &output.targets[target_index],
+                    )
+                {
+                    for message in &mut output.targets[target_index].messages {
+                        if let Some(message_id) = message.stored_message_id {
+                            message.action = "no_op".to_string();
                             message.message_id = Some(message_id);
-                            message.stored_message_id = Some(message_id);
-                            output.targets[target_index]
-                                .edited_message_ids
-                                .push(message_id);
-                            continue;
                         }
-                        output.warnings.push(format!(
+                    }
+                    self.store_voice_ux_target_metadata(&output.targets[target_index])
+                        .await?;
+                } else {
+                    let channel_id = output.targets[target_index].channel_id;
+                    let mut message_ids = Vec::new();
+                    for message_index in 0..output.targets[target_index].messages.len() {
+                        let stored_message_id =
+                            output.targets[target_index].messages[message_index].stored_message_id;
+                        if let Some(stored_message_id) = stored_message_id {
+                            if let Some(message_id) = self
+                                .edit_voice_ux_message(
+                                    channel_id,
+                                    stored_message_id,
+                                    &output.targets[target_index].messages[message_index],
+                                )
+                                .await?
+                            {
+                                message_ids.push(message_id);
+                                let message =
+                                    &mut output.targets[target_index].messages[message_index];
+                                message.action = "edited".to_string();
+                                message.message_id = Some(message_id);
+                                message.stored_message_id = Some(message_id);
+                                output.targets[target_index]
+                                    .edited_message_ids
+                                    .push(message_id);
+                                continue;
+                            }
+                            output.warnings.push(format!(
                             "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
                         ));
-                    }
-                    let message_id = self
-                        .post_voice_ux_message(
-                            channel_id,
-                            &output.targets[target_index].messages[message_index],
+                        }
+                        let message_id = self
+                            .post_voice_ux_message(
+                                channel_id,
+                                &output.targets[target_index].messages[message_index],
+                            )
+                            .await?;
+                        message_ids.push(message_id);
+                        self.store_static_v2_message_id(
+                            &voice_ux_publish::voice_ux_message_id_prefix(channel_id),
+                            message_index,
+                            message_id,
                         )
                         .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        &voice_ux_publish::voice_ux_message_id_prefix(channel_id),
-                        message_index,
-                        message_id,
+                        let message = &mut output.targets[target_index].messages[message_index];
+                        message.action = "posted".to_string();
+                        message.message_id = Some(message_id);
+                        message.stored_message_id = Some(message_id);
+                        output.targets[target_index]
+                            .posted_message_ids
+                            .push(message_id);
+                    }
+                    self.replace_voice_ux_target_metadata(
+                        &output.targets[target_index],
+                        &message_ids,
                     )
                     .await?;
-                    let message = &mut output.targets[target_index].messages[message_index];
-                    message.action = "posted".to_string();
-                    message.message_id = Some(message_id);
-                    message.stored_message_id = Some(message_id);
-                    output.targets[target_index]
-                        .posted_message_ids
-                        .push(message_id);
                 }
-                self.replace_voice_ux_target_metadata(&output.targets[target_index], &message_ids)
-                    .await?;
             }
 
             let channel_id = output.targets[target_index].channel_id;
@@ -5205,72 +5851,6 @@ impl ServerSyncOps for ServerSyncService {
                 }
             }
             output.targets[target_index].repost_required = false;
-        }
-
-        if output.forum_post.stored_thread_id.is_some()
-            && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post)
-        {
-            if let Some(thread_id) = output.forum_post.stored_thread_id {
-                output.forum_post.thread_id = Some(thread_id);
-                output.forum_post.action = "no_op".to_string();
-                self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
-                    .await?;
-                match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
-                    Ok(()) => output.forum_post.pinned = true,
-                    Err(err) => output.forum_post.warnings.push(format!(
-                        "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
-                    )),
-                }
-            }
-        } else if let Some(thread_id) = output.forum_post.stored_thread_id {
-            match self
-                .edit_voice_ux_forum_post(thread_id, &output.forum_post)
-                .await?
-            {
-                Some(_) => {
-                    output.forum_post.thread_id = Some(thread_id);
-                    output.forum_post.action = "edited".to_string();
-                    self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
-                        .await?;
-                    match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
-                        Ok(()) => output.forum_post.pinned = true,
-                        Err(err) => output.forum_post.warnings.push(format!(
-                            "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
-                        )),
-                    }
-                }
-                None => {
-                    let new_thread_id = self.post_voice_ux_forum_post(&output.forum_post).await?;
-                    output.forum_post.thread_id = Some(new_thread_id);
-                    output.forum_post.action = "posted".to_string();
-                    self.store_voice_ux_forum_metadata(
-                        new_thread_id,
-                        &output.forum_post.payload_hash,
-                    )
-                    .await?;
-                    match self
-                        .pin_voice_ux_forum_thread_best_effort(new_thread_id)
-                        .await
-                    {
-                        Ok(()) => output.forum_post.pinned = true,
-                        Err(err) => output.forum_post.warnings.push(format!(
-                            "Forum-Thread {new_thread_id} konnte nicht gepinnt werden: {err}"
-                        )),
-                    }
-                }
-            }
-        } else {
-            let thread_id = self.post_voice_ux_forum_post(&output.forum_post).await?;
-            output.forum_post.thread_id = Some(thread_id);
-            output.forum_post.action = "posted".to_string();
-            self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
-                .await?;
-            match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
-                Ok(()) => output.forum_post.pinned = true,
-                Err(err) => output.forum_post.warnings.push(format!(
-                    "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
-                )),
-            }
         }
 
         output.warnings.extend(output.forum_post.warnings.clone());
@@ -8148,7 +8728,7 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
@@ -8186,6 +8766,9 @@ mod tests {
         post_calls: Mutex<Vec<u64>>,
         post_bodies: Mutex<Vec<(u64, Value)>>,
         patch_calls: Mutex<Vec<u64>>,
+        patch_bodies: Mutex<Vec<(u64, Value)>>,
+        get_overrides: Mutex<BTreeMap<u64, StatusCode>>,
+        missing_on_delete: Mutex<HashSet<u64>>,
         pin_calls: Mutex<Vec<(u64, u64)>>,
         patched_channels: Mutex<Vec<(u64, Value)>>,
         delete_calls: Mutex<Vec<u64>>,
@@ -8562,6 +9145,9 @@ mod tests {
             post_calls: Mutex::new(Vec::new()),
             post_bodies: Mutex::new(Vec::new()),
             patch_calls: Mutex::new(Vec::new()),
+            patch_bodies: Mutex::new(Vec::new()),
+            get_overrides: Mutex::new(BTreeMap::new()),
+            missing_on_delete: Mutex::new(HashSet::new()),
             pin_calls: Mutex::new(Vec::new()),
             patched_channels: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
@@ -8612,6 +9198,7 @@ mod tests {
 
     async fn fake_discord_list_messages(
         State(state): State<Arc<FakeDiscordState>>,
+        AxumPath(channel_id): AxumPath<u64>,
         Query(query): Query<HashMap<String, String>>,
     ) -> Json<Vec<Value>> {
         let before = query
@@ -8622,12 +9209,19 @@ mod tests {
             .get("limit")
             .and_then(|raw| raw.parse::<usize>().ok())
             .unwrap_or(100);
+        let channel_key = channel_id.to_string();
         let messages = state.messages.lock().expect("messages");
         Json(
             messages
                 .iter()
                 .rev()
-                .filter(|(message_id, _)| **message_id < before)
+                .filter(|(message_id, message)| {
+                    **message_id < before
+                        && message
+                            .get("channel_id")
+                            .and_then(Value::as_str)
+                            .is_none_or(|stored| stored == channel_key)
+                })
                 .take(limit)
                 .map(|(_, message)| message.clone())
                 .collect(),
@@ -8638,6 +9232,15 @@ mod tests {
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
     ) -> Response {
+        if let Some(status) = state
+            .get_overrides
+            .lock()
+            .expect("get overrides")
+            .get(&message_id)
+            .copied()
+        {
+            return (status, Json(json!({"message": "forced get status"}))).into_response();
+        }
         state
             .messages
             .lock()
@@ -8695,6 +9298,7 @@ mod tests {
                             .cloned()
                             .unwrap_or_else(|| json!([])),
                         "embeds": [],
+                        "channel_id": channel_id.to_string(),
                     }),
                 );
                 Json(json!({"id": message_id.to_string()})).into_response()
@@ -8744,13 +9348,18 @@ mod tests {
     async fn fake_discord_patch_message(
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
-        _body: Bytes,
+        body: Bytes,
     ) -> Response {
         state
             .patch_calls
             .lock()
             .expect("patch calls")
             .push(message_id);
+        state.patch_bodies.lock().expect("patch bodies").push((
+            message_id,
+            serde_json::from_slice::<Value>(&body)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+        ));
         if state
             .messages
             .lock()
@@ -8772,6 +9381,14 @@ mod tests {
             .lock()
             .expect("delete calls")
             .push(message_id);
+        if state
+            .missing_on_delete
+            .lock()
+            .expect("missing on delete")
+            .remove(&message_id)
+        {
+            state.messages.lock().expect("messages").remove(&message_id);
+        }
         let removed = state
             .messages
             .lock()
@@ -9209,79 +9826,31 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     fn mock_support_output(dry_run: bool) -> SupportPublishOutput {
-        let payload = support_publish::SupportMessagePayload {
-            flags: support_publish::SUPPORT_COMPONENTS_V2_FLAG,
-            allowed_mentions: support_publish::SupportAllowedMentions { parse: Vec::new() },
-            components: vec![
-                json!({
-                    "type": 12,
-                    "id": support_publish::SUPPORT_COMPONENT_ID_HERO_MEDIA,
-                    "items": [{"media": {"url": "attachment://support-hero.png"}}],
-                }),
-                json!({
-                    "type": 17,
-                    "id": support_publish::SUPPORT_COMPONENT_ID_MAIN_CONTAINER,
-                    "accent_color": support_publish::SUPPORT_ACCENT_GOLD,
-                    "components": [
-                        {
-                            "type": 10,
-                            "content": support_publish::SUPPORT_TITLE,
-                        },
-                        {
-                            "type": 1,
-                            "components": [{
-                                "type": 2,
-                                "style": 5,
-                                "label": support_publish::SUPPORT_DONATE_BUTTON_LABEL,
-                                "url": support_publish::SUPPORT_DONATE_URL_DEFAULT,
-                            }],
-                        },
-                    ],
-                }),
-            ],
-            attachments: vec![support_publish::SupportPayloadAttachment {
-                id: 0,
-                filename: support_publish::SUPPORT_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    support_publish::SUPPORT_BANNER_DIR,
-                    support_publish::SUPPORT_HERO_FILENAME
-                ),
-            }],
-        };
-        SupportPublishOutput {
-            guild_id: GUILD_ID,
-            channel_id: support_publish::SUPPORT_CHANNEL_ID,
-            channel_name: support_publish::SUPPORT_CHANNEL_NAME.to_string(),
-            dry_run,
-            payload_format: support_publish::SUPPORT_PAYLOAD_FORMAT.to_string(),
-            stored_payload_format: Some(support_publish::SUPPORT_PAYLOAD_FORMAT.to_string()),
-            payload_hash: "support-hash".to_string(),
-            stored_payload_hash: Some("support-hash".to_string()),
-            repost_required: false,
-            warnings: Vec::new(),
-            messages: vec![support_publish::SupportMessageOutput {
-                message_index: 0,
-                message_key: "support".to_string(),
-                action: if dry_run { "planned_edit" } else { "no_op" }.to_string(),
-                stored_message_id: Some(8401),
-                message_id: Some(8401),
-                banner: Some(support_publish::SupportBannerOutput {
-                    filename: support_publish::SUPPORT_HERO_FILENAME.to_string(),
-                    relative_path: format!(
-                        "{}/{}",
-                        support_publish::SUPPORT_BANNER_DIR,
-                        support_publish::SUPPORT_HERO_FILENAME
-                    ),
-                    present: true,
-                }),
-                payload,
-            }],
-            stored_message_ids: vec![8401],
-            posted_message_ids: Vec::new(),
-            edited_message_ids: Vec::new(),
-            deleted_message_ids: Vec::new(),
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let stored = [8401, 8402, 8403];
+        let planned = support_publish::build_support_publish_output(
+            &repo,
+            &stored,
+            Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("support fixture");
+        let mut output = support_publish::build_support_publish_output(
+            &repo,
+            &stored,
+            Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
+            Some(planned.payload_hash.as_str()),
+            true,
+        )
+        .expect("support fixture");
+        output.dry_run = dry_run;
+        if !dry_run {
+            for message in &mut output.messages {
+                message.action = "no_op".to_string();
+            }
         }
+        output
     }
 
     fn mock_faq_output(dry_run: bool) -> FaqPublishOutput {
@@ -10815,6 +11384,126 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
     }
 
+    #[test]
+    fn unsettled_support_deletes_behaelt_lesefehler_und_vergisst_weg() {
+        let outcome = StaticV2DeleteOutcome {
+            deleted: vec![1],
+            already_gone: vec![2],
+            warnings: vec![
+                "Support: gespeicherte Message-ID 3 konnte vor Delete nicht gelesen werden: timeout"
+                    .to_string(),
+            ],
+        };
+        assert_eq!(
+            unsettled_support_deletes(&[1, 2, 3], &outcome.deleted, &outcome.already_gone),
+            vec![3]
+        );
+        let unsettled = require_settled_extras("Support", &[3], &[], &[], &outcome.warnings)
+            .expect_err("offen");
+        assert_eq!(unsettled.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(unsettled.to_string().contains("[3]"), "{unsettled}");
+        assert!(unsettled.to_string().contains("timeout"), "{unsettled}");
+    }
+
+    fn service_without_database(discord_api_base: String) -> Arc<ServerSyncService> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .expect("lazy pool");
+        ServerSyncService::new_for_test(pool, discord_api_base, std::env::temp_dir())
+    }
+
+    fn own_history(count: u64) -> Vec<Value> {
+        (1..=count)
+            .map(|id| fake_discord_message(id, 42, 0, Vec::new(), Vec::new()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn history_scans_melden_den_abbruch_nach_der_letzten_seite() {
+        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        for (count, expected_ids, expected_truncated) in
+            [(cap - 1, cap - 1, false), (cap + 1, cap, true)]
+        {
+            let fake = spawn_fake_discord(42, own_history(count), Vec::new()).await;
+            let service = service_without_database(fake.base_url.clone());
+
+            let scan = service
+                .scan_own_v2_messages(7, |_, _, _| true)
+                .await
+                .expect("shared scan");
+            assert_eq!(scan.message_ids.len() as u64, expected_ids);
+            assert_eq!(scan.truncated, expected_truncated);
+
+            let legacy = service
+                .fetch_rang_guide_legacy_cleanup_candidates(42)
+                .await
+                .expect("legacy scan");
+            assert_eq!(legacy.truncated, expected_truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn panel_writes_warten_auf_die_apply_sperre() {
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = service_without_database(fake.base_url.clone());
+        let _held = service.panel_apply_lock.lock().await;
+        let wait = std::time::Duration::from_secs(1);
+
+        let (regelwerk_publish, regelwerk, support, faq, welcome, rang_guide, router) = tokio::join!(
+            tokio::time::timeout(wait, service.regelwerk_publish(false)),
+            tokio::time::timeout(wait, service.regelwerk_apply(false)),
+            tokio::time::timeout(wait, service.support_apply(false)),
+            tokio::time::timeout(wait, service.faq_apply(false)),
+            tokio::time::timeout(wait, service.welcome_apply(false)),
+            tokio::time::timeout(wait, service.rang_guide_apply(false)),
+            tokio::time::timeout(wait, service.router_apply(false)),
+        );
+
+        assert!(regelwerk_publish.is_err(), "regelwerk_publish");
+        assert!(regelwerk.is_err(), "regelwerk_apply");
+        assert!(support.is_err(), "support_apply");
+        assert!(faq.is_err(), "faq_apply");
+        assert!(welcome.is_err(), "welcome_apply");
+        assert!(rang_guide.is_err(), "rang_guide_apply");
+        assert!(router.is_err(), "router_apply");
+    }
+
+    #[test]
+    fn abgeschnittener_scan_blockt_nur_wenn_er_entscheidet() {
+        let mut warnings = Vec::new();
+        settle_scan_truncation("Support", false, true, &mut warnings).expect("vollstaendig");
+        assert!(warnings.is_empty());
+        settle_scan_truncation("Support", true, false, &mut warnings).expect("gespeichert");
+        assert_eq!(warnings.len(), 1);
+        let blocked =
+            settle_scan_truncation("Support", true, true, &mut warnings).expect_err("blockt");
+        assert!(blocked.to_string().contains("blockiert"), "{blocked}");
+    }
+
+    #[test]
+    fn layoutwechsel_loescht_nur_eigene_ids_ausserhalb_des_speichers() {
+        assert_eq!(stray_ids_outside_stored(&[1], &[1, 2, 3]), vec![2, 3]);
+        assert!(stray_ids_outside_stored(&[1, 2], &[1, 2]).is_empty());
+        assert!(stray_ids_outside_stored(&[1, 2], &[]).is_empty());
+    }
+
+    #[test]
+    fn scan_laesst_noop_nur_zu_wenn_jede_gespeicherte_id_sichtbar_ist() {
+        assert!(scan_contains_every_stored_id(&[1, 2, 3], &[9, 1, 2, 3]));
+        assert!(!scan_contains_every_stored_id(&[1, 2, 3], &[1, 2]));
+        assert!(!scan_contains_every_stored_id(&[1, 2, 3], &[]));
+        assert!(scan_contains_every_stored_id(&[], &[]));
+        let mut warnings = Vec::new();
+        note_matched_scan_gaps(&mut warnings, "Support", &[1, 2, 3], &[1, 99], 3, &[99]);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("gelöscht"));
+        assert!(warnings[1].contains("fehlen im History-Scan"));
+        let mut action = "planned_no_op".to_string();
+        downgrade_planned_noop(&mut action);
+        assert_eq!(action, "planned_edit");
+    }
+
     #[tokio::test]
     async fn support_apply_http_ist_dry_run_default_und_liefert_v2_payload() {
         let service = Arc::new(MockServerSync::default());
@@ -10828,7 +11517,18 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let (status, body) = response_json(dry_run).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["result"]["dry_run"], true);
-        assert_eq!(body["result"]["messages"][0]["action"], "planned_edit");
+        assert_eq!(
+            body["result"]["messages"]
+                .as_array()
+                .expect("messages")
+                .len(),
+            3
+        );
+        assert_eq!(body["result"]["messages"][0]["action"], "planned_no_op");
+        assert_eq!(
+            body["result"]["messages"][0]["payload"]["components"][0]["type"],
+            17
+        );
         assert_eq!(
             body["result"]["payload_format"],
             support_publish::SUPPORT_PAYLOAD_FORMAT
@@ -10844,9 +11544,13 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .len(),
             0
         );
+        let pay_children = body["result"]["messages"][2]["payload"]["components"][0]["components"]
+            .as_array()
+            .expect("pay children");
+        let pay_row = pay_children.last().expect("pay buttons");
+        assert_eq!(pay_row["type"], 1);
         assert_eq!(
-            body["result"]["messages"][0]["payload"]["components"][1]["components"][1]
-                ["components"][0]["url"],
+            pay_row["components"][0]["url"],
             support_publish::SUPPORT_DONATE_URL_DEFAULT
         );
 
@@ -11448,6 +12152,452 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[tokio::test]
+    async fn service_support_fehlende_karte_wird_nicht_als_noop_bestaetigt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let stored = [9701_u64, 9702, 9703];
+        let planned = support_publish::build_support_publish_output(
+            repo.path(),
+            &stored,
+            Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("planned");
+        for (index, message_id) in stored.iter().copied().enumerate() {
+            set_serversync_kv(
+                db.pool(),
+                &support_publish::support_message_id_key(index),
+                &message_id.to_string(),
+            )
+            .await;
+        }
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+            support_publish::SUPPORT_PAYLOAD_FORMAT,
+        )
+        .await;
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+            &planned.payload_hash,
+        )
+        .await;
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let dry_run = service.support_apply(false).await.expect("dry-run");
+        assert!(dry_run
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("fehlen im History-Scan")));
+        assert!(dry_run
+            .messages
+            .iter()
+            .all(|message| message.action == "planned_edit"));
+
+        let output = service.support_apply(true).await.expect("apply");
+        assert!(output
+            .messages
+            .iter()
+            .all(|message| message.action != "no_op"));
+        assert_eq!(output.posted_message_ids.len(), stored.len());
+    }
+
+    async fn seed_static_panel_kv(
+        pool: &PgPool,
+        id_key: fn(usize) -> String,
+        stored: &[u64],
+        format_key: &str,
+        format_value: &str,
+        hash_key: &str,
+        payload_hash: &str,
+    ) {
+        for (index, message_id) in stored.iter().copied().enumerate() {
+            set_serversync_kv(pool, &id_key(index), &message_id.to_string()).await;
+        }
+        set_serversync_kv(pool, format_key, format_value).await;
+        set_serversync_kv(pool, hash_key, payload_hash).await;
+    }
+
+    macro_rules! static_panel_scan_edges {
+        (
+            $prepare:path,
+            $build:path,
+            $apply:ident,
+            $id_key:path,
+            $format_key:expr,
+            $format:expr,
+            $hash_key:expr,
+            $flag:expr
+        ) => {{
+            let db = dl_central_db::testing::test_pool()
+                .await
+                .expect("test_pool");
+            let repo = tempfile::tempdir().expect("repo");
+            $prepare(repo.path());
+            let probe = $build(repo.path(), &[], Some($format), None, true).expect("probe");
+            let stored: Vec<u64> = (0..probe.messages.len())
+                .map(|index| 7101 + index as u64)
+                .collect();
+            let planned = $build(repo.path(), &stored, Some($format), None, true).expect("planned");
+            let marker_components = planned.messages[0].payload.components.clone();
+
+            seed_static_panel_kv(
+                db.pool(),
+                $id_key,
+                &stored,
+                $format_key,
+                $format,
+                $hash_key,
+                &planned.payload_hash,
+            )
+            .await;
+            let missing = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, Vec::new(), Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let dry_run = missing.$apply(false).await.expect("missing dry-run");
+            assert!(
+                dry_run
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("fehlen im History-Scan")),
+                "{:?}",
+                dry_run.warnings
+            );
+            assert!(
+                dry_run
+                    .messages
+                    .iter()
+                    .all(|message| message.action == "planned_edit"),
+                "{:?}",
+                dry_run
+                    .messages
+                    .iter()
+                    .map(|message| message.action.clone())
+                    .collect::<Vec<_>>()
+            );
+            let missing_confirm = missing.$apply(true).await.expect("missing confirm");
+            assert!(missing_confirm
+                .messages
+                .iter()
+                .all(|message| message.action != "no_op"));
+            assert_eq!(missing_confirm.posted_message_ids.len(), stored.len());
+
+            seed_static_panel_kv(
+                db.pool(),
+                $id_key,
+                &stored,
+                $format_key,
+                $format,
+                $hash_key,
+                &planned.payload_hash,
+            )
+            .await;
+            let discovered: Vec<Value> = (0..stored.len())
+                .map(|index| {
+                    fake_discord_message(
+                        8101 + index as u64,
+                        42,
+                        $flag,
+                        marker_components.clone(),
+                        Vec::new(),
+                    )
+                })
+                .collect();
+            let disjoint = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, discovered, Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let blocked = disjoint.$apply(true).await.expect_err("disjoint blocks");
+            assert!(blocked.to_string().contains("blockiert"), "{blocked}");
+
+            seed_static_panel_kv(
+                db.pool(),
+                $id_key,
+                &stored,
+                $format_key,
+                $format,
+                $hash_key,
+                &planned.payload_hash,
+            )
+            .await;
+            let mut extras = stored
+                .iter()
+                .map(|message_id| {
+                    fake_discord_message(
+                        *message_id,
+                        42,
+                        $flag,
+                        marker_components.clone(),
+                        Vec::new(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let extra_id = 9101_u64;
+            extras.push(fake_discord_message(
+                extra_id,
+                42,
+                $flag,
+                marker_components.clone(),
+                Vec::new(),
+            ));
+            let extra = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, extras, Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let extra_dry = extra.$apply(false).await.expect("extra dry-run");
+            assert!(
+                extra_dry
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("gelöscht")),
+                "{:?}",
+                extra_dry.warnings
+            );
+            let extra_confirm = extra.$apply(true).await.expect("extra confirm");
+            assert!(
+                extra_confirm.deleted_message_ids.contains(&extra_id),
+                "{:?}",
+                extra_confirm.deleted_message_ids
+            );
+            assert!(extra_confirm
+                .messages
+                .iter()
+                .all(|message| message.action == "no_op"));
+
+            let with_extra = || {
+                let mut messages = stored
+                    .iter()
+                    .map(|message_id| {
+                        fake_discord_message(
+                            *message_id,
+                            42,
+                            $flag,
+                            marker_components.clone(),
+                            Vec::new(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                messages.extend([fake_discord_message(
+                    extra_id,
+                    42,
+                    $flag,
+                    marker_components.clone(),
+                    Vec::new(),
+                )]);
+                messages
+            };
+            for (get_status, gone_during_delete, settles) in [
+                (Some(StatusCode::FORBIDDEN), false, false),
+                (Some(StatusCode::NOT_FOUND), false, true),
+                (None, true, true),
+            ] {
+                seed_static_panel_kv(
+                    db.pool(),
+                    $id_key,
+                    &stored,
+                    $format_key,
+                    $format,
+                    $hash_key,
+                    &planned.payload_hash,
+                )
+                .await;
+                let fake = spawn_fake_discord(42, with_extra(), Vec::new()).await;
+                if let Some(status) = get_status {
+                    fake.state
+                        .get_overrides
+                        .lock()
+                        .expect("get overrides")
+                        .insert(extra_id, status);
+                }
+                if gone_during_delete {
+                    fake.state
+                        .missing_on_delete
+                        .lock()
+                        .expect("missing on delete")
+                        .insert(extra_id);
+                }
+                let service = ServerSyncService::new_for_test(
+                    db.pool().clone(),
+                    fake.base_url.clone(),
+                    repo.path().to_path_buf(),
+                );
+                let result = service.$apply(true).await;
+                let expected_deletes = if gone_during_delete {
+                    vec![extra_id]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    *fake.state.delete_calls.lock().expect("delete calls"),
+                    expected_deletes
+                );
+                if settles {
+                    let output = result.expect("already gone settles");
+                    assert!(!output.deleted_message_ids.contains(&extra_id));
+                    assert!(
+                        output
+                            .warnings
+                            .iter()
+                            .any(|warning| warning.contains("bereits weg")),
+                        "{:?}",
+                        output.warnings
+                    );
+                } else {
+                    let err = result.expect_err("unsettled extra blocks");
+                    let text = err.to_string();
+                    assert!(text.contains(&format!("[{extra_id}]")), "{text}");
+                    assert!(text.contains("Gründe"), "{text}");
+                }
+            }
+
+            let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+            for index in 0..stored.len() {
+                dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &$id_key(index))
+                    .await
+                    .expect("delete serversync kv");
+            }
+            let long_empty = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, own_history(cap + 1), Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let truncated_block = long_empty
+                .$apply(false)
+                .await
+                .expect_err("truncated scan without stored ids blocks");
+            assert!(
+                truncated_block.to_string().contains("History-Scan endete"),
+                "{truncated_block}"
+            );
+
+            seed_static_panel_kv(
+                db.pool(),
+                $id_key,
+                &stored,
+                $format_key,
+                $format,
+                $hash_key,
+                &planned.payload_hash,
+            )
+            .await;
+            let mut long_full = own_history(cap + 1);
+            long_full.extend(stored.iter().map(|message_id| {
+                fake_discord_message(
+                    *message_id,
+                    42,
+                    $flag,
+                    marker_components.clone(),
+                    Vec::new(),
+                )
+            }));
+            let long_stored = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, long_full, Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let truncated_warn = long_stored
+                .$apply(false)
+                .await
+                .expect("truncated scan with full stored set continues");
+            assert!(
+                truncated_warn
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("History-Scan endete")),
+                "{:?}",
+                truncated_warn.warnings
+            );
+            if stringify!($apply) == "rang_guide_apply" {
+                assert!(
+                    truncated_warn
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("Legacy-Scan endete")),
+                    "{:?}",
+                    truncated_warn.warnings
+                );
+            }
+        }};
+    }
+
+    #[tokio::test]
+    async fn service_geschwister_scan_blockt_disjunkt_meldet_extras_und_repostet_fehlende() {
+        static_panel_scan_edges!(
+            write_test_regelwerk_repo,
+            regelwerk_publish::build_regelwerk_publish_output,
+            regelwerk_apply,
+            regelwerk_publish::regelwerk_message_id_key,
+            regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
+            regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+            regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
+            regelwerk_publish::REGELWERK_COMPONENTS_V2_FLAG
+        );
+        static_panel_scan_edges!(
+            write_test_faq_repo,
+            faq_publish::build_faq_publish_output,
+            faq_apply,
+            faq_publish::faq_message_id_key,
+            faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
+            faq_publish::FAQ_PAYLOAD_FORMAT,
+            faq_publish::FAQ_PAYLOAD_HASH_KEY,
+            faq_publish::FAQ_COMPONENTS_V2_FLAG
+        );
+        static_panel_scan_edges!(
+            write_test_rang_repo_default,
+            rang_guide_publish::build_rang_guide_publish_output,
+            rang_guide_apply,
+            rang_guide_publish::rang_guide_message_id_key,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG
+        );
+        static_panel_scan_edges!(
+            write_test_support_repo,
+            support_publish::build_support_publish_output,
+            support_apply,
+            support_publish::support_message_id_key,
+            support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+            support_publish::SUPPORT_PAYLOAD_FORMAT,
+            support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+            support_publish::SUPPORT_COMPONENTS_V2_FLAG
+        );
+    }
+
+    fn write_test_rang_repo_default(repo_root: &std::path::Path) {
+        write_test_rang_repo(repo_root, None);
+    }
+
+    #[tokio::test]
     async fn service_faq_v2_repost_loescht_fremde_message_nicht() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -11612,9 +12762,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let output = service.router_apply(true).await.expect("apply");
 
         assert_eq!(output.targets.len(), 2);
-        assert_eq!(output.targets[0].posted_message_ids, vec![9201, 9202]);
-        assert_eq!(output.targets[1].posted_message_ids, vec![9203, 9204]);
-        assert_eq!(output.forum_post.thread_id, Some(9205));
+        assert_eq!(output.targets[0].posted_message_ids, vec![9202, 9203]);
+        assert_eq!(output.targets[1].posted_message_ids, vec![9204, 9205]);
+        assert_eq!(output.forum_post.thread_id, Some(9201));
         assert!(output.forum_post.pinned);
         assert_eq!(
             output.deleted_legacy_message_ids,
@@ -11624,10 +12774,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ]
         );
         for (channel_id, expected_ids) in [
-            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9201_u64, 9202]),
+            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9202_u64, 9203]),
             (
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                vec![9203_u64, 9204],
+                vec![9204_u64, 9205],
             ),
         ] {
             let prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
@@ -11660,7 +12810,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             )
             .await
             .as_deref(),
-            Some("9205")
+            Some("9201")
         );
         assert!(dl_central_db::kv::get(
             db.pool(),
@@ -11681,22 +12831,22 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(
             fake.state.post_calls.lock().expect("post calls").as_slice(),
             &[
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
                 voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
             ]
         );
-        assert_eq!(output.targets[0].pinned_message_ids, vec![9201, 9202]);
-        assert_eq!(output.targets[1].pinned_message_ids, vec![9203, 9204]);
+        assert_eq!(output.targets[0].pinned_message_ids, vec![9202, 9203]);
+        assert_eq!(output.targets[1].pinned_message_ids, vec![9204, 9205]);
         assert_eq!(
             fake.state.pin_calls.lock().expect("pin calls").as_slice(),
             &[
-                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9201),
                 (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9202),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9203),
+                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9203),
                 (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9204),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9205),
             ]
         );
         let post_bodies = fake.state.post_bodies.lock().expect("post bodies");
@@ -11714,7 +12864,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .lock()
                 .expect("patched channels")
                 .as_slice(),
-            &[(9205, json!({"pinned": true}))]
+            &[(9201, json!({"pinned": true}))]
         );
     }
 
@@ -11799,9 +12949,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     Vec::new(),
                 );
                 fake["pinned"] = json!(target.channel_id == voice_ux_publish::VOICE_UX_CHANNEL_ID);
+                fake["channel_id"] = json!(target.channel_id.to_string());
                 messages.push(fake);
             }
         }
+        messages.push(voice_ux_fake_forum_starter(9401));
         let fake = spawn_fake_discord(42, messages, Vec::new()).await;
         let service = ServerSyncService::new_for_test(
             db.pool().clone(),
@@ -11828,6 +12980,603 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ]
         );
         assert_eq!(output.targets[1].pinned_message_ids, vec![9311, 9312]);
+        assert_eq!(output.forum_post.action, "no_op");
+    }
+
+    fn voice_ux_fake_forum_starter(thread_id: u64) -> Value {
+        let mut starter = fake_discord_message(thread_id, 42, 0, Vec::new(), Vec::new());
+        starter["channel_id"] = json!(thread_id.to_string());
+        starter
+    }
+
+    fn voice_ux_fake_panel_messages(
+        planned: &voice_ux_publish::VoiceUxPublishOutput,
+    ) -> Vec<Value> {
+        let mut messages = Vec::new();
+        for target in &planned.targets {
+            for message in &target.messages {
+                let mut fake = fake_discord_message(
+                    message.message_id.expect("message id"),
+                    42,
+                    voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                );
+                fake["channel_id"] = json!(target.channel_id.to_string());
+                messages.push(fake);
+            }
+        }
+        messages
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_forum_no_op_braucht_vorhandenen_thread() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let fake = spawn_fake_discord(42, voice_ux_fake_panel_messages(&planned), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let dry_run = service.router_apply(false).await.expect("dry-run");
+        assert_eq!(dry_run.forum_post.action, "planned_edit");
+        assert!(
+            dry_run
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nicht mehr auffindbar")),
+            "{:?}",
+            dry_run.warnings
+        );
+        assert!(fake
+            .state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .is_empty());
+
+        let confirm = service.router_apply(true).await.expect("confirm");
+        assert_eq!(confirm.forum_post.action, "posted");
+        assert_ne!(confirm.forum_post.thread_id, Some(9401));
+        assert_eq!(
+            fake.state
+                .patch_calls
+                .lock()
+                .expect("patch calls")
+                .as_slice(),
+            &[9401, 9301, 9302, 9311, 9312]
+        );
+        assert_eq!(
+            get_serversync_kv(
+                db.pool(),
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY
+            )
+            .await,
+            confirm.forum_post.thread_id.map(|id| id.to_string())
+        );
+        let new_thread_id = confirm.forum_post.thread_id.expect("new thread");
+        for target in &confirm.targets {
+            let rendered = serde_json::to_string(&target.messages).expect("messages");
+            assert!(rendered.contains(&new_thread_id.to_string()), "{rendered}");
+            assert!(!rendered.contains("9401"), "{rendered}");
+            assert_eq!(target.messages[0].action, "edited");
+        }
+
+        fake.state
+            .messages
+            .lock()
+            .expect("messages")
+            .insert(new_thread_id, voice_ux_fake_forum_starter(new_thread_id));
+        let settled = service.router_apply(false).await.expect("settled dry-run");
+        assert_eq!(settled.forum_post.action, "planned_no_op");
+        for target in &settled.targets {
+            assert_eq!(target.messages[0].action, "planned_no_op");
+        }
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_ohne_forum_thread_bleibt_kein_panel_no_op() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let planned = seed_voice_ux_panel(db.pool(), repo.path(), None).await;
+        assert!(planned
+            .targets
+            .iter()
+            .flat_map(|target| target.messages.iter())
+            .all(|message| message.action == "planned_no_op"));
+        let fake = spawn_fake_discord(42, voice_ux_fake_panel_messages(&planned), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let dry_run = service.router_apply(false).await.expect("dry-run");
+        assert_eq!(dry_run.forum_post.action, "planned_post");
+        for target in &dry_run.targets {
+            assert!(
+                target
+                    .messages
+                    .iter()
+                    .all(|message| message.action == "planned_edit"),
+                "{:?}",
+                target.messages
+            );
+        }
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+
+        let confirm = service.router_apply(true).await.expect("confirm");
+        assert_eq!(confirm.forum_post.action, "posted");
+        let new_thread_id = confirm.forum_post.thread_id.expect("new thread");
+        for target in &confirm.targets {
+            assert!(
+                target
+                    .messages
+                    .iter()
+                    .all(|message| message.action == "edited"),
+                "{:?}",
+                target.messages
+            );
+        }
+        let patch_bodies = fake
+            .state
+            .patch_bodies
+            .lock()
+            .expect("patch bodies")
+            .clone();
+        let panel_ids: Vec<u64> = planned
+            .targets
+            .iter()
+            .flat_map(|target| target.stored_message_ids.iter().copied())
+            .collect();
+        assert_eq!(
+            patch_bodies.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            panel_ids
+        );
+        assert!(
+            patch_bodies
+                .iter()
+                .any(|(_, body)| body.to_string().contains(&new_thread_id.to_string())),
+            "{patch_bodies:?}"
+        );
+    }
+
+    async fn seed_voice_ux_matching_panel(
+        pool: &PgPool,
+        repo: &std::path::Path,
+    ) -> voice_ux_publish::VoiceUxPublishOutput {
+        seed_voice_ux_panel(pool, repo, Some(9401)).await
+    }
+
+    async fn seed_voice_ux_panel(
+        pool: &PgPool,
+        repo: &std::path::Path,
+        forum_thread_id: Option<u64>,
+    ) -> voice_ux_publish::VoiceUxPublishOutput {
+        write_test_voice_ux_repo(repo, b"voice-ux-banner");
+        let ids = BTreeMap::from([
+            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9301, 9302]),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                vec![9311, 9312],
+            ),
+        ]);
+        let formats = BTreeMap::from([
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+            ),
+        ]);
+        let built = voice_ux_publish::build_voice_ux_publish_output(
+            repo,
+            &ids,
+            &formats,
+            &BTreeMap::new(),
+            forum_thread_id,
+            None,
+            true,
+        )
+        .expect("built");
+        for target in &built.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for (index, message_id) in target.stored_message_ids.iter().copied().enumerate() {
+                set_serversync_kv(pool, &format!("{prefix}{index}"), &message_id.to_string()).await;
+            }
+            set_serversync_kv(
+                pool,
+                &voice_ux_publish::voice_ux_payload_format_key(target.channel_id),
+                voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            )
+            .await;
+            set_serversync_kv(
+                pool,
+                &voice_ux_publish::voice_ux_payload_hash_key(target.channel_id),
+                &target.payload_hash,
+            )
+            .await;
+        }
+        if let Some(thread_id) = forum_thread_id {
+            set_serversync_kv(
+                pool,
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+                &thread_id.to_string(),
+            )
+            .await;
+            set_serversync_kv(
+                pool,
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+                &built.forum_post.payload_hash,
+            )
+            .await;
+        }
+        let hashes = built
+            .targets
+            .iter()
+            .map(|target| (target.channel_id, Some(target.payload_hash.clone())))
+            .collect();
+        voice_ux_publish::build_voice_ux_publish_output(
+            repo,
+            &ids,
+            &formats,
+            &hashes,
+            forum_thread_id,
+            forum_thread_id.map(|_| built.forum_post.payload_hash.as_str()),
+            true,
+        )
+        .expect("planned")
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_scan_blockt_disjunkt_meldet_extras_und_repostet_fehlende() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let missing = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, vec![voice_ux_fake_forum_starter(9401)], Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let dry_run = missing.router_apply(false).await.expect("missing dry-run");
+        assert_eq!(dry_run.forum_post.action, "planned_no_op");
+        assert!(
+            dry_run
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("fehlen im History-Scan")),
+            "{:?}",
+            dry_run.warnings
+        );
+        for target in &dry_run.targets {
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action == "planned_edit"));
+        }
+        let missing_confirm = missing.router_apply(true).await.expect("missing confirm");
+        for (target, planned_target) in missing_confirm.targets.iter().zip(planned.targets.iter()) {
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action != "no_op"));
+            assert_eq!(
+                target.posted_message_ids.len(),
+                planned_target.messages.len()
+            );
+        }
+
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let mut discovered = Vec::new();
+        for target in &planned.targets {
+            for _ in &target.messages {
+                let mut fake = fake_discord_message(
+                    9901 + discovered.len() as u64,
+                    42,
+                    voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                    target.messages[0].payload.components.clone(),
+                    Vec::new(),
+                );
+                fake["channel_id"] = json!(target.channel_id.to_string());
+                discovered.push(fake);
+            }
+        }
+        let disjoint = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, discovered, Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let blocked = disjoint
+            .router_apply(true)
+            .await
+            .expect_err("disjoint blocks");
+        assert!(blocked.to_string().contains("blockiert"), "{blocked}");
+
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let mut messages = Vec::new();
+        let mut extra_ids = Vec::new();
+        for target in &planned.targets {
+            for message in &target.messages {
+                let mut fake = fake_discord_message(
+                    message.message_id.expect("message id"),
+                    42,
+                    voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                );
+                fake["channel_id"] = json!(target.channel_id.to_string());
+                messages.push(fake);
+            }
+            let extra_id = 9801 + extra_ids.len() as u64;
+            extra_ids.push((target.channel_id, extra_id));
+            let mut extra = fake_discord_message(
+                extra_id,
+                42,
+                voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                target.messages[0].payload.components.clone(),
+                Vec::new(),
+            );
+            extra["channel_id"] = json!(target.channel_id.to_string());
+            messages.push(extra);
+        }
+        messages.push(voice_ux_fake_forum_starter(9401));
+        let extra = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, messages, Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let extra_dry = extra.router_apply(false).await.expect("extra dry-run");
+        assert!(
+            extra_dry
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("gelöscht")),
+            "{:?}",
+            extra_dry.warnings
+        );
+        let extra_confirm = extra.router_apply(true).await.expect("extra confirm");
+        for (target, (channel_id, extra_id)) in extra_confirm.targets.iter().zip(extra_ids.iter()) {
+            assert_eq!(target.channel_id, *channel_id);
+            assert!(
+                target.deleted_message_ids.contains(extra_id),
+                "{:?}",
+                target.deleted_message_ids
+            );
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action == "no_op"));
+        }
+
+        for (get_status, gone_during_delete, settles) in [
+            (Some(StatusCode::FORBIDDEN), false, false),
+            (Some(StatusCode::NOT_FOUND), false, true),
+            (None, true, true),
+        ] {
+            let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+            let target = planned.targets.first().expect("voice target");
+            let mut with_extra = voice_ux_fake_panel_messages(&planned);
+            let mut extra = fake_discord_message(
+                9851,
+                42,
+                voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                target.messages[0].payload.components.clone(),
+                Vec::new(),
+            );
+            extra["channel_id"] = json!(target.channel_id.to_string());
+            with_extra.extend([extra, voice_ux_fake_forum_starter(9401)]);
+            let fake = spawn_fake_discord(42, with_extra, Vec::new()).await;
+            if let Some(status) = get_status {
+                fake.state
+                    .get_overrides
+                    .lock()
+                    .expect("get overrides")
+                    .insert(9851, status);
+            }
+            if gone_during_delete {
+                fake.state
+                    .missing_on_delete
+                    .lock()
+                    .expect("missing on delete")
+                    .insert(9851);
+            }
+            let service = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                fake.base_url.clone(),
+                repo.path().to_path_buf(),
+            );
+            let result = service.router_apply(true).await;
+            let expected_deletes = if gone_during_delete {
+                vec![9851]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                *fake.state.delete_calls.lock().expect("delete calls"),
+                expected_deletes
+            );
+            if settles {
+                let output = result.expect("already gone settles");
+                assert!(output
+                    .targets
+                    .iter()
+                    .all(|target| !target.deleted_message_ids.contains(&9851)));
+                assert!(
+                    output
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("bereits weg")),
+                    "{:?}",
+                    output.warnings
+                );
+                assert!(output
+                    .targets
+                    .iter()
+                    .flat_map(|target| &target.messages)
+                    .all(|message| message.action == "no_op"));
+            } else {
+                let err = result.expect_err("unsettled extra blocks");
+                assert!(err.to_string().contains("[9851]"), "{err}");
+                assert!(err.to_string().contains("Gründe"), "{err}");
+            }
+        }
+
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &format!("{prefix}1"))
+                .await
+                .expect("delete serversync kv");
+        }
+        let mut partial_messages = voice_ux_fake_panel_messages(&planned);
+        partial_messages.extend([voice_ux_fake_forum_starter(9401)]);
+        let partial_fake = spawn_fake_discord(42, partial_messages, Vec::new()).await;
+        let partial = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            partial_fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+        let partial_dry = partial.router_apply(false).await.expect("partial dry-run");
+        assert!(
+            partial_dry
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("außerhalb der gespeicherten IDs")),
+            "{:?}",
+            partial_dry.warnings
+        );
+        let partial_confirm = partial.router_apply(true).await.expect("partial confirm");
+        for (target, planned_target) in partial_confirm.targets.iter().zip(planned.targets.iter()) {
+            let mut deleted = target.deleted_message_ids.clone();
+            deleted.sort_unstable();
+            assert_eq!(deleted, planned_target.stored_message_ids);
+            assert_eq!(
+                target.posted_message_ids.len(),
+                planned_target.messages.len()
+            );
+        }
+
+        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let mut long_full = own_history(cap + 1);
+        long_full.extend(voice_ux_fake_panel_messages(&planned));
+        long_full.extend([voice_ux_fake_forum_starter(9401)]);
+        let long_stored = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, long_full, Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let truncated_warn = long_stored
+            .router_apply(false)
+            .await
+            .expect("truncated scan with stored ids continues");
+        assert!(
+            truncated_warn
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("History-Scan endete")),
+            "{:?}",
+            truncated_warn.warnings
+        );
+
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for index in 0..target.messages.len() {
+                dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &format!("{prefix}{index}"))
+                    .await
+                    .expect("delete serversync kv");
+            }
+        }
+        let mut long_empty = own_history(cap + 1);
+        long_empty.extend([voice_ux_fake_forum_starter(9401)]);
+        let long_unstored = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, long_empty, Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let truncated_block = long_unstored
+            .router_apply(false)
+            .await
+            .expect_err("truncated scan without stored ids blocks");
+        assert!(
+            truncated_block.to_string().contains("History-Scan endete"),
+            "{truncated_block}"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_adoption_speichert_ids_statt_no_op() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for index in 0..target.messages.len() {
+                dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &format!("{prefix}{index}"))
+                    .await
+                    .expect("delete serversync kv");
+            }
+        }
+        let mut messages = voice_ux_fake_panel_messages(&planned);
+        messages.push(voice_ux_fake_forum_starter(9401));
+        let fake = spawn_fake_discord(42, messages, Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let dry_run = service.router_apply(false).await.expect("dry-run");
+        for target in &dry_run.targets {
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action == "planned_adopted_edit"));
+        }
+
+        let confirm = service.router_apply(true).await.expect("confirm");
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        for (target, planned_target) in confirm.targets.iter().zip(planned.targets.iter()) {
+            assert!(target
+                .messages
+                .iter()
+                .all(|message| message.action == "edited"));
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for (index, message) in planned_target.messages.iter().enumerate() {
+                assert_eq!(
+                    get_serversync_kv(db.pool(), &format!("{prefix}{index}")).await,
+                    message.message_id.map(|id| id.to_string())
+                );
+            }
+        }
     }
 
     #[tokio::test]
