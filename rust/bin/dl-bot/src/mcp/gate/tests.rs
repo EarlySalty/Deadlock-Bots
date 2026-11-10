@@ -7,7 +7,8 @@ use std::sync::Mutex as StdMutex;
 const CACHE_MS: u64 = 60_000;
 const LOOKUP_MS: u64 = 2_000;
 const DECISION_MS: u64 = 6_000;
-const RELOAD_MS: u64 = 50;
+const RELOAD_MS: u64 = 500;
+const SLOW_MS: u64 = 1_500;
 const PURGE_SECS: u64 = 21_600;
 const RETENTION_DAYS: u64 = 180;
 
@@ -56,6 +57,7 @@ struct Fixture {
     addr: std::net::SocketAddr,
     members: Members,
     dir: tempfile::TempDir,
+    db: dl_central_db::testing::TestDb,
 }
 
 fn roles() -> Value {
@@ -107,6 +109,8 @@ fn base_members() -> HashMap<u64, Value> {
         (102, vec!["3", "6"]),
         (103, vec!["3", "7"]),
         (106, vec!["3", "8"]),
+        (110, vec!["3", "6"]),
+        (111, vec!["3"]),
     ]
     .into_iter()
     .map(|(id, roles)| (id, json!({"user":{"id":id.to_string()},"roles":roles})))
@@ -124,12 +128,36 @@ async fn serve(router: Router) -> std::net::SocketAddr {
     addr
 }
 
+fn options(cache_ms: u64, decision_ms: u64) -> StartOptions {
+    StartOptions {
+        access_gate_cache_ttl_ms: Some(cache_ms),
+        access_gate_lookup_timeout_ms: Some(LOOKUP_MS),
+        access_gate_decision_timeout_ms: Some(decision_ms),
+        access_gate_reload_ms: Some(RELOAD_MS),
+        access_gate_purge_every_secs: Some(PURGE_SECS),
+        access_gate_retention_days: Some(RETENTION_DAYS),
+        mcp_discord_timeout_ms: Some(10_000),
+        mcp_public_facts_cache_secs: Some(60),
+        ..StartOptions::default()
+    }
+}
+
 async fn fixture(policy: Option<&str>, recorder: bool, cache_ms: u64) -> Fixture {
+    fixture_with(policy, recorder, options(cache_ms, DECISION_MS)).await
+}
+
+async fn fixture_with(policy: Option<&str>, recorder: bool, options: StartOptions) -> Fixture {
     let members: Members = Arc::new(StdMutex::new(base_members()));
     let mock_members = members.clone();
     let mock = Router::new().fallback(move |request: axum::extract::Request| {
         let members = mock_members.clone();
-        async move { mock_answer(request.uri().path(), &members) }
+        async move {
+            let path = request.uri().path().to_owned();
+            if path.ends_with("/members/110") || path.ends_with("/members/111") {
+                tokio::time::sleep(Duration::from_millis(SLOW_MS)).await;
+            }
+            mock_answer(&path, &members)
+        }
     });
     let mock_addr = serve(mock).await;
     let dir = tempfile::tempdir().expect("test dir");
@@ -137,33 +165,21 @@ async fn fixture(policy: Option<&str>, recorder: bool, cache_ms: u64) -> Fixture
     if let Some(policy) = policy {
         std::fs::write(&file, policy).expect("test policy");
     }
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgresql:///synthetic")
-        .expect("test pool");
-    let mut state = McpState::from_config(
-        "bot-token".into(),
-        Some("general".into()),
-        &StartOptions::default(),
-    )
-    .expect("test state")
-    .with_public_source(
-        dl_discord::DiscordAdapter::new("synthetic-bot"),
-        pool.clone(),
-        1,
-    );
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("throwaway test database");
+    let pool = db.pool().clone();
+    let mut state = McpState::from_config("bot-token".into(), Some("general".into()), &options)
+        .expect("test state")
+        .with_public_source(
+            dl_discord::DiscordAdapter::new("synthetic-bot"),
+            pool.clone(),
+            1,
+        );
     state.public_policy.mcp_verified_role_id = Some(3);
     state.discord_api = format!("http://{mock_addr}");
-    let options = StartOptions {
-        access_gate_cache_ttl_ms: Some(cache_ms),
-        access_gate_lookup_timeout_ms: Some(LOOKUP_MS),
-        access_gate_decision_timeout_ms: Some(DECISION_MS),
-        access_gate_reload_ms: Some(RELOAD_MS),
-        access_gate_purge_every_secs: Some(PURGE_SECS),
-        access_gate_retention_days: Some(RETENTION_DAYS),
-        ..StartOptions::default()
-    };
-    let settings = GateSettings::from_options(file, Some(999), recorder.then_some(pool), &options)
-        .expect("gate settings");
+    let settings = GateSettings::from_options(file, Some(999), recorder.then_some(pool), &options);
+    assert!(settings.is_some(), "gate settings");
     let state = state
         .with_gate(Some("gate-token".into()), settings)
         .expect("gate state");
@@ -179,6 +195,7 @@ async fn fixture(policy: Option<&str>, recorder: bool, cache_ms: u64) -> Fixture
         addr,
         members,
         dir,
+        db,
     }
 }
 
@@ -195,7 +212,9 @@ fn request(user: Option<&str>, capability: &str, class: ActionClass) -> Authoriz
         target_user_id: None,
         target_role_id: None,
         args_hash: "0".repeat(64),
-        args_redacted: Some(json!({"name":"Turnier","api_token":"hidden"})),
+        args_redacted: json!({"name":"Turnier","api_token":"hidden"})
+            .as_object()
+            .cloned(),
     }
 }
 
@@ -227,7 +246,10 @@ async fn token_and_request_shape_are_enforced() {
         wrong.authorize(&request).await,
         Err(GateError::Status(401))
     ));
-    assert!(!wrong.permits(&request).await);
+    assert_eq!(
+        wrong.verdict(&request).await,
+        dl_access_gate::Verdict::Refused
+    );
     let raw = reqwest::Client::new();
     for path in [
         dl_access_gate::ACCESS_PATH,
@@ -263,6 +285,95 @@ async fn token_and_request_shape_are_enforced() {
         .await
         .expect("outcome answer");
     assert!(outcome.queued);
+}
+
+async fn stored(
+    fixture: &Fixture,
+    decision_id: &str,
+) -> Option<(bool, String, Option<Value>, Option<String>)> {
+    sqlx::query_as(
+        "SELECT allowed, reason, args_redacted, outcome_detail FROM bot.access_gate_decisions WHERE decision_id = $1",
+    )
+    .bind(decision_id)
+    .fetch_optional(fixture.db.pool())
+    .await
+    .expect("record query")
+}
+
+async fn stored_eventually(
+    fixture: &Fixture,
+    decision_id: &str,
+    done: impl Fn(&(bool, String, Option<Value>, Option<String>)) -> bool,
+) -> (bool, String, Option<Value>, Option<String>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(row) = stored(fixture, decision_id).await.filter(|row| done(row)) {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "record {decision_id} never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn allows_are_stored_before_the_answer_and_text_loses_nul() {
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
+    let mut allowed = request(Some("101"), "discord.event.write", ActionClass::Write);
+    allowed.args_redacted = json!({"na\u{0}me":"Tur\u{0}nier","list":["a\u{0}b"]})
+        .as_object()
+        .cloned();
+    let answer = reason(&fixture, &allowed).await;
+    checked(&answer, Reason::Allowed);
+    let (is_allowed, why, args, _) = stored(&fixture, &answer.decision_id)
+        .await
+        .expect("allow row exists when the answer arrives");
+    assert!(is_allowed);
+    assert_eq!(why, "allowed");
+    assert_eq!(args, Some(json!({"name":"Turnier","list":["ab"]})));
+    fixture
+        .client
+        .outcome(&OutcomeRequest {
+            decision_id: answer.decision_id.clone(),
+            caller: "brain".into(),
+            status: dl_access_gate::OutcomeStatus::Error,
+            detail: Some(format!("a\u{0}{}", "x".repeat(5000))),
+        })
+        .await
+        .expect("outcome answer");
+    let (_, _, _, detail) =
+        stored_eventually(&fixture, &answer.decision_id, |row| row.3.is_some()).await;
+    let detail = detail.expect("detail");
+    assert!(!detail.contains('\0'));
+    assert_eq!(
+        detail.chars().count(),
+        dl_access_gate::MAX_OUTCOME_DETAIL_CHARS
+    );
+    let refused = reason(
+        &fixture,
+        &request(Some("100"), "discord.event.write", ActionClass::Write),
+    )
+    .await;
+    checked(&refused, Reason::MissingRight);
+    let (is_allowed, why, _, _) = stored_eventually(&fixture, &refused.decision_id, |_| true).await;
+    assert!(!is_allowed);
+    assert_eq!(why, "missing_right");
+}
+
+#[tokio::test]
+async fn decision_timeout_refuses_with_confirmation() {
+    let fixture = fixture_with(Some(POLICY), true, options(CACHE_MS, LOOKUP_MS)).await;
+    let slow = AuthorizeRequest {
+        target_user_id: Some("111".into()),
+        ..request(Some("110"), "discord.moderation.read", ActionClass::Read)
+    };
+    let started = Instant::now();
+    let answer = reason(&fixture, &slow).await;
+    checked(&answer, Reason::LookupFailed);
+    assert!(answer.confirm_required && answer.shadow && !answer.place_ok);
+    assert!(started.elapsed() < Duration::from_millis(2 * SLOW_MS));
 }
 
 #[tokio::test]
@@ -452,6 +563,13 @@ async fn access_answers_match_roles_and_fail_closed() {
     assert_eq!(base.permissions, ["view_channel"]);
     assert_eq!(base.channel_permissions, Some(Vec::new()));
     assert_eq!(base.role_ids, ["3"]);
+    let hidden = fixture
+        .client
+        .access(&access("101", Some("201")))
+        .await
+        .expect("access");
+    assert!(hidden.permissions.contains(&"manage_events".to_owned()));
+    assert_eq!(hidden.channel_permissions, Some(Vec::new()));
     for (user, status) in [
         ("104", MemberStatus::LookupFailed),
         ("105", MemberStatus::NotMember),
@@ -467,7 +585,7 @@ async fn access_answers_match_roles_and_fail_closed() {
 
 #[tokio::test]
 async fn role_removal_is_visible_after_the_cache_time() {
-    let cache_ms = 300;
+    let cache_ms = 3_000;
     let fixture = fixture(Some(POLICY), true, cache_ms).await;
     let write = request(Some("101"), "discord.event.write", ActionClass::Write);
     checked(&reason(&fixture, &write).await, Reason::Allowed);
@@ -477,7 +595,7 @@ async fn role_removal_is_visible_after_the_cache_time() {
         .expect("members")
         .insert(101, json!({"user":{"id":"101"},"roles":["3"]}));
     checked(&reason(&fixture, &write).await, Reason::Allowed);
-    tokio::time::sleep(Duration::from_millis(cache_ms + 100)).await;
+    tokio::time::sleep(Duration::from_millis(cache_ms + 1_000)).await;
     checked(&reason(&fixture, &write).await, Reason::MissingRight);
 }
 
@@ -496,17 +614,29 @@ async fn missing_file_or_recorder_never_allows() {
     checked(&reason(&no_record, &refused).await, Reason::MissingRight);
 }
 
+async fn eventually(fixture: &Fixture, request: &AuthorizeRequest, expected: Reason) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if reason(fixture, request).await.reason == expected {
+            return;
+        }
+        assert!(Instant::now() < deadline, "never reached {expected:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test]
 async fn malformed_file_keeps_the_last_good_one() {
     let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let file = fixture.dir.path().join("access-gate.toml");
     let write = request(Some("101"), "discord.event.write", ActionClass::Write);
+    let settle = Duration::from_millis(RELOAD_MS * 4);
     std::fs::write(
         &file,
         format!("{POLICY}\n[capabilities.\"x\"]\npublic = true\nowner_only = true\n"),
     )
     .expect("bad policy");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(settle).await;
     checked(&reason(&fixture, &write).await, Reason::Allowed);
     std::fs::write(
         &file,
@@ -516,10 +646,9 @@ async fn malformed_file_keeps_the_last_good_one() {
         ),
     )
     .expect("changed policy");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    checked(&reason(&fixture, &write).await, Reason::ConnectorDisabled);
+    eventually(&fixture, &write, Reason::ConnectorDisabled).await;
     std::fs::remove_file(&file).expect("remove policy");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(settle).await;
     checked(&reason(&fixture, &write).await, Reason::ConnectorDisabled);
 }
 
@@ -553,46 +682,72 @@ fn shipped_access_file_is_valid() {
 fn redaction_hides_secret_keys_and_bounds_size() {
     let value = json!({"name":"x","nested":[{"Api_Key":"s","note":"ok"}],"token":"s"});
     assert_eq!(
-        record::bounded(Some(&value)),
+        record::bounded(value.as_object()),
         Some(
             json!({"name":"x","nested":[{"Api_Key":"[redacted]","note":"ok"}],"token":"[redacted]"})
         )
     );
     let big = json!({"text":"x".repeat(5000)});
     assert_eq!(
-        record::bounded(Some(&big)).and_then(|value| value.get("truncated").cloned()),
+        record::bounded(big.as_object()).and_then(|value| value.get("truncated").cloned()),
         Some(json!(true))
     );
 }
 
 #[test]
-fn gate_settings_refuse_missing_zero_and_inverted_values() {
-    let complete = StartOptions {
-        access_gate_cache_ttl_ms: Some(CACHE_MS),
-        access_gate_lookup_timeout_ms: Some(LOOKUP_MS),
-        access_gate_decision_timeout_ms: Some(DECISION_MS),
-        access_gate_reload_ms: Some(RELOAD_MS),
-        access_gate_purge_every_secs: Some(PURGE_SECS),
-        access_gate_retention_days: Some(RETENTION_DAYS),
-        ..StartOptions::default()
-    };
+fn gate_settings_stay_off_for_missing_zero_low_and_inverted_values() {
+    let complete = options(CACHE_MS, DECISION_MS);
     let build = |options: &StartOptions| {
         GateSettings::from_options(PathBuf::from("access-gate.toml"), None, None, options)
     };
-    assert!(build(&complete).is_ok());
-    let missing = StartOptions {
-        access_gate_reload_ms: None,
-        ..complete.clone()
-    };
-    assert!(build(&missing).is_err());
-    let zero = StartOptions {
-        access_gate_retention_days: Some(0),
-        ..complete.clone()
-    };
-    assert!(build(&zero).is_err());
-    let inverted = StartOptions {
-        access_gate_decision_timeout_ms: Some(LOOKUP_MS - 1),
-        ..complete
-    };
-    assert!(build(&inverted).is_err());
+    assert!(build(&complete).is_some());
+    for broken in [
+        StartOptions {
+            access_gate_reload_ms: None,
+            ..complete.clone()
+        },
+        StartOptions {
+            access_gate_retention_days: Some(0),
+            ..complete.clone()
+        },
+        StartOptions {
+            access_gate_cache_ttl_ms: Some(1),
+            ..complete.clone()
+        },
+        StartOptions {
+            access_gate_decision_timeout_ms: Some(LOOKUP_MS - 1),
+            ..complete.clone()
+        },
+    ] {
+        assert!(build(&broken).is_none());
+    }
+}
+
+fn probe(base: u64) -> Access {
+    Access {
+        user_id: Some(100),
+        guild: "1".into(),
+        roles: vec!["3".into()],
+        base,
+        timed_out: false,
+        top_position: 1,
+    }
+}
+
+#[test]
+fn implicit_denies_follow_view_and_send() {
+    let send = 1u64 << 11;
+    let dependent = (1u64 << 12) | (1 << 14) | (1 << 15) | (1 << 17);
+    let base = VIEW | send | dependent | EVENTS;
+    let channel = |deny: u64| json!({"id":"9","guild_id":"1","permission_overwrites":[{"id":"1","type":0,"deny":deny.to_string(),"allow":"0"}]});
+    assert_eq!(effective_permissions(&channel(0), &probe(base)), Some(base));
+    assert_eq!(effective_permissions(&channel(VIEW), &probe(base)), Some(0));
+    assert_eq!(
+        effective_permissions(&channel(send), &probe(base)),
+        Some(VIEW | EVENTS)
+    );
+    assert_eq!(
+        effective_permissions(&channel(VIEW), &probe(base | ADMIN)),
+        Some(u64::MAX)
+    );
 }

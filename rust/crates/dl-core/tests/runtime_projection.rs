@@ -85,3 +85,40 @@ fn dangerous_invalid_or_secret_runtime_fields_fail_before_clients() {
         );
     }
 }
+
+#[test]
+fn shipped_access_gate_and_mcp_timings_validate() {
+    let shipped = BotConfig::parse(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../config/bot.toml"
+    )))
+    .expect("shipped bot.toml");
+    let start = &shipped.runtime.start;
+    let timings = start
+        .access_gate_timings()
+        .expect("valid gate timings")
+        .expect("all gate timings shipped");
+    assert!(timings.lookup_timeout_ms <= timings.decision_timeout_ms);
+    let mcp = start.mcp_timings().expect("valid MCP timings");
+    assert!(mcp.public_facts_cache_secs.is_some() && mcp.discord_timeout_ms.is_some());
+    let without = BotConfig::parse("schema_version=1\n[runtime.start]\nmcp_port=8890\n")
+        .expect("keys are optional");
+    assert_eq!(without.runtime.start.access_gate_timings().ok(), Some(None));
+    assert_eq!(
+        without.runtime.start.access_gate_retention().ok(),
+        Some(None)
+    );
+    for section in [
+        "access_gate_cache_ttl_ms=1",
+        "access_gate_lookup_timeout_ms=5000\naccess_gate_decision_timeout_ms=4999",
+        "access_gate_retention_days=0",
+        "access_gate_purge_every_secs=59",
+        "mcp_public_facts_cache_secs=0",
+        "mcp_discord_timeout_ms=999",
+    ] {
+        assert!(
+            BotConfig::parse(&format!("schema_version=1\n[runtime.start]\n{section}\n")).is_err(),
+            "{section}"
+        );
+    }
+}

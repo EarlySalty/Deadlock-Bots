@@ -11,7 +11,6 @@ use std::{
 };
 
 const SEND: u64 = 1 << 11;
-const TTL: Duration = Duration::from_secs(60);
 const MAX_TERMS: usize = 16;
 const MAX_TERM_CHARS: usize = 64;
 const MIN_MATCH_CHARS: usize = 4;
@@ -851,6 +850,9 @@ pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Facts> {
 }
 
 pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> Result<Facts> {
+    let cache_seconds = st
+        .public_facts_cache_secs
+        .context("Serverfakten sind ohne runtime.start.mcp_public_facts_cache_secs abgeschaltet")?;
     let arguments: FactsArgs = serde_json::from_value(args.clone())?;
     let terms = normalized_terms(&arguments.channel_terms)?;
     let personal = arguments.channel_id.is_some() || !arguments.channel_terms.is_empty();
@@ -915,7 +917,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
             && !personal
             && c.guild == guild_id
             && c.channels == channels_value
-            && c.created.elapsed() < TTL
+            && c.created.elapsed() < Duration::from_secs(cache_seconds)
     }) {
         return Ok(cached.facts.clone());
     }
@@ -1023,7 +1025,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
         }
     }
     let result: Facts = serde_json::from_value(
-        json!({"schema": "discord.public-facts.v2", "guild_id": guild_id, "observed_at": chrono::Utc::now().to_rfc3339(), "cache_seconds": 60, "audience": if access.user_id.is_some() { "requester" } else { "verified_members" }, "channels": channels, "voice_counts": voice_counts, "bot_infos": infos, "tempvoice":tempvoice,"messages":messages}),
+        json!({"schema": "discord.public-facts.v2", "guild_id": guild_id, "observed_at": chrono::Utc::now().to_rfc3339(), "cache_seconds": cache_seconds, "audience": if access.user_id.is_some() { "requester" } else { "verified_members" }, "channels": channels, "voice_counts": voice_counts, "bot_infos": infos, "tempvoice":tempvoice,"messages":messages}),
     )?;
     if access.user_id.is_none() && !personal {
         *cache = Some(CachedFacts {
