@@ -1769,9 +1769,17 @@ pub async fn streamer_voice_invite(
         Ok(value) => value,
         Err(message) => return bad_request(&rid, &message),
     };
+    let allow_community = match payload.get("allow_community") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return bad_request(&rid, "allow_community must be a boolean"),
+    };
     let mut operation = Map::new();
     operation.insert("guild_id".into(), json!(guild_id));
     operation.insert("streamer_id".into(), json!(streamer_id));
+    if allow_community {
+        operation.insert("allow_community".into(), json!(true));
+    }
     let hash = payload_hash(&operation);
     let response = run_idempotent(
         &state,
@@ -1827,6 +1835,12 @@ pub async fn streamer_voice_invite(
                 }
             };
             let Some(channel_id) = channel_id else {
+                if !allow_community {
+                    return (
+                        200,
+                        success_body(&rid, Some(&idem), json!({"available": false})),
+                    );
+                }
                 return community_voice_fallback(&state, &rid, &idem, guild_id).await;
             };
             if !state.channel_allowlist.permits(channel_id) {
@@ -1894,6 +1908,7 @@ async fn community_voice_fallback(
     let Ok(candidates) = state.port.community_voice_candidates(guild_id).await else {
         return unavailable();
     };
+    let mut failed = false;
     for channel_id in candidates
         .into_iter()
         .filter(|id| state.channel_allowlist.permits(*id))
@@ -1920,8 +1935,11 @@ async fn community_voice_fallback(
                 );
             }
             Ok(None) => continue,
-            Err(_) => return unavailable(),
+            Err(_) => failed = true,
         }
+    }
+    if failed {
+        return unavailable();
     }
     (
         200,
@@ -2202,6 +2220,7 @@ pub(crate) mod tests {
         voice_invite_calls: Mutex<Vec<(u64, u64, u64)>>,
         voice_channel: Mutex<Option<u64>>,
         voice_invite_public: Mutex<bool>,
+        community_broken: Mutex<Vec<u64>>,
         channel_reply_calls: Mutex<Vec<(u64, ChannelReply, String)>>,
     }
 
@@ -2245,6 +2264,14 @@ pub(crate) mod tests {
             guild: u64,
             channel: u64,
         ) -> Result<Option<crate::port::StreamerVoiceInvite>, PortError> {
+            if self
+                .community_broken
+                .lock()
+                .expect("broken")
+                .contains(&channel)
+            {
+                return Err(PortError::GuildUnavailable);
+            }
             self.voice_invite_calls
                 .lock()
                 .expect("voice calls")
@@ -2626,8 +2653,9 @@ pub(crate) mod tests {
         let (state, port) = reaction_test_state("43").expect("state");
         *port.voice_channel.lock().expect("voice channel") = None;
         let peer = peer("127.0.0.1:12345").expect("peer");
-        let body =
-            axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
+        let body = axum::body::Bytes::from(
+            r#"{"guild_id":"1289721245281292288","streamer_id":"7","allow_community":true}"#,
+        );
         let call = || {
             streamer_voice_invite(
                 State(state.clone()),
@@ -2658,6 +2686,44 @@ pub(crate) mod tests {
             .expect("body");
         let data: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(data["result"]["available"], false);
+    }
+
+    async fn community_call(state: &SharedBroker, key: &str, body: &str) -> (u16, Value) {
+        let response = streamer_voice_invite(
+            State(state.clone()),
+            peer("127.0.0.1:12345").expect("peer"),
+            action_headers(key).expect("headers"),
+            axum::body::Bytes::from(body.to_string()),
+        )
+        .await;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 10000)
+            .await
+            .expect("body");
+        (status, serde_json::from_slice(&bytes).expect("json"))
+    }
+
+    #[tokio::test]
+    async fn community_fallback_skips_a_broken_room_and_reports_only_total_failure() {
+        let body = r#"{"guild_id":"1289721245281292288","streamer_id":"7","allow_community":true}"#;
+        let (state, port) = reaction_test_state("43,44").expect("state");
+        *port.voice_channel.lock().expect("voice channel") = None;
+        port.community_broken.lock().expect("broken").push(44);
+        let (status, data) = community_call(&state, "voice-broken-one", body).await;
+        assert_eq!(status, 200);
+        assert_eq!(data["result"]["channel_id"], "43");
+        port.community_broken.lock().expect("broken").push(43);
+        let (status, _) = community_call(&state, "voice-broken-all", body).await;
+        assert_eq!(status, 503);
+        let (state, port) = reaction_test_state("42").expect("state");
+        *port.voice_channel.lock().expect("voice channel") = None;
+        let (status, data) = community_call(&state, "voice-none-allowed", body).await;
+        assert_eq!(status, 200);
+        assert_eq!(data["result"], json!({"available": false}));
+        let bad = r#"{"guild_id":"1289721245281292288","streamer_id":"7","allow_community":"yes"}"#;
+        let (status, _) = community_call(&state, "voice-bad-flag", bad).await;
+        assert_eq!(status, 400);
+        assert!(port.voice_invite_calls.lock().expect("calls").is_empty());
     }
 
     #[tokio::test]
@@ -2691,8 +2757,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn voice_invite_without_streamer_in_voice_never_mutates() {
-        let (state, port) = reaction_test_state("42").expect("state");
+    async fn voice_invite_without_streamer_in_voice_never_mutates_without_community_opt_in() {
+        let (state, port) = reaction_test_state("42,43,44").expect("state");
         let peer = peer("127.0.0.1:12345").expect("peer");
         for user in [99, 123] {
             let body = axum::body::Bytes::from(
@@ -2751,7 +2817,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn voice_invite_retry_replays_absent_result_without_mutation() {
-        let (state, port) = reaction_test_state("42").expect("state");
+        let (state, port) = reaction_test_state("42,43,44").expect("state");
         let peer = peer("127.0.0.1:12345").expect("peer");
         let body =
             axum::body::Bytes::from(r#"{"guild_id":"1289721245281292288","streamer_id":"7"}"#);
@@ -2934,6 +3000,7 @@ pub(crate) mod tests {
                 voice_invite_calls: Mutex::new(Vec::new()),
                 voice_channel: Mutex::new(Some(42)),
                 voice_invite_public: Mutex::new(true),
+                community_broken: Mutex::new(Vec::new()),
                 delete_message_result: Err(PortError::Discord("unused".to_string())),
                 channel_reply_calls: Mutex::new(Vec::new()),
             }),
@@ -2953,6 +3020,7 @@ pub(crate) mod tests {
             voice_invite_calls: Mutex::new(Vec::new()),
             voice_channel: Mutex::new(Some(42)),
             voice_invite_public: Mutex::new(true),
+            community_broken: Mutex::new(Vec::new()),
             delete_message_result: Err(PortError::Discord("unused".to_string())),
             channel_reply_calls: Mutex::new(Vec::new()),
         });
@@ -2978,6 +3046,7 @@ pub(crate) mod tests {
             voice_invite_calls: Mutex::new(Vec::new()),
             voice_channel: Mutex::new(Some(42)),
             voice_invite_public: Mutex::new(true),
+            community_broken: Mutex::new(Vec::new()),
             delete_message_result: result,
             channel_reply_calls: Mutex::new(Vec::new()),
         });

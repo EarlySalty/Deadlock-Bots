@@ -521,7 +521,7 @@ impl DiscordAdapter {
 
     /// REST-404 (Unknown Member / Unknown User) = bestätigt abwesend.
     /// Jeder andere Fehler (Rate-Limit/5xx/Transport) ist NICHT „abwesend".
-    fn is_http_404(err: &serenity::Error) -> bool {
+    pub(crate) fn is_http_404(err: &serenity::Error) -> bool {
         matches!(
             err,
             serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))

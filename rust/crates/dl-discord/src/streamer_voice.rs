@@ -172,9 +172,41 @@ pub(crate) async fn fresh_channel(
         .http
         .get_channel(ChannelId::new(channel_id))
         .await
-        .map_err(|_| PortError::GuildUnavailable)?
+        .map_err(|error| {
+            if DiscordAdapter::is_http_404(&error) {
+                PortError::ChannelNotFound
+            } else {
+                PortError::GuildUnavailable
+            }
+        })?
         .guild()
         .ok_or(PortError::ChannelNotFound)
+}
+
+pub(crate) fn unless_gone<T>(result: Result<T, PortError>) -> Result<Option<T>, PortError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(PortError::ChannelNotFound) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn valid_code(code: &str) -> bool {
+    !code.is_empty()
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+pub(crate) async fn current_invite(
+    adapter: &DiscordAdapter,
+    code: &str,
+) -> Result<Option<serenity::all::Invite>, PortError> {
+    match adapter.http.get_invite(code, false, false, None).await {
+        Ok(invite) => Ok(Some(invite)),
+        Err(error) if DiscordAdapter::is_http_404(&error) => Ok(None),
+        Err(_) => Err(PortError::GuildUnavailable),
+    }
 }
 
 async fn read_after_edit_error(
@@ -201,10 +233,10 @@ async fn read_after_edit_error(
 /// A failed response must not leave a usable public invite behind. Never
 /// restore a channel limit here: Discord has no conditional edit, so a
 /// read-then-write rollback could overwrite a concurrent owner change.
-pub(crate) async fn discard_invite(adapter: &DiscordAdapter, code: &str) {
+pub(crate) async fn discard_invite(adapter: &DiscordAdapter, code: &str, reason: &str) {
     if !code.is_empty() {
-        if let Err(error) = adapter.http.delete_invite(code, Some(REASON)).await {
-            tracing::error!(%error, "Streamer-Voice-Invite konnte nicht zurückgenommen werden");
+        if let Err(error) = adapter.http.delete_invite(code, Some(reason)).await {
+            tracing::error!(%error, reason, "Voice-Invite konnte nicht zurückgenommen werden");
         }
     }
 }
@@ -220,7 +252,9 @@ pub(crate) async fn invite_still_valid(
     if guild_id != GUILD || !adapter.community_gateway.is_ready() {
         return Err(PortError::GuildUnavailable);
     }
-    let channel = fresh_channel(adapter, channel_id).await?;
+    let Some(channel) = unless_gone(fresh_channel(adapter, channel_id).await)? else {
+        return Ok(false);
+    };
     let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
         return Ok(false);
     };
@@ -228,21 +262,15 @@ pub(crate) async fn invite_still_valid(
     if limit != 0 && state.members >= limit as usize {
         return Ok(false);
     }
-    let Some(code) = invite_url.strip_prefix("https://discord.gg/") else {
+    let Some(code) = invite_url
+        .strip_prefix("https://discord.gg/")
+        .filter(|code| valid_code(code))
+    else {
         return Ok(false);
     };
-    if code.is_empty()
-        || !code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
+    let Some(invite) = current_invite(adapter, code).await? else {
         return Ok(false);
-    }
-    let invite = adapter
-        .http
-        .get_invite(code, false, false, None)
-        .await
-        .map_err(|_| PortError::GuildUnavailable)?;
+    };
     Ok(invite.code == code
         && invite.channel.id == channel.id
         && invite
@@ -263,7 +291,9 @@ pub(crate) async fn invite(
     if guild_id != GUILD || !adapter.community_gateway.is_ready() {
         return Err(PortError::GuildUnavailable);
     }
-    let channel = fresh_channel(adapter, expected_channel_id).await?;
+    let Some(channel) = unless_gone(fresh_channel(adapter, expected_channel_id).await)? else {
+        return Ok(None);
+    };
     let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
         return Ok(None);
     };
@@ -288,18 +318,16 @@ pub(crate) async fn invite(
                 .guild
                 .as_ref()
                 .is_none_or(|guild| guild.id.get() != guild_id)
-            || invite.code.is_empty()
-            || !invite
-                .code
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            || !valid_code(&invite.code)
         {
             return Err(PortError::GuildUnavailable);
         }
 
         // The owner may have changed the limit or locked the channel while
         // creating the invite. Re-read before writing only user_limit.
-        let channel = fresh_channel(adapter, expected_channel_id).await?;
+        let Some(channel) = unless_gone(fresh_channel(adapter, expected_channel_id).await)? else {
+            return Ok(None);
+        };
         let Some(state) = snapshot(adapter, &channel, guild_id, streamer_id)? else {
             return Ok(None);
         };
@@ -348,7 +376,7 @@ pub(crate) async fn invite(
     }
     .await;
     if !matches!(result, Ok(Some(_))) {
-        discard_invite(adapter, &invite.code).await;
+        discard_invite(adapter, &invite.code, REASON).await;
     }
     result
 }

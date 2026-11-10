@@ -3,7 +3,10 @@ use serenity::all::{ChannelId, ChannelType, Guild, GuildChannel, GuildId, Permis
 
 use crate::adapter::DiscordAdapter;
 use crate::community::{eligible, GUILD};
-use crate::streamer_voice::{discard_invite, everyone_permissions, fresh_channel, invite_options};
+use crate::streamer_voice::{
+    current_invite, discard_invite, everyone_permissions, fresh_channel, invite_options,
+    unless_gone, valid_code,
+};
 
 const REASON: &str = "Twitch: Zuschauer möchte in einen offenen Community-Call";
 
@@ -95,20 +98,15 @@ pub(crate) fn candidates(adapter: &DiscordAdapter, guild_id: u64) -> Result<Vec<
     Ok(rooms.into_iter().map(|(_, id)| id).collect())
 }
 
-fn valid_code(code: &str) -> bool {
-    !code.is_empty()
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
 pub(crate) async fn invite(
     adapter: &DiscordAdapter,
     guild_id: u64,
     channel_id: u64,
 ) -> Result<Option<StreamerVoiceInvite>, PortError> {
     let _guard = adapter.streamer_voice_lock.lock().await;
-    let channel = fresh_channel(adapter, channel_id).await?;
+    let Some(channel) = unless_gone(fresh_channel(adapter, channel_id).await)? else {
+        return Ok(None);
+    };
     if with_guild(adapter, guild_id, |guild| {
         open_room(adapter, guild, &channel)
     })?
@@ -128,7 +126,7 @@ pub(crate) async fn invite(
             .is_some_and(|guild| guild.id.get() == guild_id)
         && valid_code(&invite.code);
     if !matches {
-        discard_invite(adapter, &invite.code).await;
+        discard_invite(adapter, &invite.code, REASON).await;
         return Err(PortError::GuildUnavailable);
     }
     tracing::info!(guild_id, channel_id, "Community-Voice-Invite erstellt");
@@ -146,7 +144,9 @@ pub(crate) async fn invite_still_valid(
     invite_url: &str,
 ) -> Result<bool, PortError> {
     let _guard = adapter.streamer_voice_lock.lock().await;
-    let channel = fresh_channel(adapter, channel_id).await?;
+    let Some(channel) = unless_gone(fresh_channel(adapter, channel_id).await)? else {
+        return Ok(false);
+    };
     if with_guild(adapter, guild_id, |guild| {
         open_room(adapter, guild, &channel)
     })?
@@ -160,11 +160,9 @@ pub(crate) async fn invite_still_valid(
     else {
         return Ok(false);
     };
-    let invite = adapter
-        .http
-        .get_invite(code, false, false, None)
-        .await
-        .map_err(|_| PortError::GuildUnavailable)?;
+    let Some(invite) = current_invite(adapter, code).await? else {
+        return Ok(false);
+    };
     Ok(invite.code == code
         && invite.channel.id == channel.id
         && invite
