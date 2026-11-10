@@ -1182,6 +1182,20 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "access_gate_decisions",
+        "user_id",
+        "bot.access_gate_decisions",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "access_gate_decisions_target",
+        "target_user_id",
+        "bot.access_gate_decisions",
+        "target_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "community_team_applications",
         "applicant_user_id",
         "community.team_applications",

@@ -2,6 +2,7 @@ use super::policy::{Capability, Policy};
 use crate::mcp::access::{role_can_view, Access, GuildRoles, ADMIN, VIEW};
 use dl_access_gate::{ActionClass, Reason};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 pub const MAX_MEMBER_OVERWRITES: usize = 25;
 
@@ -81,17 +82,40 @@ pub fn guild_place(
         return None;
     }
     let everyone = roles.guild.to_string();
-    let outsider = roles.roles.iter().any(|(id, info)| {
-        *id != everyone
-            && role_can_view(channel, roles, Some(id))
-            && !holds(
-                capability,
-                std::slice::from_ref(id),
-                info.bits | roles.everyone,
-            )
+    let candidates = roles
+        .roles
+        .keys()
+        .cloned()
+        .chain(overwrite_roles(channel))
+        .collect::<BTreeSet<_>>();
+    let outsider = candidates.iter().filter(|id| **id != everyone).any(|id| {
+        role_can_view(channel, roles, Some(id))
+            && roles.roles.get(id).is_none_or(|info| {
+                !holds(
+                    capability,
+                    std::slice::from_ref(id),
+                    info.bits | roles.everyone,
+                )
+            })
     });
     if outsider {
         return None;
     }
     member_viewers(channel)
+}
+
+fn overwrite_roles(channel: &Value) -> Vec<String> {
+    channel["permission_overwrites"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|overwrite| overwrite["type"].as_u64() == Some(0))
+        .filter_map(|overwrite| overwrite["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+pub fn unknown_overwrite_role(channel: &Value, roles: &GuildRoles) -> bool {
+    overwrite_roles(channel)
+        .iter()
+        .any(|id| !roles.roles.contains_key(id))
 }

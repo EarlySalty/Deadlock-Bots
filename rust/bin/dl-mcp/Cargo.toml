@@ -11,6 +11,7 @@ version = "0.1.0"
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
+dl-core.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true

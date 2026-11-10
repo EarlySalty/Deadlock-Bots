@@ -36,7 +36,7 @@ const PROTOCOL_FALLBACK: &str = "2025-03-26";
 const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
 struct AppState {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
     bot_token: String,
     auth_token: Option<String>,
     default_guild: Option<String>,
@@ -66,10 +66,25 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("data/mcp_exports"));
 
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("reqwest client")?;
+    let timings = dl_core::config::process_bot_config()?
+        .snapshot()
+        .runtime
+        .start
+        .mcp_timings()?;
+    let http = match timings.discord_timeout_ms {
+        Some(timeout) => Some(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(timeout))
+                .build()
+                .context("reqwest client")?,
+        ),
+        None => {
+            tracing::warn!(
+                "runtime.start.mcp_discord_timeout_ms is missing, dl-mcp Discord calls are refused"
+            );
+            None
+        }
+    };
 
     let state = Arc::new(AppState { http, bot_token, auth_token, default_guild, export_dir });
 
@@ -356,6 +371,8 @@ async fn discord_call(
         let m = reqwest::Method::from_bytes(method.as_bytes()).context("HTTP-Methode")?;
         let mut req = st
             .http
+            .as_ref()
+            .context("runtime.start.mcp_discord_timeout_ms fehlt, Discord-Aufrufe sind abgeschaltet")?
             .request(m, &url)
             .header("Authorization", format!("Bot {}", st.bot_token))
             .header("User-Agent", "DiscordBot (Deadlock-Bots dl-mcp, 0.1.0)");

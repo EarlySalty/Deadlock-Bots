@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS bot.access_gate_decisions (
         reason IN (
             'allowed', 'no_identity', 'not_member', 'lookup_failed', 'access_file_unavailable',
             'unknown_caller', 'connector_disabled', 'capability_disabled', 'owner_only',
-            'unmapped', 'missing_right', 'timed_out', 'hierarchy', 'target_lookup_failed'
+            'unmapped', 'missing_right', 'timed_out', 'hierarchy', 'target_lookup_failed',
+            'record_unavailable'
         )
     ),
     CONSTRAINT access_gate_decisions_caller_format CHECK (caller ~ '^[a-z0-9._-]{1,128}$'),
@@ -64,7 +65,7 @@ CREATE INDEX IF NOT EXISTS access_gate_decisions_decided_at_idx
     ON bot.access_gate_decisions (decided_at);
 
 COMMENT ON TABLE bot.access_gate_decisions IS
-    'Decisions of the dl-bot access gate (POST /gate/v1/authorize). Every allow is inserted before the caller receives it; refusals are recorded best-effort and dropped with a warning log when the write queue is full or the insert fails. dl-bot deletes rows older than runtime.start.access_gate_retention_days every runtime.start.access_gate_purge_every_secs, whether the gate token is set or not.';
+    'Decisions of the dl-bot access gate (POST /gate/v1/authorize). An allow is answered as allowed only after its row is committed. When that insert fails or misses the decision timeout the caller receives record_unavailable, and a row that still commits is rewritten to allowed = false, reason = record_unavailable, place_ok = false, retried every access_gate_decision_timeout_ms up to 20 times. Refusals are recorded best-effort and dropped with a warning log when the write queue is full or the insert fails. dl-bot deletes rows older than runtime.start.access_gate_retention_days every runtime.start.access_gate_purge_every_secs, whether the gate token is set or not.';
 COMMENT ON COLUMN bot.access_gate_decisions.decision_id IS
     'Random 128-bit id in lower-case hex, returned to the caller as decision_id.';
 COMMENT ON COLUMN bot.access_gate_decisions.user_id IS
@@ -78,7 +79,7 @@ COMMENT ON COLUMN bot.access_gate_decisions.target_role_id IS
 COMMENT ON COLUMN bot.access_gate_decisions.args_redacted IS
     'Tool arguments as a JSON object with secret-looking keys replaced and NUL characters removed from keys and strings; NULL = the caller sent none. Above 4096 bytes only {"truncated":true,"bytes":n} is stored.';
 COMMENT ON COLUMN bot.access_gate_decisions.reason IS
-    'Machine-readable reason from dl_access_gate::Reason; allowed is true exactly when reason = allowed. record_unavailable is never stored because no row could be written.';
+    'Machine-readable reason from dl_access_gate::Reason; allowed is true exactly when reason = allowed. record_unavailable marks an allow whose insert committed after the caller had already been refused.';
 COMMENT ON COLUMN bot.access_gate_decisions.outcome IS
     'Result the connector attached through POST /gate/v1/outcome; NULL = none attached yet.';
 COMMENT ON COLUMN bot.access_gate_decisions.outcome_detail IS

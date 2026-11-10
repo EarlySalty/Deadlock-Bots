@@ -5,12 +5,11 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
 const SCHEMA_VERSION: u32 = 1;
-const MAX_NAME_CHARS: usize = 128;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -97,17 +96,9 @@ impl Policy {
 }
 
 fn snowflake(raw: &str) -> Result<String> {
-    let id = raw.trim().parse::<u64>().context("id is not a number")?;
-    ensure!(id != 0, "id is zero");
-    Ok(id.to_string())
-}
-
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_NAME_CHARS
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+    super::snowflake_id(raw)
+        .map(|id| id.to_string())
+        .with_context(|| format!("id {raw} is not a positive canonical Discord id"))
 }
 
 fn capability(
@@ -115,7 +106,7 @@ fn capability(
     raw: RawCapability,
     areas: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<Capability> {
-    ensure!(valid_name(name), "capability name {name} is invalid");
+    ensure!(super::name_ok(name), "capability name {name} is invalid");
     if let Some(area) = &raw.area {
         ensure!(
             areas.contains_key(area),
@@ -164,7 +155,7 @@ pub fn parse(text: &str) -> Result<Policy> {
     }
     let mut connectors = BTreeMap::new();
     for (name, connector) in raw.connectors {
-        ensure!(valid_name(&name), "connector name {name} is invalid");
+        ensure!(super::name_ok(&name), "connector name {name} is invalid");
         connectors.insert(
             name,
             Connector {
@@ -175,7 +166,7 @@ pub fn parse(text: &str) -> Result<Policy> {
     }
     let mut areas = BTreeMap::new();
     for (name, area) in raw.areas {
-        ensure!(valid_name(&name), "area name {name} is invalid");
+        ensure!(super::name_ok(&name), "area name {name} is invalid");
         let channels = area
             .channels
             .iter()
@@ -198,6 +189,7 @@ pub fn parse(text: &str) -> Result<Policy> {
 pub struct PolicyStore {
     path: PathBuf,
     current: RwLock<Option<(Arc<Policy>, [u8; 32])>>,
+    last_problem: Mutex<Option<String>>,
 }
 
 impl PolicyStore {
@@ -205,6 +197,18 @@ impl PolicyStore {
         Self {
             path,
             current: RwLock::new(None),
+            last_problem: Mutex::new(None),
+        }
+    }
+
+    fn first_report(&self, problem: String) -> bool {
+        match self.last_problem.lock() {
+            Ok(last) if last.as_deref() == Some(problem.as_str()) => false,
+            Ok(mut last) => {
+                *last = Some(problem);
+                true
+            }
+            Err(_) => true,
         }
     }
 
@@ -226,7 +230,9 @@ impl PolicyStore {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(error) => {
-                tracing::warn!(path = %self.path.display(), %error, "access file unreadable, keeping last good state");
+                if self.first_report(format!("unreadable {:?}", error.kind())) {
+                    tracing::warn!(path = %self.path.display(), %error, "access file unreadable, keeping last good state");
+                }
                 return;
             }
         };
@@ -237,7 +243,9 @@ impl PolicyStore {
         match parse(&text) {
             Ok(policy) => self.install(policy, digest),
             Err(error) => {
-                tracing::warn!(path = %self.path.display(), error = %format!("{error:#}"), "access file refused, keeping last good state");
+                if self.first_report(format!("refused {}", hex::encode(digest))) {
+                    tracing::warn!(path = %self.path.display(), error = %format!("{error:#}"), "access file refused, keeping last good state");
+                }
             }
         }
     }
@@ -247,6 +255,9 @@ impl PolicyStore {
         match self.current.write() {
             Ok(mut guard) => {
                 *guard = Some((Arc::new(policy), digest));
+                if let Ok(mut last) = self.last_problem.lock() {
+                    *last = None;
+                }
                 tracing::info!(path = %self.path.display(), capabilities, "access file loaded");
             }
             Err(_) => tracing::error!("access file state is poisoned"),

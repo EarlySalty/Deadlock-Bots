@@ -7,6 +7,7 @@ pub const AUTHORIZE_PATH: &str = "/gate/v1/authorize";
 pub const OUTCOME_PATH: &str = "/gate/v1/outcome";
 pub const MAX_OUTCOME_DETAIL_CHARS: usize = 1000;
 pub const MAX_REDACTED_ARGS_BYTES: usize = 4096;
+pub const MAX_NAME_CHARS: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +142,24 @@ pub enum Reason {
 }
 
 impl Reason {
+    pub const KNOWN: [Self; 15] = [
+        Self::Allowed,
+        Self::NoIdentity,
+        Self::NotMember,
+        Self::LookupFailed,
+        Self::AccessFileUnavailable,
+        Self::UnknownCaller,
+        Self::ConnectorDisabled,
+        Self::CapabilityDisabled,
+        Self::OwnerOnly,
+        Self::Unmapped,
+        Self::MissingRight,
+        Self::TimedOut,
+        Self::Hierarchy,
+        Self::TargetLookupFailed,
+        Self::RecordUnavailable,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Allowed => "allowed",
@@ -355,24 +374,7 @@ mod tests {
 
     #[test]
     fn reason_names_match_the_wire_names() {
-        for reason in [
-            Reason::Allowed,
-            Reason::NoIdentity,
-            Reason::NotMember,
-            Reason::LookupFailed,
-            Reason::AccessFileUnavailable,
-            Reason::UnknownCaller,
-            Reason::ConnectorDisabled,
-            Reason::CapabilityDisabled,
-            Reason::OwnerOnly,
-            Reason::Unmapped,
-            Reason::MissingRight,
-            Reason::TimedOut,
-            Reason::Hierarchy,
-            Reason::TargetLookupFailed,
-            Reason::RecordUnavailable,
-            Reason::Unknown,
-        ] {
+        for reason in Reason::KNOWN.into_iter().chain([Reason::Unknown]) {
             assert_eq!(
                 serde_json::to_value(reason).expect("reason"),
                 Value::from(reason.as_str())

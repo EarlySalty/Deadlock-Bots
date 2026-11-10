@@ -89,7 +89,7 @@ const ACCESS_GATE_RELOAD_MS: RangeInclusive<u64> = 500..=3_600_000;
 const ACCESS_GATE_PURGE_EVERY_SECS: RangeInclusive<u64> = 60..=604_800;
 const ACCESS_GATE_RETENTION_DAYS: RangeInclusive<u64> = 1..=3_650;
 const MCP_PUBLIC_FACTS_CACHE_SECS: RangeInclusive<u64> = 5..=3_600;
-const MCP_DISCORD_TIMEOUT_MS: RangeInclusive<u64> = 1_000..=300_000;
+const MCP_DISCORD_TIMEOUT_MS: RangeInclusive<u64> = 1_000..=120_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccessGateRetention {
@@ -208,7 +208,7 @@ impl StartOptions {
             discord_timeout_ms: within(
                 self.mcp_discord_timeout_ms,
                 MCP_DISCORD_TIMEOUT_MS,
-                "runtime.start.mcp_discord_timeout_ms liegt außerhalb von 1000 bis 300000",
+                "runtime.start.mcp_discord_timeout_ms liegt außerhalb von 1000 bis 120000",
             )?,
         })
     }

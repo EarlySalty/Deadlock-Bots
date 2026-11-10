@@ -1,4 +1,4 @@
-use super::access::{effective_permissions, Access, HISTORY, VIEW};
+use super::access::{effective_permissions, Access, HISTORY, SEND, VIEW};
 use super::{discord_call, McpState};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SEND: u64 = 1 << 11;
 const MAX_TERMS: usize = 16;
 const MAX_TERM_CHARS: usize = 64;
 const MIN_MATCH_CHARS: usize = 4;

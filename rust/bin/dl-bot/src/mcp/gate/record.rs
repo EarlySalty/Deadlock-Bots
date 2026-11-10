@@ -2,10 +2,23 @@ use dl_access_gate::{
     AuthorizeRequest, OutcomeRequest, MAX_OUTCOME_DETAIL_CHARS, MAX_REDACTED_ARGS_BYTES,
 };
 use serde_json::{json, Map, Value};
-use std::time::Duration;
-use tokio::{sync::mpsc, time::Instant};
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 
 const QUEUE: usize = 1024;
+const PENDING: u8 = 0;
+const DELIVERED: u8 = 1;
+const ABANDONED: u8 = 2;
+const REVOKE_ATTEMPTS: u32 = 20;
 const SECRET_MARKERS: &[&str] = &[
     "token",
     "secret",
@@ -46,26 +59,36 @@ pub struct Retention {
 pub struct Recorder {
     pool: sqlx::PgPool,
     queue: mpsc::Sender<Entry>,
+    revoke_every: Duration,
 }
 
 impl Recorder {
-    pub fn start(pool: sqlx::PgPool) -> Self {
+    pub fn start(pool: sqlx::PgPool, revoke_every: Duration) -> Self {
         let (queue, receiver) = mpsc::channel(QUEUE);
         tokio::spawn(write_loop(pool.clone(), receiver));
-        Self { pool, queue }
+        Self {
+            pool,
+            queue,
+            revoke_every,
+        }
     }
 
-    pub async fn allow(&self, decision: &Decision, deadline: Instant) -> bool {
-        match tokio::time::timeout_at(deadline, insert(&self.pool, decision)).await {
-            Ok(Ok(())) => true,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "access gate allow not recorded");
-                false
-            }
-            Err(_) => {
-                tracing::warn!("access gate allow not recorded before the decision timeout");
-                false
-            }
+    pub async fn allow(&self, decision: Decision, deadline: Instant) -> bool {
+        let claim = Arc::new(AtomicU8::new(PENDING));
+        let (done, finished) = oneshot::channel();
+        tokio::spawn(store_allow(
+            self.pool.clone(),
+            decision,
+            claim.clone(),
+            self.revoke_every,
+            done,
+        ));
+        if tokio::time::timeout_at(deadline, finished).await.is_err() {
+            tracing::warn!("access gate allow not recorded before the decision timeout");
+        }
+        match claim.compare_exchange(PENDING, ABANDONED, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => false,
+            Err(state) => state == DELIVERED,
         }
     }
 
@@ -144,6 +167,53 @@ async fn write_loop(pool: sqlx::PgPool, mut receiver: mpsc::Receiver<Entry>) {
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "access gate outcome not recorded"),
             },
+        }
+    }
+}
+
+async fn store_allow(
+    pool: sqlx::PgPool,
+    decision: Decision,
+    claim: Arc<AtomicU8>,
+    revoke_every: Duration,
+    done: oneshot::Sender<()>,
+) {
+    let inserted = insert(&pool, &decision).await;
+    if let Err(error) = &inserted {
+        tracing::warn!(%error, "access gate allow not recorded");
+    }
+    let delivered = inserted.is_ok()
+        && claim
+            .compare_exchange(PENDING, DELIVERED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+    let _ = done.send(());
+    if !delivered {
+        revoke(&pool, &decision.decision_id, revoke_every).await;
+    }
+}
+
+async fn revoke(pool: &sqlx::PgPool, decision_id: &str, every: Duration) {
+    for attempt in 1..=REVOKE_ATTEMPTS {
+        match sqlx::query(
+            "UPDATE bot.access_gate_decisions SET allowed = false, reason = 'record_unavailable', place_ok = false WHERE decision_id = $1 AND allowed",
+        )
+        .bind(decision_id)
+        .execute(pool)
+        .await
+        {
+            Ok(done) => {
+                if done.rows_affected() > 0 {
+                    tracing::warn!(decision_id, "access gate allow stored after its refusal, row revoked");
+                }
+                return;
+            }
+            Err(error) if attempt < REVOKE_ATTEMPTS => {
+                tracing::warn!(%error, decision_id, attempt, "access gate allow revocation failed, retrying");
+                tokio::time::sleep(every).await;
+            }
+            Err(error) => {
+                tracing::error!(%error, decision_id, "access gate allow revocation gave up, row may show an allow that was refused");
+            }
         }
     }
 }
