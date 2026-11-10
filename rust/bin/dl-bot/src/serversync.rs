@@ -387,6 +387,11 @@ fn downgrade_planned_noop(action: &mut String) {
     }
 }
 
+struct RangGuideLegacyScan {
+    candidates: Vec<rang_guide_publish::RangGuideLegacyCleanupCandidate>,
+    truncated: bool,
+}
+
 fn settle_scan_truncation(
     label: &str,
     truncated: bool,
@@ -2223,10 +2228,11 @@ impl ServerSyncService {
     async fn fetch_rang_guide_legacy_cleanup_candidates(
         &self,
         bot_user_id: u64,
-    ) -> ServerSyncResult<Vec<rang_guide_publish::RangGuideLegacyCleanupCandidate>> {
+    ) -> ServerSyncResult<RangGuideLegacyScan> {
         let mut before: Option<u64> = None;
         let mut candidates = Vec::new();
-        for _ in 0..5 {
+        let mut truncated = false;
+        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
             let mut url = format!(
                 "{}/channels/{}/messages?limit=100",
                 self.discord_api_base.trim_end_matches('/'),
@@ -2267,10 +2273,14 @@ impl ServerSyncService {
             if page.len() < 100 {
                 break;
             }
+            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
         }
         candidates.sort_unstable_by_key(|candidate| candidate.message_id);
         candidates.dedup_by_key(|candidate| candidate.message_id);
-        Ok(candidates)
+        Ok(RangGuideLegacyScan {
+            candidates,
+            truncated,
+        })
     }
 
     async fn scan_own_v2_messages(
@@ -3692,6 +3702,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let live = dl_server_as_code::import::fetch_live_guild_model(
             self.adapter.http.as_ref(),
             self.guild_id,
@@ -4725,9 +4736,15 @@ impl ServerSyncOps for ServerSyncService {
         )
         .map_err(ServerSyncError::bad_request)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
-        output.legacy_cleanup_candidates = self
+        let legacy_scan = self
             .fetch_rang_guide_legacy_cleanup_candidates(bot_user_id)
             .await?;
+        output.legacy_cleanup_candidates = legacy_scan.candidates;
+        if legacy_scan.truncated {
+            output.warnings.push(format!(
+                "Rang-Guide: Der Legacy-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten, ältere Legacy-Nachrichten sind nicht geprüft und bleiben stehen."
+            ));
+        }
         let scan = self.fetch_rang_guide_v2_message_ids(bot_user_id).await?;
         let expected_message_count = output.messages.len();
         settle_scan_truncation(
@@ -11318,6 +11335,70 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let unsettled = require_settled_extras("Support", &[3], &[], &[]).expect_err("offen");
         assert_eq!(unsettled.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(unsettled.to_string().contains("[3]"), "{unsettled}");
+    }
+
+    fn service_without_database(discord_api_base: String) -> Arc<ServerSyncService> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .expect("lazy pool");
+        ServerSyncService::new_for_test(pool, discord_api_base, std::env::temp_dir())
+    }
+
+    fn own_history(count: u64) -> Vec<Value> {
+        (1..=count)
+            .map(|id| fake_discord_message(id, 42, 0, Vec::new(), Vec::new()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn history_scans_melden_den_abbruch_nach_der_letzten_seite() {
+        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        for (count, expected_ids, expected_truncated) in
+            [(cap - 1, cap - 1, false), (cap + 1, cap, true)]
+        {
+            let fake = spawn_fake_discord(42, own_history(count), Vec::new()).await;
+            let service = service_without_database(fake.base_url.clone());
+
+            let scan = service
+                .scan_own_v2_messages(7, |_, _, _| true)
+                .await
+                .expect("shared scan");
+            assert_eq!(scan.message_ids.len() as u64, expected_ids);
+            assert_eq!(scan.truncated, expected_truncated);
+
+            let legacy = service
+                .fetch_rang_guide_legacy_cleanup_candidates(42)
+                .await
+                .expect("legacy scan");
+            assert_eq!(legacy.truncated, expected_truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn panel_writes_warten_auf_die_apply_sperre() {
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = service_without_database(fake.base_url.clone());
+        let _held = service.panel_apply_lock.lock().await;
+        let wait = std::time::Duration::from_secs(1);
+
+        let (regelwerk_publish, regelwerk, support, faq, welcome, rang_guide, router) = tokio::join!(
+            tokio::time::timeout(wait, service.regelwerk_publish(false)),
+            tokio::time::timeout(wait, service.regelwerk_apply(false)),
+            tokio::time::timeout(wait, service.support_apply(false)),
+            tokio::time::timeout(wait, service.faq_apply(false)),
+            tokio::time::timeout(wait, service.welcome_apply(false)),
+            tokio::time::timeout(wait, service.rang_guide_apply(false)),
+            tokio::time::timeout(wait, service.router_apply(false)),
+        );
+
+        assert!(regelwerk_publish.is_err(), "regelwerk_publish");
+        assert!(regelwerk.is_err(), "regelwerk_apply");
+        assert!(support.is_err(), "support_apply");
+        assert!(faq.is_err(), "faq_apply");
+        assert!(welcome.is_err(), "welcome_apply");
+        assert!(rang_guide.is_err(), "rang_guide_apply");
+        assert!(router.is_err(), "router_apply");
     }
 
     #[test]
