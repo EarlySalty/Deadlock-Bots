@@ -1,3 +1,0 @@
-2026092801_patchnotes_multiguild.sql:1
-20260930220100_steam_account_credentials.sql:1
-20260930220300_browser_credentials.sql:1

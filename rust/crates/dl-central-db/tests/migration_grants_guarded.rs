@@ -1,346 +1,114 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
-const LEGACY_BARE_GRANTS: &str = include_str!("legacy_bare_deadlock_grants.txt");
+const FROZEN_MENTIONS: &str = include_str!("deadlock_mentions_outside_role_guard.txt");
 const ROLE: &str = "deadlock";
+const GUARD: &str = "if exists (select 1 from pg_roles where rolname = 'deadlock') then";
+const GUARD_ROLE_LITERAL: &str = "'deadlock'";
+const REGION_ENDS: [&str; 4] = ["end if", "else", "elsif", "elseif"];
+const RULE: &str = "A migration may contain the word `deadlock` only between the exact guard \
+    `IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN` (exactly these words \
+    and spaces, keywords in any case, a run of whitespace counts as one space, the role literal \
+    in lowercase) and the next END IF, ELSE or ELSIF, so put every statement that names the \
+    role inside that guard and do not use the role name or the word anywhere else in the file, \
+    comments and string literals included.";
 
-#[derive(Clone, Debug, PartialEq)]
-enum Token {
-    Word(String),
-    Quoted(String),
-    Text(String),
-    Body(String),
-    Symbol(char),
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct Grants {
-    guarded: usize,
-    bare: usize,
-}
-
-enum Frame {
-    If(bool),
-    Case,
-    Loop,
-    Block,
-}
-
-fn word(text: &str) -> Token {
-    Token::Word(text.to_owned())
-}
-
-fn is_word(token: Option<&Token>, text: &str) -> bool {
-    matches!(token, Some(Token::Word(found)) if found == text)
-}
-
-fn quoted_end(chars: &[char], start: usize, quote: char, backslash: bool) -> (String, usize) {
-    let mut text = String::new();
-    let mut at = start + 1;
-    while at < chars.len() {
-        let current = chars[at];
-        if backslash && current == '\\' && at + 1 < chars.len() {
-            text.push(chars[at + 1]);
-            at += 2;
-        } else if current == quote && chars.get(at + 1) == Some(&quote) {
-            text.push(quote);
-            at += 2;
-        } else if current == quote {
-            return (text, at + 1);
-        } else {
-            text.push(current);
-            at += 1;
+fn find_whole(text: &str, needle: &str, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut start = from;
+    while let Some(offset) = text.get(start..)?.find(needle) {
+        let at = start + offset;
+        let end = at + needle.len();
+        let free_before = at == 0 || !is_identifier_byte(bytes[at - 1]);
+        let free_after = end == bytes.len() || !is_identifier_byte(bytes[end]);
+        if free_before && free_after {
+            return Some(at);
         }
-    }
-    (text, at)
-}
-
-fn block_comment_end(chars: &[char], start: usize) -> usize {
-    let mut depth = 0usize;
-    let mut at = start;
-    while at < chars.len() {
-        if chars[at] == '/' && chars.get(at + 1) == Some(&'*') {
-            depth += 1;
-            at += 2;
-        } else if chars[at] == '*' && chars.get(at + 1) == Some(&'/') {
-            depth -= 1;
-            at += 2;
-            if depth == 0 {
-                return at;
-            }
-        } else {
-            at += 1;
-        }
-    }
-    at
-}
-
-fn dollar_body(chars: &[char], start: usize) -> Option<(String, usize)> {
-    let mut tag_end = start + 1;
-    while tag_end < chars.len() && (chars[tag_end].is_alphanumeric() || chars[tag_end] == '_') {
-        tag_end += 1;
-    }
-    let starts_with_digit = chars.get(start + 1).is_some_and(char::is_ascii_digit);
-    if chars.get(tag_end) != Some(&'$') || starts_with_digit {
-        return None;
-    }
-    let delimiter = &chars[start..=tag_end];
-    let body_start = tag_end + 1;
-    let mut at = body_start;
-    while at + delimiter.len() <= chars.len() {
-        if &chars[at..at + delimiter.len()] == delimiter {
-            let body = chars[body_start..at].iter().collect();
-            return Some((body, at + delimiter.len()));
-        }
-        at += 1;
-    }
-    Some((chars[body_start..].iter().collect(), chars.len()))
-}
-
-fn tokenize(sql: &str) -> Vec<Token> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut tokens = Vec::new();
-    let mut at = 0;
-    while at < chars.len() {
-        let current = chars[at];
-        let next = chars.get(at + 1).copied();
-        if current.is_whitespace() {
-            at += 1;
-        } else if current == '-' && next == Some('-') {
-            while at < chars.len() && chars[at] != '\n' {
-                at += 1;
-            }
-        } else if current == '/' && next == Some('*') {
-            at = block_comment_end(&chars, at);
-        } else if current == '\'' {
-            let escape_prefix =
-                is_word(tokens.last(), "e") && at > 0 && matches!(chars[at - 1], 'e' | 'E');
-            if escape_prefix {
-                tokens.pop();
-            }
-            let (text, end) = quoted_end(&chars, at, '\'', escape_prefix);
-            tokens.push(Token::Text(text));
-            at = end;
-        } else if current == '"' {
-            let (text, end) = quoted_end(&chars, at, '"', false);
-            tokens.push(Token::Quoted(text));
-            at = end;
-        } else if current == '$' {
-            match dollar_body(&chars, at) {
-                Some((body, end)) => {
-                    tokens.push(Token::Body(body));
-                    at = end;
-                }
-                None => {
-                    tokens.push(Token::Symbol('$'));
-                    at += 1;
-                }
-            }
-        } else if current.is_alphanumeric() || current == '_' {
-            let start = at;
-            while at < chars.len()
-                && (chars[at].is_alphanumeric() || chars[at] == '_' || chars[at] == '$')
-            {
-                at += 1;
-            }
-            let text: String = chars[start..at].iter().collect();
-            tokens.push(Token::Word(text.to_lowercase()));
-        } else {
-            tokens.push(Token::Symbol(current));
-            at += 1;
-        }
-    }
-    tokens
-}
-
-fn grants_to_role(from_grant: &[Token]) -> bool {
-    let mut depth = 0usize;
-    let mut in_grantees = false;
-    for token in &from_grant[1..] {
-        match token {
-            Token::Symbol(';') => return false,
-            Token::Symbol('(') => depth += 1,
-            Token::Symbol(')') => depth = depth.saturating_sub(1),
-            Token::Word(found) if !in_grantees && depth == 0 && found == "to" => {
-                in_grantees = true;
-            }
-            Token::Word(found) if in_grantees && (found == "with" || found == "granted") => {
-                return false;
-            }
-            Token::Word(found) | Token::Quoted(found) if in_grantees && found == ROLE => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn then_of(tokens: &[Token], keyword: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (offset, token) in tokens[keyword + 1..].iter().enumerate() {
-        match token {
-            Token::Symbol(';') if depth == 0 => return None,
-            Token::Symbol('(') => depth += 1,
-            Token::Symbol(')') => depth = depth.saturating_sub(1),
-            Token::Word(found) if depth == 0 && found == "then" => {
-                return Some(keyword + 1 + offset);
-            }
-            _ => {}
-        }
+        start = at + 1;
     }
     None
 }
 
-fn is_role_guard(condition: &[Token]) -> bool {
-    let tail = [
-        word("pg_roles"),
-        word("where"),
-        word("rolname"),
-        Token::Symbol('='),
-        Token::Text(ROLE.to_owned()),
-        Token::Symbol(')'),
-    ];
-    let head = [word("exists"), Token::Symbol('('), word("select")];
-    if !condition.starts_with(&head) || !condition.ends_with(&tail) {
-        return false;
-    }
-    let source = &condition[..condition.len() - tail.len()];
-    let from_catalog = [word("from"), word("pg_catalog"), Token::Symbol('.')];
-    if !source.ends_with(&[word("from")]) && !source.ends_with(&from_catalog) {
-        return false;
-    }
-    let mut depth = 0usize;
-    for token in &condition[1..condition.len() - 1] {
-        match token {
-            Token::Symbol('(') => depth += 1,
-            Token::Symbol(')') => depth = depth.saturating_sub(1),
-            _ => {}
+fn find_guard(collapsed: &str, lowered: &str, from: usize) -> Option<usize> {
+    let mut start = from;
+    while let Some(at) = find_whole(lowered, GUARD, start) {
+        if collapsed[at..at + GUARD.len()].contains(GUARD_ROLE_LITERAL) {
+            return Some(at);
         }
-        if depth == 0 {
-            return false;
-        }
+        start = at + 1;
     }
-    depth == 1
+    None
 }
 
-fn close_frame(frames: &mut Vec<Frame>, after_end: Option<&Token>) {
-    let closes = |frame: &Frame| match frame {
-        Frame::If(_) => is_word(after_end, "if"),
-        Frame::Loop => is_word(after_end, "loop"),
-        Frame::Case => is_word(after_end, "case"),
-        Frame::Block => false,
-    };
-    let typed = ["if", "loop", "case"]
+fn guarded_region_end(lowered: &str, from: usize) -> usize {
+    REGION_ENDS
         .iter()
-        .any(|keyword| is_word(after_end, keyword));
-    while let Some(frame) = frames.pop() {
-        if !typed || closes(&frame) {
-            return;
-        }
-    }
+        .filter_map(|end| find_whole(lowered, end, from))
+        .min()
+        .unwrap_or(lowered.len())
 }
 
-fn scan_body(body: &str, inherited_guard: bool, grants: &mut Grants) {
-    let tokens = tokenize(body);
-    let mut frames: Vec<Frame> = Vec::new();
+fn mentions_outside_guard(sql: &str) -> usize {
+    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = collapsed.to_ascii_lowercase();
+    let mut count = 0;
     let mut at = 0;
-    while at < tokens.len() {
-        let after_end = at > 0 && is_word(tokens.get(at - 1), "end");
-        let guarded =
-            inherited_guard || frames.iter().any(|frame| matches!(frame, Frame::If(true)));
-        match &tokens[at] {
-            Token::Word(found) => match found.as_str() {
-                "if" if !after_end => {
-                    if let Some(then) = then_of(&tokens, at) {
-                        frames.push(Frame::If(is_role_guard(&tokens[at + 1..then])));
-                        at = then;
-                    }
-                }
-                "elsif" | "elseif" => {
-                    if let (Some(then), Some(Frame::If(guard))) =
-                        (then_of(&tokens, at), frames.last_mut())
-                    {
-                        *guard = is_role_guard(&tokens[at + 1..then]);
-                        at = then;
-                    }
-                }
-                "else" => {
-                    if let Some(Frame::If(guard)) = frames.last_mut() {
-                        *guard = false;
-                    }
-                }
-                "case" if !after_end => frames.push(Frame::Case),
-                "loop" if !after_end => frames.push(Frame::Loop),
-                "begin" => frames.push(Frame::Block),
-                "end" => close_frame(&mut frames, tokens.get(at + 1)),
-                "grant" if grants_to_role(&tokens[at..]) => {
-                    if guarded {
-                        grants.guarded += 1;
-                    } else {
-                        grants.bare += 1;
-                    }
-                }
-                _ => {}
-            },
-            Token::Text(inner) | Token::Body(inner) => scan_body(inner, guarded, grants),
-            _ => {}
+    loop {
+        let guard = find_guard(&collapsed, &lowered, at);
+        let open_until = guard.unwrap_or(lowered.len());
+        let mut mention = find_whole(&lowered, ROLE, at);
+        while let Some(found) = mention.filter(|found| *found < open_until) {
+            count += 1;
+            mention = find_whole(&lowered, ROLE, found + ROLE.len());
         }
-        at += 1;
+        let Some(guard) = guard else {
+            return count;
+        };
+        at = guarded_region_end(&lowered, guard + GUARD.len());
     }
 }
 
-fn scan_migration(sql: &str) -> Grants {
-    let mut grants = Grants::default();
-    let tokens = tokenize(sql);
-    for statement in tokens.split(|token| *token == Token::Symbol(';')) {
-        let is_do = is_word(statement.first(), "do");
-        for (at, token) in statement.iter().enumerate() {
-            match token {
-                Token::Word(found) if found == "grant" && grants_to_role(&statement[at..]) => {
-                    grants.bare += 1;
-                }
-                Token::Body(body) => scan_body(body, false, &mut grants),
-                Token::Text(body) if is_do => scan_body(body, false, &mut grants),
-                _ => {}
-            }
-        }
-    }
-    grants
-}
-
-fn scan_migrations() -> BTreeMap<String, Grants> {
+fn mentions_by_file() -> BTreeMap<String, usize> {
     let migrations_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let mut scanned = BTreeMap::new();
+    let mut found = BTreeMap::new();
     for entry in fs::read_dir(&migrations_path).expect("migrations directory must be readable") {
         let path = entry.expect("migration entry must be readable").path();
         let metadata = fs::metadata(&path).unwrap_or_else(|error| {
             panic!("metadata of {} must be readable: {error}", path.display())
         });
+        if !metadata.is_file() {
+            continue;
+        }
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_else(|| panic!("migration file name must be UTF-8: {}", path.display()))
             .to_owned();
-        if !metadata.is_file() || !name.ends_with(".sql") {
-            continue;
-        }
         let sql = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("{name} must be readable as UTF-8: {error}"));
-        scanned.insert(name, scan_migration(&sql));
+        found.insert(name, mentions_outside_guard(&sql));
     }
-    scanned
+    found
 }
 
-fn frozen_bare_grants(list: &str) -> Result<BTreeMap<String, usize>, String> {
+fn frozen_counts(list: &str) -> Result<BTreeMap<String, usize>, String> {
     let mut frozen = BTreeMap::new();
     for line in list.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let entry = line
             .rsplit_once(':')
+            .filter(|(file, count)| {
+                !file.is_empty()
+                    && !count.is_empty()
+                    && count.bytes().all(|byte| byte.is_ascii_digit())
+            })
             .and_then(|(file, count)| Some((file, count.parse::<usize>().ok()?)))
-            .filter(|(file, count)| !file.is_empty() && *count > 0);
+            .filter(|(_, count)| *count > 0);
         let Some((file, count)) = entry else {
             return Err(format!(
-                "frozen line {line:?} is not `file name:statement count`"
+                "frozen line {line:?} is not `file name:count` with a count above 0"
             ));
         };
         if frozen.insert(file.to_owned(), count).is_some() {
@@ -350,210 +118,252 @@ fn frozen_bare_grants(list: &str) -> Result<BTreeMap<String, usize>, String> {
     Ok(frozen)
 }
 
-fn bare_grant_problems(
-    scanned: &BTreeMap<String, Grants>,
+fn count_problems(
+    found: &BTreeMap<String, usize>,
     frozen: &BTreeMap<String, usize>,
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    for (file, grants) in scanned.iter().filter(|(_, grants)| grants.bare > 0) {
-        match frozen.get(file) {
-            None => problems.push(format!(
-                "{file}: {} GRANT statement(s) to role {ROLE} outside a DO block that checks \
-                 pg_roles for rolname = '{ROLE}' first",
-                grants.bare
-            )),
-            Some(count) if *count != grants.bare => problems.push(format!(
-                "{file}: {} bare GRANT statement(s) to role {ROLE}, the frozen list records {count}",
-                grants.bare
-            )),
-            Some(_) => {}
+    for (file, count) in found {
+        let expected = frozen.get(file).copied().unwrap_or(0);
+        if *count != expected {
+            problems.push(format!("{file}: expected {expected}, found {count}"));
         }
     }
-    for (file, count) in frozen {
-        if scanned.get(file).is_none_or(|grants| grants.bare == 0) {
-            problems.push(format!(
-                "{file}: the frozen list records {count} bare GRANT statement(s) to role {ROLE}, \
-                 the migrations hold none"
-            ));
+    for (file, expected) in frozen {
+        if !found.contains_key(file) {
+            problems.push(format!("{file}: expected {expected}, file is missing"));
         }
     }
     problems
 }
 
+fn counts(entries: &[(&str, usize)]) -> BTreeMap<String, usize> {
+    entries
+        .iter()
+        .map(|(file, count)| ((*file).to_owned(), *count))
+        .collect()
+}
+
 #[test]
-fn grants_to_role_deadlock_are_guarded() {
-    let scanned = scan_migrations();
-    let frozen = frozen_bare_grants(LEGACY_BARE_GRANTS).unwrap_or_else(|error| panic!("{error}"));
-    let guarded: Vec<&Grants> = scanned
-        .values()
-        .filter(|grants| grants.guarded > 0)
-        .collect();
-    let bare: Vec<&Grants> = scanned.values().filter(|grants| grants.bare > 0).collect();
-    println!(
-        "grants to role {ROLE} in {} migration files: {} guarded statements in {} files, \
-         {} bare statements in {} files",
-        scanned.len(),
-        guarded.iter().map(|grants| grants.guarded).sum::<usize>(),
-        guarded.len(),
-        bare.iter().map(|grants| grants.bare).sum::<usize>(),
-        bare.len(),
-    );
-    let problems = bare_grant_problems(&scanned, &frozen);
+fn role_deadlock_is_named_only_inside_the_role_guard() {
+    let frozen = frozen_counts(FROZEN_MENTIONS).unwrap_or_else(|error| panic!("{error}"));
+    let problems = count_problems(&mentions_by_file(), &frozen);
     assert!(
         problems.is_empty(),
-        "every GRANT to role {ROLE} must sit inside `DO $roles$ BEGIN IF EXISTS (SELECT 1 FROM \
-         pg_roles WHERE rolname = '{ROLE}') THEN ... END IF; END $roles$;` because the role does \
-         not exist in every database: {problems:#?}"
+        "{RULE} tests/deadlock_mentions_outside_role_guard.txt freezes the counts applied \
+         migrations already hold; a file not listed there must come out at 0. Files whose count \
+         outside the guard differs from the expected one: {problems:#?}"
     );
 }
 
 #[test]
-fn scanner_classifies_known_shapes() {
-    let guarded = |count| Grants {
-        guarded: count,
-        bare: 0,
-    };
-    let bare = |count| Grants {
-        guarded: 0,
-        bare: count,
-    };
-    let cases = [
-        ("", Grants::default()),
-        ("GRANT SELECT ON t TO deadlock;", bare(1)),
-        ("grant select on t to deadlock", bare(1)),
-        ("GRANT dl_patchnotes_privacy TO deadlock;", bare(1)),
-        ("GRANT SELECT ON t TO reader,\n    DeadLock ;", bare(1)),
-        ("GRANT SELECT ON t TO \"deadlock\", GROUP reader;", bare(1)),
-        ("GRANT UPDATE (a, b)\nON t\nTO reader, deadlock WITH GRANT OPTION;", bare(1)),
-        ("ALTER DEFAULT PRIVILEGES IN SCHEMA s GRANT SELECT ON TABLES TO deadlock;", bare(1)),
-        ("GRANT SELECT ON t TO reader; GRANT SELECT ON t TO deadlock;", bare(1)),
-        ("GRANT SELECT ON deadlock TO reader;", Grants::default()),
-        ("GRANT SELECT ON t TO \"Deadlock\", deadlock_reader;", Grants::default()),
-        ("GRANT SELECT ON t TO reader WITH GRANT OPTION; SELECT deadlock;", Grants::default()),
-        ("REVOKE GRANT OPTION FOR SELECT ON t FROM deadlock;", Grants::default()),
-        ("COMMENT ON TABLE t IS 'GRANT SELECT ON t TO deadlock;';", Grants::default()),
-        ("-- GRANT SELECT ON t TO deadlock;\n/* GRANT a TO deadlock; */", Grants::default()),
-        ("SELECT $note$ it's fine $note$; GRANT SELECT ON t TO deadlock;", bare(1)),
-        ("SELECT E'it\\'s'; GRANT SELECT ON t TO deadlock;", bare(1)),
+fn mentions_outside_the_guard_are_counted() {
+    let cases: &[(&str, &str, usize)] = &[
+        ("empty text", "", 0),
+        ("no mention", "CREATE TABLE core.t (id BIGINT PRIMARY KEY);", 0),
+        ("bare grant", "GRANT SELECT ON t TO deadlock;", 1),
         (
-            "DO $roles$\nBEGIN\n    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN\n        \
-             GRANT SELECT ON t TO deadlock;\n    END IF;\nEND\n$roles$;",
-            guarded(1),
+            "grant inside the exact guard",
+            "DO $roles$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             GRANT SELECT ON t TO deadlock; END IF; END $roles$;",
+            0,
         ),
         (
-            "do $$ begin\n if exists(select 1 from pg_catalog.pg_roles where rolname='deadlock') then\n\
-             grant select,insert on t\n   to deadlock;\n grant a to deadlock; end if; end $$;",
-            guarded(2),
+            "guard on pg_catalog.pg_roles is not the exact guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'deadlock') \
+             THEN GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            2,
         ),
         (
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
-             EXECUTE 'GRANT SELECT ON t TO deadlock'; \
-             EXECUTE format('GRANT SELECT ON %I TO deadlock', 't'); END IF; END $$;",
-            guarded(2),
-        ),
-        (
-            "DO 'BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ''deadlock'') THEN \
-             GRANT SELECT ON t TO deadlock; END IF; END';",
-            guarded(1),
-        ),
-        (
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
-             CREATE TABLE IF NOT EXISTS t (a int); \
-             PERFORM CASE WHEN true THEN 1 ELSE 2 END; \
-             FOR i IN 1..2 LOOP NULL; END LOOP; \
-             BEGIN NULL; EXCEPTION WHEN others THEN NULL; END; \
+            "guard that counts rows is always true",
+            "DO $$ BEGIN IF EXISTS (SELECT count(*) FROM pg_roles WHERE rolname = 'deadlock') THEN \
              GRANT SELECT ON t TO deadlock; END IF; END $$;",
-            guarded(1),
-        ),
-        ("DO $$ BEGIN GRANT SELECT ON t TO deadlock; END $$;", bare(1)),
-        ("DO $$ BEGIN EXECUTE 'GRANT SELECT ON t TO deadlock'; END $$;", bare(1)),
-        (
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'twitchbot') THEN \
-             GRANT SELECT ON t TO deadlock; END IF; END $$;",
-            bare(1),
+            2,
         ),
         (
+            "guard with a second condition",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') OR true \
+             THEN GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            2,
+        ),
+        (
+            "negated guard",
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             CREATE ROLE deadlock; END IF; END $$;",
+            2,
+        ),
+        (
+            "elsif exists is not the exact guard",
+            "DO $$ BEGIN IF x THEN NULL; ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = \
+             'deadlock') THEN GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            2,
+        ),
+        (
+            "guard with an uppercase role literal names another role",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'DEADLOCK') THEN \
              GRANT SELECT ON t TO deadlock; END IF; END $$;",
-            bare(1),
+            2,
         ),
         (
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') OR true THEN \
-             GRANT SELECT ON t TO deadlock; END IF; END $$;",
-            bare(1),
-        ),
-        (
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
-             NULL; ELSE GRANT SELECT ON t TO deadlock; END IF; END $$;",
-            bare(1),
-        ),
-        (
-            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
-             NULL; END IF; GRANT SELECT ON t TO deadlock; END $$;",
-            bare(1),
-        ),
-        (
+            "mention after the end of the guard",
             "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
              GRANT SELECT ON t TO deadlock; END IF; END $$; GRANT SELECT ON u TO deadlock;",
-            Grants {
-                guarded: 1,
-                bare: 1,
-            },
+            1,
         ),
         (
-            "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN \
-             GRANT SELECT ON t TO deadlock; END $$;",
-            bare(1),
+            "mention after a nested if inside the guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             IF x THEN NULL; END IF; GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            1,
         ),
+        (
+            "mention in the else branch of the guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             NULL; ELSE CREATE ROLE deadlock; END IF; END $$;",
+            1,
+        ),
+        (
+            "mention in an elsif branch of the guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             NULL; ELSIF x THEN GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            1,
+        ),
+        (
+            "mention in an elseif branch of the guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             NULL; ELSEIF x THEN GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            1,
+        ),
+        (
+            "mention after a case else inside the guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             PERFORM CASE WHEN x THEN 1 ELSE 2 END; GRANT SELECT ON t TO deadlock; END IF; END $$;",
+            1,
+        ),
+        (
+            "longer identifiers are other names",
+            "SELECT deadlock_heroes, dl_deadlock, deadlock2, xdeadlock FROM steam.deadlocks;",
+            0,
+        ),
+        (
+            "else and end if inside longer words do not end the guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             PERFORM 'the backend if needed', elsewhere, end_if FROM core.models; \
+             GRANT SELECT ON core.channels TO deadlock; END IF; END $$;",
+            0,
+        ),
+        (
+            "uppercase guard",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM PG_ROLES WHERE ROLNAME = 'deadlock') THEN \
+             GRANT SELECT ON T TO DEADLOCK; END IF; END $$;",
+            0,
+        ),
+        (
+            "lowercase guard",
+            "do $$ begin if exists (select 1 from pg_roles where rolname = 'deadlock') then \
+             grant select on t to deadlock; end if; end $$;",
+            0,
+        ),
+        (
+            "guard with a line break inside its parentheses is not the exact guard",
+            "DO $$\nBEGIN\n\tIF EXISTS (\n\t\tSELECT 1\n\t\tFROM pg_roles\n\t\tWHERE rolname = \
+             'deadlock'\n\t)\r\n\tTHEN\n\t\tGRANT SELECT ON t\n\t\tTO deadlock;\n\tEND\n\tIF;\nEND\n$$;",
+            2,
+        ),
+        (
+            "guard with line breaks between its words",
+            "DO $$\nBEGIN\n\tIF   EXISTS\n(SELECT 1\n\t\tFROM pg_roles\n\t\tWHERE rolname =\n\
+             'deadlock')\r\n\tTHEN\n\t\tGRANT SELECT ON t\n\t\tTO deadlock;\n\tEND\n\tIF;\nEND\n$$;",
+            0,
+        ),
+        (
+            "revoke outside a guard",
+            "REVOKE ALL ON t FROM deadlock;",
+            1,
+        ),
+        (
+            "owner outside a guard",
+            "ALTER TABLE t OWNER TO deadlock;",
+            1,
+        ),
+        (
+            "grantee passed to format outside a guard",
+            "DO $$ BEGIN EXECUTE format('GRANT SELECT ON t TO %I', 'deadlock'); END $$;",
+            1,
+        ),
+        (
+            "quoted grantee outside a guard",
+            "GRANT SELECT ON t TO \"deadlock\";",
+            1,
+        ),
+        (
+            "comment line outside a guard",
+            "-- the deadlock role reads this table\nCREATE TABLE t (id INT);",
+            1,
+        ),
+        (
+            "guard without end if guards the rest of the text",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             GRANT SELECT ON t TO deadlock; GRANT SELECT ON u TO deadlock;",
+            0,
+        ),
+        (
+            "two guards with a mention between them",
+            "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             GRANT SELECT ON t TO deadlock; END IF; END $$; COMMENT ON TABLE t IS 'for deadlock'; \
+             DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN \
+             GRANT SELECT ON u TO deadlock; END IF; END $$;",
+            1,
+        ),
+        (
+            "mention next to non-ASCII text",
+            "COMMENT ON TABLE t IS 'für deadlock, ädeadlock, deadlockß';",
+            3,
+        ),
+        ("the word alone", "deadlock", 1),
     ];
-    for (sql, expected) in cases {
-        assert_eq!(scan_migration(sql), expected, "{sql}");
+    for (label, sql, expected) in cases {
+        assert_eq!(mentions_outside_guard(sql), *expected, "{label}: {sql}");
     }
 }
 
 #[test]
-fn frozen_list_cannot_rot() {
-    let scanned = BTreeMap::from([
-        (
-            "a.sql".to_owned(),
-            Grants {
-                guarded: 0,
-                bare: 1,
-            },
-        ),
-        (
-            "b.sql".to_owned(),
-            Grants {
-                guarded: 2,
-                bare: 0,
-            },
-        ),
-        (
-            "c.sql".to_owned(),
-            Grants {
-                guarded: 0,
-                bare: 2,
-            },
-        ),
-    ]);
-    let frozen = |list: &str| frozen_bare_grants(list).expect("well-formed list");
+fn frozen_counts_are_compared_in_both_directions() {
+    let frozen = counts(&[("a.sql", 2)]);
+    let no_problems = Vec::<String>::new();
+    assert_eq!(
+        count_problems(&counts(&[("a.sql", 2), ("b.sql", 0)]), &frozen),
+        no_problems
+    );
+    assert_eq!(
+        count_problems(&counts(&[("a.sql", 3)]), &frozen),
+        vec!["a.sql: expected 2, found 3".to_owned()]
+    );
+    assert_eq!(
+        count_problems(&counts(&[("a.sql", 0)]), &frozen),
+        vec!["a.sql: expected 2, found 0".to_owned()]
+    );
+    assert_eq!(
+        count_problems(&counts(&[("a.sql", 2), ("b.sql", 1)]), &frozen),
+        vec!["b.sql: expected 0, found 1".to_owned()]
+    );
+    assert_eq!(
+        count_problems(&counts(&[("b.sql", 0)]), &frozen),
+        vec!["a.sql: expected 2, file is missing".to_owned()]
+    );
 
-    assert!(bare_grant_problems(&scanned, &frozen("a.sql:1\nc.sql:2\n")).is_empty());
-
-    let unlisted = bare_grant_problems(&scanned, &frozen("a.sql:1\n"));
-    assert_eq!(unlisted.len(), 1, "{unlisted:?}");
-    assert!(unlisted[0].starts_with("c.sql: 2 GRANT statement(s)"));
-
-    let grown = bare_grant_problems(&scanned, &frozen("a.sql:1\nc.sql:1\n"));
-    assert_eq!(grown.len(), 1, "{grown:?}");
-    assert!(grown[0].starts_with("c.sql: 2 bare GRANT statement(s)"));
-
-    let stale = bare_grant_problems(&scanned, &frozen("a.sql:1\nb.sql:1\nc.sql:2\ngone.sql:1\n"));
-    assert_eq!(stale.len(), 2, "{stale:?}");
-    assert!(stale[0].starts_with("b.sql: the frozen list records 1"));
-    assert!(stale[1].starts_with("gone.sql: the frozen list records 1"));
-
-    for malformed in ["a.sql", "a.sql:0", "a.sql:x", ":1", "a.sql:1\na.sql:1"] {
-        assert!(frozen_bare_grants(malformed).is_err(), "{malformed}");
+    assert_eq!(
+        frozen_counts("a.sql:2\n\n  b.sql:1  \n"),
+        Ok(counts(&[("a.sql", 2), ("b.sql", 1)]))
+    );
+    assert_eq!(frozen_counts(""), Ok(BTreeMap::new()));
+    for malformed in [
+        "a.sql", "a.sql:", "a.sql:x", "a.sql:0", "a.sql:+1", "a.sql: 1", ":1",
+    ] {
+        assert!(frozen_counts(malformed).is_err(), "{malformed}");
     }
+    assert_eq!(
+        frozen_counts("a.sql:1\na.sql:2"),
+        Err("frozen file a.sql is listed twice".to_owned())
+    );
 }

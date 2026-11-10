@@ -39,17 +39,17 @@ fn frozen_short_versions() -> BTreeSet<&'static str> {
 
 fn version_of(file_name: &str) -> Result<(&str, i64), &'static str> {
     let Some((version, rest)) = file_name.split_once('_') else {
-        return Err("has no `_` after the version, so sqlx skips the file");
+        return Err("has no `_` after the version");
     };
     if !rest.ends_with(".sql") {
-        return Err("does not end in .sql, so sqlx skips the file");
+        return Err("does not end in .sql");
     }
     if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("version is not made of ASCII digits only");
     }
     match version.parse::<i64>() {
         Ok(number) => Ok((version, number)),
-        Err(_) => Err("version does not fit the signed 64-bit integer sqlx parses"),
+        Err(_) => Err("version does not fit a signed 64-bit integer"),
     }
 }
 
@@ -86,12 +86,11 @@ fn width_problems(file_names: &[String], frozen: &BTreeSet<&str>) -> Vec<String>
             frozen_with_file.insert(*known);
         } else if version.len() != VERSION_WIDTH {
             problems.push(format!(
-                "{file_name}: version must be exactly {VERSION_WIDTH} ASCII digits (YYYYMMDDHHMMSS)"
+                "{file_name}: version must be exactly {VERSION_WIDTH} ASCII digits"
             ));
         } else if number < FIRST_FULL_WIDTH_VERSION {
             problems.push(format!(
-                "{file_name}: version number {number} is below {FIRST_FULL_WIDTH_VERSION}, \
-                 so it sorts before applied migrations"
+                "{file_name}: version number {number} is below {FIRST_FULL_WIDTH_VERSION}"
             ));
         }
     }
@@ -122,7 +121,8 @@ fn migration_versions_have_fourteen_digits() {
     assert!(
         problems.is_empty(),
         "migration versions outside the frozen legacy list must be {VERSION_WIDTH} ASCII digits \
-         and at least {FIRST_FULL_WIDTH_VERSION}: {problems:#?}"
+         and at least {FIRST_FULL_WIDTH_VERSION}; this test does not know which versions are \
+         applied, so it cannot tell whether a version sorts after them: {problems:#?}"
     );
 }
 
