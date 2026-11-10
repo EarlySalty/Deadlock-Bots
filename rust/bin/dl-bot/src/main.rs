@@ -1501,13 +1501,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             )?
             .with_gate(
                 dl_core::runtime_config::secret_value("DISCORD_ACCESS_GATE_TOKEN"),
-                mcp::GateSettings::new(
+                mcp::GateSettings::from_options(
                     dl_core::config::process_bot_config()?
                         .source()
                         .with_file_name("access-gate.toml"),
                     owner_id,
-                    central_pool.clone(),
-                ),
+                    Some(central_pool.clone()),
+                    &operating.runtime.start,
+                )
+                .context("Zugriffsschranke-Betriebswerte")?,
             )?,
     );
     let mcp_addr = mcp::McpState::bind_addr(&operating.runtime.start);

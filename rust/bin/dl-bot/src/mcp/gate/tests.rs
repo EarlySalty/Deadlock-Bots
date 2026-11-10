@@ -4,6 +4,13 @@ use dl_access_gate::{GateClient, GateError, Origin};
 use dl_core::runtime_config::StartOptions;
 use std::sync::Mutex as StdMutex;
 
+const CACHE_MS: u64 = 60_000;
+const LOOKUP_MS: u64 = 2_000;
+const DECISION_MS: u64 = 6_000;
+const RELOAD_MS: u64 = 50;
+const PURGE_SECS: u64 = 21_600;
+const RETENTION_DAYS: u64 = 180;
+
 const VIEW: u64 = 1 << 10;
 const BAN: u64 = 1 << 2;
 const EVENTS: u64 = 1 << 33;
@@ -117,7 +124,7 @@ async fn serve(router: Router) -> std::net::SocketAddr {
     addr
 }
 
-async fn fixture(policy: Option<&str>, recorder: bool, ttl: Duration) -> Fixture {
+async fn fixture(policy: Option<&str>, recorder: bool, cache_ms: u64) -> Fixture {
     let members: Members = Arc::new(StdMutex::new(base_members()));
     let mock_members = members.clone();
     let mock = Router::new().fallback(move |request: axum::extract::Request| {
@@ -146,14 +153,17 @@ async fn fixture(policy: Option<&str>, recorder: bool, ttl: Duration) -> Fixture
     );
     state.public_policy.mcp_verified_role_id = Some(3);
     state.discord_api = format!("http://{mock_addr}");
-    let settings = GateSettings {
-        access_file: file,
-        owner_id: Some(999),
-        pool: recorder.then_some(pool),
-        ttl,
-        lookup_timeout: Duration::from_secs(2),
-        reload_interval: Duration::from_millis(50),
+    let options = StartOptions {
+        access_gate_cache_ttl_ms: Some(cache_ms),
+        access_gate_lookup_timeout_ms: Some(LOOKUP_MS),
+        access_gate_decision_timeout_ms: Some(DECISION_MS),
+        access_gate_reload_ms: Some(RELOAD_MS),
+        access_gate_purge_every_secs: Some(PURGE_SECS),
+        access_gate_retention_days: Some(RETENTION_DAYS),
+        ..StartOptions::default()
     };
+    let settings = GateSettings::from_options(file, Some(999), recorder.then_some(pool), &options)
+        .expect("gate settings");
     let state = state
         .with_gate(Some("gate-token".into()), settings)
         .expect("gate state");
@@ -205,7 +215,7 @@ fn checked(answer: &AuthorizeResponse, expected: Reason) {
 
 #[tokio::test]
 async fn token_and_request_shape_are_enforced() {
-    let fixture = fixture(Some(POLICY), true, Duration::from_secs(60)).await;
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let wrong = GateClient::new(
         &format!("http://{}", fixture.addr),
         "general",
@@ -257,7 +267,7 @@ async fn token_and_request_shape_are_enforced() {
 
 #[tokio::test]
 async fn decision_table() {
-    let fixture = fixture(Some(POLICY), true, Duration::from_secs(60)).await;
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let write = |user| request(Some(user), "discord.event.write", ActionClass::Write);
     checked(&reason(&fixture, &write("100")).await, Reason::MissingRight);
     let streamer = reason(&fixture, &write("101")).await;
@@ -322,7 +332,7 @@ async fn decision_table() {
 
 #[tokio::test]
 async fn hierarchy_refuses_equal_or_higher_targets() {
-    let fixture = fixture(Some(POLICY), true, Duration::from_secs(60)).await;
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let ban = |user: &str, target: Option<&str>, role: Option<&str>| AuthorizeRequest {
         target_user_id: target.map(str::to_owned),
         target_role_id: role.map(str::to_owned),
@@ -380,7 +390,7 @@ async fn hierarchy_refuses_equal_or_higher_targets() {
 
 #[tokio::test]
 async fn place_ok_follows_channel_visibility() {
-    let fixture = fixture(Some(POLICY), true, Duration::from_secs(60)).await;
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let internal = |channel: &str, dm: bool| AuthorizeRequest {
         channel_id: Some(channel.into()),
         dm,
@@ -418,7 +428,7 @@ async fn place_ok_follows_channel_visibility() {
 
 #[tokio::test]
 async fn access_answers_match_roles_and_fail_closed() {
-    let fixture = fixture(Some(POLICY), true, Duration::from_secs(60)).await;
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let access = |user: &str, channel: Option<&str>| AccessRequest {
         user_id: user.into(),
         channel_id: channel.map(str::to_owned),
@@ -457,8 +467,8 @@ async fn access_answers_match_roles_and_fail_closed() {
 
 #[tokio::test]
 async fn role_removal_is_visible_after_the_cache_time() {
-    let ttl = Duration::from_millis(300);
-    let fixture = fixture(Some(POLICY), true, ttl).await;
+    let cache_ms = 300;
+    let fixture = fixture(Some(POLICY), true, cache_ms).await;
     let write = request(Some("101"), "discord.event.write", ActionClass::Write);
     checked(&reason(&fixture, &write).await, Reason::Allowed);
     fixture
@@ -467,19 +477,19 @@ async fn role_removal_is_visible_after_the_cache_time() {
         .expect("members")
         .insert(101, json!({"user":{"id":"101"},"roles":["3"]}));
     checked(&reason(&fixture, &write).await, Reason::Allowed);
-    tokio::time::sleep(ttl + Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(cache_ms + 100)).await;
     checked(&reason(&fixture, &write).await, Reason::MissingRight);
 }
 
 #[tokio::test]
 async fn missing_file_or_recorder_never_allows() {
     let write = request(Some("101"), "discord.event.write", ActionClass::Write);
-    let no_file = fixture(None, true, Duration::from_secs(60)).await;
+    let no_file = fixture(None, true, CACHE_MS).await;
     checked(
         &reason(&no_file, &write).await,
         Reason::AccessFileUnavailable,
     );
-    let no_record = fixture(Some(POLICY), false, Duration::from_secs(60)).await;
+    let no_record = fixture(Some(POLICY), false, CACHE_MS).await;
     checked(&reason(&no_record, &write).await, Reason::RecordUnavailable);
     let mut refused = request(Some("100"), "discord.event.write", ActionClass::Write);
     refused.args_redacted = None;
@@ -488,7 +498,7 @@ async fn missing_file_or_recorder_never_allows() {
 
 #[tokio::test]
 async fn malformed_file_keeps_the_last_good_one() {
-    let fixture = fixture(Some(POLICY), true, Duration::from_secs(60)).await;
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
     let file = fixture.dir.path().join("access-gate.toml");
     let write = request(Some("101"), "discord.event.write", ActionClass::Write);
     std::fs::write(
@@ -553,4 +563,36 @@ fn redaction_hides_secret_keys_and_bounds_size() {
         record::bounded(Some(&big)).and_then(|value| value.get("truncated").cloned()),
         Some(json!(true))
     );
+}
+
+#[test]
+fn gate_settings_refuse_missing_zero_and_inverted_values() {
+    let complete = StartOptions {
+        access_gate_cache_ttl_ms: Some(CACHE_MS),
+        access_gate_lookup_timeout_ms: Some(LOOKUP_MS),
+        access_gate_decision_timeout_ms: Some(DECISION_MS),
+        access_gate_reload_ms: Some(RELOAD_MS),
+        access_gate_purge_every_secs: Some(PURGE_SECS),
+        access_gate_retention_days: Some(RETENTION_DAYS),
+        ..StartOptions::default()
+    };
+    let build = |options: &StartOptions| {
+        GateSettings::from_options(PathBuf::from("access-gate.toml"), None, None, options)
+    };
+    assert!(build(&complete).is_ok());
+    let missing = StartOptions {
+        access_gate_reload_ms: None,
+        ..complete.clone()
+    };
+    assert!(build(&missing).is_err());
+    let zero = StartOptions {
+        access_gate_retention_days: Some(0),
+        ..complete.clone()
+    };
+    assert!(build(&zero).is_err());
+    let inverted = StartOptions {
+        access_gate_decision_timeout_ms: Some(LOOKUP_MS - 1),
+        ..complete
+    };
+    assert!(build(&inverted).is_err());
 }

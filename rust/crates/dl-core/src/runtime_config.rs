@@ -71,6 +71,12 @@ section!(StartOptions {
     mcp_guild_id: u64 => "MCP_DEFAULT_GUILD_ID",
     mcp_export_dir: PathBuf => "MCP_EXPORT_DIR",
     mcp_verified_role_id: u64 => "MCP_VERIFIED_ROLE_ID",
+    access_gate_cache_ttl_ms: u64 => "DL_ACCESS_GATE_CACHE_TTL_MS",
+    access_gate_lookup_timeout_ms: u64 => "DL_ACCESS_GATE_LOOKUP_TIMEOUT_MS",
+    access_gate_decision_timeout_ms: u64 => "DL_ACCESS_GATE_DECISION_TIMEOUT_MS",
+    access_gate_reload_ms: u64 => "DL_ACCESS_GATE_RELOAD_MS",
+    access_gate_purge_every_secs: u64 => "DL_ACCESS_GATE_PURGE_EVERY_SECS",
+    access_gate_retention_days: u64 => "DL_ACCESS_GATE_RETENTION_DAYS",
 });
 
 section!(BridgeOptions {
@@ -252,6 +258,24 @@ impl RuntimeConfig {
         }
     }
 
+    fn access_gate_values_valid(&self) -> bool {
+        let start = &self.start;
+        let within = |value: Option<u64>, max: u64| value.is_none_or(|v| (1..=max).contains(&v));
+        within(start.access_gate_cache_ttl_ms, 3_600_000)
+            && within(start.access_gate_lookup_timeout_ms, 60_000)
+            && within(start.access_gate_decision_timeout_ms, 180_000)
+            && within(start.access_gate_reload_ms, 3_600_000)
+            && within(start.access_gate_purge_every_secs, 604_800)
+            && within(start.access_gate_retention_days, 3_650)
+            && match (
+                start.access_gate_lookup_timeout_ms,
+                start.access_gate_decision_timeout_ms,
+            ) {
+                (Some(lookup), Some(decision)) => decision >= lookup,
+                _ => true,
+            }
+    }
+
     pub fn validate(&self) -> Result<(), BotConfigError> {
         let invalid = || BotConfigError::Validation("Ungültiger Betriebswert in runtime");
         for seconds in [
@@ -361,6 +385,9 @@ impl RuntimeConfig {
             .as_deref()
             .is_some_and(|value| !matches!(value, "guild" | "global" | "both"))
         {
+            return Err(invalid());
+        }
+        if !self.access_gate_values_valid() {
             return Err(invalid());
         }
         for port in [self.start.mcp_port, self.bridges.twitch_port]
