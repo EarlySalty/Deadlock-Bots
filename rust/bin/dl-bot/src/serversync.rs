@@ -5569,9 +5569,6 @@ impl ServerSyncOps for ServerSyncService {
             voice_extras.push(extras);
             voice_scans.push(discovered.clone());
             let mut adopted_from_history = false;
-            // Adoption nur bei komplett verlorenem KV; ein Format-/Layoutwechsel mit
-            // intaktem KV (Länge ≠ erwartet) läuft über den Repost-Pfad, der die
-            // gespeicherten alten Messages selbst abräumt.
             if output.targets[target_index].stored_message_ids.is_empty() {
                 match discovered.len() {
                     0 => {}
