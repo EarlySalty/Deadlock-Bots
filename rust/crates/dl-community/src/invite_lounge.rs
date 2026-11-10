@@ -249,6 +249,7 @@ trait LoungeStore: Send + Sync {
     async fn actions_since(&self) -> Result<Option<i64>, String>;
     async fn mark_actions_since(&self, now: i64) -> Result<(), String>;
     async fn steam_progress(&self, code: &str, since: i64) -> Result<SteamProgress, String>;
+    async fn handled_since(&self, code: &str, since: i64) -> Result<bool, String>;
 }
 
 struct PgLoungeStore {
@@ -387,6 +388,26 @@ impl LoungeStore for PgLoungeStore {
             invited,
             open,
         })
+    }
+
+    async fn handled_since(&self, code: &str, since: i64) -> Result<bool, String> {
+        let Some(steam_id) = steam_id64(code) else {
+            return Ok(false);
+        };
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM steam.bot_event_log
+                            WHERE event_type = 'playtest_invite' AND steam_id = $1
+                              AND occurred_at >= to_timestamp($2))
+                 OR EXISTS(SELECT 1 FROM steam.beta_invite_audit
+                            WHERE steam_id64 = $1 AND invited_at >= to_timestamp($2))
+                 OR EXISTS(SELECT 1 FROM steam.invite_requests
+                            WHERE steam_id64 = $1 AND created_at >= $2)",
+        )
+        .bind(steam_id)
+        .bind(since as f64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| err.to_string())
     }
 }
 
@@ -896,13 +917,74 @@ impl InviteLoungeWatcher {
             }
             return self.follow_steam(user_id, &previous, wait, now).await;
         }
-        if check_in_due(request, &previous.status, now) {
-            return self.check_in(user_id, &previous, now).await;
-        }
-        if !is_due(request, &previous.status, now) {
+        let check_in_now = check_in_due(request, &previous.status, now);
+        if !check_in_now && !is_due(request, &previous.status, now) {
             return Ok(());
         }
+        if self.someone_on_it(user_id, &previous, request).await? {
+            return self.close_handled(user_id, &previous).await;
+        }
+        if check_in_now {
+            return self.check_in(user_id, &previous, now).await;
+        }
         self.send_invite(user_id, &previous, now).await
+    }
+
+    async fn someone_on_it(
+        &self,
+        user_id: u64,
+        state: &LoungeState,
+        request: &Request,
+    ) -> Result<bool, String> {
+        let dispatched_here = state
+            .dispatch_started_at_millis
+            .is_some_and(|started| started / 1000 >= request.created_at);
+        if request.direct || state.status.invite_now || dispatched_here {
+            return Ok(false);
+        }
+        if let Some(code) = state.friend_code.as_deref() {
+            match self.store.handled_since(code, request.created_at).await {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(user_id, error = %err, "Invite-Lounge: Einladungsprüfung fehlgeschlagen, Bitte läuft weiter");
+                }
+            }
+        }
+        let Some(channel_id) = state.status.channel_id else {
+            return Ok(false);
+        };
+        match self
+            .request_answered(channel_id, request.message_id, user_id)
+            .await
+        {
+            Ok(answered) => Ok(answered),
+            Err(err) => {
+                tracing::warn!(user_id, channel_id, error = %err, "Invite-Lounge: Verlauf nicht lesbar, Bitte läuft weiter");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn close_handled(&self, user_id: u64, previous: &LoungeState) -> Result<(), String> {
+        let mut next = previous.clone();
+        if let Some(request) = previous.request.as_ref() {
+            next.outbox
+                .retain(|entry| entry.request_message_id != request.message_id);
+        }
+        apply_step(&mut next, Step::Finish(None));
+        next.last_result = Some("Schon von Hand erledigt; keine Meldung".into());
+        if self
+            .store
+            .compare_exchange(user_id, Some(previous), &next)
+            .await?
+        {
+            tracing::info!(
+                user_id,
+                "Invite-Lounge schließt von Hand erledigte Bitte ohne Meldung"
+            );
+        }
+        Ok(())
     }
 
     async fn expire(&self, user_id: u64, previous: &LoungeState) -> Result<(), String> {
@@ -964,9 +1046,16 @@ impl InviteLoungeWatcher {
         let Some(channel_id) = previous.status.channel_id else {
             return Ok(());
         };
-        let answered = self
+        let answered = match self
             .request_answered(channel_id, request.message_id, user_id)
-            .await?;
+            .await
+        {
+            Ok(answered) => answered,
+            Err(err) => {
+                tracing::warn!(user_id, channel_id, error = %err, "Invite-Lounge: Verlauf für die Nachfrage nicht lesbar");
+                false
+            }
+        };
         let invited = self.store.steam_progress(code, 0).await?.invited;
         let mut next = previous.clone();
         next.status.check_in_at = Some(now);
@@ -990,6 +1079,9 @@ impl InviteLoungeWatcher {
         message_id: u64,
         user_id: u64,
     ) -> Result<bool, String> {
+        let Some(bot_id) = self.port.bot_id() else {
+            return Err("Die Discord-ID des Bots fehlt".into());
+        };
         let mut before = None;
         loop {
             let page = self.port.history(channel_id, before).await?;
@@ -998,7 +1090,7 @@ impl InviteLoungeWatcher {
             }
             if page
                 .iter()
-                .any(|message| answers_request(message, message_id, user_id))
+                .any(|message| answers_request(message, message_id, user_id, bot_id))
             {
                 return Ok(true);
             }
@@ -1556,9 +1648,11 @@ fn apply_check_in(
     }
 }
 
-fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64) -> bool {
+fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64, bot_id: u64) -> bool {
     message.message_id > request_id
         && message.author_id != user_id
+        && message.author_id != bot_id
+        && !message.is_bot
         && (message.reply_message_id == Some(request_id)
             || mentions_user(&message.content, user_id))
 }
