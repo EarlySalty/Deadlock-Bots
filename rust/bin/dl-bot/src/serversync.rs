@@ -8728,7 +8728,7 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
@@ -8768,6 +8768,7 @@ mod tests {
         patch_calls: Mutex<Vec<u64>>,
         patch_bodies: Mutex<Vec<(u64, Value)>>,
         get_overrides: Mutex<BTreeMap<u64, StatusCode>>,
+        missing_on_delete: Mutex<HashSet<u64>>,
         pin_calls: Mutex<Vec<(u64, u64)>>,
         patched_channels: Mutex<Vec<(u64, Value)>>,
         delete_calls: Mutex<Vec<u64>>,
@@ -9146,6 +9147,7 @@ mod tests {
             patch_calls: Mutex::new(Vec::new()),
             patch_bodies: Mutex::new(Vec::new()),
             get_overrides: Mutex::new(BTreeMap::new()),
+            missing_on_delete: Mutex::new(HashSet::new()),
             pin_calls: Mutex::new(Vec::new()),
             patched_channels: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
@@ -9379,6 +9381,14 @@ mod tests {
             .lock()
             .expect("delete calls")
             .push(message_id);
+        if state
+            .missing_on_delete
+            .lock()
+            .expect("missing on delete")
+            .remove(&message_id)
+        {
+            state.messages.lock().expect("messages").remove(&message_id);
+        }
         let removed = state
             .messages
             .lock()
@@ -12399,9 +12409,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 )]);
                 messages
             };
-            for (status, settles) in [
-                (StatusCode::FORBIDDEN, false),
-                (StatusCode::NOT_FOUND, true),
+            for (get_status, gone_during_delete, settles) in [
+                (Some(StatusCode::FORBIDDEN), false, false),
+                (Some(StatusCode::NOT_FOUND), false, true),
+                (None, true, true),
             ] {
                 seed_static_panel_kv(
                     db.pool(),
@@ -12414,23 +12425,35 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 )
                 .await;
                 let fake = spawn_fake_discord(42, with_extra(), Vec::new()).await;
-                fake.state
-                    .get_overrides
-                    .lock()
-                    .expect("get overrides")
-                    .insert(extra_id, status);
+                if let Some(status) = get_status {
+                    fake.state
+                        .get_overrides
+                        .lock()
+                        .expect("get overrides")
+                        .insert(extra_id, status);
+                }
+                if gone_during_delete {
+                    fake.state
+                        .missing_on_delete
+                        .lock()
+                        .expect("missing on delete")
+                        .insert(extra_id);
+                }
                 let service = ServerSyncService::new_for_test(
                     db.pool().clone(),
                     fake.base_url.clone(),
                     repo.path().to_path_buf(),
                 );
                 let result = service.$apply(true).await;
-                assert!(fake
-                    .state
-                    .delete_calls
-                    .lock()
-                    .expect("delete calls")
-                    .is_empty());
+                let expected_deletes = if gone_during_delete {
+                    vec![extra_id]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    *fake.state.delete_calls.lock().expect("delete calls"),
+                    expected_deletes
+                );
                 if settles {
                     let output = result.expect("already gone settles");
                     assert!(!output.deleted_message_ids.contains(&extra_id));
@@ -12513,6 +12536,16 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 "{:?}",
                 truncated_warn.warnings
             );
+            if stringify!($apply) == "rang_guide_apply" {
+                assert!(
+                    truncated_warn
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("Legacy-Scan endete")),
+                    "{:?}",
+                    truncated_warn.warnings
+                );
+            }
         }};
     }
 
@@ -13335,9 +13368,14 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .all(|message| message.action == "no_op"));
         }
 
-        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
-        let mut with_extra = voice_ux_fake_panel_messages(&planned);
-        if let Some(target) = planned.targets.first() {
+        for (get_status, gone_during_delete, settles) in [
+            (Some(StatusCode::FORBIDDEN), false, false),
+            (Some(StatusCode::NOT_FOUND), false, true),
+            (None, true, true),
+        ] {
+            let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+            let target = planned.targets.first().expect("voice target");
+            let mut with_extra = voice_ux_fake_panel_messages(&planned);
             let mut extra = fake_discord_message(
                 9851,
                 42,
@@ -13346,33 +13384,62 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 Vec::new(),
             );
             extra["channel_id"] = json!(target.channel_id.to_string());
-            with_extra.extend([extra]);
+            with_extra.extend([extra, voice_ux_fake_forum_starter(9401)]);
+            let fake = spawn_fake_discord(42, with_extra, Vec::new()).await;
+            if let Some(status) = get_status {
+                fake.state
+                    .get_overrides
+                    .lock()
+                    .expect("get overrides")
+                    .insert(9851, status);
+            }
+            if gone_during_delete {
+                fake.state
+                    .missing_on_delete
+                    .lock()
+                    .expect("missing on delete")
+                    .insert(9851);
+            }
+            let service = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                fake.base_url.clone(),
+                repo.path().to_path_buf(),
+            );
+            let result = service.router_apply(true).await;
+            let expected_deletes = if gone_during_delete {
+                vec![9851]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                *fake.state.delete_calls.lock().expect("delete calls"),
+                expected_deletes
+            );
+            if settles {
+                let output = result.expect("already gone settles");
+                assert!(output
+                    .targets
+                    .iter()
+                    .all(|target| !target.deleted_message_ids.contains(&9851)));
+                assert!(
+                    output
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("bereits weg")),
+                    "{:?}",
+                    output.warnings
+                );
+                assert!(output
+                    .targets
+                    .iter()
+                    .flat_map(|target| &target.messages)
+                    .all(|message| message.action == "no_op"));
+            } else {
+                let err = result.expect_err("unsettled extra blocks");
+                assert!(err.to_string().contains("[9851]"), "{err}");
+                assert!(err.to_string().contains("Gründe"), "{err}");
+            }
         }
-        with_extra.extend([voice_ux_fake_forum_starter(9401)]);
-        let unsettled_fake = spawn_fake_discord(42, with_extra, Vec::new()).await;
-        unsettled_fake
-            .state
-            .get_overrides
-            .lock()
-            .expect("get overrides")
-            .insert(9851, StatusCode::FORBIDDEN);
-        let unsettled = ServerSyncService::new_for_test(
-            db.pool().clone(),
-            unsettled_fake.base_url.clone(),
-            repo.path().to_path_buf(),
-        );
-        let unsettled_err = unsettled
-            .router_apply(true)
-            .await
-            .expect_err("unsettled extra blocks");
-        assert!(
-            unsettled_err.to_string().contains("[9851]"),
-            "{unsettled_err}"
-        );
-        assert!(
-            unsettled_err.to_string().contains("Gründe"),
-            "{unsettled_err}"
-        );
 
         let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
         for target in &planned.targets {
