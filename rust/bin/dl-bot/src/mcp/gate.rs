@@ -3,7 +3,7 @@ use super::access::{
     GuildRoles, MemberLookup, ADMIN,
 };
 use super::{discord_call, json_response, McpState};
-use anyhow::{Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -13,6 +13,7 @@ use dl_access_gate::{
     AccessRequest, AccessResponse, ActionClass, AuthorizeRequest, AuthorizeResponse, MemberStatus,
     OutcomeRequest, OutcomeResponse, Reason,
 };
+use dl_core::runtime_config::StartOptions;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -36,19 +37,66 @@ pub struct GateSettings {
     pub pool: Option<sqlx::PgPool>,
     pub ttl: Duration,
     pub lookup_timeout: Duration,
+    pub decision_timeout: Duration,
     pub reload_interval: Duration,
+    pub purge_every: Duration,
+    pub retention_days: i32,
+}
+
+fn required(value: Option<u64>, key: &str) -> Result<u64> {
+    match value {
+        Some(0) => bail!("runtime.start.{key} darf nicht 0 sein"),
+        Some(value) => Ok(value),
+        None => bail!("runtime.start.{key} fehlt in der Betriebskonfiguration"),
+    }
+}
+
+fn millis(value: Option<u64>, key: &str) -> Result<Duration> {
+    required(value, key).map(Duration::from_millis)
+}
+
+fn seconds(value: Option<u64>, key: &str) -> Result<Duration> {
+    required(value, key).map(Duration::from_secs)
 }
 
 impl GateSettings {
-    pub fn new(access_file: PathBuf, owner_id: Option<u64>, pool: sqlx::PgPool) -> Self {
-        Self {
+    pub fn from_options(
+        access_file: PathBuf,
+        owner_id: Option<u64>,
+        pool: Option<sqlx::PgPool>,
+        options: &StartOptions,
+    ) -> Result<Self> {
+        let lookup = millis(
+            options.access_gate_lookup_timeout_ms,
+            "access_gate_lookup_timeout_ms",
+        )?;
+        let decision = millis(
+            options.access_gate_decision_timeout_ms,
+            "access_gate_decision_timeout_ms",
+        )?;
+        ensure!(
+            decision >= lookup,
+            "runtime.start.access_gate_decision_timeout_ms muss mindestens access_gate_lookup_timeout_ms sein"
+        );
+        let retention_days = required(
+            options.access_gate_retention_days,
+            "access_gate_retention_days",
+        )?;
+        Ok(Self {
             access_file,
             owner_id,
-            pool: Some(pool),
-            ttl: Duration::from_secs(60),
-            lookup_timeout: Duration::from_secs(5),
-            reload_interval: Duration::from_secs(5),
-        }
+            pool,
+            ttl: millis(options.access_gate_cache_ttl_ms, "access_gate_cache_ttl_ms")?,
+            lookup_timeout: lookup,
+            decision_timeout: decision,
+            reload_interval: millis(options.access_gate_reload_ms, "access_gate_reload_ms")?,
+            purge_every: seconds(
+                options.access_gate_purge_every_secs,
+                "access_gate_purge_every_secs",
+            )?,
+            retention_days: i32::try_from(retention_days)
+                .context("runtime.start.access_gate_retention_days ist zu groß")?,
+        })
     }
 }
 
@@ -61,6 +109,7 @@ pub struct GateState {
     recorder: Option<record::Recorder>,
     ttl: Duration,
     lookup_timeout: Duration,
+    decision_timeout: Duration,
     roles: Mutex<Option<Stamped<Arc<GuildRoles>>>>,
     members: Mutex<HashMap<u64, Stamped<Option<Arc<Access>>>>>,
     channels: Mutex<HashMap<u64, Stamped<Arc<Value>>>>,
@@ -75,6 +124,10 @@ struct Verdict {
 
 impl GateState {
     pub fn start(token: String, settings: GateSettings) -> Self {
+        let retention = record::Retention {
+            purge_every: settings.purge_every,
+            days: settings.retention_days,
+        };
         let store = Arc::new(policy::PolicyStore::new(settings.access_file));
         store.reload();
         policy::spawn_reload(store.clone(), settings.reload_interval);
@@ -82,9 +135,12 @@ impl GateState {
             token,
             owner_id: settings.owner_id,
             policy: store,
-            recorder: settings.pool.map(record::Recorder::start),
+            recorder: settings
+                .pool
+                .map(|pool| record::Recorder::start(pool, retention)),
             ttl: settings.ttl,
             lookup_timeout: settings.lookup_timeout,
+            decision_timeout: settings.decision_timeout,
             roles: Mutex::new(None),
             members: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
@@ -367,8 +423,7 @@ pub async fn authorize_post(
         return invalid();
     };
     let verdict =
-        match tokio::time::timeout(gate.lookup_timeout * 3, decide(&st, &gate, &request, &ids))
-            .await
+        match tokio::time::timeout(gate.decision_timeout, decide(&st, &gate, &request, &ids)).await
         {
             Ok(verdict) => verdict,
             Err(_) => Verdict {

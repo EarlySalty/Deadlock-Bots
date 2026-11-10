@@ -25,7 +25,7 @@ Answer (always HTTP 200 once authenticated and well formed):
 
 | Field | Type | Notes |
 |---|---|---|
-| `status` | `member`, `not_member`, `lookup_failed` | `lookup_failed` covers Discord errors and lookups over 5 s |
+| `status` | `member`, `not_member`, `lookup_failed` | `lookup_failed` covers Discord errors and lookups over `runtime.start.access_gate_lookup_timeout_ms` (default 5000) |
 | `member` | bool | true only for `member` |
 | `owner` | bool | the configured owner id |
 | `timed_out` | bool | an active Discord timeout |
@@ -34,7 +34,7 @@ Answer (always HTTP 200 once authenticated and well formed):
 | `role_ids` | string[] | the member's role ids |
 | `top_role_position` | int | position of the highest role |
 
-For `not_member` and `lookup_failed` every right field is empty or false. Answers are cached for at most 60 seconds per user; a role change is visible after that at the latest.
+For `not_member` and `lookup_failed` every right field is empty or false. Answers are cached per user for at most `runtime.start.access_gate_cache_ttl_ms` (default 60000); a role change is visible after that at the latest. A whole decision is bounded by `runtime.start.access_gate_decision_timeout_ms` (default 15000, never below the lookup timeout) and answers `lookup_failed` when it runs over.
 
 ### `POST /gate/v1/authorize`
 
@@ -100,7 +100,7 @@ Callers must treat an unknown reason as a refusal; new reasons may be added.
 
 ## Access file
 
-`access-gate.toml` next to dl-bot's operating config (`bot.toml`). Only the gate reads it; it is reloaded within 5 seconds of a change. A malformed file is refused and the last good one stays active. Template: `config/access-gate.toml`.
+`access-gate.toml` next to dl-bot's operating config (`bot.toml`). Only the gate reads it; it is reloaded within `runtime.start.access_gate_reload_ms` (default 5000) of a change. A malformed file is refused and the last good one stays active. Template: `config/access-gate.toml`.
 
 ```toml
 schema_version = 1
@@ -127,7 +127,7 @@ Administrator holds every capability that is not `owner_only`; the owner holds e
 
 ## Record
 
-Every decision is a row in `bot.access_gate_decisions`, written off the request path through a bounded queue. Rows older than 180 days are purged.
+Every decision is a row in `bot.access_gate_decisions`, written off the request path through a bounded queue. Rows older than `runtime.start.access_gate_retention_days` (default 180) are purged every `runtime.start.access_gate_purge_every_secs` (default 21600). All six values live in dl-bot's `bot.toml`; dl-bot refuses to start when one is missing or 0, and config validation rejects out-of-range values.
 
 ## Planned without a break (G0b, confirm click)
 

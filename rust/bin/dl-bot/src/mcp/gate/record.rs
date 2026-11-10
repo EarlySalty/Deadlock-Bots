@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 const QUEUE: usize = 1024;
-const PURGE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const SECRET_MARKERS: &[&str] = &[
     "token",
     "secret",
@@ -37,16 +36,22 @@ enum Entry {
     Outcome(OutcomeRequest),
 }
 
+#[derive(Clone, Copy)]
+pub struct Retention {
+    pub purge_every: Duration,
+    pub days: i32,
+}
+
 #[derive(Clone)]
 pub struct Recorder {
     queue: mpsc::Sender<Entry>,
 }
 
 impl Recorder {
-    pub fn start(pool: sqlx::PgPool) -> Self {
+    pub fn start(pool: sqlx::PgPool, retention: Retention) -> Self {
         let (queue, receiver) = mpsc::channel(QUEUE);
         tokio::spawn(write_loop(pool.clone(), receiver));
-        tokio::spawn(purge_loop(pool));
+        tokio::spawn(purge_loop(pool, retention));
         Self { queue }
     }
 
@@ -152,13 +157,14 @@ async fn attach(pool: &sqlx::PgPool, outcome: OutcomeRequest) -> sqlx::Result<()
     .map(|_| ())
 }
 
-async fn purge_loop(pool: sqlx::PgPool) {
-    let mut ticker = tokio::time::interval(PURGE_EVERY);
+async fn purge_loop(pool: sqlx::PgPool, retention: Retention) {
+    let mut ticker = tokio::time::interval(retention.purge_every);
     loop {
         ticker.tick().await;
         let result = sqlx::query(
-            "DELETE FROM bot.access_gate_decisions WHERE decided_at < now() - interval '180 days'",
+            "DELETE FROM bot.access_gate_decisions WHERE decided_at < now() - make_interval(days => $1)",
         )
+        .bind(retention.days)
         .execute(&pool)
         .await;
         match result {

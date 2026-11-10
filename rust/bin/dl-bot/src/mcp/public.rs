@@ -1,4 +1,4 @@
-use super::access::{effective_permissions, Access, ADMIN, HISTORY, VIEW};
+use super::access::{effective_permissions, Access, HISTORY, VIEW};
 use super::{discord_call, McpState};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1039,6 +1039,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::access::ADMIN;
 
     #[test]
     fn suchgrenzen_und_anzeigenamen_folgen_dem_vertrag() {
