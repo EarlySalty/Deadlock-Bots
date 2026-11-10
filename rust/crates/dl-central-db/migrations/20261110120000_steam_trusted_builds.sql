@@ -83,3 +83,12 @@ CREATE TABLE steam.trusted_build_hero_state (
     last_attempt_at TIMESTAMPTZ,
     last_error TEXT
 );
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    steam.trusted_build_curated_players,
+    steam.trusted_build_watch_regions,
+    steam.trusted_build_pool,
+    steam.trusted_build_pool_state,
+    steam.trusted_build_index,
+    steam.trusted_build_hero_state
+TO deadlock;
