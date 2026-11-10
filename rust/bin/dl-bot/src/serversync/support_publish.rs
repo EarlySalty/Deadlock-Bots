@@ -100,9 +100,7 @@ pub const SUPPORT_DISCORD: &str = "\
 \n\
 Supporter bekommen eine eigene Rolle, private Supporter-Channels im VIP-Bereich und Zugang zum Streamer-VC.\n\
 \n\
-Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.\n\
-\n\
-Moderationsrechte gibt es darüber nicht.";
+Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.";
 pub const SUPPORT_PLANNED: &str = "\
 ## Was noch kommt\n\
 \n\
@@ -1191,7 +1189,7 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!rendered.contains("Community-Moderatoren-Chat"));
-        assert!(rendered.contains("Moderationsrechte gibt es darüber nicht"));
+        assert!(!rendered.contains("Moderationsrechte"));
         assert!(output
             .warnings
             .iter()
@@ -1273,6 +1271,7 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
         assert!(benefits[2].contains("Geplant, und noch nicht eingerichtet"));
         assert!(!benefits[2].contains("Moderatoren-Chats"));
         assert!(!benefits[2].contains("interne Teambereiche"));
+        assert!(!benefits[2].contains("Moderationsrechte"));
         assert!(benefits[3].contains("Statlocker"));
         let free = benefits
             .iter()
