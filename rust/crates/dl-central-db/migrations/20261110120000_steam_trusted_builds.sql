@@ -14,6 +14,9 @@ CREATE TABLE steam.trusted_build_curated_players (
     )
 );
 
+COMMENT ON COLUMN steam.trusted_build_curated_players.trusted IS
+    'Manual trust override: true = hand-picked as trusted; false = never trusted, even when the account is in the high-MMR pool; NULL = no override.';
+
 CREATE TABLE steam.trusted_build_watch_regions (
     account_id BIGINT NOT NULL,
     server_region TEXT NOT NULL,
@@ -84,11 +87,17 @@ CREATE TABLE steam.trusted_build_hero_state (
     last_error TEXT
 );
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON
-    steam.trusted_build_curated_players,
-    steam.trusted_build_watch_regions,
-    steam.trusted_build_pool,
-    steam.trusted_build_pool_state,
-    steam.trusted_build_index,
-    steam.trusted_build_hero_state
-TO deadlock;
+DO $roles$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN
+        GRANT SELECT, INSERT, UPDATE, DELETE ON
+            steam.trusted_build_curated_players,
+            steam.trusted_build_watch_regions,
+            steam.trusted_build_pool,
+            steam.trusted_build_pool_state,
+            steam.trusted_build_index,
+            steam.trusted_build_hero_state
+        TO deadlock;
+    END IF;
+END
+$roles$;
