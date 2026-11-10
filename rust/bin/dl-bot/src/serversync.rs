@@ -98,7 +98,6 @@ pub enum ServerSyncErrorKind {
 }
 
 const HISTORY_SCAN_MAX_PAGES: usize = 5;
-const DISCORD_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
@@ -923,13 +922,6 @@ pub struct ServerSyncService {
     panel_apply_lock: tokio::sync::Mutex<()>,
 }
 
-fn discord_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(DISCORD_HTTP_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-}
-
 impl ServerSyncService {
     pub fn new(
         pool: PgPool,
@@ -942,7 +934,7 @@ impl ServerSyncService {
             adapter,
             discord_token,
             guild_id,
-            http_client: discord_http_client(),
+            http_client: reqwest::Client::new(),
             discord_api_base: DISCORD_API_BASE.to_string(),
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
@@ -962,7 +954,7 @@ impl ServerSyncService {
             adapter: dl_discord::DiscordAdapter::new("test-token"),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
-            http_client: discord_http_client(),
+            http_client: reqwest::Client::new(),
             discord_api_base,
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),

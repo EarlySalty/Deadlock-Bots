@@ -28,3 +28,7 @@ The panel is three Components V2 messages in `#server-support` (`148313630127135
 - Brain use without a usage limit is written as not switched on. The daily limit still applies to every user. There is no supporter bypass in this change.
 - Build helper, patch watchlist and extended match queries are described as planned. Extended queries do not promise realtime.
 - Ko-fi still grants the supporter role manually for 31 days. That is the existing panel policy, not a new webhook.
+
+## Known limits
+
+- The panel apply lock has no wait limit and the serversync Discord client has no request timeout, because dl-bot has no configured Discord timeout and fixed timeouts are not allowed. A stalled Discord call holds all seven panel endpoints until it returns or the bot restarts.
