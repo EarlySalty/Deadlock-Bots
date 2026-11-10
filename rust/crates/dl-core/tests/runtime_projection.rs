@@ -115,6 +115,16 @@ fn shipped_access_gate_and_mcp_timings_validate() {
         "access_gate_purge_every_secs=59",
         "mcp_public_facts_cache_secs=0",
         "mcp_discord_timeout_ms=999",
+        "access_gate_cache_ttl_ms=3600001",
+        "access_gate_lookup_timeout_ms=60001",
+        "access_gate_decision_timeout_ms=180001",
+        "access_gate_reload_ms=499",
+        "access_gate_reload_ms=3600001",
+        "access_gate_purge_every_secs=604801",
+        "access_gate_retention_days=3651",
+        "mcp_public_facts_cache_secs=3601",
+        "mcp_discord_timeout_ms=120001",
+        "mcp_discord_timeout_ms=18446744073709551615",
     ] {
         assert!(
             BotConfig::parse(&format!("schema_version=1\n[runtime.start]\n{section}\n")).is_err(),

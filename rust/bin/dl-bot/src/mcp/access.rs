@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashSet};
 pub(crate) const VIEW: u64 = 1 << 10;
 pub(crate) const HISTORY: u64 = 1 << 16;
 pub(crate) const ADMIN: u64 = 1 << 3;
-const SEND: u64 = 1 << 11;
-const SEND_DEPENDENT: u64 = (1 << 12) | (1 << 14) | (1 << 15) | (1 << 17);
+pub(crate) const SEND: u64 = 1 << 11;
+pub(crate) const SEND_DEPENDENT: u64 = (1 << 12) | (1 << 14) | (1 << 15) | (1 << 17);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Access {

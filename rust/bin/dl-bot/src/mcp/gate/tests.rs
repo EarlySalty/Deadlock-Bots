@@ -1,4 +1,5 @@
 use super::*;
+use crate::mcp::access::{HISTORY, SEND, SEND_DEPENDENT, VIEW};
 use axum::{response::IntoResponse, Router};
 use dl_access_gate::{GateClient, GateError, Origin};
 use dl_core::runtime_config::StartOptions;
@@ -12,9 +13,11 @@ const SLOW_MS: u64 = 1_500;
 const PURGE_SECS: u64 = 21_600;
 const RETENTION_DAYS: u64 = 180;
 
-const VIEW: u64 = 1 << 10;
-const BAN: u64 = 1 << 2;
-const EVENTS: u64 = 1 << 33;
+const RETIRED_BITS: [u32; 1] = [47];
+
+fn named(name: &str) -> u64 {
+    bits::bit(name).unwrap_or_else(|| panic!("known permission {name}"))
+}
 
 const POLICY: &str = r#"
 schema_version = 1
@@ -61,13 +64,14 @@ struct Fixture {
 }
 
 fn roles() -> Value {
+    let ban = named("ban_members");
     json!([
         {"id":"1","permissions":"0","position":0},
         {"id":"3","permissions":VIEW.to_string(),"position":1},
-        {"id":"5","permissions":EVENTS.to_string(),"position":10},
-        {"id":"6","permissions":BAN.to_string(),"position":20},
-        {"id":"7","permissions":(ADMIN | BAN).to_string(),"position":30},
-        {"id":"8","permissions":BAN.to_string(),"position":30}
+        {"id":"5","permissions":named("manage_events").to_string(),"position":10},
+        {"id":"6","permissions":ban.to_string(),"position":20},
+        {"id":"7","permissions":(ADMIN | ban).to_string(),"position":30},
+        {"id":"8","permissions":ban.to_string(),"position":30}
     ])
 }
 
@@ -178,7 +182,8 @@ async fn fixture_with(policy: Option<&str>, recorder: bool, options: StartOption
         );
     state.public_policy.mcp_verified_role_id = Some(3);
     state.discord_api = format!("http://{mock_addr}");
-    let settings = GateSettings::from_options(file, Some(999), recorder.then_some(pool), &options);
+    let settings = GateSettings::from_options(file, Some(999), recorder.then_some(pool), &options)
+        .expect("valid gate settings");
     assert!(settings.is_some(), "gate settings");
     let state = state
         .with_gate(Some("gate-token".into()), settings)
@@ -274,6 +279,33 @@ async fn token_and_request_shape_are_enforced() {
         Err(GateError::Status(400))
     ));
     let answer = reason(&fixture, &request).await;
+    checked(&answer, Reason::Allowed);
+    for (path, body) in [
+        (dl_access_gate::ACCESS_PATH, json!({"user_id":"0"})),
+        (dl_access_gate::ACCESS_PATH, json!({"user_id":"abc"})),
+        (
+            dl_access_gate::ACCESS_PATH,
+            json!({"user_id":"9223372036854775808"}),
+        ),
+        (
+            dl_access_gate::OUTCOME_PATH,
+            json!({"decision_id":"XYZ","caller":"brain","status":"ok"}),
+        ),
+        (
+            dl_access_gate::OUTCOME_PATH,
+            json!({"decision_id":answer.decision_id,"caller":"Brain","status":"ok"}),
+        ),
+    ] {
+        let status = raw
+            .post(format!("http://{}{path}", fixture.addr))
+            .bearer_auth("gate-token")
+            .json(&body)
+            .send()
+            .await
+            .expect("answer")
+            .status();
+        assert_eq!(status.as_u16(), 400, "{path} {body}");
+    }
     let outcome = fixture
         .client
         .outcome(&OutcomeRequest {
@@ -360,6 +392,46 @@ async fn allows_are_stored_before_the_answer_and_text_loses_nul() {
     let (is_allowed, why, _, _) = stored_eventually(&fixture, &refused.decision_id, |_| true).await;
     assert!(!is_allowed);
     assert_eq!(why, "missing_right");
+}
+
+#[tokio::test]
+async fn late_allow_insert_is_revoked_and_never_shows_as_allowed() {
+    let fixture = fixture_with(Some(POLICY), true, options(CACHE_MS, LOOKUP_MS)).await;
+    let mut lock = fixture.db.pool().begin().await.expect("lock transaction");
+    sqlx::query("LOCK TABLE bot.access_gate_decisions IN SHARE MODE")
+        .execute(&mut *lock)
+        .await
+        .expect("table lock");
+    let answer = reason(
+        &fixture,
+        &request(Some("101"), "discord.event.write", ActionClass::Write),
+    )
+    .await;
+    checked(&answer, Reason::RecordUnavailable);
+    assert!(answer.confirm_required && answer.shadow && !answer.place_ok);
+    assert!(stored(&fixture, &answer.decision_id).await.is_none());
+    lock.commit().await.expect("release lock");
+    let (is_allowed, why, _, _) =
+        stored_eventually(&fixture, &answer.decision_id, |row| row.1 != "allowed").await;
+    assert!(!is_allowed);
+    assert_eq!(why, "record_unavailable");
+}
+
+#[tokio::test]
+async fn every_known_reason_passes_the_record_checks() {
+    let fixture = fixture(Some(POLICY), true, CACHE_MS).await;
+    for (index, reason) in Reason::KNOWN.into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO bot.access_gate_decisions (decision_id, caller, origin, dm, capability, class, internal, args_hash, allowed, reason, shadow, confirm_required, place_ok) VALUES ($1, 'brain', 'none', false, 'a.b', 'read', false, $2, $3, $4, true, false, false)",
+        )
+        .bind(format!("{index:032x}"))
+        .bind("0".repeat(64))
+        .bind(reason == Reason::Allowed)
+        .bind(reason.as_str())
+        .execute(fixture.db.pool())
+        .await
+        .unwrap_or_else(|error| panic!("{}: {error}", reason.as_str()));
+    }
 }
 
 #[tokio::test]
@@ -570,6 +642,18 @@ async fn access_answers_match_roles_and_fail_closed() {
         .expect("access");
     assert!(hidden.permissions.contains(&"manage_events".to_owned()));
     assert_eq!(hidden.channel_permissions, Some(Vec::new()));
+    let owner = fixture
+        .client
+        .access(&access("999", None))
+        .await
+        .expect("access");
+    assert_eq!(
+        owner,
+        AccessResponse {
+            owner: true,
+            ..AccessResponse::no_rights(MemberStatus::NotMember)
+        }
+    );
     for (user, status) in [
         ("104", MemberStatus::LookupFailed),
         ("105", MemberStatus::NotMember),
@@ -633,7 +717,13 @@ async fn malformed_file_keeps_the_last_good_one() {
     let settle = Duration::from_millis(RELOAD_MS * 4);
     std::fs::write(
         &file,
-        format!("{POLICY}\n[capabilities.\"x\"]\npublic = true\nowner_only = true\n"),
+        format!(
+            "{}\n[capabilities.\"x\"]\npublic = true\nowner_only = true\n",
+            POLICY.replace(
+                "[connectors.brain]\nenabled = true",
+                "[connectors.brain]\nenabled = false",
+            )
+        ),
     )
     .expect("bad policy");
     tokio::time::sleep(settle).await;
@@ -664,13 +754,16 @@ fn shipped_access_file_is_valid() {
         .capabilities
         .get("discord.event.write")
         .expect("event capability");
-    assert_eq!(event.mask, EVENTS | (1 << 44));
+    assert_eq!(event.mask, named("manage_events") | named("create_events"));
     for bad in [
         "schema_version = 2",
         "schema_version = 1\nunknown = 1",
         "schema_version = 1\n[capabilities.\"a.b\"]\npermissions = [\"no_such_bit\"]",
         "schema_version = 1\n[capabilities.\"a.b\"]\narea = \"missing\"",
         "schema_version = 1\n[capabilities.\"a.b\"]\nroles = [\"abc\"]",
+        "schema_version = 1\n[capabilities.\"a.b\"]\nroles = [\" 5\"]",
+        "schema_version = 1\n[capabilities.\"a.b\"]\nroles = [\"05\"]",
+        "schema_version = 1\n[capabilities.\"a.b\"]\nroles = [\"9223372036854775808\"]",
         "schema_version = 1\n[capabilities.\"a.b\"]\npublic = true\nroles = [\"5\"]",
         "schema_version = 1\n[capabilities.\"a.b\"]\npermissions = [\"administrator\"]",
     ] {
@@ -695,17 +788,20 @@ fn redaction_hides_secret_keys_and_bounds_size() {
 }
 
 #[test]
-fn gate_settings_stay_off_for_missing_zero_low_and_inverted_values() {
+fn gate_settings_are_off_when_missing_and_an_error_when_invalid() {
     let complete = options(CACHE_MS, DECISION_MS);
     let build = |options: &StartOptions| {
         GateSettings::from_options(PathBuf::from("access-gate.toml"), None, None, options)
     };
-    assert!(build(&complete).is_some());
-    for broken in [
-        StartOptions {
+    assert!(matches!(build(&complete), Ok(Some(_))));
+    assert!(matches!(
+        build(&StartOptions {
             access_gate_reload_ms: None,
             ..complete.clone()
-        },
+        }),
+        Ok(None)
+    ));
+    for broken in [
         StartOptions {
             access_gate_retention_days: Some(0),
             ..complete.clone()
@@ -719,8 +815,111 @@ fn gate_settings_stay_off_for_missing_zero_low_and_inverted_values() {
             ..complete.clone()
         },
     ] {
-        assert!(build(&broken).is_none());
+        assert!(build(&broken).is_err());
     }
+}
+
+#[test]
+fn reused_gate_token_stops_the_start() {
+    let state = || {
+        McpState::from_config(
+            "bot-token".into(),
+            Some("general".into()),
+            &options(CACHE_MS, DECISION_MS),
+        )
+        .expect("state")
+    };
+    assert!(state().with_gate(Some("general".into()), None).is_err());
+    assert!(state().with_gate(Some(" ".into()), None).is_err());
+    assert!(state().with_gate(Some("gate".into()), None).is_ok());
+}
+
+#[test]
+fn wire_ids_and_names_follow_the_record_checks() {
+    for good in ["1", "9223372036854775807"] {
+        assert!(snowflake_id(good).is_some(), "{good}");
+    }
+    for bad in [
+        "",
+        "0",
+        "00",
+        "012",
+        "+12",
+        " 12",
+        "12 ",
+        "-1",
+        "9223372036854775808",
+        "1a",
+    ] {
+        assert!(snowflake_id(bad).is_none(), "{bad}");
+    }
+    let longest = "a".repeat(dl_access_gate::MAX_NAME_CHARS);
+    assert!(name_ok(&longest) && name_ok("a.b-c_1"));
+    for bad in [
+        String::new(),
+        format!("{longest}a"),
+        "A".into(),
+        "a b".into(),
+        "\u{e4}".into(),
+    ] {
+        assert!(!name_ok(&bad), "{bad}");
+    }
+}
+
+#[test]
+fn every_discord_permission_bit_has_a_name() {
+    let known = bits::all_known();
+    let serenity = serenity::all::Permissions::all().bits();
+    assert_eq!(serenity & !known, 0, "serenity knows a bit without a name");
+    let highest = 63 - known.leading_zeros();
+    for bit in (0..=highest).filter(|bit| !RETIRED_BITS.contains(bit)) {
+        let names = bits::names(1 << bit);
+        assert!(
+            names.len() == 1 && !names[0].starts_with("bit_"),
+            "bit {bit} has no name"
+        );
+        assert_eq!(bits::bit(&names[0]), Some(1 << bit));
+    }
+    let admin = permission_names(ADMIN);
+    assert_eq!(admin, bits::names(known));
+    assert!(admin.contains(&"set_voice_channel_status".to_owned()));
+    assert_eq!(bits::bit("view_channel"), Some(VIEW));
+    assert_eq!(bits::bit("send_messages"), Some(SEND));
+    assert_eq!(bits::bit("read_message_history"), Some(HISTORY));
+    assert_eq!(bits::bit("administrator"), Some(ADMIN));
+    assert_eq!(
+        [
+            "send_tts_messages",
+            "embed_links",
+            "attach_files",
+            "mention_everyone"
+        ]
+        .iter()
+        .fold(0, |mask, name| mask | named(name)),
+        SEND_DEPENDENT
+    );
+}
+
+#[test]
+fn unknown_overwrite_role_is_never_a_safe_place() {
+    let policy = policy::parse(POLICY).expect("policy");
+    let capability = policy.capabilities.get("discord.moderation.read");
+    let roles = parse_roles(1, 3, &roles()).expect("roles");
+    let safe = restricted("201", None);
+    assert_eq!(
+        decide::guild_place(&policy, capability, 201, &safe, &roles),
+        Some(Vec::new())
+    );
+    assert!(!decide::unknown_overwrite_role(&safe, &roles));
+    let mut unknown = restricted("201", None);
+    if let Some(overwrites) = unknown["permission_overwrites"].as_array_mut() {
+        overwrites.push(json!({"id":"99","type":0,"deny":"0","allow":VIEW.to_string()}));
+    }
+    assert!(decide::unknown_overwrite_role(&unknown, &roles));
+    assert_eq!(
+        decide::guild_place(&policy, capability, 201, &unknown, &roles),
+        None
+    );
 }
 
 fn probe(base: u64) -> Access {
@@ -736,15 +935,14 @@ fn probe(base: u64) -> Access {
 
 #[test]
 fn implicit_denies_follow_view_and_send() {
-    let send = 1u64 << 11;
-    let dependent = (1u64 << 12) | (1 << 14) | (1 << 15) | (1 << 17);
-    let base = VIEW | send | dependent | EVENTS;
+    let events = named("manage_events");
+    let base = VIEW | SEND | SEND_DEPENDENT | events;
     let channel = |deny: u64| json!({"id":"9","guild_id":"1","permission_overwrites":[{"id":"1","type":0,"deny":deny.to_string(),"allow":"0"}]});
     assert_eq!(effective_permissions(&channel(0), &probe(base)), Some(base));
     assert_eq!(effective_permissions(&channel(VIEW), &probe(base)), Some(0));
     assert_eq!(
-        effective_permissions(&channel(send), &probe(base)),
-        Some(VIEW | EVENTS)
+        effective_permissions(&channel(SEND), &probe(base)),
+        Some(VIEW | events)
     );
     assert_eq!(
         effective_permissions(&channel(VIEW), &probe(base | ADMIN)),

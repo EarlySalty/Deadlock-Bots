@@ -1508,10 +1508,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     owner_id,
                     Some(central_pool.clone()),
                     &operating.runtime.start,
-                ),
+                )?,
             )?,
     );
-    mcp::spawn_retention_purge(central_pool.clone(), &operating.runtime.start);
+    mcp::spawn_retention_purge(central_pool.clone(), &operating.runtime.start)?;
     let mcp_addr = mcp::McpState::bind_addr(&operating.runtime.start);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
         .await

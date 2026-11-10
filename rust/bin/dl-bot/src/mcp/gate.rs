@@ -47,19 +47,12 @@ impl GateSettings {
         owner_id: Option<u64>,
         pool: Option<sqlx::PgPool>,
         options: &StartOptions,
-    ) -> Option<Self> {
-        let timings = match options.access_gate_timings() {
-            Ok(Some(timings)) => timings,
-            Ok(None) => {
-                tracing::warn!("access gate keys in runtime.start are incomplete, gate stays off");
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "access gate keys in runtime.start are invalid, gate stays off");
-                return None;
-            }
+    ) -> Result<Option<Self>> {
+        let Some(timings) = options.access_gate_timings()? else {
+            tracing::warn!("access gate keys in runtime.start are incomplete, gate stays off");
+            return Ok(None);
         };
-        Some(Self {
+        Ok(Some(Self {
             access_file,
             owner_id,
             pool,
@@ -67,28 +60,19 @@ impl GateSettings {
             lookup_timeout: Duration::from_millis(timings.lookup_timeout_ms),
             decision_timeout: Duration::from_millis(timings.decision_timeout_ms),
             reload_interval: Duration::from_millis(timings.reload_ms),
-        })
+        }))
     }
 }
 
-pub fn spawn_retention_purge(pool: sqlx::PgPool, options: &StartOptions) {
-    let retention = match options.access_gate_retention() {
-        Ok(Some(retention)) => retention,
-        Ok(None) => {
-            tracing::warn!(
-                "access gate retention keys in runtime.start are missing, decision purge is off"
-            );
-            return;
-        }
-        Err(error) => {
-            tracing::warn!(%error, "access gate retention keys in runtime.start are invalid, decision purge is off");
-            return;
-        }
+pub fn spawn_retention_purge(pool: sqlx::PgPool, options: &StartOptions) -> Result<()> {
+    let Some(retention) = options.access_gate_retention()? else {
+        tracing::warn!(
+            "access gate retention keys in runtime.start are missing, decision purge is off"
+        );
+        return Ok(());
     };
-    let Ok(days) = i32::try_from(retention.retention_days) else {
-        tracing::warn!("access gate retention days do not fit, decision purge is off");
-        return;
-    };
+    let days =
+        i32::try_from(retention.retention_days).context("access gate retention days do not fit")?;
     tokio::spawn(record::purge_loop(
         pool,
         record::Retention {
@@ -96,6 +80,7 @@ pub fn spawn_retention_purge(pool: sqlx::PgPool, options: &StartOptions) {
             days,
         },
     ));
+    Ok(())
 }
 
 type Stamped<T> = (Instant, T);
@@ -129,7 +114,9 @@ impl GateState {
             token,
             owner_id: settings.owner_id,
             policy: store,
-            recorder: settings.pool.map(record::Recorder::start),
+            recorder: settings
+                .pool
+                .map(|pool| record::Recorder::start(pool, settings.decision_timeout)),
             ttl: settings.ttl,
             lookup_timeout: settings.lookup_timeout,
             decision_timeout: settings.decision_timeout,
@@ -234,21 +221,22 @@ impl GateState {
     }
 }
 
-fn snowflake(raw: Option<&str>) -> Result<Option<u64>, ()> {
-    match raw {
-        None => Ok(None),
-        Some(raw) => raw
-            .parse::<u64>()
-            .ok()
-            .filter(|id| *id != 0 && i64::try_from(*id).is_ok())
-            .map(Some)
-            .ok_or(()),
+fn snowflake_id(raw: &str) -> Option<u64> {
+    if raw.is_empty() || raw.starts_with('0') || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
+    raw.parse::<u64>()
+        .ok()
+        .filter(|id| i64::try_from(*id).is_ok())
+}
+
+fn snowflake(raw: Option<&str>) -> Result<Option<u64>, ()> {
+    raw.map_or(Ok(None), |raw| snowflake_id(raw).map(Some).ok_or(()))
 }
 
 fn name_ok(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 128
+        && name.len() <= dl_access_gate::MAX_NAME_CHARS
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
@@ -466,8 +454,13 @@ async fn settle(
         place_ok: verdict.place_ok,
     };
     let reason = match (&gate.recorder, allowed) {
-        (Some(recorder), true) if recorder.allow(&decision, deadline).await => Reason::Allowed,
-        (Some(_), true) => Reason::RecordUnavailable,
+        (Some(recorder), true) => {
+            if recorder.allow(decision, deadline).await {
+                Reason::Allowed
+            } else {
+                Reason::RecordUnavailable
+            }
+        }
         (None, true) => {
             tracing::warn!("access gate allow not recorded, no database");
             Reason::RecordUnavailable
@@ -615,6 +608,10 @@ async fn place(
     let Ok((_, roles)) = gate.roles(st).await else {
         return false;
     };
+    if decide::unknown_overwrite_role(&raw, &roles) {
+        *gate.roles.lock().await = None;
+        return false;
+    }
     let Some(viewers) = decide::guild_place(policy, capability, channel, &raw, &roles) else {
         return false;
     };

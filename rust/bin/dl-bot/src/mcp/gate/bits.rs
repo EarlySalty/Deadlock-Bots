@@ -46,6 +46,7 @@ const NAMES: &[(u32, &str)] = &[
     (44, "create_events"),
     (45, "use_external_sounds"),
     (46, "send_voice_messages"),
+    (48, "set_voice_channel_status"),
     (49, "send_polls"),
     (50, "use_external_apps"),
     (51, "pin_messages"),

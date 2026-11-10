@@ -69,16 +69,26 @@ impl std::fmt::Display for DiscordHttpError {
 
 impl std::error::Error for DiscordHttpError {}
 
+#[derive(Debug)]
+pub(crate) struct DiscordCallsOff;
+
+impl std::fmt::Display for DiscordCallsOff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "MCP: runtime.start.mcp_discord_timeout_ms fehlt, Discord-Aufrufe sind abgeschaltet",
+        )
+    }
+}
+
+impl std::error::Error for DiscordCallsOff {}
+
 impl McpState {
     pub fn from_config(
         bot_token: String,
         auth_token: Option<String>,
         config: &StartOptions,
     ) -> Result<Self> {
-        let timings = config.mcp_timings().unwrap_or_else(|error| {
-            tracing::warn!(%error, "MCP timings in runtime.start are invalid");
-            dl_core::runtime_config::McpTimings::default()
-        });
+        let timings = config.mcp_timings()?;
         let http = match timings.discord_timeout_ms {
             Some(timeout) => Some(
                 reqwest::Client::builder()
@@ -671,7 +681,7 @@ async fn discord_call(
         let mut req = st
             .http
             .as_ref()
-            .context("MCP: runtime.start.mcp_discord_timeout_ms fehlt, Discord-Aufrufe sind abgeschaltet")?
+            .ok_or(DiscordCallsOff)?
             .request(m, &url)
             .header("Authorization", format!("Bot {}", st.bot_token))
             .header(
@@ -1820,16 +1830,35 @@ mod tests {
         assert!(with[0]["description"]
             .as_str()
             .is_some_and(|text| text.ends_with("Cache 30 Sekunden.")));
-        let state = McpState::from_config(
+        let mut state = McpState::from_config(
             "bot-token".into(),
             Some("internal".into()),
             &StartOptions::default(),
         )
         .expect("state without timings");
         assert!(state.public_facts_cache_secs.is_none());
-        assert!(discord_call(&state, "GET", "/users/@me", &[], None, None)
+        assert!(state.http.is_none());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
+        listener.set_nonblocking(true).expect("nonblocking probe");
+        state.discord_api = format!("http://{}", listener.local_addr().expect("probe address"));
+        let error = discord_call(&state, "GET", "/users/@me", &[], None, None)
             .await
-            .is_err());
+            .expect_err("Discord calls are off");
+        assert!(
+            error.downcast_ref::<DiscordCallsOff>().is_some(),
+            "{error:#}"
+        );
+        assert!(
+            listener.accept().is_err(),
+            "no request may leave the process"
+        );
+        let invalid = StartOptions {
+            mcp_discord_timeout_ms: Some(999),
+            ..StartOptions::default()
+        };
+        assert!(
+            McpState::from_config("bot-token".into(), Some("internal".into()), &invalid).is_err()
+        );
     }
 
     #[test]
