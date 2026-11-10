@@ -98,7 +98,9 @@ Geplant, und noch nicht fertig, ist ein Build-Helfer. Du wählst einen Helden un
 pub const SUPPORT_DISCORD: &str = "\
 ## Auf Discord\n\
 \n\
-Supporter bekommen eine eigene Rolle, private Supporter-Channels im VIP-Bereich und Zugang zum Streamer-VC.\n\
+Supporter bekommen eine eigene Rolle und Zugang zum Streamer-VC.\n\
+\n\
+Private Supporter-Channels im VIP-Bereich sind noch nicht freigeschaltet.\n\
 \n\
 Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.";
 pub const SUPPORT_PLANNED: &str = "\
@@ -1269,6 +1271,8 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
         assert!(benefits[1].contains("Bis dahin gilt das normale Tageslimit"));
         assert!(benefits[1].contains("noch nicht fertig"));
         assert!(benefits[2].contains("Geplant, und noch nicht eingerichtet"));
+        assert!(benefits[2]
+            .contains("Private Supporter-Channels im VIP-Bereich sind noch nicht freigeschaltet"));
         assert!(!benefits[2].contains("Moderatoren-Chats"));
         assert!(!benefits[2].contains("interne Teambereiche"));
         assert!(!benefits[2].contains("Moderationsrechte"));

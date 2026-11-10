@@ -40,7 +40,9 @@ Für Supporter ist vorgesehen, das Deadlock Brain ohne zusätzliches Abo und ohn
 Geplant, und noch nicht fertig, ist ein Build-Helfer. Du wählst einen Helden und bekommst sinnvolle Items und Builds, dazu eine Erklärung, warum ein Item passt. Du kannst gegen bestimmte Gegner bauen. Die Vorschläge sollen sich an Patches anpassen. Der Helfer soll beim Verstehen helfen, die Entscheidung bleibt bei dir."""
 discord = """## Auf Discord
 
-Supporter bekommen eine eigene Rolle, private Supporter-Channels im VIP-Bereich und Zugang zum Streamer-VC.
+Supporter bekommen eine eigene Rolle und Zugang zum Streamer-VC.
+
+Private Supporter-Channels im VIP-Bereich sind noch nicht freigeschaltet.
 
 Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests."""
 planned = """## Was noch kommt
