@@ -29,6 +29,8 @@ access_gate_decision_timeout_ms = 15000
 access_gate_reload_ms = 5000
 access_gate_purge_every_secs = 21600
 access_gate_retention_days = 180
+mcp_public_facts_cache_secs = 60
+mcp_discord_timeout_ms = 60000
 
 [runtime.ai]
 brain_command_enabled = false

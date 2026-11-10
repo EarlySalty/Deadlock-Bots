@@ -3,7 +3,7 @@ use super::access::{
     GuildRoles, MemberLookup, ADMIN,
 };
 use super::{discord_call, json_response, McpState};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result};
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -39,24 +39,6 @@ pub struct GateSettings {
     pub lookup_timeout: Duration,
     pub decision_timeout: Duration,
     pub reload_interval: Duration,
-    pub purge_every: Duration,
-    pub retention_days: i32,
-}
-
-fn required(value: Option<u64>, key: &str) -> Result<u64> {
-    match value {
-        Some(0) => bail!("runtime.start.{key} darf nicht 0 sein"),
-        Some(value) => Ok(value),
-        None => bail!("runtime.start.{key} fehlt in der Betriebskonfiguration"),
-    }
-}
-
-fn millis(value: Option<u64>, key: &str) -> Result<Duration> {
-    required(value, key).map(Duration::from_millis)
-}
-
-fn seconds(value: Option<u64>, key: &str) -> Result<Duration> {
-    required(value, key).map(Duration::from_secs)
 }
 
 impl GateSettings {
@@ -65,39 +47,55 @@ impl GateSettings {
         owner_id: Option<u64>,
         pool: Option<sqlx::PgPool>,
         options: &StartOptions,
-    ) -> Result<Self> {
-        let lookup = millis(
-            options.access_gate_lookup_timeout_ms,
-            "access_gate_lookup_timeout_ms",
-        )?;
-        let decision = millis(
-            options.access_gate_decision_timeout_ms,
-            "access_gate_decision_timeout_ms",
-        )?;
-        ensure!(
-            decision >= lookup,
-            "runtime.start.access_gate_decision_timeout_ms muss mindestens access_gate_lookup_timeout_ms sein"
-        );
-        let retention_days = required(
-            options.access_gate_retention_days,
-            "access_gate_retention_days",
-        )?;
-        Ok(Self {
+    ) -> Option<Self> {
+        let timings = match options.access_gate_timings() {
+            Ok(Some(timings)) => timings,
+            Ok(None) => {
+                tracing::warn!("access gate keys in runtime.start are incomplete, gate stays off");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "access gate keys in runtime.start are invalid, gate stays off");
+                return None;
+            }
+        };
+        Some(Self {
             access_file,
             owner_id,
             pool,
-            ttl: millis(options.access_gate_cache_ttl_ms, "access_gate_cache_ttl_ms")?,
-            lookup_timeout: lookup,
-            decision_timeout: decision,
-            reload_interval: millis(options.access_gate_reload_ms, "access_gate_reload_ms")?,
-            purge_every: seconds(
-                options.access_gate_purge_every_secs,
-                "access_gate_purge_every_secs",
-            )?,
-            retention_days: i32::try_from(retention_days)
-                .context("runtime.start.access_gate_retention_days ist zu groß")?,
+            ttl: Duration::from_millis(timings.cache_ttl_ms),
+            lookup_timeout: Duration::from_millis(timings.lookup_timeout_ms),
+            decision_timeout: Duration::from_millis(timings.decision_timeout_ms),
+            reload_interval: Duration::from_millis(timings.reload_ms),
         })
     }
+}
+
+pub fn spawn_retention_purge(pool: sqlx::PgPool, options: &StartOptions) {
+    let retention = match options.access_gate_retention() {
+        Ok(Some(retention)) => retention,
+        Ok(None) => {
+            tracing::warn!(
+                "access gate retention keys in runtime.start are missing, decision purge is off"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "access gate retention keys in runtime.start are invalid, decision purge is off");
+            return;
+        }
+    };
+    let Ok(days) = i32::try_from(retention.retention_days) else {
+        tracing::warn!("access gate retention days do not fit, decision purge is off");
+        return;
+    };
+    tokio::spawn(record::purge_loop(
+        pool,
+        record::Retention {
+            purge_every: Duration::from_secs(retention.purge_every_secs),
+            days,
+        },
+    ));
 }
 
 type Stamped<T> = (Instant, T);
@@ -124,10 +122,6 @@ struct Verdict {
 
 impl GateState {
     pub fn start(token: String, settings: GateSettings) -> Self {
-        let retention = record::Retention {
-            purge_every: settings.purge_every,
-            days: settings.retention_days,
-        };
         let store = Arc::new(policy::PolicyStore::new(settings.access_file));
         store.reload();
         policy::spawn_reload(store.clone(), settings.reload_interval);
@@ -135,9 +129,7 @@ impl GateState {
             token,
             owner_id: settings.owner_id,
             policy: store,
-            recorder: settings
-                .pool
-                .map(|pool| record::Recorder::start(pool, retention)),
+            recorder: settings.pool.map(record::Recorder::start),
             ttl: settings.ttl,
             lookup_timeout: settings.lookup_timeout,
             decision_timeout: settings.decision_timeout,
@@ -325,7 +317,18 @@ pub async fn access_post(
     ) else {
         return invalid();
     };
-    answer(&access_answer(&st, &gate, user, channel).await)
+    let answer_in_time = tokio::time::timeout(
+        gate.decision_timeout,
+        access_answer(&st, &gate, user, channel),
+    )
+    .await;
+    answer(&answer_in_time.unwrap_or_else(|_| {
+        tracing::warn!("access gate access answer ran over the decision timeout");
+        AccessResponse {
+            owner: gate.is_owner(user),
+            ..AccessResponse::no_rights(MemberStatus::LookupFailed)
+        }
+    }))
 }
 
 async fn access_answer(
@@ -422,32 +425,33 @@ pub async fn authorize_post(
     let Some(ids) = validate(&request) else {
         return invalid();
     };
-    let verdict =
-        match tokio::time::timeout(gate.decision_timeout, decide(&st, &gate, &request, &ids)).await
-        {
-            Ok(verdict) => verdict,
-            Err(_) => Verdict {
-                reason: Reason::LookupFailed,
-                confirm_required: true,
-                shadow: true,
-                place_ok: false,
-            },
-        };
-    answer(&settle(&gate, request, &ids, verdict))
+    let deadline = tokio::time::Instant::now() + gate.decision_timeout;
+    let verdict = match tokio::time::timeout_at(deadline, decide(&st, &gate, &request, &ids)).await
+    {
+        Ok(verdict) => verdict,
+        Err(_) => Verdict {
+            reason: Reason::LookupFailed,
+            confirm_required: true,
+            shadow: true,
+            place_ok: false,
+        },
+    };
+    answer(&settle(&gate, request, &ids, verdict, deadline).await)
 }
 
 fn as_db(id: Option<u64>) -> Option<i64> {
     id.and_then(|id| i64::try_from(id).ok())
 }
 
-fn settle(
+async fn settle(
     gate: &GateState,
     request: AuthorizeRequest,
     ids: &Ids,
     verdict: Verdict,
+    deadline: tokio::time::Instant,
 ) -> AuthorizeResponse {
     let decision_id = hex::encode(rand::random::<[u8; 16]>());
-    let mut reason = verdict.reason;
+    let allowed = verdict.reason == Reason::Allowed;
     let decision = record::Decision {
         decision_id: decision_id.clone(),
         request,
@@ -455,20 +459,28 @@ fn settle(
         channel_id: as_db(ids.channel),
         target_user_id: as_db(ids.target_user),
         target_role_id: as_db(ids.target_role),
-        allowed: reason == Reason::Allowed,
-        reason: reason.as_str(),
+        allowed,
+        reason: verdict.reason.as_str(),
         shadow: verdict.shadow,
         confirm_required: verdict.confirm_required,
         place_ok: verdict.place_ok,
     };
-    let recorded = gate
-        .recorder
-        .as_ref()
-        .is_some_and(|recorder| recorder.decision(decision));
-    if !recorded && reason == Reason::Allowed {
-        tracing::warn!("access gate decision not recorded, refusing");
-        reason = Reason::RecordUnavailable;
-    }
+    let reason = match (&gate.recorder, allowed) {
+        (Some(recorder), true) if recorder.allow(&decision, deadline).await => Reason::Allowed,
+        (Some(_), true) => Reason::RecordUnavailable,
+        (None, true) => {
+            tracing::warn!("access gate allow not recorded, no database");
+            Reason::RecordUnavailable
+        }
+        (Some(recorder), false) => {
+            recorder.refusal(decision);
+            verdict.reason
+        }
+        (None, false) => {
+            tracing::warn!("access gate refusal not recorded, no database");
+            verdict.reason
+        }
+    };
     let allowed = reason == Reason::Allowed;
     AuthorizeResponse {
         decision_id,

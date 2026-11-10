@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::time::Duration;
 
 pub const ACCESS_PATH: &str = "/gate/v1/access";
@@ -115,7 +115,7 @@ pub struct AuthorizeRequest {
     pub target_role_id: Option<String>,
     pub args_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args_redacted: Option<Value>,
+    pub args_redacted: Option<Map<String, Value>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,9 +173,29 @@ pub struct AuthorizeResponse {
     pub place_ok: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Refused,
+    Shadow,
+    NeedsConfirmation { place_ok: bool },
+    Act { place_ok: bool },
+}
+
 impl AuthorizeResponse {
-    pub fn permits(&self) -> bool {
-        self.allowed && self.reason == Reason::Allowed
+    pub fn verdict(&self) -> Verdict {
+        if !self.allowed || self.reason != Reason::Allowed {
+            Verdict::Refused
+        } else if self.shadow {
+            Verdict::Shadow
+        } else if self.confirm_required {
+            Verdict::NeedsConfirmation {
+                place_ok: self.place_ok,
+            }
+        } else {
+            Verdict::Act {
+                place_ok: self.place_ok,
+            }
+        }
     }
 }
 
@@ -237,6 +257,7 @@ impl GateClient {
         }
         let http = reqwest::Client::builder()
             .timeout(timeout)
+            .no_proxy()
             .build()
             .map_err(GateError::Transport)?;
         Ok(Self {
@@ -276,10 +297,10 @@ impl GateClient {
         self.post(AUTHORIZE_PATH, request).await
     }
 
-    pub async fn permits(&self, request: &AuthorizeRequest) -> bool {
+    pub async fn verdict(&self, request: &AuthorizeRequest) -> Verdict {
         self.authorize(request)
             .await
-            .is_ok_and(|answer| answer.permits())
+            .map_or(Verdict::Refused, |answer| answer.verdict())
     }
 
     pub async fn outcome(&self, request: &OutcomeRequest) -> Result<OutcomeResponse, GateError> {
@@ -291,24 +312,80 @@ impl GateClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn unknown_reason_or_missing_allow_is_a_refusal() {
-        let answer: AuthorizeResponse = serde_json::from_str(
-            r#"{"decision_id":"x","allowed":true,"reason":"later_reason","confirm_required":true,"shadow":true,"place_ok":false,"extra":1}"#,
-        )
-        .expect("forward compatible answer");
-        assert_eq!(answer.reason, Reason::Unknown);
-        assert!(!answer.permits());
-        let answer = AuthorizeResponse {
-            reason: Reason::Allowed,
-            ..answer
-        };
-        assert!(answer.permits());
-        assert!(!AuthorizeResponse {
-            allowed: false,
-            ..answer
+    const ANSWER: &str = r#"{"decision_id":"x","allowed":true,"reason":"allowed","confirm_required":false,"shadow":false,"place_ok":true,"extra":1}"#;
+
+    fn answer(edit: &str, value: Value) -> Result<AuthorizeResponse, serde_json::Error> {
+        let mut raw: Value = serde_json::from_str(ANSWER).expect("base answer");
+        if value.is_null() {
+            raw.as_object_mut().expect("object").remove(edit);
+        } else {
+            raw[edit] = value;
         }
-        .permits());
+        serde_json::from_value(raw)
+    }
+
+    #[test]
+    fn only_an_explicit_live_allow_lets_the_caller_act() {
+        let base = answer("extra", Value::from(2)).expect("forward compatible answer");
+        assert_eq!(base.verdict(), Verdict::Act { place_ok: true });
+        let unknown = answer("reason", Value::from("later_reason")).expect("answer");
+        assert_eq!(unknown.reason, Reason::Unknown);
+        assert_eq!(unknown.verdict(), Verdict::Refused);
+        let refused = answer("allowed", Value::from(false)).expect("answer");
+        assert_eq!(refused.verdict(), Verdict::Refused);
+        assert!(answer("allowed", Value::Null).is_err());
+        assert!(answer("reason", Value::Null).is_err());
+        let shadow = answer("shadow", Value::from(true)).expect("answer");
+        assert_eq!(shadow.verdict(), Verdict::Shadow);
+        let confirm = AuthorizeResponse {
+            confirm_required: true,
+            place_ok: false,
+            ..base.clone()
+        };
+        assert_eq!(
+            confirm.verdict(),
+            Verdict::NeedsConfirmation { place_ok: false }
+        );
+        let hidden = AuthorizeResponse {
+            place_ok: false,
+            ..base
+        };
+        assert_eq!(hidden.verdict(), Verdict::Act { place_ok: false });
+    }
+
+    #[test]
+    fn reason_names_match_the_wire_names() {
+        for reason in [
+            Reason::Allowed,
+            Reason::NoIdentity,
+            Reason::NotMember,
+            Reason::LookupFailed,
+            Reason::AccessFileUnavailable,
+            Reason::UnknownCaller,
+            Reason::ConnectorDisabled,
+            Reason::CapabilityDisabled,
+            Reason::OwnerOnly,
+            Reason::Unmapped,
+            Reason::MissingRight,
+            Reason::TimedOut,
+            Reason::Hierarchy,
+            Reason::TargetLookupFailed,
+            Reason::RecordUnavailable,
+            Reason::Unknown,
+        ] {
+            assert_eq!(
+                serde_json::to_value(reason).expect("reason"),
+                Value::from(reason.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn redacted_arguments_must_be_an_object() {
+        let request = r#"{"caller":"brain","origin":"none","capability":"a.b","class":"read","args_hash":"00","args_redacted":["x"]}"#;
+        assert!(serde_json::from_str::<AuthorizeRequest>(request).is_err());
+        let request = request.replace(r#"["x"]"#, r#"{"x":1}"#);
+        assert!(serde_json::from_str::<AuthorizeRequest>(&request).is_ok());
     }
 
     #[tokio::test]
@@ -329,7 +406,7 @@ mod tests {
             args_hash: "0".repeat(64),
             args_redacted: None,
         };
-        assert!(!client.permits(&request).await);
+        assert_eq!(client.verdict(&request).await, Verdict::Refused);
         assert!(GateClient::new("http://x", " ", Duration::from_secs(1)).is_err());
     }
 }

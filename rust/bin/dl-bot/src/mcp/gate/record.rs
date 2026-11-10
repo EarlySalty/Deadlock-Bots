@@ -1,9 +1,9 @@
 use dl_access_gate::{
     AuthorizeRequest, OutcomeRequest, MAX_OUTCOME_DETAIL_CHARS, MAX_REDACTED_ARGS_BYTES,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Instant};
 
 const QUEUE: usize = 1024;
 const SECRET_MARKERS: &[&str] = &[
@@ -32,7 +32,7 @@ pub struct Decision {
 }
 
 enum Entry {
-    Decision(Box<Decision>),
+    Refusal(Box<Decision>),
     Outcome(OutcomeRequest),
 }
 
@@ -44,21 +44,39 @@ pub struct Retention {
 
 #[derive(Clone)]
 pub struct Recorder {
+    pool: sqlx::PgPool,
     queue: mpsc::Sender<Entry>,
 }
 
 impl Recorder {
-    pub fn start(pool: sqlx::PgPool, retention: Retention) -> Self {
+    pub fn start(pool: sqlx::PgPool) -> Self {
         let (queue, receiver) = mpsc::channel(QUEUE);
         tokio::spawn(write_loop(pool.clone(), receiver));
-        tokio::spawn(purge_loop(pool, retention));
-        Self { queue }
+        Self { pool, queue }
     }
 
-    pub fn decision(&self, decision: Decision) -> bool {
-        self.queue
-            .try_send(Entry::Decision(Box::new(decision)))
-            .is_ok()
+    pub async fn allow(&self, decision: &Decision, deadline: Instant) -> bool {
+        match tokio::time::timeout_at(deadline, insert(&self.pool, decision)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "access gate allow not recorded");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("access gate allow not recorded before the decision timeout");
+                false
+            }
+        }
+    }
+
+    pub fn refusal(&self, decision: Decision) {
+        if self
+            .queue
+            .try_send(Entry::Refusal(Box::new(decision)))
+            .is_err()
+        {
+            tracing::warn!("access gate refusal dropped, record queue full");
+        }
     }
 
     pub fn outcome(&self, outcome: OutcomeRequest) -> bool {
@@ -66,27 +84,35 @@ impl Recorder {
     }
 }
 
-pub fn redact(value: &Value) -> Value {
+fn without_nul(text: &str) -> String {
+    text.replace('\0', "")
+}
+
+fn redact(value: &Value) -> Value {
     match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, value)| {
-                    let lowered = key.to_ascii_lowercase();
-                    if SECRET_MARKERS.iter().any(|marker| lowered.contains(marker)) {
-                        (key.clone(), json!("[redacted]"))
-                    } else {
-                        (key.clone(), redact(value))
-                    }
-                })
-                .collect(),
-        ),
+        Value::Object(map) => Value::Object(redact_map(map)),
         Value::Array(items) => Value::Array(items.iter().map(redact).collect()),
+        Value::String(text) => Value::String(without_nul(text)),
         other => other.clone(),
     }
 }
 
-pub fn bounded(value: Option<&Value>) -> Option<Value> {
-    let redacted = redact(value?);
+fn redact_map(map: &Map<String, Value>) -> Map<String, Value> {
+    map.iter()
+        .map(|(key, value)| {
+            let key = without_nul(key);
+            let lowered = key.to_ascii_lowercase();
+            if SECRET_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+                (key, json!("[redacted]"))
+            } else {
+                (key, redact(value))
+            }
+        })
+        .collect()
+}
+
+pub fn bounded(value: Option<&Map<String, Value>>) -> Option<Value> {
+    let redacted = Value::Object(redact_map(value?));
     let bytes = redacted.to_string().len();
     if bytes > MAX_REDACTED_ARGS_BYTES {
         return Some(json!({"truncated": true, "bytes": bytes}));
@@ -97,7 +123,8 @@ pub fn bounded(value: Option<&Value>) -> Option<Value> {
 pub fn bounded_detail(detail: Option<String>) -> Option<String> {
     detail
         .map(|text| {
-            text.chars()
+            without_nul(&text)
+                .chars()
                 .take(MAX_OUTCOME_DETAIL_CHARS)
                 .collect::<String>()
         })
@@ -106,12 +133,17 @@ pub fn bounded_detail(detail: Option<String>) -> Option<String> {
 
 async fn write_loop(pool: sqlx::PgPool, mut receiver: mpsc::Receiver<Entry>) {
     while let Some(entry) = receiver.recv().await {
-        let result = match entry {
-            Entry::Decision(decision) => insert(&pool, &decision).await,
-            Entry::Outcome(outcome) => attach(&pool, outcome).await,
-        };
-        if let Err(error) = result {
-            tracing::warn!(%error, "access gate record write failed");
+        match entry {
+            Entry::Refusal(decision) => {
+                if let Err(error) = insert(&pool, &decision).await {
+                    tracing::warn!(%error, "access gate refusal not recorded");
+                }
+            }
+            Entry::Outcome(outcome) => match attach(&pool, outcome).await {
+                Ok(0) => tracing::warn!("access gate outcome matched no open decision"),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "access gate outcome not recorded"),
+            },
         }
     }
 }
@@ -144,7 +176,7 @@ async fn insert(pool: &sqlx::PgPool, decision: &Decision) -> sqlx::Result<()> {
     .map(|_| ())
 }
 
-async fn attach(pool: &sqlx::PgPool, outcome: OutcomeRequest) -> sqlx::Result<()> {
+async fn attach(pool: &sqlx::PgPool, outcome: OutcomeRequest) -> sqlx::Result<u64> {
     sqlx::query(
         "UPDATE bot.access_gate_decisions SET outcome = $3, outcome_detail = $4, outcome_at = now() WHERE decision_id = $1 AND caller = $2 AND outcome IS NULL",
     )
@@ -154,10 +186,10 @@ async fn attach(pool: &sqlx::PgPool, outcome: OutcomeRequest) -> sqlx::Result<()
     .bind(bounded_detail(outcome.detail))
     .execute(pool)
     .await
-    .map(|_| ())
+    .map(|done| done.rows_affected())
 }
 
-async fn purge_loop(pool: sqlx::PgPool, retention: Retention) {
+pub async fn purge_loop(pool: sqlx::PgPool, retention: Retention) {
     let mut ticker = tokio::time::interval(retention.purge_every);
     loop {
         ticker.tick().await;

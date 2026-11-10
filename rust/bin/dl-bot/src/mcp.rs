@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 
 mod access;
 mod gate;
-pub use gate::GateSettings;
+pub use gate::{spawn_retention_purge, GateSettings};
 mod public;
 mod self_invite;
 
@@ -40,7 +40,8 @@ const PROTOCOL_FALLBACK: &str = "2025-03-26";
 const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
 pub struct McpState {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
+    public_facts_cache_secs: Option<u64>,
     bot_token: String,
     discord_api: String,
     auth_token: String,
@@ -74,16 +75,36 @@ impl McpState {
         auth_token: Option<String>,
         config: &StartOptions,
     ) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .context("MCP: reqwest-Client")?;
+        let timings = config.mcp_timings().unwrap_or_else(|error| {
+            tracing::warn!(%error, "MCP timings in runtime.start are invalid");
+            dl_core::runtime_config::McpTimings::default()
+        });
+        let http = match timings.discord_timeout_ms {
+            Some(timeout) => Some(
+                reqwest::Client::builder()
+                    .timeout(Duration::from_millis(timeout))
+                    .build()
+                    .context("MCP: reqwest-Client")?,
+            ),
+            None => {
+                tracing::warn!(
+                    "runtime.start.mcp_discord_timeout_ms is missing, MCP Discord calls are refused"
+                );
+                None
+            }
+        };
+        if timings.public_facts_cache_secs.is_none() {
+            tracing::warn!(
+                "runtime.start.mcp_public_facts_cache_secs is missing, public_server_facts is off"
+            );
+        }
         let auth_token = auth_token
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .context("MCP: interner Auth-Token aus Infisical fehlt")?;
         Ok(Self {
             http,
+            public_facts_cache_secs: timings.public_facts_cache_secs,
             bot_token,
             discord_api: DISCORD_API.into(),
             auth_token,
@@ -133,10 +154,10 @@ impl McpState {
     pub fn with_gate(
         mut self,
         token: Option<String>,
-        settings: gate::GateSettings,
+        settings: Option<gate::GateSettings>,
     ) -> Result<Self> {
         let Some(token) = token.map(|value| value.trim().to_owned()) else {
-            tracing::warn!("Zugriffsschranke ohne Schlüssel, alle Anfragen werden abgelehnt");
+            tracing::warn!("access gate token is missing, gate stays off and answers 401");
             return Ok(self);
         };
         let reused = constant_time_eq(&token, &self.auth_token)
@@ -147,6 +168,10 @@ impl McpState {
         if token.is_empty() || reused {
             bail!("Zugriffsschranke benötigt einen eigenen Schlüssel");
         }
+        let Some(settings) = settings else {
+            tracing::warn!("access gate settings are unavailable, gate stays off and answers 401");
+            return Ok(self);
+        };
         self.gate = Some(Arc::new(gate::GateState::start(token, settings)));
         Ok(self)
     }
@@ -218,7 +243,15 @@ async fn public_post(
         .filter(|id| *id != 0 && request_id.is_some());
     let result = match req["method"].as_str() {
         Some("tools/list") => {
-            json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages","inputSchema":read_messages_schema()},{"name":"search_messages","description":SEARCH_MESSAGES_DESCRIPTION,"inputSchema":search_messages_schema()},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
+            let facts = st
+                .public_facts_cache_secs
+                .map(|_| json!({"name":"public_server_facts"}));
+            let others = json!([{"name":"read_messages","inputSchema":read_messages_schema()},{"name":"search_messages","description":SEARCH_MESSAGES_DESCRIPTION,"inputSchema":search_messages_schema()},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]);
+            let tools: Vec<Value> = facts
+                .into_iter()
+                .chain(others.as_array().cloned().unwrap_or_default())
+                .collect();
+            json!({ "tools": tools })
         }
         Some("tools/call") if req["params"]["name"] == "self_invite_status" => {
             let Ok(access) = access::access(&st, user).await else {
@@ -423,7 +456,7 @@ async fn handle_rpc(st: &Arc<McpState>, req: Value) -> Option<Value> {
     let result: Result<Value> = match method.as_str() {
         "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+        "tools/list" => Ok(json!({ "tools": tool_definitions(st.public_facts_cache_secs) })),
         "tools/call" => tools_call(st, &params).await,
         _ => Err(anyhow!("__method_not_found__")),
     };
@@ -513,13 +546,27 @@ async fn tools_call(st: &Arc<McpState>, params: &Value) -> Result<Value> {
     })
 }
 
-fn tool_definitions() -> Value {
+fn public_facts_definition(cache_seconds: u64) -> Value {
+    json!({
+        "name": "public_server_facts",
+        "description": format!("Aktuelle Kanalstruktur, Topics, Voice-Anzahlen ohne Namen und registrierte Infotexte unseres Bots aus der verifizierten Mitgliedersicht; Cache {cache_seconds} Sekunden."),
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    })
+}
+
+fn tool_definitions(public_facts_cache_secs: Option<u64>) -> Value {
+    let mut tools = public_facts_cache_secs
+        .map(public_facts_definition)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Value::Array(rest) = other_tool_definitions() {
+        tools.extend(rest);
+    }
+    Value::Array(tools)
+}
+
+fn other_tool_definitions() -> Value {
     json!([
-        {
-            "name": "public_server_facts",
-            "description": "Aktuelle Kanalstruktur, Topics, Voice-Anzahlen ohne Namen und registrierte Infotexte unseres Bots aus der verifizierten Mitgliedersicht; Cache 60 Sekunden.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        },
         {
             "name": "server_overview",
             "description": "Überblick über den Server: Guild-Infos, Rollen, Kategorien mit Channels, Member-Zahl.",
@@ -623,6 +670,8 @@ async fn discord_call(
         let m = reqwest::Method::from_bytes(method.as_bytes()).context("HTTP-Methode")?;
         let mut req = st
             .http
+            .as_ref()
+            .context("MCP: runtime.start.mcp_discord_timeout_ms fehlt, Discord-Aufrufe sind abgeschaltet")?
             .request(m, &url)
             .header("Authorization", format!("Bot {}", st.bot_token))
             .header(
@@ -1751,8 +1800,36 @@ mod tests {
         McpState::from_config(
             "bot-token".into(),
             token.map(str::to_owned),
+            &StartOptions {
+                mcp_discord_timeout_ms: Some(10_000),
+                mcp_public_facts_cache_secs: Some(60),
+                ..StartOptions::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn missing_mcp_timings_switch_off_facts_and_discord_calls() {
+        let without = tool_definitions(None);
+        assert!(!without
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "public_server_facts"));
+        let with = tool_definitions(Some(30));
+        assert!(with[0]["description"]
+            .as_str()
+            .is_some_and(|text| text.ends_with("Cache 30 Sekunden.")));
+        let state = McpState::from_config(
+            "bot-token".into(),
+            Some("internal".into()),
             &StartOptions::default(),
         )
+        .expect("state without timings");
+        assert!(state.public_facts_cache_secs.is_none());
+        assert!(discord_call(&state, "GET", "/users/@me", &[], None, None)
+            .await
+            .is_err());
     }
 
     #[test]

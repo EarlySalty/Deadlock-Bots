@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashSet};
 pub(crate) const VIEW: u64 = 1 << 10;
 pub(crate) const HISTORY: u64 = 1 << 16;
 pub(crate) const ADMIN: u64 = 1 << 3;
+const SEND: u64 = 1 << 11;
+const SEND_DEPENDENT: u64 = (1 << 12) | (1 << 14) | (1 << 15) | (1 << 17);
 
 #[derive(Clone, Debug)]
 pub(crate) struct Access {
@@ -233,10 +235,21 @@ pub(crate) fn effective_permissions(channel: &Value, access: &Access) -> Option<
     if let Some((deny, allow)) = member {
         permissions = (permissions & !deny) | allow;
     }
+    permissions = implicit_denies(permissions);
     if access.timed_out {
         permissions &= VIEW | HISTORY;
     }
     Some(permissions)
+}
+
+fn implicit_denies(permissions: u64) -> u64 {
+    if permissions & VIEW == 0 {
+        0
+    } else if permissions & SEND == 0 {
+        permissions & !SEND_DEPENDENT
+    } else {
+        permissions
+    }
 }
 
 pub(crate) fn role_can_view(channel: &Value, roles: &GuildRoles, role: Option<&str>) -> bool {

@@ -4,6 +4,7 @@ use crate::bot_config::{BotConfig, BotConfigError};
 use serde::{Deserialize, Serialize};
 use std::{
     net::IpAddr,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
 };
 
@@ -77,7 +78,141 @@ section!(StartOptions {
     access_gate_reload_ms: u64 => "DL_ACCESS_GATE_RELOAD_MS",
     access_gate_purge_every_secs: u64 => "DL_ACCESS_GATE_PURGE_EVERY_SECS",
     access_gate_retention_days: u64 => "DL_ACCESS_GATE_RETENTION_DAYS",
+    mcp_public_facts_cache_secs: u64 => "DL_MCP_PUBLIC_FACTS_CACHE_SECS",
+    mcp_discord_timeout_ms: u64 => "DL_MCP_DISCORD_TIMEOUT_MS",
 });
+
+const ACCESS_GATE_CACHE_TTL_MS: RangeInclusive<u64> = 1_000..=3_600_000;
+const ACCESS_GATE_LOOKUP_TIMEOUT_MS: RangeInclusive<u64> = 100..=60_000;
+const ACCESS_GATE_DECISION_TIMEOUT_MS: RangeInclusive<u64> = 100..=180_000;
+const ACCESS_GATE_RELOAD_MS: RangeInclusive<u64> = 500..=3_600_000;
+const ACCESS_GATE_PURGE_EVERY_SECS: RangeInclusive<u64> = 60..=604_800;
+const ACCESS_GATE_RETENTION_DAYS: RangeInclusive<u64> = 1..=3_650;
+const MCP_PUBLIC_FACTS_CACHE_SECS: RangeInclusive<u64> = 5..=3_600;
+const MCP_DISCORD_TIMEOUT_MS: RangeInclusive<u64> = 1_000..=300_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessGateRetention {
+    pub purge_every_secs: u64,
+    pub retention_days: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessGateTimings {
+    pub cache_ttl_ms: u64,
+    pub lookup_timeout_ms: u64,
+    pub decision_timeout_ms: u64,
+    pub reload_ms: u64,
+    pub retention: AccessGateRetention,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct McpTimings {
+    pub public_facts_cache_secs: Option<u64>,
+    pub discord_timeout_ms: Option<u64>,
+}
+
+fn within(
+    value: Option<u64>,
+    range: RangeInclusive<u64>,
+    message: &'static str,
+) -> Result<Option<u64>, BotConfigError> {
+    match value {
+        Some(value) if !range.contains(&value) => Err(BotConfigError::Validation(message)),
+        other => Ok(other),
+    }
+}
+
+impl StartOptions {
+    pub fn access_gate_retention(&self) -> Result<Option<AccessGateRetention>, BotConfigError> {
+        let purge_every_secs = within(
+            self.access_gate_purge_every_secs,
+            ACCESS_GATE_PURGE_EVERY_SECS,
+            "runtime.start.access_gate_purge_every_secs liegt außerhalb von 60 bis 604800",
+        )?;
+        let retention_days = within(
+            self.access_gate_retention_days,
+            ACCESS_GATE_RETENTION_DAYS,
+            "runtime.start.access_gate_retention_days liegt außerhalb von 1 bis 3650",
+        )?;
+        Ok(purge_every_secs
+            .zip(retention_days)
+            .map(|(purge_every_secs, retention_days)| AccessGateRetention {
+                purge_every_secs,
+                retention_days,
+            }))
+    }
+
+    pub fn access_gate_timings(&self) -> Result<Option<AccessGateTimings>, BotConfigError> {
+        let retention = self.access_gate_retention()?;
+        let cache_ttl_ms = within(
+            self.access_gate_cache_ttl_ms,
+            ACCESS_GATE_CACHE_TTL_MS,
+            "runtime.start.access_gate_cache_ttl_ms liegt außerhalb von 1000 bis 3600000",
+        )?;
+        let lookup_timeout_ms = within(
+            self.access_gate_lookup_timeout_ms,
+            ACCESS_GATE_LOOKUP_TIMEOUT_MS,
+            "runtime.start.access_gate_lookup_timeout_ms liegt außerhalb von 100 bis 60000",
+        )?;
+        let decision_timeout_ms = within(
+            self.access_gate_decision_timeout_ms,
+            ACCESS_GATE_DECISION_TIMEOUT_MS,
+            "runtime.start.access_gate_decision_timeout_ms liegt außerhalb von 100 bis 180000",
+        )?;
+        let reload_ms = within(
+            self.access_gate_reload_ms,
+            ACCESS_GATE_RELOAD_MS,
+            "runtime.start.access_gate_reload_ms liegt außerhalb von 500 bis 3600000",
+        )?;
+        if let (Some(lookup), Some(decision)) = (lookup_timeout_ms, decision_timeout_ms) {
+            if decision < lookup {
+                return Err(BotConfigError::Validation(
+                    "runtime.start.access_gate_decision_timeout_ms liegt unter access_gate_lookup_timeout_ms",
+                ));
+            }
+        }
+        Ok(
+            match (
+                cache_ttl_ms,
+                lookup_timeout_ms,
+                decision_timeout_ms,
+                reload_ms,
+                retention,
+            ) {
+                (
+                    Some(cache_ttl_ms),
+                    Some(lookup_timeout_ms),
+                    Some(decision_timeout_ms),
+                    Some(reload_ms),
+                    Some(retention),
+                ) => Some(AccessGateTimings {
+                    cache_ttl_ms,
+                    lookup_timeout_ms,
+                    decision_timeout_ms,
+                    reload_ms,
+                    retention,
+                }),
+                _ => None,
+            },
+        )
+    }
+
+    pub fn mcp_timings(&self) -> Result<McpTimings, BotConfigError> {
+        Ok(McpTimings {
+            public_facts_cache_secs: within(
+                self.mcp_public_facts_cache_secs,
+                MCP_PUBLIC_FACTS_CACHE_SECS,
+                "runtime.start.mcp_public_facts_cache_secs liegt außerhalb von 5 bis 3600",
+            )?,
+            discord_timeout_ms: within(
+                self.mcp_discord_timeout_ms,
+                MCP_DISCORD_TIMEOUT_MS,
+                "runtime.start.mcp_discord_timeout_ms liegt außerhalb von 1000 bis 300000",
+            )?,
+        })
+    }
+}
 
 section!(BridgeOptions {
     twitch_api_url: String => "TWITCH_INTERNAL_API_BASE_URL",
@@ -258,24 +393,6 @@ impl RuntimeConfig {
         }
     }
 
-    fn access_gate_values_valid(&self) -> bool {
-        let start = &self.start;
-        let within = |value: Option<u64>, max: u64| value.is_none_or(|v| (1..=max).contains(&v));
-        within(start.access_gate_cache_ttl_ms, 3_600_000)
-            && within(start.access_gate_lookup_timeout_ms, 60_000)
-            && within(start.access_gate_decision_timeout_ms, 180_000)
-            && within(start.access_gate_reload_ms, 3_600_000)
-            && within(start.access_gate_purge_every_secs, 604_800)
-            && within(start.access_gate_retention_days, 3_650)
-            && match (
-                start.access_gate_lookup_timeout_ms,
-                start.access_gate_decision_timeout_ms,
-            ) {
-                (Some(lookup), Some(decision)) => decision >= lookup,
-                _ => true,
-            }
-    }
-
     pub fn validate(&self) -> Result<(), BotConfigError> {
         let invalid = || BotConfigError::Validation("Ungültiger Betriebswert in runtime");
         for seconds in [
@@ -387,9 +504,8 @@ impl RuntimeConfig {
         {
             return Err(invalid());
         }
-        if !self.access_gate_values_valid() {
-            return Err(invalid());
-        }
+        self.start.access_gate_timings()?;
+        self.start.mcp_timings()?;
         for port in [self.start.mcp_port, self.bridges.twitch_port]
             .into_iter()
             .flatten()

@@ -610,6 +610,8 @@ mod tests {
         });
         let config = dl_core::runtime_config::StartOptions {
             mcp_verified_role_id: Some(3),
+            mcp_discord_timeout_ms: Some(10_000),
+            mcp_public_facts_cache_secs: Some(60),
             ..Default::default()
         };
         let mut state = McpState::from_config(
