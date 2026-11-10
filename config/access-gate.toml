@@ -1,0 +1,180 @@
+schema_version = 1
+
+[connectors.brain]
+enabled = true
+shadow = true
+
+[connectors.discord]
+enabled = true
+shadow = true
+
+[connectors.steam]
+enabled = true
+shadow = true
+
+[connectors.twitch]
+enabled = true
+shadow = true
+
+[connectors.turniere]
+enabled = true
+shadow = true
+
+[connectors.operations]
+enabled = true
+shadow = true
+
+[areas.knowledge]
+channels = []
+
+[areas.events]
+channels = []
+
+[areas.moderation]
+channels = []
+
+[areas.structure]
+channels = []
+
+[areas.announcements]
+channels = []
+
+[areas.turniere]
+channels = []
+
+[areas.scrims]
+channels = []
+
+[areas.coaching]
+channels = []
+
+[areas.streamer]
+channels = []
+
+[areas.steam]
+channels = []
+
+[areas.twitch]
+channels = []
+
+[areas.operations]
+channels = []
+
+[areas.owner]
+channels = []
+
+[capabilities."knowledge.public.read"]
+area = "knowledge"
+public = true
+
+[capabilities."discord.event.read"]
+area = "events"
+public = true
+
+[capabilities."discord.event.write"]
+area = "events"
+permissions = ["manage_events", "create_events"]
+
+[capabilities."discord.moderation.read"]
+area = "moderation"
+permissions = ["kick_members", "ban_members", "moderate_members", "manage_messages"]
+roles = ["1401891955931222110"]
+
+[capabilities."discord.moderation.timeout"]
+area = "moderation"
+permissions = ["moderate_members"]
+
+[capabilities."discord.moderation.kick"]
+area = "moderation"
+permissions = ["kick_members"]
+
+[capabilities."discord.moderation.ban"]
+area = "moderation"
+permissions = ["ban_members"]
+
+[capabilities."discord.moderation.delete_messages"]
+area = "moderation"
+permissions = ["manage_messages"]
+
+[capabilities."discord.structure.read"]
+area = "structure"
+permissions = ["manage_channels", "manage_roles", "manage_guild"]
+
+[capabilities."discord.structure.write"]
+area = "structure"
+permissions = ["manage_channels", "manage_roles", "manage_guild"]
+
+[capabilities."discord.announcement.post"]
+area = "announcements"
+confirm = true
+
+[capabilities."turniere.read"]
+area = "turniere"
+roles = ["1531728710976143390", "1494120177577754747"]
+
+[capabilities."turniere.write"]
+area = "turniere"
+roles = ["1531728710976143390"]
+
+[capabilities."turniere.match.write"]
+area = "turniere"
+roles = ["1531728710976143390", "1494120177577754747"]
+
+[capabilities."scrims.read"]
+area = "scrims"
+roles = ["1524268805424025651"]
+
+[capabilities."scrims.write"]
+area = "scrims"
+roles = ["1524268805424025651"]
+
+[capabilities."coaching.read"]
+area = "coaching"
+roles = ["1494372744286965941", "1551330025494683689"]
+
+[capabilities."coaching.write"]
+area = "coaching"
+roles = ["1494372744286965941", "1551330025494683689"]
+
+[capabilities."streamer.own.read"]
+area = "streamer"
+roles = ["1313624729466441769"]
+
+[capabilities."streamer.own.write"]
+area = "streamer"
+roles = ["1313624729466441769"]
+
+[capabilities."streamer.partner.write"]
+area = "streamer"
+
+[capabilities."steam.status.read"]
+area = "steam"
+
+[capabilities."steam.write"]
+area = "steam"
+
+[capabilities."twitch.status.read"]
+area = "twitch"
+
+[capabilities."twitch.write"]
+area = "twitch"
+
+[capabilities."operations.status.read"]
+area = "operations"
+roles = ["1411000883155832852"]
+
+[capabilities."operations.write"]
+area = "operations"
+owner_only = true
+
+[capabilities."gate.access_file.write"]
+area = "owner"
+owner_only = true
+
+[capabilities."money.write"]
+area = "owner"
+owner_only = true
+
+[capabilities."discord.moderation.mass_ban"]
+area = "moderation"
+owner_only = true

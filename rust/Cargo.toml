@@ -25,6 +25,7 @@ members = [
     "crates/dl-token-secrets",
     "crates/dl-central-etl",
     "crates/dl-server-as-code",
+    "crates/dl-access-gate",
     "bin/dl-bot",
     "bin/dl-knowledge",
     "bin/dl-web",
@@ -121,6 +122,7 @@ dl-dashboard = { path = "crates/dl-dashboard" }
 dl-central-db = { path = "crates/dl-central-db" }
 dl-central-etl = { path = "crates/dl-central-etl" }
 dl-server-as-code = { path = "crates/dl-server-as-code" }
+dl-access-gate = { path = "crates/dl-access-gate" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

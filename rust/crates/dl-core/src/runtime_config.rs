@@ -674,12 +674,12 @@ impl BotConfig {
 /// Unbekannte Namen sind keine heimlichen Betriebs-ENV-Overrides.
 pub fn secret_value(key: &str) -> Option<String> {
     match key {
-        "DISCORD_BRAIN_CLIENT_TOKEN" | "DISCORD_PUBLIC_FACTS_TOKEN" => {
-            crate::token_snapshot::value(key)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        }
+        "DISCORD_BRAIN_CLIENT_TOKEN"
+        | "DISCORD_PUBLIC_FACTS_TOKEN"
+        | "DISCORD_ACCESS_GATE_TOKEN" => crate::token_snapshot::value(key)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
         "DISCORD_TOKEN"
         | "DISCORD_TOKEN_RANKED"
         | "CHANGELOG_API_TOKEN"
