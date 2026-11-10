@@ -387,6 +387,26 @@ fn downgrade_planned_noop(action: &mut String) {
     }
 }
 
+fn settle_voice_ux_forum_noops(
+    output: &mut voice_ux_publish::VoiceUxPublishOutput,
+    thread_exists: bool,
+) {
+    if thread_exists {
+        return;
+    }
+    downgrade_planned_noop(&mut output.forum_post.action);
+    for target in &mut output.targets {
+        for message in &mut target.messages {
+            downgrade_planned_noop(&mut message.action);
+        }
+    }
+    if let Some(thread_id) = output.forum_post.stored_thread_id {
+        output.warnings.push(format!(
+            "Voice-UX: Forum-Thread {thread_id} ist nicht mehr auffindbar. Beim Bestätigen wird er bearbeitet, bei 404 neu gepostet, und die Panels verlinken danach den neuen Thread."
+        ));
+    }
+}
+
 struct RangGuideLegacyScan {
     candidates: Vec<rang_guide_publish::RangGuideLegacyCleanupCandidate>,
     truncated: bool,
@@ -407,7 +427,7 @@ fn settle_scan_truncation(
         )));
     }
     warnings.push(format!(
-        "{label}: Der History-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten. Ältere gespeicherte Nachrichten gelten als nicht gesehen und werden beim Bestätigen bearbeitet."
+        "{label}: Der History-Scan endete nach {HISTORY_SCAN_MAX_PAGES} Seiten. Ältere gespeicherte Nachrichten gelten als nicht gesehen und werden beim Bestätigen bearbeitet oder neu gepostet."
     ));
     Ok(())
 }
@@ -5599,23 +5619,13 @@ impl ServerSyncOps for ServerSyncService {
         output.legacy_cleanup_candidates = legacy_candidates;
         output.warnings.extend(legacy_warnings);
 
-        let mut forum_noop_proven = false;
-        if let Some(thread_id) = output.forum_post.stored_thread_id {
-            let thread_exists = self.voice_ux_forum_post_exists(thread_id).await?;
-            forum_noop_proven = thread_exists
-                && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post);
-            if !thread_exists {
-                downgrade_planned_noop(&mut output.forum_post.action);
-                for target in &mut output.targets {
-                    for message in &mut target.messages {
-                        downgrade_planned_noop(&mut message.action);
-                    }
-                }
-                output.warnings.push(format!(
-                    "Voice-UX: Forum-Thread {thread_id} ist nicht mehr auffindbar. Beim Bestätigen wird er bearbeitet, bei 404 neu gepostet, und die Panels verlinken danach den neuen Thread."
-                ));
-            }
-        }
+        let thread_exists = match output.forum_post.stored_thread_id {
+            Some(thread_id) => self.voice_ux_forum_post_exists(thread_id).await?,
+            None => false,
+        };
+        let forum_noop_proven = thread_exists
+            && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post);
+        settle_voice_ux_forum_noops(&mut output, thread_exists);
 
         if !confirm {
             return Ok(output);
@@ -12846,6 +12856,48 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         for target in &settled.targets {
             assert_eq!(target.messages[0].action, "planned_no_op");
         }
+    }
+
+    #[test]
+    fn voice_ux_ohne_forum_thread_bleibt_kein_panel_no_op() {
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
+        let ids = BTreeMap::from([(voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9301, 9302])]);
+        let formats = BTreeMap::from([(
+            voice_ux_publish::VOICE_UX_CHANNEL_ID,
+            Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+        )]);
+        let first = voice_ux_publish::build_voice_ux_publish_output(
+            repo.path(),
+            &ids,
+            &formats,
+            &BTreeMap::new(),
+            None,
+            None,
+            true,
+        )
+        .expect("first");
+        let hashes = BTreeMap::from([(
+            voice_ux_publish::VOICE_UX_CHANNEL_ID,
+            Some(first.targets[0].payload_hash.clone()),
+        )]);
+        let mut output = voice_ux_publish::build_voice_ux_publish_output(
+            repo.path(),
+            &ids,
+            &formats,
+            &hashes,
+            None,
+            None,
+            true,
+        )
+        .expect("output");
+        assert_eq!(output.targets[0].messages[0].action, "planned_no_op");
+
+        settle_voice_ux_forum_noops(&mut output, false);
+
+        assert_eq!(output.forum_post.action, "planned_post");
+        assert_eq!(output.targets[0].messages[0].action, "planned_edit");
+        assert!(output.warnings.is_empty(), "{:?}", output.warnings);
     }
 
     async fn seed_voice_ux_matching_panel(
