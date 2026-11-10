@@ -1283,6 +1283,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-access-gate"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "dl-activity"
 version = "0.1.0"
 dependencies = [
@@ -1367,6 +1378,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "dl-access-gate",
  "dl-activity",
  "dl-ai",
  "dl-brain",
@@ -1385,6 +1397,7 @@ dependencies = [
  "dl-webcore",
  "fs2",
  "hex",
+ "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",

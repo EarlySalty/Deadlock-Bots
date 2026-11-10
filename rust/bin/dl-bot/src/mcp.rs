@@ -26,6 +26,9 @@ use dl_core::runtime_config::StartOptions;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+mod access;
+mod gate;
+pub use gate::GateSettings;
 mod public;
 mod self_invite;
 
@@ -48,7 +51,22 @@ pub struct McpState {
     export_dir: PathBuf,
     public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool, u64)>,
     public_cache: tokio::sync::Mutex<Option<public::CachedFacts>>,
+    gate: Option<Arc<gate::GateState>>,
 }
+
+#[derive(Debug)]
+pub(crate) struct DiscordHttpError {
+    pub status: u16,
+    message: String,
+}
+
+impl std::fmt::Display for DiscordHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DiscordHttpError {}
 
 impl McpState {
     pub fn from_config(
@@ -79,6 +97,7 @@ impl McpState {
                 .unwrap_or_else(|| PathBuf::from("data/mcp_exports")),
             public_source: None,
             public_cache: tokio::sync::Mutex::new(None),
+            gate: None,
         })
     }
 
@@ -110,12 +129,36 @@ impl McpState {
         self.public_tempvoice = Some(engine);
         Ok(self)
     }
+
+    pub fn with_gate(
+        mut self,
+        token: Option<String>,
+        settings: gate::GateSettings,
+    ) -> Result<Self> {
+        let Some(token) = token.map(|value| value.trim().to_owned()) else {
+            tracing::warn!("Zugriffsschranke ohne Schlüssel, alle Anfragen werden abgelehnt");
+            return Ok(self);
+        };
+        let reused = constant_time_eq(&token, &self.auth_token)
+            || self
+                .public_token
+                .as_deref()
+                .is_some_and(|public| constant_time_eq(&token, public.trim()));
+        if token.is_empty() || reused {
+            bail!("Zugriffsschranke benötigt einen eigenen Schlüssel");
+        }
+        self.gate = Some(Arc::new(gate::GateState::start(token, settings)));
+        Ok(self)
+    }
 }
 
 pub fn router(state: Arc<McpState>) -> Router {
     Router::new()
         .route("/mcp", post(mcp_post).get(mcp_get))
         .route("/mcp/public", post(public_post))
+        .route(dl_access_gate::ACCESS_PATH, post(gate::access_post))
+        .route(dl_access_gate::AUTHORIZE_PATH, post(gate::authorize_post))
+        .route(dl_access_gate::OUTCOME_PATH, post(gate::outcome_post))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -178,7 +221,7 @@ async fn public_post(
             json!({"tools":[{"name":"public_server_facts"},{"name":"read_messages","inputSchema":read_messages_schema()},{"name":"search_messages","description":SEARCH_MESSAGES_DESCRIPTION,"inputSchema":search_messages_schema()},{"name":"send_message"},{"name":"self_invite_status","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]})
         }
         Some("tools/call") if req["params"]["name"] == "self_invite_status" => {
-            let Ok(access) = public::access(&st, user).await else {
+            let Ok(access) = access::access(&st, user).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
             let Some(user) = access.user_id.filter(|id| Some(*id) == user) else {
@@ -197,7 +240,7 @@ async fn public_post(
             json!({"content":[{"type":"text","text":serde_json::to_string(&status).expect("Status ist serialisierbar")}],"isError":false})
         }
         Some("tools/call") if req["params"]["name"] == "public_server_facts" => {
-            let Ok(access) = public::access(&st, user).await else {
+            let Ok(access) = access::access(&st, user).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
             match public::facts_for(&st, &req["params"]["arguments"], &access).await {
@@ -236,7 +279,7 @@ async fn public_post(
                     json!({"error":"invalid_arguments"}),
                 );
             }
-            let Ok(access) = public::access(&st, user).await else {
+            let Ok(access) = access::access(&st, user).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
             match public::request_tool(
@@ -624,10 +667,14 @@ async fn discord_call(
         }
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!(
-                "Discord {status}: {} ({method} {path})",
-                truncate_str(&text, 600)
-            );
+            return Err(DiscordHttpError {
+                status: status.as_u16(),
+                message: format!(
+                    "Discord {status}: {} ({method} {path})",
+                    truncate_str(&text, 600)
+                ),
+            }
+            .into());
         }
         if text.trim().is_empty() {
             return Ok(Value::Null);

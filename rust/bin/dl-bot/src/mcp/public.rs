@@ -1,3 +1,4 @@
+use super::access::{effective_permissions, Access, ADMIN, HISTORY, VIEW};
 use super::{discord_call, McpState};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -9,9 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const VIEW: u64 = 1 << 10;
-const HISTORY: u64 = 1 << 16;
-const ADMIN: u64 = 1 << 3;
 const SEND: u64 = 1 << 11;
 const TTL: Duration = Duration::from_secs(60);
 const MAX_TERMS: usize = 16;
@@ -84,154 +82,6 @@ struct OpenLane {
     channel_id: String,
     count: usize,
     mode: String,
-}
-
-pub(super) struct Access {
-    pub user_id: Option<u64>,
-    guild: String,
-    roles: Vec<String>,
-    base: u64,
-    timed_out: bool,
-}
-
-pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result<Access> {
-    let (_, _, guild_id) = st.public_source.as_ref().context("Gateway-Quelle fehlt")?;
-    let verified = st
-        .public_policy
-        .mcp_verified_role_id
-        .filter(|id| *id != 0 && *id != *guild_id)
-        .context("Mitgliederrolle ist nicht konfiguriert")?;
-    let member = if let Some(user) = requested_user {
-        discord_call(
-            st,
-            "GET",
-            &format!("/guilds/{guild_id}/members/{user}"),
-            &[],
-            None,
-            None,
-        )
-        .await
-        .context("Mitglied ist nicht abrufbar")
-        .and_then(|member| {
-            if member["user"]["id"].as_str() == Some(user.to_string().as_str()) {
-                Ok(Some(member))
-            } else {
-                bail!("Mitglied ist uneindeutig")
-            }
-        })?
-    } else {
-        None
-    };
-    let member_roles = member
-        .as_ref()
-        .and_then(|member| member["roles"].as_array())
-        .and_then(|roles| {
-            roles
-                .iter()
-                .map(|role| role.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()
-        });
-    if requested_user.is_some() && member_roles.is_none() {
-        bail!("Mitgliedsrollen sind unbekannt");
-    }
-    let raw_roles = discord_call(
-        st,
-        "GET",
-        &format!("/guilds/{guild_id}/roles"),
-        &[],
-        None,
-        None,
-    )
-    .await?;
-    let mut role_bits = std::collections::BTreeMap::new();
-    for role in raw_roles.as_array().context("Rollenformat ist unbekannt")? {
-        let id = role["id"].as_str().context("Rollen-ID fehlt")?.to_owned();
-        let bits = role["permissions"]
-            .as_str()
-            .context("Rollenrechte fehlen")?
-            .parse::<u64>()?;
-        if role_bits.insert(id, bits).is_some() {
-            bail!("Rollen-Zulassung ist uneindeutig");
-        }
-    }
-    let everyone = *role_bits
-        .get(&guild_id.to_string())
-        .context("everyone-Rolle fehlt")?;
-    let verified_bits = *role_bits
-        .get(&verified.to_string())
-        .context("Mitgliederrolle ist unbekannt")?;
-    if verified_bits & ADMIN != 0 {
-        bail!("Mitgliederrolle ist nicht eindeutig zulässig");
-    }
-    let user_id = member_roles.as_ref().and(requested_user);
-    let timed_out = match member
-        .as_ref()
-        .filter(|_| user_id.is_some())
-        .and_then(|member| member.get("communication_disabled_until"))
-    {
-        None | Some(Value::Null) => false,
-        Some(until) => {
-            chrono::DateTime::parse_from_rfc3339(
-                until.as_str().context("Timeout-Zeitpunkt ist ungültig")?,
-            )
-            .context("Timeout-Zeitpunkt ist ungültig")?
-                > chrono::Utc::now()
-        }
-    };
-    let roles = member_roles.unwrap_or_else(|| vec![verified.to_string()]);
-    let mut base = everyone;
-    for role in &roles {
-        role.parse::<u64>()?;
-        base |= role_bits
-            .get(role)
-            .context("Mitgliedsrolle ist unbekannt")?;
-    }
-    Ok(Access {
-        user_id,
-        guild: guild_id.to_string(),
-        roles,
-        base,
-        timed_out,
-    })
-}
-
-fn effective_permissions(channel: &Value, access: &Access) -> Option<u64> {
-    if access.base & ADMIN != 0 && access.user_id.is_some() {
-        return Some(u64::MAX);
-    }
-    if access.base & ADMIN != 0 {
-        return None;
-    }
-    let mut permissions = access.base;
-    let mut role_deny = 0;
-    let mut role_allow = 0;
-    let mut member = None;
-    let mut seen = HashSet::new();
-    for overwrite in channel.get("permission_overwrites")?.as_array()? {
-        let kind = overwrite.get("type")?.as_u64()?;
-        let id = overwrite.get("id")?.as_str()?;
-        if kind > 1 || !seen.insert((kind, id)) {
-            return None;
-        }
-        let deny = overwrite.get("deny")?.as_str()?.parse::<u64>().ok()?;
-        let allow = overwrite.get("allow")?.as_str()?.parse::<u64>().ok()?;
-        if kind == 0 && id == access.guild {
-            permissions = (permissions & !deny) | allow;
-        } else if kind == 0 && access.roles.iter().any(|role| role == id) {
-            role_deny |= deny;
-            role_allow |= allow;
-        } else if kind == 1 && access.user_id.is_some_and(|user| user.to_string() == id) {
-            member = Some((deny, allow));
-        }
-    }
-    permissions = (permissions & !role_deny) | role_allow;
-    if let Some((deny, allow)) = member {
-        permissions = (permissions & !deny) | allow;
-    }
-    if access.timed_out {
-        permissions &= VIEW | HISTORY;
-    }
-    Some(permissions)
 }
 
 pub(super) struct CachedFacts {
@@ -996,7 +846,7 @@ fn registered_info(message: &Value, bot_id: &str, channel: &str, id: &str) -> Op
 }
 
 pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Facts> {
-    let access = access(st, None).await?;
+    let access = super::access::access(st, None).await?;
     facts_for(st, args, &access).await
 }
 
@@ -1269,6 +1119,7 @@ mod tests {
                 roles: vec!["3".into()],
                 base: HISTORY,
                 timed_out: false,
+                top_position: 0,
             };
             assert_eq!(
                 join_channel_ids(&public_channels(&channels, &access), &config)
@@ -1307,6 +1158,7 @@ mod tests {
             roles: vec!["3".into()],
             base: VIEW | HISTORY,
             timed_out: false,
+            top_position: 0,
         };
         let result = public_channels(&channels, &access);
         assert_eq!(
@@ -1366,6 +1218,7 @@ mod tests {
             roles: vec!["3".into()],
             base: VIEW | HISTORY,
             timed_out: false,
+            top_position: 0,
         };
         let readable: Vec<Value> = public_channels(&raw, &access)
             .iter()
