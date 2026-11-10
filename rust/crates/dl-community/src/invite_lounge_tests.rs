@@ -1184,6 +1184,41 @@ async fn von_hand_erledigte_bitte_bleibt_ohne_meldung() {
 }
 
 #[tokio::test]
+async fn einladung_nach_dem_check_in_schliesst_die_bitte_still() {
+    let (watcher, store, _, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let notices_before = notices(&brain).len();
+    store.handled.store(true, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + ROOM_WAIT_SECONDS)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert!(invite.calls.lock().await.is_empty());
+    assert_eq!(notices(&brain).len(), notices_before);
+    let state = store
+        .load(USER)
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(
+        state.last_result.as_deref(),
+        Some("Schon von Hand erledigt; keine Meldung")
+    );
+    assert!(state.outbox.is_empty());
+}
+
+#[tokio::test]
 async fn bitten_vor_dem_deploy_loesen_nichts_aus() {
     let (watcher, store, port, invite, brain) = setup_scripted();
     store.actions_since.store(NOW, Ordering::SeqCst);
@@ -1529,6 +1564,52 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         .is_empty());
     assert!(invite.calls.lock().await.is_empty());
     assert!(port.replies.lock().await.is_empty());
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn postgres_offene_admin_einladung_zaehlt_als_erledigt() {
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("Testdatenbank");
+    let store = PgLoungeStore {
+        pool: db.pool().clone(),
+    };
+    let steam_id = steam_id64("123456789").expect("gültiger Freundescode");
+    assert!(!store
+        .handled_since("123456789", NOW)
+        .await
+        .expect("Abfrage läuft"));
+    sqlx::query(
+        "INSERT INTO steam.invite_requests (steam_id64, account_id, admin_id, created_at)
+         VALUES ($1, 123456789, 7, $2)",
+    )
+    .bind(steam_id)
+    .bind(NOW + 5)
+    .execute(db.pool())
+    .await
+    .expect("Testzeile");
+    assert!(store
+        .handled_since("123456789", NOW)
+        .await
+        .expect("Abfrage läuft"));
+    assert!(!store
+        .handled_since("123456789", NOW + 10)
+        .await
+        .expect("Abfrage läuft"));
+    sqlx::query(
+        "INSERT INTO steam.bot_event_log (occurred_at, event_type, decision, steam_id)
+         VALUES (to_timestamp($2), 'playtest_invite', 'sent', $1)",
+    )
+    .bind(steam_id)
+    .bind((NOW + 20) as f64)
+    .execute(db.pool())
+    .await
+    .expect("Testzeile");
+    assert!(store
+        .handled_since("123456789", NOW + 10)
+        .await
+        .expect("Abfrage läuft"));
 }
 
 #[cfg(feature = "testing")]

@@ -399,7 +399,9 @@ impl LoungeStore for PgLoungeStore {
                             WHERE event_type = 'playtest_invite' AND steam_id = $1
                               AND occurred_at >= to_timestamp($2))
                  OR EXISTS(SELECT 1 FROM steam.beta_invite_audit
-                            WHERE steam_id64 = $1 AND invited_at >= to_timestamp($2))",
+                            WHERE steam_id64 = $1 AND invited_at >= to_timestamp($2))
+                 OR EXISTS(SELECT 1 FROM steam.invite_requests
+                            WHERE steam_id64 = $1 AND created_at >= $2)",
         )
         .bind(steam_id)
         .bind(since as f64)
