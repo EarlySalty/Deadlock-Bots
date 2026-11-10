@@ -98,6 +98,7 @@ pub enum ServerSyncErrorKind {
 }
 
 const HISTORY_SCAN_MAX_PAGES: usize = 5;
+const DISCORD_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
@@ -465,13 +466,19 @@ fn require_settled_extras(
     extra_delete_ids: &[u64],
     deleted: &[u64],
     already_gone: &[u64],
+    delete_warnings: &[String],
 ) -> ServerSyncResult<()> {
     let unsettled = unsettled_support_deletes(extra_delete_ids, deleted, already_gone);
     if unsettled.is_empty() {
         return Ok(());
     }
+    let reasons = if delete_warnings.is_empty() {
+        String::new()
+    } else {
+        format!(" Gründe: {}", delete_warnings.join(" | "))
+    };
     Err(ServerSyncError::internal(format!(
-        "{label}: Löschen unvollständig, eigene Panel-Nachrichten {unsettled:?} außerhalb der gespeicherten IDs bleiben im Kanal. Bereits gespeicherte Karten bleiben gültig. Ein erneutes Bestätigen versucht das Löschen wieder."
+        "{label}: Löschen unvollständig, eigene Panel-Nachrichten {unsettled:?} außerhalb der gespeicherten IDs bleiben im Kanal. Bereits gespeicherte Karten bleiben gültig. Ein erneutes Bestätigen versucht das Löschen wieder.{reasons}"
     )))
 }
 
@@ -916,6 +923,13 @@ pub struct ServerSyncService {
     panel_apply_lock: tokio::sync::Mutex<()>,
 }
 
+fn discord_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(DISCORD_HTTP_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 impl ServerSyncService {
     pub fn new(
         pool: PgPool,
@@ -928,7 +942,7 @@ impl ServerSyncService {
             adapter,
             discord_token,
             guild_id,
-            http_client: reqwest::Client::new(),
+            http_client: discord_http_client(),
             discord_api_base: DISCORD_API_BASE.to_string(),
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
@@ -948,7 +962,7 @@ impl ServerSyncService {
             adapter: dl_discord::DiscordAdapter::new("test-token"),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
-            http_client: reqwest::Client::new(),
+            http_client: discord_http_client(),
             discord_api_base,
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
@@ -981,10 +995,18 @@ impl ServerSyncService {
             },
             None => (self.post_voice_ux_forum_post(forum).await?, "posted"),
         };
+        if let Err(err) = self
+            .store_voice_ux_forum_metadata(thread_id, &forum.payload_hash)
+            .await
+        {
+            if action == "posted" {
+                self.delete_new_voice_ux_forum_thread_best_effort(thread_id)
+                    .await;
+            }
+            return Err(err);
+        }
         forum.thread_id = Some(thread_id);
         forum.action = action.to_string();
-        self.store_voice_ux_forum_metadata(thread_id, &forum.payload_hash)
-            .await?;
         match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
             Ok(()) => forum.pinned = true,
             Err(err) => forum.warnings.push(format!(
@@ -992,6 +1014,13 @@ impl ServerSyncService {
             )),
         }
         Ok(())
+    }
+
+    async fn delete_new_voice_ux_forum_thread_best_effort(&self, thread_id: u64) {
+        let url = self.discord_api_url(&format!("/channels/{thread_id}"));
+        if let Err(err) = self.discord_delete(url).await {
+            tracing::warn!(thread_id, error = %err, "Voice-UX: new forum thread could not be removed after a failed KV write");
+        }
     }
 
     fn discord_api_url(&self, path: &str) -> String {
@@ -3950,6 +3979,7 @@ impl ServerSyncOps for ServerSyncService {
                 &extra_delete_ids,
                 &delete_outcome.deleted,
                 &delete_outcome.already_gone,
+                &delete_outcome.warnings,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -3963,6 +3993,7 @@ impl ServerSyncOps for ServerSyncService {
                     &extra_delete_ids,
                     &delete_outcome.deleted,
                     &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -4206,6 +4237,7 @@ impl ServerSyncOps for ServerSyncService {
                 &extra_delete_ids,
                 &delete_outcome.deleted,
                 &delete_outcome.already_gone,
+                &delete_outcome.warnings,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -4219,6 +4251,7 @@ impl ServerSyncOps for ServerSyncService {
                     &extra_delete_ids,
                     &delete_outcome.deleted,
                     &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -4445,6 +4478,7 @@ impl ServerSyncOps for ServerSyncService {
                 &extra_delete_ids,
                 &delete_outcome.deleted,
                 &delete_outcome.already_gone,
+                &delete_outcome.warnings,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -4458,6 +4492,7 @@ impl ServerSyncOps for ServerSyncService {
                     &extra_delete_ids,
                     &delete_outcome.deleted,
                     &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -4870,6 +4905,7 @@ impl ServerSyncOps for ServerSyncService {
                 &extra_delete_ids,
                 &delete_outcome.deleted,
                 &delete_outcome.already_gone,
+                &delete_outcome.warnings,
             )?;
             output.deleted_message_ids = delete_outcome.deleted;
             output.warnings.extend(delete_outcome.warnings);
@@ -4883,6 +4919,7 @@ impl ServerSyncOps for ServerSyncService {
                     &extra_delete_ids,
                     &delete_outcome.deleted,
                     &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
                 )?;
                 output.deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -5701,6 +5738,7 @@ impl ServerSyncOps for ServerSyncService {
                     extra_delete_ids,
                     &delete_outcome.deleted,
                     &delete_outcome.already_gone,
+                    &delete_outcome.warnings,
                 )?;
                 output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
                 output.warnings.extend(delete_outcome.warnings);
@@ -5715,6 +5753,7 @@ impl ServerSyncOps for ServerSyncService {
                         extra_delete_ids,
                         &delete_outcome.deleted,
                         &delete_outcome.already_gone,
+                        &delete_outcome.warnings,
                     )?;
                     output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
                     output.warnings.extend(delete_outcome.warnings);
@@ -8735,6 +8774,8 @@ mod tests {
         post_calls: Mutex<Vec<u64>>,
         post_bodies: Mutex<Vec<(u64, Value)>>,
         patch_calls: Mutex<Vec<u64>>,
+        patch_bodies: Mutex<Vec<(u64, Value)>>,
+        get_overrides: Mutex<BTreeMap<u64, StatusCode>>,
         pin_calls: Mutex<Vec<(u64, u64)>>,
         patched_channels: Mutex<Vec<(u64, Value)>>,
         delete_calls: Mutex<Vec<u64>>,
@@ -9111,6 +9152,8 @@ mod tests {
             post_calls: Mutex::new(Vec::new()),
             post_bodies: Mutex::new(Vec::new()),
             patch_calls: Mutex::new(Vec::new()),
+            patch_bodies: Mutex::new(Vec::new()),
+            get_overrides: Mutex::new(BTreeMap::new()),
             pin_calls: Mutex::new(Vec::new()),
             patched_channels: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
@@ -9195,6 +9238,15 @@ mod tests {
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
     ) -> Response {
+        if let Some(status) = state
+            .get_overrides
+            .lock()
+            .expect("get overrides")
+            .get(&message_id)
+            .copied()
+        {
+            return (status, Json(json!({"message": "forced get status"}))).into_response();
+        }
         state
             .messages
             .lock()
@@ -9302,13 +9354,18 @@ mod tests {
     async fn fake_discord_patch_message(
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
-        _body: Bytes,
+        body: Bytes,
     ) -> Response {
         state
             .patch_calls
             .lock()
             .expect("patch calls")
             .push(message_id);
+        state.patch_bodies.lock().expect("patch bodies").push((
+            message_id,
+            serde_json::from_slice::<Value>(&body)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+        ));
         if state
             .messages
             .lock()
@@ -11339,9 +11396,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             unsettled_support_deletes(&[1, 2, 3], &outcome.deleted, &outcome.already_gone),
             vec![3]
         );
-        let unsettled = require_settled_extras("Support", &[3], &[], &[]).expect_err("offen");
+        let unsettled = require_settled_extras("Support", &[3], &[], &[], &outcome.warnings)
+            .expect_err("offen");
         assert_eq!(unsettled.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(unsettled.to_string().contains("[3]"), "{unsettled}");
+        assert!(unsettled.to_string().contains("timeout"), "{unsettled}");
     }
 
     fn service_without_database(discord_api_base: String) -> Arc<ServerSyncService> {
@@ -12325,6 +12384,143 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .messages
                 .iter()
                 .all(|message| message.action == "no_op"));
+
+            let with_extra = || {
+                let mut messages = stored
+                    .iter()
+                    .map(|message_id| {
+                        fake_discord_message(
+                            *message_id,
+                            42,
+                            $flag,
+                            marker_components.clone(),
+                            Vec::new(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                messages.extend([fake_discord_message(
+                    extra_id,
+                    42,
+                    $flag,
+                    marker_components.clone(),
+                    Vec::new(),
+                )]);
+                messages
+            };
+            for (status, settles) in [
+                (StatusCode::FORBIDDEN, false),
+                (StatusCode::NOT_FOUND, true),
+            ] {
+                seed_static_panel_kv(
+                    db.pool(),
+                    $id_key,
+                    &stored,
+                    $format_key,
+                    $format,
+                    $hash_key,
+                    &planned.payload_hash,
+                )
+                .await;
+                let fake = spawn_fake_discord(42, with_extra(), Vec::new()).await;
+                fake.state
+                    .get_overrides
+                    .lock()
+                    .expect("get overrides")
+                    .insert(extra_id, status);
+                let service = ServerSyncService::new_for_test(
+                    db.pool().clone(),
+                    fake.base_url.clone(),
+                    repo.path().to_path_buf(),
+                );
+                let result = service.$apply(true).await;
+                assert!(fake
+                    .state
+                    .delete_calls
+                    .lock()
+                    .expect("delete calls")
+                    .is_empty());
+                if settles {
+                    let output = result.expect("already gone settles");
+                    assert!(!output.deleted_message_ids.contains(&extra_id));
+                    assert!(
+                        output
+                            .warnings
+                            .iter()
+                            .any(|warning| warning.contains("bereits weg")),
+                        "{:?}",
+                        output.warnings
+                    );
+                } else {
+                    let err = result.expect_err("unsettled extra blocks");
+                    let text = err.to_string();
+                    assert!(text.contains(&format!("[{extra_id}]")), "{text}");
+                    assert!(text.contains("Gründe"), "{text}");
+                }
+            }
+
+            let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+            for index in 0..stored.len() {
+                dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &$id_key(index))
+                    .await
+                    .expect("delete serversync kv");
+            }
+            let long_empty = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, own_history(cap + 1), Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let truncated_block = long_empty
+                .$apply(false)
+                .await
+                .expect_err("truncated scan without stored ids blocks");
+            assert!(
+                truncated_block.to_string().contains("History-Scan endete"),
+                "{truncated_block}"
+            );
+
+            seed_static_panel_kv(
+                db.pool(),
+                $id_key,
+                &stored,
+                $format_key,
+                $format,
+                $hash_key,
+                &planned.payload_hash,
+            )
+            .await;
+            let mut long_full = own_history(cap + 1);
+            long_full.extend(stored.iter().map(|message_id| {
+                fake_discord_message(
+                    *message_id,
+                    42,
+                    $flag,
+                    marker_components.clone(),
+                    Vec::new(),
+                )
+            }));
+            let long_stored = ServerSyncService::new_for_test(
+                db.pool().clone(),
+                spawn_fake_discord(42, long_full, Vec::new())
+                    .await
+                    .base_url
+                    .clone(),
+                repo.path().to_path_buf(),
+            );
+            let truncated_warn = long_stored
+                .$apply(false)
+                .await
+                .expect("truncated scan with full stored set continues");
+            assert!(
+                truncated_warn
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("History-Scan endete")),
+                "{:?}",
+                truncated_warn.warnings
+            );
         }};
     }
 
@@ -12858,51 +13054,86 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         }
     }
 
-    #[test]
-    fn voice_ux_ohne_forum_thread_bleibt_kein_panel_no_op() {
+    #[tokio::test]
+    async fn service_voice_ux_ohne_forum_thread_bleibt_kein_panel_no_op() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let repo = tempfile::tempdir().expect("repo");
-        write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
-        let ids = BTreeMap::from([(voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9301, 9302])]);
-        let formats = BTreeMap::from([(
-            voice_ux_publish::VOICE_UX_CHANNEL_ID,
-            Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
-        )]);
-        let first = voice_ux_publish::build_voice_ux_publish_output(
-            repo.path(),
-            &ids,
-            &formats,
-            &BTreeMap::new(),
-            None,
-            None,
-            true,
-        )
-        .expect("first");
-        let hashes = BTreeMap::from([(
-            voice_ux_publish::VOICE_UX_CHANNEL_ID,
-            Some(first.targets[0].payload_hash.clone()),
-        )]);
-        let mut output = voice_ux_publish::build_voice_ux_publish_output(
-            repo.path(),
-            &ids,
-            &formats,
-            &hashes,
-            None,
-            None,
-            true,
-        )
-        .expect("output");
-        assert_eq!(output.targets[0].messages[0].action, "planned_no_op");
+        let planned = seed_voice_ux_panel(db.pool(), repo.path(), None).await;
+        assert!(planned
+            .targets
+            .iter()
+            .flat_map(|target| target.messages.iter())
+            .all(|message| message.action == "planned_no_op"));
+        let fake = spawn_fake_discord(42, voice_ux_fake_panel_messages(&planned), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
 
-        settle_voice_ux_forum_noops(&mut output, false);
+        let dry_run = service.router_apply(false).await.expect("dry-run");
+        assert_eq!(dry_run.forum_post.action, "planned_post");
+        for target in &dry_run.targets {
+            assert!(
+                target
+                    .messages
+                    .iter()
+                    .all(|message| message.action == "planned_edit"),
+                "{:?}",
+                target.messages
+            );
+        }
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
 
-        assert_eq!(output.forum_post.action, "planned_post");
-        assert_eq!(output.targets[0].messages[0].action, "planned_edit");
-        assert!(output.warnings.is_empty(), "{:?}", output.warnings);
+        let confirm = service.router_apply(true).await.expect("confirm");
+        assert_eq!(confirm.forum_post.action, "posted");
+        let new_thread_id = confirm.forum_post.thread_id.expect("new thread");
+        for target in &confirm.targets {
+            assert!(
+                target
+                    .messages
+                    .iter()
+                    .all(|message| message.action == "edited"),
+                "{:?}",
+                target.messages
+            );
+        }
+        let patch_bodies = fake
+            .state
+            .patch_bodies
+            .lock()
+            .expect("patch bodies")
+            .clone();
+        let panel_ids: Vec<u64> = planned
+            .targets
+            .iter()
+            .flat_map(|target| target.stored_message_ids.iter().copied())
+            .collect();
+        assert_eq!(
+            patch_bodies.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            panel_ids
+        );
+        assert!(
+            patch_bodies
+                .iter()
+                .any(|(_, body)| body.to_string().contains(&new_thread_id.to_string())),
+            "{patch_bodies:?}"
+        );
     }
 
     async fn seed_voice_ux_matching_panel(
         pool: &PgPool,
         repo: &std::path::Path,
+    ) -> voice_ux_publish::VoiceUxPublishOutput {
+        seed_voice_ux_panel(pool, repo, Some(9401)).await
+    }
+
+    async fn seed_voice_ux_panel(
+        pool: &PgPool,
+        repo: &std::path::Path,
+        forum_thread_id: Option<u64>,
     ) -> voice_ux_publish::VoiceUxPublishOutput {
         write_test_voice_ux_repo(repo, b"voice-ux-banner");
         let ids = BTreeMap::from([
@@ -12922,17 +13153,17 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
             ),
         ]);
-        let planned = voice_ux_publish::build_voice_ux_publish_output(
+        let built = voice_ux_publish::build_voice_ux_publish_output(
             repo,
             &ids,
             &formats,
             &BTreeMap::new(),
-            Some(9401),
+            forum_thread_id,
             None,
             true,
         )
-        .expect("planned");
-        for target in &planned.targets {
+        .expect("built");
+        for target in &built.targets {
             let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
             for (index, message_id) in target.stored_message_ids.iter().copied().enumerate() {
                 set_serversync_kv(pool, &format!("{prefix}{index}"), &message_id.to_string()).await;
@@ -12950,19 +13181,35 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             )
             .await;
         }
-        set_serversync_kv(
-            pool,
-            voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
-            "9401",
+        if let Some(thread_id) = forum_thread_id {
+            set_serversync_kv(
+                pool,
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+                &thread_id.to_string(),
+            )
+            .await;
+            set_serversync_kv(
+                pool,
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+                &built.forum_post.payload_hash,
+            )
+            .await;
+        }
+        let hashes = built
+            .targets
+            .iter()
+            .map(|target| (target.channel_id, Some(target.payload_hash.clone())))
+            .collect();
+        voice_ux_publish::build_voice_ux_publish_output(
+            repo,
+            &ids,
+            &formats,
+            &hashes,
+            forum_thread_id,
+            forum_thread_id.map(|_| built.forum_post.payload_hash.as_str()),
+            true,
         )
-        .await;
-        set_serversync_kv(
-            pool,
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
-            &planned.forum_post.payload_hash,
-        )
-        .await;
-        planned
+        .expect("planned")
     }
 
     #[tokio::test]
@@ -12974,13 +13221,14 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
         let missing = ServerSyncService::new_for_test(
             db.pool().clone(),
-            spawn_fake_discord(42, Vec::new(), Vec::new())
+            spawn_fake_discord(42, vec![voice_ux_fake_forum_starter(9401)], Vec::new())
                 .await
                 .base_url
                 .clone(),
             repo.path().to_path_buf(),
         );
         let dry_run = missing.router_apply(false).await.expect("missing dry-run");
+        assert_eq!(dry_run.forum_post.action, "planned_no_op");
         assert!(
             dry_run
                 .warnings
@@ -13094,6 +13342,133 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .iter()
                 .all(|message| message.action == "no_op"));
         }
+
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let mut with_extra = voice_ux_fake_panel_messages(&planned);
+        if let Some(target) = planned.targets.first() {
+            let mut extra = fake_discord_message(
+                9851,
+                42,
+                voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                target.messages[0].payload.components.clone(),
+                Vec::new(),
+            );
+            extra["channel_id"] = json!(target.channel_id.to_string());
+            with_extra.extend([extra]);
+        }
+        with_extra.extend([voice_ux_fake_forum_starter(9401)]);
+        let unsettled_fake = spawn_fake_discord(42, with_extra, Vec::new()).await;
+        unsettled_fake
+            .state
+            .get_overrides
+            .lock()
+            .expect("get overrides")
+            .insert(9851, StatusCode::FORBIDDEN);
+        let unsettled = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            unsettled_fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+        let unsettled_err = unsettled
+            .router_apply(true)
+            .await
+            .expect_err("unsettled extra blocks");
+        assert!(
+            unsettled_err.to_string().contains("[9851]"),
+            "{unsettled_err}"
+        );
+        assert!(
+            unsettled_err.to_string().contains("Gründe"),
+            "{unsettled_err}"
+        );
+
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &format!("{prefix}1"))
+                .await
+                .expect("delete serversync kv");
+        }
+        let mut partial_messages = voice_ux_fake_panel_messages(&planned);
+        partial_messages.extend([voice_ux_fake_forum_starter(9401)]);
+        let partial_fake = spawn_fake_discord(42, partial_messages, Vec::new()).await;
+        let partial = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            partial_fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+        let partial_dry = partial.router_apply(false).await.expect("partial dry-run");
+        assert!(
+            partial_dry
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("außerhalb der gespeicherten IDs")),
+            "{:?}",
+            partial_dry.warnings
+        );
+        let partial_confirm = partial.router_apply(true).await.expect("partial confirm");
+        for (target, planned_target) in partial_confirm.targets.iter().zip(planned.targets.iter()) {
+            let mut deleted = target.deleted_message_ids.clone();
+            deleted.sort_unstable();
+            assert_eq!(deleted, planned_target.stored_message_ids);
+            assert_eq!(
+                target.posted_message_ids.len(),
+                planned_target.messages.len()
+            );
+        }
+
+        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
+        let mut long_full = own_history(cap + 1);
+        long_full.extend(voice_ux_fake_panel_messages(&planned));
+        long_full.extend([voice_ux_fake_forum_starter(9401)]);
+        let long_stored = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, long_full, Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let truncated_warn = long_stored
+            .router_apply(false)
+            .await
+            .expect("truncated scan with stored ids continues");
+        assert!(
+            truncated_warn
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("History-Scan endete")),
+            "{:?}",
+            truncated_warn.warnings
+        );
+
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for index in 0..target.messages.len() {
+                dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &format!("{prefix}{index}"))
+                    .await
+                    .expect("delete serversync kv");
+            }
+        }
+        let mut long_empty = own_history(cap + 1);
+        long_empty.extend([voice_ux_fake_forum_starter(9401)]);
+        let long_unstored = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            spawn_fake_discord(42, long_empty, Vec::new())
+                .await
+                .base_url
+                .clone(),
+            repo.path().to_path_buf(),
+        );
+        let truncated_block = long_unstored
+            .router_apply(false)
+            .await
+            .expect_err("truncated scan without stored ids blocks");
+        assert!(
+            truncated_block.to_string().contains("History-Scan endete"),
+            "{truncated_block}"
+        );
     }
 
     #[tokio::test]

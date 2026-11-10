@@ -102,7 +102,7 @@ Supporter bekommen eine eigene Rolle, private Supporter-Channels im VIP-Bereich 
 \n\
 Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.\n\
 \n\
-Moderatoren-Chats, interne Teambereiche und Moderationsrechte gibt es darüber nicht.";
+Moderationsrechte gibt es darüber nicht.";
 pub const SUPPORT_PLANNED: &str = "\
 ## Was noch kommt\n\
 \n\
@@ -1265,19 +1265,15 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
                 SUPPORT_FREE.to_string()
             ]
         );
-        assert!(benefits
-            .iter()
-            .any(|text| text.contains("deadlock-api.com/patron")));
-        assert!(benefits
-            .iter()
-            .any(|text| text.contains("Echtzeit verspreche ich nicht")));
-        assert!(benefits
-            .iter()
-            .any(|text| text.contains("noch nicht fertig")));
-        assert!(benefits.iter().any(|text| text.contains("Statlocker")));
-        assert!(benefits
-            .iter()
-            .any(|text| text.contains("noch nicht eingerichtet")));
+        assert!(benefits[0].contains("deadlock-api.com/patron"));
+        assert!(benefits[0].contains("Echtzeit verspreche ich nicht"));
+        assert!(benefits[1].contains("noch nicht eingerichtet"));
+        assert!(benefits[1].contains("Bis dahin gilt das normale Tageslimit"));
+        assert!(benefits[1].contains("noch nicht fertig"));
+        assert!(benefits[2].contains("Geplant, und noch nicht eingerichtet"));
+        assert!(!benefits[2].contains("Moderatoren-Chats"));
+        assert!(!benefits[2].contains("interne Teambereiche"));
+        assert!(benefits[3].contains("Statlocker"));
         let free = benefits
             .iter()
             .find(|text| text.starts_with("## Was kostenlos bleibt"))
@@ -1290,9 +1286,7 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
             pay_text,
             vec![SUPPORT_PAY.to_string(), SUPPORT_THANKS.to_string()]
         );
-        assert!(pay_text
-            .iter()
-            .any(|text| text.contains("noch nicht eingerichtet")));
+        assert!(pay_text[0].contains("Die automatische Freischaltung ist noch nicht eingerichtet"));
         let buttons = link_buttons(pay);
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0]["style"], json!(5));
