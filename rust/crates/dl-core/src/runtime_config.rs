@@ -160,6 +160,12 @@ section!(CommunityOptions {
     recording_state_dir: PathBuf => "SCRIM_RECORD_STATE_DIR",
     recording_rclone_path: PathBuf => "SCRIM_RECORD_RCLONE_PATH",
     recording_archive_base: String => "SCRIM_RECORD_ARCHIVE_BASE",
+    supporter_role_sync_apply: bool => "DL_SUPPORTER_ROLE_SYNC_APPLY",
+    supporter_role_sync_max_revokes: u64 => "DL_SUPPORTER_ROLE_SYNC_MAX_REVOKES",
+    supporter_sync_interval_seconds: u64 => "DL_SUPPORTER_SYNC_INTERVAL_SECONDS",
+    supporter_funding_goal_cents: i64 => "DL_SUPPORTER_FUNDING_GOAL_CENTS",
+    supporter_steam_api_base: String => "DL_SUPPORTER_STEAM_API_BASE",
+    supporter_twitch_api_base: String => "DL_SUPPORTER_TWITCH_API_BASE",
 });
 
 section!(ModerationOptions {

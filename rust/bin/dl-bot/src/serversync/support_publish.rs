@@ -11,40 +11,40 @@ pub const SUPPORT_CHANNEL_NAME: &str = "server-support";
 pub const SUPPORT_TEXTS_FILE: &str = "assets/support_texts.toml";
 pub const SUPPORT_BANNER_DIR: &str = "assets/welcome-banners";
 pub const SUPPORT_HERO_FILENAME: &str = "support-hero.png";
-pub const SUPPORT_PAYLOAD_FORMAT: &str = "2";
+pub const SUPPORT_PAYLOAD_FORMAT: &str = "3";
 pub const SUPPORT_PAYLOAD_FORMAT_KEY: &str = "support_v2_payload_format";
 pub const SUPPORT_PAYLOAD_HASH_KEY: &str = "support_v2_payload_hash";
 pub const SUPPORT_MESSAGE_ID_PREFIX: &str = "support_v2_message_id_";
+pub const SUPPORT_FUNDING_LIVE_KEY: &str = "support_v3_funding_live";
 pub const SUPPORT_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const SUPPORT_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const SUPPORT_FUNDING_MESSAGE_INDEX: usize = 2;
 #[cfg(test)]
 pub const SUPPORT_OWNER_MESSAGE_ID: u64 = 1_483_147_756_192_403_467;
+
+pub const SUPPORT_BUTTON_BECOME: &str = "support:become";
+pub const SUPPORT_BUTTON_TIP: &str = "support:tip";
+pub const SUPPORT_BUTTON_MANAGE: &str = "support:manage";
+pub const SUPPORT_BUTTON_TWITCH: &str = "support:twitch";
 
 pub const SUPPORT_COMPONENT_ID_HERO_MEDIA: u64 = 33_001;
 pub const SUPPORT_COMPONENT_ID_MAIN_CONTAINER: u64 = 33_002;
 pub const SUPPORT_COMPONENT_ID_MAIN_TEXT: u64 = 33_003;
 pub const SUPPORT_COMPONENT_ID_ACTION_ROW: u64 = 33_004;
-pub const SUPPORT_COMPONENT_ID_DONATE_BUTTON: u64 = 33_005;
-pub const SUPPORT_COMPONENT_ID_STRIPE_BUTTON: u64 = 33_006;
-pub const SUPPORT_COMPONENT_ID_WHY_SEP_1: u64 = 33_011;
-pub const SUPPORT_COMPONENT_ID_WHY_BODY: u64 = 33_012;
-pub const SUPPORT_COMPONENT_ID_WHY_SEP_2: u64 = 33_013;
-pub const SUPPORT_COMPONENT_ID_WHY_AI: u64 = 33_014;
+pub const SUPPORT_COMPONENT_ID_BECOME_BUTTON: u64 = 33_005;
+pub const SUPPORT_COMPONENT_ID_TIP_BUTTON: u64 = 33_006;
+pub const SUPPORT_COMPONENT_ID_MANAGE_BUTTON: u64 = 33_007;
+pub const SUPPORT_COMPONENT_ID_TWITCH_BUTTON: u64 = 33_008;
+pub const SUPPORT_COMPONENT_ID_PERKS: u64 = 33_014;
 pub const SUPPORT_COMPONENT_ID_BENEFITS_CONTAINER: u64 = 33_020;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_STEAM: u64 = 33_021;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_SEP_1: u64 = 33_022;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_BRAIN: u64 = 33_023;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_SEP_2: u64 = 33_024;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_DISCORD: u64 = 33_025;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_SEP_3: u64 = 33_026;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_PLANNED: u64 = 33_027;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_SEP_4: u64 = 33_028;
-pub const SUPPORT_COMPONENT_ID_BENEFITS_FREE: u64 = 33_029;
+pub const SUPPORT_COMPONENT_ID_STEAM: u64 = 33_021;
+pub const SUPPORT_COMPONENT_ID_PLANNED: u64 = 33_027;
+pub const SUPPORT_COMPONENT_ID_FREE: u64 = 33_029;
 pub const SUPPORT_COMPONENT_ID_PAY_CONTAINER: u64 = 33_030;
 pub const SUPPORT_COMPONENT_ID_PAY_BODY: u64 = 33_031;
-pub const SUPPORT_COMPONENT_ID_PAY_SEP: u64 = 33_032;
 pub const SUPPORT_COMPONENT_ID_PAY_THANKS: u64 = 33_033;
 pub const SUPPORT_COMPONENT_ID_PAY_SEP_ACTIONS: u64 = 33_034;
+pub const SUPPORT_COMPONENT_ID_FUNDING: u64 = 33_035;
 
 pub const SUPPORT_MARKER_COMPONENT_IDS: &[u64] = &[
     SUPPORT_COMPONENT_ID_HERO_MEDIA,
@@ -58,80 +58,95 @@ pub const SUPPORT_MARKER_COMPONENT_IDS: &[u64] = &[
 pub const SUPPORT_TEXT_CHAR_BUDGET: usize = 3500;
 pub const SUPPORT_COMPONENT_BUDGET: usize = 35;
 pub const SUPPORT_ATTACHMENT_BUDGET: usize = 9;
+pub const SUPPORT_FUNDING_GOAL_CENTS_DEFAULT: i64 = 5000;
 const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 const SUPPORT_MESSAGE_COUNT: usize = 3;
+const FUNDING_BAR_SEGMENTS: i64 = 20;
+const CUSTOM_ID_MAX_CHARS: usize = 100;
 
-pub const SUPPORT_DONATE_URL_DEFAULT: &str = "https://ko-fi.com/deutschedeadlockcommunity";
 pub const SUPPORT_INTRO: &str = "\
 # Server unterstützen\n\
 \n\
-Ich baue einen großen Teil von dem, was hier läuft, selbst. Steam Bot, Twitch Bot, Patchnotes, Deadlock Brain, die Website, Turniere und die übrigen Community-Systeme. Das sind jede Woche viele Stunden, und der Betrieb kostet laufend Geld.";
-pub const SUPPORT_WHY: &str = "\
-## Warum ich Unterstützung brauche\n\
+Hier steht, wie du den Server und die Projekte unterstützen kannst und was du dafür bekommst. Egal welchen Weg du wählst, du bekommst dieselbe Rolle und dieselben Vorteile.";
+pub const SUPPORT_PERKS: &str = "\
+## Was du jetzt bekommst\n\
 \n\
-Server, APIs, Infrastruktur und die KI-Coding-Abos liegen je nach Monat ungefähr bei **50 bis 250 €**, manchmal auch darüber. 2026 sind bis zum 8. November schon **über 1.600 €** zusammengekommen. Meine Arbeitszeit ist darin nicht enthalten.\n\
+**Mit den Streamern zusammen spielen.** Als Unterstützer bist du ein vertrauenswürdiges Mitglied der Community. Du kommst in den Streamer-VC und kannst dort mit den Streamern zusammen zocken.\n\
 \n\
-Ich habe mir oft überlegt, wie sich das langfristig tragen lässt. So wie bisher kann ich die Kosten nicht dauerhaft alleine stemmen.";
-pub const SUPPORT_AI: &str = "\
-## Zu den KI-Abos\n\
-\n\
-Die Abos kosten Geld. Bei diesem Umfang sind sie aber deutlich günstiger, als dieselbe Arbeitszeit auch nur zum Mindestlohn an Entwickler zu zahlen.\n\
-\n\
-Die Tools entwickeln die Projekte nicht alleine. Planung, Architektur, Umsetzung, Tests, Fehlersuche und Betrieb bleiben bei mir. Die Abos machen diesen Umfang überhaupt erst bezahlbar.\n\
-\n\
-Was an Unterstützung reinkommt, geht zurück in Infrastruktur und Entwicklung. Gewinn ist nicht das Ziel.";
+**Die Rolle Server Unterstützer.** Damit sieht jeder, dass du den Server mitträgst.";
 pub const SUPPORT_STEAM: &str = "\
 ## Steam Bot\n\
 \n\
-Der Steam Bot wird auf ein Supporter-Modell umgestellt. Das gilt für die Steam-Verknüpfung, die automatischen Rang-Rollen, Rang-Abfragen, Match-Abfragen und die weiteren Funktionen des Bots.\n\
+Der Steam Bot wird zur Funktion für Unterstützer. Für dich holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.\n\
 \n\
-Die Anbindung ist aufwendig. Deadlock ändert sich, und die Pflege läuft mit.\n\
-\n\
-Geplant sind erweiterte Match-Abfragen, ähnlich dem priorisierten Abruf bei der Deadlock API: https://deadlock-api.com/patron\n\
-Echtzeit verspreche ich nicht. Was möglich ist, hängt von Steam und dem Game Coordinator ab.";
-pub const SUPPORT_BRAIN: &str = "\
-## Deadlock Brain\n\
-\n\
-Für Supporter ist vorgesehen, das Deadlock Brain ohne zusätzliches Abo und ohne Nutzungslimit zu nutzen. Das ist noch nicht eingerichtet. Bis dahin gilt das normale Tageslimit.\n\
-\n\
-Geplant, und noch nicht fertig, ist ein Build-Helfer. Du wählst einen Helden und bekommst sinnvolle Items und Builds, dazu eine Erklärung, warum ein Item passt. Du kannst gegen bestimmte Gegner bauen. Die Vorschläge sollen sich an Patches anpassen. Der Helfer soll beim Verstehen helfen, die Entscheidung bleibt bei dir.";
-pub const SUPPORT_DISCORD: &str = "\
-## Auf Discord\n\
-\n\
-Supporter bekommen eine eigene Rolle und Zugang zum Streamer-VC.\n\
-\n\
-Private Supporter-Channels im VIP-Bereich sind noch nicht freigeschaltet.\n\
-\n\
-Geplant, und noch nicht eingerichtet, sind Einblicke in das, was gerade gebaut wird, Abstimmungen über neue Funktionen und früherer Zugang zu Betatests.";
+Die Umstellung läuft gerade. Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.";
 pub const SUPPORT_PLANNED: &str = "\
 ## Was noch kommt\n\
 \n\
-**Patch-Watchlist.** Du suchst dir Helden und Items aus und bekommst Bescheid, wenn ein Patch genau daran etwas ändert.\n\
+Das ist geplant und noch nicht fertig:\n\
 \n\
-**Weitere Match-Abfragen** im Steam Bot, soweit sie sich zuverlässig bauen lassen.\n\
-\n\
-Ein eigenes Spielerprofil baue ich nicht. Dafür gibt es Statlocker und ähnliche Seiten. Eine eigene Funktion für Tierlisten und Builds gibt es ebenfalls nicht.";
+- **Patch-Watchlist.** Du suchst dir Helden und Items aus und bekommst Bescheid, wenn ein Patch genau daran etwas ändert.\n\
+- **Build-Helfer im Deadlock Brain.** Du wählst einen Helden und bekommst passende Items mit einer Erklärung, auch gegen bestimmte Gegner.\n\
+- **Mehr Match-Funktionen im Steam Bot.**\n\
+- **Turniere und Scrims.** Unterstützer testen neue Turnierfunktionen als Erste. Dazu kommen zusätzliche Community-Abende und Fun-Turniere.\n\
+- **Coaching-Material** für Unterstützer.\n\
+- **Mitbestimmen.** Unterstützer stimmen ab, was als Nächstes gebaut wird.";
 pub const SUPPORT_FREE: &str = "\
 ## Was kostenlos bleibt\n\
 \n\
-Der Server wird nicht kostenpflichtig. Kostenlos bleiben Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching.\n\
+Der Server wird nicht kostenpflichtig. Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching bleiben frei.\n\
 \n\
-Bei Turnieren und Coaching bringt ein Abo keinen Vorteil.";
+Bei regulären Turnieren und beim Coaching bringt Unterstützung keinen Vorteil.";
+pub const SUPPORT_FUNDING: &str = "\
+## Monatsziel\n\
+\n\
+{balken} {prozent} %\n\
+**{stand} von {ziel} im Monat**\n\
+-# Hier zählen die laufenden Abos und die einmaligen Beträge aus diesem Monat.";
 pub const SUPPORT_PAY: &str = "\
 ## So kannst du unterstützen\n\
 \n\
-**Discord-Server-Abo.** Über den Servernamen, dort wo Discord die Server-Abos anbietet.\n\
+**Monatlich über Stripe.** 5 €, 10 € oder 20 € im Monat, 5 € sind das Minimum. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.\n\
 \n\
-**Server-Boost.** Zählt vorerst ebenfalls als Unterstützung.\n\
+**Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.\n\
 \n\
-**Ko-fi.** Einmalig oder monatlich. Dafür gibt es die Unterstützer-Rolle für 31 Tage. Nach dem Eingang schalte ich sie manuell frei, in der Regel innerhalb eines Tages.\n\
+**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.\n\
 \n\
-**Stripe-Abo für den Server.** Ein eigenes Abo, getrennt von den Abos des Steam Bots und des Twitch Bots. Der Button erscheint erst, wenn die Zahlung deinem Discord-Account zugeordnet wird und die Rolle nach Ablauf oder Kündigung wieder entzogen wird.\n\
-\n\
-**Twitch-Bot-Abo.** Der Twitch Bot hat eigene kostenpflichtige Abos. Wer so ein Abo hat, soll dieselben Discord-Supporter-Vorteile bekommen, ohne ein zweites Abo. Die automatische Freischaltung ist noch nicht eingerichtet. Bis dahin reicht eine kurze Nachricht, dann trage ich es manuell ein.";
-pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst.";
-pub const SUPPORT_DONATE_BUTTON_LABEL: &str = "Über Ko-fi unterstützen";
-pub const SUPPORT_STRIPE_BUTTON_LABEL: &str = "Supporter-Abo abschließen";
+**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.";
+pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst ❤️";
+pub const SUPPORT_BECOME_BUTTON_LABEL: &str = "Supporter werden";
+pub const SUPPORT_TIP_BUTTON_LABEL: &str = "Einmalig unterstützen";
+pub const SUPPORT_MANAGE_BUTTON_LABEL: &str = "Abo verwalten oder kündigen";
+pub const SUPPORT_TWITCH_BUTTON_LABEL: &str = "Twitch verbinden";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupportFunding {
+    pub raised_cents: i64,
+    pub goal_cents: i64,
+}
+
+impl Default for SupportFunding {
+    fn default() -> Self {
+        Self {
+            raised_cents: 0,
+            goal_cents: SUPPORT_FUNDING_GOAL_CENTS_DEFAULT,
+        }
+    }
+}
+
+impl SupportFunding {
+    pub fn to_kv(self) -> String {
+        format!("{}:{}", self.raised_cents, self.goal_cents)
+    }
+
+    pub fn from_kv(raw: &str) -> Option<Self> {
+        let (raised, goal) = raw.split_once(':')?;
+        Some(Self {
+            raised_cents: raised.trim().parse().ok()?,
+            goal_cents: goal.trim().parse().ok()?,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupportHistoryPlan {
@@ -151,6 +166,8 @@ pub struct SupportPublishOutput {
     pub payload_hash: String,
     pub stored_payload_hash: Option<String>,
     pub repost_required: bool,
+    #[serde(default)]
+    pub funding: SupportFunding,
     pub warnings: Vec<String>,
     pub messages: Vec<SupportMessageOutput>,
     pub stored_message_ids: Vec<u64>,
@@ -211,34 +228,26 @@ pub struct SupportV2Message {
 struct ResolvedSupportConfig {
     texts: ResolvedSupportTexts,
     buttons: ResolvedSupportButtons,
-    urls: ResolvedSupportUrls,
-    stripe_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSupportTexts {
     intro: String,
-    why: String,
-    ai: String,
+    perks: String,
     steam: String,
-    brain: String,
-    discord: String,
     planned: String,
     free: String,
+    funding: String,
     pay: String,
     thanks: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSupportButtons {
-    donate: String,
-    stripe: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedSupportUrls {
-    donate: String,
-    stripe: Option<String>,
+    become: String,
+    tip: String,
+    manage: String,
+    twitch: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -248,50 +257,57 @@ struct SupportTextsToml {
     texts: SupportBodyTextsToml,
     #[serde(default)]
     buttons: SupportButtonsToml,
-    #[serde(default)]
-    urls: SupportUrlsToml,
-    #[serde(default)]
-    stripe: SupportStripeToml,
+    urls: Option<toml::Table>,
+    stripe: Option<toml::Table>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SupportBodyTextsToml {
+    intro: Option<String>,
+    perks: Option<String>,
+    steam: Option<String>,
+    planned: Option<String>,
+    free: Option<String>,
+    funding: Option<String>,
+    pay: Option<String>,
+    thanks: Option<String>,
     title: Option<String>,
     boost: Option<String>,
     donation: Option<String>,
     benefits: Option<String>,
-    intro: Option<String>,
     why: Option<String>,
     ai: Option<String>,
-    steam: Option<String>,
     brain: Option<String>,
     discord: Option<String>,
-    planned: Option<String>,
-    free: Option<String>,
-    pay: Option<String>,
-    thanks: Option<String>,
+}
+
+impl SupportBodyTextsToml {
+    fn has_legacy_fields(&self) -> bool {
+        [
+            &self.title,
+            &self.boost,
+            &self.donation,
+            &self.benefits,
+            &self.why,
+            &self.ai,
+            &self.brain,
+            &self.discord,
+        ]
+        .iter()
+        .any(|field| field.is_some())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SupportButtonsToml {
+    become: Option<String>,
+    tip: Option<String>,
+    manage: Option<String>,
+    twitch: Option<String>,
     donate: Option<String>,
     stripe: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SupportUrlsToml {
-    donate: Option<String>,
-    stripe: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SupportStripeToml {
-    #[serde(default)]
-    enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -348,20 +364,25 @@ pub fn plan_support_history(
     }
 }
 
+pub struct SupportStoredState<'a> {
+    pub message_ids: &'a [u64],
+    pub payload_format: Option<&'a str>,
+    pub payload_hash: Option<&'a str>,
+}
+
 pub fn build_support_publish_output(
     repo_root: &Path,
-    stored_message_ids: &[u64],
-    stored_payload_format: Option<&str>,
-    stored_payload_hash: Option<&str>,
+    stored: &SupportStoredState<'_>,
+    funding: SupportFunding,
     dry_run: bool,
 ) -> Result<SupportPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_support_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = support_messages(repo_root, &config, &mut warnings);
+    let built_messages = support_messages(repo_root, &config, funding, &mut warnings);
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
-        let stored_message_id = stored_message_ids.get(message_index).copied();
+        let stored_message_id = stored.message_ids.get(message_index).copied();
         messages.push(SupportMessageOutput {
             message_index,
             message_key: support_message_key(message_index),
@@ -383,8 +404,8 @@ pub fn build_support_publish_output(
 
     let payload_hash = support_payload_hash(repo_root, &messages)?;
     let repost_required =
-        !support_storage_matches(stored_payload_format, stored_message_ids, messages.len());
-    let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
+        !support_storage_matches(stored.payload_format, stored.message_ids, messages.len());
+    let hash_matches = stored.payload_hash == Some(payload_hash.as_str());
     if dry_run {
         for message in &mut messages {
             message.action =
@@ -398,13 +419,14 @@ pub fn build_support_publish_output(
         channel_name: SUPPORT_CHANNEL_NAME.to_string(),
         dry_run,
         payload_format: SUPPORT_PAYLOAD_FORMAT.to_string(),
-        stored_payload_format: stored_payload_format.map(str::to_string),
+        stored_payload_format: stored.payload_format.map(str::to_string),
         payload_hash,
-        stored_payload_hash: stored_payload_hash.map(str::to_string),
+        stored_payload_hash: stored.payload_hash.map(str::to_string),
         repost_required,
+        funding,
         warnings,
         messages,
-        stored_message_ids: stored_message_ids.to_vec(),
+        stored_message_ids: stored.message_ids.to_vec(),
         posted_message_ids: Vec::new(),
         edited_message_ids: Vec::new(),
         deleted_message_ids: Vec::new(),
@@ -422,6 +444,60 @@ pub fn support_storage_matches(
 
 pub fn support_payload_is_unchanged(output: &SupportPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
+}
+
+pub fn render_funding_text(template: &str, funding: SupportFunding) -> String {
+    template
+        .replace("{balken}", &funding_bar(funding))
+        .replace("{prozent}", &funding_percent(funding).to_string())
+        .replace("{stand}", &format_euro(funding.raised_cents))
+        .replace("{ziel}", &format_euro(funding.goal_cents))
+}
+
+fn funding_percent(funding: SupportFunding) -> i64 {
+    if funding.goal_cents <= 0 {
+        return 0;
+    }
+    funding.raised_cents.max(0).saturating_mul(100) / funding.goal_cents
+}
+
+fn funding_bar(funding: SupportFunding) -> String {
+    let raised = funding.raised_cents.max(0);
+    let filled = if funding.goal_cents <= 0 {
+        0
+    } else {
+        let exact = raised.saturating_mul(FUNDING_BAR_SEGMENTS) / funding.goal_cents;
+        let at_least_one = if raised > 0 { exact.max(1) } else { exact };
+        at_least_one.min(FUNDING_BAR_SEGMENTS)
+    };
+    let empty = FUNDING_BAR_SEGMENTS - filled;
+    format!(
+        "`{}{}`",
+        "█".repeat(filled as usize),
+        "░".repeat(empty as usize)
+    )
+}
+
+fn format_euro(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    let euros = group_thousands(abs / 100);
+    match abs % 100 {
+        0 => format!("{sign}{euros} €"),
+        rest => format!("{sign}{euros},{rest:02} €"),
+    }
+}
+
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push('.');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 pub fn support_payload_hash(
@@ -541,65 +617,50 @@ impl ResolvedSupportConfig {
         Self {
             texts: ResolvedSupportTexts {
                 intro: SUPPORT_INTRO.to_string(),
-                why: SUPPORT_WHY.to_string(),
-                ai: SUPPORT_AI.to_string(),
+                perks: SUPPORT_PERKS.to_string(),
                 steam: SUPPORT_STEAM.to_string(),
-                brain: SUPPORT_BRAIN.to_string(),
-                discord: SUPPORT_DISCORD.to_string(),
                 planned: SUPPORT_PLANNED.to_string(),
                 free: SUPPORT_FREE.to_string(),
+                funding: SUPPORT_FUNDING.to_string(),
                 pay: SUPPORT_PAY.to_string(),
                 thanks: SUPPORT_THANKS.to_string(),
             },
             buttons: ResolvedSupportButtons {
-                donate: SUPPORT_DONATE_BUTTON_LABEL.to_string(),
-                stripe: SUPPORT_STRIPE_BUTTON_LABEL.to_string(),
+                become: SUPPORT_BECOME_BUTTON_LABEL.to_string(),
+                tip: SUPPORT_TIP_BUTTON_LABEL.to_string(),
+                manage: SUPPORT_MANAGE_BUTTON_LABEL.to_string(),
+                twitch: SUPPORT_TWITCH_BUTTON_LABEL.to_string(),
             },
-            urls: ResolvedSupportUrls {
-                donate: SUPPORT_DONATE_URL_DEFAULT.to_string(),
-                stripe: None,
-            },
-            stripe_enabled: false,
         }
     }
 
     fn merge(mut self, file: SupportTextsToml, warnings: &mut Vec<String>) -> Self {
+        let legacy = file.texts.has_legacy_fields()
+            || file.buttons.donate.is_some()
+            || file.buttons.stripe.is_some()
+            || file.urls.is_some()
+            || file.stripe.is_some();
         apply_optional(&mut self.texts.intro, file.texts.intro);
-        apply_optional(&mut self.texts.why, file.texts.why);
-        apply_optional(&mut self.texts.ai, file.texts.ai);
+        apply_optional(&mut self.texts.perks, file.texts.perks);
         apply_optional(&mut self.texts.steam, file.texts.steam);
-        apply_optional(&mut self.texts.brain, file.texts.brain);
-        apply_optional(&mut self.texts.discord, file.texts.discord);
         apply_optional(&mut self.texts.planned, file.texts.planned);
         apply_optional(&mut self.texts.free, file.texts.free);
+        apply_optional(&mut self.texts.funding, file.texts.funding);
         apply_optional(&mut self.texts.pay, file.texts.pay);
         apply_optional(&mut self.texts.thanks, file.texts.thanks);
-        apply_optional(&mut self.buttons.donate, file.buttons.donate);
-        apply_optional(&mut self.buttons.stripe, file.buttons.stripe);
-        if let Some(donate) = file.urls.donate {
-            let donate = donate.trim();
-            if is_https_url(donate) {
-                self.urls.donate = donate.to_string();
-            } else {
-                warnings.push(
-                    "Ko-fi-Button behält die Standard-URL: [urls].donate muss eine https-Adresse mit Host sein"
-                        .to_string(),
-                );
-            }
-        }
-        if let Some(stripe) = file.urls.stripe {
-            if !stripe.is_empty() {
-                self.urls.stripe = Some(stripe);
-            }
-        }
-        self.stripe_enabled = file.stripe.enabled;
-        if file.texts.title.is_some()
-            || file.texts.boost.is_some()
-            || file.texts.donation.is_some()
-            || file.texts.benefits.is_some()
-        {
+        apply_optional(&mut self.buttons.become, file.buttons.become);
+        apply_optional(&mut self.buttons.tip, file.buttons.tip);
+        apply_optional(&mut self.buttons.manage, file.buttons.manage);
+        apply_optional(&mut self.buttons.twitch, file.buttons.twitch);
+        if legacy {
             warnings.push(
-                "Support-Textdatei enthält alte Felder (title, boost, donation, benefits). Die werden nicht mehr angezeigt."
+                "Support-Textdatei enthält alte Felder (Ko-fi, Warum, KI-Abos, Stripe-Link oder ältere Abschnitte). Die werden nicht mehr angezeigt."
+                    .to_string(),
+            );
+        }
+        if !self.texts.funding.contains("{stand}") {
+            warnings.push(
+                "Support-Textdatei: [texts].funding enthält keinen Platzhalter {stand}; der Balken zeigt dann keinen Betrag."
                     .to_string(),
             );
         }
@@ -616,28 +677,28 @@ fn apply_optional(target: &mut String, value: Option<String>) {
 fn support_messages(
     repo_root: &Path,
     config: &ResolvedSupportConfig,
+    funding: SupportFunding,
     warnings: &mut Vec<String>,
 ) -> Vec<SupportBuiltMessage> {
     let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, warnings);
     let messages = vec![
-        why_message(banner, config),
-        section_message(
+        main_message(banner, config),
+        message_from_container(
             SUPPORT_COMPONENT_ID_BENEFITS_CONTAINER,
-            &[
-                (SUPPORT_COMPONENT_ID_BENEFITS_STEAM, &config.texts.steam),
-                (SUPPORT_COMPONENT_ID_BENEFITS_BRAIN, &config.texts.brain),
-                (SUPPORT_COMPONENT_ID_BENEFITS_DISCORD, &config.texts.discord),
-                (SUPPORT_COMPONENT_ID_BENEFITS_PLANNED, &config.texts.planned),
-                (SUPPORT_COMPONENT_ID_BENEFITS_FREE, &config.texts.free),
-            ],
+            None,
+            section_children(&[
+                (SUPPORT_COMPONENT_ID_PLANNED, &config.texts.planned),
+                (SUPPORT_COMPONENT_ID_FREE, &config.texts.free),
+            ]),
+            Vec::new(),
         ),
-        pay_message(config, warnings),
+        pay_message(config, funding),
     ];
     debug_assert_eq!(messages.len(), SUPPORT_MESSAGE_COUNT);
     messages
 }
 
-fn why_message(
+fn main_message(
     banner: Option<SupportBannerOutput>,
     config: &ResolvedSupportConfig,
 ) -> SupportBuiltMessage {
@@ -656,8 +717,8 @@ fn why_message(
     }
     children.extend(section_children(&[
         (SUPPORT_COMPONENT_ID_MAIN_TEXT, &config.texts.intro),
-        (SUPPORT_COMPONENT_ID_WHY_BODY, &config.texts.why),
-        (SUPPORT_COMPONENT_ID_WHY_AI, &config.texts.ai),
+        (SUPPORT_COMPONENT_ID_PERKS, &config.texts.perks),
+        (SUPPORT_COMPONENT_ID_STEAM, &config.texts.steam),
     ]));
     message_from_container(
         SUPPORT_COMPONENT_ID_MAIN_CONTAINER,
@@ -667,74 +728,51 @@ fn why_message(
     )
 }
 
-fn section_message(container_id: u64, blocks: &[(u64, &str)]) -> SupportBuiltMessage {
-    message_from_container(container_id, None, section_children(blocks), Vec::new())
-}
-
-fn pay_message(config: &ResolvedSupportConfig, warnings: &mut Vec<String>) -> SupportBuiltMessage {
+fn pay_message(config: &ResolvedSupportConfig, funding: SupportFunding) -> SupportBuiltMessage {
+    let funding_text = render_funding_text(&config.texts.funding, funding);
     let mut children = section_children(&[
+        (SUPPORT_COMPONENT_ID_FUNDING, &funding_text),
         (SUPPORT_COMPONENT_ID_PAY_BODY, &config.texts.pay),
         (SUPPORT_COMPONENT_ID_PAY_THANKS, &config.texts.thanks),
     ]);
-    let mut buttons = vec![link_button(
-        SUPPORT_COMPONENT_ID_DONATE_BUTTON,
-        &config.buttons.donate,
-        &config.urls.donate,
-    )];
-    if let Some(button) = stripe_button(config, warnings) {
-        buttons.push(button);
-    }
     if !children.is_empty() {
         children.push(separator(SUPPORT_COMPONENT_ID_PAY_SEP_ACTIONS, 2));
     }
-    children.push(action_row(SUPPORT_COMPONENT_ID_ACTION_ROW, buttons));
+    children.push(action_row(
+        SUPPORT_COMPONENT_ID_ACTION_ROW,
+        vec![
+            interactive_button(
+                SUPPORT_COMPONENT_ID_BECOME_BUTTON,
+                1,
+                &config.buttons.become,
+                SUPPORT_BUTTON_BECOME,
+            ),
+            interactive_button(
+                SUPPORT_COMPONENT_ID_TIP_BUTTON,
+                2,
+                &config.buttons.tip,
+                SUPPORT_BUTTON_TIP,
+            ),
+            interactive_button(
+                SUPPORT_COMPONENT_ID_MANAGE_BUTTON,
+                2,
+                &config.buttons.manage,
+                SUPPORT_BUTTON_MANAGE,
+            ),
+            interactive_button(
+                SUPPORT_COMPONENT_ID_TWITCH_BUTTON,
+                2,
+                &config.buttons.twitch,
+                SUPPORT_BUTTON_TWITCH,
+            ),
+        ],
+    ));
     message_from_container(
         SUPPORT_COMPONENT_ID_PAY_CONTAINER,
         None,
         children,
         Vec::new(),
     )
-}
-
-fn stripe_button(config: &ResolvedSupportConfig, warnings: &mut Vec<String>) -> Option<Value> {
-    let Some(url) = config
-        .urls
-        .stripe
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-    else {
-        if config.stripe_enabled {
-            warnings.push(
-                "Stripe-Button aus: [stripe].enabled ist true, aber [urls].stripe fehlt."
-                    .to_string(),
-            );
-        }
-        return None;
-    };
-    if !is_buy_stripe_link(url) {
-        warnings.push(
-            "Stripe-Button aus: [urls].stripe muss ein https://buy.stripe.com/-Payment-Link des Server-Supporter-Abos sein"
-                .to_string(),
-        );
-        return None;
-    }
-    if !config.stripe_enabled {
-        warnings.push(
-            "Stripe-Button aus: [urls].stripe ist gesetzt, [stripe].enabled bleibt false, bis die Zahlung dem Discord-Account zugeordnet wird und die Rolle nach Ablauf oder Kündigung entzogen wird."
-                .to_string(),
-        );
-        return None;
-    }
-    warnings.push(
-        "Stripe-Button ist sichtbar. Dieses Panel prüft nicht, ob die Zahlung dem Discord-Account zugeordnet wird und ob die Rolle nach Ablauf oder Kündigung entzogen wird."
-            .to_string(),
-    );
-    Some(link_button(
-        SUPPORT_COMPONENT_ID_STRIPE_BUTTON,
-        &config.buttons.stripe,
-        url,
-    ))
 }
 
 fn same_id_set(left: &[u64], right: &[u64]) -> bool {
@@ -760,21 +798,6 @@ fn is_https_url(url: &str) -> bool {
         && !host.ends_with('.')
 }
 
-fn is_buy_stripe_link(url: &str) -> bool {
-    if url.chars().count() > 512 {
-        return false;
-    }
-    let Some(rest) = url.strip_prefix("https://buy.stripe.com/") else {
-        return false;
-    };
-    let slug = rest.split(['?', '#']).next().unwrap_or("");
-    let slug = slug.trim_matches('/');
-    !slug.is_empty()
-        && slug
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-}
-
 fn section_children(blocks: &[(u64, &str)]) -> Vec<Value> {
     let present: Vec<&(u64, &str)> = blocks
         .iter()
@@ -784,23 +807,10 @@ fn section_children(blocks: &[(u64, &str)]) -> Vec<Value> {
     for (index, (text_id, text)) in present.iter().enumerate() {
         children.push(text_display(*text_id, (*text).trim().to_string()));
         if index + 1 < present.len() {
-            children.push(separator(separator_id_for(*text_id), 1));
+            children.push(separator(text_id.saturating_add(100), 1));
         }
     }
     children
-}
-
-fn separator_id_for(text_id: u64) -> u64 {
-    match text_id {
-        SUPPORT_COMPONENT_ID_MAIN_TEXT => SUPPORT_COMPONENT_ID_WHY_SEP_1,
-        SUPPORT_COMPONENT_ID_WHY_BODY => SUPPORT_COMPONENT_ID_WHY_SEP_2,
-        SUPPORT_COMPONENT_ID_BENEFITS_STEAM => SUPPORT_COMPONENT_ID_BENEFITS_SEP_1,
-        SUPPORT_COMPONENT_ID_BENEFITS_BRAIN => SUPPORT_COMPONENT_ID_BENEFITS_SEP_2,
-        SUPPORT_COMPONENT_ID_BENEFITS_DISCORD => SUPPORT_COMPONENT_ID_BENEFITS_SEP_3,
-        SUPPORT_COMPONENT_ID_BENEFITS_PLANNED => SUPPORT_COMPONENT_ID_BENEFITS_SEP_4,
-        SUPPORT_COMPONENT_ID_PAY_BODY => SUPPORT_COMPONENT_ID_PAY_SEP,
-        other => other.saturating_add(100),
-    }
 }
 
 fn message_from_container(
@@ -907,13 +917,25 @@ fn validate_component_shape(value: &Value) -> Result<(), String> {
         }
     }
     if kind == Some(2) {
-        let label = value.get("label").and_then(Value::as_str).unwrap_or("");
-        let label_chars = label.chars().count();
-        if label.trim().is_empty() || label_chars > 80 {
-            return Err(format!(
-                "Support-Button-Label muss 1 bis 80 Zeichen haben, hat {label_chars}"
-            ));
+        validate_button(value)?;
+    }
+    if let Some(children) = value.get("components").and_then(Value::as_array) {
+        for child in children {
+            validate_component_shape(child)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_button(value: &Value) -> Result<(), String> {
+    let label = value.get("label").and_then(Value::as_str).unwrap_or("");
+    let label_chars = label.chars().count();
+    if label.trim().is_empty() || label_chars > 80 {
+        return Err(format!(
+            "Support-Button-Label muss 1 bis 80 Zeichen haben, hat {label_chars}"
+        ));
+    }
+    if value.get("style").and_then(Value::as_u64) == Some(5) {
         let url = value.get("url").and_then(Value::as_str).unwrap_or("");
         if !is_https_url(url) || url.chars().count() > 512 {
             return Err(
@@ -921,11 +943,16 @@ fn validate_component_shape(value: &Value) -> Result<(), String> {
                     .to_string(),
             );
         }
+        return Ok(());
     }
-    if let Some(children) = value.get("components").and_then(Value::as_array) {
-        for child in children {
-            validate_component_shape(child)?;
-        }
+    let custom_id = value.get("custom_id").and_then(Value::as_str).unwrap_or("");
+    if custom_id.is_empty()
+        || custom_id.chars().count() > CUSTOM_ID_MAX_CHARS
+        || value.get("url").is_some()
+    {
+        return Err(format!(
+            "Support-Button braucht eine custom_id mit 1 bis {CUSTOM_ID_MAX_CHARS} Zeichen und keine URL"
+        ));
     }
     Ok(())
 }
@@ -1039,6 +1066,17 @@ fn action_row(id: u64, components: Vec<Value>) -> Value {
     })
 }
 
+fn interactive_button(id: u64, style: u8, label: &str, custom_id: &str) -> Value {
+    json!({
+        "type": 2,
+        "id": id,
+        "style": style,
+        "label": label,
+        "custom_id": custom_id,
+    })
+}
+
+#[cfg(test)]
 fn link_button(id: u64, label: &str, url: &str) -> Value {
     json!({
         "type": 2,
@@ -1051,37 +1089,6 @@ fn link_button(id: u64, label: &str, url: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn button_prueft_genau_die_gesendeten_zeichen() {
-        for url in [
-            "https://ko-fi.com/a b",
-            " https://ko-fi.com/x",
-            "https://ko-fi.com/x\n",
-            "https://user@ko-fi.com/x",
-        ] {
-            assert!(!is_https_url(url), "{url}");
-        }
-        assert!(is_https_url("https://ko-fi.com/deutschedeadlockcommunity"));
-        let padded = serde_json::json!({
-            "type": 2,
-            "label": format!("{}   ", "a".repeat(80)),
-            "url": "https://ko-fi.com/x",
-        });
-        assert!(validate_component_shape(&padded).is_err());
-        let long_stripe = format!("https://buy.stripe.com/{}", "a".repeat(500));
-        assert!(!is_buy_stripe_link(&long_stripe));
-    }
-
-    #[test]
-    fn gleiche_ids_in_anderer_reihenfolge_werden_ersetzt() {
-        assert_eq!(
-            plan_support_history(&[2, 1], &[1, 2], 3),
-            SupportHistoryPlan::Proceed {
-                extra_delete_ids: Vec::new()
-            }
-        );
-    }
-
     use super::*;
     use std::path::Path;
 
@@ -1117,26 +1124,74 @@ mod tests {
         contents
     }
 
-    fn link_buttons(payload: &SupportMessagePayload) -> Vec<Value> {
-        let mut buttons = Vec::new();
-        fn walk(value: &Value, buttons: &mut Vec<Value>) {
+    fn buttons(payload: &SupportMessagePayload) -> Vec<Value> {
+        let mut found = Vec::new();
+        fn walk(value: &Value, found: &mut Vec<Value>) {
             if value.get("type").and_then(Value::as_u64) == Some(2) {
-                buttons.push(value.clone());
+                found.push(value.clone());
             }
             if let Some(children) = value.get("components").and_then(Value::as_array) {
                 for child in children {
-                    walk(child, buttons);
+                    walk(child, found);
                 }
             }
         }
         for component in &payload.components {
-            walk(component, &mut buttons);
+            walk(component, &mut found);
         }
-        buttons
+        found
     }
 
-    fn stored_ids() -> [u64; SUPPORT_MESSAGE_COUNT] {
-        [7001, 7002, 7003]
+    const STORED_IDS: [u64; SUPPORT_MESSAGE_COUNT] = [7001, 7002, 7003];
+
+    fn stored<'a>(ids: &'a [u64], hash: Option<&'a str>) -> SupportStoredState<'a> {
+        SupportStoredState {
+            message_ids: ids,
+            payload_format: Some(SUPPORT_PAYLOAD_FORMAT),
+            payload_hash: hash,
+        }
+    }
+
+    fn funding(raised_cents: i64) -> SupportFunding {
+        SupportFunding {
+            raised_cents,
+            goal_cents: 5000,
+        }
+    }
+
+    #[test]
+    fn button_prueft_genau_die_gesendeten_zeichen() {
+        for url in [
+            "https://example.com/a b",
+            " https://example.com/x",
+            "https://example.com/x\n",
+            "https://user@example.com/x",
+        ] {
+            assert!(!is_https_url(url), "{url}");
+        }
+        let padded = json!({
+            "type": 2,
+            "style": 5,
+            "label": format!("{}   ", "a".repeat(80)),
+            "url": "https://example.com/x",
+        });
+        assert!(validate_component_shape(&padded).is_err());
+        let no_custom_id = json!({"type": 2, "style": 1, "label": "Supporter werden"});
+        assert!(validate_component_shape(&no_custom_id).is_err());
+        let long_custom_id = interactive_button(1, 1, "x", &"a".repeat(101));
+        assert!(validate_component_shape(&long_custom_id).is_err());
+        let ok = interactive_button(1, 1, "x", SUPPORT_BUTTON_BECOME);
+        assert!(validate_component_shape(&ok).is_ok());
+    }
+
+    #[test]
+    fn gleiche_ids_in_anderer_reihenfolge_werden_ersetzt() {
+        assert_eq!(
+            plan_support_history(&[2, 1], &[1, 2], 3),
+            SupportHistoryPlan::Proceed {
+                extra_delete_ids: Vec::new()
+            }
+        );
     }
 
     #[test]
@@ -1149,20 +1204,17 @@ mod tests {
 pay = "Runtime Zahlung"
 
 [buttons]
-donate = "Runtime Button"
-
-[urls]
-donate = "https://example.invalid/kofi"
+become = "Runtime Button"
 "#,
         );
         let mut warnings = Vec::new();
         let config = load_support_runtime_config(temp.path(), &mut warnings).expect("config");
         assert_eq!(config.texts.intro, SUPPORT_INTRO);
         assert_eq!(config.texts.pay, "Runtime Zahlung");
-        assert_eq!(config.texts.why, SUPPORT_WHY);
-        assert_eq!(config.buttons.donate, "Runtime Button");
-        assert_eq!(config.urls.donate, "https://example.invalid/kofi");
-        assert!(!config.stripe_enabled);
+        assert_eq!(config.texts.perks, SUPPORT_PERKS);
+        assert_eq!(config.buttons.become, "Runtime Button");
+        assert_eq!(config.buttons.manage, SUPPORT_MANAGE_BUTTON_LABEL);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
@@ -1173,14 +1225,23 @@ donate = "https://example.invalid/kofi"
             r#"
 [texts]
 title = "Alt"
-benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
+why = "Warum ich Unterstützung brauche"
+ai = "Zu den KI-Abos"
+
+[buttons]
+donate = "Über Ko-fi unterstützen"
+
+[urls]
+donate = "https://ko-fi.com/deutschedeadlockcommunity"
+
+[stripe]
+enabled = false
 "#,
         );
         let output = build_support_publish_output(
             temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
+            &stored(&STORED_IDS, None),
+            funding(0),
             true,
         )
         .expect("output");
@@ -1190,8 +1251,9 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
             .flat_map(|message| text_contents(&message.payload))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!rendered.contains("Community-Moderatoren-Chat"));
-        assert!(!rendered.contains("Moderationsrechte"));
+        assert!(!rendered.contains("Warum ich Unterstützung brauche"));
+        assert!(!rendered.contains("KI-Abos"));
+        assert!(!rendered.contains("Ko-fi"));
         assert!(output
             .warnings
             .iter()
@@ -1208,98 +1270,84 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
     }
 
     #[test]
-    fn support_payload_ist_drei_goldene_karten_mit_banner_und_kofi() {
+    fn support_payload_ist_drei_goldene_karten_mit_banner_balken_und_knoepfen() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_banner_bytes(temp.path(), b"banner");
-        let output = build_support_publish_output(
-            temp.path(),
-            &[],
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
-            true,
-        )
-        .expect("output");
+        let output =
+            build_support_publish_output(temp.path(), &stored(&[], None), funding(1500), true)
+                .expect("output");
         assert_eq!(output.messages.len(), SUPPORT_MESSAGE_COUNT);
         assert_eq!(output.messages[0].message_key, "support");
         assert_eq!(output.messages[1].message_key, "support:vorteile");
         assert_eq!(output.messages[2].message_key, "support:zahlung");
         assert!(output.repost_required);
 
-        let why = &output.messages[0].payload;
-        assert_eq!(why.flags, SUPPORT_COMPONENTS_V2_FLAG);
-        assert!(why.allowed_mentions.parse.is_empty());
-        assert_eq!(why.attachments.len(), 1);
-        assert_eq!(why.components[0]["type"], json!(17));
+        let main = &output.messages[0].payload;
+        assert_eq!(main.flags, SUPPORT_COMPONENTS_V2_FLAG);
+        assert!(main.allowed_mentions.parse.is_empty());
+        assert_eq!(main.attachments.len(), 1);
+        assert_eq!(main.components[0]["type"], json!(17));
         assert_eq!(
-            why.components[0]["accent_color"],
+            main.components[0]["accent_color"],
             json!(SUPPORT_ACCENT_GOLD)
         );
-        assert_eq!(why.components[0]["components"][0]["type"], json!(12));
         assert_eq!(
-            why.components[0]["components"][0]["items"][0]["media"]["url"],
+            main.components[0]["components"][0]["items"][0]["media"]["url"],
             format!("attachment://{SUPPORT_HERO_FILENAME}")
         );
-        let why_text = text_contents(why);
+        let main_text = text_contents(main);
         assert_eq!(
-            why_text,
+            main_text,
             vec![
                 SUPPORT_INTRO.to_string(),
-                SUPPORT_WHY.to_string(),
-                SUPPORT_AI.to_string()
+                SUPPORT_PERKS.to_string(),
+                SUPPORT_STEAM.to_string()
             ]
         );
-        assert!(why_text.iter().any(|text| text.contains("1.600 €")));
-        assert!(why
-            .components
-            .iter()
-            .any(|component| component_has_type(component, 14)));
+        assert!(main_text[1]
+            .starts_with("## Was du jetzt bekommst\n\n**Mit den Streamern zusammen spielen.**"));
+        assert!(main_text[1].contains("vertrauenswürdiges Mitglied"));
+        assert!(main_text[2].contains("deadlock-api.com/patron"));
 
         let benefits = text_contents(&output.messages[1].payload);
         assert_eq!(
             benefits,
-            vec![
-                SUPPORT_STEAM.to_string(),
-                SUPPORT_BRAIN.to_string(),
-                SUPPORT_DISCORD.to_string(),
-                SUPPORT_PLANNED.to_string(),
-                SUPPORT_FREE.to_string()
-            ]
+            vec![SUPPORT_PLANNED.to_string(), SUPPORT_FREE.to_string()]
         );
-        assert!(benefits[0].contains("deadlock-api.com/patron"));
-        assert!(benefits[0].contains("Echtzeit verspreche ich nicht"));
-        assert!(benefits[1].contains("noch nicht eingerichtet"));
-        assert!(benefits[1].contains("Bis dahin gilt das normale Tageslimit"));
-        assert!(benefits[1].contains("noch nicht fertig"));
-        assert!(benefits[2].contains("Geplant, und noch nicht eingerichtet"));
-        assert!(benefits[2]
-            .contains("Private Supporter-Channels im VIP-Bereich sind noch nicht freigeschaltet"));
-        assert!(!benefits[2].contains("Moderatoren-Chats"));
-        assert!(!benefits[2].contains("interne Teambereiche"));
-        assert!(!benefits[2].contains("Moderationsrechte"));
-        assert!(benefits[3].contains("Statlocker"));
-        let free = benefits
-            .iter()
-            .find(|text| text.starts_with("## Was kostenlos bleibt"))
-            .expect("free section");
-        assert!(!free.to_lowercase().contains("steam"));
+        assert!(!benefits[1].to_lowercase().contains("steam"));
 
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
+        assert_eq!(pay_text.len(), 3);
+        assert!(pay_text[0].contains("`██████░░░░░░░░░░░░░░` 30 %"));
+        assert!(pay_text[0].contains("**15 € von 50 € im Monat**"));
+        assert_eq!(pay_text[1], SUPPORT_PAY);
+        assert_eq!(pay_text[2], SUPPORT_THANKS);
+        let pay_buttons = buttons(pay);
+        let custom_ids: Vec<&str> = pay_buttons
+            .iter()
+            .filter_map(|button| button["custom_id"].as_str())
+            .collect();
         assert_eq!(
-            pay_text,
-            vec![SUPPORT_PAY.to_string(), SUPPORT_THANKS.to_string()]
+            custom_ids,
+            vec![
+                SUPPORT_BUTTON_BECOME,
+                SUPPORT_BUTTON_TIP,
+                SUPPORT_BUTTON_MANAGE,
+                SUPPORT_BUTTON_TWITCH
+            ]
         );
-        assert!(pay_text[0].contains("Die automatische Freischaltung ist noch nicht eingerichtet"));
-        let buttons = link_buttons(pay);
-        assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0]["style"], json!(5));
-        assert_eq!(buttons[0]["label"], SUPPORT_DONATE_BUTTON_LABEL);
-        assert_eq!(buttons[0]["url"], SUPPORT_DONATE_URL_DEFAULT);
-        assert!(buttons[0].get("custom_id").is_none());
-        assert_eq!(
-            pay.components[0]["accent_color"],
-            json!(SUPPORT_ACCENT_GOLD)
-        );
+        assert!(pay_buttons.iter().all(|button| button.get("url").is_none()));
+
+        let rendered = output
+            .messages
+            .iter()
+            .flat_map(|message| text_contents(&message.payload))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["Ko-fi", "KI-Abos", "Warum ich", "Server-Abo", "admin.", "\u{2014}"] {
+            assert!(!rendered.contains(banned), "{banned}");
+        }
 
         for message in &output.messages {
             validate_support_message_budget(&message.payload).expect("budget");
@@ -1316,123 +1364,46 @@ benefits = "Lese-Zugriff auf den Community-Moderatoren-Chat"
         }
     }
 
-    fn component_has_type(value: &Value, kind: u64) -> bool {
-        if value.get("type").and_then(Value::as_u64) == Some(kind) {
-            return true;
-        }
-        value
-            .get("components")
-            .and_then(Value::as_array)
-            .is_some_and(|children| children.iter().any(|child| component_has_type(child, kind)))
-    }
-
     #[test]
-    fn stripe_button_erscheint_nur_mit_link_und_freigabe() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        write_support_texts_file(
-            temp.path(),
-            r#"[urls]
-stripe = "https://buy.stripe.com/test-server-supporter"
-
-[stripe]
-enabled = true
-"#,
-        );
-        let output = build_support_publish_output(
-            temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
-            true,
-        )
-        .expect("output");
-        let buttons = link_buttons(&output.messages[2].payload);
-        assert_eq!(buttons.len(), 2);
-        assert_eq!(buttons[1]["id"], json!(SUPPORT_COMPONENT_ID_STRIPE_BUTTON));
-        assert_eq!(buttons[1]["label"], json!(SUPPORT_STRIPE_BUTTON_LABEL));
+    fn balken_zeigt_betrag_prozent_und_mindestens_ein_segment() {
+        let template = "{balken} {prozent} % {stand} von {ziel}";
         assert_eq!(
-            buttons[1]["url"],
-            "https://buy.stripe.com/test-server-supporter"
+            render_funding_text(template, funding(0)),
+            "`░░░░░░░░░░░░░░░░░░░░` 0 % 0 € von 50 €"
         );
-        assert_eq!(buttons[1]["style"], json!(5));
-        assert!(buttons[1].get("custom_id").is_none());
-        assert!(output.warnings.iter().any(|warning| {
-            warning.contains("prüft nicht, ob die Zahlung dem Discord-Account zugeordnet wird")
-        }));
-
-        write_support_texts_file(
-            temp.path(),
-            r#"[urls]
-stripe = "https://buy.stripe.com/test-server-supporter"
-"#,
+        assert_eq!(
+            render_funding_text(template, funding(50)),
+            "`█░░░░░░░░░░░░░░░░░░░` 1 % 0,50 € von 50 €"
         );
-        let held = build_support_publish_output(
-            temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
-            true,
-        )
-        .expect("enabled defaults false");
-        assert_eq!(link_buttons(&held.messages[2].payload).len(), 1);
-        assert!(held
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("[stripe].enabled bleibt false")));
-
-        write_support_texts_file(
-            temp.path(),
-            r#"[urls]
-stripe = "https://example.com/no-payment-link"
-
-[stripe]
-enabled = true
-"#,
+        assert_eq!(
+            render_funding_text(template, funding(7550)),
+            "`████████████████████` 151 % 75,50 € von 50 €"
         );
-        let invalid = build_support_publish_output(
-            temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
-            true,
-        )
-        .expect("invalid link leaves Ko-fi active");
-        assert_eq!(link_buttons(&invalid.messages[2].payload).len(), 1);
-        assert!(invalid
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("Stripe-Button aus")));
-
-        write_support_texts_file(
-            temp.path(),
-            r#"[stripe]
-enabled = true
-"#,
+        let big = SupportFunding {
+            raised_cents: 123_456_700,
+            goal_cents: 0,
+        };
+        assert_eq!(
+            render_funding_text(template, big),
+            "`░░░░░░░░░░░░░░░░░░░░` 0 % 1.234.567 € von 0 €"
         );
-        let missing = build_support_publish_output(
-            temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
-            true,
-        )
-        .expect("enabled without url leaves Ko-fi active");
-        assert_eq!(link_buttons(&missing.messages[2].payload).len(), 1);
-        assert!(missing
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("[urls].stripe fehlt")));
     }
 
     #[test]
-    fn support_payload_hash_noop_und_banner_bytes_aendern_hash() {
+    fn funding_kv_rundreise() {
+        let value = funding(1234);
+        assert_eq!(SupportFunding::from_kv(&value.to_kv()), Some(value));
+        assert_eq!(SupportFunding::from_kv("kaputt"), None);
+    }
+
+    #[test]
+    fn support_payload_hash_noop_banner_und_balken_aendern_hash() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_banner_bytes(temp.path(), b"banner-one");
         let first = build_support_publish_output(
             temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
+            &stored(&STORED_IDS, None),
+            funding(0),
             true,
         )
         .expect("first output");
@@ -1440,9 +1411,8 @@ enabled = true
 
         let same = build_support_publish_output(
             temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            Some(&first.payload_hash),
+            &stored(&STORED_IDS, Some(&first.payload_hash)),
+            funding(0),
             true,
         )
         .expect("same output");
@@ -1451,12 +1421,20 @@ enabled = true
         assert!(support_payload_is_unchanged(&same));
         assert!(!same.repost_required);
 
+        let more_money = build_support_publish_output(
+            temp.path(),
+            &stored(&STORED_IDS, Some(&first.payload_hash)),
+            funding(500),
+            true,
+        )
+        .expect("funding output");
+        assert_ne!(more_money.payload_hash, first.payload_hash);
+
         write_banner_bytes(temp.path(), b"banner-two");
         let changed = build_support_publish_output(
             temp.path(),
-            &stored_ids(),
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            Some(&first.payload_hash),
+            &stored(&STORED_IDS, Some(&first.payload_hash)),
+            funding(0),
             true,
         )
         .expect("changed output");
@@ -1465,16 +1443,28 @@ enabled = true
     }
 
     #[test]
+    fn altes_format_wird_als_repost_geplant() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = SupportStoredState {
+            message_ids: &STORED_IDS,
+            payload_format: Some("2"),
+            payload_hash: None,
+        };
+        let output =
+            build_support_publish_output(temp.path(), &state, funding(0), true).expect("output");
+        assert!(output.repost_required);
+        assert!(output
+            .messages
+            .iter()
+            .all(|message| message.action == "planned_repost"));
+    }
+
+    #[test]
     fn eine_gespeicherte_nachricht_wird_als_repost_geplant() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = build_support_publish_output(
-            temp.path(),
-            &[7001],
-            Some(SUPPORT_PAYLOAD_FORMAT),
-            None,
-            true,
-        )
-        .expect("output");
+        let output =
+            build_support_publish_output(temp.path(), &stored(&[7001], None), funding(0), true)
+                .expect("output");
         assert!(output.repost_required);
         assert_eq!(output.messages[0].action, "planned_repost");
         assert_eq!(output.messages[1].action, "planned_post");
@@ -1548,21 +1538,7 @@ enabled = true
             warnings.is_empty(),
             "Repo-Textdatei soll ohne Warnung laden: {warnings:?}"
         );
-        assert_eq!(config.texts.intro, SUPPORT_INTRO);
-        assert_eq!(config.texts.why, SUPPORT_WHY);
-        assert_eq!(config.texts.ai, SUPPORT_AI);
-        assert_eq!(config.texts.steam, SUPPORT_STEAM);
-        assert_eq!(config.texts.brain, SUPPORT_BRAIN);
-        assert_eq!(config.texts.discord, SUPPORT_DISCORD);
-        assert_eq!(config.texts.planned, SUPPORT_PLANNED);
-        assert_eq!(config.texts.free, SUPPORT_FREE);
-        assert_eq!(config.texts.pay, SUPPORT_PAY);
-        assert_eq!(config.texts.thanks, SUPPORT_THANKS);
-        assert_eq!(config.buttons.donate, SUPPORT_DONATE_BUTTON_LABEL);
-        assert_eq!(config.buttons.stripe, SUPPORT_STRIPE_BUTTON_LABEL);
-        assert_eq!(config.urls.donate, SUPPORT_DONATE_URL_DEFAULT);
-        assert_eq!(config.urls.stripe, None);
-        assert!(!config.stripe_enabled);
+        assert_eq!(config, ResolvedSupportConfig::from_defaults());
     }
 
     #[test]
@@ -1575,7 +1551,7 @@ enabled = true
         let overflow = message_from_container(
             1,
             None,
-            vec![link_button(2, &long_label, "https://ko-fi.com/x")],
+            vec![link_button(2, &long_label, "https://example.com/x")],
             Vec::new(),
         );
         let overflow_error = validate_support_message_budget(&overflow.payload).expect_err("label");
@@ -1584,7 +1560,7 @@ enabled = true
         let bare = message_from_container(
             1,
             None,
-            vec![link_button(2, "Ko-fi", "https://")],
+            vec![link_button(2, "Link", "https://")],
             Vec::new(),
         );
         let bare_error = validate_support_message_budget(&bare.payload).expect_err("url");
