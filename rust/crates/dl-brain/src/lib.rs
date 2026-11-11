@@ -16,8 +16,8 @@ pub use brain_client::{
     DiscordAnswerTask,
 };
 pub use brain_contracts::invite::{
-    InviteCheckInOutcome, InviteLoungeUpdate, InviteNotice, InviteProblem, InviteStatus,
-    NoticeTarget,
+    InviteChatLine, InviteChatSpeaker, InviteCheckInOutcome, InviteHandledOutcome,
+    InviteLoungeUpdate, InviteNotice, InviteProblem, InviteStatus, NoticeTarget,
 };
 pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
 
@@ -75,6 +75,10 @@ pub enum DiscordConversation {
     InviteCheckIn {
         message: String,
     },
+    InviteHandled {
+        request: String,
+        conversation: Vec<InviteChatLine>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +103,9 @@ pub enum ConversationReply {
     },
     Judged {
         outcome: InviteCheckInOutcome,
+    },
+    Handled {
+        outcome: InviteHandledOutcome,
     },
     Rejected,
 }

@@ -11,7 +11,7 @@ use brain_client::{
 use brain_contracts::bot_tasks::{
     BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, TaskFailure, MAX_CHAT_LINES,
     MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
-    MAX_READABLE_CHANNELS,
+    MAX_READABLE_CHANNELS, MAX_TASK_TEXT_CHARS,
 };
 use brain_contracts::image::QueryImage;
 use sha2::{Digest, Sha256};
@@ -245,6 +245,35 @@ fn bounded_chat(entries: &[ChatEntry]) -> Vec<ChatLine> {
     lines
 }
 
+fn bounded_invite_chat(lines: &[crate::InviteChatLine]) -> Vec<crate::InviteChatLine> {
+    let mut bounded: Vec<crate::InviteChatLine> = lines
+        .iter()
+        .rev()
+        .filter(|line| !line.text.trim().is_empty())
+        .take(MAX_CHAT_LINES)
+        .map(|line| crate::InviteChatLine {
+            speaker: line.speaker,
+            text: line.text.chars().take(MAX_CHAT_LINE_CHARS).collect(),
+        })
+        .collect();
+    bounded.reverse();
+    bounded
+}
+
+fn fit_request_limit(request: &mut BotTaskRequest) {
+    while !request.fits_request_limit() {
+        let BotTask::Conversation(ConversationTask::DiscordInviteHandled { conversation, .. }) =
+            &mut request.task
+        else {
+            return;
+        };
+        if conversation.is_empty() {
+            return;
+        }
+        conversation.remove(0);
+    }
+}
+
 fn follows_up(task: &DiscordConversation) -> bool {
     match task {
         DiscordConversation::Concierge { history, .. }
@@ -261,6 +290,7 @@ fn conversation_text(task: &DiscordConversation) -> &str {
         | DiscordConversation::VoiceHint { message }
         | DiscordConversation::InviteLounge { message }
         | DiscordConversation::InviteCheckIn { message } => message,
+        DiscordConversation::InviteHandled { request, .. } => request,
         DiscordConversation::InviteNotice { .. } => "",
     }
 }
@@ -276,6 +306,7 @@ fn conversation_task(
                 | DiscordConversation::InviteLounge { .. }
                 | DiscordConversation::InviteNotice { .. }
                 | DiscordConversation::InviteCheckIn { .. }
+                | DiscordConversation::InviteHandled { .. }
         )
     {
         return Err(classified_backend_error("anfrage"));
@@ -321,6 +352,13 @@ fn conversation_task(
         DiscordConversation::InviteCheckIn { message } => ConversationTask::DiscordInviteCheckIn {
             reply: message.clone(),
         },
+        DiscordConversation::InviteHandled {
+            request,
+            conversation,
+        } => ConversationTask::DiscordInviteHandled {
+            request: request.chars().take(MAX_TASK_TEXT_CHARS).collect(),
+            conversation: bounded_invite_chat(conversation),
+        },
     })
 }
 
@@ -345,6 +383,10 @@ fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, Brai
             reply: BotReply::Judged { outcome },
             ..
         } => Ok(ConversationReply::Judged { outcome }),
+        BotTaskResult::Conversation {
+            reply: BotReply::Handled { outcome },
+            ..
+        } => Ok(ConversationReply::Handled { outcome }),
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed {
             failure: TaskFailure::DeliveryRejected,
@@ -614,7 +656,7 @@ impl AiAnswerer for BrainApiAnswerer {
                 return Err(classified_backend_error("bild"));
             }
             let sequence = next_sequence(&self.sequence).ok_or_else(backend_error)?;
-            let task_request = BotTaskRequest {
+            let mut task_request = BotTaskRequest {
                 contract_version: BOT_TASK_VERSION.to_owned(),
                 request_id: format!("{}-{sequence}", self.namespace),
                 identity: BotIdentity::Discord {
@@ -624,6 +666,7 @@ impl AiAnswerer for BrainApiAnswerer {
                 },
                 task: BotTask::Conversation(conversation_task(&request.task, images)?),
             };
+            fit_request_limit(&mut task_request);
             let response = self
                 .client
                 .task(&task_request)

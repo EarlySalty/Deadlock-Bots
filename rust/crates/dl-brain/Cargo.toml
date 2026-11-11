@@ -8,8 +8,8 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
-brain-client = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "5b5de88d27d0d3d61c61221028c4e520166f8a19" }
-brain-contracts = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "5b5de88d27d0d3d61c61221028c4e520166f8a19" }
+brain-client = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "850e0d27461448f66e5e0659f1f5fa441076305e" }
+brain-contracts = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "850e0d27461448f66e5e0659f1f5fa441076305e" }
 async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true

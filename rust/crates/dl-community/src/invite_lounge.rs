@@ -13,7 +13,8 @@ use sqlx::PgPool;
 mod status;
 use status::{
     after_invite, after_progress, check_in_step, check_in_window, classify_invite_reply,
-    steam_outcome, CheckIn, Notice, OutboxEntry, RequestStatus, SteamProgress, SteamWait, Step,
+    steam_outcome, ChatJudged, CheckIn, Notice, OutboxEntry, RequestStatus, SteamProgress,
+    SteamWait, Step,
 };
 
 pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
@@ -30,6 +31,7 @@ pub const NEWCOMER_MAX_JOIN_SECONDS: i64 = 7 * 24 * 60 * 60;
 const REQUEST_WINDOW_SECONDS: i64 = NEWCOMER_MAX_JOIN_SECONDS;
 const STEAM_ID64_BASE: u64 = 76_561_197_960_265_728;
 const DISCORD_ANSWER_CHARS: usize = 2000;
+const THREAD_MAX_PAGES: usize = 10;
 
 static FRIEND_CODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{6,12}\b").ok());
 static STEAM_LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
@@ -426,6 +428,14 @@ fn steam_id64(code: &str) -> Option<i64> {
         .ok()
         .filter(|id| *id > 0 && *id <= u64::from(u32::MAX))
         .and_then(|id| i64::try_from(id + STEAM_ID64_BASE).ok())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handling {
+    Done,
+    Open,
+    Ask,
+    Wait,
 }
 
 pub struct InviteLoungeWatcher {
@@ -921,30 +931,29 @@ impl InviteLoungeWatcher {
         if !check_in_now && !is_due(request, &previous.status, now) {
             return Ok(());
         }
-        if self.someone_on_it(user_id, &previous, request).await? {
-            return self.close_handled(user_id, &previous).await;
+        let mut current = previous.clone();
+        match self.handling(user_id, &mut current).await? {
+            Handling::Done => self.close_handled(user_id, &current).await,
+            Handling::Wait => Ok(()),
+            Handling::Ask => self.check_in(user_id, &current, now).await,
+            Handling::Open if check_in_now => self.check_in(user_id, &current, now).await,
+            Handling::Open => self.send_invite(user_id, &current, now).await,
         }
-        if check_in_now {
-            return self.check_in(user_id, &previous, now).await;
-        }
-        self.send_invite(user_id, &previous, now).await
     }
 
-    async fn someone_on_it(
-        &self,
-        user_id: u64,
-        state: &LoungeState,
-        request: &Request,
-    ) -> Result<bool, String> {
+    async fn handling(&self, user_id: u64, state: &mut LoungeState) -> Result<Handling, String> {
+        let Some(request) = state.request.clone() else {
+            return Ok(Handling::Wait);
+        };
         let dispatched_here = state
             .dispatch_started_at_millis
             .is_some_and(|started| started / 1000 >= request.created_at);
         if request.direct || state.status.invite_now || dispatched_here {
-            return Ok(false);
+            return Ok(Handling::Open);
         }
         if let Some(code) = state.friend_code.as_deref() {
             match self.store.handled_since(code, request.created_at).await {
-                Ok(true) => return Ok(true),
+                Ok(true) => return Ok(Handling::Done),
                 Ok(false) => {}
                 Err(err) => {
                     tracing::warn!(user_id, error = %err, "Invite-Lounge: Einladungsprüfung fehlgeschlagen, Bitte läuft weiter");
@@ -952,18 +961,118 @@ impl InviteLoungeWatcher {
             }
         }
         let Some(channel_id) = state.status.channel_id else {
-            return Ok(false);
+            return Ok(Handling::Open);
         };
-        match self
-            .request_answered(channel_id, request.message_id, user_id)
-            .await
-        {
-            Ok(answered) => Ok(answered),
+        let Some(outcome) = self
+            .judge_chat(user_id, channel_id, &request, state)
+            .await?
+        else {
+            return Ok(Handling::Wait);
+        };
+        Ok(match outcome {
+            dl_brain::InviteHandledOutcome::Invited => Handling::Done,
+            dl_brain::InviteHandledOutcome::NotInvited => Handling::Open,
+            dl_brain::InviteHandledOutcome::Unclear if state.status.asked() => Handling::Wait,
+            dl_brain::InviteHandledOutcome::Unclear => Handling::Ask,
+        })
+    }
+
+    async fn judge_chat(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        request: &Request,
+        state: &mut LoungeState,
+    ) -> Result<Option<dl_brain::InviteHandledOutcome>, String> {
+        let Some(bot_id) = self.port.bot_id() else {
+            return Err("Die Discord-ID des Bots fehlt".into());
+        };
+        let (asked, after) = match self.thread_since(channel_id, request.message_id).await {
+            Ok(thread) => thread,
             Err(err) => {
                 tracing::warn!(user_id, channel_id, error = %err, "Invite-Lounge: Verlauf nicht lesbar, Bitte läuft weiter");
-                Ok(false)
+                return Ok(Some(dl_brain::InviteHandledOutcome::NotInvited));
             }
+        };
+        let Some(through_message_id) = after.iter().map(|message| message.message_id).max() else {
+            return Ok(Some(dl_brain::InviteHandledOutcome::NotInvited));
+        };
+        if let Some(judged) = state
+            .status
+            .chat_judged
+            .filter(|judged| judged.through_message_id == through_message_id)
+        {
+            return Ok(Some(judged.outcome));
         }
+        let task = dl_brain::DiscordConversation::InviteHandled {
+            request: asked
+                .unwrap_or_else(|| "Bitte um eine Einladung zum Deadlock-Playtest".into()),
+            conversation: chat_lines(&after, request.message_id, user_id, bot_id),
+        };
+        let outcome = match self.converse(user_id, channel_id, task).await {
+            Some(dl_brain::ConversationReply::Handled { outcome }) => outcome,
+            _ => return Ok(None),
+        };
+        let mut next = state.clone();
+        next.status.chat_judged = Some(ChatJudged {
+            through_message_id,
+            outcome,
+        });
+        if !self
+            .store
+            .compare_exchange(user_id, Some(state), &next)
+            .await?
+        {
+            return Ok(None);
+        }
+        tracing::info!(
+            user_id,
+            ?outcome,
+            "Invite-Lounge: Brain hat den Verlauf zur Bitte bewertet"
+        );
+        *state = next;
+        Ok(Some(outcome))
+    }
+
+    async fn thread_since(
+        &self,
+        channel_id: u64,
+        request_id: u64,
+    ) -> Result<(Option<String>, Vec<LoungeMessage>), String> {
+        let mut before = None;
+        let mut after: Vec<LoungeMessage> = Vec::new();
+        for _ in 0..THREAD_MAX_PAGES {
+            let page = self.port.history(channel_id, before).await?;
+            if page.is_empty() {
+                after.sort_by_key(|message| message.message_id);
+                after.dedup_by_key(|message| message.message_id);
+                return Ok((None, after));
+            }
+            let asked = page
+                .iter()
+                .find(|message| message.message_id == request_id)
+                .map(|message| message.content.clone());
+            after.extend(
+                page.iter()
+                    .filter(|message| message.message_id > request_id)
+                    .cloned(),
+            );
+            let oldest = page
+                .iter()
+                .map(|message| message.message_id)
+                .min()
+                .ok_or("Leere Verlaufsseite")?;
+            if asked.is_some() || oldest <= request_id {
+                after.sort_by_key(|message| message.message_id);
+                after.dedup_by_key(|message| message.message_id);
+                return Ok((asked, after));
+            }
+            if before.is_some_and(|id| oldest >= id) {
+                return Err("Der Verlauf liefert keine ältere Seite".into());
+            }
+            before = Some(oldest);
+        }
+        Err("Die Bitte liegt zu weit zurück im Verlauf".into())
     }
 
     async fn close_handled(&self, user_id: u64, previous: &LoungeState) -> Result<(), String> {
@@ -1038,32 +1147,17 @@ impl InviteLoungeWatcher {
     }
 
     async fn check_in(&self, user_id: u64, previous: &LoungeState, now: i64) -> Result<(), String> {
-        let (Some(request), Some(code)) =
-            (previous.request.as_ref(), previous.friend_code.as_deref())
+        let (Some(_), Some(code)) = (previous.request.as_ref(), previous.friend_code.as_deref())
         else {
             return Ok(());
-        };
-        let Some(channel_id) = previous.status.channel_id else {
-            return Ok(());
-        };
-        let answered = match self
-            .request_answered(channel_id, request.message_id, user_id)
-            .await
-        {
-            Ok(answered) => answered,
-            Err(err) => {
-                tracing::warn!(user_id, channel_id, error = %err, "Invite-Lounge: Verlauf für die Nachfrage nicht lesbar");
-                false
-            }
         };
         let invited = self.store.steam_progress(code, 0).await?.invited;
         let mut next = previous.clone();
         next.status.check_in_at = Some(now);
-        let notice = match check_in_step(invited, answered) {
+        let notice = match check_in_step(invited) {
             CheckIn::AlreadyInvited => {
                 apply_step(&mut next, Step::Finish(Some(Notice::AlreadyInvited)))
             }
-            CheckIn::Skip => None,
             CheckIn::Ask => next.status.claim(Some(Notice::CheckIn)),
         };
         queue_notice(&mut next, notice, invited);
@@ -1071,42 +1165,6 @@ impl InviteLoungeWatcher {
             .compare_exchange(user_id, Some(previous), &next)
             .await
             .map(|_| ())
-    }
-
-    async fn request_answered(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        user_id: u64,
-    ) -> Result<bool, String> {
-        let Some(bot_id) = self.port.bot_id() else {
-            return Err("Die Discord-ID des Bots fehlt".into());
-        };
-        let mut before = None;
-        loop {
-            let page = self.port.history(channel_id, before).await?;
-            if page.is_empty() {
-                return Ok(false);
-            }
-            if page
-                .iter()
-                .any(|message| answers_request(message, message_id, user_id, bot_id))
-            {
-                return Ok(true);
-            }
-            let oldest = page
-                .iter()
-                .map(|message| message.message_id)
-                .min()
-                .ok_or("Leere Verlaufsseite")?;
-            if oldest <= message_id {
-                return Ok(false);
-            }
-            if before.is_some_and(|id| oldest >= id) {
-                return Err("Der Verlauf liefert keine ältere Seite".into());
-            }
-            before = Some(oldest);
-        }
     }
 
     async fn send_invite(
@@ -1648,13 +1706,50 @@ fn apply_check_in(
     }
 }
 
-fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64, bot_id: u64) -> bool {
-    message.message_id > request_id
-        && message.author_id != user_id
-        && message.author_id != bot_id
-        && !message.is_bot
-        && (message.reply_message_id == Some(request_id)
-            || mentions_user(&message.content, user_id))
+fn chat_lines(
+    messages: &[LoungeMessage],
+    request_id: u64,
+    user_id: u64,
+    bot_id: u64,
+) -> Vec<dl_brain::InviteChatLine> {
+    let own: HashSet<u64> = messages
+        .iter()
+        .filter(|message| message.author_id == user_id)
+        .map(|message| message.message_id)
+        .chain([request_id])
+        .collect();
+    messages
+        .iter()
+        .filter(|message| !message.content.trim().is_empty())
+        .map(|message| dl_brain::InviteChatLine {
+            speaker: speaker(message, user_id, bot_id, &own),
+            text: message.content.clone(),
+        })
+        .collect()
+}
+
+fn speaker(
+    message: &LoungeMessage,
+    user_id: u64,
+    bot_id: u64,
+    own: &HashSet<u64>,
+) -> dl_brain::InviteChatSpeaker {
+    use dl_brain::InviteChatSpeaker;
+    if message.author_id == user_id {
+        return InviteChatSpeaker::Requester;
+    }
+    if message.is_bot || message.author_id == bot_id {
+        return InviteChatSpeaker::Bot;
+    }
+    let to_requester = mentions_user(&message.content, user_id)
+        || message.reply_message_id.is_some_and(|id| own.contains(&id));
+    if to_requester {
+        InviteChatSpeaker::MemberToRequester
+    } else if message.reply_message_id.is_some() || message.content.contains("<@") {
+        InviteChatSpeaker::MemberToOther
+    } else {
+        InviteChatSpeaker::Member
+    }
 }
 
 fn replies_to_check_in(event: &LoungeMessage, status: &RequestStatus, request_id: u64) -> bool {

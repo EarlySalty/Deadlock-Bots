@@ -1,4 +1,6 @@
-use dl_brain::{InviteCheckInOutcome, InviteLoungeUpdate, InviteProblem, InviteStatus};
+use dl_brain::{
+    InviteCheckInOutcome, InviteHandledOutcome, InviteLoungeUpdate, InviteProblem, InviteStatus,
+};
 use serde::{Deserialize, Serialize};
 
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
@@ -193,6 +195,14 @@ pub(super) struct RequestStatus {
     pub(super) check_in_message_id: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) invite_now: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) chat_judged: Option<ChatJudged>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ChatJudged {
+    pub(super) through_message_id: u64,
+    pub(super) outcome: InviteHandledOutcome,
 }
 
 impl RequestStatus {
@@ -335,15 +345,12 @@ pub(super) fn after_progress(wait: SteamWait, progress: SteamProgress, now: i64)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CheckIn {
     AlreadyInvited,
-    Skip,
     Ask,
 }
 
-pub(super) fn check_in_step(invited: bool, answered: bool) -> CheckIn {
+pub(super) fn check_in_step(invited: bool) -> CheckIn {
     if invited {
         CheckIn::AlreadyInvited
-    } else if answered {
-        CheckIn::Skip
     } else {
         CheckIn::Ask
     }
@@ -555,10 +562,8 @@ mod tests {
         assert!(!check_in_window(CHECK_IN_SECONDS - 1, 3600));
         assert!(check_in_window(CHECK_IN_SECONDS, 3600));
         assert!(!check_in_window(3600, 3600));
-        assert_eq!(check_in_step(false, false), CheckIn::Ask);
-        assert_eq!(check_in_step(false, true), CheckIn::Skip);
-        assert_eq!(check_in_step(true, false), CheckIn::AlreadyInvited);
-        assert_eq!(check_in_step(true, true), CheckIn::AlreadyInvited);
+        assert_eq!(check_in_step(false), CheckIn::Ask);
+        assert_eq!(check_in_step(true), CheckIn::AlreadyInvited);
         assert_eq!(Notice::CheckIn.update(), InviteLoungeUpdate::CheckIn);
     }
 

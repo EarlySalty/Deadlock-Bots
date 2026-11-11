@@ -249,7 +249,8 @@ pub(crate) mod test_brain {
     use async_trait::async_trait;
     use dl_brain::{
         AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker, DiscordAnswerTask,
-        DiscordConversation, DiscordConversationRequest, InviteCheckInOutcome, NoticeTarget,
+        DiscordConversation, DiscordConversationRequest, InviteCheckInOutcome,
+        InviteHandledOutcome, NoticeTarget,
     };
     use tokio::sync::Notify;
 
@@ -272,6 +273,7 @@ pub(crate) mod test_brain {
     pub(crate) struct ScriptedBrain {
         replies: Mutex<VecDeque<ScriptedReply>>,
         check_ins: Mutex<VecDeque<ScriptedReply>>,
+        handled: Mutex<VecDeque<ScriptedReply>>,
         notices: Mutex<VecDeque<ScriptedReply>>,
         default_reply: Option<ConversationReply>,
         gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
@@ -320,6 +322,10 @@ pub(crate) mod test_brain {
             gate
         }
 
+        pub(crate) fn script_handled(&self, replies: Vec<ScriptedReply>) {
+            self.handled.lock().expect("handled").extend(replies);
+        }
+
         pub(crate) fn script_notices(&self, replies: Vec<ScriptedReply>) {
             self.notices.lock().expect("notices").extend(replies);
         }
@@ -327,6 +333,18 @@ pub(crate) mod test_brain {
         pub(crate) fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
+    }
+
+    fn judged_chat(conversation: &[dl_brain::InviteChatLine]) -> ConversationReply {
+        let outcome = if conversation
+            .iter()
+            .any(|line| line.speaker == dl_brain::InviteChatSpeaker::MemberToRequester)
+        {
+            InviteHandledOutcome::Invited
+        } else {
+            InviteHandledOutcome::NotInvited
+        };
+        ConversationReply::Handled { outcome }
     }
 
     fn delivered(target: &NoticeTarget) -> ConversationReply {
@@ -349,7 +367,10 @@ pub(crate) mod test_brain {
             DiscordConversation::PassiveHelp { message, .. }
             | DiscordConversation::VoiceHint { message }
             | DiscordConversation::InviteLounge { message }
-            | DiscordConversation::InviteCheckIn { message } => (message, [].as_slice()),
+            | DiscordConversation::InviteCheckIn { message }
+            | DiscordConversation::InviteHandled {
+                request: message, ..
+            } => (message, [].as_slice()),
             DiscordConversation::InviteNotice { notice } => {
                 return serde_json::to_string(&notice.update).unwrap_or_default();
             }
@@ -429,6 +450,10 @@ pub(crate) mod test_brain {
             if let DiscordConversation::InviteNotice { notice } = &request.task {
                 let scripted = self.notices.lock().expect("notices").pop_front();
                 return scripted.unwrap_or_else(|| Ok(delivered(&notice.target)));
+            }
+            if let DiscordConversation::InviteHandled { conversation, .. } = &request.task {
+                let scripted = self.handled.lock().expect("handled").pop_front();
+                return scripted.unwrap_or_else(|| Ok(judged_chat(conversation)));
             }
             if matches!(request.task, DiscordConversation::InviteCheckIn { .. }) {
                 return self

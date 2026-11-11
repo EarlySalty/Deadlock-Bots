@@ -1065,6 +1065,33 @@ async fn beantwortete_raumbitte_bekommt_keine_nachfrage() {
 }
 
 #[tokio::test]
+async fn unklarer_verlauf_fragt_einmal_nach_und_laedt_nicht_ein() {
+    let (watcher, _, port, invite, brain) = setup_scripted();
+    brain.script_handled(vec![Ok(ConversationReply::Handled {
+        outcome: dl_brain::InviteHandledOutcome::Unclear,
+    })]);
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    let mut answer = message(2, NOW + 60, "probier ich mal");
+    answer.author_id = 8;
+    port.history.lock().await.push(answer);
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    }
+    assert!(invite.calls.lock().await.is_empty());
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+}
+
+#[tokio::test]
 async fn bereits_eingeladen_laut_steam_bestaetigt_ohne_neue_einladung() {
     let (watcher, store, _, invite, brain) = setup_scripted();
     store.progress.lock().await.invited = true;
