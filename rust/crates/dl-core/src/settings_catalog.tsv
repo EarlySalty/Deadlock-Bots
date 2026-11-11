@@ -14,6 +14,7 @@ services.changelog_port	u16	Infrastruktur	Changelog-Port	protected	Geschützte I
 storage.legacy_snapshot_path	PathBuf	Infrastruktur	Pfad des Kompatibilitäts-Snapshots	protected	Geschützte Infrastruktur: Änderung über die Betriebsdatei bzw. Infisical, nicht über den Browser. Der Wert wird nicht ausgeliefert.
 features.gateway	bool	Discord · Allgemein	Discord-Gateway aktivieren	edit	Wirksam nach Neustart des betroffenen Dienstes.
 moderation.enforce	bool	Moderation	Moderationsmaßnahmen tatsächlich anwenden	edit	Wirksam nach Neustart des betroffenen Dienstes.
+moderation.ticket_screenshot_review	bool	Moderation	Ticket-Screenshots bei Scam-Meldungen per KI prüfen	edit	Standard aus. Eingeschaltet gehen Bilder aus Ticket-Kanälen an den externen Bildprüfer der Moderation. Ergebnis nur im Shadow-Log, kein echter Bann. Wirksam nach Neustart.
 concierge.timeout_seconds	u64	Bot-Pate & Onboarding	Antwortzeitlimit des Bot-Paten (Sekunden)	edit	Wirksam nach Neustart des betroffenen Dienstes.
 tempvoice.empty_lane_grace_seconds	u64	Voice & Mitspielersuche	Wartezeit vor dem Entfernen leerer Lanes (Sekunden)	edit	Wirksam nach Neustart des betroffenen Dienstes.
 schema_version	u32	Infrastruktur	Konfigurationsversion	protected	Geschützte Infrastruktur: Änderung über die Betriebsdatei bzw. Infisical, nicht über den Browser. Der Wert wird nicht ausgeliefert.

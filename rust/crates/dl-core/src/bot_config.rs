@@ -118,6 +118,7 @@ pub struct FeatureConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ModerationConfig {
     pub enforce: bool,
+    pub ticket_screenshot_review: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

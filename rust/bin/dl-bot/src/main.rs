@@ -81,6 +81,23 @@ impl Drop for ReadinessReset {
     }
 }
 
+fn install_ticket_screenshot_review(
+    faq: &dl_community::faq::FaqChat,
+    moderator: Option<&Arc<dl_moderation::ModerationSystem>>,
+    enabled: bool,
+) {
+    match (enabled, moderator) {
+        (true, Some(moderator)) => {
+            faq.install_screenshot_reviewer(moderator.clone());
+            tracing::info!("Ticket-Bildprüfung für Scam-Meldungen eingeschaltet");
+        }
+        (true, None) => tracing::warn!(
+            "Ticket-Bildprüfung eingeschaltet, aber Moderations-KI fehlt; Bildprüfung bleibt aus"
+        ),
+        (false, _) => tracing::info!("Ticket-Bildprüfung für Scam-Meldungen ausgeschaltet"),
+    }
+}
+
 #[cfg(test)]
 fn moderation_enforce_from_lookup<F>(lookup: F) -> bool
 where
@@ -1346,9 +1363,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         _ => None,
     };
-    if let Some(moderator) = &moderator {
-        faq.install_screenshot_reviewer(moderator.clone());
-    }
+    install_ticket_screenshot_review(
+        &faq,
+        moderator.as_ref(),
+        operating.moderation.ticket_screenshot_review,
+    );
 
     let router = Arc::new(router);
     let command_sync_config = master::CommandSyncStartupConfig::from_lookup(operating_value);

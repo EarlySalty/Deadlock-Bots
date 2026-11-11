@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::content_verifier::ContentVerifier;
 use crate::moderation_verdict::{
     parse_content_analysis, ContentAnalysis, ModerationCategory, ModerationVerdict,
+    PARSE_ERROR_REASON,
 };
 
 #[cfg(test)]
@@ -50,6 +51,23 @@ pub(crate) mod test_support {
 }
 
 pub const REPORTED_SCREENSHOT_TRIGGER: &str = "ticket_scam_report";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportedScreenshotFailure {
+    NoImages,
+    AnalysisFailed,
+    VerificationFailed,
+}
+
+impl ReportedScreenshotFailure {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoImages => "keine Bilder übergeben",
+            Self::AnalysisFailed => "Analyse ohne verwertbare Antwort",
+            Self::VerificationFailed => "Verifikation ohne verwertbare Antwort",
+        }
+    }
+}
 
 pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer für einen Gaming-Server.
 Analysiere Text und Bilder knapp und konservativ.
@@ -322,21 +340,30 @@ impl ContentModerationPipeline {
         }
     }
 
-    pub async fn evaluate_reported_screenshots(
+    pub(crate) async fn evaluate_reported_screenshots(
         &self,
         image_urls: Vec<String>,
-    ) -> ModerationVerdict {
+    ) -> Result<ModerationVerdict, ReportedScreenshotFailure> {
+        if image_urls.is_empty() {
+            return Err(ReportedScreenshotFailure::NoImages);
+        }
         let input = ModerationInput::new(String::new(), image_urls);
         let analysis = self.analyzer.analyze(&input).await;
+        if analysis.reason == PARSE_ERROR_REASON {
+            return Err(ReportedScreenshotFailure::AnalysisFailed);
+        }
         let verification = self
             .verifier
             .verify_behavior_trigger(&input, &analysis, REPORTED_SCREENSHOT_TRIGGER)
             .await;
-        ModerationVerdict {
+        if verification.reason == PARSE_ERROR_REASON {
+            return Err(ReportedScreenshotFailure::VerificationFailed);
+        }
+        Ok(ModerationVerdict {
             analysis,
             verification,
             trigger: input.trigger_preview(),
-        }
+        })
     }
 }
 
@@ -510,6 +537,53 @@ mod tests {
         assert_eq!(
             vision.models.lock().await.as_slice(),
             &[Some("gpt-5.4-nano".to_string())]
+        );
+    }
+
+    fn screenshot_pipeline(
+        vision: Arc<RecordingVision>,
+        verifier_vision: Arc<RecordingVision>,
+    ) -> ContentModerationPipeline {
+        ContentModerationPipeline::new(
+            ContentAnalyzer::new(
+                Arc::new(RecordingText::default()),
+                Some(vision),
+                ContentAnalyzerConfig::default(),
+            ),
+            ContentVerifier::new(
+                Arc::new(RecordingText::default()),
+                Some(verifier_vision),
+                ContentVerifierConfig {
+                    model: "gpt-5.4-nano".to_string(),
+                },
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn reported_screenshots_report_failures_instead_of_a_verdict() {
+        let image = vec!["https://example.test/dm.png".to_string()];
+        let vision = Arc::new(RecordingVision::default());
+        let verifier_vision = Arc::new(RecordingVision::default());
+        let pipeline = screenshot_pipeline(vision.clone(), verifier_vision.clone());
+        assert_eq!(
+            pipeline.evaluate_reported_screenshots(Vec::new()).await,
+            Err(ReportedScreenshotFailure::NoImages)
+        );
+        assert!(vision.image_counts.lock().await.is_empty());
+        assert_eq!(
+            pipeline.evaluate_reported_screenshots(image.clone()).await,
+            Err(ReportedScreenshotFailure::AnalysisFailed)
+        );
+        assert!(verifier_vision.image_counts.lock().await.is_empty());
+        vision
+            .responses
+            .lock()
+            .await
+            .push(r#"{"category":"scam","confidence":0.9,"reason":"Fake-Support"}"#.to_string());
+        assert_eq!(
+            pipeline.evaluate_reported_screenshots(image).await,
+            Err(ReportedScreenshotFailure::VerificationFailed)
         );
     }
 

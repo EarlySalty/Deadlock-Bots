@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const PARSE_ERROR_REASON: &str = "parse_error";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModerationCategory {
     Scam,
@@ -132,7 +134,7 @@ pub fn parse_content_analysis(raw_text: Option<&str>) -> ContentAnalysis {
         return ContentAnalysis {
             category: ModerationCategory::Other,
             confidence: 0.0,
-            reason: "parse_error".to_string(),
+            reason: PARSE_ERROR_REASON.to_string(),
             raw_json: raw_envelope(raw_text, None),
         };
     };
@@ -158,7 +160,7 @@ pub fn parse_verification_decision(
             confirmed: false,
             category: ModerationCategory::Other,
             confidence: 0.0,
-            reason: "parse_error".to_string(),
+            reason: PARSE_ERROR_REASON.to_string(),
             raw_json: raw_envelope(raw_text, None),
         };
     };

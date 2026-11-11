@@ -11,6 +11,7 @@ use crate::behavior_detector::{
 use crate::case_embed::{build_case_components, build_compact_case_embed, CompactCaseEmbedInput};
 use crate::content_analyzer::{
     ContentModerationEvaluation, ContentModerationPipeline, ModerationInput,
+    ReportedScreenshotFailure,
 };
 use crate::moderation_channel::{DEFAULT_MODERATION_CHANNEL_ID, DEFAULT_SCAN_CHANNEL_IDS};
 use crate::moderation_verdict::{
@@ -171,13 +172,16 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
     pub async fn review_reported_screenshots(
         &self,
         image_urls: Vec<String>,
-    ) -> ReportedScreenshotReview {
+    ) -> Result<ReportedScreenshotReview, ReportedScreenshotFailure> {
+        if image_urls.is_empty() {
+            return Err(ReportedScreenshotFailure::NoImages);
+        }
         let verdict = self
             .pipeline
             .evaluate_reported_screenshots(image_urls)
-            .await;
+            .await?;
         let decision = self.policy.decide(&verdict);
-        ReportedScreenshotReview { verdict, decision }
+        Ok(ReportedScreenshotReview { verdict, decision })
     }
 
     pub async fn handle_message(self: &Arc<Self>, event: &dl_discord::MessageEvent) {

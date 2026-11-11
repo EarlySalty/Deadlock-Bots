@@ -1,4 +1,5 @@
 use dl_moderation::action_policy::{ModerationAction, PolicyDecision};
+use dl_moderation::content_analyzer::ReportedScreenshotFailure;
 use dl_moderation::moderation_system::ReportedScreenshotReview;
 use dl_moderation::moderation_verdict::ModerationCategory;
 
@@ -89,7 +90,7 @@ pub trait ScreenshotReviewer: Send + Sync {
     async fn review_reported_screenshots(
         &self,
         image_urls: Vec<String>,
-    ) -> ReportedScreenshotReview;
+    ) -> Result<ReportedScreenshotReview, ReportedScreenshotFailure>;
 }
 
 #[async_trait::async_trait]
@@ -97,8 +98,37 @@ impl ScreenshotReviewer for dl_moderation::ModerationSystem {
     async fn review_reported_screenshots(
         &self,
         image_urls: Vec<String>,
-    ) -> ReportedScreenshotReview {
+    ) -> Result<ReportedScreenshotReview, ReportedScreenshotFailure> {
         dl_moderation::ModerationSystem::review_reported_screenshots(self, image_urls).await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScreenshotCheck {
+    Disabled,
+    NoImages,
+    Failed(ReportedScreenshotFailure),
+    Reviewed(ReportedScreenshotReview),
+}
+
+impl ScreenshotCheck {
+    pub fn from_result(
+        result: Result<ReportedScreenshotReview, ReportedScreenshotFailure>,
+    ) -> Self {
+        match result {
+            Ok(review) => Self::Reviewed(review),
+            Err(ReportedScreenshotFailure::NoImages) => Self::NoImages,
+            Err(failure) => Self::Failed(failure),
+        }
+    }
+
+    fn line(&self) -> String {
+        match self {
+            Self::Disabled => "Bildprüfung: nicht gelaufen (deaktiviert)".to_string(),
+            Self::NoImages => "Bildprüfung: keine Bilder".to_string(),
+            Self::Failed(failure) => format!("Bildprüfung fehlgeschlagen ({})", failure.label()),
+            Self::Reviewed(review) => verdict_line(review),
+        }
     }
 }
 
@@ -303,12 +333,15 @@ impl ShadowAction {
 }
 
 pub fn shadow_action(
-    review: Option<&ReportedScreenshotReview>,
+    screenshot: &ScreenshotCheck,
     accounts: &[ResolvedAccount],
     opener_id: u64,
 ) -> ShadowAction {
-    let Some(review) = review else {
-        return ShadowAction::NoBan("keine Bildprüfung");
+    let review = match screenshot {
+        ScreenshotCheck::Reviewed(review) => review,
+        ScreenshotCheck::Disabled => return ShadowAction::NoBan("Bildprüfung deaktiviert"),
+        ScreenshotCheck::NoImages => return ShadowAction::NoBan("keine Bilder"),
+        ScreenshotCheck::Failed(_) => return ShadowAction::NoBan("Bildprüfung fehlgeschlagen"),
     };
     if !matches!(review.decision, PolicyDecision::AutoExecute { .. })
         || !review.verdict.verification.confirmed
@@ -351,8 +384,7 @@ fn policy_label(decision: &PolicyDecision) -> String {
 
 pub struct ScamSection<'a> {
     pub image_count: usize,
-    pub review: Option<&'a ReportedScreenshotReview>,
-    pub reviewer_available: bool,
+    pub screenshot: &'a ScreenshotCheck,
     pub accounts: &'a [ResolvedAccount],
     pub action: &'a ShadowAction,
 }
@@ -394,14 +426,7 @@ fn needs_mod_line(escalation: &Escalation) -> String {
 
 fn scam_lines(scam: &ScamSection<'_>) -> Vec<String> {
     let mut lines = vec![format!("Scam-Meldung: ja, Bilder: {}", scam.image_count)];
-    lines.push(
-        match (scam.review, scam.reviewer_available, scam.image_count) {
-            (Some(review), _, _) => verdict_line(review),
-            (None, _, 0) => "Bildprüfung: keine Bilder".to_string(),
-            (None, false, _) => "Bildprüfung: nicht verfügbar".to_string(),
-            (None, true, _) => "Bildprüfung: nicht gelaufen".to_string(),
-        },
-    );
+    lines.push(scam.screenshot.line());
     if scam.accounts.is_empty() {
         lines.push("Gemeldeter Account: keiner erkannt".to_string());
     }
@@ -433,11 +458,7 @@ mod tests {
 
     const REAL_SCAM_TICKET: &str = "Heyho, leider nun auch bei euch unterwegs: Der \"Ich hab dich ausversehen auf Discord reportet\"-Betrug. Man wird gebeten Kontakt zu einem \"Discord-Support-Mitarbeiter\" aufzunehmen. Leider hab ich ihn schon bei Discord gemeldet und glaube keinen Zugriff mehr auf die Nachrichten. Demnach keinen Beweis mehr. Sollte noch jemand weiteres sich bei euch melden, habt ihr mit mir eine 2. Bestätigung\n\nUsername: franklygab";
 
-    fn review(
-        category: ModerationCategory,
-        confirmed: bool,
-        auto: bool,
-    ) -> ReportedScreenshotReview {
+    fn review(category: ModerationCategory, confirmed: bool, auto: bool) -> ScreenshotCheck {
         let decision = if auto {
             PolicyDecision::AutoExecute {
                 action: ModerationAction::Timeout,
@@ -446,7 +467,7 @@ mod tests {
         } else {
             PolicyDecision::Ignore
         };
-        ReportedScreenshotReview {
+        ScreenshotCheck::Reviewed(ReportedScreenshotReview {
             verdict: ModerationVerdict {
                 analysis: ContentAnalysis {
                     category: category.clone(),
@@ -464,7 +485,7 @@ mod tests {
                 trigger: String::new(),
             },
             decision,
-        }
+        })
     }
 
     fn member(id: u64) -> ResolvedAccount {
@@ -528,15 +549,15 @@ mod tests {
     fn would_ban_nur_bei_bestaetigtem_scam_und_genau_einem_fremden_mitglied() {
         let scam = review(ModerationCategory::Scam, true, true);
         assert_eq!(
-            shadow_action(Some(&scam), &[member(7)], 1),
+            shadow_action(&scam, &[member(7)], 1),
             ShadowAction::WouldBan(7)
         );
         assert!(matches!(
-            shadow_action(Some(&scam), &[member(1)], 1),
+            shadow_action(&scam, &[member(1)], 1),
             ShadowAction::NoBan(_)
         ));
         assert!(matches!(
-            shadow_action(Some(&scam), &[member(7), member(8)], 1),
+            shadow_action(&scam, &[member(7), member(8)], 1),
             ShadowAction::NoBan(_)
         ));
         let not_member = ResolvedAccount {
@@ -544,7 +565,7 @@ mod tests {
             lookup: MemberLookup::NotMember,
         };
         assert!(matches!(
-            shadow_action(Some(&scam), &[not_member], 1),
+            shadow_action(&scam, &[not_member], 1),
             ShadowAction::NoBan(_)
         ));
         for other in [
@@ -553,14 +574,20 @@ mod tests {
             review(ModerationCategory::NsfwExplicit, true, true),
         ] {
             assert!(matches!(
-                shadow_action(Some(&other), &[member(7)], 1),
+                shadow_action(&other, &[member(7)], 1),
                 ShadowAction::NoBan(_)
             ));
         }
-        assert!(matches!(
-            shadow_action(None, &[member(7)], 1),
-            ShadowAction::NoBan(_)
-        ));
+        for state in [
+            ScreenshotCheck::Disabled,
+            ScreenshotCheck::NoImages,
+            ScreenshotCheck::Failed(ReportedScreenshotFailure::AnalysisFailed),
+        ] {
+            assert!(matches!(
+                shadow_action(&state, &[member(7)], 1),
+                ShadowAction::NoBan(_)
+            ));
+        }
     }
 
     #[test]
@@ -575,7 +602,7 @@ mod tests {
             lookup: MemberLookup::Member(7),
         };
         assert_eq!(
-            shadow_action(Some(&scam), &[member(7), not_member, by_name.clone()], 1),
+            shadow_action(&scam, &[member(7), not_member, by_name.clone()], 1),
             ShadowAction::WouldBan(7)
         );
         let other_member = ResolvedAccount {
@@ -583,9 +610,34 @@ mod tests {
             lookup: MemberLookup::Member(8),
         };
         assert!(matches!(
-            shadow_action(Some(&scam), &[member(7), other_member, by_name], 1),
+            shadow_action(&scam, &[member(7), other_member, by_name], 1),
             ShadowAction::NoBan("mehrere Mitglieder genannt")
         ));
+    }
+
+    #[test]
+    fn fehlgeschlagene_bildpruefung_ist_kein_urteil() {
+        let failed = ScreenshotCheck::from_result(Err(ReportedScreenshotFailure::AnalysisFailed));
+        let action = shadow_action(&failed, &[member(7)], 1);
+        let text = scam_lines(&ScamSection {
+            image_count: 1,
+            screenshot: &failed,
+            accounts: &[member(7)],
+            action: &action,
+        })
+        .join("\n");
+        assert!(text.contains("Bildprüfung fehlgeschlagen"), "{text}");
+        assert!(!text.contains("Policy"), "{text}");
+        assert!(!text.contains("Bildprüfung: other"), "{text}");
+        assert_eq!(action, ShadowAction::NoBan("Bildprüfung fehlgeschlagen"));
+        let disabled = scam_lines(&ScamSection {
+            image_count: 1,
+            screenshot: &ScreenshotCheck::Disabled,
+            accounts: &[],
+            action: &ShadowAction::NoBan("Bildprüfung deaktiviert"),
+        })
+        .join("\n");
+        assert!(disabled.contains("Bildprüfung: nicht gelaufen (deaktiviert)"));
     }
 
     #[test]

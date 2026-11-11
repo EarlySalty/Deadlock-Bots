@@ -12,8 +12,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::answer_support::{acquire_stateful_support_turn, KnowledgeLookup};
 use crate::db::{i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 use crate::ticket_triage::{
-    self, MemberLookup, ResolvedAccount, ScamSection, ScreenshotReviewer, ShadowEntry, TicketImage,
-    TICKET_MAX_IMAGES,
+    self, MemberLookup, ResolvedAccount, ScamSection, ScreenshotCheck, ScreenshotReviewer,
+    ShadowEntry, TicketImage, TICKET_MAX_IMAGES,
 };
 
 pub use crate::answer_support::{KnowledgeAnswer, KnowledgeSource};
@@ -783,8 +783,7 @@ impl TicketOpening {
 
 struct TicketScamCheck {
     image_count: usize,
-    reviewer_available: bool,
-    review: Option<dl_moderation::moderation_system::ReportedScreenshotReview>,
+    screenshot: ScreenshotCheck,
     accounts: Vec<ResolvedAccount>,
     action: ticket_triage::ShadowAction,
 }
@@ -793,8 +792,7 @@ impl TicketScamCheck {
     fn section(&self) -> ScamSection<'_> {
         ScamSection {
             image_count: self.image_count,
-            review: self.review.as_ref(),
-            reviewer_available: self.reviewer_available,
+            screenshot: &self.screenshot,
             accounts: &self.accounts,
             action: &self.action,
         }
@@ -1026,32 +1024,28 @@ impl FaqChat {
         if !ticket_triage::is_scam_report(&question.text) {
             return None;
         }
-        let reviewer = self.screenshot_reviewer.get();
-        let review = match reviewer {
-            Some(reviewer) if !question.images.is_empty() => Some(
-                reviewer
-                    .review_reported_screenshots(
-                        question
-                            .images
-                            .iter()
-                            .map(|image| image.url.clone())
-                            .collect(),
-                    )
-                    .await,
-            ),
-            _ => None,
-        };
+        let screenshot = self.review_ticket_screenshots(&question.images).await;
         let accounts = self
             .resolve_reported_accounts(guild_id, author_id, &question.text)
             .await;
-        let action = ticket_triage::shadow_action(review.as_ref(), &accounts, author_id);
+        let action = ticket_triage::shadow_action(&screenshot, &accounts, author_id);
         Some(TicketScamCheck {
             image_count: question.images.len(),
-            reviewer_available: reviewer.is_some(),
-            review,
+            screenshot,
             accounts,
             action,
         })
+    }
+
+    async fn review_ticket_screenshots(&self, images: &[TicketImage]) -> ScreenshotCheck {
+        let Some(reviewer) = self.screenshot_reviewer.get() else {
+            return ScreenshotCheck::Disabled;
+        };
+        if images.is_empty() {
+            return ScreenshotCheck::NoImages;
+        }
+        let urls = images.iter().map(|image| image.url.clone()).collect();
+        ScreenshotCheck::from_result(reviewer.review_reported_screenshots(urls).await)
     }
 
     async fn resolve_reported_accounts(
@@ -3125,7 +3119,10 @@ mod tests {
         async fn review_reported_screenshots(
             &self,
             image_urls: Vec<String>,
-        ) -> dl_moderation::moderation_system::ReportedScreenshotReview {
+        ) -> Result<
+            dl_moderation::moderation_system::ReportedScreenshotReview,
+            dl_moderation::content_analyzer::ReportedScreenshotFailure,
+        > {
             self.calls.lock().unwrap().push(image_urls);
             let analysis = dl_moderation::moderation_verdict::ContentAnalysis {
                 category: dl_moderation::moderation_verdict::ModerationCategory::Scam,
@@ -3133,7 +3130,7 @@ mod tests {
                 reason: "Fake-Support".to_string(),
                 raw_json: String::new(),
             };
-            dl_moderation::moderation_system::ReportedScreenshotReview {
+            Ok(dl_moderation::moderation_system::ReportedScreenshotReview {
                 verdict: dl_moderation::moderation_verdict::ModerationVerdict {
                     verification: dl_moderation::moderation_verdict::VerificationDecision {
                         confirmed: true,
@@ -3149,7 +3146,7 @@ mod tests {
                     action: dl_moderation::action_policy::ModerationAction::Timeout,
                     timeout_minutes: 1440,
                 },
-            }
+            })
         }
     }
 
@@ -4798,8 +4795,10 @@ mod tests {
 
         let sent = port.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert!(sent[0].1.contains("Bildprüfung: nicht verfügbar"));
-        assert!(sent[0].1.contains("kein Bann (keine Bildprüfung)"));
+        assert!(sent[0]
+            .1
+            .contains("Bildprüfung: nicht gelaufen (deaktiviert)"));
+        assert!(sent[0].1.contains("kein Bann (Bildprüfung deaktiviert)"));
         assert!(!sent[0].1.contains("would ban"));
     }
 
