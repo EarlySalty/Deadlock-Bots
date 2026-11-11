@@ -12,8 +12,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::answer_support::{acquire_stateful_support_turn, KnowledgeLookup};
 use crate::db::{i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 use crate::ticket_triage::{
-    self, MemberLookup, ReportedAccounts, ResolvedAccount, ScamSection, ScreenshotCheck,
-    ScreenshotReviewer, ShadowEntry, TicketImage, TICKET_MAX_IMAGES,
+    self, BrainState, MemberLookup, ReportedAccounts, ResolvedAccount, ScamSection,
+    ScreenshotCheck, ScreenshotReviewer, ShadowEntry, TicketImage, TICKET_MAX_IMAGES,
 };
 
 pub use crate::answer_support::{KnowledgeAnswer, KnowledgeSource};
@@ -22,10 +22,8 @@ pub const PANEL_CHANNEL_ID: u64 = 1491953161747955853;
 pub const FAQ_CATEGORY_ID: u64 = 1310153243795390475;
 pub const TICKET_AUTO_HELP_CATEGORY_ID: u64 = 1459628097145147645;
 pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
-pub const TICKET_TOOL_BOT_ID: u64 = 557628352828014614;
 pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
-const TICKET_CANDIDATE_UNAVAILABLE: &str = "Kein Kandidat erzeugt (Generator nicht verfügbar).";
 const FAQ_DISCORD_IO_TIMEOUT: Duration = Duration::from_secs(3);
 const FAQ_DISCORD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
 const FAQ_PRIVACY_BLOCK_TEXT: &str = "Dein globaler Datenschutz-Opt-out ist aktiv, deshalb lege ich keinen neuen FAQ-Chat an – der würde Verlauf speichern. Falls du schon einen FAQ-Kanal hast, kannst du dort direkt fragen: Ich antworte ohne Speichern und ohne Verlauf, genauso wenn du mir einfach direkt schreibst. Willst du wieder einen Chat mit Verlauf, aktivier ihn mit `/datenschutz-optin`; lieber ein Mensch? Dann mach ein Ticket in <#1459628609705738539> auf.";
@@ -63,28 +61,28 @@ fn answer_text(answer: KnowledgeLookup) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TicketAutoOutcome {
     answer: Option<String>,
-    decision: &'static str,
+    brain: BrainState,
 }
 
 impl TicketAutoOutcome {
-    fn silence(decision: &'static str) -> Self {
+    fn silence(brain: BrainState) -> Self {
         Self {
             answer: None,
-            decision,
+            brain,
         }
     }
 }
 
 fn ticket_auto_outcome_from_knowledge(answer: KnowledgeLookup) -> TicketAutoOutcome {
     match answer {
-        KnowledgeLookup::Unanswerable => TicketAutoOutcome::silence("no"),
-        KnowledgeLookup::Transport => TicketAutoOutcome::silence("uncertain"),
+        KnowledgeLookup::Unanswerable => TicketAutoOutcome::silence(BrainState::NoAnswer),
+        KnowledgeLookup::Transport => TicketAutoOutcome::silence(BrainState::Unreachable),
         answer => match answer_text(answer) {
             Some(answer) => TicketAutoOutcome {
                 answer: Some(answer),
-                decision: "yes",
+                brain: BrainState::Answered,
             },
-            None => TicketAutoOutcome::silence("uncertain"),
+            None => TicketAutoOutcome::silence(BrainState::NoAnswer),
         },
     }
 }
@@ -959,11 +957,7 @@ impl FaqChat {
         let outcome = self
             .ticket_brain_outcome(&question.text, author_id, channel_id)
             .await;
-        let escalation = ticket_triage::escalation(
-            outcome.answer.is_some(),
-            outcome.decision != "uncertain",
-            &question.text,
-        );
+        let escalation = ticket_triage::escalation(outcome.brain, &question.text);
         let scam = self.ticket_scam_check(guild_id, author_id, &question).await;
         let (candidate_status, candidate) = Self::ticket_candidate(&outcome);
         tracing::info!(
@@ -971,7 +965,7 @@ impl FaqChat {
             author_id,
             question_chars,
             image_count = question.images.len(),
-            verdict = outcome.decision,
+            verdict = outcome.brain.verdict(),
             candidate_status,
             needs_mod = escalation.needs_mod(),
             scam_report = scam.is_some(),
@@ -980,7 +974,7 @@ impl FaqChat {
         );
         let entry = ShadowEntry {
             ticket_channel_id: channel_id,
-            brain_verdict: outcome.decision,
+            brain_verdict: outcome.brain.verdict(),
             escalation: &escalation,
             scam: scam.as_ref().map(TicketScamCheck::section),
             candidate: &candidate,
@@ -995,7 +989,7 @@ impl FaqChat {
             tracing::warn!(
                 channel_id,
                 shadow_channel_id,
-                verdict = outcome.decision,
+                verdict = outcome.brain.verdict(),
                 candidate_status,
                 shadow_send_status = "failed",
                 "FAQ-Ticket-Shadow Versand fehlgeschlagen"
@@ -1010,7 +1004,7 @@ impl FaqChat {
         channel_id: u64,
     ) -> TicketAutoOutcome {
         if text.trim().is_empty() {
-            return TicketAutoOutcome::silence("no");
+            return TicketAutoOutcome::silence(BrainState::NotAsked);
         }
         ticket_auto_outcome_from_knowledge(self.lookup_ticket(text, author_id, channel_id).await)
     }
@@ -1386,7 +1380,10 @@ impl FaqChat {
     fn ticket_candidate(outcome: &TicketAutoOutcome) -> (&'static str, String) {
         match &outcome.answer {
             Some(answer) => ("generated", answer.clone()),
-            None => ("unavailable", TICKET_CANDIDATE_UNAVAILABLE.to_string()),
+            None => {
+                let (status, text) = outcome.brain.missing_candidate();
+                (status, text.to_string())
+            }
         }
     }
 
@@ -1585,7 +1582,7 @@ impl FaqChat {
         content: &str,
         images: &[TicketImage],
     ) {
-        if guild_id == 0 || author_id == TICKET_TOOL_BOT_ID {
+        if guild_id == 0 {
             return;
         }
         if self.port.channel_category(guild_id, channel_id).await
@@ -2667,15 +2664,15 @@ mod tests {
                 answer: Some("  Antwort aus Knowledge  ".to_string()),
                 sources: Vec::new(),
             }));
-        assert_eq!(answered.decision, "yes");
+        assert_eq!(answered.brain.verdict(), "yes");
         assert_eq!(answered.answer.as_deref(), Some("Antwort aus Knowledge"));
 
         let unanswerable = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Unanswerable);
-        assert_eq!(unanswerable.decision, "no");
+        assert_eq!(unanswerable.brain.verdict(), "no");
         assert_eq!(unanswerable.answer, None);
 
         let uncertain = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Transport);
-        assert_eq!(uncertain.decision, "uncertain");
+        assert_eq!(uncertain.brain.verdict(), "uncertain");
         assert_eq!(uncertain.answer, None);
     }
 
@@ -4699,12 +4696,17 @@ mod tests {
 
     #[tokio::test]
     async fn ticket_shadow_ohne_brain_antwort_loggt_needs_mod() {
-        for (brain, reason) in [
+        for (brain, reason, candidate) in [
             (
                 ScriptedBrain::replying(Vec::new()),
                 "Brain ohne belegte Antwort",
+                "Kein Kandidat (Brain hat keine belegte Antwort).",
             ),
-            (ScriptedBrain::failing(), "Brain nicht erreichbar"),
+            (
+                ScriptedBrain::failing(),
+                "Brain nicht erreichbar",
+                "Kein Kandidat (Brain nicht erreichbar).",
+            ),
         ] {
             let port = ticket_port();
             let faq = ticket_faq(port.clone(), brain.clone());
@@ -4717,7 +4719,8 @@ mod tests {
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0].0, LOG_CHANNEL_ID);
             assert!(sent[0].1.contains(&format!("needs_mod: ja ({reason})")));
-            assert!(sent[0].1.contains(TICKET_CANDIDATE_UNAVAILABLE));
+            assert!(sent[0].1.contains(candidate), "{}", sent[0].1);
+            assert!(!sent[0].1.contains("Generator"), "{}", sent[0].1);
         }
     }
 
@@ -4732,14 +4735,6 @@ mod tests {
         faq.install_screenshot_reviewer(reviewer.clone());
         let opener = 111111111111111111;
 
-        faq.handle_ticket_message_with_images(
-            1,
-            222,
-            TICKET_TOOL_BOT_ID,
-            "<@111111111111111111> Willkommen",
-            &[scam_image("bot", 10)],
-        )
-        .await;
         faq.handle_ticket_message_with_images(
             1,
             222,

@@ -17,28 +17,8 @@ const NAME_LABELS: &[&str] = &[
 ];
 const MODERATION_EXACT: &[&str] = &["ban", "bann", "banned", "acc", "mute", "muted"];
 const MODERATION_PREFIXES: &[&str] = &[
-    "scam",
-    "betrug",
-    "betrüg",
-    "phish",
-    "hack",
-    "gehackt",
-    "gebannt",
-    "entbann",
-    "unban",
-    "report",
-    "gemeldet",
-    "meldung",
-    "melden",
-    "account",
-    "konto",
-    "timeout",
-    "gemutet",
-    "beleidig",
-    "beläst",
-    "fake",
-    "gestohlen",
-    "geklaut",
+    "hack", "gebannt", "entbann", "unban", "report", "gemeldet", "meldung", "melden", "account",
+    "konto", "timeout", "gemutet", "beleidig", "beläst",
 ];
 const SCAM_PREFIXES: &[&str] = &[
     "scam",
@@ -51,8 +31,6 @@ const SCAM_PREFIXES: &[&str] = &[
     "gestohlen",
     "geklaut",
     "reportet",
-    "ausversehen",
-    "versehentlich",
 ];
 const HUMAN_EXACT: &[&str] = &[
     "mod",
@@ -128,9 +106,52 @@ impl ScreenshotCheck {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrainState {
+    Answered,
+    NoAnswer,
+    Unreachable,
+    NotAsked,
+}
+
+impl BrainState {
+    pub fn verdict(self) -> &'static str {
+        match self {
+            Self::Answered => "yes",
+            Self::NoAnswer => "no",
+            Self::Unreachable => "uncertain",
+            Self::NotAsked => "not_asked",
+        }
+    }
+
+    pub fn missing_candidate(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Answered | Self::NoAnswer => (
+                "no_answer",
+                "Kein Kandidat (Brain hat keine belegte Antwort).",
+            ),
+            Self::Unreachable => ("unavailable", "Kein Kandidat (Brain nicht erreichbar)."),
+            Self::NotAsked => (
+                "not_asked",
+                "Kein Kandidat (Brain nicht gefragt, nur Bilder).",
+            ),
+        }
+    }
+
+    fn escalation_reason(self) -> Option<EscalationReason> {
+        match self {
+            Self::Answered => None,
+            Self::NoAnswer => Some(EscalationReason::BrainNoAnswer),
+            Self::Unreachable => Some(EscalationReason::BrainUnavailable),
+            Self::NotAsked => Some(EscalationReason::BrainNotAsked),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscalationReason {
     BrainNoAnswer,
     BrainUnavailable,
+    BrainNotAsked,
     ModerationCase,
     HumanRequested,
 }
@@ -140,6 +161,7 @@ impl EscalationReason {
         match self {
             Self::BrainNoAnswer => "Brain ohne belegte Antwort",
             Self::BrainUnavailable => "Brain nicht erreichbar",
+            Self::BrainNotAsked => "Brain nicht gefragt (nur Bilder)",
             Self::ModerationCase => "Moderations-, Scam-, Bann- oder Accountfall",
             Self::HumanRequested => "Mitglied fragt nach einem Menschen",
         }
@@ -157,14 +179,9 @@ impl Escalation {
     }
 }
 
-pub fn escalation(brain_answered: bool, brain_reachable: bool, text: &str) -> Escalation {
+pub fn escalation(brain: BrainState, text: &str) -> Escalation {
     let words = words(text);
-    let mut reasons = Vec::new();
-    if !brain_reachable {
-        reasons.push(EscalationReason::BrainUnavailable);
-    } else if !brain_answered {
-        reasons.push(EscalationReason::BrainNoAnswer);
-    }
+    let mut reasons: Vec<EscalationReason> = brain.escalation_reason().into_iter().collect();
     if words.iter().any(|word| is_moderation_word(word)) {
         reasons.push(EscalationReason::ModerationCase);
     }
@@ -187,6 +204,7 @@ fn is_moderation_word(word: &str) -> bool {
     MODERATION_EXACT.contains(&word)
         || MODERATION_PREFIXES
             .iter()
+            .chain(SCAM_PREFIXES)
             .any(|prefix| word.starts_with(prefix))
 }
 
@@ -610,7 +628,7 @@ mod tests {
             vec![AccountRef::Name("franklygab".to_string())]
         );
         assert!(is_scam_report(REAL_SCAM_TICKET));
-        let escalation = escalation(true, true, REAL_SCAM_TICKET);
+        let escalation = escalation(BrainState::Answered, REAL_SCAM_TICKET);
         assert_eq!(escalation.reasons, vec![EscalationReason::ModerationCase]);
     }
 
@@ -696,23 +714,35 @@ mod tests {
 
     #[test]
     fn needs_mod_gruende() {
-        assert!(!escalation(true, true, "Wie stelle ich die Sprache um?").needs_mod());
+        assert!(!escalation(BrainState::Answered, "Wie stelle ich die Sprache um?").needs_mod());
         assert_eq!(
-            escalation(false, true, "Frage").reasons,
+            escalation(BrainState::NoAnswer, "Frage").reasons,
             vec![EscalationReason::BrainNoAnswer]
         );
         assert_eq!(
-            escalation(false, false, "Kann ein Mod bitte schauen?").reasons,
+            escalation(BrainState::Unreachable, "Kann ein Mod bitte schauen?").reasons,
             vec![
                 EscalationReason::BrainUnavailable,
                 EscalationReason::HumanRequested
             ]
         );
         assert_eq!(
-            escalation(true, true, "Warum wurde ich gebannt?").reasons,
+            escalation(BrainState::Answered, "Warum wurde ich gebannt?").reasons,
             vec![EscalationReason::ModerationCase]
         );
-        assert!(!escalation(true, true, "Ich spiele in einer Band").needs_mod());
+        assert!(!escalation(BrainState::Answered, "Ich spiele in einer Band").needs_mod());
+        assert_eq!(
+            escalation(BrainState::NotAsked, "").reasons,
+            vec![EscalationReason::BrainNotAsked]
+        );
+        assert!(
+            !escalation(BrainState::Answered, "Ich habe das versehentlich gelöscht").needs_mod()
+        );
+        assert!(!is_scam_report("Ich habe das ausversehen gelöscht"));
+        for word in ["scam", "betrug", "phishing", "fake", "geklaut"] {
+            assert!(is_scam_report(word), "{word}");
+            assert!(escalation(BrainState::Answered, word).needs_mod(), "{word}");
+        }
     }
 
     #[test]
