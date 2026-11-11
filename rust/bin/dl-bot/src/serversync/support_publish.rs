@@ -244,7 +244,7 @@ struct ResolvedSupportTexts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSupportButtons {
-    become: String,
+    join: String,
     tip: String,
     manage: String,
     twitch: String,
@@ -302,7 +302,8 @@ impl SupportBodyTextsToml {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SupportButtonsToml {
-    become: Option<String>,
+    #[serde(rename = "become")]
+    join: Option<String>,
     tip: Option<String>,
     manage: Option<String>,
     twitch: Option<String>,
@@ -626,7 +627,7 @@ impl ResolvedSupportConfig {
                 thanks: SUPPORT_THANKS.to_string(),
             },
             buttons: ResolvedSupportButtons {
-                become: SUPPORT_BECOME_BUTTON_LABEL.to_string(),
+                join: SUPPORT_BECOME_BUTTON_LABEL.to_string(),
                 tip: SUPPORT_TIP_BUTTON_LABEL.to_string(),
                 manage: SUPPORT_MANAGE_BUTTON_LABEL.to_string(),
                 twitch: SUPPORT_TWITCH_BUTTON_LABEL.to_string(),
@@ -648,7 +649,7 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.texts.funding, file.texts.funding);
         apply_optional(&mut self.texts.pay, file.texts.pay);
         apply_optional(&mut self.texts.thanks, file.texts.thanks);
-        apply_optional(&mut self.buttons.become, file.buttons.become);
+        apply_optional(&mut self.buttons.join, file.buttons.join);
         apply_optional(&mut self.buttons.tip, file.buttons.tip);
         apply_optional(&mut self.buttons.manage, file.buttons.manage);
         apply_optional(&mut self.buttons.twitch, file.buttons.twitch);
@@ -744,7 +745,7 @@ fn pay_message(config: &ResolvedSupportConfig, funding: SupportFunding) -> Suppo
             interactive_button(
                 SUPPORT_COMPONENT_ID_BECOME_BUTTON,
                 1,
-                &config.buttons.become,
+                &config.buttons.join,
                 SUPPORT_BUTTON_BECOME,
             ),
             interactive_button(
@@ -1212,7 +1213,7 @@ become = "Runtime Button"
         assert_eq!(config.texts.intro, SUPPORT_INTRO);
         assert_eq!(config.texts.pay, "Runtime Zahlung");
         assert_eq!(config.texts.perks, SUPPORT_PERKS);
-        assert_eq!(config.buttons.become, "Runtime Button");
+        assert_eq!(config.buttons.join, "Runtime Button");
         assert_eq!(config.buttons.manage, SUPPORT_MANAGE_BUTTON_LABEL);
         assert!(warnings.is_empty(), "{warnings:?}");
     }
@@ -1238,13 +1239,9 @@ donate = "https://ko-fi.com/deutschedeadlockcommunity"
 enabled = false
 "#,
         );
-        let output = build_support_publish_output(
-            temp.path(),
-            &stored(&STORED_IDS, None),
-            funding(0),
-            true,
-        )
-        .expect("output");
+        let output =
+            build_support_publish_output(temp.path(), &stored(&STORED_IDS, None), funding(0), true)
+                .expect("output");
         let rendered = output
             .messages
             .iter()
@@ -1345,7 +1342,14 @@ enabled = false
             .flat_map(|message| text_contents(&message.payload))
             .collect::<Vec<_>>()
             .join("\n");
-        for banned in ["Ko-fi", "KI-Abos", "Warum ich", "Server-Abo", "admin.", "\u{2014}"] {
+        for banned in [
+            "Ko-fi",
+            "KI-Abos",
+            "Warum ich",
+            "Server-Abo",
+            "admin.",
+            "\u{2014}",
+        ] {
             assert!(!rendered.contains(banned), "{banned}");
         }
 
@@ -1400,13 +1404,9 @@ enabled = false
     fn support_payload_hash_noop_banner_und_balken_aendern_hash() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_banner_bytes(temp.path(), b"banner-one");
-        let first = build_support_publish_output(
-            temp.path(),
-            &stored(&STORED_IDS, None),
-            funding(0),
-            true,
-        )
-        .expect("first output");
+        let first =
+            build_support_publish_output(temp.path(), &stored(&STORED_IDS, None), funding(0), true)
+                .expect("first output");
         assert_eq!(first.messages[0].action, "planned_edit");
 
         let same = build_support_publish_output(

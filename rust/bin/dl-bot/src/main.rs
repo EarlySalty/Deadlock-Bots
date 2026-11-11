@@ -17,6 +17,7 @@ mod runtime_assets;
 mod scrim_adapter;
 mod scrimglue;
 mod serversync;
+mod supporter;
 mod turnierglue;
 mod twitch_invite_sync;
 mod twitch_invites;
@@ -651,6 +652,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
+    let supporter_config = supporter::SupporterConfig::from_lookup(
+        env,
+        format!("http://127.0.0.1:{}", cfg.ports.dashboard),
+    );
+    let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config);
+    supporter::register(&mut router, supporter_links.clone());
+    serversync_concrete
+        .set_supporter_funding(supporter_links)
+        .await;
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
@@ -1549,6 +1559,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 matcher.client.clone(),
             );
         }
+        supporter::SupporterSync::new(
+            central_pool.clone(),
+            adapter.http.clone(),
+            serversync::GUILD_ID,
+            serversync_concrete.clone(),
+            supporter_config.clone(),
+        )
+        .spawn();
         master::spawn_control(
             &dispatcher,
             adapter.clone(),
