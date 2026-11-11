@@ -44,12 +44,13 @@ pub const MAX_LANE_MEMBERS: usize = 6;
 /// selbst und die permanenten Kanäle. Sie dürfen nie Ziel eines Routings werden,
 /// sonst „verschiebt" der Bot jemanden in den Kanal, in dem er schon sitzt.
 /// Einzige Quelle für die Fixkanäle der TempVoice-Engine.
-pub const NON_LANE_CHANNEL_IDS: [u64; 5] = [
+pub const NON_LANE_CHANNEL_IDS: [u64; 6] = [
     ROUTER_VC_ID,
     1493690350580138114, // permanenter Chill-Voice
     1411391356278018245, // Off-Topic-Anker
     1470126503252721845, // Neue-Spieler-Anker
     1505618194017161267,
+    1570132490784604164,
 ];
 pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
 pub const ROUTER_PANEL_MESSAGE_KEY: &str = "components_v2_message_id";
