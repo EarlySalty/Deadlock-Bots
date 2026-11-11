@@ -2,7 +2,8 @@
 
 Worktree: /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107
 Branch: feat/ticket-scam-shadow-20261107 (base origin/main 5700ed1a)
-Head: 0edeeb35 (local commit only, NOT pushed yet)
+Remote: origin/feat/ticket-scam-shadow-20261107 = a3a6abb6 (checked with `git rev-parse`).
+Local head: see "Fixer state 2026-11-11" below; those commits are local only.
 
 ## Done
 - Collector keeps the opener's images (max 4, max 8 MiB each, same author only, Ticket Tool bot 557628352828014614 ignored). `MessageAttachment.size` added in dl-discord.
@@ -44,7 +45,16 @@ BLOCK only because the reviewer quota ran out (no verified finding). Its diff-on
 - WORKER-ERGEBNIS.md written. Next: gate-review, push, integrator review and deploy.
 
 ## Gate state 2026-11-07 17:00
-- Branch feature/ticket-scam-shadow-20261107 pushed, HEAD 1ba0d376, origin/main 20c9bff4 merged.
+- Branch feat/ticket-scam-shadow-20261107 pushed, remote head a3a6abb6 (docs commit on top of 1ba0d376), origin/main 20c9bff4 merged.
 - gate-review run twice: "kein Modell der Kette hat geurteilt: claude-opus-5-5: ... weekly limit · resets 4am (Europe/Berlin)". No BLOCK finding; the configured chain has only Opus.
 - Wakeup scheduled for 04:05 Europe/Berlin to rerun gate-review, merge HEAD:main on ALLOW, deploy dl-bot and prove the shadow log live. Shadow only, no bans, no pings.
 - If the 04:05 gate still has no judgment: report and stop, no bypass. Only the user can push main in that case.
+
+## Fixer state 2026-11-11 (gate round 1 findings)
+- 527220e6 merges origin/main 987e587c (2026-11-11 00:32). On top, local only, not pushed: dedup twins, config switch for the screenshot review, account extraction and member lookup hardening, shadow log truthfulness, docs.
+- Screenshot review is behind `moderation.ticket_screenshot_review` in config/bot.toml, default `false`. While off, the shadow entry says "Bildprüfung: nicht gelaufen (deaktiviert)" and the decision is always "kein Bann". A failed review is logged as "Bildprüfung fehlgeschlagen (...)", never as a verdict.
+- Scope item 2 resolves reported accounts from the ticket text only (user mention, Discord user ID, `@name`, explicit labels such as `Username:` or `Discord-Name:`). Extracting account names from the screenshots is NOT built; open follow-up.
+- "would ban" only for exactly one distinct non-staff, non-bot member who is not the opener, with no unclear or non-member refs alongside and a confirmed scam verdict above the auto threshold. More than five refs, unclear membership or several accounts give "kein Bann" with a German reason.
+- Brain state per opening is logged as it happened: `yes`, `no`, `uncertain` (Brain unreachable) or `not_asked` (image-only opening), each with its own candidate placeholder.
+- Commit 2ecf3c26 keeps its subject; the gate asked for a reword, but no amend or force is allowed, so the fixes are new commits.
+- Next: gate-review on this head, then integrator review, merge, deploy. The user still has to approve ticket screenshots going to the moderation vision provider before the switch is turned on.
