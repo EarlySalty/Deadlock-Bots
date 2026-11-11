@@ -521,7 +521,7 @@ impl DiscordAdapter {
 
     /// REST-404 (Unknown Member / Unknown User) = bestätigt abwesend.
     /// Jeder andere Fehler (Rate-Limit/5xx/Transport) ist NICHT „abwesend".
-    fn is_http_404(err: &serenity::Error) -> bool {
+    pub(crate) fn is_http_404(err: &serenity::Error) -> bool {
         matches!(
             err,
             serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
@@ -941,6 +941,27 @@ impl DiscordPort for DiscordAdapter {
             invite_url,
         )
         .await
+    }
+
+    async fn community_voice_candidates(&self, guild_id: u64) -> Result<Vec<u64>, PortError> {
+        crate::community_voice::candidates(self, guild_id)
+    }
+
+    async fn community_voice_invite(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+    ) -> Result<Option<dl_broker::port::StreamerVoiceInvite>, PortError> {
+        crate::community_voice::invite(self, guild_id, channel_id).await
+    }
+
+    async fn community_voice_invite_valid(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        invite_url: &str,
+    ) -> Result<bool, PortError> {
+        crate::community_voice::invite_still_valid(self, guild_id, channel_id, invite_url).await
     }
 
     async fn create_invite(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, PortError> {
