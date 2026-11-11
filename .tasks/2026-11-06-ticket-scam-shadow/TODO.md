@@ -29,6 +29,19 @@ Last origin/main merge: 11f721bd (2026-11-11), merge commit fbd40262.
 - Left as is: `handle_ticket_message` stays as the text-only entry point used by tests; no test for the `install_ticket_screenshot_review` wiring in dl-bot main.rs (wiring is a plain `if switch && moderator` install).
 - The Ticket Tool bot guard claim was removed from these docs because no such guard exists in the code.
 
+## Gate round 5 (HEAD 9eab7e7d, 2026-11-11 evening): BLOCK by Opus 5.5
+Full output: /tmp/claude-1000/-home-nathanael-Documents/d0019076-673b-4e50-9c79-7701977fdd65/scratchpad/gate-r5.txt (201 BLOCKING, 16 NIT, many duplicates). Classes:
+- Commit format (hook): fix commits need an `Ursache:` block with all four layers (mechanism, why_possible, why_unnoticed, twins); e086af40, d59239d1, 4ef7c633, 65885803 and others fail. The gate asks for a reword of those commits, which is a history rewrite.
+- Images: the early return in `handle_ticket_message_with_images` skips oversized-only messages before `skipped_images` counts them; no review count for images the provider failed to download.
+- Silent truncation of opening text at TICKET_OPENING_MAX_CHARS has no marker in the entry.
+- Shadow entry cut at literal 3900 vs BRAIN_V2_TEXT_LIMIT 4000; test asserts 2000; literal `not_asked` in three log sites instead of `BrainState::NotAsked.verdict()`.
+- `ScreenshotCheck::Disabled` also covers "switch on but moderation AI missing"; no test for `install_ticket_screenshot_review`.
+- `member_by_name` matches only `user.name`, so nicknames count as "kein Mitglied".
+- Image-only first message takes the one-shot claim and is judged `not_asked` if the text comes later than 45 s.
+- Analyzer failure logging may include signed CDN image URLs.
+- Docs: stale merge state, "Ticket Tool guard does not exist" is wrong (gateway.rs drops bot messages), "first message" wording, removed loaders and tools still mentioned in docs/faq-bot-selbst.md, internal jargon in member-facing text, an unenforced privacy claim.
+Decision for the user: the attempt cap is exceeded (five runs); continuing needs a new go and a decision on rewriting the local commits for the Ursache format.
+
 ## Decisions for the user
 - Ticket screenshots go to the moderation vision provider (same one message moderation uses). There is no explicit approval for tickets yet, so the switch stays off after deploy.
 - Policy maps a confirmed scam to a timeout; the shadow entry logs it as "would ban" only.
