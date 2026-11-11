@@ -715,6 +715,7 @@ struct TicketOpening {
     author_id: u64,
     messages: Vec<String>,
     images: Vec<TicketImage>,
+    skipped_images: usize,
     started: tokio::time::Instant,
     last_message: tokio::time::Instant,
 }
@@ -722,6 +723,7 @@ struct TicketOpening {
 struct TicketQuestion {
     text: String,
     images: Vec<TicketImage>,
+    skipped_images: usize,
 }
 
 impl TicketOpening {
@@ -730,6 +732,7 @@ impl TicketOpening {
             author_id,
             messages: Vec::new(),
             images: Vec::new(),
+            skipped_images: 0,
             started: now,
             last_message: now,
         }
@@ -758,13 +761,15 @@ impl TicketOpening {
 
     fn add_images(&mut self, images: &[TicketImage]) -> bool {
         let before = self.images.len();
-        for image in images.iter().filter(|image| image.within_limits()) {
-            if self.images.len() >= TICKET_MAX_IMAGES {
-                break;
+        for image in images {
+            if self.images.iter().any(|known| known.url == image.url) {
+                continue;
             }
-            if !self.images.iter().any(|known| known.url == image.url) {
-                self.images.push(image.clone());
+            if !image.within_limits() || self.images.len() >= TICKET_MAX_IMAGES {
+                self.skipped_images += 1;
+                continue;
             }
+            self.images.push(image.clone());
         }
         self.images.len() > before
     }
@@ -775,12 +780,14 @@ impl TicketOpening {
         (!text.trim().is_empty() || !self.images.is_empty()).then_some(TicketQuestion {
             text,
             images: self.images,
+            skipped_images: self.skipped_images,
         })
     }
 }
 
 struct TicketScamCheck {
     image_count: usize,
+    skipped_images: usize,
     screenshot: ScreenshotCheck,
     accounts: ReportedAccounts,
     action: ticket_triage::ShadowAction,
@@ -790,6 +797,7 @@ impl TicketScamCheck {
     fn section(&self) -> ScamSection<'_> {
         ScamSection {
             image_count: self.image_count,
+            skipped_images: self.skipped_images,
             screenshot: &self.screenshot,
             accounts: &self.accounts,
             action: &self.action,
@@ -965,6 +973,7 @@ impl FaqChat {
             author_id,
             question_chars,
             image_count = question.images.len(),
+            skipped_images = question.skipped_images,
             verdict = outcome.brain.verdict(),
             candidate_status,
             needs_mod = escalation.needs_mod(),
@@ -1025,6 +1034,7 @@ impl FaqChat {
         let action = ticket_triage::shadow_action(&screenshot, &accounts, author_id);
         Some(TicketScamCheck {
             image_count: question.images.len(),
+            skipped_images: question.skipped_images,
             screenshot,
             accounts,
             action,
@@ -1596,7 +1606,7 @@ impl FaqChat {
         }
         let question_chars = problem.chars().count();
         let Some(shadow_channel_id) = self.shadow_channel_id else {
-            let (verdict, confidence, absent) = ("uncertain", "none", "absent");
+            let (verdict, confidence, absent) = ("not_asked", "none", "absent");
             tracing::warn!(
                 question_chars,
                 verdict = %verdict,
@@ -1614,7 +1624,7 @@ impl FaqChat {
         // Fehlkonfiguration: Shadow-Kanal == Ticket-Kanal. Ein Post würde die Bot-Antwort
         // sichtbar ins Mitglieder-Ticket schreiben. Fail-closed: kein Knowledge, kein Post.
         if shadow_channel_id == channel_id {
-            let (verdict, confidence, absent) = ("uncertain", "none", "absent");
+            let (verdict, confidence, absent) = ("not_asked", "none", "absent");
             tracing::warn!(
                 question_chars,
                 verdict = %verdict,
@@ -1630,7 +1640,7 @@ impl FaqChat {
             return;
         }
         if shadow_channel_id != LOG_CHANNEL_ID {
-            let (verdict, confidence, absent) = ("uncertain", "none", "absent");
+            let (verdict, confidence, absent) = ("not_asked", "none", "absent");
             tracing::warn!(
                 question_chars,
                 verdict = %verdict,
@@ -4534,7 +4544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ticket_auto_help_ohne_shadow_loggt_sicheres_uncertain() {
+    async fn ticket_auto_help_ohne_shadow_loggt_sicheres_not_asked() {
         let port = ticket_port();
         let faq = ticket_faq_with_shadow(port.clone(), ScriptedBrain::replying(Vec::new()), None);
         let marker = "TICKET_NO_SHADOW_MARKER";
@@ -4554,7 +4564,7 @@ mod tests {
 
         let logs = capture.text();
         for field in [
-            "verdict=uncertain",
+            "verdict=not_asked",
             "confidence=none",
             "retrieval_score=absent",
             "reason=shadow_not_configured",
@@ -4776,6 +4786,8 @@ mod tests {
         assert_eq!(sent[0].0, LOG_CHANNEL_ID);
         let entry = &sent[0].1;
         assert!(entry.contains("needs_mod: ja (Moderations-"), "{entry}");
+        assert!(entry.contains("Bilder: 2"), "{entry}");
+        assert!(entry.contains("Nicht geprüft: 1 Bild(er)"), "{entry}");
         assert!(
             entry.contains("Bildprüfung: scam, Sicherheit 0.93, bestätigt ja"),
             "{entry}"
