@@ -1051,7 +1051,28 @@ fn contract_numbers_and_reasons_follow_the_code() {
     ] {
         assert!(contract.contains(&expected), "CONTRACT.md lacks {expected}");
     }
+    let migration = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../crates/dl-central-db/migrations/20261110180000_access_gate_decisions.sql"
+    ));
+    for expected in [
+        format!("up to {} times", record::REVOKE_ATTEMPTS),
+        format!("Above {} bytes", dl_access_gate::MAX_REDACTED_ARGS_BYTES),
+        format!(
+            "cut to {} characters",
+            dl_access_gate::MAX_OUTCOME_DETAIL_CHARS
+        ),
+        format!("BETWEEN 1 AND {}", dl_access_gate::MAX_OUTCOME_DETAIL_CHARS),
+        format!("[a-z0-9._-]{{1,{}}}$'", dl_access_gate::MAX_NAME_CHARS),
+    ] {
+        assert!(migration.contains(&expected), "migration lacks {expected}");
+    }
     for reason in Reason::KNOWN {
+        assert!(
+            migration.contains(&format!("'{}'", reason.as_str())),
+            "migration lacks reason {}",
+            reason.as_str()
+        );
         let row = format!("| `{}` |", reason.as_str());
         assert!(contract.contains(&row), "CONTRACT.md lacks reason {row}");
     }

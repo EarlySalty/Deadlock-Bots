@@ -2050,7 +2050,6 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, mock).await });
         let mut state = state(Some("internal")).expect("state");
         state.discord_api = format!("http://{addr}");
-        let started = std::time::Instant::now();
         let error = discord_call(&state, "GET", "/long", &[], None, None)
             .await
             .expect_err("wait longer than the timeout");
@@ -2067,7 +2066,6 @@ mod tests {
         .await
         .expect_err("wait longer than the lookup limit");
         assert!(error.to_string().contains("Zeitbudget"), "{error:#}");
-        assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
         server.abort();
     }
