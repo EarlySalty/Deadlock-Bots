@@ -14,7 +14,7 @@
 
 ## Scope status
 
-1. Collector keeps the opener's images (max 4, max 8 MiB each, same author only, Ticket Tool bot ignored). Done, unchanged.
+1. Collector keeps the opener's images (max 4, max 8 MiB each, same author only). Done, unchanged.
 2. One shadow entry per opening in log channel 1374364800817303632: Brain state and candidate, `needs_mod` with reasons, and for scam reports the screenshot review state, the reported accounts with guild membership, the moderation policy action as its own line and `Bann-Entscheidung (Shadow, nur Log): would ban <id>` / `kein Bann (...)`. Reported accounts come from the ticket text only; reading account names out of the screenshots is not built (open follow-up). The screenshot review runs only with `moderation.ticket_screenshot_review = true` (default false).
 3. No ban, no ping, no member-visible message. Done: all output goes to the log channel through `FaqGlue::send_message`.
 

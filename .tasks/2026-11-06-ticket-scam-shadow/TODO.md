@@ -6,7 +6,7 @@ Remote: origin/feat/ticket-scam-shadow-20261107 = a3a6abb6. Everything after tha
 Last origin/main merge: 11f721bd (2026-11-11), merge commit fbd40262.
 
 ## What the branch does
-- Collector keeps the opener's images (max 4, max 8 MiB each, same author only, Ticket Tool bot 557628352828014614 ignored). `MessageAttachment.size` added in dl-discord.
+- Collector keeps the opener's images (max 4, max 8 MiB each, same author only). `MessageAttachment.size` added in dl-discord.
 - One shadow entry per ticket opening in log channel 1374364800817303632 (capped at 3900 UTF-16 units, Components V2 allows 4000): Brain state (`yes`, `no`, `uncertain`, `not_asked`) with candidate, `needs_mod` with reasons, and for scam reports the screenshot review state, the reported accounts with guild membership, the moderation policy action as its own line and `Bann-Entscheidung (Shadow, nur Log): would ban <id>` or `kein Bann (...)`.
 - No ban, no ping, no member-visible message.
 - Screenshot review runs only with `moderation.ticket_screenshot_review = true` in config/bot.toml (default `false`). While off the entry says "Bildprüfung: nicht gelaufen (deaktiviert)" and the decision is always "kein Bann". A failed review is logged as "Bildprüfung fehlgeschlagen (...)", never as a verdict.
@@ -22,6 +22,16 @@ Last origin/main merge: 11f721bd (2026-11-11), merge commit fbd40262.
 1. `gate-review --repo /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107 --base origin/main`. Quota failures (reset times differ) give "kein Urteil", not a finding; rerun after the reset.
 2. On ALLOW: push the branch, `git push origin HEAD:main`, deploy dl-bot via a new copy of /opt/deadlock/bots/.install-*.sh, prove the shadow entry live in channel 1374364800817303632, then remove branch and worktree.
 3. Live replay with a real scam screenshot is still open: no closed ticket with an image has been found, channel 1567507300216737894 contains text only. The replay needs the switch on, which needs the user's approval first.
+
+## Gate round 3 (HEAD 10da8823, 2026-11-11 afternoon)
+- No verdict. Fable 5.2 answers were rejected as malformed JSON, Opus 5.5 hit the 5-hour limit (reset 19:20). The rejected answers still named real findings, to fix before the next attempt:
+  - `faq.rs` `add_images`: images beyond the limit are dropped silently (same pattern as the accounts overflow that was fixed).
+  - `faq.rs` fail-closed paths around lines 1599, 1617, 1633 still log the literal verdict "uncertain" although the Brain was never asked.
+  - `ticket_triage.rs` keyword lists miss common German forms (gescammt, betrogen, bannen).
+  - `handle_ticket_message` has only test callers; production uses `handle_ticket_message_with_images`.
+  - No test covers the `install_ticket_screenshot_review` wiring in dl-bot main.rs.
+- The Ticket Tool bot guard claim was removed from these docs because no such guard exists in the code.
+- The gate attempt cap (four) is reached: the next paid attempt needs the user's go.
 
 ## Decisions for the user
 - Ticket screenshots go to the moderation vision provider (same one message moderation uses). There is no explicit approval for tickets yet, so the switch stays off after deploy.
