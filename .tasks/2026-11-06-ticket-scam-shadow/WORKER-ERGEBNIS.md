@@ -29,8 +29,8 @@
 ## Checks
 
 - `cargo fmt -p dl-community -- --check`: exit 0.
-- `cargo-slot test -p dl-community --lib`: 313 passed, 4 failed. The 4 failures are the known DB tests that need `CENTRAL_TEST_DSN` (ionos test instance, offline).
-- `cargo-slot test -p dl-moderation`: 65 passed.
+- `cargo-slot test -p dl-community --lib`: 324 passed, 4 failed. The 4 failures are the known DB tests that need `CENTRAL_TEST_DSN` (ionos test instance, offline).
+- `cargo-slot test -p dl-moderation`: 66 passed.
 - `cargo-slot test -p dl-discord`: 67 passed plus 3 integration tests passed.
 - `cargo-slot check -p dl-bot`: exit 0.
 - `cargo-slot clippy -p dl-community -p dl-moderation -p dl-bot --no-deps`: exit 0. Only the workspace baseline lints remain (`double_must_use` from async_trait, `result_large_err`); ticket_triage.rs has only the async_trait baseline on the `ScreenshotReviewer` trait.
