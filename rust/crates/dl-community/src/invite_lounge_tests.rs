@@ -333,11 +333,10 @@ fn assert_notices_request(brain: &ScriptedBrain, count: usize) {
                 channel_id: CHECK_IN_CHANNEL_ID,
                 message_id: 1
             }));
-    let mut keys: Vec<_> = notices
+    let keys: std::collections::HashSet<_> = notices
         .iter()
         .map(|(_, notice)| &notice.idempotency_key)
         .collect();
-    keys.dedup();
     assert_eq!(keys.len(), count);
 }
 

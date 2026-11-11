@@ -589,7 +589,6 @@ fn build_item(item: &Value, budget: usize) -> Option<Value> {
         return None;
     }
     let raw = item.get("sources")?.as_array()?;
-    // Aktuelle berechnete Mechanik vor der ungekürzten historischen Patchsammlung.
     let kind = if raw.iter().any(|source| source["kind"] == "Mechanic") {
         "Mechanic"
     } else {
@@ -602,7 +601,8 @@ fn build_item(item: &Value, budget: usize) -> Option<Value> {
         .filter(|text| !text.trim().is_empty())
         .collect();
     candidates.sort_by_key(|text| text.encode_utf16().count());
-    candidates.dedup();
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|text| seen.insert(*text));
     let mut remaining = budget;
     let sources: Vec<_> = candidates
         .into_iter()
@@ -785,6 +785,23 @@ async fn read_pipe<R: AsyncRead + Unpin>(pipe: R) -> std::io::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn build_item_entfernt_nicht_benachbarte_gleiche_details() {
+        let item = json!({"item_id": 1, "name": "X", "confidence": "High", "sources": [
+            {"kind": "Patch", "detail": "abc"},
+            {"kind": "Patch", "detail": "xyz"},
+            {"kind": "Patch", "detail": "abc"},
+        ]});
+        let built = build_item(&item, 10_000).expect("Item");
+        let details: Vec<_> = built["sources"]
+            .as_array()
+            .expect("Quellen")
+            .iter()
+            .map(|source| source["detail"].clone())
+            .collect();
+        assert_eq!(details, vec![json!("abc"), json!("xyz")]);
+    }
 
     #[test]
     fn lokalisierte_beschreibung_braucht_passende_quellenrevision() {

@@ -2293,7 +2293,8 @@ fn scrub_text_target_refs(text: &str, target_refs: &[String]) -> String {
         .filter(|target| !target.is_empty())
         .collect::<Vec<_>>();
     refs.sort_by_key(|target| std::cmp::Reverse(target.len()));
-    refs.dedup();
+    let mut seen = HashSet::new();
+    refs.retain(|target| seen.insert(*target));
     for target_ref in refs {
         scrubbed = scrub_exact_target_ref(&scrubbed, target_ref);
     }
