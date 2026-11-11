@@ -5,20 +5,15 @@ use dl_moderation::moderation_verdict::ModerationCategory;
 
 pub const TICKET_MAX_IMAGES: usize = 4;
 pub const TICKET_MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_ACCOUNT_REFS: usize = 3;
+const MAX_ACCOUNT_LOOKUPS: usize = 5;
+const STEAM64_PREFIX: &str = "7656119";
 const NAME_LABELS: &[&str] = &[
-    "user",
     "username",
-    "benutzer",
     "benutzername",
-    "nutzer",
     "nutzername",
-    "name",
-    "account",
-    "acc",
-    "discord",
     "discordname",
-    "tag",
+    "discordusername",
+    "accountname",
 ];
 const MODERATION_EXACT: &[&str] = &["ban", "bann", "banned", "acc", "mute", "muted"];
 const MODERATION_PREFIXES: &[&str] = &[
@@ -218,7 +213,13 @@ impl AccountRef {
     }
 }
 
-pub fn reported_account_refs(text: &str, opener_id: u64) -> Vec<AccountRef> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedRefs {
+    pub refs: Vec<AccountRef>,
+    pub overflow: bool,
+}
+
+pub fn reported_account_refs(text: &str, opener_id: u64) -> ReportedRefs {
     let tokens: Vec<&str> = text.split_whitespace().collect();
     let mut refs = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
@@ -228,8 +229,9 @@ pub fn reported_account_refs(text: &str, opener_id: u64) -> Vec<AccountRef> {
             }
         }
     }
-    refs.truncate(MAX_ACCOUNT_REFS);
-    refs
+    let overflow = refs.len() > MAX_ACCOUNT_LOOKUPS;
+    refs.truncate(MAX_ACCOUNT_LOOKUPS);
+    ReportedRefs { refs, overflow }
 }
 
 fn token_refs(token: &str, next: Option<&str>) -> Vec<AccountRef> {
@@ -237,7 +239,7 @@ fn token_refs(token: &str, next: Option<&str>) -> Vec<AccountRef> {
     if !mentions.is_empty() {
         return mentions.into_iter().map(AccountRef::Id).collect();
     }
-    if let Some(id) = snowflake(token.trim_matches(|c: char| !c.is_ascii_digit())) {
+    if let Some(id) = plain_id(token) {
         return vec![AccountRef::Id(id)];
     }
     if let Some(name) = token.strip_prefix('@').and_then(username) {
@@ -251,13 +253,18 @@ fn token_refs(token: &str, next: Option<&str>) -> Vec<AccountRef> {
 
 fn labelled_name(token: &str, next: Option<&str>) -> Option<String> {
     let (label, rest) = token.split_once(':')?;
-    let label = label
-        .trim_matches(|c: char| !c.is_alphanumeric())
+    let label: String = label
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
         .to_lowercase();
     if !NAME_LABELS.contains(&label.as_str()) {
         return None;
     }
     let value = if rest.trim().is_empty() { next? } else { rest };
+    if !mention_ids(value).is_empty() || plain_id(value).is_some() {
+        return None;
+    }
     username(value.trim_start_matches('@'))
 }
 
@@ -273,8 +280,21 @@ fn mention_ids(token: &str) -> Vec<u64> {
         .collect()
 }
 
+fn plain_id(token: &str) -> Option<u64> {
+    snowflake(token.trim_matches(|c: char| {
+        matches!(
+            c,
+            ',' | '.' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '"' | '\''
+        )
+    }))
+}
+
 fn snowflake(digits: &str) -> Option<u64> {
-    if !(17..=20).contains(&digits.len()) || !digits.chars().all(|c| c.is_ascii_digit()) {
+    let plain = (17..=20).contains(&digits.len())
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && !digits.starts_with('0')
+        && !digits.starts_with(STEAM64_PREFIX);
+    if !plain {
         return None;
     }
     digits.parse().ok()
@@ -295,7 +315,7 @@ fn username(raw: &str) -> Option<String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberLookup {
-    Member(u64),
+    Member { id: u64, staff_or_bot: bool },
     NotMember,
     Unknown,
 }
@@ -309,11 +329,62 @@ pub struct ResolvedAccount {
 impl ResolvedAccount {
     fn line(&self) -> String {
         let status = match self.lookup {
-            MemberLookup::Member(id) => format!("Mitglied {id}"),
+            MemberLookup::Member {
+                id,
+                staff_or_bot: false,
+            } => format!("Mitglied {id}"),
+            MemberLookup::Member {
+                id,
+                staff_or_bot: true,
+            } => format!("Mitglied {id} (Team oder Bot)"),
             MemberLookup::NotMember => "kein Mitglied".to_string(),
             MemberLookup::Unknown => "Mitgliedschaft unbekannt".to_string(),
         };
         format!("{} → {status}", self.reference.label())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReportedAccounts {
+    pub accounts: Vec<ResolvedAccount>,
+    pub overflow: bool,
+}
+
+impl ReportedAccounts {
+    fn lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .accounts
+            .iter()
+            .map(|account| format!("Gemeldeter Account: {}", account.line()))
+            .collect();
+        if lines.is_empty() {
+            lines.push("Gemeldeter Account: keiner erkannt".to_string());
+        }
+        if self.overflow {
+            lines.push(format!(
+                "Gemeldete Accounts: mehr als {MAX_ACCOUNT_LOOKUPS} genannt, nur diese geprüft"
+            ));
+        }
+        lines
+    }
+
+    fn distinct_members(&self) -> Vec<(u64, bool)> {
+        let mut members: Vec<(u64, bool)> = Vec::new();
+        for account in &self.accounts {
+            if let MemberLookup::Member { id, staff_or_bot } = account.lookup {
+                if !members.iter().any(|(known, _)| *known == id) {
+                    members.push((id, staff_or_bot));
+                }
+            }
+        }
+        members
+    }
+
+    fn count(&self, lookup: MemberLookup) -> usize {
+        self.accounts
+            .iter()
+            .filter(|account| account.lookup == lookup)
+            .count()
     }
 }
 
@@ -334,7 +405,7 @@ impl ShadowAction {
 
 pub fn shadow_action(
     screenshot: &ScreenshotCheck,
-    accounts: &[ResolvedAccount],
+    reported: &ReportedAccounts,
     opener_id: u64,
 ) -> ShadowAction {
     let review = match screenshot {
@@ -343,27 +414,48 @@ pub fn shadow_action(
         ScreenshotCheck::NoImages => return ShadowAction::NoBan("keine Bilder"),
         ScreenshotCheck::Failed(_) => return ShadowAction::NoBan("Bildprüfung fehlgeschlagen"),
     };
-    if !matches!(review.decision, PolicyDecision::AutoExecute { .. })
-        || !review.verdict.verification.confirmed
-    {
-        return ShadowAction::NoBan("Policy würde nicht automatisch handeln");
+    if let Some(reason) = verdict_blocker(review) {
+        return ShadowAction::NoBan(reason);
     }
-    if review.verdict.verification.category != ModerationCategory::Scam {
-        return ShadowAction::NoBan("Bild zeigt keinen bestätigten Scam");
+    ban_target(reported, opener_id)
+}
+
+fn verdict_blocker(review: &ReportedScreenshotReview) -> Option<&'static str> {
+    let verification = &review.verdict.verification;
+    if !verification.confirmed || verification.category != ModerationCategory::Scam {
+        return Some("Bild zeigt keinen bestätigten Scam");
     }
-    let mut members: Vec<u64> = accounts
-        .iter()
-        .filter_map(|account| match account.lookup {
-            MemberLookup::Member(id) if id != opener_id => Some(id),
-            _ => None,
-        })
-        .collect();
-    members.sort_unstable();
-    members.dedup();
-    match members.as_slice() {
-        [id] => ShadowAction::WouldBan(*id),
-        [] => ShadowAction::NoBan("gemeldeter Account nicht als Mitglied gefunden"),
+    if !matches!(review.decision, PolicyDecision::AutoExecute { .. }) {
+        return Some("Bildurteil unter der automatischen Schwelle der Policy");
+    }
+    None
+}
+
+fn ban_target(reported: &ReportedAccounts, opener_id: u64) -> ShadowAction {
+    if reported.overflow {
+        return ShadowAction::NoBan("zu viele Konten genannt");
+    }
+    if reported.count(MemberLookup::Unknown) > 0 {
+        return ShadowAction::NoBan("Mitgliedschaft eines genannten Kontos unklar");
+    }
+    let not_members = reported.count(MemberLookup::NotMember);
+    match (reported.distinct_members().as_slice(), not_members) {
+        ([], 0) => ShadowAction::NoBan("kein gemeldeter Account erkannt"),
+        ([], 1) => ShadowAction::NoBan("gemeldeter Account ist kein Mitglied"),
+        ([], _) => ShadowAction::NoBan("mehrere Konten genannt, keines ist Mitglied"),
+        ([member], 0) => single_member_action(*member, opener_id),
+        ([_], _) => ShadowAction::NoBan("mehrere Konten genannt, nicht alle sind Mitglied"),
         _ => ShadowAction::NoBan("mehrere Mitglieder genannt"),
+    }
+}
+
+fn single_member_action((id, staff_or_bot): (u64, bool), opener_id: u64) -> ShadowAction {
+    if id == opener_id {
+        ShadowAction::NoBan("gemeldeter Account ist der Ticket-Ersteller")
+    } else if staff_or_bot {
+        ShadowAction::NoBan("gemeldeter Account gehört zum Team oder ist ein Bot")
+    } else {
+        ShadowAction::WouldBan(id)
     }
 }
 
@@ -385,7 +477,7 @@ fn policy_label(decision: &PolicyDecision) -> String {
 pub struct ScamSection<'a> {
     pub image_count: usize,
     pub screenshot: &'a ScreenshotCheck,
-    pub accounts: &'a [ResolvedAccount],
+    pub accounts: &'a ReportedAccounts,
     pub action: &'a ShadowAction,
 }
 
@@ -427,20 +519,18 @@ fn needs_mod_line(escalation: &Escalation) -> String {
 fn scam_lines(scam: &ScamSection<'_>) -> Vec<String> {
     let mut lines = vec![format!("Scam-Meldung: ja, Bilder: {}", scam.image_count)];
     lines.push(scam.screenshot.line());
-    if scam.accounts.is_empty() {
-        lines.push("Gemeldeter Account: keiner erkannt".to_string());
-    }
-    for account in scam.accounts {
-        lines.push(format!("Gemeldeter Account: {}", account.line()));
-    }
-    lines.push(format!("Aktion (Shadow): {}", scam.action.line()));
+    lines.extend(scam.accounts.lines());
+    lines.push(format!(
+        "Bann-Entscheidung (Shadow, nur Log): {}",
+        scam.action.line()
+    ));
     lines
 }
 
 fn verdict_line(review: &ReportedScreenshotReview) -> String {
     let verification = &review.verdict.verification;
     format!(
-        "Bildprüfung: {}, Sicherheit {:.2}, bestätigt {}, Policy {}\nBegründung: {}",
+        "Bildprüfung: {}, Sicherheit {:.2}, bestätigt {}\nPolicy-Aktion der Moderation (eigene Regel, nicht die Bann-Entscheidung): {}\nBegründung: {}",
         verification.category.as_label(),
         verification.confidence,
         if verification.confirmed { "ja" } else { "nein" },
@@ -489,16 +579,34 @@ mod tests {
     }
 
     fn member(id: u64) -> ResolvedAccount {
-        ResolvedAccount {
-            reference: AccountRef::Id(id),
-            lookup: MemberLookup::Member(id),
+        resolved(
+            AccountRef::Id(id),
+            MemberLookup::Member {
+                id,
+                staff_or_bot: false,
+            },
+        )
+    }
+
+    fn resolved(reference: AccountRef, lookup: MemberLookup) -> ResolvedAccount {
+        ResolvedAccount { reference, lookup }
+    }
+
+    fn reported(accounts: Vec<ResolvedAccount>) -> ReportedAccounts {
+        ReportedAccounts {
+            accounts,
+            overflow: false,
         }
+    }
+
+    fn refs(text: &str, opener_id: u64) -> Vec<AccountRef> {
+        reported_account_refs(text, opener_id).refs
     }
 
     #[test]
     fn echter_scam_ticket_text_liefert_username_und_scam() {
         assert_eq!(
-            reported_account_refs(REAL_SCAM_TICKET, 411895243357683714),
+            refs(REAL_SCAM_TICKET, 411895243357683714),
             vec![AccountRef::Name("franklygab".to_string())]
         );
         assert!(is_scam_report(REAL_SCAM_TICKET));
@@ -510,18 +618,80 @@ mod tests {
     fn account_aus_mention_id_und_at_name_ohne_opener() {
         let text = "<@!123456789012345678> und 223456789012345678, auch @Scammer.Max. Ich bin <@411895243357683714>";
         assert_eq!(
-            reported_account_refs(text, 411895243357683714),
+            refs(text, 411895243357683714),
             vec![
                 AccountRef::Id(123456789012345678),
                 AccountRef::Id(223456789012345678),
                 AccountRef::Name("scammer.max".to_string()),
             ]
         );
+        for labelled in [
+            "Username:\n@foo_bar",
+            "Discord-Name: foo_bar",
+            "Account-Name:foo_bar",
+        ] {
+            assert_eq!(
+                refs(labelled, 1),
+                vec![AccountRef::Name("foo_bar".to_string())],
+                "{labelled}"
+            );
+        }
+        assert!(refs("@everyone 12345", 1).is_empty());
+    }
+
+    #[test]
+    fn keine_discord_user_ids_aus_fremden_kennungen() {
+        for text in [
+            "00000000000000000",
+            "012345678901234567",
+            "<@00000000000000000>",
+            "<@&123456789012345678>",
+            "<#123456789012345678>",
+            "<:pepe:123456789012345678>",
+            "<a:pepe:123456789012345678>",
+            "76561198000000000",
+            "https://steamcommunity.com/profiles/76561198000000000",
+            "steamcommunity.com/profiles/123456789012345678",
+            "ID:123456789012345678",
+        ] {
+            assert!(refs(text, 1).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn prosa_woerter_sind_keine_namenslabels() {
+        for text in [
+            "Er schrieb mir auf Discord: hallo, ich bin vom Support",
+            "Name: ist mir entfallen",
+            "Mein Account: gesperrt seit gestern",
+            "User: keine Ahnung",
+            "Tag: heute",
+            "Acc: weg",
+        ] {
+            assert!(refs(text, 1).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn alle_konten_werden_gezaehlt_und_ueberlauf_bannt_nie() {
+        let text = "<@100000000000000001> <@100000000000000002> <@100000000000000003> <@100000000000000004> <@100000000000000005> <@100000000000000006>";
+        let found = reported_account_refs(text, 1);
+        assert!(found.overflow);
+        assert_eq!(found.refs.len(), MAX_ACCOUNT_LOOKUPS);
+        let scam = review(ModerationCategory::Scam, true, true);
+        let accounts = ReportedAccounts {
+            accounts: vec![member(7)],
+            overflow: true,
+        };
         assert_eq!(
-            reported_account_refs("Name:\n@foo_bar", 1),
-            vec![AccountRef::Name("foo_bar".to_string())]
+            shadow_action(&scam, &accounts, 1),
+            ShadowAction::NoBan("zu viele Konten genannt")
         );
-        assert!(reported_account_refs("@everyone 12345", 1).is_empty());
+        let four =
+            "<@100000000000000001> <@100000000000000002> Username: a_b <@100000000000000004>";
+        let found = reported_account_refs(four, 1);
+        assert!(!found.overflow);
+        assert_eq!(found.refs.len(), 4);
     }
 
     #[test]
@@ -549,32 +719,47 @@ mod tests {
     fn would_ban_nur_bei_bestaetigtem_scam_und_genau_einem_fremden_mitglied() {
         let scam = review(ModerationCategory::Scam, true, true);
         assert_eq!(
-            shadow_action(&scam, &[member(7)], 1),
+            shadow_action(&scam, &reported(vec![member(7)]), 1),
             ShadowAction::WouldBan(7)
         );
-        assert!(matches!(
-            shadow_action(&scam, &[member(1)], 1),
-            ShadowAction::NoBan(_)
-        ));
-        assert!(matches!(
-            shadow_action(&scam, &[member(7), member(8)], 1),
-            ShadowAction::NoBan(_)
-        ));
-        let not_member = ResolvedAccount {
-            reference: AccountRef::Name("franklygab".to_string()),
-            lookup: MemberLookup::NotMember,
-        };
-        assert!(matches!(
-            shadow_action(&scam, &[not_member], 1),
-            ShadowAction::NoBan(_)
-        ));
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![member(1)]), 1),
+            ShadowAction::NoBan("gemeldeter Account ist der Ticket-Ersteller")
+        );
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![member(7), member(8)]), 1),
+            ShadowAction::NoBan("mehrere Mitglieder genannt")
+        );
+        let staff = resolved(
+            AccountRef::Id(9),
+            MemberLookup::Member {
+                id: 9,
+                staff_or_bot: true,
+            },
+        );
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![staff]), 1),
+            ShadowAction::NoBan("gemeldeter Account gehört zum Team oder ist ein Bot")
+        );
+        let not_member = resolved(
+            AccountRef::Name("franklygab".to_string()),
+            MemberLookup::NotMember,
+        );
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![not_member]), 1),
+            ShadowAction::NoBan("gemeldeter Account ist kein Mitglied")
+        );
+        assert_eq!(
+            shadow_action(&scam, &reported(Vec::new()), 1),
+            ShadowAction::NoBan("kein gemeldeter Account erkannt")
+        );
         for other in [
             review(ModerationCategory::Scam, false, true),
             review(ModerationCategory::Scam, true, false),
             review(ModerationCategory::NsfwExplicit, true, true),
         ] {
             assert!(matches!(
-                shadow_action(&other, &[member(7)], 1),
+                shadow_action(&other, &reported(vec![member(7)]), 1),
                 ShadowAction::NoBan(_)
             ));
         }
@@ -584,45 +769,85 @@ mod tests {
             ScreenshotCheck::Failed(ReportedScreenshotFailure::AnalysisFailed),
         ] {
             assert!(matches!(
-                shadow_action(&state, &[member(7)], 1),
+                shadow_action(&state, &reported(vec![member(7)]), 1),
                 ShadowAction::NoBan(_)
             ));
         }
     }
 
     #[test]
+    fn unklare_oder_gemischte_konten_bannen_nie() {
+        let scam = review(ModerationCategory::Scam, true, true);
+        let unknown = resolved(AccountRef::Id(8), MemberLookup::Unknown);
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![unknown, member(7)]), 1),
+            ShadowAction::NoBan("Mitgliedschaft eines genannten Kontos unklar")
+        );
+        let not_member = resolved(AccountRef::Id(8), MemberLookup::NotMember);
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![member(7), not_member]), 1),
+            ShadowAction::NoBan("mehrere Konten genannt, nicht alle sind Mitglied")
+        );
+    }
+
+    #[test]
     fn derselbe_gemeldete_account_ueber_id_und_name_zaehlt_einmal() {
         let scam = review(ModerationCategory::Scam, true, true);
-        let not_member = ResolvedAccount {
-            reference: AccountRef::Id(8),
-            lookup: MemberLookup::NotMember,
-        };
-        let by_name = ResolvedAccount {
-            reference: AccountRef::Name("scammer".to_string()),
-            lookup: MemberLookup::Member(7),
-        };
+        let by_name = resolved(
+            AccountRef::Name("scammer".to_string()),
+            MemberLookup::Member {
+                id: 7,
+                staff_or_bot: false,
+            },
+        );
         assert_eq!(
-            shadow_action(&scam, &[member(7), not_member, by_name.clone()], 1),
+            shadow_action(&scam, &reported(vec![member(7), by_name.clone()]), 1),
             ShadowAction::WouldBan(7)
         );
-        let other_member = ResolvedAccount {
-            reference: AccountRef::Name("zweiter".to_string()),
-            lookup: MemberLookup::Member(8),
-        };
-        assert!(matches!(
-            shadow_action(&scam, &[member(7), other_member, by_name], 1),
+        let other_member = resolved(
+            AccountRef::Name("zweiter".to_string()),
+            MemberLookup::Member {
+                id: 8,
+                staff_or_bot: false,
+            },
+        );
+        assert_eq!(
+            shadow_action(&scam, &reported(vec![member(7), other_member, by_name]), 1),
             ShadowAction::NoBan("mehrere Mitglieder genannt")
-        ));
+        );
+    }
+
+    #[test]
+    fn policy_aktion_und_bann_entscheidung_sind_getrennt_beschriftet() {
+        let scam = review(ModerationCategory::Scam, true, true);
+        let accounts = reported(vec![member(7)]);
+        let action = shadow_action(&scam, &accounts, 1);
+        let text = scam_lines(&ScamSection {
+            image_count: 1,
+            screenshot: &scam,
+            accounts: &accounts,
+            action: &action,
+        })
+        .join("\n");
+        assert!(
+            text.contains("Policy-Aktion der Moderation (eigene Regel, nicht die Bann-Entscheidung): auto_execute (timeout)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Bann-Entscheidung (Shadow, nur Log): would ban 7"),
+            "{text}"
+        );
     }
 
     #[test]
     fn fehlgeschlagene_bildpruefung_ist_kein_urteil() {
         let failed = ScreenshotCheck::from_result(Err(ReportedScreenshotFailure::AnalysisFailed));
-        let action = shadow_action(&failed, &[member(7)], 1);
+        let accounts = reported(vec![member(7)]);
+        let action = shadow_action(&failed, &accounts, 1);
         let text = scam_lines(&ScamSection {
             image_count: 1,
             screenshot: &failed,
-            accounts: &[member(7)],
+            accounts: &accounts,
             action: &action,
         })
         .join("\n");
@@ -633,7 +858,7 @@ mod tests {
         let disabled = scam_lines(&ScamSection {
             image_count: 1,
             screenshot: &ScreenshotCheck::Disabled,
-            accounts: &[],
+            accounts: &ReportedAccounts::default(),
             action: &ShadowAction::NoBan("Bildprüfung deaktiviert"),
         })
         .join("\n");

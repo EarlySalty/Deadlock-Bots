@@ -12,8 +12,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::answer_support::{acquire_stateful_support_turn, KnowledgeLookup};
 use crate::db::{i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 use crate::ticket_triage::{
-    self, MemberLookup, ResolvedAccount, ScamSection, ScreenshotCheck, ScreenshotReviewer,
-    ShadowEntry, TicketImage, TICKET_MAX_IMAGES,
+    self, MemberLookup, ReportedAccounts, ResolvedAccount, ScamSection, ScreenshotCheck,
+    ScreenshotReviewer, ShadowEntry, TicketImage, TICKET_MAX_IMAGES,
 };
 
 pub use crate::answer_support::{KnowledgeAnswer, KnowledgeSource};
@@ -784,7 +784,7 @@ impl TicketOpening {
 struct TicketScamCheck {
     image_count: usize,
     screenshot: ScreenshotCheck,
-    accounts: Vec<ResolvedAccount>,
+    accounts: ReportedAccounts,
     action: ticket_triage::ShadowAction,
 }
 
@@ -1053,18 +1053,35 @@ impl FaqChat {
         guild_id: u64,
         author_id: u64,
         text: &str,
-    ) -> Vec<ResolvedAccount> {
+    ) -> ReportedAccounts {
+        let found = ticket_triage::reported_account_refs(text, author_id);
         let mut accounts = Vec::new();
-        for reference in ticket_triage::reported_account_refs(text, author_id) {
-            let lookup = match &reference {
+        for reference in found.refs {
+            let lookup = self.lookup_reported_member(guild_id, &reference).await;
+            accounts.push(ResolvedAccount { reference, lookup });
+        }
+        ReportedAccounts {
+            accounts,
+            overflow: found.overflow,
+        }
+    }
+
+    async fn lookup_reported_member(
+        &self,
+        guild_id: u64,
+        reference: &ticket_triage::AccountRef,
+    ) -> MemberLookup {
+        let lookup = async {
+            match reference {
                 ticket_triage::AccountRef::Id(id) => self.port.member_by_id(guild_id, *id).await,
                 ticket_triage::AccountRef::Name(name) => {
                     self.port.member_by_name(guild_id, name).await
                 }
-            };
-            accounts.push(ResolvedAccount { reference, lookup });
-        }
-        accounts
+            }
+        };
+        tokio::time::timeout(FAQ_DISCORD_IO_TIMEOUT, lookup)
+            .await
+            .unwrap_or(MemberLookup::Unknown)
     }
 
     fn chat_action_lock(&self, channel_id: u64) -> Arc<tokio::sync::Mutex<()>> {
@@ -3094,14 +3111,20 @@ mod tests {
         }
         async fn member_by_id(&self, _g: u64, user_id: u64) -> MemberLookup {
             if user_id == MOCK_MEMBER_ID {
-                MemberLookup::Member(user_id)
+                MemberLookup::Member {
+                    id: user_id,
+                    staff_or_bot: false,
+                }
             } else {
                 MemberLookup::NotMember
             }
         }
         async fn member_by_name(&self, _g: u64, name: &str) -> MemberLookup {
             if name == "scammer" {
-                MemberLookup::Member(MOCK_MEMBER_ID)
+                MemberLookup::Member {
+                    id: MOCK_MEMBER_ID,
+                    staff_or_bot: false,
+                }
             } else {
                 MemberLookup::NotMember
             }
@@ -4767,7 +4790,9 @@ mod tests {
             "{entry}"
         );
         assert!(
-            entry.contains(&format!("Aktion (Shadow): would ban {MOCK_MEMBER_ID}")),
+            entry.contains(&format!(
+                "Bann-Entscheidung (Shadow, nur Log): would ban {MOCK_MEMBER_ID}"
+            )),
             "{entry}"
         );
         assert!(

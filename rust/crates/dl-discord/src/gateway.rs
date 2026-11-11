@@ -74,7 +74,7 @@ struct PermissionFlags {
     author_is_staff: bool,
 }
 
-fn is_staff_permissions(perms: Permissions) -> bool {
+pub fn is_staff_permissions(perms: Permissions) -> bool {
     perms.administrator() || perms.manage_messages() || perms.manage_guild()
 }
 

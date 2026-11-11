@@ -3196,7 +3196,7 @@ impl dl_community::faq::FaqPort for FaqGlue {
         user_id: u64,
     ) -> dl_community::ticket_triage::MemberLookup {
         use dl_community::ticket_triage::MemberLookup;
-        if guild_id == 0 {
+        if guild_id == 0 || user_id == 0 {
             return MemberLookup::Unknown;
         }
         let gid = GuildId::new(guild_id);
@@ -3205,19 +3205,20 @@ impl dl_community::faq::FaqPort for FaqGlue {
             .adapter
             .cache()
             .guild(gid)
-            .is_some_and(|guild| guild.members.contains_key(&uid));
-        if cached {
-            return MemberLookup::Member(user_id);
-        }
-        match self.adapter.http.get_member(gid, uid).await {
-            Ok(_) => MemberLookup::Member(user_id),
-            Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(resp)))
-                if resp.status_code.as_u16() == 404 =>
-            {
-                MemberLookup::NotMember
-            }
-            Err(_) => MemberLookup::Unknown,
-        }
+            .and_then(|guild| guild.members.get(&uid).cloned());
+        let member = match cached {
+            Some(member) => member,
+            None => match self.adapter.http.get_member(gid, uid).await {
+                Ok(member) => member,
+                Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(resp)))
+                    if resp.status_code.as_u16() == 404 =>
+                {
+                    return MemberLookup::NotMember;
+                }
+                Err(_) => return MemberLookup::Unknown,
+            },
+        };
+        classify_member(self.adapter.cache(), gid, &member)
     }
 
     async fn member_by_name(
@@ -3229,29 +3230,92 @@ impl dl_community::faq::FaqPort for FaqGlue {
         if guild_id == 0 {
             return MemberLookup::Unknown;
         }
-        match self
+        let gid = GuildId::new(guild_id);
+        let members = match self
             .adapter
             .http
-            .search_guild_members(GuildId::new(guild_id), name, Some(10))
+            .search_guild_members(gid, name, Some(MEMBER_SEARCH_LIMIT))
             .await
         {
-            Ok(members) => exact_member_by_name(&members, name)
-                .map(MemberLookup::Member)
-                .unwrap_or(MemberLookup::NotMember),
-            Err(_) => MemberLookup::Unknown,
+            Ok(members) => members,
+            Err(_) => return MemberLookup::Unknown,
+        };
+        let usernames: Vec<&str> = members
+            .iter()
+            .map(|member| member.user.name.as_str())
+            .collect();
+        match exact_name_match(&usernames, name, MEMBER_SEARCH_LIMIT as usize) {
+            NameMatch::Unique(index) => match members.get(index) {
+                Some(member) => classify_member(self.adapter.cache(), gid, member),
+                None => MemberLookup::Unknown,
+            },
+            NameMatch::Absent => MemberLookup::NotMember,
+            NameMatch::Unclear => MemberLookup::Unknown,
         }
     }
 }
 
-fn exact_member_by_name(members: &[serenity::all::Member], name: &str) -> Option<u64> {
-    let matches: Vec<u64> = members
+fn classify_member(
+    cache: &serenity::all::Cache,
+    gid: GuildId,
+    member: &serenity::all::Member,
+) -> dl_community::ticket_triage::MemberLookup {
+    use dl_community::ticket_triage::MemberLookup;
+    let Some(guild) = cache.guild(gid) else {
+        return MemberLookup::Unknown;
+    };
+    let staff = dl_discord::gateway::is_staff_permissions(guild.member_permissions(member));
+    MemberLookup::Member {
+        id: member.user.id.get(),
+        staff_or_bot: staff || member.user.bot,
+    }
+}
+
+const MEMBER_SEARCH_LIMIT: u64 = 10;
+
+#[derive(Debug, PartialEq, Eq)]
+enum NameMatch {
+    Unique(usize),
+    Absent,
+    Unclear,
+}
+
+fn exact_name_match(usernames: &[&str], name: &str, limit: usize) -> NameMatch {
+    let matches: Vec<usize> = usernames
         .iter()
-        .filter(|member| member.user.name.eq_ignore_ascii_case(name))
-        .map(|member| member.user.id.get())
+        .enumerate()
+        .filter(|(_, username)| username.eq_ignore_ascii_case(name))
+        .map(|(index, _)| index)
         .collect();
     match matches.as_slice() {
-        [id] => Some(*id),
-        _ => None,
+        [index] => NameMatch::Unique(*index),
+        [] if usernames.len() < limit => NameMatch::Absent,
+        _ => NameMatch::Unclear,
+    }
+}
+
+#[cfg(test)]
+mod member_name_tests {
+    use super::{exact_name_match, NameMatch};
+
+    #[test]
+    fn nur_unvollstaendige_suche_ohne_treffer_ist_kein_mitglied() {
+        assert_eq!(
+            exact_name_match(&["foo", "Bar"], "bar", 10),
+            NameMatch::Unique(1)
+        );
+        assert_eq!(
+            exact_name_match(&["foo", "foobar"], "bar", 10),
+            NameMatch::Absent
+        );
+        assert_eq!(
+            exact_name_match(&["foo", "foobar"], "bar", 2),
+            NameMatch::Unclear
+        );
+        assert_eq!(
+            exact_name_match(&["bar", "BAR"], "bar", 10),
+            NameMatch::Unclear
+        );
     }
 }
 
