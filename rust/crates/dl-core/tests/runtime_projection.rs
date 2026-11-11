@@ -1,4 +1,8 @@
-use dl_core::{bot_config::BotConfig, operating_config::fingerprint};
+use dl_core::{
+    bot_config::BotConfig,
+    operating_config::fingerprint,
+    runtime_config::{StartBound, START_BOUNDS},
+};
 
 #[test]
 fn typed_runtime_values_reach_existing_constructor_keys() {
@@ -109,26 +113,69 @@ fn shipped_access_gate_and_mcp_timings_validate() {
         Some(None)
     );
     for section in [
-        "access_gate_cache_ttl_ms=1",
-        "access_gate_lookup_timeout_ms=5000\naccess_gate_decision_timeout_ms=4999",
-        "access_gate_retention_days=0",
-        "access_gate_purge_every_secs=59",
-        "mcp_public_facts_cache_secs=0",
-        "mcp_discord_timeout_ms=999",
-        "access_gate_cache_ttl_ms=3600001",
-        "access_gate_lookup_timeout_ms=60001",
-        "access_gate_decision_timeout_ms=180001",
-        "access_gate_reload_ms=499",
-        "access_gate_reload_ms=3600001",
-        "access_gate_purge_every_secs=604801",
-        "access_gate_retention_days=3651",
-        "mcp_public_facts_cache_secs=3601",
-        "mcp_discord_timeout_ms=120001",
-        "mcp_discord_timeout_ms=18446744073709551615",
-    ] {
+        "access_gate_lookup_timeout_ms=5000\naccess_gate_decision_timeout_ms=4999".to_owned(),
+        "mcp_discord_timeout_ms=18446744073709551615".to_owned(),
+    ]
+    .into_iter()
+    .chain(START_BOUNDS.iter().flat_map(|bound| {
+        [bound.min.checked_sub(1), bound.max.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .map(|value| format!("{}={value}", bound.key))
+    })) {
+        assert!(parse_start(&section).is_err(), "{section}");
+    }
+    for bound in START_BOUNDS {
+        for value in [bound.min, bound.max] {
+            let section = format!("{}={value}", bound.key);
+            assert!(parse_start(&section).is_ok(), "{section}");
+        }
+    }
+}
+
+fn parse_start(section: &str) -> Result<BotConfig, dl_core::bot_config::BotConfigError> {
+    BotConfig::parse(&format!("schema_version=1\n[runtime.start]\n{section}\n"))
+}
+
+fn contract_row<'a>(contract: &'a str, bound: &StartBound) -> Vec<&'a str> {
+    let prefix = format!("| `{}` |", bound.key);
+    let row = contract
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("CONTRACT.md has no row for {}", bound.key));
+    row.split('|').map(str::trim).collect()
+}
+
+#[test]
+fn contract_operating_values_follow_the_start_bounds_and_shipped_config() {
+    let contract = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../dl-access-gate/CONTRACT.md"
+    ));
+    let shipped: toml::Value = toml::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../config/bot.toml"
+    )))
+    .expect("shipped bot.toml");
+    let rows = contract
+        .lines()
+        .filter(|line| line.starts_with("| `access_gate_") || line.starts_with("| `mcp_"))
+        .count();
+    assert_eq!(rows, START_BOUNDS.len());
+    for bound in START_BOUNDS {
+        let cells = contract_row(contract, &bound);
         assert!(
-            BotConfig::parse(&format!("schema_version=1\n[runtime.start]\n{section}\n")).is_err(),
-            "{section}"
+            cells[2].starts_with(&format!("{} to {}", bound.min, bound.max)),
+            "{}: {}",
+            bound.key,
+            cells[2]
         );
+        let value = shipped
+            .get("runtime")
+            .and_then(|runtime| runtime.get("start"))
+            .and_then(|start| start.get(bound.key))
+            .and_then(toml::Value::as_integer)
+            .unwrap_or_else(|| panic!("config/bot.toml ships no {}", bound.key));
+        assert_eq!(cells[3], value.to_string(), "{}", bound.key);
     }
 }

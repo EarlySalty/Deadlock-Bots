@@ -2,11 +2,11 @@ use super::access::{
     effective_permissions, fetch_member, guild_source, member_access, parse_roles, Access,
     GuildRoles, MemberLookup, ADMIN,
 };
-use super::{discord_call, json_response, McpState};
+use super::{bearer_matches, discord_call_within, discord_status, json_response, McpState};
 use anyhow::{Context, Result};
 use axum::{
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use dl_access_gate::{
@@ -86,7 +86,6 @@ pub fn spawn_retention_purge(pool: sqlx::PgPool, options: &StartOptions) -> Resu
 type Stamped<T> = (Instant, T);
 
 pub struct GateState {
-    token: String,
     owner_id: Option<u64>,
     policy: Arc<policy::PolicyStore>,
     recorder: Option<record::Recorder>,
@@ -106,12 +105,11 @@ struct Verdict {
 }
 
 impl GateState {
-    pub fn start(token: String, settings: GateSettings) -> Self {
+    pub fn start(settings: GateSettings) -> Self {
         let store = Arc::new(policy::PolicyStore::new(settings.access_file));
         store.reload();
         policy::spawn_reload(store.clone(), settings.reload_interval);
         Self {
-            token,
             owner_id: settings.owner_id,
             policy: store,
             recorder: settings
@@ -131,7 +129,7 @@ impl GateState {
     }
 
     fn fresh(&self, stamp: Instant) -> bool {
-        stamp.elapsed() < self.ttl
+        super::fresh(stamp, self.ttl)
     }
 
     async fn bounded<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
@@ -149,8 +147,9 @@ impl GateState {
         let stamp = Instant::now();
         let (guild, verified) = guild_source(st)?;
         let raw = self
-            .bounded(discord_call(
+            .bounded(discord_call_within(
                 st,
+                Some(self.lookup_timeout),
                 "GET",
                 &format!("/guilds/{guild}/roles"),
                 &[],
@@ -171,7 +170,9 @@ impl GateState {
         }
         let stamp = Instant::now();
         let (guild, _) = guild_source(st)?;
-        let lookup = self.bounded(fetch_member(st, guild, user)).await?;
+        let lookup = self
+            .bounded(fetch_member(st, guild, user, Some(self.lookup_timeout)))
+            .await?;
         let (roles_stamp, roles) = self.roles(st).await?;
         let member = match lookup {
             MemberLookup::Missing => None,
@@ -185,7 +186,7 @@ impl GateState {
         };
         let mut members = self.members.lock().await;
         if members.len() >= CACHE_LIMIT {
-            members.retain(|_, (stamp, _)| stamp.elapsed() < self.ttl);
+            members.retain(|_, (stamp, _)| self.fresh(*stamp));
             if members.len() >= CACHE_LIMIT {
                 members.clear();
             }
@@ -202,8 +203,9 @@ impl GateState {
         }
         let stamp = Instant::now();
         let channel = Arc::new(
-            self.bounded(discord_call(
+            self.bounded(discord_call_within(
                 st,
+                Some(self.lookup_timeout),
                 "GET",
                 &format!("/channels/{id}"),
                 &[],
@@ -251,15 +253,7 @@ fn lower_hex(value: &str, len: usize) -> bool {
 
 fn gate_for(st: &McpState, headers: &HeaderMap) -> Option<Arc<GateState>> {
     let gate = st.gate.as_ref()?;
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .is_some_and(|(scheme, token)| {
-            scheme.eq_ignore_ascii_case("Bearer")
-                && super::constant_time_eq(token.trim(), &gate.token)
-        })
-        .then(|| gate.clone())
+    bearer_matches(headers, st.gate_token.as_deref()).then(|| gate.clone())
 }
 
 fn unauthorized() -> Response {
@@ -343,7 +337,16 @@ async fn access_answer(
         }
     };
     let channel_permissions = match channel {
-        Some(channel) => channel_permissions(st, gate, channel, &member).await,
+        Some(channel) => match channel_permissions(st, gate, channel, &member).await {
+            Ok(names) => names,
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "access gate channel lookup failed");
+                return AccessResponse {
+                    owner,
+                    ..AccessResponse::no_rights(MemberStatus::LookupFailed)
+                };
+            }
+        },
         None => None,
     };
     AccessResponse {
@@ -363,18 +366,22 @@ async fn channel_permissions(
     gate: &GateState,
     channel: u64,
     member: &Access,
-) -> Option<Vec<String>> {
-    let raw = gate.channel(st, channel).await.ok()?;
+) -> Result<Option<Vec<String>>> {
+    let raw = match gate.channel(st, channel).await {
+        Ok(raw) => raw,
+        Err(error) if matches!(discord_status(&error), Some(403 | 404)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     if raw["guild_id"].as_str() != Some(member.guild.as_str()) {
-        return None;
+        return Ok(None);
     }
-    effective_permissions(&raw, member).map(|mask| {
+    Ok(effective_permissions(&raw, member).map(|mask| {
         if mask == u64::MAX {
             bits::names(bits::all_known())
         } else {
             bits::names(mask)
         }
-    })
+    }))
 }
 
 struct Ids {

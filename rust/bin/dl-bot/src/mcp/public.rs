@@ -1,5 +1,5 @@
 use super::access::{effective_permissions, Access, HISTORY, SEND, VIEW};
-use super::{discord_call, McpState};
+use super::{discord_call, discord_status, McpState};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -542,8 +542,12 @@ async fn search_messages(
         .await
         {
             Ok(raw) => raw,
-            Err(error) if round == 0 => return Err(error),
-            Err(_) => break,
+            Err(error)
+                if round > 0 && discord_status(&error).is_some_and(|status| status >= 500) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
         };
         let mut page = raw
             .as_array()
@@ -843,15 +847,19 @@ fn registered_info(message: &Value, bot_id: &str, channel: &str, id: &str) -> Op
     own_info(message, bot_id)
 }
 
+pub(super) fn facts_cache_secs(st: &McpState) -> Result<u64> {
+    st.public_facts_cache_secs
+        .context("Serverfakten sind ohne runtime.start.mcp_public_facts_cache_secs abgeschaltet")
+}
+
 pub(super) async fn facts(st: &McpState, args: &Value) -> Result<Facts> {
+    facts_cache_secs(st)?;
     let access = super::access::access(st, None).await?;
     facts_for(st, args, &access).await
 }
 
 pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> Result<Facts> {
-    let cache_seconds = st
-        .public_facts_cache_secs
-        .context("Serverfakten sind ohne runtime.start.mcp_public_facts_cache_secs abgeschaltet")?;
+    let cache_seconds = facts_cache_secs(st)?;
     let arguments: FactsArgs = serde_json::from_value(args.clone())?;
     let terms = normalized_terms(&arguments.channel_terms)?;
     let personal = arguments.channel_id.is_some() || !arguments.channel_terms.is_empty();
@@ -916,7 +924,7 @@ pub(super) async fn facts_for(st: &McpState, args: &Value, access: &Access) -> R
             && !personal
             && c.guild == guild_id
             && c.channels == channels_value
-            && c.created.elapsed() < Duration::from_secs(cache_seconds)
+            && super::fresh(c.created, Duration::from_secs(cache_seconds))
     }) {
         return Ok(cached.facts.clone());
     }

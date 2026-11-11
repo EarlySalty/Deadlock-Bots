@@ -18,7 +18,7 @@ const QUEUE: usize = 1024;
 const PENDING: u8 = 0;
 const DELIVERED: u8 = 1;
 const ABANDONED: u8 = 2;
-const REVOKE_ATTEMPTS: u32 = 20;
+pub(super) const REVOKE_ATTEMPTS: u32 = 20;
 const SECRET_MARKERS: &[&str] = &[
     "token",
     "secret",
@@ -218,7 +218,7 @@ async fn revoke(pool: &sqlx::PgPool, decision_id: &str, every: Duration) {
     }
 }
 
-async fn insert(pool: &sqlx::PgPool, decision: &Decision) -> sqlx::Result<()> {
+pub(super) async fn insert(pool: &sqlx::PgPool, decision: &Decision) -> sqlx::Result<()> {
     let request = &decision.request;
     sqlx::query(
         "INSERT INTO bot.access_gate_decisions (decision_id, caller, origin, user_id, channel_id, dm, capability, class, internal, target_user_id, target_role_id, args_hash, args_redacted, allowed, reason, shadow, confirm_required, place_ok) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",

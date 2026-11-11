@@ -39,8 +39,13 @@ const MAX_INLINE_RESULT_CHARS: usize = 250_000;
 const PROTOCOL_FALLBACK: &str = "2025-03-26";
 const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
+struct DiscordHttp {
+    client: reqwest::Client,
+    timeout: Duration,
+}
+
 pub struct McpState {
-    http: Option<reqwest::Client>,
+    http: Option<DiscordHttp>,
     public_facts_cache_secs: Option<u64>,
     bot_token: String,
     discord_api: String,
@@ -53,6 +58,7 @@ pub struct McpState {
     public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool, u64)>,
     public_cache: tokio::sync::Mutex<Option<public::CachedFacts>>,
     gate: Option<Arc<gate::GateState>>,
+    gate_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -89,13 +95,14 @@ impl McpState {
         config: &StartOptions,
     ) -> Result<Self> {
         let timings = config.mcp_timings()?;
-        let http = match timings.discord_timeout_ms {
-            Some(timeout) => Some(
-                reqwest::Client::builder()
-                    .timeout(Duration::from_millis(timeout))
+        let http = match timings.discord_timeout_ms.map(Duration::from_millis) {
+            Some(timeout) => Some(DiscordHttp {
+                client: reqwest::Client::builder()
+                    .timeout(timeout)
                     .build()
                     .context("MCP: reqwest-Client")?,
-            ),
+                timeout,
+            }),
             None => {
                 tracing::warn!(
                     "runtime.start.mcp_discord_timeout_ms is missing, MCP Discord calls are refused"
@@ -129,6 +136,7 @@ impl McpState {
             public_source: None,
             public_cache: tokio::sync::Mutex::new(None),
             gate: None,
+            gate_token: None,
         })
     }
 
@@ -147,17 +155,21 @@ impl McpState {
     }
 
     pub fn with_public_access(
-        mut self,
+        self,
         token: Option<String>,
         engine: Arc<dl_voice::tempvoice::TempVoiceEngine>,
     ) -> Result<Self> {
+        let mut state = self.with_public_token(token)?;
+        state.public_tempvoice = Some(engine);
+        Ok(state)
+    }
+
+    fn with_public_token(mut self, token: Option<String>) -> Result<Self> {
         if let Some(token) = token {
-            if token.trim().is_empty() || constant_time_eq(&token, &self.auth_token) {
-                bail!("Öffentlicher MCP-Zugang benötigt einen eigenen Schlüssel");
-            }
-            self.public_token = Some(token);
+            self.public_token = Some(token.trim().to_owned());
+            self.ensure_distinct_tokens()
+                .context("Öffentlicher MCP-Zugang benötigt einen eigenen Schlüssel")?;
         }
-        self.public_tempvoice = Some(engine);
         Ok(self)
     }
 
@@ -166,24 +178,40 @@ impl McpState {
         token: Option<String>,
         settings: Option<gate::GateSettings>,
     ) -> Result<Self> {
-        let Some(token) = token.map(|value| value.trim().to_owned()) else {
+        let Some(token) = token else {
             tracing::warn!("access gate token is missing, gate stays off and answers 401");
             return Ok(self);
         };
-        let reused = constant_time_eq(&token, &self.auth_token)
-            || self
-                .public_token
-                .as_deref()
-                .is_some_and(|public| constant_time_eq(&token, public.trim()));
-        if token.is_empty() || reused {
-            bail!("Zugriffsschranke benötigt einen eigenen Schlüssel");
-        }
+        self.gate_token = Some(token.trim().to_owned());
+        self.ensure_distinct_tokens()
+            .context("Zugriffsschranke benötigt einen eigenen Schlüssel")?;
         let Some(settings) = settings else {
             tracing::warn!("access gate settings are unavailable, gate stays off and answers 401");
             return Ok(self);
         };
-        self.gate = Some(Arc::new(gate::GateState::start(token, settings)));
+        self.gate = Some(Arc::new(gate::GateState::start(settings)));
         Ok(self)
+    }
+
+    fn ensure_distinct_tokens(&self) -> Result<()> {
+        let tokens = [
+            Some(self.auth_token.as_str()),
+            self.public_token.as_deref(),
+            self.gate_token.as_deref(),
+        ];
+        let tokens: Vec<&str> = tokens.into_iter().flatten().collect();
+        if tokens.iter().any(|token| token.is_empty()) {
+            bail!("MCP-Schlüssel ist leer");
+        }
+        for (index, token) in tokens.iter().enumerate() {
+            if tokens[index + 1..]
+                .iter()
+                .any(|other| constant_time_eq(token, other))
+            {
+                bail!("MCP-Schlüssel wird mehrfach verwendet");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -209,26 +237,26 @@ fn json_response(status: StatusCode, body: Value) -> Response {
         .into_response()
 }
 
-fn auth_ok(st: &McpState, headers: &HeaderMap) -> bool {
-    headers
+fn bearer_matches(headers: &HeaderMap, expected: Option<&str>) -> bool {
+    let presented = headers
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-        .map(|(_, token)| constant_time_eq(token.trim(), &st.auth_token))
-        .unwrap_or(false)
+        .and_then(|value| value.to_str().ok())
+        .and_then(dl_core::http_auth::bearer_token);
+    presented
+        .zip(expected)
+        .is_some_and(|(presented, expected)| constant_time_eq(presented, expected))
+}
+
+fn auth_ok(st: &McpState, headers: &HeaderMap) -> bool {
+    bearer_matches(headers, Some(&st.auth_token))
 }
 
 fn public_auth(st: &McpState, headers: &HeaderMap) -> bool {
-    st.public_token.as_ref().is_some_and(|expected| {
-        headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split_once(' '))
-            .is_some_and(|(scheme, token)| {
-                scheme.eq_ignore_ascii_case("Bearer") && constant_time_eq(token.trim(), expected)
-            })
-    })
+    bearer_matches(headers, st.public_token.as_deref())
+}
+
+pub(crate) fn fresh(stamp: std::time::Instant, ttl: Duration) -> bool {
+    stamp.elapsed() < ttl
 }
 
 async fn public_post(
@@ -283,6 +311,12 @@ async fn public_post(
             json!({"content":[{"type":"text","text":serde_json::to_string(&status).expect("Status ist serialisierbar")}],"isError":false})
         }
         Some("tools/call") if req["params"]["name"] == "public_server_facts" => {
+            if public::facts_cache_secs(&st).is_err() {
+                return json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error":"public_facts_unavailable"}),
+                );
+            }
             let Ok(access) = access::access(&st, user).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
@@ -663,8 +697,6 @@ fn other_tool_definitions() -> Value {
     ])
 }
 
-// ───────────────────────────── Discord-REST-Kern ─────────────────────────────
-
 async fn discord_call(
     st: &McpState,
     method: &str,
@@ -673,16 +705,44 @@ async fn discord_call(
     body: Option<&Value>,
     audit_reason: Option<&str>,
 ) -> Result<Value> {
+    discord_call_within(st, None, method, path, query, body, audit_reason).await
+}
+
+pub(crate) fn discord_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .downcast_ref::<DiscordHttpError>()
+        .map(|error| error.status)
+}
+
+fn wait_fits(deadline: tokio::time::Instant, wait: Duration) -> bool {
+    tokio::time::Instant::now() + wait < deadline
+}
+
+pub(crate) async fn discord_call_within(
+    st: &McpState,
+    limit: Option<Duration>,
+    method: &str,
+    path: &str,
+    query: &[(String, String)],
+    body: Option<&Value>,
+    audit_reason: Option<&str>,
+) -> Result<Value> {
+    let http = st.http.as_ref().ok_or(DiscordCallsOff)?;
+    let budget = limit.map_or(http.timeout, |limit| limit.min(http.timeout));
+    let deadline = tokio::time::Instant::now() + budget;
     let url = format!("{}{path}", st.discord_api);
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            bail!("Discord-Zeitbudget ist aufgebraucht ({method} {path})");
+        }
         let m = reqwest::Method::from_bytes(method.as_bytes()).context("HTTP-Methode")?;
-        let mut req = st
-            .http
-            .as_ref()
-            .ok_or(DiscordCallsOff)?
+        let mut req = http
+            .client
             .request(m, &url)
+            .timeout(remaining)
             .header("Authorization", format!("Bot {}", st.bot_token))
             .header(
                 "User-Agent",
@@ -712,16 +772,21 @@ async fn discord_call(
                 .and_then(|v| v.as_f64())
                 .or(hdr_retry)
                 .unwrap_or(1.0);
+            let wait = Duration::from_millis((retry * 1000.0) as u64 + 100);
             if attempt > 8 {
                 bail!("Rate-Limit: zu viele Versuche ({url})");
             }
+            if !wait_fits(deadline, wait) {
+                bail!("Rate-Limit: Wartezeit passt nicht ins Zeitbudget ({url})");
+            }
             tracing::warn!(path, retry, attempt, "MCP: Discord 429, warte");
-            tokio::time::sleep(Duration::from_millis((retry * 1000.0) as u64 + 100)).await;
+            tokio::time::sleep(wait).await;
             continue;
         }
-        if status.is_server_error() && attempt <= 3 {
+        let server_wait = Duration::from_millis(800 * u64::from(attempt));
+        if status.is_server_error() && attempt <= 3 && wait_fits(deadline, server_wait) {
             tracing::warn!(%status, path, attempt, "MCP: Discord 5xx, Retry");
-            tokio::time::sleep(Duration::from_millis(800 * u64::from(attempt))).await;
+            tokio::time::sleep(server_wait).await;
             continue;
         }
         let text = resp.text().await.unwrap_or_default();
@@ -929,12 +994,8 @@ async fn fetch_messages(
     Ok(collected)
 }
 
-/// Aktive + archivierte Threads eines Channels.
 async fn fetch_threads(st: &McpState, guild_id: &str, channel_id: &str) -> Result<Vec<Value>> {
-    let mut threads: Vec<Value> = Vec::new();
-
-    // Aktive Threads (guild-weit, nach parent gefiltert)
-    if let Ok(active) = discord_call(
+    let active = discord_call(
         st,
         "GET",
         &format!("/guilds/{guild_id}/threads/active"),
@@ -942,58 +1003,60 @@ async fn fetch_threads(st: &McpState, guild_id: &str, channel_id: &str) -> Resul
         None,
         None,
     )
-    .await
-    {
-        if let Some(arr) = active.get("threads").and_then(|t| t.as_array()) {
-            threads.extend(
-                arr.iter()
-                    .filter(|t| t["parent_id"].as_str() == Some(channel_id))
-                    .cloned(),
-            );
-        }
-    }
-
-    // Archivierte Threads (öffentlich; privat falls berechtigt), paginiert
+    .await?;
+    let mut threads: Vec<Value> = active
+        .get("threads")
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|t| t["parent_id"].as_str() == Some(channel_id))
+        .cloned()
+        .collect();
     for kind in ["public", "private"] {
-        let mut before: Option<String> = None;
-        loop {
-            let mut query = vec![("limit".to_string(), "100".to_string())];
-            if let Some(b) = &before {
-                query.push(("before".to_string(), b.clone()));
-            }
-            let path = format!("/channels/{channel_id}/threads/archived/{kind}");
-            let page = match discord_call(st, "GET", &path, &query, None, None).await {
-                Ok(p) => p,
-                Err(e) => {
-                    // private ggf. ohne Berechtigung — still überspringen
-                    tracing::debug!(kind, channel_id, error = %e, "MCP: archived threads übersprungen");
-                    break;
-                }
-            };
-            let arr = page
-                .get("threads")
-                .and_then(|t| t.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if arr.is_empty() {
-                break;
-            }
-            before = arr
-                .last()
-                .and_then(|t| t["thread_metadata"]["archive_timestamp"].as_str())
-                .map(|s| s.to_string());
-            threads.extend(arr);
-            if !page
-                .get("has_more")
-                .and_then(|h| h.as_bool())
-                .unwrap_or(false)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(PAGE_DELAY_MS)).await;
-        }
+        threads.extend(archived_threads(st, channel_id, kind).await?);
     }
     Ok(threads)
+}
+
+async fn archived_threads(st: &McpState, channel_id: &str, kind: &str) -> Result<Vec<Value>> {
+    let mut threads = Vec::new();
+    let mut before: Option<String> = None;
+    loop {
+        let mut query = vec![("limit".to_string(), "100".to_string())];
+        if let Some(b) = &before {
+            query.push(("before".to_string(), b.clone()));
+        }
+        let path = format!("/channels/{channel_id}/threads/archived/{kind}");
+        let page = match discord_call(st, "GET", &path, &query, None, None).await {
+            Ok(page) => page,
+            Err(error) if discord_status(&error) == Some(403) => {
+                tracing::debug!(kind, channel_id, error = %error, "MCP: archived threads without access skipped");
+                return Ok(threads);
+            }
+            Err(error) => return Err(error),
+        };
+        let arr = page
+            .get("threads")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if arr.is_empty() {
+            return Ok(threads);
+        }
+        before = arr
+            .last()
+            .and_then(|t| t["thread_metadata"]["archive_timestamp"].as_str())
+            .map(|s| s.to_string());
+        threads.extend(arr);
+        if !page
+            .get("has_more")
+            .and_then(|h| h.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(threads);
+        }
+        tokio::time::sleep(Duration::from_millis(PAGE_DELAY_MS)).await;
+    }
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -1859,6 +1922,154 @@ mod tests {
         assert!(
             McpState::from_config("bot-token".into(), Some("internal".into()), &invalid).is_err()
         );
+    }
+
+    fn probe() -> (std::net::TcpListener, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
+        listener.set_nonblocking(true).expect("nonblocking probe");
+        let api = format!("http://{}", listener.local_addr().expect("probe address"));
+        (listener, api)
+    }
+
+    async fn call(app: &Router, path: &str, token: &str, body: Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-discord-user-id", "42")
+                    .header("x-discord-request-id", "synthetic-request")
+                    .body(Body::from(body.to_string()))
+                    .expect("test request"),
+            )
+            .await
+            .expect("test response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("test body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn facts_off_is_refused_and_unlisted_before_any_discord_call() {
+        let options = StartOptions {
+            mcp_discord_timeout_ms: Some(10_000),
+            ..StartOptions::default()
+        };
+        let mut state =
+            McpState::from_config("bot-token".into(), Some("internal".into()), &options)
+                .and_then(|state| state.with_public_token(Some("public".into())))
+                .expect("state without facts cache");
+        let (listener, api) = probe();
+        state.discord_api = api;
+        let app = router(Arc::new(state));
+        let facts = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"public_server_facts","arguments":{}}});
+        let (status, body) = call(
+            &app,
+            "/mcp/public",
+            "public",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["result"]["tools"]
+            .as_array()
+            .expect("public tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"read_messages"), "{body}");
+        assert!(!names.contains(&"public_server_facts"), "{body}");
+        let (status, body) = call(&app, "/mcp/public", "public", facts.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "public_facts_unavailable");
+        let (status, body) = call(&app, "/mcp", "internal", facts).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        assert!(
+            listener.accept().is_err(),
+            "no request may leave the process"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_with_discord_calls_off_is_an_error() {
+        let mut state = McpState::from_config(
+            "bot-token".into(),
+            Some("internal".into()),
+            &StartOptions::default(),
+        )
+        .expect("state without timings");
+        let (listener, api) = probe();
+        state.discord_api = api;
+        let result = tools_call(
+            &Arc::new(state),
+            &json!({"name":"list_threads","arguments":{"channel_id":"5","guild_id":"1"}}),
+        )
+        .await
+        .expect("tool answer");
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            result.to_string().contains("mcp_discord_timeout_ms"),
+            "{result}"
+        );
+        assert!(
+            listener.accept().is_err(),
+            "no request may leave the process"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_waits_never_outlast_the_time_budget() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        let mock = Router::new().fallback(move |request: axum::extract::Request| {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let retry = if request.uri().path() == "/long" {
+                    30.0
+                } else {
+                    2.0
+                };
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(json!({"retry_after": retry})),
+                )
+                    .into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock listener");
+        let addr = listener.local_addr().expect("mock address");
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await });
+        let mut state = state(Some("internal")).expect("state");
+        state.discord_api = format!("http://{addr}");
+        let started = std::time::Instant::now();
+        let error = discord_call(&state, "GET", "/long", &[], None, None)
+            .await
+            .expect_err("wait longer than the timeout");
+        assert!(error.to_string().contains("Zeitbudget"), "{error:#}");
+        let error = discord_call_within(
+            &state,
+            Some(Duration::from_secs(1)),
+            "GET",
+            "/short",
+            &[],
+            None,
+            None,
+        )
+        .await
+        .expect_err("wait longer than the lookup limit");
+        assert!(error.to_string().contains("Zeitbudget"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
     }
 
     #[test]

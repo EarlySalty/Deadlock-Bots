@@ -35,8 +35,27 @@ const MAX_INLINE_RESULT_CHARS: usize = 300_000;
 const PROTOCOL_FALLBACK: &str = "2025-03-26";
 const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
+struct DiscordHttp {
+    client: reqwest::Client,
+    timeout: Duration,
+}
+
+#[derive(Debug)]
+struct DiscordStatus {
+    status: u16,
+    message: String,
+}
+
+impl std::fmt::Display for DiscordStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DiscordStatus {}
+
 struct AppState {
-    http: Option<reqwest::Client>,
+    http: Option<DiscordHttp>,
     bot_token: String,
     auth_token: Option<String>,
     default_guild: Option<String>,
@@ -71,13 +90,11 @@ async fn main() -> Result<()> {
         .runtime
         .start
         .mcp_timings()?;
-    let http = match timings.discord_timeout_ms {
-        Some(timeout) => Some(
-            reqwest::Client::builder()
-                .timeout(Duration::from_millis(timeout))
-                .build()
-                .context("reqwest client")?,
-        ),
+    let http = match timings.discord_timeout_ms.map(Duration::from_millis) {
+        Some(timeout) => Some(DiscordHttp {
+            client: reqwest::Client::builder().timeout(timeout).build().context("reqwest client")?,
+            timeout,
+        }),
         None => {
             tracing::warn!(
                 "runtime.start.mcp_discord_timeout_ms is missing, dl-mcp Discord calls are refused"
@@ -113,12 +130,12 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 
 fn auth_ok(st: &AppState, headers: &HeaderMap, query: &HashMap<String, String>) -> bool {
     let Some(expected) = &st.auth_token else { return true };
-    if let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(tok) = v.strip_prefix("Bearer ") {
-            if tok.trim() == expected {
-                return true;
-            }
-        }
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(dl_core::http_auth::bearer_token);
+    if bearer == Some(expected.as_str()) {
+        return true;
     }
     query.get("token").map(|t| t == expected).unwrap_or(false)
 }
@@ -355,7 +372,13 @@ fn tool_definitions() -> Value {
     ])
 }
 
-// ───────────────────────────── Discord-REST-Kern ─────────────────────────────
+fn discord_status(error: &anyhow::Error) -> Option<u16> {
+    error.downcast_ref::<DiscordStatus>().map(|error| error.status)
+}
+
+fn wait_fits(deadline: tokio::time::Instant, wait: Duration) -> bool {
+    tokio::time::Instant::now() + wait < deadline
+}
 
 async fn discord_call(
     st: &AppState,
@@ -364,16 +387,24 @@ async fn discord_call(
     query: &[(String, String)],
     body: Option<&Value>,
 ) -> Result<Value> {
+    let http = st
+        .http
+        .as_ref()
+        .context("runtime.start.mcp_discord_timeout_ms fehlt, Discord-Aufrufe sind abgeschaltet")?;
+    let deadline = tokio::time::Instant::now() + http.timeout;
     let url = format!("{DISCORD_API}{path}");
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            bail!("Discord-Zeitbudget ist aufgebraucht ({method} {path})");
+        }
         let m = reqwest::Method::from_bytes(method.as_bytes()).context("HTTP-Methode")?;
-        let mut req = st
-            .http
-            .as_ref()
-            .context("runtime.start.mcp_discord_timeout_ms fehlt, Discord-Aufrufe sind abgeschaltet")?
+        let mut req = http
+            .client
             .request(m, &url)
+            .timeout(remaining)
             .header("Authorization", format!("Bot {}", st.bot_token))
             .header("User-Agent", "DiscordBot (Deadlock-Bots dl-mcp, 0.1.0)");
         if !query.is_empty() {
@@ -397,21 +428,30 @@ async fn discord_call(
                 .and_then(|v| v.as_f64())
                 .or(hdr_retry)
                 .unwrap_or(1.0);
+            let wait = Duration::from_millis((retry * 1000.0) as u64 + 100);
             if attempt > 8 {
                 bail!("Rate-Limit: zu viele Versuche ({url})");
             }
+            if !wait_fits(deadline, wait) {
+                bail!("Rate-Limit: Wartezeit passt nicht ins Zeitbudget ({url})");
+            }
             tracing::warn!("429 auf {path}, warte {retry:.2}s (Versuch {attempt})");
-            tokio::time::sleep(Duration::from_millis((retry * 1000.0) as u64 + 100)).await;
+            tokio::time::sleep(wait).await;
             continue;
         }
-        if status.is_server_error() && attempt <= 3 {
+        let server_wait = Duration::from_millis(800 * attempt as u64);
+        if status.is_server_error() && attempt <= 3 && wait_fits(deadline, server_wait) {
             tracing::warn!("{status} auf {path}, Retry {attempt}");
-            tokio::time::sleep(Duration::from_millis(800 * attempt as u64)).await;
+            tokio::time::sleep(server_wait).await;
             continue;
         }
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("Discord {status}: {} ({method} {path})", truncate(&text, 600));
+            return Err(DiscordStatus {
+                status: status.as_u16(),
+                message: format!("Discord {status}: {} ({method} {path})", truncate(&text, 600)),
+            }
+            .into());
         }
         if text.trim().is_empty() {
             return Ok(Value::Null);
@@ -582,54 +622,53 @@ async fn fetch_messages(
     Ok(collected)
 }
 
-/// Aktive + archivierte Threads eines Channels.
 async fn fetch_threads(st: &AppState, guild_id: &str, channel_id: &str) -> Result<Vec<Value>> {
-    let mut threads: Vec<Value> = Vec::new();
-
-    // Aktive Threads (guild-weit, nach parent gefiltert)
-    if let Ok(active) = discord_call(st, "GET", &format!("/guilds/{guild_id}/threads/active"), &[], None).await {
-        if let Some(arr) = active.get("threads").and_then(|t| t.as_array()) {
-            threads.extend(
-                arr.iter()
-                    .filter(|t| t["parent_id"].as_str() == Some(channel_id))
-                    .cloned(),
-            );
-        }
-    }
-
-    // Archivierte öffentliche Threads (paginiert über archive_timestamp)
+    let active = discord_call(st, "GET", &format!("/guilds/{guild_id}/threads/active"), &[], None).await?;
+    let mut threads: Vec<Value> = active
+        .get("threads")
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|t| t["parent_id"].as_str() == Some(channel_id))
+        .cloned()
+        .collect();
     for kind in ["public", "private"] {
-        let mut before: Option<String> = None;
-        loop {
-            let mut query = vec![("limit".to_string(), "100".to_string())];
-            if let Some(b) = &before {
-                query.push(("before".to_string(), b.clone()));
-            }
-            let path = format!("/channels/{channel_id}/threads/archived/{kind}");
-            let page = match discord_call(st, "GET", &path, &query, None).await {
-                Ok(p) => p,
-                Err(e) => {
-                    // private ggf. ohne Berechtigung — still überspringen
-                    tracing::debug!("threads {kind} für {channel_id}: {e:#}");
-                    break;
-                }
-            };
-            let arr = page.get("threads").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-            if arr.is_empty() {
-                break;
-            }
-            before = arr
-                .last()
-                .and_then(|t| t["thread_metadata"]["archive_timestamp"].as_str())
-                .map(|s| s.to_string());
-            threads.extend(arr);
-            if !page.get("has_more").and_then(|h| h.as_bool()).unwrap_or(false) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(PAGE_DELAY_MS)).await;
-        }
+        threads.extend(archived_threads(st, channel_id, kind).await?);
     }
     Ok(threads)
+}
+
+async fn archived_threads(st: &AppState, channel_id: &str, kind: &str) -> Result<Vec<Value>> {
+    let mut threads = Vec::new();
+    let mut before: Option<String> = None;
+    loop {
+        let mut query = vec![("limit".to_string(), "100".to_string())];
+        if let Some(b) = &before {
+            query.push(("before".to_string(), b.clone()));
+        }
+        let path = format!("/channels/{channel_id}/threads/archived/{kind}");
+        let page = match discord_call(st, "GET", &path, &query, None).await {
+            Ok(page) => page,
+            Err(e) if discord_status(&e) == Some(403) => {
+                tracing::debug!("threads {kind} für {channel_id} ohne Zugriff: {e:#}");
+                return Ok(threads);
+            }
+            Err(e) => return Err(e),
+        };
+        let arr = page.get("threads").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        if arr.is_empty() {
+            return Ok(threads);
+        }
+        before = arr
+            .last()
+            .and_then(|t| t["thread_metadata"]["archive_timestamp"].as_str())
+            .map(|s| s.to_string());
+        threads.extend(arr);
+        if !page.get("has_more").and_then(|h| h.as_bool()).unwrap_or(false) {
+            return Ok(threads);
+        }
+        tokio::time::sleep(Duration::from_millis(PAGE_DELAY_MS)).await;
+    }
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -972,4 +1011,28 @@ async fn tool_api_call(st: &AppState, args: &Value) -> Result<Value> {
 
     let res = discord_call(st, &method, &path, &query, body).await?;
     Ok(if res.is_null() { json!({"ok": true, "note": "204 No Content"}) } else { res })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_threads_without_discord_timeout_is_an_error() {
+        let state = Arc::new(AppState {
+            http: None,
+            bot_token: "bot-token".into(),
+            auth_token: None,
+            default_guild: None,
+            export_dir: PathBuf::from("data/mcp_exports"),
+        });
+        let result = tools_call(
+            &state,
+            &json!({"name":"list_threads","arguments":{"channel_id":"5","guild_id":"1"}}),
+        )
+        .await
+        .expect("tool answer");
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(result.to_string().contains("mcp_discord_timeout_ms"), "{result}");
+    }
 }

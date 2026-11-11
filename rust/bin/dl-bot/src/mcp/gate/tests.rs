@@ -829,15 +829,70 @@ fn reused_gate_token_stops_the_start() {
         )
         .expect("state")
     };
+    let gate_first = |public: &str, gate: &str| {
+        state()
+            .with_gate(Some(gate.into()), None)
+            .and_then(|state| state.with_public_token(Some(public.into())))
+    };
+    let public_first = |public: &str, gate: &str| {
+        state()
+            .with_public_token(Some(public.into()))
+            .and_then(|state| state.with_gate(Some(gate.into()), None))
+    };
+    for (public, gate) in [
+        ("public", "public"),
+        ("public", " public "),
+        ("public", "general"),
+        ("general", "gate"),
+        ("public", " "),
+        (" ", "gate"),
+    ] {
+        assert!(gate_first(public, gate).is_err(), "{public} {gate}");
+        assert!(public_first(public, gate).is_err(), "{public} {gate}");
+    }
     assert!(state().with_gate(Some("general".into()), None).is_err());
     assert!(state().with_gate(Some(" ".into()), None).is_err());
-    assert!(state().with_gate(Some("gate".into()), None).is_ok());
+    assert!(gate_first("public", "gate").is_ok());
+    assert!(public_first("public", "gate").is_ok());
 }
 
-#[test]
-fn wire_ids_and_names_follow_the_record_checks() {
+fn row(decision_id: &str, id: Option<i64>, name: &str, args_hash: &str) -> record::Decision {
+    let mut request = request(None, name, ActionClass::Read);
+    request.caller = name.into();
+    request.args_hash = args_hash.into();
+    record::Decision {
+        decision_id: decision_id.into(),
+        request,
+        user_id: id,
+        channel_id: id,
+        target_user_id: id,
+        target_role_id: id,
+        allowed: false,
+        reason: Reason::Unmapped.as_str(),
+        shadow: false,
+        confirm_required: false,
+        place_ok: false,
+    }
+}
+
+#[tokio::test]
+async fn wire_ids_and_names_follow_the_record_checks() {
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("throwaway test database");
+    let pool = db.pool();
+    let hash = "0".repeat(64);
+    let mut rows = 0_u32;
+    let mut stores = |id: Option<i64>, name: &str, decision_id: Option<&str>, args_hash: &str| {
+        rows += 1;
+        let decision_id = decision_id.map_or_else(|| format!("{rows:032x}"), str::to_owned);
+        let decision = row(&decision_id, id, name, args_hash);
+        async move { record::insert(pool, &decision).await.is_ok() }
+    };
     for good in ["1", "9223372036854775807"] {
-        assert!(snowflake_id(good).is_some(), "{good}");
+        let id = snowflake_id(good).and_then(|id| i64::try_from(id).ok());
+        assert!(id.is_some(), "{good}");
+        assert!(stores(id, "brain", None, &hash).await, "{good}");
     }
     for bad in [
         "",
@@ -853,8 +908,17 @@ fn wire_ids_and_names_follow_the_record_checks() {
     ] {
         assert!(snowflake_id(bad).is_none(), "{bad}");
     }
+    for unstorable in [0_i64, -1] {
+        assert!(
+            !stores(Some(unstorable), "brain", None, &hash).await,
+            "{unstorable}"
+        );
+    }
     let longest = "a".repeat(dl_access_gate::MAX_NAME_CHARS);
-    assert!(name_ok(&longest) && name_ok("a.b-c_1"));
+    for good in [longest.as_str(), "a.b-c_1"] {
+        assert!(name_ok(good), "{good}");
+        assert!(stores(None, good, None, &hash).await, "{good}");
+    }
     for bad in [
         String::new(),
         format!("{longest}a"),
@@ -863,7 +927,14 @@ fn wire_ids_and_names_follow_the_record_checks() {
         "\u{e4}".into(),
     ] {
         assert!(!name_ok(&bad), "{bad}");
+        assert!(!stores(None, &bad, None, &hash).await, "{bad}");
     }
+    let upper_id = "A".repeat(32);
+    let upper_hash = "A".repeat(64);
+    assert!(!lower_hex(&upper_id, 32) && !lower_hex(&upper_hash, 64));
+    assert!(!stores(None, "brain", Some(&upper_id), &hash).await);
+    assert!(!stores(None, "brain", None, &upper_hash).await);
+    assert!(!stores(None, "brain", Some(&"a".repeat(31)), &hash).await);
 }
 
 #[test]
@@ -948,4 +1019,40 @@ fn implicit_denies_follow_view_and_send() {
         effective_permissions(&channel(VIEW), &probe(base | ADMIN)),
         Some(u64::MAX)
     );
+}
+
+#[test]
+fn contract_numbers_and_reasons_follow_the_code() {
+    let contract = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../crates/dl-access-gate/CONTRACT.md"
+    ));
+    for expected in [
+        format!(
+            "more than {} member overwrites",
+            decide::MAX_MEMBER_OVERWRITES
+        ),
+        format!("at most {} times", record::REVOKE_ATTEMPTS),
+        format!(
+            "cut at {} characters",
+            dl_access_gate::MAX_OUTCOME_DETAIL_CHARS
+        ),
+        format!(
+            "more than {} bytes are stored as a size marker",
+            dl_access_gate::MAX_REDACTED_ARGS_BYTES
+        ),
+        format!(
+            "names are 1 to {} characters",
+            dl_access_gate::MAX_NAME_CHARS
+        ),
+        format!("### `POST {}`", dl_access_gate::ACCESS_PATH),
+        format!("### `POST {}`", dl_access_gate::AUTHORIZE_PATH),
+        format!("### `POST {}`", dl_access_gate::OUTCOME_PATH),
+    ] {
+        assert!(contract.contains(&expected), "CONTRACT.md lacks {expected}");
+    }
+    for reason in Reason::KNOWN {
+        let row = format!("| `{}` |", reason.as_str());
+        assert!(contract.contains(&row), "CONTRACT.md lacks reason {row}");
+    }
 }

@@ -1,7 +1,10 @@
-use super::{discord_call, DiscordHttpError, McpState};
+use super::{discord_call, discord_call_within, discord_status, McpState};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 pub(crate) const VIEW: u64 = 1 << 10;
 pub(crate) const HISTORY: u64 = 1 << 16;
@@ -109,9 +112,15 @@ pub(crate) async fn guild_roles(st: &McpState) -> Result<GuildRoles> {
     parse_roles(guild, verified, &raw)
 }
 
-pub(crate) async fn fetch_member(st: &McpState, guild: u64, user: u64) -> Result<MemberLookup> {
-    match discord_call(
+pub(crate) async fn fetch_member(
+    st: &McpState,
+    guild: u64,
+    user: u64,
+    limit: Option<Duration>,
+) -> Result<MemberLookup> {
+    match discord_call_within(
         st,
+        limit,
         "GET",
         &format!("/guilds/{guild}/members/{user}"),
         &[],
@@ -124,13 +133,7 @@ pub(crate) async fn fetch_member(st: &McpState, guild: u64, user: u64) -> Result
             Ok(MemberLookup::Found(member))
         }
         Ok(_) => bail!("Mitglied ist uneindeutig"),
-        Err(error)
-            if error
-                .downcast_ref::<DiscordHttpError>()
-                .is_some_and(|error| error.status == 404) =>
-        {
-            Ok(MemberLookup::Missing)
-        }
+        Err(error) if discord_status(&error) == Some(404) => Ok(MemberLookup::Missing),
         Err(error) => Err(error),
     }
 }
@@ -189,7 +192,7 @@ pub(crate) fn member_access(
 pub(crate) async fn access(st: &McpState, requested_user: Option<u64>) -> Result<Access> {
     let (guild, _) = guild_source(st)?;
     let member = match requested_user {
-        Some(user) => match fetch_member(st, guild, user)
+        Some(user) => match fetch_member(st, guild, user, None)
             .await
             .context("Mitglied ist nicht abrufbar")?
         {

@@ -7,6 +7,7 @@
 pub mod admin_settings;
 pub mod bot_config;
 pub mod config;
+pub mod http_auth;
 pub mod observability;
 pub mod operating_config;
 pub mod pyfloat;

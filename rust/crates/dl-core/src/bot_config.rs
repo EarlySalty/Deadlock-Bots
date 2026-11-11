@@ -30,6 +30,12 @@ pub enum BotConfigError {
     Parse { offset: usize },
     #[error("Ungültige Konfiguration: {0}")]
     Validation(&'static str),
+    #[error("Ungültige Konfiguration: runtime.start.{key} liegt außerhalb von {min} bis {max}")]
+    OutOfRange {
+        key: &'static str,
+        min: u64,
+        max: u64,
+    },
     #[error("Config-Zustand konnte nicht gesperrt werden")]
     Lock,
 }
