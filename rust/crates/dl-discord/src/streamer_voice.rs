@@ -28,22 +28,38 @@ struct EditReadback {
 
 /// An edit may have reached Discord even if its HTTP acknowledgement was
 /// lost. Read only; never issue an unsafe compensating channel PATCH.
-async fn confirm_uncertain_edit<F, Fut>(channel_id: u64, target: u32, mut read: F) -> bool
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditCheck {
+    Confirmed,
+    Unconfirmed,
+    Gone,
+}
+
+async fn confirm_uncertain_edit<F, Fut>(channel_id: u64, target: u32, mut read: F) -> EditCheck
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<EditReadback, PortError>>,
 {
     for attempt in 0..EDIT_READBACK_ATTEMPTS {
         match read().await {
-            Ok(state) if !state.policy_safe || state.channel_id != channel_id => return false,
-            Ok(state) if state.limit == target => return state.members < target as usize,
+            Err(PortError::ChannelNotFound) => return EditCheck::Gone,
+            Ok(state) if !state.policy_safe || state.channel_id != channel_id => {
+                return EditCheck::Unconfirmed
+            }
+            Ok(state) if state.limit == target => {
+                return if state.members < target as usize {
+                    EditCheck::Confirmed
+                } else {
+                    EditCheck::Unconfirmed
+                };
+            }
             _ => {}
         }
         if attempt + 1 < EDIT_READBACK_ATTEMPTS {
             tokio::time::sleep(EDIT_READBACK_DELAY).await;
         }
     }
-    false
+    EditCheck::Unconfirmed
 }
 
 pub(crate) fn invite_options() -> serde_json::Value {
@@ -198,6 +214,22 @@ pub(crate) fn valid_code(code: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+pub(crate) async fn create_voice_invite(
+    adapter: &DiscordAdapter,
+    channel_id: ChannelId,
+    reason: &str,
+) -> Result<Option<serenity::all::RichInvite>, PortError> {
+    match adapter
+        .http
+        .create_invite(channel_id, &invite_options(), Some(reason))
+        .await
+    {
+        Ok(invite) => Ok(Some(invite)),
+        Err(error) if DiscordAdapter::is_http_404(&error) => Ok(None),
+        Err(_) => Err(PortError::GuildUnavailable),
+    }
+}
+
 pub(crate) async fn current_invite(
     adapter: &DiscordAdapter,
     code: &str,
@@ -307,11 +339,9 @@ pub(crate) async fn invite(
 
     // Invite failure must not leave an expanded channel behind. Short-lived,
     // channel-specific invites also work for people not yet on the server.
-    let invite = adapter
-        .http
-        .create_invite(channel.id, &invite_options(), Some(REASON))
-        .await
-        .map_err(|_| PortError::GuildUnavailable)?;
+    let Some(invite) = create_voice_invite(adapter, channel.id, REASON).await? else {
+        return Ok(None);
+    };
     let result = async {
         if invite.channel.id != channel.id
             || invite
@@ -349,14 +379,17 @@ pub(crate) async fn invite(
             {
                 Ok(edited) if edited.id == channel.id && edited.user_limit.unwrap_or(0) == target => {}
                 Ok(_) => return Err(PortError::GuildUnavailable),
+                Err(error) if DiscordAdapter::is_http_404(&error) => return Ok(None),
                 Err(error) => {
                     tracing::warn!(%error, channel_id = expected_channel_id, target, "Streamer-Voice-Edit-ACK unklar; REST-Zustand wird geprüft");
-                    if !confirm_uncertain_edit(expected_channel_id, target, || {
+                    match confirm_uncertain_edit(expected_channel_id, target, || {
                         read_after_edit_error(adapter, guild_id, streamer_id, expected_channel_id)
                     })
                     .await
                     {
-                        return Err(PortError::GuildUnavailable);
+                        EditCheck::Confirmed => {}
+                        EditCheck::Gone => return Ok(None),
+                        EditCheck::Unconfirmed => return Err(PortError::GuildUnavailable),
                     }
                 }
             }
@@ -398,22 +431,24 @@ mod tests {
     #[tokio::test]
     async fn verlorenes_edit_ack_mit_wirksamem_limit_wird_bestaetigt() {
         let mut reads = VecDeque::from([readback(9, true)]);
-        assert!(
+        assert_eq!(
             confirm_uncertain_edit(42, 9, || {
                 std::future::ready(reads.pop_front().expect("readback"))
             })
-            .await
+            .await,
+            EditCheck::Confirmed
         );
     }
 
     #[tokio::test]
     async fn noch_nicht_sichtbares_edit_wird_begrenzt_nachgelesen() {
         let mut reads = VecDeque::from([readback(8, true), readback(9, true)]);
-        assert!(
+        assert_eq!(
             confirm_uncertain_edit(42, 9, || {
                 std::future::ready(reads.pop_front().expect("readback"))
             })
-            .await
+            .await,
+            EditCheck::Confirmed
         );
         assert!(reads.is_empty());
     }
@@ -421,32 +456,35 @@ mod tests {
     #[tokio::test]
     async fn nicht_wirksames_edit_oder_get_fehler_bleibt_gesperrt() {
         let mut unchanged = VecDeque::from([readback(8, true), readback(8, true)]);
-        assert!(
-            !confirm_uncertain_edit(42, 9, || {
+        assert_eq!(
+            confirm_uncertain_edit(42, 9, || {
                 std::future::ready(unchanged.pop_front().expect("readback"))
             })
-            .await
+            .await,
+            EditCheck::Unconfirmed
         );
         let mut unavailable = VecDeque::from([
             Err(PortError::GuildUnavailable),
             Err(PortError::GuildUnavailable),
         ]);
-        assert!(
-            !confirm_uncertain_edit(42, 9, || {
+        assert_eq!(
+            confirm_uncertain_edit(42, 9, || {
                 std::future::ready(unavailable.pop_front().expect("readback"))
             })
-            .await
+            .await,
+            EditCheck::Unconfirmed
         );
     }
 
     #[tokio::test]
     async fn nach_rechteentzug_oder_vollem_ziel_keine_bestaetigung() {
         let mut revoked = VecDeque::from([readback(9, false)]);
-        assert!(
-            !confirm_uncertain_edit(42, 9, || {
+        assert_eq!(
+            confirm_uncertain_edit(42, 9, || {
                 std::future::ready(revoked.pop_front().expect("readback"))
             })
-            .await
+            .await,
+            EditCheck::Unconfirmed
         );
         let mut full = VecDeque::from([Ok(EditReadback {
             channel_id: 42,
@@ -454,12 +492,39 @@ mod tests {
             members: 9,
             policy_safe: true,
         })]);
-        assert!(
-            !confirm_uncertain_edit(42, 9, || {
+        assert_eq!(
+            confirm_uncertain_edit(42, 9, || {
                 std::future::ready(full.pop_front().expect("readback"))
             })
-            .await
+            .await,
+            EditCheck::Unconfirmed
         );
+    }
+
+    #[tokio::test]
+    async fn geloeschter_kanal_beim_nachlesen_gilt_als_weg() {
+        let mut gone = VecDeque::from([Err(PortError::ChannelNotFound), readback(9, true)]);
+        assert_eq!(
+            confirm_uncertain_edit(42, 9, || {
+                std::future::ready(gone.pop_front().expect("readback"))
+            })
+            .await,
+            EditCheck::Gone
+        );
+        assert_eq!(gone.len(), 1);
+    }
+
+    #[test]
+    fn nur_ein_404_gilt_als_weg() {
+        assert!(matches!(unless_gone::<u8>(Ok(1)), Ok(Some(1))));
+        assert!(matches!(
+            unless_gone::<u8>(Err(PortError::ChannelNotFound)),
+            Ok(None)
+        ));
+        assert!(matches!(
+            unless_gone::<u8>(Err(PortError::GuildUnavailable)),
+            Err(PortError::GuildUnavailable)
+        ));
     }
 
     #[test]

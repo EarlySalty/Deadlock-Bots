@@ -4,7 +4,7 @@ use serenity::all::{ChannelId, ChannelType, Guild, GuildChannel, GuildId, Permis
 use crate::adapter::DiscordAdapter;
 use crate::community::{eligible, GUILD};
 use crate::streamer_voice::{
-    current_invite, discard_invite, everyone_permissions, fresh_channel, invite_options,
+    create_voice_invite, current_invite, discard_invite, everyone_permissions, fresh_channel,
     unless_gone, valid_code,
 };
 
@@ -114,11 +114,9 @@ pub(crate) async fn invite(
     {
         return Ok(None);
     }
-    let invite = adapter
-        .http
-        .create_invite(channel.id, &invite_options(), Some(REASON))
-        .await
-        .map_err(|_| PortError::GuildUnavailable)?;
+    let Some(invite) = create_voice_invite(adapter, channel.id, REASON).await? else {
+        return Ok(None);
+    };
     let matches = invite.channel.id == channel.id
         && invite
             .guild

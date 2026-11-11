@@ -1905,8 +1905,12 @@ async fn community_voice_fallback(
             error_body(rid, Some(idem), "unavailable", "Discord voice unavailable"),
         )
     };
-    let Ok(candidates) = state.port.community_voice_candidates(guild_id).await else {
-        return unavailable();
+    let candidates = match state.port.community_voice_candidates(guild_id).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(%error, guild_id, "Community-Voice-Räume nicht lesbar");
+            return unavailable();
+        }
     };
     let mut failed = false;
     for channel_id in candidates
@@ -1935,7 +1939,10 @@ async fn community_voice_fallback(
                 );
             }
             Ok(None) => continue,
-            Err(_) => failed = true,
+            Err(error) => {
+                tracing::warn!(%error, guild_id, channel_id, "Community-Voice-Raum übersprungen");
+                failed = true;
+            }
         }
     }
     if failed {
