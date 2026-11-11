@@ -15,7 +15,7 @@ const NAME_LABELS: &[&str] = &[
     "discordusername",
     "accountname",
 ];
-const MODERATION_EXACT: &[&str] = &["ban", "bann", "banned", "acc", "mute", "muted"];
+const MODERATION_EXACT: &[&str] = &["ban", "bann", "bannen", "banned", "acc", "mute", "muted"];
 const MODERATION_PREFIXES: &[&str] = &[
     "hack", "gebannt", "entbann", "unban", "report", "gemeldet", "meldung", "melden", "account",
     "konto", "timeout", "gemutet", "beleidig", "beläst",
@@ -24,6 +24,9 @@ const SCAM_PREFIXES: &[&str] = &[
     "scam",
     "betrug",
     "betrüg",
+    "betrog",
+    "gescam",
+    "hijack",
     "phish",
     "fake",
     "gehackt",
@@ -494,6 +497,7 @@ fn policy_label(decision: &PolicyDecision) -> String {
 
 pub struct ScamSection<'a> {
     pub image_count: usize,
+    pub skipped_images: usize,
     pub screenshot: &'a ScreenshotCheck,
     pub accounts: &'a ReportedAccounts,
     pub action: &'a ShadowAction,
@@ -536,6 +540,12 @@ fn needs_mod_line(escalation: &Escalation) -> String {
 
 fn scam_lines(scam: &ScamSection<'_>) -> Vec<String> {
     let mut lines = vec![format!("Scam-Meldung: ja, Bilder: {}", scam.image_count)];
+    if scam.skipped_images > 0 {
+        lines.push(format!(
+            "Nicht geprüft: {} Bild(er) (zu groß oder über dem Limit von {})",
+            scam.skipped_images, TICKET_MAX_IMAGES
+        ));
+    }
     lines.push(scam.screenshot.line());
     lines.extend(scam.accounts.lines());
     lines.push(format!(
@@ -739,7 +749,9 @@ mod tests {
             !escalation(BrainState::Answered, "Ich habe das versehentlich gelöscht").needs_mod()
         );
         assert!(!is_scam_report("Ich habe das ausversehen gelöscht"));
-        for word in ["scam", "betrug", "phishing", "fake", "geklaut"] {
+        for word in [
+            "scam", "betrug", "phishing", "fake", "geklaut", "gescammt", "betrogen",
+        ] {
             assert!(is_scam_report(word), "{word}");
             assert!(escalation(BrainState::Answered, word).needs_mod(), "{word}");
         }
@@ -854,6 +866,7 @@ mod tests {
         let action = shadow_action(&scam, &accounts, 1);
         let text = scam_lines(&ScamSection {
             image_count: 1,
+            skipped_images: 0,
             screenshot: &scam,
             accounts: &accounts,
             action: &action,
@@ -876,6 +889,7 @@ mod tests {
         let action = shadow_action(&failed, &accounts, 1);
         let text = scam_lines(&ScamSection {
             image_count: 1,
+            skipped_images: 0,
             screenshot: &failed,
             accounts: &accounts,
             action: &action,
@@ -887,6 +901,7 @@ mod tests {
         assert_eq!(action, ShadowAction::NoBan("Bildprüfung fehlgeschlagen"));
         let disabled = scam_lines(&ScamSection {
             image_count: 1,
+            skipped_images: 0,
             screenshot: &ScreenshotCheck::Disabled,
             accounts: &ReportedAccounts::default(),
             action: &ShadowAction::NoBan("Bildprüfung deaktiviert"),
