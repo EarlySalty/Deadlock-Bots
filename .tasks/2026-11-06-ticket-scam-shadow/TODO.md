@@ -24,14 +24,10 @@ Last origin/main merge: 11f721bd (2026-11-11), merge commit fbd40262.
 3. Live replay with a real scam screenshot is still open: no closed ticket with an image has been found, channel 1567507300216737894 contains text only. The replay needs the switch on, which needs the user's approval first.
 
 ## Gate round 3 (HEAD 10da8823, 2026-11-11 afternoon)
-- No verdict. Fable 5.2 answers were rejected as malformed JSON, Opus 5.5 hit the 5-hour limit (reset 19:20). The rejected answers still named real findings, to fix before the next attempt:
-  - `faq.rs` `add_images`: images beyond the limit are dropped silently (same pattern as the accounts overflow that was fixed).
-  - `faq.rs` fail-closed paths around lines 1599, 1617, 1633 still log the literal verdict "uncertain" although the Brain was never asked.
-  - `ticket_triage.rs` keyword lists miss common German forms (gescammt, betrogen, bannen).
-  - `handle_ticket_message` has only test callers; production uses `handle_ticket_message_with_images`.
-  - No test covers the `install_ticket_screenshot_review` wiring in dl-bot main.rs.
+- No verdict (Fable answers rejected as malformed JSON, Opus 5.5 hit the 5-hour limit). The user gave the go for a fifth run on 2026-11-11.
+- Fixed in e086af40: skipped images are counted and shown in the shadow entry ("Nicht geprüft: n Bild(er)"), the fail-closed logs say `not_asked`, scam and ban stems cover gescammt, betrogen, bannen.
+- Left as is: `handle_ticket_message` stays as the text-only entry point used by tests; no test for the `install_ticket_screenshot_review` wiring in dl-bot main.rs (wiring is a plain `if switch && moderator` install).
 - The Ticket Tool bot guard claim was removed from these docs because no such guard exists in the code.
-- The gate attempt cap (four) is reached: the next paid attempt needs the user's go.
 
 ## Decisions for the user
 - Ticket screenshots go to the moderation vision provider (same one message moderation uses). There is no explicit approval for tickets yet, so the switch stays off after deploy.
