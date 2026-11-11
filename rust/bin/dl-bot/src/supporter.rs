@@ -24,6 +24,7 @@ pub struct SupporterConfig {
     pub role_sync_apply: bool,
     pub max_revokes: usize,
     pub interval: Duration,
+    pub request_timeout: Option<Duration>,
     pub goal_cents: i64,
     pub steam_api_base: String,
     pub steam_token: Option<String>,
@@ -68,6 +69,10 @@ impl SupporterConfig {
                 )
                 .max(MIN_INTERVAL_SECONDS),
             ),
+            request_timeout: get("DL_SUPPORTER_REQUEST_TIMEOUT_MS")
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .map(Duration::from_millis),
             goal_cents: get("DL_SUPPORTER_FUNDING_GOAL_CENTS")
                 .and_then(|value| value.parse::<i64>().ok())
                 .filter(|value| *value > 0)

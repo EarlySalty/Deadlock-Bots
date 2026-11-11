@@ -166,6 +166,7 @@ section!(CommunityOptions {
     supporter_funding_goal_cents: i64 => "DL_SUPPORTER_FUNDING_GOAL_CENTS",
     supporter_steam_api_base: String => "DL_SUPPORTER_STEAM_API_BASE",
     supporter_twitch_api_base: String => "DL_SUPPORTER_TWITCH_API_BASE",
+    supporter_request_timeout_ms: u64 => "DL_SUPPORTER_REQUEST_TIMEOUT_MS",
 });
 
 section!(ModerationOptions {
@@ -287,6 +288,10 @@ impl RuntimeConfig {
             .ai
             .brain_api_timeout_ms
             .is_some_and(|ms| ms == 0 || ms > 120_000)
+            || self
+                .community
+                .supporter_request_timeout_ms
+                .is_some_and(|ms| ms == 0 || ms > 60_000)
             || (self.ai.brain_command_enabled == Some(true)
                 && self
                     .ai

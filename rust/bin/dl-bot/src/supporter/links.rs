@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -10,7 +9,6 @@ use crate::serversync::support_publish::{
     SUPPORT_BUTTON_TWITCH,
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
 const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
 const TIP_PATH: &str = "/supporter/v1/tip";
@@ -61,10 +59,7 @@ pub struct HttpSupporterLinks {
 impl HttpSupporterLinks {
     pub fn new(config: &SupporterConfig) -> Arc<Self> {
         Arc::new(Self {
-            http: reqwest::Client::builder()
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+            http: http_client(config),
             steam_base: config.steam_api_base.trim_end_matches('/').to_string(),
             steam_token: config.steam_token.clone(),
             twitch_base: config.twitch_api_base.trim_end_matches('/').to_string(),
@@ -100,6 +95,22 @@ impl HttpSupporterLinks {
             .await?;
         link_outcome(path, status, &body, is_stripe_url)
     }
+}
+
+fn http_client(config: &SupporterConfig) -> reqwest::Client {
+    let Some(limit) = config.request_timeout else {
+        tracing::warn!(
+            "Server-Unterstützer: supporter_request_timeout_ms fehlt in der Konfiguration, Anfragen laufen ohne Zeitgrenze"
+        );
+        return reqwest::Client::new();
+    };
+    reqwest::Client::builder()
+        .timeout(limit)
+        .build()
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "Server-Unterstützer: HTTP-Client ohne Zeitgrenze");
+            reqwest::Client::new()
+        })
 }
 
 #[async_trait::async_trait]
