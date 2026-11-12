@@ -8,9 +8,9 @@ Es gibt zwei sichtbare Zugänge, die beide dasselbe machen: Im FAQ-Panel klickst
 
 Der Bot merkt sich den bisherigen Verlauf innerhalb derselben Session (die letzten Nachrichten). Das heißt: Du musst nicht jede Anschlussfrage komplett neu formulieren, solange du im gleichen FAQ-Chat bleibst. Wenn du fertig bist, beendest du die Session über den `Chat beenden`-Button — einen Schließen-Befehl gibt es nicht.
 
-Für neue Tickets in der vorgesehenen Kategorie läuft eine interne Shadow-Auswertung der ersten Nachricht. Das Brain wird gefragt und das Ergebnis landet als `yes` (Antwortkandidat da), `no` (keine belegte Antwort), `uncertain` (Brain nicht erreichbar) oder `not_asked` (nur Bilder, kein Text) im internen Shadow-Kanal. Dazu kommt `needs_mod` mit Gründen: keine Antwort, Brain nicht erreichbar, nur Bilder, Moderations- oder Scam-Fall oder der Wunsch nach einem Menschen. Der Bot schreibt niemals automatisch ins Ticket.
+Bei neuen Support-Tickets sammelt der Bot, was du zu Beginn schreibst, bis du kurz nichts mehr schickst. Daraus macht er eine interne Notiz fürs Team: ob die Doku eine passende Antwort hergibt, einen Antwortvorschlag und den Hinweis, ob besser ein Moderator draufschaut, zum Beispiel bei Banns, Sperren, Scam oder wenn du ausdrücklich einen Menschen willst.
 
-Meldet jemand einen Scam, zeigt der Eintrag zusätzlich die genannten Accounts samt Mitgliedschaft auf dem Server und eine reine Shadow-Entscheidung, ob ein Bann in Frage käme. Accounts werden nur aus dem Tickettext gelesen (Erwähnung, Discord-ID, `@name` oder Angaben wie `Username: name`). Die KI-Prüfung der Screenshots ist standardmäßig aus; solange sie aus ist, steht im Eintrag „Bildprüfung: nicht gelaufen (deaktiviert)“ und es gibt nie einen Bann-Vorschlag.
+Meldest du einen Scam, nennt die Notiz zusätzlich die Accounts aus deinem Text und ob sie auf dem Server sind. Am besten schreibst du den Namen in eine eigene Zeile, etwa `Username: name`, oder erwähnst den Account direkt. Die Notiz sagt auch, ob ein Bann in Frage käme. Gebannt wird dabei niemand; das entscheidet immer das Team. Screenshots prüft der Bot ohne ausdrückliche Freigabe des Teams nicht.
 
 Die Shadow-Auswertung ist nur eine Entscheidungshilfe für das Team. Sie führt keine Aktion im Ticket aus und fordert nicht dazu auf, ein weiteres Ticket zu öffnen.
 
@@ -20,7 +20,7 @@ Wichtig ist der Zeitrahmen: FAQ-Sessions bleiben 24 Stunden aktiv. Danach schlie
 kostenlos
 
 ## Was passiert technisch (kurz)?
-Beim Start lädt der Bot alle Markdown-Dateien aus dem flachen `docs/`-Ordner und nutzt genau diesen Inhalt als Wissensbasis. Fragen und Antworten werden pro Session gespeichert, damit Rückfragen mit Kontext beantwortet werden können. Im Ticket-Shadow geht nur der Tickettext ans Brain; nur das interne Team sieht das Ergebnis. Screenshots aus Scam-Meldungen gehen ausschließlich dann an den Bild-Anbieter der Moderation, wenn `moderation.ticket_screenshot_review` in `config/bot.toml` eingeschaltet ist (Standard: aus). Für Twitch-Fragen kann er zusätzlich eine Diagnose des Twitch-Setups abrufen (OAuth-Status, fehlende Scopes, Discord-Link) und daraus konkrete Schritte ableiten.
+Der Bot beantwortet Fragen über das zentrale Deadlock Brain, das die Server-Doku kennt. Fragen und Antworten werden pro Session gespeichert, damit Rückfragen mit Kontext beantwortet werden können. Bei Tickets geht nur dein Text an das Brain, und das Ergebnis sieht nur das Team. Screenshots aus Scam-Meldungen gehen nur an den Bildprüfer der Moderation, wenn das Team diese Prüfung eingeschaltet hat; ab Werk ist sie aus.
 
 ## Grenzen & häufige Fragen
 - Der FAQ-Bot kennt nur Server-Doku. Wenn etwas nicht dokumentiert ist, weiß er es im Zweifel nicht.
@@ -32,7 +32,8 @@ Beim Start lädt der Bot alle Markdown-Dateien aus dem flachen `docs/`-Ordner un
 - Es gibt keinen `/faqclose`-Befehl und keine Thread-Sessions mehr — das war das alte System.
 
 ## Für Devs (knapp)
-- Rust live: `dl-community/src/faq.rs` — Panel (`/faqpanel`, idempotentes Panel-Healing), `/faq`, Button `faq_chat:start`, Close-Button `faq_chat:close:{session}`, Ticket-Shadow (Brain-Zustand, Kandidat, needs_mod, Scam-Shadow aus `ticket_triage.rs`), Twitch-Diagnose-Tool
-- Grounding: flacher Loader für `docs/*.md` (`load_docs`), Verlauf = letzte 10 Nachrichten
+- Rust live: `dl-community/src/faq.rs`: Panel (`/faqpanel`, idempotentes Panel-Healing), `/faq`, Button `faq_chat:start`, Close-Button `faq_chat:close:{session}`, Ticket-Shadow (Sammelfenster 45 s Ruhe, höchstens 180 s; Brain-Zustand, Kandidat, Eskalationsgründe; Scam-Shadow aus `ticket_triage.rs`)
+- Ticket-Bildprüfung: Schalter `moderation.ticket_screenshot_review` (Standard aus), Ergebnis nur im Shadow-Log
+- Grounding: Deadlock Brain, Verlauf = letzte 10 Nachrichten
 - Wichtige DB-Tabellen: `bot.faq_chat_sessions`, `bot.faq_chat_messages`, Panel-ID im KV (`faq_chat:panel`)
 - Python `cogs/faq_chat.py`/`server_faq.py` sind Legacy (dort lebte `/faqclose` + `server_faq_logs`)

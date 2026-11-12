@@ -1,51 +1,38 @@
-# TODO: ticket scam shadow (current state)
+# TODO: ticket scam shadow (state 2026-11-12)
 
 Worktree: /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107
-Branch: feat/ticket-scam-shadow-20261107
-Remote: origin/feat/ticket-scam-shadow-20261107 = a3a6abb6. Everything after that is local and still has to be pushed.
-Last origin/main merge: 11f721bd (2026-11-11), merge commit fbd40262.
+Branch: feat/ticket-scam-shadow-20261107. origin is still at fbd40262; the local commits after it are NOT on the remote yet (tests unverified).
+Gate counter: 2 counted BLOCK rounds. The final round was NOT run; see GATE-RETRO.md "Decision needed".
+Backup of the pre-retro local history: ref `backup/ticket-scam-shadow-pre-retro` (8b038e44).
 
 ## What the branch does
-- Collector keeps the opener's images (max 4, max 8 MiB each, same author only). `MessageAttachment.size` added in dl-discord.
-- One shadow entry per ticket opening in log channel 1374364800817303632 (capped at 3900 UTF-16 units, Components V2 allows 4000): Brain state (`yes`, `no`, `uncertain`, `not_asked`) with candidate, `needs_mod` with reasons, and for scam reports the screenshot review state, the reported accounts with guild membership, the moderation policy action as its own line and `Bann-Entscheidung (Shadow, nur Log): would ban <id>` or `kein Bann (...)`.
-- No ban, no ping, no member-visible message.
-- Screenshot review runs only with `moderation.ticket_screenshot_review = true` in config/bot.toml (default `false`). While off the entry says "Bildprüfung: nicht gelaufen (deaktiviert)" and the decision is always "kein Bann". A failed review is logged as "Bildprüfung fehlgeschlagen (...)", never as a verdict.
-- Reported accounts come from the ticket text only (user mention, Discord user ID, `@name`, labels such as `Username:` or `Discord-Name:`). Reading account names out of the screenshots is NOT built; open follow-up.
-- "would ban" needs exactly one distinct member who is not the opener, not staff and not a bot, no unclear or non-member ref beside it, and a confirmed scam verdict above the policy auto threshold. More than five refs, unclear membership or several accounts give "kein Bann" with a German reason.
-- New module rust/crates/dl-community/src/ticket_triage.rs; the reviewer is installed in dl-bot main.rs only when the switch is on and a moderator exists.
+- The collector gathers every message of the ticket opener until the text has been quiet for 45 s, at most 180 s. Images alone do not end the window. Up to `dl_ai::MAX_MULTIMODAL_IMAGES` images of at most `dl_ai::MAX_OPENAI_IMAGE_BYTES` each are kept; skipped images and text cut at the Brain question limit are counted and shown in the entry.
+- One shadow entry per ticket opening in log channel 1374364800817303632. The transport (`faq_message_body` -> `brain_v2_body`) enforces the 4000-unit limit with a marker.
+- Entry: Brain state with candidate, escalation reasons, intake counts, and for scam reports the screenshot review state, the reported accounts with guild membership, the policy action and `Bann-Entscheidung (Shadow, nur Log)`.
+- No ban, no ping, no member-visible message. Bot messages in tickets (Ticket Tool) are dropped earlier by `gateway.rs` `is_user_message`.
+- Screenshot review: `ScreenshotReviewSetup::from_config(switch, moderator)` gives Off, ModerationAiMissing or Active. Default off (serde default; the key is not written to `config/bot.toml`).
+- Reported accounts come from the ticket text only: user mentions, Discord user IDs (no Steam64 range), `@name`, or a label line such as `Username: name` with exactly one ASCII name. Prose or non-ASCII after a label marks the report unclear.
+- "would ban" needs exactly one distinct member that is not the opener, not staff, not a bot, no unclear or non-member ref, at most five refs, and a confirmed scam verdict above the policy threshold.
+- Name lookups: a search with hits but no exact username match is "unklar", never "kein Mitglied".
 
-## Checks at the last fixer run
-- dl-community lib 324 passed, 4 failed (the known ionos DB tests); dl-moderation 66 passed; dl-answer 35 passed; `cargo-slot check -p dl-bot --tests` exit 0 (also after the 2026-11-11 merge).
-- clippy: only workspace baseline lints (`double_must_use` from async_trait, `result_large_err`, one `needless_borrow` at gateway.rs:722 that predates this branch).
+## Stopped 2026-11-12 ~03:00 (quota emergency)
+Done: retro fixer pass committed locally (3d9147dc tickets, ee5f5433 moderation, ef096693 members, config chore, docs commit on top). `cargo-slot check -p dl-community -p dl-moderation -p dl-ai -p dl-bot --tests` exit 0. Ursache preflight: all new commits pass; the five published ones still fail (as expected).
+Not verified yet: unit tests. `cargo-slot test -p dl-community -p dl-moderation -p dl-bot --lib --bins` printed only failing dl-bot DB tests (build_publisher, self_invite, scrim_adapter, scrimglue: ionos DB baseline, untouched code); the output filter cut the `test result` lines, so dl-community and dl-moderation results are unknown.
+Clippy on touched files: 219 lines in /tmp/claude-1000/-home-nathanael-Documents/8a85e52b-0943-4cac-a83e-4599f3e057da/scratchpad/clippy-touched.txt, first pages are the workspace baseline `double_must_use` from async_trait; not yet checked for lints on lines this branch changed.
+
+Resume here:
+a. `cd rust && cargo-slot test -p dl-community --lib 2>&1 | grep -E "^test result|FAILED"`, same for `-p dl-moderation --lib` and `-p dl-bot --bin dl-bot modglue`; baseline is 4 DB failures in dl-community. Fix failures in ticket_triage/faq/content_analyzer/modglue tests by amending the matching local commit (local history only).
+b. Check clippy-touched.txt for lints on changed lines only (`git diff fbd40262 -U0`), fix those.
+c. Run the Ursache preflight (scratchpad ursache_check.py), then a plain fast-forward upload of the branch to origin as its own simple git call.
+d. Do NOT run the final gate: report to the user the retro (GATE-RETRO.md), fixed vs dropped, and decision a/b/c.
 
 ## Next steps
-1. `gate-review --repo /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107 --base origin/main`. Quota failures (reset times differ) give "kein Urteil", not a finding; rerun after the reset.
-2. On ALLOW: push the branch, `git push origin HEAD:main`, deploy dl-bot via a new copy of /opt/deadlock/bots/.install-*.sh, prove the shadow entry live in channel 1374364800817303632, then remove branch and worktree.
-3. Live replay with a real scam screenshot is still open: no closed ticket with an image has been found, channel 1567507300216737894 contains text only. The replay needs the switch on, which needs the user's approval first.
-
-## Gate round 3 (HEAD 10da8823, 2026-11-11 afternoon)
-- No verdict (Fable answers rejected as malformed JSON, Opus 5.5 hit the 5-hour limit). The user gave the go for a fifth run on 2026-11-11.
-- Fixed in e086af40: skipped images are counted and shown in the shadow entry ("Nicht geprüft: n Bild(er)"), the fail-closed logs say `not_asked`, scam and ban stems cover gescammt, betrogen, bannen.
-- Left as is: `handle_ticket_message` stays as the text-only entry point used by tests; no test for the `install_ticket_screenshot_review` wiring in dl-bot main.rs (wiring is a plain `if switch && moderator` install).
-- The Ticket Tool bot guard claim was removed from these docs because no such guard exists in the code.
-
-## Gate round 5 (HEAD 9eab7e7d, 2026-11-11 evening): BLOCK by Opus 5.5
-Full output: /tmp/claude-1000/-home-nathanael-Documents/d0019076-673b-4e50-9c79-7701977fdd65/scratchpad/gate-r5.txt (201 BLOCKING, 16 NIT, many duplicates). Classes:
-- Commit format (hook): fix commits need an `Ursache:` block with all four layers (mechanism, why_possible, why_unnoticed, twins); e086af40, d59239d1, 4ef7c633, 65885803 and others fail. The gate asks for a reword of those commits, which is a history rewrite.
-- Images: the early return in `handle_ticket_message_with_images` skips oversized-only messages before `skipped_images` counts them; no review count for images the provider failed to download.
-- Silent truncation of opening text at TICKET_OPENING_MAX_CHARS has no marker in the entry.
-- Shadow entry cut at literal 3900 vs BRAIN_V2_TEXT_LIMIT 4000; test asserts 2000; literal `not_asked` in three log sites instead of `BrainState::NotAsked.verdict()`.
-- `ScreenshotCheck::Disabled` also covers "switch on but moderation AI missing"; no test for `install_ticket_screenshot_review`.
-- `member_by_name` matches only `user.name`, so nicknames count as "kein Mitglied".
-- Image-only first message takes the one-shot claim and is judged `not_asked` if the text comes later than 45 s.
-- Analyzer failure logging may include signed CDN image URLs.
-- Docs: stale merge state, "Ticket Tool guard does not exist" is wrong (gateway.rs drops bot messages), "first message" wording, removed loaders and tools still mentioned in docs/faq-bot-selbst.md, internal jargon in member-facing text, an unenforced privacy claim.
-Decision for the user: the attempt cap is exceeded (five runs); continuing needs a new go and a decision on rewriting the local commits for the Ursache format.
+1. User decision on the five published commits that fail the gate hook's Ursache check (GATE-RETRO.md, options a/b/c).
+2. Then one final `gate-review --repo /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107 --base origin/main`.
+3. On ALLOW: merge to main, deploy dl-bot via its release wrapper, prove one shadow entry live in 1374364800817303632 with the switch off, then remove branch, backup ref and worktree.
+4. Acceptance item: a live replay with a real scam screenshot needs the switch on, which sends member images to the moderation vision provider. Needs the user's approval; before switching on, rebuild `dl-community-points-sync` so it accepts the new key.
+5. Open causes listed in GATE-RETRO.md move to `claude-config/orchestrierung/OFFENE-URSACHEN.md` once that checkout is clean.
 
 ## Decisions for the user
-- Ticket screenshots go to the moderation vision provider (same one message moderation uses). There is no explicit approval for tickets yet, so the switch stays off after deploy.
-- Policy maps a confirmed scam to a timeout; the shadow entry logs it as "would ban" only.
-
-## History
-- 2ecf3c26 keeps its subject without its own Ursache block; the gate asked for a reword, but no amend or force is allowed. Its mechanism (adjacent-only dedup) is described in 38353890.
-- Gate round 1 BLOCK findings (dedup twins, config switch, ID safety, account extraction, ban rule, member lookups, failed review state, log truthfulness, docs) are fixed in 38353890, 65885803, 4ef7c633, d59239d1 and 0c680fc2.
+- Screenshot review sends ticket images to the moderation vision provider. No approval yet; stays off.
+- The policy maps a confirmed scam to a timeout; the shadow entry calls it "would ban" per the brief. Decide before live bans.
