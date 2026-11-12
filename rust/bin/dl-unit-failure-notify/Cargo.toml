@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+dl-core.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 url.workspace = true
@@ -21,5 +22,4 @@ zeroize = "1"
 uplink-infisical-transport = { path = "../../vendor/uplink-infisical-transport" }
 
 [dev-dependencies]
-dl-core.workspace = true
 tempfile.workspace = true
