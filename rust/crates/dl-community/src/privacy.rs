@@ -825,6 +825,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "supporter_sources",
+        "discord_id",
+        "core.supporter_sources",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "coaching_requests",
         "discord_user_id",
         "coaching.requests",

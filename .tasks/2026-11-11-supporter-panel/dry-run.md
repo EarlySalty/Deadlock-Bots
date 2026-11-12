@@ -1,6 +1,11 @@
 # Support panel dry-run, funding 0 € of 250 €
 
-Rendered by `build_support_publish_output` with `dry_run = true`, empty KV, payload format `3`, tiers 5/10/20/50 €, Steam Plus 3 €, Twitch off. Nothing was posted to Discord. Buttons are shown as label and custom_id.
+Rendered by `build_support_publish_output` with `dry_run = true`, empty KV and payload format `3`, from the committed `config/bot.toml` read through `SupporterConfig::new`: tiers 5/10/20/50 €, goal 250 €, no Steam Plus (`supporter_plus_monthly_cents` unset), Twitch off (`supporter_twitch_api_base` unset), `supporter_role_grant_apply` unset (off). Nothing was posted to Discord. Buttons are shown as label and custom_id.
+
+With `supporter_role_grant_apply = true` (go-live) only card 3 changes; these lines replace their counterparts:
+
+> **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Die Rolle kommt automatisch. Kündigen kannst du jederzeit selbst über den Button unten.
+> **Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
 
 ## Card 1 (support), action planned_post
 
@@ -45,7 +50,7 @@ Das ist geplant und noch nicht fertig:
 
 Der Server wird nicht kostenpflichtig. Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching bleiben frei.
 
-Bei regulären Turnieren und beim Coaching bringt Unterstützung keinen Vorteil.
+Bei regulären Turnieren und beim normalen Coaching bringt Unterstützung keinen Vorteil.
 
 ## Card 3 (support:zahlung), action planned_post
 
@@ -59,13 +64,11 @@ Bei regulären Turnieren und beim Coaching bringt Unterstützung keinen Vorteil.
 
 ## So kannst du unterstützen
 
-**Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.
+**Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Kündigen kannst du jederzeit selbst über den Button unten.
 
 **Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.
 
-**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
-
-**Steam Plus.** Plus beim Steam Bot kostet 3 € im Monat und zählt auch als Unterstützung. Du bekommst damit dieselbe Rolle, und dein Abo geht ins Monatsziel ein.
+**Server-Boost.** Zählt vorerst als Unterstützung.
 
 ---
 

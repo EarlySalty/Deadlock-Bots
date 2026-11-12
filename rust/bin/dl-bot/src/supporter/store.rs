@@ -105,11 +105,12 @@ pub async fn import_manual(pool: &PgPool, holders: &[u64]) -> Result<u64, StoreE
     let imported = sqlx::query(
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
-         SELECT id, 'manual', 'role_cutover', NULL, now() + interval '31 days', now()
+         SELECT id, 'manual', 'role_cutover', NULL, now() + make_interval(days => $2), now()
            FROM UNNEST($1::bigint[]) AS id
          ON CONFLICT (discord_id, source, source_ref) DO NOTHING",
     )
     .bind(&ids)
+    .bind(dl_core::runtime_config::SUPPORTER_TIP_VALID_DAYS)
     .execute(&mut *tx)
     .await?
     .rows_affected();

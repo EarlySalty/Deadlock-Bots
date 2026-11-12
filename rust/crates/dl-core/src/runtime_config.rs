@@ -8,20 +8,31 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const STRIPE_MIN_CHARGE_EUR_CENTS: i64 = 50;
+pub const STRIPE_MAX_UNIT_AMOUNT_CENTS: i64 = 99_999_999;
+pub const SUPPORTER_MIN_CENTS: i64 = 500;
+pub const SUPPORTER_TIP_VALID_DAYS: i32 = 31;
+pub const SUPPORTER_TWITCH_CHANNELS: &[&str] = &["earlysalty", "dach_lock"];
+pub const SUPPORTER_TIER_MIN_EUR: u64 = SUPPORTER_MIN_CENTS as u64 / 100;
+pub const SUPPORTER_TIER_MAX_EUR: u64 = STRIPE_MAX_UNIT_AMOUNT_CENTS as u64 / 100;
+pub const SUPPORTER_MAX_TIERS: usize = 5;
 pub const SUPPORTER_REQUEST_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=60_000;
 pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
 pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
 pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> = 100..=10_000_000;
-pub const SUPPORTER_TIER_MIN_EUR: u64 = 5;
-pub const SUPPORTER_MAX_TIERS: usize = 5;
-pub const SUPPORTER_PLUS_MONTHLY_CENTS_RANGE: RangeInclusive<i64> = 1..=i32::MAX as i64;
+pub const SUPPORTER_PLUS_MONTHLY_CENTS_RANGE: RangeInclusive<i64> =
+    STRIPE_MIN_CHARGE_EUR_CENTS..=STRIPE_MAX_UNIT_AMOUNT_CENTS;
+pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
+pub const SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 300;
+pub const SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS: i64 = 25_000;
+pub const SUPPORTER_DEFAULT_TIERS_EUR: &[u64] = &[5, 10, 20, 50];
 
 pub fn supporter_tiers_valid(tiers: &[u64]) -> bool {
     !tiers.is_empty()
         && tiers.len() <= SUPPORTER_MAX_TIERS
         && tiers
             .iter()
-            .all(|eur| *eur >= SUPPORTER_TIER_MIN_EUR && u32::try_from(*eur).is_ok())
+            .all(|eur| (SUPPORTER_TIER_MIN_EUR..=SUPPORTER_TIER_MAX_EUR).contains(eur))
         && tiers.windows(2).all(|pair| pair[0] < pair[1])
 }
 
@@ -183,7 +194,6 @@ section!(CommunityOptions {
     supporter_role_sync_max_revokes: u64 => "DL_SUPPORTER_ROLE_SYNC_MAX_REVOKES",
     supporter_sync_interval_seconds: u64 => "DL_SUPPORTER_SYNC_INTERVAL_SECONDS",
     supporter_funding_goal_cents: i64 => "DL_SUPPORTER_FUNDING_GOAL_CENTS",
-    supporter_steam_api_base: String => "DL_SUPPORTER_STEAM_API_BASE",
     supporter_twitch_api_base: String => "DL_SUPPORTER_TWITCH_API_BASE",
     supporter_request_timeout_ms: u64 => "DL_SUPPORTER_REQUEST_TIMEOUT_MS",
     supporter_tiers_eur: Vec<u64> => "DL_SUPPORTER_TIERS_EUR",
@@ -577,7 +587,6 @@ impl RuntimeConfig {
             (&self.dashboard.discord_redirect_uri, false),
             (&self.dashboard.discord_api_base, false),
             (&self.web.dashboard_base, true),
-            (&self.community.supporter_steam_api_base, true),
             (&self.community.supporter_twitch_api_base, true),
             (&self.web.callback_url, false),
             (&self.ai.openai_base_url, false),
@@ -585,6 +594,11 @@ impl RuntimeConfig {
         ] {
             if let Some(address) = address {
                 validate_url(address, local)?;
+            }
+        }
+        if let Some(base) = &self.community.supporter_twitch_api_base {
+            if url::Url::parse(base).map_err(|_| invalid())?.path() != "/" {
+                return Err(invalid());
             }
         }
         for origins in [&self.dashboard.allowed_origins, &self.web.cors_origins]
@@ -899,6 +913,9 @@ mod supporter_bound_tests {
             "supporter_tiers_eur=[5, 10, 20, 50]",
             "supporter_tiers_eur=[5, 10, 20, 50, 100]",
             "supporter_plus_monthly_cents=300",
+            "supporter_plus_monthly_cents=50",
+            "supporter_plus_monthly_cents=99999999",
+            "supporter_tiers_eur=[5, 999999]",
         ] {
             assert!(parse(accepted), "{accepted}");
         }
@@ -910,7 +927,8 @@ mod supporter_bound_tests {
             "supporter_role_sync_max_revokes=101",
             "supporter_funding_goal_cents=0",
             "supporter_funding_goal_cents=10000001",
-            "supporter_steam_api_base='https://example.org'",
+            "supporter_steam_api_base='http://127.0.0.1:8783'",
+            "supporter_twitch_api_base='http://127.0.0.1:8769/x'",
             "supporter_twitch_api_base=''",
             "supporter_tiers_eur=[]",
             "supporter_tiers_eur=[4, 10]",
@@ -920,10 +938,55 @@ mod supporter_bound_tests {
             "supporter_tiers_eur=[5, 10, 20, 50, 100, 200]",
             "supporter_tiers_eur=[5, 4294967296]",
             "supporter_plus_monthly_cents=0",
+            "supporter_plus_monthly_cents=49",
             "supporter_plus_monthly_cents=-300",
-            "supporter_plus_monthly_cents=2147483648",
+            "supporter_plus_monthly_cents=100000000",
+            "supporter_tiers_eur=[5, 1000000]",
         ] {
             assert!(!parse(rejected), "{rejected}");
         }
+    }
+
+    fn catalog_help(key: &str) -> String {
+        let prefix = format!("runtime.community.{key}\t");
+        crate::admin_settings::SPEC
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .and_then(|line| line.split('\t').nth(5))
+            .expect("Katalogzeile")
+            .to_string()
+    }
+
+    #[test]
+    fn katalogtexte_nennen_die_werte_aus_dem_code() {
+        use super::*;
+        assert!(catalog_help("supporter_role_sync_max_revokes")
+            .starts_with(&format!("Standard ist {SUPPORTER_DEFAULT_MAX_REVOKES}.")));
+        assert!(
+            catalog_help("supporter_sync_interval_seconds").starts_with(&format!(
+                "Standard ist {SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS}."
+            ))
+        );
+        assert!(
+            catalog_help("supporter_funding_goal_cents").starts_with(&format!(
+                "Standard ist {SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS}, also {} €.",
+                SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100
+            ))
+        );
+        let tiers = SUPPORTER_DEFAULT_TIERS_EUR
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tier_help = catalog_help("supporter_tiers_eur");
+        assert!(tier_help.starts_with(&format!("Standard ist {tiers}.")));
+        assert!(tier_help.contains(&format!("mindestens {SUPPORTER_TIER_MIN_EUR} €")));
+        assert_eq!(SUPPORTER_MAX_TIERS, 5);
+        assert!(tier_help.contains("Eine bis fünf Stufen"));
+        assert!(supporter_tiers_valid(SUPPORTER_DEFAULT_TIERS_EUR));
+        assert!(SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(&SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS));
+        assert!(SUPPORTER_MAX_REVOKES_RANGE.contains(&SUPPORTER_DEFAULT_MAX_REVOKES));
+        assert!(SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE
+            .contains(&SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS));
     }
 }

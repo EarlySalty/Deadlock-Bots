@@ -153,6 +153,24 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
             }
             match path.as_str() {
                 "concierge.timeout_seconds" => bounds = Some((1, 110)),
+                "runtime.community.supporter_role_sync_max_revokes" => {
+                    bounds = Some(u64_bounds(
+                        &crate::runtime_config::SUPPORTER_MAX_REVOKES_RANGE,
+                    ))
+                }
+                "runtime.community.supporter_sync_interval_seconds" => {
+                    bounds = Some(u64_bounds(
+                        &crate::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
+                    ))
+                }
+                "runtime.community.supporter_funding_goal_cents" => {
+                    let range = crate::runtime_config::SUPPORTER_FUNDING_GOAL_CENTS_RANGE;
+                    bounds = Some((*range.start(), *range.end()))
+                }
+                "runtime.community.supporter_plus_monthly_cents" => {
+                    let range = crate::runtime_config::SUPPORTER_PLUS_MONTHLY_CENTS_RANGE;
+                    bounds = Some((*range.start(), *range.end()))
+                }
                 "tempvoice.empty_lane_grace_seconds" => bounds = Some((1, 86_400)),
                 "runtime.bridges.matcher_max_ai_per_scan" => bounds = Some((0, 1000)),
                 "runtime.bridges.matcher_scan_interval_hours" => bounds = Some((1, 8760)),
@@ -201,6 +219,10 @@ fn integer_to_wire(value: &Value) -> Value {
         Value::String(value.to_string())
     }
 }
+fn u64_bounds(range: &std::ops::RangeInclusive<u64>) -> (i64, i64) {
+    (*range.start() as i64, *range.end() as i64)
+}
+
 pub fn build(value: &Value, fields: Vec<Field>) -> Catalog {
     let mut values = BTreeMap::new();
     for field in &fields {

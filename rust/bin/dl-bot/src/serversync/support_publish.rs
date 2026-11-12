@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use dl_core::runtime_config::{
+    SUPPORTER_MIN_CENTS, SUPPORTER_TIP_VALID_DAYS, SUPPORTER_TWITCH_CHANNELS,
+};
+
 pub const SUPPORT_CHANNEL_ID: u64 = 1_483_136_301_271_355_532;
 pub const SUPPORT_CHANNEL_NAME: &str = "server-support";
 pub const SUPPORT_TEXTS_FILE: &str = "assets/support_texts.toml";
@@ -16,6 +20,7 @@ pub const SUPPORT_PAYLOAD_FORMAT_KEY: &str = "support_v2_payload_format";
 pub const SUPPORT_PAYLOAD_HASH_KEY: &str = "support_v2_payload_hash";
 pub const SUPPORT_MESSAGE_ID_PREFIX: &str = "support_v2_message_id_";
 pub const SUPPORT_FUNDING_LIVE_KEY: &str = "support_v3_funding_live";
+pub const SUPPORT_PANEL_OPTIONS_KEY: &str = "support_v3_panel_options";
 pub const SUPPORT_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const SUPPORT_ACCENT_GOLD: u64 = 0xC8A86B;
 pub const SUPPORT_FUNDING_MESSAGE_INDEX: usize = 2;
@@ -58,8 +63,6 @@ pub const SUPPORT_MARKER_COMPONENT_IDS: &[u64] = &[
 pub const SUPPORT_TEXT_CHAR_BUDGET: usize = 3500;
 pub const SUPPORT_COMPONENT_BUDGET: usize = 35;
 pub const SUPPORT_ATTACHMENT_BUDGET: usize = 9;
-pub const SUPPORT_FUNDING_GOAL_CENTS_DEFAULT: i64 = 25_000;
-pub const SUPPORT_TIERS_EUR_DEFAULT: [u32; 4] = [5, 10, 20, 50];
 pub const SUPPORT_TIER_BUTTON_PREFIX: &str = "support:tier:";
 const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 const SUPPORT_MESSAGE_COUNT: usize = 3;
@@ -98,7 +101,7 @@ pub const SUPPORT_FREE: &str = "\
 \n\
 Der Server wird nicht kostenpflichtig. Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching bleiben frei.\n\
 \n\
-Bei regulären Turnieren und beim Coaching bringt Unterstützung keinen Vorteil.";
+Bei regulären Turnieren und beim normalen Coaching bringt Unterstützung keinen Vorteil.";
 pub const SUPPORT_FUNDING: &str = "\
 ## Monatsziel\n\
 \n\
@@ -108,20 +111,21 @@ pub const SUPPORT_FUNDING: &str = "\
 pub const SUPPORT_PAY: &str = "\
 ## So kannst du unterstützen\n\
 \n\
-**Monatlich über Stripe.** {stufen} im Monat. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.\n\
+**Monatlich über Stripe.** {stufen} im Monat.{rolle} Kündigen kannst du jederzeit selbst über den Button unten.\n\
 \n\
-**Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.\n\
+**Einmalig.** Du wählst den Betrag selbst, ab {mindestbetrag}. Dafür bekommst du die Vorteile für {tage} Tage.\n\
 \n\
-**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.";
+**Server-Boost.** Zählt vorerst als Unterstützung.{rolle}";
 pub const SUPPORT_PLUS: &str = "\
-**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung. Du bekommst damit dieselbe Rolle, und dein Abo geht ins Monatsziel ein.";
+**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung.{rolle}";
 pub const SUPPORT_TWITCH: &str = "\
-**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.";
+**Twitch-Sub.** Ein Abo bei {kanaele} zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.";
 pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst ❤️";
 pub const SUPPORT_BECOME_BUTTON_LABEL: &str = "Supporter werden";
 pub const SUPPORT_TIP_BUTTON_LABEL: &str = "Einmalig unterstützen";
 pub const SUPPORT_MANAGE_BUTTON_LABEL: &str = "Abo verwalten oder kündigen";
 pub const SUPPORT_TWITCH_BUTTON_LABEL: &str = "Twitch verbinden";
+const SUPPORT_ROLE_NOTE: &str = " Die Rolle kommt automatisch.";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SupportFunding {
@@ -129,46 +133,57 @@ pub struct SupportFunding {
     pub goal_cents: i64,
 }
 
-impl Default for SupportFunding {
-    fn default() -> Self {
-        Self {
-            raised_cents: 0,
-            goal_cents: SUPPORT_FUNDING_GOAL_CENTS_DEFAULT,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SupportPanelOptions {
-    pub tiers_eur: Vec<u32>,
+    pub tiers_eur: Vec<u64>,
     pub plus_monthly_cents: Option<i64>,
     pub twitch: bool,
+    pub role_grant: bool,
 }
 
-impl Default for SupportPanelOptions {
-    fn default() -> Self {
-        Self {
-            tiers_eur: SUPPORT_TIERS_EUR_DEFAULT.to_vec(),
-            plus_monthly_cents: None,
-            twitch: false,
-        }
+impl SupportPanelOptions {
+    pub fn to_kv(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|error| error.to_string())
+    }
+
+    pub fn from_kv(raw: &str) -> Option<Self> {
+        serde_json::from_str(raw).ok()
     }
 }
 
-pub fn tier_button_id(eur: u32) -> String {
+pub fn tier_button_id(eur: u64) -> String {
     format!("{SUPPORT_TIER_BUTTON_PREFIX}{eur}")
 }
 
-pub fn format_tier_list(tiers_eur: &[u32]) -> String {
-    let labels: Vec<String> = tiers_eur
-        .iter()
-        .map(|eur| format_euro(i64::from(*eur) * 100))
-        .collect();
+pub fn format_tier_list(tiers_eur: &[u64]) -> String {
+    join_alternatives(
+        tiers_eur
+            .iter()
+            .map(|eur| format_whole_euro(*eur))
+            .collect(),
+    )
+}
+
+pub fn twitch_channel_list() -> String {
+    join_alternatives(
+        SUPPORTER_TWITCH_CHANNELS
+            .iter()
+            .map(|channel| channel.to_string())
+            .collect(),
+    )
+}
+
+pub fn join_alternatives(labels: Vec<String>) -> String {
     match labels.split_last() {
         None => String::new(),
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} oder {last}", rest.join(", ")),
     }
+}
+
+pub fn format_whole_euro(eur: u64) -> String {
+    format!("{} €", group_thousands(eur))
 }
 
 impl SupportFunding {
@@ -203,7 +218,6 @@ pub struct SupportPublishOutput {
     pub payload_hash: String,
     pub stored_payload_hash: Option<String>,
     pub repost_required: bool,
-    #[serde(default)]
     pub funding: SupportFunding,
     pub warnings: Vec<String>,
     pub messages: Vec<SupportMessageOutput>,
@@ -421,6 +435,7 @@ pub fn build_support_publish_output(
 ) -> Result<SupportPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_support_runtime_config(repo_root, &mut warnings)?;
+    placeholder_warnings(&config.texts, options, &mut warnings);
     let built_messages = support_messages(repo_root, &config, funding, options, &mut warnings);
 
     let mut messages = Vec::new();
@@ -485,6 +500,21 @@ pub fn support_storage_matches(
         && stored_message_ids.len() == expected_message_count
 }
 
+pub fn only_funding_message_differs(
+    current: &SupportPublishOutput,
+    next: &SupportPublishOutput,
+) -> bool {
+    current.messages.len() == next.messages.len()
+        && current
+            .messages
+            .iter()
+            .zip(&next.messages)
+            .enumerate()
+            .all(|(index, (left, right))| {
+                index == SUPPORT_FUNDING_MESSAGE_INDEX || left.payload == right.payload
+            })
+}
+
 pub fn support_payload_is_unchanged(output: &SupportPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
@@ -521,7 +551,7 @@ fn funding_bar(funding: SupportFunding) -> String {
     )
 }
 
-fn format_euro(cents: i64) -> String {
+pub fn format_euro(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.unsigned_abs();
     let euros = group_thousands(abs / 100);
@@ -705,23 +735,42 @@ impl ResolvedSupportConfig {
                     .to_string(),
             );
         }
-        for (text, placeholder, field) in [
-            (&self.texts.pay, "{stufen}", "pay"),
-            (&self.texts.plus, "{plus_preis}", "plus"),
-        ] {
-            if !text.contains(placeholder) {
-                warnings.push(format!(
-                    "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {placeholder}; der Betrag fehlt dann im Panel."
-                ));
-            }
-        }
-        if !self.texts.funding.contains("{stand}") {
-            warnings.push(
-                "Support-Textdatei: [texts].funding enthält keinen Platzhalter {stand}; der Balken zeigt dann keinen Betrag."
-                    .to_string(),
-            );
-        }
         self
+    }
+}
+
+fn placeholder_warnings(
+    texts: &ResolvedSupportTexts,
+    options: &SupportPanelOptions,
+    warnings: &mut Vec<String>,
+) {
+    let mut checks: Vec<(&str, &str, &[&str])> = vec![
+        (
+            &texts.funding,
+            "funding",
+            &["{balken}", "{prozent}", "{stand}", "{ziel}"],
+        ),
+        (
+            &texts.pay,
+            "pay",
+            &["{stufen}", "{mindestbetrag}", "{tage}", "{rolle}"],
+        ),
+    ];
+    if options.plus_monthly_cents.is_some() {
+        checks.push((&texts.plus, "plus", &["{plus_preis}", "{rolle}"]));
+    }
+    if options.twitch {
+        checks.push((&texts.twitch, "twitch", &["{kanaele}"]));
+    }
+    for (text, field, placeholders) in checks {
+        for placeholder in placeholders
+            .iter()
+            .filter(|placeholder| !text.contains(**placeholder))
+        {
+            warnings.push(format!(
+                "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {placeholder}; der Wert fehlt dann im Panel."
+            ));
+        }
     }
 }
 
@@ -787,14 +836,27 @@ fn main_message(
 }
 
 fn render_pay_text(texts: &ResolvedSupportTexts, options: &SupportPanelOptions) -> String {
+    let role = if options.role_grant {
+        SUPPORT_ROLE_NOTE
+    } else {
+        ""
+    };
     let mut parts = vec![texts
         .pay
-        .replace("{stufen}", &format_tier_list(&options.tiers_eur))];
+        .replace("{stufen}", &format_tier_list(&options.tiers_eur))
+        .replace("{mindestbetrag}", &format_euro(SUPPORTER_MIN_CENTS))
+        .replace("{tage}", &SUPPORTER_TIP_VALID_DAYS.to_string())
+        .replace("{rolle}", role)];
     if let Some(cents) = options.plus_monthly_cents {
-        parts.push(texts.plus.replace("{plus_preis}", &format_euro(cents)));
+        parts.push(
+            texts
+                .plus
+                .replace("{plus_preis}", &format_euro(cents))
+                .replace("{rolle}", role),
+        );
     }
     if options.twitch {
-        parts.push(texts.twitch.clone());
+        parts.push(texts.twitch.replace("{kanaele}", &twitch_channel_list()));
     }
     parts.retain(|part| !part.trim().is_empty());
     parts.join("\n\n")
@@ -858,21 +920,6 @@ fn same_id_set(left: &[u64], right: &[u64]) -> bool {
     left.sort_unstable();
     right.sort_unstable();
     left == right
-}
-
-fn is_https_url(url: &str) -> bool {
-    if url.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
-        return false;
-    }
-    let Some(rest) = url.strip_prefix("https://") else {
-        return false;
-    };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty()
-        && !host.contains('@')
-        && host.contains('.')
-        && !host.starts_with('.')
-        && !host.ends_with('.')
 }
 
 fn section_children(blocks: &[(u64, &str)]) -> Vec<Value> {
@@ -1012,16 +1059,6 @@ fn validate_button(value: &Value) -> Result<(), String> {
             "Support-Button-Label muss 1 bis 80 Zeichen haben, hat {label_chars}"
         ));
     }
-    if value.get("style").and_then(Value::as_u64) == Some(5) {
-        let url = value.get("url").and_then(Value::as_str).unwrap_or("");
-        if !is_https_url(url) || url.chars().count() > 512 {
-            return Err(
-                "Support-Button-URL muss https sein, einen Host haben und höchstens 512 Zeichen lang sein"
-                    .to_string(),
-            );
-        }
-        return Ok(());
-    }
     let custom_id = value.get("custom_id").and_then(Value::as_str).unwrap_or("");
     if custom_id.is_empty()
         || custom_id.chars().count() > CUSTOM_ID_MAX_CHARS
@@ -1154,17 +1191,6 @@ fn interactive_button(id: u64, style: u8, label: &str, custom_id: &str) -> Value
 }
 
 #[cfg(test)]
-fn link_button(id: u64, label: &str, url: &str) -> Value {
-    json!({
-        "type": 2,
-        "id": id,
-        "style": 5,
-        "label": label,
-        "url": url,
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
@@ -1229,6 +1255,15 @@ mod tests {
         }
     }
 
+    fn options() -> SupportPanelOptions {
+        SupportPanelOptions {
+            tiers_eur: dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR.to_vec(),
+            plus_monthly_cents: None,
+            twitch: false,
+            role_grant: true,
+        }
+    }
+
     fn funding(raised_cents: i64) -> SupportFunding {
         SupportFunding {
             raised_cents,
@@ -1238,21 +1273,16 @@ mod tests {
 
     #[test]
     fn button_prueft_genau_die_gesendeten_zeichen() {
-        for url in [
-            "https://example.com/a b",
-            " https://example.com/x",
-            "https://example.com/x\n",
-            "https://user@example.com/x",
-        ] {
-            assert!(!is_https_url(url), "{url}");
-        }
-        let padded = json!({
+        let padded = interactive_button(1, 1, &format!("{}   ", "a".repeat(80)), "x");
+        assert!(validate_component_shape(&padded).is_err());
+        let with_url = json!({
             "type": 2,
-            "style": 5,
-            "label": format!("{}   ", "a".repeat(80)),
+            "style": 1,
+            "label": "Link",
+            "custom_id": "x",
             "url": "https://example.com/x",
         });
-        assert!(validate_component_shape(&padded).is_err());
+        assert!(validate_component_shape(&with_url).is_err());
         let no_custom_id = json!({"type": 2, "style": 1, "label": "Supporter werden"});
         assert!(validate_component_shape(&no_custom_id).is_err());
         let long_custom_id = interactive_button(1, 1, "x", &"a".repeat(101));
@@ -1319,7 +1349,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, None),
             funding(0),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("output");
@@ -1355,7 +1385,7 @@ enabled = false
             temp.path(),
             &stored(&[], None),
             funding(1500),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("output");
@@ -1406,7 +1436,11 @@ enabled = false
         assert!(pay_text[0].contains("**15 € von 50 € im Monat**"));
         assert_eq!(
             pay_text[1],
-            SUPPORT_PAY.replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
+            SUPPORT_PAY
+                .replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
+                .replace("{mindestbetrag}", "5 €")
+                .replace("{tage}", "31")
+                .replace("{rolle}", SUPPORT_ROLE_NOTE)
         );
         assert!(!pay_text[1].contains("Steam Plus"));
         assert!(!pay_text[1].contains("Twitch"));
@@ -1461,23 +1495,26 @@ enabled = false
     #[test]
     fn plus_und_twitch_erscheinen_nur_wenn_eingerichtet() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let options = SupportPanelOptions {
-            tiers_eur: vec![5, 10, 20, 50],
+        let full = SupportPanelOptions {
             plus_monthly_cents: Some(300),
             twitch: true,
+            ..options()
         };
-        let output = build_support_publish_output(
-            temp.path(),
-            &stored(&[], None),
-            funding(0),
-            &options,
-            true,
-        )
-        .expect("output");
+        let output =
+            build_support_publish_output(temp.path(), &stored(&[], None), funding(0), &full, true)
+                .expect("output");
+        assert!(
+            !output.warnings.iter().any(|warning| warning.contains('{')),
+            "{:?}",
+            output.warnings
+        );
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
         assert!(pay_text[1].contains("**Steam Plus.** Plus beim Steam Bot kostet 3 € im Monat"));
-        assert!(pay_text[1].ends_with(SUPPORT_TWITCH));
+        assert!(pay_text[1].ends_with(
+            "Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."
+        ));
+        assert!(pay_text[1].contains("Ein Abo bei earlysalty oder dach_lock zählt"));
         let custom_ids: Vec<String> = buttons(pay)
             .iter()
             .filter_map(|button| button["custom_id"].as_str().map(str::to_string))
@@ -1490,7 +1527,7 @@ enabled = false
             temp.path(),
             &stored(&[], None),
             funding(0),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("default output");
@@ -1503,9 +1540,11 @@ enabled = false
         assert_eq!(format_tier_list(&[5]), "5 €");
         assert_eq!(format_tier_list(&[5, 10]), "5 € oder 10 €");
         assert_eq!(
-            format_tier_list(&SUPPORT_TIERS_EUR_DEFAULT),
+            format_tier_list(dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR),
             "5 €, 10 €, 20 € oder 50 €"
         );
+        assert_eq!(format_tier_list(&[5, 1000]), "5 € oder 1.000 €");
+        assert_eq!(twitch_channel_list(), "earlysalty oder dach_lock");
         assert_eq!(tier_button_id(50), "support:tier:50");
     }
 
@@ -1549,7 +1588,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, None),
             funding(0),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("first output");
@@ -1559,7 +1598,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, Some(&first.payload_hash)),
             funding(0),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("same output");
@@ -1572,7 +1611,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, Some(&first.payload_hash)),
             funding(500),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("funding output");
@@ -1583,7 +1622,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, Some(&first.payload_hash)),
             funding(0),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("changed output");
@@ -1599,14 +1638,9 @@ enabled = false
             payload_format: Some("2"),
             payload_hash: None,
         };
-        let output = build_support_publish_output(
-            temp.path(),
-            &state,
-            funding(0),
-            &SupportPanelOptions::default(),
-            true,
-        )
-        .expect("output");
+        let output =
+            build_support_publish_output(temp.path(), &state, funding(0), &options(), true)
+                .expect("output");
         assert!(output.repost_required);
         assert!(output
             .messages
@@ -1621,7 +1655,7 @@ enabled = false
             temp.path(),
             &stored(&[7001], None),
             funding(0),
-            &SupportPanelOptions::default(),
+            &options(),
             true,
         )
         .expect("output");
@@ -1711,19 +1745,92 @@ enabled = false
         let overflow = message_from_container(
             1,
             None,
-            vec![link_button(2, &long_label, "https://example.com/x")],
+            vec![action_row(
+                2,
+                vec![interactive_button(3, 1, &long_label, "x")],
+            )],
             Vec::new(),
         );
         let overflow_error = validate_support_message_budget(&overflow.payload).expect_err("label");
         assert!(overflow_error.contains("1 bis 80"));
+    }
 
-        let bare = message_from_container(
-            1,
-            None,
-            vec![link_button(2, "Link", "https://")],
-            Vec::new(),
+    fn pay_text_for(options: &SupportPanelOptions) -> String {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = build_support_publish_output(
+            temp.path(),
+            &stored(&[], None),
+            funding(0),
+            options,
+            true,
+        )
+        .expect("output");
+        text_contents(&output.messages[2].payload)[1].clone()
+    }
+
+    #[test]
+    fn rollenzusage_haengt_am_vergabeschalter() {
+        let with_plus = SupportPanelOptions {
+            plus_monthly_cents: Some(300),
+            ..options()
+        };
+        let granted = pay_text_for(&with_plus);
+        assert_eq!(granted.matches(SUPPORT_ROLE_NOTE.trim()).count(), 3);
+        let manual = pay_text_for(&SupportPanelOptions {
+            role_grant: false,
+            ..with_plus
+        });
+        assert!(!manual.contains("Rolle"), "{manual}");
+        assert!(!manual.contains('{'), "{manual}");
+    }
+
+    #[test]
+    fn mindestbetrag_und_laufzeit_kommen_aus_dl_core() {
+        let text = pay_text_for(&options());
+        assert!(text.contains(&format!(
+            "ab {}. Dafür bekommst du die Vorteile für {} Tage.",
+            format_euro(SUPPORTER_MIN_CENTS),
+            SUPPORTER_TIP_VALID_DAYS
+        )));
+        assert!(!text.contains('{'), "{text}");
+    }
+
+    #[test]
+    fn fehlende_platzhalter_werden_je_feld_gemeldet() {
+        let mut texts = ResolvedSupportConfig::from_defaults().texts;
+        let mut warnings = Vec::new();
+        placeholder_warnings(&texts, &options(), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        texts.funding = "{stand}".to_string();
+        texts.plus = "Plus".to_string();
+        placeholder_warnings(&texts, &options(), &mut warnings);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings
+            .iter()
+            .all(|warning| warning.contains("[texts].funding")));
+        warnings.clear();
+        let with_plus = SupportPanelOptions {
+            plus_monthly_cents: Some(300),
+            ..options()
+        };
+        placeholder_warnings(&texts, &with_plus, &mut warnings);
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.contains("[texts].plus"))
+                .count(),
+            2
         );
-        let bare_error = validate_support_message_budget(&bare.payload).expect_err("url");
-        assert!(bare_error.contains("https"));
+    }
+
+    #[test]
+    fn panel_optionen_rundreise() {
+        let value = SupportPanelOptions {
+            plus_monthly_cents: Some(300),
+            ..options()
+        };
+        let raw = value.to_kv().expect("kv");
+        assert_eq!(SupportPanelOptions::from_kv(&raw), Some(value));
+        assert_eq!(SupportPanelOptions::from_kv("kaputt"), None);
     }
 }

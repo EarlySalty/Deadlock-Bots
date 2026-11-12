@@ -26,7 +26,7 @@ free = """## Was kostenlos bleibt
 
 Der Server wird nicht kostenpflichtig. Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching bleiben frei.
 
-Bei regulären Turnieren und beim Coaching bringt Unterstützung keinen Vorteil."""
+Bei regulären Turnieren und beim normalen Coaching bringt Unterstützung keinen Vorteil."""
 funding = """## Monatsziel
 
 {balken} {prozent} %
@@ -34,13 +34,13 @@ funding = """## Monatsziel
 -# Hier zählen die laufenden Abos und die einmaligen Beträge aus diesem Monat."""
 pay = """## So kannst du unterstützen
 
-**Monatlich über Stripe.** {stufen} im Monat. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.
+**Monatlich über Stripe.** {stufen} im Monat.{rolle} Kündigen kannst du jederzeit selbst über den Button unten.
 
-**Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.
+**Einmalig.** Du wählst den Betrag selbst, ab {mindestbetrag}. Dafür bekommst du die Vorteile für {tage} Tage.
 
-**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch."""
-plus = "**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung. Du bekommst damit dieselbe Rolle, und dein Abo geht ins Monatsziel ein."
-twitch = "**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."
+**Server-Boost.** Zählt vorerst als Unterstützung.{rolle}"""
+plus = "**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung.{rolle}"
+twitch = "**Twitch-Sub.** Ein Abo bei {kanaele} zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."
 thanks = "Danke, dass du den Server und die Projekte mitträgst ❤️"
 
 [buttons]

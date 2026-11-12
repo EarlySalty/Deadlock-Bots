@@ -93,16 +93,14 @@ impl DashboardConfig {
                 .filter(|v| !v.is_empty())
         };
 
-        let turnier_tokens = collect_tokens(
-            &get,
-            &[
-                "TURNIER_INTERNAL_API_TOKEN",
-                "MASTER_BROKER_TOKEN",
-                "MAIN_BOT_INTERNAL_TOKEN",
-                "TWITCH_INTERNAL_API_TOKEN",
-            ],
+        let turnier_tokens = dl_core::internal_tokens::all_tokens(
+            get,
+            dl_core::internal_tokens::DASHBOARD_INTERNAL_RECEIVER,
         );
-        let twitch_tokens = collect_tokens(&get, &["TWITCH_INTERNAL_API_TOKEN"]);
+        let twitch_tokens = dl_core::internal_tokens::all_tokens(
+            get,
+            dl_core::internal_tokens::DASHBOARD_TWITCH_RECEIVER,
+        );
 
         let public_base_url = Some(
             get("MASTER_DASHBOARD_PUBLIC_URL")
@@ -183,18 +181,6 @@ impl DashboardConfig {
     pub fn accepts_twitch_token(&self, token: &str) -> bool {
         token_matches(&self.twitch_tokens, token)
     }
-}
-
-fn collect_tokens(get: &impl Fn(&str) -> Option<String>, keys: &[&str]) -> Vec<String> {
-    let mut out = Vec::new();
-    for key in keys {
-        if let Some(value) = get(key) {
-            if !out.contains(&value) {
-                out.push(value);
-            }
-        }
-    }
-    out
 }
 
 fn token_matches(tokens: &[String], candidate: &str) -> bool {

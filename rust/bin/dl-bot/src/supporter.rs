@@ -2,36 +2,32 @@ pub mod links;
 pub mod roles;
 pub mod store;
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serenity::model::id::{GuildId, RoleId, UserId};
 use sqlx::PgPool;
 
+use dl_core::internal_tokens::{first_token, DASHBOARD_TWITCH_RECEIVER, STEAM_BOT_RECEIVER};
 use dl_core::runtime_config::{
-    supporter_tiers_valid, SUPPORTER_FUNDING_GOAL_CENTS_RANGE, SUPPORTER_MAX_REVOKES_RANGE,
-    SUPPORTER_PLUS_MONTHLY_CENTS_RANGE, SUPPORTER_REQUEST_TIMEOUT_MS_RANGE,
-    SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
+    CommunityOptions, SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS, SUPPORTER_DEFAULT_MAX_REVOKES,
+    SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS, SUPPORTER_DEFAULT_TIERS_EUR, SUPPORTER_TIP_VALID_DAYS,
 };
 
-use crate::serversync::support_publish::{
-    SupportFunding, SupportPanelOptions, SUPPORT_FUNDING_GOAL_CENTS_DEFAULT,
-    SUPPORT_TIERS_EUR_DEFAULT,
-};
+use crate::serversync::support_publish::{SupportFunding, SupportPanelOptions};
 use crate::serversync::{FundingRefresh, ServerSyncService};
 
 pub const SUPPORTER_ROLE_ID: u64 = 1_483_135_384_098_570_363;
 pub const BOOSTER_ROLE_ID: u64 = 1_414_182_925_460_836_443;
-const DEFAULT_MAX_REVOKES: usize = 10;
-const DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const GRANT_REASON: &str = "Server-Unterstützer: aktive Unterstützung";
 const REVOKE_REASON: &str = "Server-Unterstützer: keine aktive Unterstützung mehr";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SupporterConfig {
     pub role_grant_apply: bool,
     pub role_sync_apply: bool,
-    pub max_revokes: usize,
+    pub max_revokes: u64,
     pub interval: Duration,
     pub request_timeout: Option<Duration>,
     pub goal_cents: i64,
@@ -39,110 +35,62 @@ pub struct SupporterConfig {
     pub steam_token: Option<String>,
     pub twitch_api_base: Option<String>,
     pub twitch_token: Option<String>,
-    pub tiers_eur: Vec<u32>,
+    pub tiers_eur: Vec<u64>,
     pub plus_monthly_cents: Option<i64>,
-    pub invalid_keys: Vec<&'static str>,
 }
 
-fn parse_tiers(raw: &str) -> Option<Vec<u32>> {
-    let tiers: Vec<u64> = raw
-        .split(',')
-        .map(|part| part.trim().parse::<u64>().ok())
-        .collect::<Option<_>>()?;
-    if !supporter_tiers_valid(&tiers) {
-        return None;
+impl fmt::Debug for SupporterConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SupporterConfig")
+            .field("role_grant_apply", &self.role_grant_apply)
+            .field("role_sync_apply", &self.role_sync_apply)
+            .field("max_revokes", &self.max_revokes)
+            .field("interval", &self.interval)
+            .field("request_timeout", &self.request_timeout)
+            .field("goal_cents", &self.goal_cents)
+            .field("steam_api_base", &self.steam_api_base)
+            .field("steam_token_set", &self.steam_token.is_some())
+            .field("twitch_api_base", &self.twitch_api_base)
+            .field("twitch_token_set", &self.twitch_token.is_some())
+            .field("tiers_eur", &self.tiers_eur)
+            .field("plus_monthly_cents", &self.plus_monthly_cents)
+            .finish()
     }
-    tiers
-        .into_iter()
-        .map(|eur| u32::try_from(eur).ok())
-        .collect()
 }
 
 impl SupporterConfig {
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let get = |key: &str| {
-            lookup(key)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
-        let invalid = std::cell::RefCell::new(Vec::new());
-        let checked = |key: &'static str, valid: bool| {
-            if !valid {
-                invalid.borrow_mut().push(key);
-            }
-        };
-        let flag = |key: &str| {
-            get(key).is_some_and(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-        };
-        let bounded = |key: &'static str, range: &std::ops::RangeInclusive<u64>| {
-            let raw = get(key)?;
-            let value = raw
-                .parse::<u64>()
-                .ok()
-                .filter(|value| range.contains(value));
-            checked(key, value.is_some());
-            value
-        };
-        let goal_cents = get("DL_SUPPORTER_FUNDING_GOAL_CENTS").and_then(|raw| {
-            let value = raw
-                .parse::<i64>()
-                .ok()
-                .filter(|value| SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(value));
-            checked("DL_SUPPORTER_FUNDING_GOAL_CENTS", value.is_some());
-            value
-        });
-        let tiers_eur = get("DL_SUPPORTER_TIERS_EUR").and_then(|raw| {
-            let value = parse_tiers(&raw);
-            checked("DL_SUPPORTER_TIERS_EUR", value.is_some());
-            value
-        });
-        let plus_monthly_cents = get("DL_SUPPORTER_PLUS_MONTHLY_CENTS").and_then(|raw| {
-            let value = raw
-                .parse::<i64>()
-                .ok()
-                .filter(|value| SUPPORTER_PLUS_MONTHLY_CENTS_RANGE.contains(value));
-            checked("DL_SUPPORTER_PLUS_MONTHLY_CENTS", value.is_some());
-            value
-        });
-        let mut config = Self {
-            role_grant_apply: flag("DL_SUPPORTER_ROLE_GRANT_APPLY"),
-            role_sync_apply: flag("DL_SUPPORTER_ROLE_SYNC_APPLY"),
-            max_revokes: bounded(
-                "DL_SUPPORTER_ROLE_SYNC_MAX_REVOKES",
-                &SUPPORTER_MAX_REVOKES_RANGE,
-            )
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(DEFAULT_MAX_REVOKES),
+    pub fn new(
+        community: &CommunityOptions,
+        steam_api_base: &str,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        Self {
+            role_grant_apply: community.supporter_role_grant_apply.unwrap_or(false),
+            role_sync_apply: community.supporter_role_sync_apply.unwrap_or(false),
+            max_revokes: community
+                .supporter_role_sync_max_revokes
+                .unwrap_or(SUPPORTER_DEFAULT_MAX_REVOKES),
             interval: Duration::from_secs(
-                bounded(
-                    "DL_SUPPORTER_SYNC_INTERVAL_SECONDS",
-                    &SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
-                )
-                .unwrap_or(DEFAULT_INTERVAL_SECONDS),
+                community
+                    .supporter_sync_interval_seconds
+                    .unwrap_or(SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS),
             ),
-            request_timeout: bounded(
-                "DL_SUPPORTER_REQUEST_TIMEOUT_MS",
-                &SUPPORTER_REQUEST_TIMEOUT_MS_RANGE,
-            )
-            .map(Duration::from_millis),
-            goal_cents: goal_cents.unwrap_or(SUPPORT_FUNDING_GOAL_CENTS_DEFAULT),
-            steam_api_base: get("DL_SUPPORTER_STEAM_API_BASE")
-                .or_else(|| get("STEAM_BOT_API_URL"))
-                .unwrap_or_else(|| dl_bridges::steam::DEFAULT_API_URL.to_string()),
-            steam_token: dl_bridges::steam::token_from_lookup(&lookup),
-            twitch_api_base: get("DL_SUPPORTER_TWITCH_API_BASE"),
-            twitch_token: get("TWITCH_INTERNAL_API_TOKEN"),
-            tiers_eur: tiers_eur.unwrap_or_else(|| SUPPORT_TIERS_EUR_DEFAULT.to_vec()),
-            plus_monthly_cents,
-            invalid_keys: Vec::new(),
-        };
-        config.invalid_keys = invalid.into_inner();
-        config
+            request_timeout: community
+                .supporter_request_timeout_ms
+                .map(Duration::from_millis),
+            goal_cents: community
+                .supporter_funding_goal_cents
+                .unwrap_or(SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS),
+            steam_api_base: steam_api_base.to_string(),
+            steam_token: first_token(&lookup, STEAM_BOT_RECEIVER),
+            twitch_api_base: community.supporter_twitch_api_base.clone(),
+            twitch_token: first_token(&lookup, DASHBOARD_TWITCH_RECEIVER),
+            tiers_eur: community
+                .supporter_tiers_eur
+                .clone()
+                .unwrap_or_else(|| SUPPORTER_DEFAULT_TIERS_EUR.to_vec()),
+            plus_monthly_cents: community.supporter_plus_monthly_cents,
+        }
     }
 
     pub fn panel_options(&self) -> SupportPanelOptions {
@@ -150,6 +98,7 @@ impl SupporterConfig {
             tiers_eur: self.tiers_eur.clone(),
             plus_monthly_cents: self.plus_monthly_cents,
             twitch: self.twitch_api_base.is_some() && self.twitch_token.is_some(),
+            role_grant: self.role_grant_apply,
         }
     }
 
@@ -159,14 +108,9 @@ impl SupporterConfig {
             tiers_eur = ?self.tiers_eur,
             plus_monthly_cents = ?self.plus_monthly_cents,
             twitch = self.panel_options().twitch,
+            role_grant_apply = self.role_grant_apply,
             "Server-Unterstützer: Panel-Werte"
         );
-        for key in &self.invalid_keys {
-            tracing::error!(
-                key,
-                "Server-Unterstützer: Wert ungültig, Standard wird verwendet"
-            );
-        }
     }
 }
 
@@ -174,17 +118,11 @@ impl SupporterConfig {
 pub trait FundingSource: Send + Sync {
     async fn funding(&self) -> Result<SupportFunding, String>;
 
-    fn missing_config(&self) -> Option<&'static str> {
-        None
-    }
+    fn missing_config(&self) -> Option<&'static str>;
 
-    fn goal_cents(&self) -> i64 {
-        SUPPORT_FUNDING_GOAL_CENTS_DEFAULT
-    }
+    fn goal_cents(&self) -> i64;
 
-    fn panel_options(&self) -> SupportPanelOptions {
-        SupportPanelOptions::default()
-    }
+    fn panel_options(&self) -> SupportPanelOptions;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +160,8 @@ impl SupporterSync {
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             tracing::info!(
-                apply = self.config.role_sync_apply,
+                grant_apply = self.config.role_grant_apply,
+                revoke_apply = self.config.role_sync_apply,
                 max_revokes = self.config.max_revokes,
                 interval_seconds = self.config.interval.as_secs(),
                 "Server-Unterstützer: Abgleich gestartet"
@@ -273,7 +212,8 @@ impl SupporterSync {
             let imported = store::import_manual(&self.pool, &holders).await?;
             tracing::info!(
                 imported,
-                "Server-Unterstützer: bisherige Rolleninhaber für 31 Tage übernommen"
+                valid_days = SUPPORTER_TIP_VALID_DAYS,
+                "Server-Unterstützer: bisherige Rolleninhaber übernommen"
             );
             import_done = true;
         }
@@ -365,7 +305,7 @@ impl SupporterSync {
 pub fn register(
     router: &mut dl_discord::InteractionRouter,
     links: Arc<dyn links::SupporterLinks>,
-    tiers_eur: &[u32],
+    options: &SupportPanelOptions,
 ) {
-    links::register(router, links, tiers_eur);
+    links::register(router, links, options);
 }

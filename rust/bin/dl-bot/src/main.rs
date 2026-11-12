@@ -652,13 +652,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
-    let supporter_config = supporter::SupporterConfig::from_lookup(env);
+    let supporter_config = supporter::SupporterConfig::new(
+        &operating.runtime.community,
+        &operating.services.steam_api_url,
+        env,
+    );
     supporter_config.log_effective();
     let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config);
     supporter::register(
         &mut router,
         supporter_links.clone(),
-        &supporter_config.tiers_eur,
+        &supporter_config.panel_options(),
     );
     serversync_concrete
         .set_supporter_funding(supporter_links)
@@ -666,9 +670,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
-        env("MASTER_BROKER_TOKEN")
-            .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-            .or_else(|| env("TWITCH_INTERNAL_API_TOKEN")),
+        dl_core::internal_tokens::first_token(
+            env,
+            dl_core::internal_tokens::DASHBOARD_INTERNAL_RECEIVER,
+        ),
     );
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
@@ -1400,9 +1405,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     };
 
     // Master-Broker :8770 — Token-Kette wie das Original
-    let broker_token = env("MASTER_BROKER_TOKEN")
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
+    let broker_token =
+        dl_core::internal_tokens::first_token(env, dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
         .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
     let twitch_invites = twitch_invites::TwitchInvites::new(
         central_pool.clone(),
@@ -1480,10 +1484,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
     // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN")
-        .or_else(|| env("MASTER_BROKER_TOKEN"))
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"));
+    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN").or_else(|| {
+        dl_core::internal_tokens::first_token(env, dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
+    });
     if serversync_token.is_none() {
         tracing::warn!(
             "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN) — Server-Sync-HTTP-Routen liefern 403"
