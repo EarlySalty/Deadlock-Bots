@@ -117,7 +117,7 @@ struct PublishRequest {
 
 #[derive(Clone)]
 struct TurnierClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     token: String,
 }
@@ -125,7 +125,7 @@ struct TurnierClient {
 impl TurnierClient {
     fn new(base_url: String, token: String) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: dl_core::bot_http::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
         }
@@ -252,7 +252,10 @@ impl TurnierClient {
         .await
     }
 
-    async fn request(&self, request: reqwest::RequestBuilder) -> Result<ProposalEnvelope, String> {
+    async fn request(
+        &self,
+        request: dl_core::bot_http::RequestBuilder,
+    ) -> Result<ProposalEnvelope, String> {
         if self.token.trim().is_empty() {
             return Err("TURNIER_INTERNAL_API_TOKEN fehlt".to_string());
         }

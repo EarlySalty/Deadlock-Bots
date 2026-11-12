@@ -73,7 +73,7 @@ section!(StartOptions {
     mcp_verified_role_id: u64 => "MCP_VERIFIED_ROLE_ID",
 });
 
-pub const STEAM_HTTP_TIMEOUT_MS: std::ops::RangeInclusive<u64> = 1..=60_000;
+pub const STEAM_HTTP_TIMEOUT_MS: std::ops::RangeInclusive<u64> = 1..=120_000;
 
 section!(BridgeOptions {
     steam_connect_timeout_ms: u64 => "STEAM_BOT_CONNECT_TIMEOUT_MS",
@@ -270,6 +270,14 @@ impl RuntimeConfig {
             }
         }
 
+        if let (Some(connect), Some(total)) = (
+            self.bridges.steam_connect_timeout_ms,
+            self.bridges.steam_request_timeout_ms,
+        ) {
+            if connect > total {
+                return Err(invalid());
+            }
+        }
         for seconds in [
             self.community.router_auto_move_delay_seconds,
             self.ai.transparency_error_repeat_seconds,
@@ -850,7 +858,7 @@ mod steam_timeout_tests {
             ("steam_connect_timeout_ms", "STEAM_BOT_CONNECT_TIMEOUT_MS"),
             ("steam_request_timeout_ms", "STEAM_BOT_REQUEST_TIMEOUT_MS"),
         ] {
-            for value in ["0", "60001", "-1", "18446744073709551616", "'invalid'"] {
+            for value in ["0", "120001", "-1", "18446744073709551616", "'invalid'"] {
                 assert!(BotConfig::parse(&format!(
                     "schema_version=1\n[runtime.bridges]\n{field}={value}\n"
                 ))

@@ -15,3 +15,5 @@ pub mod settings_catalog;
 pub mod token_snapshot;
 
 pub use config::{Config, ConfigError, Ports};
+
+pub mod bot_http;

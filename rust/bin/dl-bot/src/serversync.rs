@@ -175,6 +175,12 @@ impl From<serde_json::Error> for ServerSyncError {
     }
 }
 
+impl From<dl_core::bot_http::Error> for ServerSyncError {
+    fn from(value: dl_core::bot_http::Error) -> Self {
+        Self::internal(value.to_string())
+    }
+}
+
 impl From<reqwest::Error> for ServerSyncError {
     fn from(value: reqwest::Error) -> Self {
         Self::internal(value.to_string())
@@ -914,7 +920,7 @@ pub struct ServerSyncService {
     adapter: Arc<dl_discord::DiscordAdapter>,
     discord_token: String,
     guild_id: u64,
-    http_client: reqwest::Client,
+    http_client: dl_core::bot_http::Client,
     discord_api_base: String,
     rang_guide_repo_root: PathBuf,
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
@@ -934,7 +940,7 @@ impl ServerSyncService {
             adapter,
             discord_token,
             guild_id,
-            http_client: reqwest::Client::new(),
+            http_client: dl_core::bot_http::Client::new(),
             discord_api_base: DISCORD_API_BASE.to_string(),
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
@@ -954,7 +960,7 @@ impl ServerSyncService {
             adapter: dl_discord::DiscordAdapter::new("test-token"),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
-            http_client: reqwest::Client::new(),
+            http_client: dl_core::bot_http::Client::new(),
             discord_api_base,
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),

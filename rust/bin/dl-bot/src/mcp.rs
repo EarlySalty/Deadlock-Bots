@@ -37,7 +37,7 @@ const PROTOCOL_FALLBACK: &str = "2025-03-26";
 const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
 pub struct McpState {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     bot_token: String,
     discord_api: String,
     auth_token: String,
@@ -56,7 +56,7 @@ impl McpState {
         auth_token: Option<String>,
         config: &StartOptions,
     ) -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let http = dl_core::bot_http::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .context("MCP: reqwest-Client")?;
@@ -1439,7 +1439,7 @@ mod tests {
                 .await
                 .expect("Testserver");
         });
-        let client = reqwest::Client::new();
+        let client = dl_core::bot_http::Client::new();
         for (user, tool, status, send_count) in [
             ("44", "send_message", 403, 0),
             ("44", "read_messages", 200, 0),

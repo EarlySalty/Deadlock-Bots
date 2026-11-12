@@ -634,7 +634,7 @@ mod tests {
                 .await
                 .expect("MCP");
         });
-        let client = reqwest::Client::new();
+        let client = dl_core::bot_http::Client::new();
         for (token, route, user, request, args, expected) in [
             (
                 "falsch",

@@ -8,6 +8,8 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+reqwest.workspace = true
+http = "1"
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

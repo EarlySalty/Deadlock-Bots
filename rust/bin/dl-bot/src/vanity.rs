@@ -43,7 +43,7 @@ pub fn spawn_vanity_snapshots(
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = reqwest::Client::new();
+    let client = dl_core::bot_http::Client::new();
     tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -80,7 +80,7 @@ pub fn spawn_member_directory_sweep(
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = reqwest::Client::new();
+    let client = dl_core::bot_http::Client::new();
     tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let start = tokio::time::Instant::now() + MEMBER_DIRECTORY_INTERVAL;
@@ -111,7 +111,7 @@ pub fn spawn_member_directory_sweep(
 
 async fn poll_one(
     pool: &PgPool,
-    client: &reqwest::Client,
+    client: &dl_core::bot_http::Client,
     token: &str,
     guild_id: u64,
 ) -> TaskResult<()> {
@@ -272,7 +272,7 @@ async fn purge_old_vanity_snapshots(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 async fn run_directory_sweeps(
     pool: &PgPool,
-    client: &reqwest::Client,
+    client: &dl_core::bot_http::Client,
     token: &str,
     guilds: &BTreeSet<u64>,
 ) {
@@ -285,7 +285,7 @@ async fn run_directory_sweeps(
 
 async fn sync_member_directory(
     pool: &PgPool,
-    client: &reqwest::Client,
+    client: &dl_core::bot_http::Client,
     token: &str,
     guild_id: u64,
 ) -> TaskResult<()> {
@@ -336,7 +336,7 @@ async fn sync_member_directory(
 }
 
 async fn fetch_member_page(
-    client: &reqwest::Client,
+    client: &dl_core::bot_http::Client,
     token: &str,
     guild_id: u64,
     after: Option<u64>,

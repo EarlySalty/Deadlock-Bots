@@ -86,7 +86,7 @@ fn component_forward_timeout(custom_id: &str) -> Duration {
 const POSTED_IN_CHANNEL_MSG: &str = "✅ Antwort im Kanal gepostet.";
 
 const UNREACHABLE_MSG: &str =
-    "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte versuche es in wenigen Sekunden erneut.";
+    "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte informiere das Team, falls das Problem bestehen bleibt.";
 
 /// Admin-Text-Kommandos (Prefix !), die an den Steam-Bot durchgereicht werden.
 const ADMIN_COMMANDS: [&str; 6] = [
@@ -101,9 +101,7 @@ const ADMIN_COMMANDS: [&str; 6] = [
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
 pub struct SteamBotClient {
-    pub(crate) http: Option<reqwest::Client>,
-    pub(crate) connect_timeout: Option<Duration>,
-    pub(crate) request_timeout: Option<Duration>,
+    pub(crate) http: Option<dl_core::bot_http::Client>,
     pub(crate) base_url: String,
     pub(crate) token: Option<String>,
 }
@@ -146,28 +144,16 @@ impl SteamBotClient {
         connect_ms: Option<u64>,
         request_ms: Option<u64>,
     ) -> Arc<Self> {
-        let bounded = |value: Option<u64>| {
-            value
-                .filter(|v| dl_core::runtime_config::STEAM_HTTP_TIMEOUT_MS.contains(v))
-                .map(Duration::from_millis)
-        };
-        let connect_timeout = bounded(connect_ms);
-        let request_timeout = bounded(request_ms);
-        let http = connect_timeout.zip(request_timeout).and_then(|(connect, total)| {
-            reqwest::Client::builder()
-                .connect_timeout(connect)
-                .timeout(total)
-                .build()
-                .map_err(|error| tracing::warn!(%error, "Steam bridge HTTP client initialization failed"))
-                .ok()
-        });
-        if http.is_none() {
-            tracing::warn!("Steam bridge disabled: missing or invalid HTTP timeout configuration");
-        }
+        let http = dl_core::bot_http::Client::builder_with_timeouts(connect_ms, request_ms)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| {
+                tracing::error!("Steam HTTP configuration or client initialization failed")
+            })
+            .ok();
         Arc::new(Self {
             http,
-            connect_timeout,
-            request_timeout,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
         })
@@ -185,12 +171,11 @@ impl SteamBotClient {
         payload.insert("kind".into(), json!(kind));
         payload.extend(data);
 
-        let mut request = self
-            .http
-            .as_ref()?
-            .post(&url)
-            .json(&payload)
-            .timeout(timeout);
+        let Some(http) = self.http.as_ref() else {
+            tracing::error!("Steam request rejected: HTTP configuration or initialization failed; operator action required");
+            return None;
+        };
+        let mut request = http.post(&url).json(&payload).timeout(timeout);
         if let Some(token) = &self.token {
             request = request.header("X-Internal-Token", token);
         }
@@ -1092,7 +1077,7 @@ mod tests {
             None,
             Some(""),
             Some("0"),
-            Some("60001"),
+            Some("120001"),
             Some("invalid"),
             Some("18446744073709551616"),
         ] {
@@ -1135,93 +1120,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_default_deadline_and_longer_request_override() {
-        const RESPONSE_DELAY: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(1));
-        const REQUEST_TIMEOUT: Duration = DEFAULT_TIMEOUT.saturating_mul(2);
+    async fn production_event_deadline_caps_longer_override() {
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&entered);
         let app = axum::Router::new().route(
-            "/",
-            axum::routing::get(|| async {
-                tokio::time::sleep(RESPONSE_DELAY).await;
-                "ok"
+            "/events/discord",
+            axum::routing::post(move || {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    axum::Json(json!({"ok": true}))
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test server");
-        let url = format!("http://{}", listener.local_addr().expect("test address"));
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
         let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve test requests");
+            axum::serve(listener, app).await.expect("serve");
         });
-        let client = test_client(url.clone(), None);
-        let (default, extended) = tokio::time::timeout(REQUEST_TIMEOUT, async {
-            tokio::join!(
-                client
-                    .http
-                    .as_ref()
-                    .expect("configured client")
-                    .get(&url)
-                    .send(),
-                client
-                    .http
-                    .as_ref()
-                    .expect("configured client")
-                    .get(&url)
-                    .timeout(REQUEST_TIMEOUT)
-                    .send()
-            )
-        })
+        let client =
+            SteamBotClient::with_timeouts(url, Some("synthetic".into()), Some(10), Some(50));
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            client.post_event("test", Map::new(), Duration::from_secs(1)),
+        )
         .await
-        .expect("client requests must finish within the watchdog deadline");
+        .expect("configured cap must win");
+        assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
         server.abort();
-        assert!(default
-            .expect_err("default deadline must expire")
-            .is_timeout());
-        assert_eq!(
-            extended.expect("request override must survive").status(),
-            reqwest::StatusCode::OK
-        );
+        assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn client_default_deadline_covers_stalled_response_body() {
+    async fn production_event_deadline_covers_stalled_body() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        const WATCHDOG_TIMEOUT: Duration = DEFAULT_TIMEOUT.saturating_mul(2);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test server");
-        let url = format!("http://{}", listener.local_addr().expect("test address"));
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept test request");
-            let mut request = [0_u8];
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0_u8; 1];
+            socket.read_exact(&mut request).await.expect("read");
             socket
-                .read_exact(&mut request)
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
                 .await
-                .expect("read start of test request");
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx")
-                .await
-                .expect("write incomplete response");
+                .expect("write");
             std::future::pending::<()>().await;
         });
-        let client = test_client(url.clone(), None);
-        let result = tokio::time::timeout(WATCHDOG_TIMEOUT, async {
-            client
-                .http
-                .as_ref()
-                .expect("configured client")
-                .get(url)
-                .send()
-                .await?
-                .bytes()
-                .await
-        })
+        let client =
+            SteamBotClient::with_timeouts(url, Some("synthetic".into()), Some(10), Some(50));
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            client.post_event("test", Map::new(), Duration::from_secs(1)),
+        )
         .await
-        .expect("body read must finish within the watchdog deadline");
+        .expect("body must finish within cap");
         server.abort();
-        assert!(result.expect_err("stalled body must time out").is_timeout());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn valid_lookup_enables_client_and_rejects_inverted_limits() {
+        let client = SteamBotClient::from_env(|key| match key {
+            "STEAM_BOT_CONNECT_TIMEOUT_MS" => Some("5".into()),
+            "STEAM_BOT_REQUEST_TIMEOUT_MS" => Some("50".into()),
+            _ => None,
+        });
+        assert!(client.http.is_some());
+        assert!(
+            SteamBotClient::with_timeouts("http://localhost", None, Some(50), Some(5))
+                .http
+                .is_none()
+        );
     }
 
     #[test]

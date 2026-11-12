@@ -11,6 +11,7 @@ version = "0.1.0"
 testing = []
 
 [dependencies]
+dl-core.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 dl-bridges.workspace = true

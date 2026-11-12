@@ -136,25 +136,12 @@ impl super::steam::SteamBotClient {
             .filter(|value| !value.is_empty())
             .ok_or(Error::Unavailable)?;
         let url = format!("{}/internal/config", self.base_url);
-        self.http.as_ref().ok_or(Error::Unavailable)?;
-        let (connect, total) = self
-            .connect_timeout
-            .zip(self.request_timeout)
-            .ok_or(Error::Unavailable)?;
-        let http = reqwest::Client::builder()
-            .connect_timeout(connect)
-            .timeout(total)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Error::Unavailable)?;
+        let http = self.http.as_ref().ok_or(Error::Unavailable)?;
         let mut request = match save {
             Some(body) => http.patch(url).json(body),
             None => http.get(url),
         };
-        request = request
-            .header("x-internal-token", token)
-            .timeout(std::time::Duration::from_secs(10));
+        request = request.header("x-internal-token", token);
         let response = request.send().await.map_err(|_| Error::Unavailable)?;
         match response.status().as_u16() {
             200 => {}

@@ -81,7 +81,7 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 None => text.to_owned(),
             };
             let mut ty = columns[1];
-            let nullable = ty.starts_with("Option<");
+            let mut nullable = ty.starts_with("Option<");
             if nullable {
                 ty = &ty[7..ty.len() - 1];
             }
@@ -152,6 +152,12 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 }
             }
             match path.as_str() {
+                "runtime.bridges.steam_connect_timeout_ms"
+                | "runtime.bridges.steam_request_timeout_ms" => {
+                    nullable = false;
+                    let range = crate::runtime_config::STEAM_HTTP_TIMEOUT_MS;
+                    bounds = Some((*range.start() as i64, *range.end() as i64));
+                }
                 "concierge.timeout_seconds" => bounds = Some((1, 110)),
                 "tempvoice.empty_lane_grace_seconds" => bounds = Some((1, 86_400)),
                 "runtime.bridges.matcher_max_ai_per_scan" => bounds = Some((0, 1000)),

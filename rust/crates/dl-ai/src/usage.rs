@@ -506,11 +506,11 @@ mod tests {
         .await
         .unwrap();
         initialize(pool.clone(), "test-fixture").unwrap();
-        let request = reqwest::Client::new()
+        let request = dl_core::bot_http::Client::new()
             .post("https://api.fireworks.ai/inference/v1/chat/completions")
             .json(&json!({"model":"fixture-model","messages":[{"content":"nicht speichern"}]}))
             .build()
-            .unwrap();
+            .expect("valid usage request fixture");
         let mut lock = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE public.llm_usage IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *lock)

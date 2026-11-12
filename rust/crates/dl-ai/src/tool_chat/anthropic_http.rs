@@ -12,7 +12,7 @@ use super::types::{ContentBlock, StopReason, ToolChatRequest, ToolChatResponse, 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct AnthropicHttpBackend {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     messages_url: String,
     api_key: Option<HeaderValue>,
     workspace_id: Option<HeaderValue>,
@@ -42,11 +42,11 @@ impl AnthropicHttpBackend {
         api_key: Option<HeaderValue>,
         workspace_id: Option<HeaderValue>,
     ) -> Self {
-        let http = reqwest::Client::builder()
+        let http = dl_core::bot_http::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
+            .unwrap_or_else(dl_core::bot_http::Client::disabled);
         Self {
             http,
             messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
@@ -55,7 +55,11 @@ impl AnthropicHttpBackend {
         }
     }
 
-    fn request(&self, request: &ToolChatRequest, target: &CallTarget) -> reqwest::RequestBuilder {
+    fn request(
+        &self,
+        request: &ToolChatRequest,
+        target: &CallTarget,
+    ) -> dl_core::bot_http::RequestBuilder {
         let builder = self
             .http
             .post(&self.messages_url)

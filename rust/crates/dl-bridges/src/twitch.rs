@@ -73,7 +73,7 @@ pub fn build_custom_id(streamer_login: &str, tracking_token: &str) -> String {
 // ── API-Client ─────────────────────────────────────────────────────────────
 
 pub struct TwitchApiClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     token: String,
 }
@@ -124,12 +124,12 @@ impl TwitchApiClient {
         let base_url = normalize_internal_api_base_url(&base_url.into(), allow_non_loopback)
             .map_err(TwitchBridgeError::Api)?;
         Ok(Arc::new(Self {
-            http: reqwest::Client::builder()
+            http: dl_core::bot_http::Client::builder()
                 .timeout(timeout)
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url,
             token: token.into(),
         }))

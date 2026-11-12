@@ -101,7 +101,7 @@ Bei Fragen melde dich beim Coach."
 // ── Website-Client ─────────────────────────────────────────────────────────
 
 pub struct WebsiteClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     token: String,
 }
@@ -126,16 +126,16 @@ impl WebsiteClient {
         let base_url = get("WEBSITE_API_BASE")
             .unwrap_or_else(|| "https://deutsche-deadlock-community.de/api".to_string());
         Some(Arc::new(Self {
-            http: reqwest::Client::builder()
+            http: dl_core::bot_http::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
         }))
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: reqwest::Method, path: &str) -> dl_core::bot_http::RequestBuilder {
         self.http
             .request(method, format!("{}{path}", self.base_url))
             .header("X-Internal-Token", &self.token)

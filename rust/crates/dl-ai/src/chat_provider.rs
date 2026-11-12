@@ -629,7 +629,7 @@ fn read_env(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> Option<Strin
 }
 
 pub struct MistralChatProvider {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     default_model: String,
@@ -637,7 +637,7 @@ pub struct MistralChatProvider {
 }
 
 pub struct OpenAiChatProvider {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     default_model: String,
@@ -888,7 +888,7 @@ impl ChatProvider for MistralChatProvider {
 }
 
 pub struct MiniMaxChatProvider {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     token_plan: bool,
@@ -1069,12 +1069,12 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    fn http_client(&self) -> reqwest::Client {
-        reqwest::Client::builder()
+    fn http_client(&self) -> dl_core::bot_http::Client {
+        dl_core::bot_http::Client::builder()
             .timeout(self.request_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default()
+            .unwrap_or_else(dl_core::bot_http::Client::disabled)
     }
 
     fn backoff_for_attempt(&self, attempt: usize) -> Duration {
@@ -1092,7 +1092,7 @@ struct HttpJsonResult {
 async fn send_json_with_retry(
     provider: &'static str,
     retry: &RetryConfig,
-    make_request: impl Fn() -> reqwest::RequestBuilder,
+    make_request: impl Fn() -> dl_core::bot_http::RequestBuilder,
 ) -> Result<HttpJsonResult, ChatProviderError> {
     let started = Instant::now();
     for attempt in 0..=retry.max_retries {
@@ -1317,7 +1317,7 @@ fn anbieter_meldung(rohtext: &str) -> Option<String> {
     })
 }
 
-fn request_error_kind(err: &reqwest::Error) -> String {
+fn request_error_kind(err: &dl_core::bot_http::Error) -> String {
     if err.is_connect() {
         "connect".to_string()
     } else if err.is_request() {

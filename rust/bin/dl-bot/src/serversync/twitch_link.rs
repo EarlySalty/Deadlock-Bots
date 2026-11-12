@@ -31,7 +31,7 @@ pub trait TwitchLinkUrlSource: Send + Sync {
 
 /// Holt den Link per `POST /internal/v1/discord/twitch-link/initiate`.
 pub struct DashboardTwitchLinkClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     token: Option<String>,
 }
@@ -39,10 +39,10 @@ pub struct DashboardTwitchLinkClient {
 impl DashboardTwitchLinkClient {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: dl_core::bot_http::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token: token
                 .map(|t| t.trim().to_string())

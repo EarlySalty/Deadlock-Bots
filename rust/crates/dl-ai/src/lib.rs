@@ -182,7 +182,7 @@ const VALID_IMAGE_PREFIXES: [&str; 3] = ["http://", "https://", "data:image/"];
 const MAX_MULTIMODAL_IMAGES: usize = 4;
 
 pub struct MiniMaxClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     token_plan: bool,
@@ -227,10 +227,10 @@ impl MiniMaxClient {
         model: impl Into<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            http: reqwest::Client::builder()
+            http: dl_core::bot_http::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             token_plan,
@@ -240,14 +240,14 @@ impl MiniMaxClient {
 }
 
 pub struct OpenAiClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     model: String,
 }
 
 pub struct FireworksClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     model: String,
@@ -292,17 +292,17 @@ impl OpenAiClient {
         model: impl Into<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            http: reqwest::Client::builder()
+            http: dl_core::bot_http::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
         })
     }
 
-    async fn image_data_uri(http: &reqwest::Client, image_url: &str) -> Option<String> {
+    async fn image_data_uri(http: &dl_core::bot_http::Client, image_url: &str) -> Option<String> {
         if image_url.starts_with("data:image/") {
             if image_url.len() as u64 > MAX_OPENAI_IMAGE_BYTES * 4 / 3 + 1024 {
                 return None;
@@ -530,8 +530,8 @@ impl FireworksClient {
         Some(data)
     }
 
-    fn http_client() -> Option<reqwest::Client> {
-        reqwest::Client::builder()
+    fn http_client() -> Option<dl_core::bot_http::Client> {
+        dl_core::bot_http::Client::builder()
             .timeout(Duration::from_secs(60))
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -590,7 +590,7 @@ impl FireworksClient {
 }
 
 pub struct GeminiClient {
-    http: reqwest::Client,
+    http: dl_core::bot_http::Client,
     base_url: String,
     api_key: String,
     model: String,
@@ -609,10 +609,10 @@ impl GeminiClient {
         let model = get("AI_GEMINI_MODEL").unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string());
         tracing::info!(%base_url, %model, "Gemini-Text-Client initialisiert");
         Some(Arc::new(Self {
-            http: reqwest::Client::builder()
+            http: dl_core::bot_http::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,

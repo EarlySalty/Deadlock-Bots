@@ -424,7 +424,7 @@ async fn run_once(pool: &PgPool, base: &str, token: &str, dry_run: bool) -> anyh
         "{}/internal/twitch/v1/streamer-invites",
         base.trim_end_matches('/')
     );
-    let client = reqwest::Client::builder()
+    let client = dl_core::bot_http::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
