@@ -88,11 +88,11 @@ fn ticket_auto_outcome_from_knowledge(answer: KnowledgeLookup) -> TicketAutoOutc
 }
 
 fn log_ticket_fail_closed(reason: &str, question_chars: usize, channel_id: u64, author_id: u64) {
-    let absent = "absent";
+    let (absent, confidence) = ("absent", "none");
     tracing::warn!(
         question_chars,
         verdict = %BrainState::NotAsked.verdict(),
-        confidence = "none",
+        confidence = %confidence,
         retrieval_score = %absent,
         reason = %reason,
         sources = %absent,
