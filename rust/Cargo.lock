@@ -1577,6 +1577,7 @@ dependencies = [
  "dl-brain",
  "dl-bridges",
  "dl-central-db",
+ "dl-core",
  "dl-discord",
  "dl-squads",
  "dl-stats",
