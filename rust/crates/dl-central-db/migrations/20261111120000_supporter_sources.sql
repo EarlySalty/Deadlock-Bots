@@ -24,7 +24,7 @@ COMMENT ON COLUMN core.supporter_sources.source IS
 COMMENT ON COLUMN core.supporter_sources.source_ref IS
     'Id of the proof inside the source, for example the Stripe subscription id, the Twitch channel, discord for a boost or role_cutover for the manual import; never empty.';
 COMMENT ON COLUMN core.supporter_sources.monthly_cents IS
-    'Monthly amount in euro cents the source pays; NULL when the source carries no amount (boost, Twitch, manual). The funding bar sums the active stripe rows.';
+    'Monthly amount in euro cents the source pays; NULL when the source carries no amount (boost, Twitch, manual).';
 COMMENT ON COLUMN core.supporter_sources.valid_until IS
     'End of the support from this source; NULL = active until the writer deletes the row. Finite.';
 COMMENT ON COLUMN core.supporter_sources.updated_at IS
@@ -37,7 +37,7 @@ SELECT DISTINCT discord_id
     OR valid_until > now();
 
 COMMENT ON VIEW core.active_supporters IS
-    'Discord members with at least one active supporter source. Read by the dl-bot role sync, the Steam bot gate and the panel.';
+    'Discord members with at least one active supporter source. Read by the dl-bot role sync, the only writer of the Discord supporter role, and by the Steam bot gate.';
 
 INSERT INTO core.privacy_field_registry(
     schema_name,
@@ -75,5 +75,10 @@ BEGIN
             EXECUTE format('GRANT SELECT ON core.active_supporters TO %I', writer);
         END IF;
     END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'twitchdash')
+       AND to_regclass('core.discord_platform_connections') IS NOT NULL THEN
+        GRANT SELECT (platform, platform_user_id, discord_id, verified)
+            ON core.discord_platform_connections TO twitchdash;
+    END IF;
 END
 $roles$;
