@@ -652,10 +652,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
-    let supporter_config = supporter::SupporterConfig::from_lookup(
-        env,
-        format!("http://127.0.0.1:{}", cfg.ports.dashboard),
-    );
+    let supporter_config = supporter::SupporterConfig::from_lookup(env);
     let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config);
     supporter::register(&mut router, supporter_links.clone());
     serversync_concrete

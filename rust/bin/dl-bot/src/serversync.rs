@@ -1198,6 +1198,24 @@ impl ServerSyncService {
         Ok(())
     }
 
+    async fn store_serversync_kv_pairs(&self, pairs: &[(&str, &str)]) -> ServerSyncResult<()> {
+        let mut tx = self.pool.begin().await?;
+        for (key, value) in pairs {
+            sqlx::query(
+                "INSERT INTO bot.kv_store(ns, k, v)
+                 VALUES($1, $2, $3)
+                 ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
+            )
+            .bind(SERVERSYNC_KV_NS)
+            .bind(key)
+            .bind(value)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn delete_serversync_kv(&self, key: &str) -> ServerSyncResult<()> {
         sqlx::query(
             "DELETE FROM bot.kv_store
@@ -2194,6 +2212,9 @@ impl ServerSyncService {
         let Some(source) = self.supporter_funding.read().await.clone() else {
             return Ok(FundingRefresh::Skipped("keine Quelle"));
         };
+        if let Some(missing) = source.missing_config() {
+            return Ok(FundingRefresh::Skipped(missing));
+        }
         let funding = source.funding().await.map_err(ServerSyncError::internal)?;
         let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_payload_format = self
@@ -2263,13 +2284,14 @@ impl ServerSyncService {
                 "Monatsziel-Nachricht nicht gefunden",
             ));
         }
-        self.store_serversync_kv(
-            support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-            &next.payload_hash,
-        )
+        self.store_serversync_kv_pairs(&[
+            (
+                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                &next.payload_hash,
+            ),
+            (support_publish::SUPPORT_FUNDING_LIVE_KEY, &funding.to_kv()),
+        ])
         .await?;
-        self.store_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY, &funding.to_kv())
-            .await?;
         Ok(FundingRefresh::Updated)
     }
 

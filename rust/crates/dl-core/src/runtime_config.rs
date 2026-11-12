@@ -4,8 +4,14 @@ use crate::bot_config::{BotConfig, BotConfigError};
 use serde::{Deserialize, Serialize};
 use std::{
     net::IpAddr,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
 };
+
+pub const SUPPORTER_REQUEST_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=60_000;
+pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
+pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
+pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> = 100..=10_000_000;
 
 trait LookupValue {
     fn lookup_value(&self) -> String;
@@ -291,7 +297,19 @@ impl RuntimeConfig {
             || self
                 .community
                 .supporter_request_timeout_ms
-                .is_some_and(|ms| ms == 0 || ms > 60_000)
+                .is_some_and(|ms| !SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.contains(&ms))
+            || self
+                .community
+                .supporter_sync_interval_seconds
+                .is_some_and(|seconds| !SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.contains(&seconds))
+            || self
+                .community
+                .supporter_role_sync_max_revokes
+                .is_some_and(|count| !SUPPORTER_MAX_REVOKES_RANGE.contains(&count))
+            || self
+                .community
+                .supporter_funding_goal_cents
+                .is_some_and(|cents| !SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(&cents))
             || (self.ai.brain_command_enabled == Some(true)
                 && self
                     .ai
@@ -535,6 +553,8 @@ impl RuntimeConfig {
             (&self.dashboard.discord_redirect_uri, false),
             (&self.dashboard.discord_api_base, false),
             (&self.web.dashboard_base, true),
+            (&self.community.supporter_steam_api_base, true),
+            (&self.community.supporter_twitch_api_base, true),
             (&self.web.callback_url, false),
             (&self.ai.openai_base_url, false),
             (&self.ai.fireworks_base_url, false),
@@ -832,5 +852,41 @@ mod discord_brain_secret_tests {
             Some("fixture-public-facts")
         );
         assert!(super::secret_value("RUST_LOG").is_none());
+    }
+}
+
+#[cfg(test)]
+mod supporter_bound_tests {
+    use crate::bot_config::BotConfig;
+
+    fn parse(line: &str) -> bool {
+        BotConfig::parse(&format!("schema_version=1\n[runtime.community]\n{line}\n")).is_ok()
+    }
+
+    #[test]
+    fn unterstuetzer_werte_haben_ober_und_untergrenzen() {
+        for accepted in [
+            "supporter_request_timeout_ms=8000",
+            "supporter_sync_interval_seconds=300",
+            "supporter_role_sync_max_revokes=0",
+            "supporter_role_sync_max_revokes=100",
+            "supporter_funding_goal_cents=5000",
+            "supporter_twitch_api_base='http://127.0.0.1:8765'",
+        ] {
+            assert!(parse(accepted), "{accepted}");
+        }
+        for rejected in [
+            "supporter_request_timeout_ms=0",
+            "supporter_request_timeout_ms=60001",
+            "supporter_sync_interval_seconds=59",
+            "supporter_sync_interval_seconds=86401",
+            "supporter_role_sync_max_revokes=101",
+            "supporter_funding_goal_cents=0",
+            "supporter_funding_goal_cents=10000001",
+            "supporter_steam_api_base='https://example.org'",
+            "supporter_twitch_api_base=''",
+        ] {
+            assert!(!parse(rejected), "{rejected}");
+        }
     }
 }

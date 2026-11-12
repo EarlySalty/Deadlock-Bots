@@ -8,14 +8,18 @@ use std::time::Duration;
 use serenity::model::id::{GuildId, RoleId, UserId};
 use sqlx::PgPool;
 
+use dl_core::runtime_config::{
+    SUPPORTER_FUNDING_GOAL_CENTS_RANGE, SUPPORTER_MAX_REVOKES_RANGE,
+    SUPPORTER_REQUEST_TIMEOUT_MS_RANGE, SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
+};
+
 use crate::serversync::support_publish::{SupportFunding, SUPPORT_FUNDING_GOAL_CENTS_DEFAULT};
 use crate::serversync::ServerSyncService;
 
 pub const SUPPORTER_ROLE_ID: u64 = 1_483_135_384_098_570_363;
 pub const BOOSTER_ROLE_ID: u64 = 1_414_182_925_460_836_443;
-const DEFAULT_MAX_REVOKES: u64 = 10;
-const DEFAULT_INTERVAL_SECONDS: u64 = 900;
-const MIN_INTERVAL_SECONDS: u64 = 60;
+const DEFAULT_MAX_REVOKES: usize = 10;
+const DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const GRANT_REASON: &str = "Server-Unterstützer: aktive Unterstützung";
 const REVOKE_REASON: &str = "Server-Unterstützer: keine aktive Unterstützung mehr";
 
@@ -28,15 +32,12 @@ pub struct SupporterConfig {
     pub goal_cents: i64,
     pub steam_api_base: String,
     pub steam_token: Option<String>,
-    pub twitch_api_base: String,
+    pub twitch_api_base: Option<String>,
     pub twitch_token: Option<String>,
 }
 
 impl SupporterConfig {
-    pub fn from_lookup(
-        lookup: impl Fn(&str) -> Option<String>,
-        dashboard_api_base: String,
-    ) -> Self {
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let get = |key: &str| {
             lookup(key)
                 .map(|value| value.trim().to_string())
@@ -50,32 +51,34 @@ impl SupporterConfig {
                 )
             })
         };
-        let number = |key: &str, default: u64| {
+        let bounded = |key: &str, range: &std::ops::RangeInclusive<u64>| {
             get(key)
                 .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(default)
+                .filter(|value| range.contains(value))
         };
         Self {
             role_sync_apply: flag("DL_SUPPORTER_ROLE_SYNC_APPLY"),
-            max_revokes: usize::try_from(number(
+            max_revokes: bounded(
                 "DL_SUPPORTER_ROLE_SYNC_MAX_REVOKES",
-                DEFAULT_MAX_REVOKES,
-            ))
-            .unwrap_or(usize::MAX),
+                &SUPPORTER_MAX_REVOKES_RANGE,
+            )
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(DEFAULT_MAX_REVOKES),
             interval: Duration::from_secs(
-                number(
+                bounded(
                     "DL_SUPPORTER_SYNC_INTERVAL_SECONDS",
-                    DEFAULT_INTERVAL_SECONDS,
+                    &SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
                 )
-                .max(MIN_INTERVAL_SECONDS),
+                .unwrap_or(DEFAULT_INTERVAL_SECONDS),
             ),
-            request_timeout: get("DL_SUPPORTER_REQUEST_TIMEOUT_MS")
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value > 0)
-                .map(Duration::from_millis),
+            request_timeout: bounded(
+                "DL_SUPPORTER_REQUEST_TIMEOUT_MS",
+                &SUPPORTER_REQUEST_TIMEOUT_MS_RANGE,
+            )
+            .map(Duration::from_millis),
             goal_cents: get("DL_SUPPORTER_FUNDING_GOAL_CENTS")
                 .and_then(|value| value.parse::<i64>().ok())
-                .filter(|value| *value > 0)
+                .filter(|value| SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(value))
                 .unwrap_or(SUPPORT_FUNDING_GOAL_CENTS_DEFAULT),
             steam_api_base: get("DL_SUPPORTER_STEAM_API_BASE")
                 .or_else(|| get("STEAM_BOT_API_URL"))
@@ -83,7 +86,7 @@ impl SupporterConfig {
             steam_token: get("TWITCH_INTERNAL_API_TOKEN")
                 .or_else(|| get("MASTER_BROKER_TOKEN"))
                 .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN")),
-            twitch_api_base: get("DL_SUPPORTER_TWITCH_API_BASE").unwrap_or(dashboard_api_base),
+            twitch_api_base: get("DL_SUPPORTER_TWITCH_API_BASE"),
             twitch_token: get("MASTER_BROKER_TOKEN")
                 .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"))
                 .or_else(|| get("TWITCH_INTERNAL_API_TOKEN")),
@@ -94,6 +97,10 @@ impl SupporterConfig {
 #[async_trait::async_trait]
 pub trait FundingSource: Send + Sync {
     async fn funding(&self) -> Result<SupportFunding, String>;
+
+    fn missing_config(&self) -> Option<&'static str> {
+        None
+    }
 
     fn goal_cents(&self) -> i64 {
         SUPPORT_FUNDING_GOAL_CENTS_DEFAULT

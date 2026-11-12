@@ -1,4 +1,6 @@
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde_json::{json, Value};
@@ -17,11 +19,16 @@ const FUNDING_PATH: &str = "/supporter/v1/funding";
 const TWITCH_CONNECT_PATH: &str = "/internal/supporter/twitch-connect-link";
 const PUBLIC_ORIGIN: &str = "https://deutsche-deadlock-community.de/";
 const STRIPE_HOST_SUFFIX: &str = ".stripe.com";
+const MISSING_TIMEOUT: &str = "supporter_request_timeout_ms fehlt oder ist ungültig";
+const MISSING_STEAM_TOKEN: &str = "interner Token für den Steam Bot fehlt";
+const MISSING_TWITCH_TOKEN: &str = "interner Token für das Twitch-Dashboard fehlt";
 pub const TIERS: [u32; 3] = [5, 10, 20];
 
 pub const REPLY_FAILED: &str =
     "Das hat gerade nicht geklappt. Versuch es bitte in ein paar Minuten noch einmal.";
-pub const REPLY_BECOME: &str = "Such dir aus, wie viel du im Monat geben möchtest. Die Links gehören zu deinem Discord-Account, gib sie bitte nicht weiter.\n-# Die Rolle kommt automatisch, sobald die Zahlung durch ist.";
+pub const REPLY_UNAVAILABLE: &str =
+    "Das ist gerade noch nicht freigeschaltet. Schau bitte später noch mal vorbei.";
+pub const REPLY_BECOME: &str = "Such dir aus, wie viel du im Monat geben möchtest. Die Links gehören zu deinem Discord-Account, gib sie bitte nicht weiter.\n-# Die Rolle kommt automatisch ein paar Minuten nach der Zahlung.";
 pub const REPLY_ALREADY_SUBSCRIBED: &str = "Du hast schon ein laufendes Abo. Ändern oder kündigen kannst du es über „Abo verwalten oder kündigen“.";
 pub const REPLY_TIP: &str = "Hier wählst du deinen Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.";
 pub const REPLY_MANAGE: &str = "Hier kannst du dein Abo ändern oder kündigen.";
@@ -37,85 +44,136 @@ pub enum LinkOutcome {
     Url(String),
     NoSubscription,
     AlreadySubscribed,
+    Unavailable,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkError {
+    NotConfigured(&'static str),
+    Failed(String),
+}
+
+impl fmt::Display for LinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotConfigured(missing) => write!(f, "nicht eingerichtet: {missing}"),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+type LinkResult = Result<LinkOutcome, LinkError>;
 
 #[async_trait::async_trait]
 pub trait SupporterLinks: Send + Sync {
-    async fn checkout(&self, discord_id: u64, tier: u32) -> Result<LinkOutcome, String>;
-    async fn tip(&self, discord_id: u64) -> Result<LinkOutcome, String>;
-    async fn portal(&self, discord_id: u64) -> Result<LinkOutcome, String>;
-    async fn twitch_connect(&self, discord_id: u64) -> Result<LinkOutcome, String>;
+    async fn checkout(&self, discord_id: u64, tier: u32) -> LinkResult;
+    async fn tip(&self, discord_id: u64) -> LinkResult;
+    async fn portal(&self, discord_id: u64) -> LinkResult;
+    async fn twitch_connect(&self, discord_id: u64) -> LinkResult;
 }
 
 pub struct HttpSupporterLinks {
-    http: reqwest::Client,
+    http: Option<reqwest::Client>,
     steam_base: String,
     steam_token: Option<String>,
-    twitch_base: String,
+    twitch_base: Option<String>,
     twitch_token: Option<String>,
     goal_cents: i64,
 }
 
 impl HttpSupporterLinks {
     pub fn new(config: &SupporterConfig) -> Arc<Self> {
-        Arc::new(Self {
-            http: http_client(config),
+        let links = Self {
+            http: http_client(config.request_timeout),
             steam_base: config.steam_api_base.trim_end_matches('/').to_string(),
             steam_token: config.steam_token.clone(),
-            twitch_base: config.twitch_api_base.trim_end_matches('/').to_string(),
+            twitch_base: config
+                .twitch_api_base
+                .as_deref()
+                .map(|base| base.trim_end_matches('/').to_string()),
             twitch_token: config.twitch_token.clone(),
             goal_cents: config.goal_cents,
-        })
+        };
+        links.log_setup();
+        Arc::new(links)
+    }
+
+    fn log_setup(&self) {
+        tracing::info!(
+            steam_base = %self.steam_base,
+            twitch_base = ?self.twitch_base,
+            "Server-Unterstützer: Knöpfe eingerichtet"
+        );
+        for (absent, missing) in [
+            (self.http.is_none(), MISSING_TIMEOUT),
+            (self.steam_token.is_none(), MISSING_STEAM_TOKEN),
+            (self.twitch_token.is_none(), MISSING_TWITCH_TOKEN),
+        ] {
+            if absent {
+                tracing::warn!(
+                    missing,
+                    "Server-Unterstützer: betroffene Knöpfe antworten nur mit einer Fehlermeldung"
+                );
+            }
+        }
+        if self.twitch_base.is_none() {
+            tracing::warn!(
+                "Server-Unterstützer: DL_SUPPORTER_TWITCH_API_BASE fehlt, „Twitch verbinden“ meldet „noch nicht freigeschaltet“"
+            );
+        }
+    }
+
+    fn client(&self) -> Result<&reqwest::Client, LinkError> {
+        self.http
+            .as_ref()
+            .ok_or(LinkError::NotConfigured(MISSING_TIMEOUT))
     }
 
     async fn post(
         &self,
         base: &str,
-        token: Option<&str>,
+        token: &str,
         path: &str,
         body: Value,
-    ) -> Result<(StatusCode, Value), String> {
-        let token = token.ok_or_else(|| format!("kein interner Token für {path}"))?;
+    ) -> Result<(StatusCode, Value), LinkError> {
         let response = self
-            .http
+            .client()?
             .post(format!("{base}{path}"))
             .header(INTERNAL_TOKEN_HEADER, token)
             .json(&body)
             .send()
             .await
-            .map_err(|error| format!("{path} nicht erreichbar: {error}"))?;
+            .map_err(|error| LinkError::Failed(format!("{path} nicht erreichbar: {error}")))?;
         let status = response.status();
         let body = response.json::<Value>().await.unwrap_or(Value::Null);
         Ok((status, body))
     }
 
-    async fn steam_link(&self, path: &str, body: Value) -> Result<LinkOutcome, String> {
-        let (status, body) = self
-            .post(&self.steam_base, self.steam_token.as_deref(), path, body)
-            .await?;
+    async fn steam_link(&self, path: &str, body: Value) -> LinkResult {
+        let token = required(self.steam_token.as_deref(), MISSING_STEAM_TOKEN)?;
+        let (status, body) = self.post(&self.steam_base, token, path, body).await?;
         link_outcome(path, status, &body, is_stripe_url)
     }
 }
 
-fn http_client(config: &SupporterConfig) -> reqwest::Client {
-    let Some(limit) = config.request_timeout else {
-        tracing::warn!(
-            "Server-Unterstützer: supporter_request_timeout_ms fehlt in der Konfiguration, Anfragen laufen ohne Zeitgrenze"
-        );
-        return reqwest::Client::new();
-    };
+fn required<'a>(value: Option<&'a str>, missing: &'static str) -> Result<&'a str, LinkError> {
+    value.ok_or(LinkError::NotConfigured(missing))
+}
+
+fn http_client(timeout: Option<Duration>) -> Option<reqwest::Client> {
+    let limit = timeout?;
     reqwest::Client::builder()
         .timeout(limit)
         .build()
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "Server-Unterstützer: HTTP-Client ohne Zeitgrenze");
-            reqwest::Client::new()
+        .map_err(|error| {
+            tracing::warn!(%error, "Server-Unterstützer: HTTP-Client nicht erstellt");
         })
+        .ok()
 }
 
 #[async_trait::async_trait]
 impl SupporterLinks for HttpSupporterLinks {
-    async fn checkout(&self, discord_id: u64, tier: u32) -> Result<LinkOutcome, String> {
+    async fn checkout(&self, discord_id: u64, tier: u32) -> LinkResult {
         self.steam_link(
             CHECKOUT_PATH,
             json!({ "discord_id": discord_id, "tier": tier }),
@@ -123,21 +181,25 @@ impl SupporterLinks for HttpSupporterLinks {
         .await
     }
 
-    async fn tip(&self, discord_id: u64) -> Result<LinkOutcome, String> {
+    async fn tip(&self, discord_id: u64) -> LinkResult {
         self.steam_link(TIP_PATH, json!({ "discord_id": discord_id }))
             .await
     }
 
-    async fn portal(&self, discord_id: u64) -> Result<LinkOutcome, String> {
+    async fn portal(&self, discord_id: u64) -> LinkResult {
         self.steam_link(PORTAL_PATH, json!({ "discord_id": discord_id }))
             .await
     }
 
-    async fn twitch_connect(&self, discord_id: u64) -> Result<LinkOutcome, String> {
+    async fn twitch_connect(&self, discord_id: u64) -> LinkResult {
+        let Some(base) = self.twitch_base.as_deref() else {
+            return Ok(LinkOutcome::Unavailable);
+        };
+        let token = required(self.twitch_token.as_deref(), MISSING_TWITCH_TOKEN)?;
         let (status, body) = self
             .post(
-                &self.twitch_base,
-                self.twitch_token.as_deref(),
+                base,
+                token,
                 TWITCH_CONNECT_PATH,
                 json!({ "discord_id": discord_id }),
             )
@@ -149,12 +211,11 @@ impl SupporterLinks for HttpSupporterLinks {
 #[async_trait::async_trait]
 impl FundingSource for HttpSupporterLinks {
     async fn funding(&self) -> Result<SupportFunding, String> {
-        let token = self
-            .steam_token
-            .as_deref()
-            .ok_or_else(|| format!("kein interner Token für {FUNDING_PATH}"))?;
+        let token = required(self.steam_token.as_deref(), MISSING_STEAM_TOKEN)
+            .map_err(|error| error.to_string())?;
         let response = self
-            .http
+            .client()
+            .map_err(|error| error.to_string())?
             .get(format!("{}{FUNDING_PATH}", self.steam_base))
             .header(INTERNAL_TOKEN_HEADER, token)
             .send()
@@ -169,6 +230,13 @@ impl FundingSource for HttpSupporterLinks {
             .await
             .map_err(|error| format!("{FUNDING_PATH} Antwort unlesbar: {error}"))?;
         parse_funding(&body, self.goal_cents)
+    }
+
+    fn missing_config(&self) -> Option<&'static str> {
+        if self.http.is_none() {
+            return Some(MISSING_TIMEOUT);
+        }
+        self.steam_token.is_none().then_some(MISSING_STEAM_TOKEN)
     }
 
     fn goal_cents(&self) -> i64 {
@@ -193,7 +261,7 @@ fn link_outcome(
     status: StatusCode,
     body: &Value,
     accept: fn(&str) -> bool,
-) -> Result<LinkOutcome, String> {
+) -> LinkResult {
     let code = body.get("error").and_then(Value::as_str).unwrap_or("");
     if status == StatusCode::NOT_FOUND && code == "no_subscription" {
         return Ok(LinkOutcome::NoSubscription);
@@ -202,14 +270,16 @@ fn link_outcome(
         return Ok(LinkOutcome::AlreadySubscribed);
     }
     if !status.is_success() {
-        return Err(format!("{path} antwortet {status} {code}"));
+        return Err(LinkError::Failed(format!(
+            "{path} antwortet {status} {code}"
+        )));
     }
     body.get("url")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|url| accept(url))
         .map(|url| LinkOutcome::Url(url.to_string()))
-        .ok_or_else(|| format!("{path} liefert keinen gültigen Link"))
+        .ok_or_else(|| LinkError::Failed(format!("{path} liefert keinen gültigen Link")))
 }
 
 fn url_host(url: &str) -> Option<&str> {
@@ -278,7 +348,16 @@ impl dl_discord::InteractionHandler for SupportButtonHandler {
                 );
                 reply
             }
-            Err(error) => {
+            Err(LinkError::NotConfigured(missing)) => {
+                tracing::debug!(
+                    user_id,
+                    button = self.button.name(),
+                    missing,
+                    "Unterstützer-Knopf: nicht eingerichtet"
+                );
+                dl_discord::BridgeReply::ephemeral_text(REPLY_FAILED)
+            }
+            Err(LinkError::Failed(error)) => {
                 tracing::warn!(user_id, button = self.button.name(), %error, "Unterstützer-Knopf: Link nicht erzeugt");
                 dl_discord::BridgeReply::ephemeral_text(REPLY_FAILED)
             }
@@ -289,7 +368,7 @@ impl dl_discord::InteractionHandler for SupportButtonHandler {
 async fn become_reply(
     links: &dyn SupporterLinks,
     user_id: u64,
-) -> Result<dl_discord::BridgeReply, String> {
+) -> Result<dl_discord::BridgeReply, LinkError> {
     let (five, ten, twenty) = tokio::join!(
         links.checkout(user_id, TIERS[0]),
         links.checkout(user_id, TIERS[1]),
@@ -307,33 +386,51 @@ async fn become_reply(
                     REPLY_ALREADY_SUBSCRIBED,
                 ))
             }
-            Ok(LinkOutcome::NoSubscription) => errors.push(format!("{tier}: no_subscription")),
-            Err(error) => errors.push(format!("{tier}: {error}")),
+            Ok(other) => errors.push(LinkError::Failed(format!("{tier}: {other:?}"))),
+            Err(LinkError::Failed(error)) => {
+                errors.push(LinkError::Failed(format!("{tier}: {error}")))
+            }
+            Err(not_configured) => errors.push(not_configured),
         }
+    }
+    if buttons.is_empty() {
+        return Err(combine_errors(errors));
     }
     if !errors.is_empty() {
         tracing::warn!(user_id, errors = ?errors, "Unterstützer-Abo: nicht alle Stufen verfügbar");
     }
-    if buttons.is_empty() {
-        return Err(errors.join("; "));
-    }
     Ok(link_reply(REPLY_BECOME, buttons))
 }
 
+fn combine_errors(errors: Vec<LinkError>) -> LinkError {
+    let failed: Vec<String> = errors
+        .iter()
+        .filter_map(|error| match error {
+            LinkError::Failed(message) => Some(message.clone()),
+            LinkError::NotConfigured(_) => None,
+        })
+        .collect();
+    if !failed.is_empty() {
+        return LinkError::Failed(failed.join("; "));
+    }
+    errors
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| LinkError::Failed("keine Abo-Stufe beantwortet".to_string()))
+}
+
 fn single_reply(
-    outcome: Result<LinkOutcome, String>,
+    outcome: LinkResult,
     text: &str,
     label: &str,
-) -> Result<dl_discord::BridgeReply, String> {
-    match outcome? {
-        LinkOutcome::Url(url) => Ok(link_reply(text, vec![link_button(label, &url)])),
-        LinkOutcome::NoSubscription => Ok(dl_discord::BridgeReply::ephemeral_text(
-            REPLY_NO_SUBSCRIPTION,
-        )),
-        LinkOutcome::AlreadySubscribed => Ok(dl_discord::BridgeReply::ephemeral_text(
-            REPLY_ALREADY_SUBSCRIBED,
-        )),
-    }
+) -> Result<dl_discord::BridgeReply, LinkError> {
+    let reply = match outcome? {
+        LinkOutcome::Url(url) => return Ok(link_reply(text, vec![link_button(label, &url)])),
+        LinkOutcome::NoSubscription => REPLY_NO_SUBSCRIPTION,
+        LinkOutcome::AlreadySubscribed => REPLY_ALREADY_SUBSCRIBED,
+        LinkOutcome::Unavailable => REPLY_UNAVAILABLE,
+    };
+    Ok(dl_discord::BridgeReply::ephemeral_text(reply))
 }
 
 fn link_button(label: &str, url: &str) -> Value {
@@ -373,31 +470,39 @@ mod tests {
     use dl_discord::InteractionHandler;
 
     struct Fixed {
-        checkout: fn(u32) -> Result<LinkOutcome, String>,
-        other: Result<LinkOutcome, String>,
+        checkout: fn(u32) -> LinkResult,
+        other: LinkResult,
     }
 
     #[async_trait::async_trait]
     impl SupporterLinks for Fixed {
-        async fn checkout(&self, _discord_id: u64, tier: u32) -> Result<LinkOutcome, String> {
+        async fn checkout(&self, _discord_id: u64, tier: u32) -> LinkResult {
             (self.checkout)(tier)
         }
-        async fn tip(&self, _discord_id: u64) -> Result<LinkOutcome, String> {
+        async fn tip(&self, _discord_id: u64) -> LinkResult {
             self.other.clone()
         }
-        async fn portal(&self, _discord_id: u64) -> Result<LinkOutcome, String> {
+        async fn portal(&self, _discord_id: u64) -> LinkResult {
             self.other.clone()
         }
-        async fn twitch_connect(&self, _discord_id: u64) -> Result<LinkOutcome, String> {
+        async fn twitch_connect(&self, _discord_id: u64) -> LinkResult {
             self.other.clone()
         }
     }
 
+    fn failure() -> LinkError {
+        LinkError::Failed("down".to_string())
+    }
+
     async fn click(links: Fixed, button: SupportButton) -> dl_discord::BridgeReply {
-        let handler = SupportButtonHandler {
-            links: Arc::new(links),
-            button,
-        };
+        click_shared(Arc::new(links), button).await
+    }
+
+    async fn click_shared(
+        links: Arc<dyn SupporterLinks>,
+        button: SupportButton,
+    ) -> dl_discord::BridgeReply {
+        let handler = SupportButtonHandler { links, button };
         handler
             .handle(dl_discord::BridgeInteraction {
                 user_id: 42,
@@ -421,12 +526,12 @@ mod tests {
     async fn supporter_werden_zeigt_nur_erreichbare_stufen() {
         let links = Fixed {
             checkout: |tier| match tier {
-                10 => Err("down".to_string()),
+                10 => Err(failure()),
                 _ => Ok(LinkOutcome::Url(format!(
                     "https://checkout.stripe.com/{tier}"
                 ))),
             },
-            other: Err("unused".to_string()),
+            other: Err(failure()),
         };
         let reply = click(links, SupportButton::Become).await;
         assert!(reply.ephemeral);
@@ -443,8 +548,8 @@ mod tests {
     async fn fehler_und_kein_abo_werden_freundlich_beantwortet() {
         let down = click(
             Fixed {
-                checkout: |_| Err("down".to_string()),
-                other: Err("down".to_string()),
+                checkout: |_| Err(failure()),
+                other: Err(failure()),
             },
             SupportButton::Become,
         )
@@ -453,7 +558,7 @@ mod tests {
         assert!(down.ephemeral);
         let none = click(
             Fixed {
-                checkout: |_| Err("unused".to_string()),
+                checkout: |_| Err(failure()),
                 other: Ok(LinkOutcome::NoSubscription),
             },
             SupportButton::Manage,
@@ -462,7 +567,7 @@ mod tests {
         assert_eq!(none.content.as_deref(), Some(REPLY_NO_SUBSCRIPTION));
         let twitch = click(
             Fixed {
-                checkout: |_| Err("unused".to_string()),
+                checkout: |_| Err(failure()),
                 other: Ok(LinkOutcome::Url(
                     "https://deutsche-deadlock-community.de/twitch/x".to_string(),
                 )),
@@ -474,6 +579,30 @@ mod tests {
             reply_urls(&twitch),
             vec!["https://deutsche-deadlock-community.de/twitch/x".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn fehlende_einrichtung_bleibt_ohne_anfrage_und_ohne_falschen_host() {
+        let config = SupporterConfig::from_lookup(|key| match key {
+            "TWITCH_INTERNAL_API_TOKEN" => Some("token".to_string()),
+            "DL_SUPPORTER_REQUEST_TIMEOUT_MS" => Some("0".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.request_timeout, None);
+        assert_eq!(config.twitch_api_base, None);
+        let links = HttpSupporterLinks::new(&config);
+        assert_eq!(
+            links.checkout(42, 5).await,
+            Err(LinkError::NotConfigured(MISSING_TIMEOUT))
+        );
+        assert_eq!(links.missing_config(), Some(MISSING_TIMEOUT));
+        assert_eq!(links.twitch_connect(42).await, Ok(LinkOutcome::Unavailable));
+        let become_reply =
+            click_shared(HttpSupporterLinks::new(&config), SupportButton::Become).await;
+        assert_eq!(become_reply.content.as_deref(), Some(REPLY_FAILED));
+        let twitch = click_shared(HttpSupporterLinks::new(&config), SupportButton::Twitch).await;
+        assert_eq!(twitch.content.as_deref(), Some(REPLY_UNAVAILABLE));
+        assert!(twitch.ephemeral);
     }
 
     #[test]
