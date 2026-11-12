@@ -3244,7 +3244,7 @@ impl dl_community::faq::FaqPort for FaqGlue {
             .iter()
             .map(|member| member.user.name.as_str())
             .collect();
-        match exact_name_match(&usernames, name, MEMBER_SEARCH_LIMIT as usize) {
+        match exact_name_match(&usernames, name) {
             NameMatch::Unique(index) => match members.get(index) {
                 Some(member) => classify_member(self.adapter.cache(), gid, member),
                 None => MemberLookup::Unknown,
@@ -3280,7 +3280,7 @@ enum NameMatch {
     Unclear,
 }
 
-fn exact_name_match(usernames: &[&str], name: &str, limit: usize) -> NameMatch {
+fn exact_name_match(usernames: &[&str], name: &str) -> NameMatch {
     let matches: Vec<usize> = usernames
         .iter()
         .enumerate()
@@ -3289,7 +3289,7 @@ fn exact_name_match(usernames: &[&str], name: &str, limit: usize) -> NameMatch {
         .collect();
     match matches.as_slice() {
         [index] => NameMatch::Unique(*index),
-        [] if usernames.len() < limit => NameMatch::Absent,
+        [] if usernames.is_empty() => NameMatch::Absent,
         _ => NameMatch::Unclear,
     }
 }
@@ -3299,23 +3299,17 @@ mod member_name_tests {
     use super::{exact_name_match, NameMatch};
 
     #[test]
-    fn nur_unvollstaendige_suche_ohne_treffer_ist_kein_mitglied() {
+    fn nur_eine_suche_ohne_jeden_treffer_ist_kein_mitglied() {
         assert_eq!(
-            exact_name_match(&["foo", "Bar"], "bar", 10),
+            exact_name_match(&["foo", "Bar"], "bar"),
             NameMatch::Unique(1)
         );
+        assert_eq!(exact_name_match(&[], "bar"), NameMatch::Absent);
         assert_eq!(
-            exact_name_match(&["foo", "foobar"], "bar", 10),
-            NameMatch::Absent
-        );
-        assert_eq!(
-            exact_name_match(&["foo", "foobar"], "bar", 2),
+            exact_name_match(&["foo", "foobar"], "bar"),
             NameMatch::Unclear
         );
-        assert_eq!(
-            exact_name_match(&["bar", "BAR"], "bar", 10),
-            NameMatch::Unclear
-        );
+        assert_eq!(exact_name_match(&["bar", "BAR"], "bar"), NameMatch::Unclear);
     }
 }
 
