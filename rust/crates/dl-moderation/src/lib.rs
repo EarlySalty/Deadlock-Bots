@@ -150,7 +150,7 @@ fn parse_error_verdict(raw_text: Option<&str>) -> AiVerdict {
         verdict: "needs_context".to_string(),
         category: "other".to_string(),
         confidence: 0.0,
-        reason: "parse_error".to_string(),
+        reason: moderation_verdict::PARSE_ERROR_REASON.to_string(),
         raw_json: raw_envelope(raw_text, None),
     }
 }

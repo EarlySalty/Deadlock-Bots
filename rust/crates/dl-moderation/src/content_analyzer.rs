@@ -51,10 +51,10 @@ pub(crate) mod test_support {
 }
 
 pub const REPORTED_SCREENSHOT_TRIGGER: &str = "ticket_scam_report";
+const TRIGGER_PREVIEW_CHARS: usize = 900;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportedScreenshotFailure {
-    NoImages,
     AnalysisFailed,
     VerificationFailed,
 }
@@ -62,7 +62,6 @@ pub enum ReportedScreenshotFailure {
 impl ReportedScreenshotFailure {
     pub fn label(self) -> &'static str {
         match self {
-            Self::NoImages => "keine Bilder übergeben",
             Self::AnalysisFailed => "Analyse ohne verwertbare Antwort",
             Self::VerificationFailed => "Verifikation ohne verwertbare Antwort",
         }
@@ -131,7 +130,7 @@ impl ModerationInput {
                     .join("\n"),
             );
         }
-        trigger.chars().take(900).collect()
+        trigger.chars().take(TRIGGER_PREVIEW_CHARS).collect()
     }
 }
 
@@ -252,11 +251,16 @@ pub(crate) struct ContentModerationEvaluation {
 }
 
 fn log_provider_failure(input: &ModerationInput, modality: &str, model: &str) {
-    let input = input.trigger_preview();
+    let text: String = input
+        .prompt_text()
+        .chars()
+        .take(TRIGGER_PREVIEW_CHARS)
+        .collect();
     let verdict = "error";
     let reason = "provider_timeout_or_error";
     tracing::error!(
-        input = %input,
+        input = %text,
+        image_count = input.image_urls.len(),
         verdict = %verdict,
         reason = %reason,
         modality,
@@ -344,9 +348,7 @@ impl ContentModerationPipeline {
         &self,
         image_urls: Vec<String>,
     ) -> Result<ModerationVerdict, ReportedScreenshotFailure> {
-        if image_urls.is_empty() {
-            return Err(ReportedScreenshotFailure::NoImages);
-        }
+        let image_count = image_urls.len();
         let input = ModerationInput::new(String::new(), image_urls);
         let analysis = self.analyzer.analyze(&input).await;
         if analysis.reason == PARSE_ERROR_REASON {
@@ -362,7 +364,7 @@ impl ContentModerationPipeline {
         Ok(ModerationVerdict {
             analysis,
             verification,
-            trigger: input.trigger_preview(),
+            trigger: format!("{REPORTED_SCREENSHOT_TRIGGER}: {image_count} Bild(er)"),
         })
     }
 }
@@ -568,7 +570,7 @@ mod tests {
         let pipeline = screenshot_pipeline(vision.clone(), verifier_vision.clone());
         assert_eq!(
             pipeline.evaluate_reported_screenshots(Vec::new()).await,
-            Err(ReportedScreenshotFailure::NoImages)
+            Err(ReportedScreenshotFailure::AnalysisFailed)
         );
         assert!(vision.image_counts.lock().await.is_empty());
         assert_eq!(

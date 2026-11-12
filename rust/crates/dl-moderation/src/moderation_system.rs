@@ -173,9 +173,6 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         &self,
         image_urls: Vec<String>,
     ) -> Result<ReportedScreenshotReview, ReportedScreenshotFailure> {
-        if image_urls.is_empty() {
-            return Err(ReportedScreenshotFailure::NoImages);
-        }
         let verdict = self
             .pipeline
             .evaluate_reported_screenshots(image_urls)
