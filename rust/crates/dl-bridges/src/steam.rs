@@ -19,6 +19,7 @@ use sqlx::PgPool;
 
 pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `/invite` wartet steam-seitig synchron auf ZWEI Steam-Tasks (erst der
@@ -124,7 +125,11 @@ impl SteamBotClient {
 
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Arc<Self> {
         Arc::new(Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(DEFAULT_TIMEOUT)
+                .build()
+                .expect("Steam bridge HTTP client initialization failed"),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
         })
@@ -1033,6 +1038,77 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn client_default_deadline_and_longer_request_override() {
+        const RESPONSE_DELAY: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(1));
+        const REQUEST_TIMEOUT: Duration = DEFAULT_TIMEOUT.saturating_mul(2);
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                tokio::time::sleep(RESPONSE_DELAY).await;
+                "ok"
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let url = format!("http://{}", listener.local_addr().expect("test address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test requests");
+        });
+        let client = SteamBotClient::new(url.clone(), None);
+        let (default, extended) = tokio::time::timeout(REQUEST_TIMEOUT, async {
+            tokio::join!(
+                client.http.get(&url).send(),
+                client.http.get(&url).timeout(REQUEST_TIMEOUT).send()
+            )
+        })
+        .await
+        .expect("client requests must finish within the watchdog deadline");
+        server.abort();
+        assert!(default
+            .expect_err("default deadline must expire")
+            .is_timeout());
+        assert_eq!(
+            extended.expect("request override must survive").status(),
+            reqwest::StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn client_default_deadline_covers_stalled_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const WATCHDOG_TIMEOUT: Duration = DEFAULT_TIMEOUT.saturating_mul(2);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let url = format!("http://{}", listener.local_addr().expect("test address"));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut request = [0_u8];
+            socket
+                .read_exact(&mut request)
+                .await
+                .expect("read start of test request");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx")
+                .await
+                .expect("write incomplete response");
+            std::future::pending::<()>().await;
+        });
+        let client = SteamBotClient::new(url.clone(), None);
+        let result = tokio::time::timeout(WATCHDOG_TIMEOUT, async {
+            client.http.get(url).send().await?.bytes().await
+        })
+        .await
+        .expect("body read must finish within the watchdog deadline");
+        server.abort();
+        assert!(result.expect_err("stalled body must time out").is_timeout());
+    }
 
     #[test]
     fn post_in_channel_reply_goes_to_channel_with_ephemeral_confirmation() {
