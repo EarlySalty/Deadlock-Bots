@@ -227,8 +227,10 @@ impl MiniMaxClient {
         model: impl Into<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            http: dl_core::bot_http::Client::builder()
-                .timeout(Duration::from_secs(60))
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
+                .timeout(Duration::from_millis(
+                    dl_core::settings_catalog::http_defaults::PROVIDER_MS,
+                ))
                 .build()
                 .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -292,8 +294,10 @@ impl OpenAiClient {
         model: impl Into<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            http: dl_core::bot_http::Client::builder()
-                .timeout(Duration::from_secs(60))
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
+                .timeout(Duration::from_millis(
+                    dl_core::settings_catalog::http_defaults::PROVIDER_MS,
+                ))
                 .build()
                 .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -469,7 +473,8 @@ impl OpenAiClient {
 
 impl FireworksClient {
     async fn tracked_json(&self, body: Value) -> Option<Value> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let deadline = std::time::Instant::now()
+            + Duration::from_millis(dl_core::settings_catalog::http_defaults::PROVIDER_MS);
         let request = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
@@ -531,8 +536,10 @@ impl FireworksClient {
     }
 
     fn http_client() -> Option<dl_core::bot_http::Client> {
-        dl_core::bot_http::Client::builder()
-            .timeout(Duration::from_secs(60))
+        dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
+            .timeout(Duration::from_millis(
+                dl_core::settings_catalog::http_defaults::PROVIDER_MS,
+            ))
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -609,8 +616,10 @@ impl GeminiClient {
         let model = get("AI_GEMINI_MODEL").unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string());
         tracing::info!(%base_url, %model, "Gemini-Text-Client initialisiert");
         Some(Arc::new(Self {
-            http: dl_core::bot_http::Client::builder()
-                .timeout(Duration::from_secs(60))
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
+                .timeout(Duration::from_millis(
+                    dl_core::settings_catalog::http_defaults::PROVIDER_MS,
+                ))
                 .build()
                 .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: base_url.trim_end_matches('/').to_string(),

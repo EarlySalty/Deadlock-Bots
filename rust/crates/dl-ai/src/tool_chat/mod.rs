@@ -33,7 +33,9 @@ const ANTHROPIC_API_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 fn retry(timeout_ms: Option<u64>) -> RetryConfig {
     RetryConfig {
-        request_timeout: Duration::from_millis(timeout_ms.unwrap_or(60_000)),
+        request_timeout: Duration::from_millis(
+            timeout_ms.unwrap_or(dl_core::settings_catalog::http_defaults::PROVIDER_MS),
+        ),
         max_retries: 0,
         ..RetryConfig::default()
     }
@@ -64,7 +66,11 @@ fn backend(
                 .base_url
                 .as_deref()
                 .ok_or_else(|| missing("base_url"))?,
-            Duration::from_millis(provider.request_timeout_ms.unwrap_or(60_000)),
+            Duration::from_millis(
+                provider
+                    .request_timeout_ms
+                    .unwrap_or(dl_core::settings_catalog::http_defaults::PROVIDER_MS),
+            ),
         )),
         ProviderKind::AnthropicApi => {
             let key_name = provider

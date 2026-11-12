@@ -1896,7 +1896,7 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
         &self,
         image_urls: &[String],
     ) -> Vec<dl_moderation::moderation_system::ModerationEvidenceFile> {
-        let client = dl_core::bot_http::Client::new();
+        let client = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default());
         let mut files = Vec::new();
         for url in image_urls.iter().take(MODERATION_EVIDENCE_IMAGE_LIMIT) {
             let Ok(Ok(response)) =
@@ -4564,7 +4564,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
                 .map_err(|err| err.to_string())?;
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = dl_core::bot_http::Client::new()
+        let response = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default())
             .post(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages"
             ))
@@ -4618,7 +4618,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             };
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = match dl_core::bot_http::Client::new()
+        let response = match dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default())
             .patch(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
             ))

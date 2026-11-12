@@ -124,12 +124,12 @@ impl TwitchApiClient {
         let base_url = normalize_internal_api_base_url(&base_url.into(), allow_non_loopback)
             .map_err(TwitchBridgeError::Api)?;
         Ok(Arc::new(Self {
-            http: dl_core::bot_http::Client::builder()
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                 .timeout(timeout)
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_else(dl_core::bot_http::Client::disabled),
+                .map_err(|error| TwitchBridgeError::Api(error.to_string()))?,
             base_url,
             token: token.into(),
         }))

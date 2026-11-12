@@ -141,7 +141,11 @@ impl super::steam::SteamBotClient {
             Some(body) => http.patch(url).json(body),
             None => http.get(url),
         };
-        request = request.header("x-internal-token", token);
+        request = request
+            .timeout(std::time::Duration::from_secs(
+                dl_core::settings_catalog::http_defaults::STEAM_OPERATING_SECS,
+            ))
+            .header("x-internal-token", token);
         let response = request.send().await.map_err(|_| Error::Unavailable)?;
         match response.status().as_u16() {
             200 => {}

@@ -125,7 +125,7 @@ struct TurnierClient {
 impl TurnierClient {
     fn new(base_url: String, token: String) -> Self {
         Self {
-            http: dl_core::bot_http::Client::new(),
+            http: dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default()),
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
         }

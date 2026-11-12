@@ -1,5 +1,17 @@
 //! Versionierter Admin-Vertrag. Nur Einträge im geprüften Katalog sind schreibbar.
 //! Ganzzahlen laufen als Dezimalstrings über JSON, niemals als JavaScript-Number.
+pub mod http_defaults {
+    pub const CONNECT_MS: u64 = 5_000;
+    pub const REQUEST_MS: u64 = 15_000;
+    pub const COACHING_MS: u64 = 10_000;
+    pub const INGEST_MS: u64 = 30_000;
+    pub const PROVIDER_MS: u64 = 60_000;
+    pub const MAX_OPERATION_MS: u64 = 3_600_000;
+    pub const STEAM_INVITE_SECS: u64 = 120;
+    pub const STEAM_SYNC_SECS: u64 = 180;
+    pub const STEAM_OPERATING_SECS: u64 = 10;
+}
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,7 +93,7 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 None => text.to_owned(),
             };
             let mut ty = columns[1];
-            let mut nullable = ty.starts_with("Option<");
+            let nullable = ty.starts_with("Option<");
             if nullable {
                 ty = &ty[7..ty.len() - 1];
             }
@@ -154,7 +166,6 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
             match path.as_str() {
                 "runtime.bridges.steam_connect_timeout_ms"
                 | "runtime.bridges.steam_request_timeout_ms" => {
-                    nullable = false;
                     let range = crate::runtime_config::STEAM_HTTP_TIMEOUT_MS;
                     bounds = Some((*range.start() as i64, *range.end() as i64));
                 }

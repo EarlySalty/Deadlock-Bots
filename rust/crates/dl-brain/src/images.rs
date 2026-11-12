@@ -6,9 +6,10 @@ use brain_contracts::image::{
     ImageMediaType, ImageOrigin, QueryImage, MAX_IMAGE_BYTES, MAX_QUERY_IMAGES,
     MAX_TOTAL_IMAGE_BYTES,
 };
+use dl_core::bot_http::{Client, Deadlines};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
-use reqwest::{Client, Url};
+use reqwest::Url;
 
 use crate::BrainError;
 
@@ -109,7 +110,7 @@ pub(crate) struct ImageFetcher {
 
 impl ImageFetcher {
     pub(crate) fn new(limits: ImageLimits) -> Result<Self, BrainError> {
-        let client = Client::builder()
+        let client = Client::builder(Deadlines::default())
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()

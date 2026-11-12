@@ -56,7 +56,7 @@ impl McpState {
         auth_token: Option<String>,
         config: &StartOptions,
     ) -> Result<Self> {
-        let http = dl_core::bot_http::Client::builder()
+        let http = dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
             .timeout(Duration::from_secs(60))
             .build()
             .context("MCP: reqwest-Client")?;
@@ -1439,7 +1439,7 @@ mod tests {
                 .await
                 .expect("Testserver");
         });
-        let client = dl_core::bot_http::Client::new();
+        let client = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default());
         for (user, tool, status, send_count) in [
             ("44", "send_message", 403, 0),
             ("44", "read_messages", 200, 0),

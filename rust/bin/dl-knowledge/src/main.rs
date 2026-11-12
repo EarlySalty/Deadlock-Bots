@@ -2566,7 +2566,7 @@ mod tests {
         let url = std::env::var("DL_GOLDEN_API_URL").context("DL_GOLDEN_API_URL fehlt")?;
         ensure!(!url.trim().is_empty(), "DL_GOLDEN_API_URL ist leer");
         let cases = load_golden_cases(&golden_dir, &docs_path)?;
-        let client = reqwest::Client::new();
+        let client = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default());
 
         for (index, case) in cases.into_iter().enumerate() {
             if index > 0 {

@@ -43,7 +43,7 @@ pub fn spawn_vanity_snapshots(
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = dl_core::bot_http::Client::new();
+    let client = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default());
     tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
@@ -80,7 +80,7 @@ pub fn spawn_member_directory_sweep(
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = dl_core::bot_http::Client::new();
+    let client = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default());
     tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let start = tokio::time::Instant::now() + MEMBER_DIRECTORY_INTERVAL;

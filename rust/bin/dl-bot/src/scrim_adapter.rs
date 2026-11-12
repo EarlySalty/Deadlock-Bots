@@ -537,12 +537,12 @@ pub struct TurnierScrimClient {
 impl TurnierScrimClient {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         Self {
-            http: dl_core::bot_http::Client::builder()
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                 .timeout(RELAY_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()
                 .build()
-                .expect("statischer Turnier-Scrim-HTTP-Client"),
+                .unwrap_or_else(dl_core::bot_http::Client::disabled),
             base_url: lookup("TURNIER_INTERNAL_API_BASE_URL")
                 .unwrap_or_else(|| "http://127.0.0.1:8900".to_string())
                 .trim_end_matches('/')
@@ -2537,7 +2537,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let client = TurnierScrimClient {
-            http: dl_core::bot_http::Client::builder()
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                 .timeout(RELAY_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()
@@ -2603,7 +2603,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let client = TurnierScrimClient {
-            http: dl_core::bot_http::Client::builder()
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                 .timeout(RELAY_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()
@@ -2703,7 +2703,7 @@ mod tests {
         });
         let handler = RelayInteractionHandler::new(
             TurnierScrimClient {
-                http: dl_core::bot_http::Client::builder()
+                http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                     .timeout(RELAY_TIMEOUT)
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
@@ -2950,7 +2950,7 @@ mod tests {
         });
         let handler = RelayInteractionHandler::new(
             TurnierScrimClient {
-                http: dl_core::bot_http::Client::builder()
+                http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                     .timeout(Duration::from_millis(50))
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
@@ -3228,7 +3228,7 @@ mod tests {
         .await?;
         let handler = RelayInteractionHandler::new(
             TurnierScrimClient {
-                http: dl_core::bot_http::Client::builder()
+                http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                     .timeout(RELAY_TIMEOUT)
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
@@ -3258,7 +3258,7 @@ mod tests {
         seed_match_request(db.pool()).await?;
         let handler = RelayInteractionHandler::new(
             TurnierScrimClient {
-                http: dl_core::bot_http::Client::builder()
+                http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                     .timeout(Duration::from_millis(50))
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
@@ -3330,7 +3330,7 @@ mod tests {
         timeout: Duration,
     ) -> Result<TurnierScrimClient, dl_core::bot_http::Error> {
         Ok(TurnierScrimClient {
-            http: dl_core::bot_http::Client::builder()
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                 .timeout(timeout)
                 .redirect(reqwest::redirect::Policy::none())
                 .no_proxy()

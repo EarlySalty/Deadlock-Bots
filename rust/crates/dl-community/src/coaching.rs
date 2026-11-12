@@ -126,10 +126,15 @@ impl WebsiteClient {
         let base_url = get("WEBSITE_API_BASE")
             .unwrap_or_else(|| "https://deutsche-deadlock-community.de/api".to_string());
         Some(Arc::new(Self {
-            http: dl_core::bot_http::Client::builder()
-                .timeout(Duration::from_secs(10))
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
+                .timeout(Duration::from_millis(
+                    dl_core::settings_catalog::http_defaults::COACHING_MS,
+                ))
                 .build()
-                .unwrap_or_else(dl_core::bot_http::Client::disabled),
+                .map_err(
+                    |error| tracing::error!(%error, "Website HTTP client initialization failed"),
+                )
+                .ok()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
         }))

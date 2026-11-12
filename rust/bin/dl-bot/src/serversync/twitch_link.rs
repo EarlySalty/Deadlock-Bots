@@ -20,7 +20,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_millis(2_500);
 
 pub const TWITCH_LINK_INTRO: &str = "Hier verknüpfst du dein Twitch-Konto mit dem Server. Discord fragt dich gleich, ob wir sehen dürfen, welche Konten du mit Discord verbunden hast. Wir merken uns davon nur dein Twitch-Konto, damit dich der Bot in Partner-Streams erkennt.\n-# Der Link ist ein paar Stunden gültig.";
 pub const TWITCH_LINK_FAILED: &str =
-    "Das hat gerade nicht geklappt. Versuch es bitte in einer Minute noch einmal.";
+    "Das hat gerade nicht geklappt. Bitte informiere das Team, falls das Problem bestehen bleibt.";
 pub const TWITCH_LINK_BUTTON_LABEL: &str = "Twitch verknüpfen";
 
 /// Liefert den Discord-Link für die Twitch-Verknüpfung.
@@ -39,7 +39,7 @@ pub struct DashboardTwitchLinkClient {
 impl DashboardTwitchLinkClient {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
         Self {
-            http: dl_core::bot_http::Client::builder()
+            http: dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::default())
                 .timeout(REQUEST_TIMEOUT)
                 .build()
                 .unwrap_or_else(dl_core::bot_http::Client::disabled),

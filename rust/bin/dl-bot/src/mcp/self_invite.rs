@@ -634,7 +634,7 @@ mod tests {
                 .await
                 .expect("MCP");
         });
-        let client = dl_core::bot_http::Client::new();
+        let client = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default());
         for (token, route, user, request, args, expected) in [
             (
                 "falsch",

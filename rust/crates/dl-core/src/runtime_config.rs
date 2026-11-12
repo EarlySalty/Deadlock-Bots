@@ -270,13 +270,22 @@ impl RuntimeConfig {
             }
         }
 
-        if let (Some(connect), Some(total)) = (
-            self.bridges.steam_connect_timeout_ms,
-            self.bridges.steam_request_timeout_ms,
-        ) {
-            if connect > total {
-                return Err(invalid());
-            }
+        if crate::bot_http::Deadlines::from_millis(
+            Some(
+                self.bridges
+                    .steam_connect_timeout_ms
+                    .unwrap_or(crate::settings_catalog::http_defaults::CONNECT_MS),
+            ),
+            Some(
+                self.bridges
+                    .steam_request_timeout_ms
+                    .unwrap_or(crate::settings_catalog::http_defaults::REQUEST_MS),
+            ),
+        )
+        .validate()
+        .is_err()
+        {
+            return Err(invalid());
         }
         for seconds in [
             self.community.router_auto_move_delay_seconds,
@@ -850,7 +859,22 @@ mod discord_brain_secret_tests {
 
 #[cfg(test)]
 mod steam_timeout_tests {
+    use super::STEAM_HTTP_TIMEOUT_MS;
     use crate::bot_config::BotConfig;
+
+    #[test]
+    fn partial_settings_use_catalog_defaults_and_validate_the_pair() {
+        for values in [
+            "steam_connect_timeout_ms=15001",
+            "steam_request_timeout_ms=4999",
+            "steam_connect_timeout_ms=5001\nsteam_request_timeout_ms=5000",
+        ] {
+            assert!(
+                BotConfig::parse(&format!("schema_version=1\n[runtime.bridges]\n{values}"))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn steam_timeouts_are_bounded_and_projected_from_toml() {
@@ -864,9 +888,9 @@ mod steam_timeout_tests {
                 ))
                 .is_err());
             }
-            for value in [1, 5000, 15000, 60000] {
+            for value in [1, 5000, 15000, *STEAM_HTTP_TIMEOUT_MS.end()] {
                 let config = BotConfig::parse(&format!(
-                    "schema_version=1\n[runtime.bridges]\n{field}={value}\n"
+                    "schema_version=1\n[runtime.bridges]\nsteam_connect_timeout_ms={value}\nsteam_request_timeout_ms={value}\n"
                 ))
                 .expect("valid timeout config");
                 assert_eq!(config.runtime_value(key), Some(value.to_string()));

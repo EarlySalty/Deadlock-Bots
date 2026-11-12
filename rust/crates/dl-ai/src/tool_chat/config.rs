@@ -198,6 +198,11 @@ impl ProviderConfig {
                 "provider {name} needs a valid name, concurrency and queue_timeout_ms"
             )));
         }
+        if self.request_timeout_ms.is_some_and(|value| {
+            value == 0 || value > dl_core::settings_catalog::http_defaults::MAX_OPERATION_MS
+        }) {
+            return missing("request_timeout_ms within the catalog bounds");
+        }
         match self.kind {
             ProviderKind::ClaudePlan => {
                 if self.claude_bin.is_none() {
@@ -312,6 +317,12 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
     #[test]
     fn unsafe_or_incomplete_configs_are_rejected() {
         for broken in [
+            SAMPLE.replace("request_timeout_ms = 60000", "request_timeout_ms = 0"),
+            SAMPLE.replace("request_timeout_ms = 60000", "request_timeout_ms = 3600001"),
+            SAMPLE.replace(
+                "request_timeout_ms = 60000",
+                "request_timeout_ms = 18446744073709551616",
+            ),
             SAMPLE.replace("127.0.0.1:18790", "0.0.0.0:18790"),
             SAMPLE.replace("provider = \"codex_plan\"", "provider = \"nope\""),
             SAMPLE.replace("claude_bin = \"/bin/claude\"\n", ""),

@@ -506,7 +506,7 @@ mod tests {
         .await
         .unwrap();
         initialize(pool.clone(), "test-fixture").unwrap();
-        let request = dl_core::bot_http::Client::new()
+        let request = dl_core::bot_http::Client::new(dl_core::bot_http::Deadlines::default())
             .post("https://api.fireworks.ai/inference/v1/chat/completions")
             .json(&json!({"model":"fixture-model","messages":[{"content":"nicht speichern"}]}))
             .build()

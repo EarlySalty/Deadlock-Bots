@@ -67,4 +67,4 @@ provider = "fireworks"
 
 [runtime.bridges]
 steam_connect_timeout_ms = 5000
-steam_request_timeout_ms = 120000
+steam_request_timeout_ms = 15000

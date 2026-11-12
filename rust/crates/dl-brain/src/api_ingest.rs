@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use reqwest::Client;
+use dl_core::bot_http::{Client, Deadlines};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -17,12 +17,12 @@ const STATE_KIND: &str = "assets_api";
 #[derive(Debug, Error)]
 pub enum ApiIngestError {
     #[error("Deadlock API HTTP client could not be built: {0}")]
-    Client(#[source] reqwest::Error),
+    Client(#[source] dl_core::bot_http::Error),
     #[error("GET {url} failed: {source}")]
     Fetch {
         url: &'static str,
         #[source]
-        source: reqwest::Error,
+        source: dl_core::bot_http::Error,
     },
     #[error("GET {url} returned HTTP {status}")]
     Http {
@@ -150,9 +150,10 @@ pub async fn ingest_deadlock_api(
 async fn ingest_deadlock_api_inner(
     pool: &PgPool,
 ) -> Result<DeadlockApiIngestSummary, ApiIngestError> {
-    let client = Client::builder()
-        .user_agent("deadlock-bots-dl-brain/0.1")
-        .timeout(Duration::from_secs(30))
+    let client = Client::builder(Deadlines::default())
+        .timeout(Duration::from_millis(
+            dl_core::settings_catalog::http_defaults::INGEST_MS,
+        ))
         .build()
         .map_err(ApiIngestError::Client)?;
     let (items_payload, heroes_payload) = tokio::try_join!(
@@ -191,6 +192,7 @@ async fn ingest_deadlock_api_inner(
 async fn fetch_json(client: &Client, url: &'static str) -> Result<Value, ApiIngestError> {
     let response = client
         .get(url)
+        .header("user-agent", "deadlock-bots-dl-brain/0.1")
         .send()
         .await
         .map_err(|source| ApiIngestError::Fetch { url, source })?;
@@ -203,7 +205,10 @@ async fn fetch_json(client: &Client, url: &'static str) -> Result<Value, ApiInge
     response
         .json()
         .await
-        .map_err(|source| ApiIngestError::Fetch { url, source })
+        .map_err(|source| ApiIngestError::Fetch {
+            url,
+            source: source.into(),
+        })
 }
 
 fn normalize_items(payload: &Value) -> Result<NormalizedBatch, ApiIngestError> {

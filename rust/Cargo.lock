@@ -1410,6 +1410,7 @@ dependencies = [
  "brain-contracts",
  "chrono",
  "chrono-tz",
+ "dl-core",
  "image",
  "reqwest",
  "serde",

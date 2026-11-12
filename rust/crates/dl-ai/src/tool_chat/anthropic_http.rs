@@ -42,11 +42,12 @@ impl AnthropicHttpBackend {
         api_key: Option<HeaderValue>,
         workspace_id: Option<HeaderValue>,
     ) -> Self {
-        let http = dl_core::bot_http::Client::builder()
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_else(dl_core::bot_http::Client::disabled);
+        let http = dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::for_operation(
+            timeout,
+        ))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(dl_core::bot_http::Client::disabled);
         Self {
             http,
             messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
@@ -202,7 +203,9 @@ impl ToolBackend for AnthropicHttpBackend {
             .send()
             .await
             .map_err(|error| {
-                if error.is_timeout() {
+                if error.is_configuration() {
+                    BackendError::new(FailureKind::InvalidRequest, "http_configuration")
+                } else if error.is_timeout() {
                     BackendError::new(FailureKind::Timeout, "http_timeout")
                 } else {
                     BackendError::new(FailureKind::Unavailable, "transport")

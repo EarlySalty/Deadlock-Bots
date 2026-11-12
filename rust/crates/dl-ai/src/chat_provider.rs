@@ -1070,11 +1070,12 @@ impl Default for RetryConfig {
 
 impl RetryConfig {
     fn http_client(&self) -> dl_core::bot_http::Client {
-        dl_core::bot_http::Client::builder()
-            .timeout(self.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_else(dl_core::bot_http::Client::disabled)
+        dl_core::bot_http::Client::builder(dl_core::bot_http::Deadlines::for_operation(
+            self.request_timeout,
+        ))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(dl_core::bot_http::Client::disabled)
     }
 
     fn backoff_for_attempt(&self, attempt: usize) -> Duration {
@@ -1103,7 +1104,7 @@ async fn send_json_with_retry(
                 .try_clone()
                 .ok_or_else(|| ChatProviderError::Provider("Aufrufmetadaten fehlen".into()))?
                 .build()
-                .map_err(|_| ChatProviderError::Provider("Aufrufmetadaten ungültig".into()))?;
+                .map_err(|error| ChatProviderError::Provider(error.to_string()))?;
             Some(crate::usage::Attempt::begin_before(&metadata, deadline).await?)
         } else {
             None
@@ -1318,7 +1319,9 @@ fn anbieter_meldung(rohtext: &str) -> Option<String> {
 }
 
 fn request_error_kind(err: &dl_core::bot_http::Error) -> String {
-    if err.is_connect() {
+    if err.is_configuration() {
+        "configuration".to_string()
+    } else if err.is_connect() {
         "connect".to_string()
     } else if err.is_request() {
         "request".to_string()
