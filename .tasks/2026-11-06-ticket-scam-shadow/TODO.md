@@ -3,6 +3,9 @@
 Worktree: /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107
 Branch: feat/ticket-scam-shadow-20261107. origin is still at fbd40262; the local commits after it are NOT on the remote yet (tests unverified).
 Gate counter: 2 counted BLOCK rounds. The final round was NOT run; see GATE-RETRO.md "Decision needed".
+
+DECISION (integrator, 2026-11-12 03:10 Berlin): option (c). No force push on any branch (CLAUDE.md). After tests and clippy pass, create `feat/ticket-scam-shadow-r2-20261112` from origin/main with the same final code as a few clean commits whose messages carry the full four-layer `Ursache:` block in the spelling the hook accepts, and upload it. Before the gate run, carry the counter over: set `block_rounds` in the new branch's file under `~/.local/state/gpt-workers/review-branch-rounds/` to at least 4, so the next verdict is the final round, and note in GATE-RETRO.md that this is a carry-over, not a reset. Run the final round only once the gate fix (fix/gate-round-four-20261112) is live. The `why_possible:` spelling rejection is a hook bug: add it as an open-cause row for the gate owner.
+DECISION UPDATE (user, 2026-11-12 03:41 Berlin) REPLACES option (c): the user now allows a lease-protected force update of an own unmerged feature branch when only commit messages change. So keep `feat/ticket-scam-shadow-20261107`, no new branch, no counter carry-over. Reword the five published commits with the full four-layer `Ursache:` block, rebase the local fix commits on top, prove that every rewritten published commit has the same tree hash as its original, then lease-update the branch as its own simple git call. The next gate verdict is still the final round (round-four review already done); do not reset the counter. Run it only once the gate fix is live.
 Backup of the pre-retro local history: ref `backup/ticket-scam-shadow-pre-retro` (8b038e44).
 
 ## What the branch does
@@ -23,7 +26,7 @@ Clippy on touched files: 219 lines in /tmp/claude-1000/-home-nathanael-Documents
 Resume here:
 a. `cd rust && cargo-slot test -p dl-community --lib 2>&1 | grep -E "^test result|FAILED"`, same for `-p dl-moderation --lib` and `-p dl-bot --bin dl-bot modglue`; baseline is 4 DB failures in dl-community. Fix failures in ticket_triage/faq/content_analyzer/modglue tests by amending the matching local commit (local history only).
 b. Check clippy-touched.txt for lints on changed lines only (`git diff fbd40262 -U0`), fix those.
-c. Run the Ursache preflight (scratchpad ursache_check.py), then a plain fast-forward upload of the branch to origin as its own simple git call.
+c. Do the message-only reword per DECISION UPDATE above, run the Ursache preflight (scratchpad ursache_check.py) on all commits, prove tree equality, then the lease update of the branch to origin as its own simple git call.
 d. Do NOT run the final gate: report to the user the retro (GATE-RETRO.md), fixed vs dropped, and decision a/b/c.
 
 ## Next steps

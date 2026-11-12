@@ -24,3 +24,11 @@ The Brain should help in support tickets and contact a mod only when needed, so 
 - Real ticket openings in category 1459628097145147645 produce one shadow log entry each with the three parts above.
 - A scam screenshot replay (from an existing closed ticket) yields category scam and a resolved account, logged as "would ban".
 - fmt, clippy -D warnings, existing tests green (baseline: 4 DB tests in dl-community need ionos).
+
+## Amendment 2026-11-12 (user): public scam reports, shadow
+Trigger example: general channel 1289721245281292291, message 1570393213364076626: a member pings mod role 1337518124647579661 with a screenshot and "Bannt mal die Person / Scammer".
+1. Any guild message that pings role 1337518124647579661 (or says scam/scammer with an image) starts the same review path as a ticket opening (reuse ticket_triage + review_reported_screenshots, no second classifier). Collect the reporter's images from that message and their follow-ups within a short window.
+2. Resolve the reported account also from the screenshot (vision extracts display/user name or ID), then member lookup as for tickets. Same "would ban" rule.
+3. Brain writes the reply it would post: short, casual German like a human mod ("Danke, hab ich mir angeschaut, ist raus."), no bot formatting, no "Ich habe Ihre Meldung erhalten". Through the central Brain path and its answer-shape rules.
+4. Shadow only: log channel 1374364800817303632 gets source link, reply candidate, verdict, resolved account, would-ban. No post, ping or ban. Respect `moderation.ticket_screenshot_review` switch (default false).
+Acceptance: replay of message 1570393213364076626 (and 1570396144607957032) gives one shadow entry with a natural reply candidate and a resolved account or a clear German reason why not.
