@@ -15,7 +15,7 @@ use crate::content_analyzer::{
 };
 use crate::moderation_channel::{DEFAULT_MODERATION_CHANNEL_ID, DEFAULT_SCAN_CHANNEL_IDS};
 use crate::moderation_verdict::{
-    ContentAnalysis, ModerationCategory, ModerationVerdict, VerificationDecision,
+    ContentAnalysis, ModerationCategory, ModerationVerdict, ScreenshotAccount, VerificationDecision,
 };
 use crate::store::{CaseAttachment, CaseDraft, CaseRecord, ModerationStore};
 use crate::ReviewOutcome;
@@ -105,6 +105,7 @@ impl ModerationCaseStore for ModerationStore {
 pub struct ReportedScreenshotReview {
     pub verdict: ModerationVerdict,
     pub decision: PolicyDecision,
+    pub account: ScreenshotAccount,
 }
 
 pub struct ModerationSystem<S: ModerationCaseStore = ModerationStore> {
@@ -173,12 +174,16 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         &self,
         image_urls: Vec<String>,
     ) -> Result<ReportedScreenshotReview, ReportedScreenshotFailure> {
-        let verdict = self
+        let (verdict, account) = self
             .pipeline
             .evaluate_reported_screenshots(image_urls)
             .await?;
         let decision = self.policy.decide(&verdict);
-        Ok(ReportedScreenshotReview { verdict, decision })
+        Ok(ReportedScreenshotReview {
+            verdict,
+            decision,
+            account,
+        })
     }
 
     pub async fn handle_message(self: &Arc<Self>, event: &dl_discord::MessageEvent) {

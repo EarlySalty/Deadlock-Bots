@@ -6,7 +6,10 @@ use dl_moderation::content_analyzer::ReportedScreenshotFailure;
 use dl_moderation::moderation_system::ReportedScreenshotReview;
 use dl_moderation::moderation_verdict::ModerationCategory;
 
+pub const MOD_ROLE_ID: u64 = 1337518124647579661;
 const MAX_ACCOUNT_LOOKUPS: usize = 5;
+const PUBLIC_SCAM_PREFIXES: &[&str] = &["scam", "gescam"];
+const SCREENSHOT_NAME_SHOWN_CHARS: usize = 40;
 const STEAM64_IDS: RangeInclusive<u64> = 76_561_197_960_265_728..=76_561_202_255_233_023;
 const NAME_LABELS: &[&str] = &[
     "username",
@@ -102,7 +105,7 @@ pub enum ScreenshotCheck {
     Unavailable,
     NoImages,
     Failed(ReportedScreenshotFailure),
-    Reviewed(ReportedScreenshotReview),
+    Reviewed(Box<ReportedScreenshotReview>),
 }
 
 impl ScreenshotCheck {
@@ -110,7 +113,7 @@ impl ScreenshotCheck {
         result: Result<ReportedScreenshotReview, ReportedScreenshotFailure>,
     ) -> Self {
         match result {
-            Ok(review) => Self::Reviewed(review),
+            Ok(review) => Self::Reviewed(Box::new(review)),
             Err(failure) => Self::Failed(failure),
         }
     }
@@ -215,6 +218,27 @@ pub fn escalation(brain: BrainState, text: &str) -> Escalation {
         reasons.push(EscalationReason::HumanRequested);
     }
     Escalation { reasons }
+}
+
+pub fn is_public_report_trigger(text: &str, image_count: usize) -> bool {
+    let pings_mods = text.contains(&format!("<@&{MOD_ROLE_ID}>"));
+    let says_scam = words(text).iter().any(|word| {
+        PUBLIC_SCAM_PREFIXES
+            .iter()
+            .any(|prefix| word.starts_with(prefix))
+    });
+    pings_mods || (image_count > 0 && says_scam)
+}
+
+pub fn public_report_escalation(brain: BrainState, text: &str) -> Escalation {
+    let mut escalation = escalation(brain, text);
+    if !escalation
+        .reasons
+        .contains(&EscalationReason::ModerationCase)
+    {
+        escalation.reasons.push(EscalationReason::ModerationCase);
+    }
+    escalation
 }
 
 pub fn is_scam_report(text: &str) -> bool {
@@ -388,6 +412,79 @@ fn username(raw: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefOrigin {
+    Text,
+    Screenshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportTargets {
+    pub refs: Vec<(AccountRef, RefOrigin)>,
+    pub overflow: bool,
+    pub unclear: bool,
+    pub screenshot_name_only: Option<String>,
+}
+
+pub fn report_targets(text: &str, screenshot: &ScreenshotCheck) -> ReportTargets {
+    let from_text = reported_account_refs(text);
+    let mut refs: Vec<(AccountRef, RefOrigin)> = from_text
+        .refs
+        .into_iter()
+        .map(|reference| (reference, RefOrigin::Text))
+        .collect();
+    let mut overflow = from_text.overflow;
+    let (from_screenshot, screenshot_name_only) = screenshot_refs(screenshot);
+    for reference in from_screenshot {
+        if refs.iter().any(|(known, _)| *known == reference) {
+            continue;
+        }
+        if refs.len() >= MAX_ACCOUNT_LOOKUPS {
+            overflow = true;
+            continue;
+        }
+        refs.push((reference, RefOrigin::Screenshot));
+    }
+    ReportTargets {
+        refs,
+        overflow,
+        unclear: from_text.unclear,
+        screenshot_name_only,
+    }
+}
+
+fn screenshot_refs(screenshot: &ScreenshotCheck) -> (Vec<AccountRef>, Option<String>) {
+    let ScreenshotCheck::Reviewed(review) = screenshot else {
+        return (Vec::new(), None);
+    };
+    let account = &review.account;
+    let mut refs = Vec::new();
+    if let Some(id) = account.user_id.and_then(|id| snowflake(&id.to_string())) {
+        refs.push(AccountRef::Id(id));
+    }
+    let raw_username = account.username.as_deref();
+    if let Some(name) = raw_username.and_then(|raw| username(raw.trim_start_matches('@'))) {
+        refs.push(AccountRef::Name(name));
+    }
+    if !refs.is_empty() {
+        return (refs, None);
+    }
+    let shown = raw_username
+        .or(account.display_name.as_deref())
+        .map(shown_name)
+        .filter(|name| !name.is_empty());
+    (refs, shown)
+}
+
+fn shown_name(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_'))
+        .take(SCREENSHOT_NAME_SHOWN_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberLookup {
     Member { id: u64, staff_or_bot: bool },
     NotMember,
@@ -397,6 +494,7 @@ pub enum MemberLookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAccount {
     pub reference: AccountRef,
+    pub origin: RefOrigin,
     pub lookup: MemberLookup,
 }
 
@@ -414,7 +512,11 @@ impl ResolvedAccount {
             MemberLookup::NotMember => "kein Mitglied".to_string(),
             MemberLookup::Unknown => "Mitgliedschaft unbekannt".to_string(),
         };
-        format!("`{}` → {status}", self.reference.label())
+        let origin = match self.origin {
+            RefOrigin::Text => "",
+            RefOrigin::Screenshot => " (aus dem Screenshot gelesen)",
+        };
+        format!("`{}`{origin} → {status}", self.reference.label())
     }
 }
 
@@ -423,6 +525,7 @@ pub struct ReportedAccounts {
     pub accounts: Vec<ResolvedAccount>,
     pub overflow: bool,
     pub unclear: bool,
+    pub screenshot_name_only: Option<String>,
 }
 
 impl ReportedAccounts {
@@ -434,6 +537,11 @@ impl ReportedAccounts {
             .collect();
         if self.unclear {
             lines.push("Gemeldeter Account: Angabe nicht eindeutig lesbar".to_string());
+        }
+        if let Some(name) = &self.screenshot_name_only {
+            lines.push(format!(
+                "Gemeldeter Account: im Screenshot nur der Anzeigename `{name}` lesbar, kein Benutzername und keine ID"
+            ));
         }
         if lines.is_empty() {
             lines.push("Gemeldeter Account: keiner erkannt".to_string());
@@ -517,6 +625,11 @@ fn ban_target(reported: &ReportedAccounts, opener_id: u64) -> ShadowAction {
     if reported.unclear {
         return ShadowAction::NoBan("Angabe eines gemeldeten Kontos nicht eindeutig");
     }
+    if reported.screenshot_name_only.is_some() {
+        return ShadowAction::NoBan(
+            "im Screenshot nur ein Anzeigename lesbar, Konto nicht eindeutig zuzuordnen",
+        );
+    }
     if reported.count(MemberLookup::Unknown) > 0 {
         return ShadowAction::NoBan("Mitgliedschaft eines genannten Kontos unklar");
     }
@@ -597,8 +710,60 @@ impl TicketIntake {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowSource {
+    Ticket {
+        channel_id: u64,
+    },
+    PublicReport {
+        guild_id: u64,
+        channel_id: u64,
+        message_id: u64,
+    },
+}
+
+impl ShadowSource {
+    pub fn channel_id(self) -> u64 {
+        match self {
+            Self::Ticket { channel_id } | Self::PublicReport { channel_id, .. } => channel_id,
+        }
+    }
+
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::PublicReport { .. })
+    }
+
+    fn header(self) -> [String; 2] {
+        match self {
+            Self::Ticket { channel_id } => [
+                "🧪 **Ticket-Shadow**".to_string(),
+                format!("Ticket: <#{channel_id}>"),
+            ],
+            Self::PublicReport {
+                guild_id,
+                channel_id,
+                message_id,
+            } => [
+                "🧪 **Scam-Meldung-Shadow** (öffentlicher Kanal)".to_string(),
+                format!(
+                    "Quelle: https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+                ),
+            ],
+        }
+    }
+
+    fn candidate_label(self) -> &'static str {
+        match self {
+            Self::Ticket { .. } => "Kandidat:",
+            Self::PublicReport { .. } => {
+                "Antwort-Kandidat im Kanal (nicht gesendet, Brain-Aufgabe Ticket):"
+            }
+        }
+    }
+}
+
 pub struct ShadowEntry<'a> {
-    pub ticket_channel_id: u64,
+    pub source: ShadowSource,
     pub brain_verdict: &'a str,
     pub escalation: &'a Escalation,
     pub intake: TicketIntake,
@@ -607,18 +772,19 @@ pub struct ShadowEntry<'a> {
 }
 
 pub fn shadow_entry_text(entry: &ShadowEntry<'_>) -> String {
-    let mut lines = vec![
-        "🧪 **Ticket-Shadow**".to_string(),
-        format!("Ticket: <#{}>", entry.ticket_channel_id),
-        format!("Urteil: {}", entry.brain_verdict),
-        needs_mod_line(entry.escalation),
-    ];
+    let mut lines: Vec<String> = entry.source.header().into();
+    lines.push(format!("Urteil: {}", entry.brain_verdict));
+    lines.push(needs_mod_line(entry.escalation));
     lines.extend(entry.intake.lines());
     if let Some(scam) = &entry.scam {
         lines.extend(scam_lines(scam));
     }
     lines.push(String::new());
-    lines.push(format!("Kandidat:\n{}", entry.candidate));
+    lines.push(format!(
+        "{}\n{}",
+        entry.source.candidate_label(),
+        entry.candidate
+    ));
     lines.join("\n")
 }
 
@@ -660,7 +826,7 @@ fn verdict_line(review: &ReportedScreenshotReview) -> String {
 mod tests {
     use super::*;
     use dl_moderation::moderation_verdict::{
-        ContentAnalysis, ModerationVerdict, VerificationDecision,
+        ContentAnalysis, ModerationVerdict, ScreenshotAccount, VerificationDecision,
     };
 
     const SCAM_TICKET: &str = "Hallo, mich hat jemand angeschrieben: Er hätte mich \"ausversehen auf Discord reportet\" und ich solle einen Discord-Support-Mitarbeiter kontaktieren. Das ist der bekannte Betrug. Ich habe ihn schon bei Discord gemeldet.
@@ -676,7 +842,7 @@ Username: beispiel_scammer";
         } else {
             PolicyDecision::Ignore
         };
-        ScreenshotCheck::Reviewed(ReportedScreenshotReview {
+        ScreenshotCheck::Reviewed(Box::new(ReportedScreenshotReview {
             verdict: ModerationVerdict {
                 analysis: ContentAnalysis {
                     category: category.clone(),
@@ -694,7 +860,17 @@ Username: beispiel_scammer";
                 trigger: String::new(),
             },
             decision,
-        })
+            account: ScreenshotAccount::default(),
+        }))
+    }
+
+    fn with_account(check: ScreenshotCheck, account: ScreenshotAccount) -> ScreenshotCheck {
+        match check {
+            ScreenshotCheck::Reviewed(review) => {
+                ScreenshotCheck::Reviewed(Box::new(ReportedScreenshotReview { account, ..*review }))
+            }
+            other => other,
+        }
     }
 
     fn member(id: u64) -> ResolvedAccount {
@@ -708,7 +884,11 @@ Username: beispiel_scammer";
     }
 
     fn resolved(reference: AccountRef, lookup: MemberLookup) -> ResolvedAccount {
-        ResolvedAccount { reference, lookup }
+        ResolvedAccount {
+            reference,
+            origin: RefOrigin::Text,
+            lookup,
+        }
     }
 
     fn reported(accounts: Vec<ResolvedAccount>) -> ReportedAccounts {
@@ -1097,5 +1277,133 @@ Username: beispiel_scammer";
         };
         assert!(ok.within_limits());
         assert!(!big.within_limits());
+    }
+
+    #[test]
+    fn oeffentliche_meldung_startet_bei_mod_ping_oder_scam_mit_bild() {
+        let ping = format!("<@&{MOD_ROLE_ID}> Bannt mal die Person");
+        assert!(is_public_report_trigger(&ping, 0));
+        assert!(is_public_report_trigger(&ping, 1));
+        assert!(is_public_report_trigger("Scammer", 1));
+        assert!(is_public_report_trigger("wurde gescammt", 2));
+        assert!(!is_public_report_trigger("Scammer", 0));
+        assert!(!is_public_report_trigger("fake news lol", 1));
+        assert!(!is_public_report_trigger("<@&123456789012345678> hi", 1));
+        assert!(!is_public_report_trigger("schönes Bild", 1));
+        let escalation = public_report_escalation(BrainState::Answered, &ping);
+        assert_eq!(escalation.reasons, vec![EscalationReason::ModerationCase]);
+    }
+
+    #[test]
+    fn screenshot_konto_ergaenzt_textangaben_und_anzeigename_bannt_nie() {
+        let scam = review(ModerationCategory::Scam, true, true);
+        let by_id = with_account(
+            scam.clone(),
+            ScreenshotAccount {
+                user_id: Some(223456789012345678),
+                username: Some("@Fake_Support".to_string()),
+                display_name: Some("Support".to_string()),
+            },
+        );
+        let targets = report_targets("Scammer", &by_id);
+        assert_eq!(
+            targets.refs,
+            vec![
+                (AccountRef::Id(223456789012345678), RefOrigin::Screenshot),
+                (name("fake_support"), RefOrigin::Screenshot),
+            ]
+        );
+        assert_eq!(targets.screenshot_name_only, None);
+
+        let both = report_targets("@fake_support hat mich gescammt", &by_id);
+        assert_eq!(
+            both.refs,
+            vec![
+                (name("fake_support"), RefOrigin::Text),
+                (AccountRef::Id(223456789012345678), RefOrigin::Screenshot),
+            ]
+        );
+
+        let display_only = with_account(
+            scam.clone(),
+            ScreenshotAccount {
+                user_id: None,
+                username: Some("José <@1>".to_string()),
+                display_name: Some("Steam Support".to_string()),
+            },
+        );
+        let targets = report_targets("Scammer", &display_only);
+        assert!(targets.refs.is_empty());
+        assert_eq!(targets.screenshot_name_only.as_deref(), Some("José 1"));
+        let accounts = ReportedAccounts {
+            accounts: vec![member(7)],
+            screenshot_name_only: targets.screenshot_name_only,
+            ..ReportedAccounts::default()
+        };
+        assert!(matches!(
+            shadow_action(&scam, &accounts, 1),
+            ShadowAction::NoBan(reason) if reason.contains("Anzeigename")
+        ));
+        assert!(accounts
+            .lines()
+            .iter()
+            .any(|line| line.contains("nur der Anzeigename `José 1`")));
+
+        let steam = with_account(
+            scam,
+            ScreenshotAccount {
+                user_id: Some(76561198000000000),
+                ..ScreenshotAccount::default()
+            },
+        );
+        assert!(report_targets("", &steam).refs.is_empty());
+        assert!(report_targets("", &ScreenshotCheck::Disabled)
+            .refs
+            .is_empty());
+    }
+
+    #[test]
+    fn oeffentlicher_eintrag_verlinkt_die_quelle_ohne_ping() {
+        let escalation = public_report_escalation(BrainState::Answered, "Scammer");
+        let scam = review(ModerationCategory::Scam, true, true);
+        let accounts = ReportedAccounts {
+            accounts: vec![ResolvedAccount {
+                reference: name("fake_support"),
+                origin: RefOrigin::Screenshot,
+                lookup: MemberLookup::Member {
+                    id: 7,
+                    staff_or_bot: false,
+                },
+            }],
+            ..ReportedAccounts::default()
+        };
+        let action = shadow_action(&scam, &accounts, 1);
+        let text = shadow_entry_text(&ShadowEntry {
+            source: ShadowSource::PublicReport {
+                guild_id: 1,
+                channel_id: 2,
+                message_id: 3,
+            },
+            brain_verdict: "yes",
+            escalation: &escalation,
+            intake: TicketIntake::default(),
+            scam: Some(ScamSection {
+                screenshot: &scam,
+                accounts: &accounts,
+                action: &action,
+            }),
+            candidate: "Danke, schauen wir uns an.",
+        });
+        assert!(text.starts_with("🧪 **Scam-Meldung-Shadow**"), "{text}");
+        assert!(
+            text.contains("Quelle: https://discord.com/channels/1/2/3"),
+            "{text}"
+        );
+        assert!(text.contains("`fake_support` (aus dem Screenshot gelesen) → Mitglied 7"));
+        assert!(text.contains("Bann-Entscheidung (Shadow, nur Log): would ban 7"));
+        assert!(
+            text.ends_with("(nicht gesendet, Brain-Aufgabe Ticket):\nDanke, schauen wir uns an.")
+        );
+        assert!(!text.contains("<@"), "{text}");
     }
 }

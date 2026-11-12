@@ -13,10 +13,14 @@ use crate::answer_support::{acquire_stateful_support_turn, KnowledgeLookup};
 use crate::db::{i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 use crate::ticket_triage::{
     self, BrainState, MemberLookup, ReportedAccounts, ResolvedAccount, ScamSection,
-    ScreenshotCheck, ScreenshotReviewSetup, ShadowEntry, TicketImage, TicketIntake,
+    ScreenshotCheck, ScreenshotReviewSetup, ShadowEntry, ShadowSource, TicketImage, TicketIntake,
 };
 
 pub use crate::answer_support::{KnowledgeAnswer, KnowledgeSource};
+
+#[path = "faq_public_report.rs"]
+mod public_report;
+pub use public_report::{PublicMessage, ReplayMessage};
 
 pub const PANEL_CHANNEL_ID: u64 = 1491953161747955853;
 pub const FAQ_CATEGORY_ID: u64 = 1310153243795390475;
@@ -838,6 +842,9 @@ pub struct FaqChat {
     ticket_opening_max: Duration,
     ticket_opening_poll: Duration,
     screenshot_review: std::sync::OnceLock<ScreenshotReviewSetup>,
+    public_reports: public_report::PublicReports,
+    public_report_quiet: Duration,
+    public_report_max: Duration,
     chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -858,6 +865,9 @@ impl FaqChat {
             ticket_opening_max: TICKET_OPENING_MAX,
             ticket_opening_poll: TICKET_OPENING_POLL,
             screenshot_review: std::sync::OnceLock::new(),
+            public_reports: std::sync::Mutex::new(HashMap::new()),
+            public_report_quiet: public_report::PUBLIC_REPORT_QUIET,
+            public_report_max: public_report::PUBLIC_REPORT_MAX,
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -981,17 +991,58 @@ impl FaqChat {
         shadow_channel_id: u64,
         question: TicketQuestion,
     ) {
-        let question_chars = question.text.chars().count();
+        let source = ShadowSource::Ticket { channel_id };
+        let content = self
+            .shadow_report_entry(guild_id, source, author_id, &question)
+            .await;
+        self.send_shadow_entry(source, shadow_channel_id, &content)
+            .await;
+    }
+
+    async fn send_shadow_entry(&self, source: ShadowSource, shadow_channel_id: u64, content: &str) {
+        if self
+            .port
+            .send_message(shadow_channel_id, content, None)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                channel_id = source.channel_id(),
+                shadow_channel_id,
+                public_report = source.is_public(),
+                shadow_send_status = "failed",
+                "FAQ-Ticket-Shadow Versand fehlgeschlagen"
+            );
+        }
+    }
+
+    async fn shadow_report_entry(
+        &self,
+        guild_id: u64,
+        source: ShadowSource,
+        author_id: u64,
+        question: &TicketQuestion,
+    ) -> String {
+        let channel_id = source.channel_id();
         let outcome = self
             .ticket_brain_outcome(&question.text, author_id, channel_id)
             .await;
-        let escalation = ticket_triage::escalation(outcome.brain, &question.text);
-        let scam = self.ticket_scam_check(guild_id, author_id, &question).await;
+        let escalation = if source.is_public() {
+            ticket_triage::public_report_escalation(outcome.brain, &question.text)
+        } else {
+            ticket_triage::escalation(outcome.brain, &question.text)
+        };
+        let scam = if source.is_public() || ticket_triage::is_scam_report(&question.text) {
+            Some(self.ticket_scam_check(guild_id, author_id, question).await)
+        } else {
+            None
+        };
         let (candidate_status, candidate) = Self::ticket_candidate(&outcome);
         tracing::info!(
             channel_id,
             author_id,
-            question_chars,
+            public_report = source.is_public(),
+            question_chars = question.text.chars().count(),
             image_count = question.images.len(),
             skipped_images = question.skipped_images,
             dropped_chars = question.dropped_chars,
@@ -1002,8 +1053,8 @@ impl FaqChat {
             shadow_action = %scam.as_ref().map(|scam| scam.action.line()).unwrap_or_default(),
             "FAQ-Ticket-Shadow ausgewertet"
         );
-        let entry = ShadowEntry {
-            ticket_channel_id: channel_id,
+        ticket_triage::shadow_entry_text(&ShadowEntry {
+            source,
             brain_verdict: outcome.brain.verdict(),
             escalation: &escalation,
             intake: TicketIntake {
@@ -1013,23 +1064,7 @@ impl FaqChat {
             },
             scam: scam.as_ref().map(TicketScamCheck::section),
             candidate: &candidate,
-        };
-        let content = ticket_triage::shadow_entry_text(&entry);
-        if self
-            .port
-            .send_message(shadow_channel_id, &content, None)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                channel_id,
-                shadow_channel_id,
-                verdict = outcome.brain.verdict(),
-                candidate_status,
-                shadow_send_status = "failed",
-                "FAQ-Ticket-Shadow Versand fehlgeschlagen"
-            );
-        }
+        })
     }
 
     async fn ticket_brain_outcome(
@@ -1049,20 +1084,17 @@ impl FaqChat {
         guild_id: u64,
         author_id: u64,
         question: &TicketQuestion,
-    ) -> Option<TicketScamCheck> {
-        if !ticket_triage::is_scam_report(&question.text) {
-            return None;
-        }
+    ) -> TicketScamCheck {
         let screenshot = self.review_ticket_screenshots(&question.images).await;
         let accounts = self
-            .resolve_reported_accounts(guild_id, &question.text)
+            .resolve_reported_accounts(guild_id, &question.text, &screenshot)
             .await;
         let action = ticket_triage::shadow_action(&screenshot, &accounts, author_id);
-        Some(TicketScamCheck {
+        TicketScamCheck {
             screenshot,
             accounts,
             action,
-        })
+        }
     }
 
     async fn review_ticket_screenshots(&self, images: &[TicketImage]) -> ScreenshotCheck {
@@ -1080,17 +1112,27 @@ impl FaqChat {
         ScreenshotCheck::from_result(reviewer.review_reported_screenshots(urls).await)
     }
 
-    async fn resolve_reported_accounts(&self, guild_id: u64, text: &str) -> ReportedAccounts {
-        let found = ticket_triage::reported_account_refs(text);
+    async fn resolve_reported_accounts(
+        &self,
+        guild_id: u64,
+        text: &str,
+        screenshot: &ScreenshotCheck,
+    ) -> ReportedAccounts {
+        let found = ticket_triage::report_targets(text, screenshot);
         let mut accounts = Vec::new();
-        for reference in found.refs {
+        for (reference, origin) in found.refs {
             let lookup = self.lookup_reported_member(guild_id, &reference).await;
-            accounts.push(ResolvedAccount { reference, lookup });
+            accounts.push(ResolvedAccount {
+                reference,
+                origin,
+                lookup,
+            });
         }
         ReportedAccounts {
             accounts,
             overflow: found.overflow,
             unclear: found.unclear,
+            screenshot_name_only: found.screenshot_name_only,
         }
     }
 
@@ -1597,6 +1639,15 @@ impl FaqChat {
         true
     }
 
+    fn shadow_target(&self, channel_id: u64) -> Result<u64, &'static str> {
+        match self.shadow_channel_id {
+            None => Err(SHADOW_NOT_CONFIGURED),
+            Some(id) if id == channel_id => Err(SHADOW_EQUALS_TICKET),
+            Some(id) if id != LOG_CHANNEL_ID => Err(SHADOW_NOT_ALLOWLISTED),
+            Some(id) => Ok(id),
+        }
+    }
+
     pub async fn handle_ticket_message(
         self: &Arc<Self>,
         guild_id: u64,
@@ -1618,13 +1669,7 @@ impl FaqChat {
             return;
         }
         let question_chars = problem.chars().count();
-        let shadow_channel_id = match self.shadow_channel_id {
-            None => Err(SHADOW_NOT_CONFIGURED),
-            Some(id) if id == channel_id => Err(SHADOW_EQUALS_TICKET),
-            Some(id) if id != LOG_CHANNEL_ID => Err(SHADOW_NOT_ALLOWLISTED),
-            Some(id) => Ok(id),
-        };
-        let shadow_channel_id = match shadow_channel_id {
+        let shadow_channel_id = match self.shadow_target(channel_id) {
             Ok(id) => id,
             Err(reason) => {
                 log_ticket_fail_closed(reason, question_chars, channel_id, author_id);
@@ -2309,13 +2354,23 @@ pub fn spawn(
                             )
                             .await;
                         if !handled {
+                            let images = ticket_images(&event);
                             faq.handle_ticket_message(
                                 event.guild_id.unwrap_or_default(),
                                 event.channel_id,
                                 event.author_id,
                                 &event.content,
-                                &ticket_images(&event),
+                                &images,
                             )
+                            .await;
+                            faq.handle_public_message(PublicMessage {
+                                guild_id: event.guild_id.unwrap_or_default(),
+                                channel_id: event.channel_id,
+                                message_id: event.message_id,
+                                author_id: event.author_id,
+                                content: &event.content,
+                                images: &images,
+                            })
                             .await;
                         }
                     }
@@ -2504,6 +2559,187 @@ mod tests {
         faq
     }
 
+    fn public_report_faq(port: Arc<MockPanelPort>, brain: Arc<ScriptedBrain>) -> Arc<FaqChat> {
+        let mut faq = FaqChat::brain_only(lazy_pool(), port, brain);
+        let fixture = Arc::get_mut(&mut faq).expect("fresh fixture");
+        fixture.public_report_quiet = Duration::from_millis(40);
+        fixture.public_report_max = Duration::from_secs(1);
+        fixture.ticket_opening_poll = Duration::from_millis(10);
+        faq
+    }
+
+    fn public_port(category: Option<u64>) -> Arc<MockPanelPort> {
+        let port = ticket_port();
+        let mut port = Arc::try_unwrap(port).unwrap_or_else(|_| panic!("fresh port"));
+        port.category = category;
+        Arc::new(port)
+    }
+
+    async fn wait_for_entry(port: &MockPanelPort) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while port.sent.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Shadow-Eintrag");
+    }
+
+    const PUBLIC_CHANNEL: u64 = 333;
+    const REPORTER: u64 = 111111111111111111;
+
+    fn public_message<'a>(
+        message_id: u64,
+        author_id: u64,
+        content: &'a str,
+        images: &'a [TicketImage],
+    ) -> PublicMessage<'a> {
+        PublicMessage {
+            guild_id: 1,
+            channel_id: PUBLIC_CHANNEL,
+            message_id,
+            author_id,
+            content,
+            images,
+        }
+    }
+
+    #[tokio::test]
+    async fn oeffentliche_mod_meldung_ergibt_einen_shadow_eintrag_mit_screenshot_konto() {
+        let port = public_port(None);
+        let brain = ScriptedBrain::answering("Danke dir, schauen wir uns an.");
+        let faq = public_report_faq(port.clone(), brain.clone());
+        let reviewer = scam_reviewer(dl_moderation::moderation_verdict::ScreenshotAccount {
+            user_id: None,
+            username: Some("scammer".to_string()),
+            display_name: Some("Support".to_string()),
+        });
+        faq.install_screenshot_review(ScreenshotReviewSetup::Active(reviewer.clone()));
+        let ping = format!("<@&{}> Bannt mal die Person", ticket_triage::MOD_ROLE_ID);
+        let first = [scam_image("dm", 10)];
+
+        faq.handle_public_message(public_message(10, REPORTER, &ping, &first))
+            .await;
+        faq.handle_public_message(public_message(10, REPORTER, &ping, &first))
+            .await;
+        faq.handle_public_message(public_message(11, REPORTER, "Scammer", &[]))
+            .await;
+        faq.handle_public_message(public_message(12, 222222222222222222, "lol", &[]))
+            .await;
+        wait_for_entry(&port).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(brain.call_count(), 1);
+        assert_eq!(
+            reviewer.calls.lock().unwrap().as_slice(),
+            &[vec!["https://cdn.discordapp.com/dm.png".to_string()]]
+        );
+        let sent = port.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, LOG_CHANNEL_ID);
+        let entry = &sent[0].1;
+        for expected in [
+            "🧪 **Scam-Meldung-Shadow** (öffentlicher Kanal)",
+            &format!("Quelle: https://discord.com/channels/1/{PUBLIC_CHANNEL}/10"),
+            "needs_mod: ja (Moderations-, Scam-, Bann- oder Accountfall)",
+            "Bildprüfung: scam, Sicherheit 0.93, bestätigt ja",
+            &format!("`scammer` (aus dem Screenshot gelesen) → Mitglied {MOCK_MEMBER_ID}"),
+            &format!("Bann-Entscheidung (Shadow, nur Log): would ban {MOCK_MEMBER_ID}"),
+            "(nicht gesendet, Brain-Aufgabe Ticket):\nDanke dir, schauen wir uns an.",
+        ] {
+            assert!(entry.contains(expected), "{expected}\n{entry}");
+        }
+        assert!(!entry.contains("<@&"), "{entry}");
+    }
+
+    #[tokio::test]
+    async fn oeffentliche_meldung_ohne_schalter_nennt_den_grund_ohne_bildpruefung() {
+        let port = public_port(None);
+        let brain = ScriptedBrain::answering("Danke, ist notiert.");
+        let faq = public_report_faq(port.clone(), brain.clone());
+        let images = [scam_image("dm", 10)];
+
+        faq.handle_public_message(public_message(20, REPORTER, "Scammer hier", &images))
+            .await;
+        wait_for_entry(&port).await;
+
+        let sent = port.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let entry = &sent[0].1;
+        assert!(
+            entry.contains("Bildprüfung: nicht gelaufen (deaktiviert)"),
+            "{entry}"
+        );
+        assert!(
+            entry.contains("Gemeldeter Account: keiner erkannt"),
+            "{entry}"
+        );
+        assert!(
+            entry.contains(
+                "Bann-Entscheidung (Shadow, nur Log): kein Bann (Bildprüfung deaktiviert)"
+            ),
+            "{entry}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oeffentlicher_pfad_ignoriert_normale_nachrichten_und_tickets() {
+        let ping = format!("<@&{}> hilfe", ticket_triage::MOD_ROLE_ID);
+        let images = [scam_image("bild", 10)];
+        for (category, content, images) in [
+            (None, "schönes Bild", &images[..]),
+            (None, "Scammer", &[][..]),
+            (
+                Some(TICKET_AUTO_HELP_CATEGORY_ID),
+                ping.as_str(),
+                &images[..],
+            ),
+        ] {
+            let port = public_port(category);
+            let brain = ScriptedBrain::answering("x");
+            let faq = public_report_faq(port.clone(), brain.clone());
+            faq.handle_public_message(public_message(30, REPORTER, content, images))
+                .await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            assert!(port.sent.lock().unwrap().is_empty(), "{content}");
+            assert_eq!(brain.call_count(), 0, "{content}");
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_fasst_mehrere_nachrichten_zu_einem_eintrag_zusammen() {
+        let port = public_port(None);
+        let brain = ScriptedBrain::answering("Danke, schau ich mir an.");
+        let faq = public_report_faq(port.clone(), brain.clone());
+        let ping = format!("<@&{}> Bannt mal die Person", ticket_triage::MOD_ROLE_ID);
+        let messages = [
+            ReplayMessage {
+                content: ping,
+                images: vec![scam_image("eins", 10)],
+            },
+            ReplayMessage {
+                content: "Ist einfach ein Bot".to_string(),
+                images: vec![scam_image("zwei", 10)],
+            },
+        ];
+        let entry = faq
+            .replay_public_report(
+                ShadowSource::PublicReport {
+                    guild_id: 1,
+                    channel_id: PUBLIC_CHANNEL,
+                    message_id: 40,
+                },
+                1,
+                REPORTER,
+                &messages,
+            )
+            .await
+            .expect("Eintrag");
+        assert!(entry.contains("Bilder: 2 angehängt"), "{entry}");
+        assert!(entry.contains("Danke, schau ich mir an."), "{entry}");
+        assert!(port.sent.lock().unwrap().is_empty());
+    }
+
     fn ticket_faq_with_opening_window(
         port: Arc<MockPanelPort>,
         brain: Arc<ScriptedBrain>,
@@ -2666,9 +2902,9 @@ mod tests {
         let escalation = ticket_triage::Escalation {
             reasons: Vec::new(),
         };
-        let entry = |ticket_channel_id, brain_verdict, candidate| {
+        let entry = |channel_id, brain_verdict, candidate| {
             ticket_triage::shadow_entry_text(&ShadowEntry {
-                ticket_channel_id,
+                source: ShadowSource::Ticket { channel_id },
                 brain_verdict,
                 escalation: &escalation,
                 intake: TicketIntake::default(),
@@ -3185,6 +3421,16 @@ mod tests {
 
     struct ScamReviewer {
         calls: std::sync::Mutex<Vec<Vec<String>>>,
+        account: dl_moderation::moderation_verdict::ScreenshotAccount,
+    }
+
+    fn scam_reviewer(
+        account: dl_moderation::moderation_verdict::ScreenshotAccount,
+    ) -> Arc<ScamReviewer> {
+        Arc::new(ScamReviewer {
+            calls: std::sync::Mutex::new(Vec::new()),
+            account,
+        })
     }
 
     #[async_trait::async_trait]
@@ -3219,6 +3465,7 @@ mod tests {
                     action: dl_moderation::action_policy::ModerationAction::Timeout,
                     timeout_minutes: 1440,
                 },
+                account: self.account.clone(),
             })
         }
     }
@@ -4788,9 +5035,7 @@ mod tests {
         let port = ticket_port();
         let brain = ScriptedBrain::answering("Danke für die Meldung");
         let faq = ticket_faq_with_opening_window(port.clone(), brain.clone());
-        let reviewer = Arc::new(ScamReviewer {
-            calls: std::sync::Mutex::new(Vec::new()),
-        });
+        let reviewer = scam_reviewer(Default::default());
         faq.install_screenshot_review(ScreenshotReviewSetup::Active(reviewer.clone()));
         let opener = 111111111111111111;
 

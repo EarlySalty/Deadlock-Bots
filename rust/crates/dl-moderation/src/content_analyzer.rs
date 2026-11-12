@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::content_verifier::ContentVerifier;
 use crate::moderation_verdict::{
     parse_content_analysis, ContentAnalysis, ModerationCategory, ModerationVerdict,
-    PARSE_ERROR_REASON,
+    ScreenshotAccount, PARSE_ERROR_REASON,
 };
 
 #[cfg(test)]
@@ -347,25 +347,26 @@ impl ContentModerationPipeline {
     pub(crate) async fn evaluate_reported_screenshots(
         &self,
         image_urls: Vec<String>,
-    ) -> Result<ModerationVerdict, ReportedScreenshotFailure> {
+    ) -> Result<(ModerationVerdict, ScreenshotAccount), ReportedScreenshotFailure> {
         let image_count = image_urls.len();
         let input = ModerationInput::new(String::new(), image_urls);
         let analysis = self.analyzer.analyze(&input).await;
         if analysis.reason == PARSE_ERROR_REASON {
             return Err(ReportedScreenshotFailure::AnalysisFailed);
         }
-        let verification = self
+        let (verification, account) = self
             .verifier
-            .verify_behavior_trigger(&input, &analysis, REPORTED_SCREENSHOT_TRIGGER)
+            .verify_reported_screenshot(&input, &analysis, REPORTED_SCREENSHOT_TRIGGER)
             .await;
         if verification.reason == PARSE_ERROR_REASON {
             return Err(ReportedScreenshotFailure::VerificationFailed);
         }
-        Ok(ModerationVerdict {
+        let verdict = ModerationVerdict {
             analysis,
             verification,
             trigger: format!("{REPORTED_SCREENSHOT_TRIGGER}: {image_count} Bild(er)"),
-        })
+        };
+        Ok((verdict, account))
     }
 }
 
@@ -584,9 +585,26 @@ mod tests {
             .await
             .push(r#"{"category":"scam","confidence":0.9,"reason":"Fake-Support"}"#.to_string());
         assert_eq!(
-            pipeline.evaluate_reported_screenshots(image).await,
+            pipeline.evaluate_reported_screenshots(image.clone()).await,
             Err(ReportedScreenshotFailure::VerificationFailed)
         );
+        vision
+            .responses
+            .lock()
+            .await
+            .push(r#"{"category":"scam","confidence":0.9,"reason":"Fake-Support"}"#.to_string());
+        verifier_vision.responses.lock().await.push(
+            r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Fake-Support","reported_account":{"user_id":null,"username":"fake_support","display_name":"Support"}}"#
+                .to_string(),
+        );
+        let (verdict, account) = pipeline
+            .evaluate_reported_screenshots(image)
+            .await
+            .expect("Urteil");
+        assert!(verdict.verification.confirmed);
+        assert_eq!(account.username.as_deref(), Some("fake_support"));
+        assert_eq!(account.display_name.as_deref(), Some("Support"));
+        assert_eq!(account.user_id, None);
     }
 
     #[tokio::test]

@@ -151,6 +151,46 @@ pub fn parse_content_analysis(raw_text: Option<&str>) -> ContentAnalysis {
     }
 }
 
+const SCREENSHOT_NAME_MAX_CHARS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScreenshotAccount {
+    pub user_id: Option<u64>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+}
+
+pub fn parse_screenshot_account(raw_text: Option<&str>) -> ScreenshotAccount {
+    let Some(account) =
+        extract_json_object(raw_text).and_then(|payload| payload.get("reported_account").cloned())
+    else {
+        return ScreenshotAccount::default();
+    };
+    ScreenshotAccount {
+        user_id: account.get("user_id").and_then(screenshot_user_id),
+        username: account.get("username").and_then(screenshot_name),
+        display_name: account.get("display_name").and_then(screenshot_name),
+    }
+}
+
+fn screenshot_user_id(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+}
+
+fn screenshot_name(value: &Value) -> Option<String> {
+    let name: String = value
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(SCREENSHOT_NAME_MAX_CHARS)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 pub fn parse_verification_decision(
     raw_text: Option<&str>,
     _suspected_category: ModerationCategory,
@@ -184,6 +224,32 @@ pub fn parse_verification_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_account_reads_only_the_reported_account_object() {
+        let parsed = parse_screenshot_account(Some(
+            r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"x","reported_account":{"user_id":"123456789012345678","username":"  fake_support ","display_name":null}}"#,
+        ));
+        assert_eq!(
+            parsed,
+            ScreenshotAccount {
+                user_id: Some(123456789012345678),
+                username: Some("fake_support".to_string()),
+                display_name: None,
+            }
+        );
+        assert_eq!(
+            parse_screenshot_account(Some(r#"{"confirmed":true,"username":"x"}"#)),
+            ScreenshotAccount::default()
+        );
+        assert_eq!(parse_screenshot_account(None), ScreenshotAccount::default());
+        let only_display = parse_screenshot_account(Some(
+            r#"{"reported_account":{"user_id":"nicht lesbar","username":"","display_name":"Steam   Support"}}"#,
+        ));
+        assert_eq!(only_display.user_id, None);
+        assert_eq!(only_display.username, None);
+        assert_eq!(only_display.display_name.as_deref(), Some("Steam Support"));
+    }
 
     #[test]
     fn parses_analyzer_json_and_clamps_confidence() {
