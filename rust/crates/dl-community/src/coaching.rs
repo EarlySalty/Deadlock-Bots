@@ -112,17 +112,16 @@ pub trait CoachingWebsiteSyncClient: Send + Sync {
 }
 
 impl WebsiteClient {
-    /// Token-Kette wie website_client.py: TWITCH_INTERNAL_API_TOKEN →
-    /// MASTER_BROKER_TOKEN; None ohne Token (Loops laufen dann leer).
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let token = get("TWITCH_INTERNAL_API_TOKEN")
-            .or_else(|| get("MASTER_BROKER_TOKEN"))
-            .or_else(|| get("COACHING_BOT_TOKEN"))?;
+        let token = dl_core::internal_tokens::first_token(
+            get,
+            dl_core::internal_tokens::WEBSITE_API_RECEIVER,
+        )?;
         let base_url = get("WEBSITE_API_BASE")
             .unwrap_or_else(|| "https://deutsche-deadlock-community.de/api".to_string());
         Some(Arc::new(Self {

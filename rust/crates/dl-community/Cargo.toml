@@ -23,6 +23,7 @@ serenity.workspace = true
 dl-ai.workspace = true
 dl-activity.workspace = true
 dl-bridges.workspace = true
+dl-core.workspace = true
 dl-central-db.workspace = true
 dl-discord.workspace = true
 dl-stats.workspace = true

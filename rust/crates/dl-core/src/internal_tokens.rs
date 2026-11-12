@@ -17,6 +17,12 @@ pub const DASHBOARD_INTERNAL_RECEIVER: &[&str] = &[
     "TWITCH_INTERNAL_API_TOKEN",
 ];
 
+pub const WEBSITE_API_RECEIVER: &[&str] = &[
+    "TWITCH_INTERNAL_API_TOKEN",
+    "MASTER_BROKER_TOKEN",
+    "COACHING_BOT_TOKEN",
+];
+
 pub const DASHBOARD_TWITCH_RECEIVER: &[&str] = &["TWITCH_INTERNAL_API_TOKEN"];
 
 pub fn first_token(lookup: impl Fn(&str) -> Option<String>, keys: &[&str]) -> Option<String> {
