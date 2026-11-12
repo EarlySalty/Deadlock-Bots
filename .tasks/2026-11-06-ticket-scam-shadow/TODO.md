@@ -1,7 +1,7 @@
 # TODO: ticket scam shadow (state 2026-11-12)
 
 Worktree: /home/nathanael/.worktrees/bots-ticket-scam-shadow-20261107
-Branch: feat/ticket-scam-shadow-20261107. origin is still at fbd40262; the local commits after it are NOT on the remote yet (tests unverified).
+Branch: feat/ticket-scam-shadow-20261107. Since 2026-11-12 the local history is uploaded as a plain fast-forward on top of fbd40262 (no rewrite).
 Gate counter: 2 counted BLOCK rounds. The final round was NOT run; see GATE-RETRO.md "Decision needed".
 
 DECISION (integrator, 2026-11-12 03:10 Berlin): option (c). No force push on any branch (CLAUDE.md). After tests and clippy pass, create `feat/ticket-scam-shadow-r2-20261112` from origin/main with the same final code as a few clean commits whose messages carry the full four-layer `Ursache:` block in the spelling the hook accepts, and upload it. Before the gate run, carry the counter over: set `block_rounds` in the new branch's file under `~/.local/state/gpt-workers/review-branch-rounds/` to at least 4, so the next verdict is the final round, and note in GATE-RETRO.md that this is a carry-over, not a reset. Run the final round only once the gate fix (fix/gate-round-four-20261112) is live. The `why_possible:` spelling rejection is a hook bug: add it as an open-cause row for the gate owner.
@@ -28,6 +28,21 @@ a. `cd rust && cargo-slot test -p dl-community --lib 2>&1 | grep -E "^test resul
 b. Check clippy-touched.txt for lints on changed lines only (`git diff fbd40262 -U0`), fix those.
 c. Do the message-only reword per DECISION UPDATE above, run the Ursache preflight (scratchpad ursache_check.py) on all commits, prove tree equality, then the lease update of the branch to origin as its own simple git call.
 d. Do NOT run the final gate: report to the user the retro (GATE-RETRO.md), fixed vs dropped, and decision a/b/c.
+
+## Amendment 2026-11-12: public scam reports (state after worker run)
+Commits: 870f5cdb (fail-closed log field), 971aef9c (public report shadow path, screenshot account extraction), 4121a00f (German reason for a missing account, replay example).
+- Trigger: a guild message outside the ticket category that pings role 1337518124647579661, or carries an image plus a scam word (`ticket_triage::is_public_report_trigger`). Further messages of the same author in the same channel join the report until 20 s quiet, at most 90 s (`faq_public_report.rs`).
+- Same path as a ticket opening: `shadow_report_entry` with Brain task Ticket, `public_report_escalation` (always a moderation case), `ticket_scam_check`, member lookup and the same "would ban" rule.
+- Screenshot account: the reported-screenshot verifier prompt asks for `reported_account` (user_id, username, display_name); `parse_screenshot_account` reads it. IDs and usernames go through the normal member lookup; a display name alone is listed but never a ban target.
+- Shadow only: entry goes to 1374364800817303632 with a source link, verdict, reply candidate, reported account and ban decision. `moderation.ticket_screenshot_review` stays default false.
+- Checks: `cargo-slot test -p dl-community --lib` 336 passed, 4 failed (ionos DB baseline: privacy, reaction_roles, two scrim_signup). `-p dl-moderation --lib` 68 passed. `cargo-slot check -p dl-bot --tests` exit 0. Clippy on dl-community with tests and examples: only baseline warnings (`double_must_use`, unused `evidence_server` that is also on origin/main).
+- Replay (no Discord send, live Brain on 127.0.0.1:8788, switch off, placeholder image URLs): `cargo-slot build -p dl-community --example public_report_replay`, then run the binary with `DISCORD_BRAIN_PROBE_ENDPOINT`, `DISCORD_BRAIN_PROBE_TIMEOUT_MS` and the token from Infisical (`DISCORD_BRAIN_CLIENT_TOKEN`) on a JSON file with guild_id, channel_id, message_id, author_id and messages[{content, images[{url,size}]}]. Result for 1570393213364076626 plus 1570396144607957032: one entry, `Gemeldeter Account: keiner erkannt (im Text kein Konto genannt, Screenshot nicht ausgelesen, weil die Bildprüfung nicht gelaufen ist)`, `kein Bann (Bildprüfung deaktiviert)`.
+
+Open points of the amendment:
+1. Reply tone not met. The Brain task Ticket answers in its bot voice ("Das Team sieht sich den Fall an ... Welchen genauen Namen oder welche ID ...") and asks for a screenshot that was already attached. A casual human-mod reply that knows the outcome needs its own Brain task with an answer-shape rule in the Deadlock-Brain repo plus a rev bump; out of scope for this branch.
+2. Message 1570396144607957032 came 11.5 minutes after the trigger, without ping or scam word. The live window (20 s quiet, 90 s max) does not collect it; only the replay merges both. Decide whether a longer window is wanted.
+3. Screenshot account extraction is only tested with mocks. A real vision run needs the switch on, which sends member images to the moderation vision provider: user approval required.
+4. The message-only reword with lease update from the DECISION UPDATE was not done; this worker's brief forbids any history rewrite.
 
 ## Next steps
 1. User decision on the five published commits that fail the gate hook's Ursache check (GATE-RETRO.md, options a/b/c).
