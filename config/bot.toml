@@ -38,6 +38,7 @@ concierge_proactive = true
 concierge_pate_panel_channel_id = 1562083323507900517
 concierge_pate_help_channel_id = 1426220702054355077
 supporter_request_timeout_ms = 8000
+supporter_twitch_api_base = "http://127.0.0.1:8769"
 
 [storage]
 # Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.

@@ -606,6 +606,27 @@ mod tests {
     }
 
     #[test]
+    fn tokens_kommen_aus_genau_einer_quelle() {
+        let config = SupporterConfig::from_lookup(|key| match key {
+            "MASTER_BROKER_TOKEN" => Some("broker".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.twitch_token, None);
+        assert_eq!(config.steam_token.as_deref(), Some("broker"));
+        assert!(!config.role_grant_apply);
+        let config = SupporterConfig::from_lookup(|key| match key {
+            "MASTER_BROKER_TOKEN" => Some("broker".to_string()),
+            "TWITCH_INTERNAL_API_TOKEN" => Some("internal".to_string()),
+            "DL_SUPPORTER_ROLE_GRANT_APPLY" => Some("1".to_string()),
+            _ => None,
+        });
+        assert_eq!(config.twitch_token.as_deref(), Some("internal"));
+        assert_eq!(config.steam_token.as_deref(), Some("internal"));
+        assert!(config.role_grant_apply);
+        assert!(!config.role_sync_apply);
+    }
+
+    #[test]
     fn antworten_der_dienste_werden_streng_gelesen() {
         let ok = json!({ "url": "https://checkout.stripe.com/c/pay/x" });
         assert_eq!(

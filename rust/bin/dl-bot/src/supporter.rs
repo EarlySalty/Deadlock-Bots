@@ -25,6 +25,7 @@ const REVOKE_REASON: &str = "Server-Unterstützer: keine aktive Unterstützung m
 
 #[derive(Clone, Debug)]
 pub struct SupporterConfig {
+    pub role_grant_apply: bool,
     pub role_sync_apply: bool,
     pub max_revokes: usize,
     pub interval: Duration,
@@ -57,6 +58,7 @@ impl SupporterConfig {
                 .filter(|value| range.contains(value))
         };
         Self {
+            role_grant_apply: flag("DL_SUPPORTER_ROLE_GRANT_APPLY"),
             role_sync_apply: flag("DL_SUPPORTER_ROLE_SYNC_APPLY"),
             max_revokes: bounded(
                 "DL_SUPPORTER_ROLE_SYNC_MAX_REVOKES",
@@ -83,13 +85,9 @@ impl SupporterConfig {
             steam_api_base: get("DL_SUPPORTER_STEAM_API_BASE")
                 .or_else(|| get("STEAM_BOT_API_URL"))
                 .unwrap_or_else(|| dl_bridges::steam::DEFAULT_API_URL.to_string()),
-            steam_token: get("TWITCH_INTERNAL_API_TOKEN")
-                .or_else(|| get("MASTER_BROKER_TOKEN"))
-                .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN")),
+            steam_token: dl_bridges::steam::token_from_lookup(&lookup),
             twitch_api_base: get("DL_SUPPORTER_TWITCH_API_BASE"),
-            twitch_token: get("MASTER_BROKER_TOKEN")
-                .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"))
-                .or_else(|| get("TWITCH_INTERNAL_API_TOKEN")),
+            twitch_token: get("TWITCH_INTERNAL_API_TOKEN"),
         }
     }
 }
@@ -195,7 +193,8 @@ impl SupporterSync {
         }
         let plan = roles::plan_roles(&members, &active, self.config.max_revokes);
         tracing::info!(
-            apply = self.config.role_sync_apply,
+            grant_apply = self.config.role_grant_apply,
+            revoke_apply = self.config.role_sync_apply,
             boosters = boosters.len(),
             boost_rows_removed = boost.removed,
             would_import = if import_done { 0 } else { holders.len() },
@@ -207,16 +206,19 @@ impl SupporterSync {
             revoke_ids = ?plan.revokes,
             "Server-Unterstützer: Rollenabgleich"
         );
+        if self.config.role_grant_apply {
+            self.apply_grants(&plan.grants).await;
+        }
         if self.config.role_sync_apply {
-            self.apply_plan(&plan).await;
+            self.apply_revokes(&plan.revokes).await;
         }
         Ok(())
     }
 
-    async fn apply_plan(&self, plan: &roles::RolePlan) {
+    async fn apply_grants(&self, grants: &[u64]) {
         let guild = GuildId::new(self.guild_id);
         let role = RoleId::new(SUPPORTER_ROLE_ID);
-        for user_id in &plan.grants {
+        for user_id in grants {
             if let Err(error) = self
                 .http
                 .add_member_role(guild, UserId::new(*user_id), role, Some(GRANT_REASON))
@@ -225,7 +227,12 @@ impl SupporterSync {
                 tracing::warn!(user_id, %error, "Server-Unterstützer: Rolle nicht vergeben");
             }
         }
-        for user_id in &plan.revokes {
+    }
+
+    async fn apply_revokes(&self, revokes: &[u64]) {
+        let guild = GuildId::new(self.guild_id);
+        let role = RoleId::new(SUPPORTER_ROLE_ID);
+        for user_id in revokes {
             if let Err(error) = self
                 .http
                 .remove_member_role(guild, UserId::new(*user_id), role, Some(REVOKE_REASON))

@@ -100,6 +100,18 @@ const ADMIN_COMMANDS: [&str; 6] = [
 
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
+pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    trimmed(&lookup, "TWITCH_INTERNAL_API_TOKEN")
+        .or_else(|| trimmed(&lookup, "MASTER_BROKER_TOKEN"))
+        .or_else(|| trimmed(&lookup, "MAIN_BOT_INTERNAL_TOKEN"))
+}
+
+fn trimmed(lookup: impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+    lookup(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 pub struct SteamBotClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: String,
@@ -107,19 +119,10 @@ pub struct SteamBotClient {
 }
 
 impl SteamBotClient {
-    /// ENVs wie das Original: STEAM_BOT_API_URL + Token-Kette
-    /// TWITCH_INTERNAL_API_TOKEN → MASTER_BROKER_TOKEN → MAIN_BOT_INTERNAL_TOKEN.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Arc<Self> {
-        let get = |key: &str| {
-            lookup(key)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let base_url = get("STEAM_BOT_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
-        let token = get("TWITCH_INTERNAL_API_TOKEN")
-            .or_else(|| get("MASTER_BROKER_TOKEN"))
-            .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"));
-        Self::new(base_url, token)
+        let base_url =
+            trimmed(&lookup, "STEAM_BOT_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        Self::new(base_url, token_from_lookup(&lookup))
     }
 
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Arc<Self> {
