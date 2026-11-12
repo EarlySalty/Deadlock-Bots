@@ -1,6 +1,6 @@
-# Support panel dry-run, funding 15 € of 50 €
+# Support panel dry-run, funding 0 € of 250 €
 
-Rendered by `build_support_publish_output` with `dry_run = true`, empty KV, payload format `3`. Nothing was posted to Discord. Buttons are shown as label and custom_id.
+Rendered by `build_support_publish_output` with `dry_run = true`, empty KV, payload format `3`, tiers 5/10/20/50 €, Steam Plus 3 €, Twitch off. Nothing was posted to Discord. Buttons are shown as label and custom_id.
 
 ## Card 1 (support), action planned_post
 
@@ -22,9 +22,9 @@ Hier steht, wie du den Server und die Projekte unterstützen kannst und was du d
 
 ## Steam Bot
 
-Der Steam Bot wird zur Funktion für Unterstützer. Für dich holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.
+Als Nächstes wird der Steam Bot zur Funktion für Unterstützer. Dann holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.
 
-Die Umstellung läuft gerade. Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.
+Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.
 
 ## Card 2 (support:vorteile), action planned_post
 
@@ -51,21 +51,21 @@ Bei regulären Turnieren und beim Coaching bringt Unterstützung keinen Vorteil.
 
 ## Monatsziel
 
-`██████░░░░░░░░░░░░░░` 30 %
-**15 € von 50 € im Monat**
+`░░░░░░░░░░░░░░░░░░░░` 0 %
+**0 € von 250 € im Monat**
 -# Hier zählen die laufenden Abos und die einmaligen Beträge aus diesem Monat.
 
 ---
 
 ## So kannst du unterstützen
 
-**Monatlich über Stripe.** 5 €, 10 € oder 20 € im Monat, 5 € sind das Minimum. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.
+**Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.
 
 **Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.
 
 **Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
 
-**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.
+**Steam Plus.** Plus beim Steam Bot kostet 3 € im Monat und zählt auch als Unterstützung. Du bekommst damit dieselbe Rolle, und dein Abo geht ins Monatsziel ein.
 
 ---
 
@@ -73,4 +73,4 @@ Danke, dass du den Server und die Projekte mitträgst ❤️
 
 ---
 
-[Supporter werden] (support:become) | [Einmalig unterstützen] (support:tip) | [Abo verwalten oder kündigen] (support:manage) | [Twitch verbinden] (support:twitch)
+[Supporter werden] (support:become) | [Einmalig unterstützen] (support:tip) | [Abo verwalten oder kündigen] (support:manage)

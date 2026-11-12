@@ -12,6 +12,18 @@ pub const SUPPORTER_REQUEST_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=60_000;
 pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
 pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
 pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> = 100..=10_000_000;
+pub const SUPPORTER_TIER_MIN_EUR: u64 = 5;
+pub const SUPPORTER_MAX_TIERS: usize = 5;
+pub const SUPPORTER_PLUS_MONTHLY_CENTS_RANGE: RangeInclusive<i64> = 1..=i32::MAX as i64;
+
+pub fn supporter_tiers_valid(tiers: &[u64]) -> bool {
+    !tiers.is_empty()
+        && tiers.len() <= SUPPORTER_MAX_TIERS
+        && tiers
+            .iter()
+            .all(|eur| *eur >= SUPPORTER_TIER_MIN_EUR && u32::try_from(*eur).is_ok())
+        && tiers.windows(2).all(|pair| pair[0] < pair[1])
+}
 
 trait LookupValue {
     fn lookup_value(&self) -> String;
@@ -174,6 +186,8 @@ section!(CommunityOptions {
     supporter_steam_api_base: String => "DL_SUPPORTER_STEAM_API_BASE",
     supporter_twitch_api_base: String => "DL_SUPPORTER_TWITCH_API_BASE",
     supporter_request_timeout_ms: u64 => "DL_SUPPORTER_REQUEST_TIMEOUT_MS",
+    supporter_tiers_eur: Vec<u64> => "DL_SUPPORTER_TIERS_EUR",
+    supporter_plus_monthly_cents: i64 => "DL_SUPPORTER_PLUS_MONTHLY_CENTS",
 });
 
 section!(ModerationOptions {
@@ -311,6 +325,15 @@ impl RuntimeConfig {
                 .community
                 .supporter_funding_goal_cents
                 .is_some_and(|cents| !SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(&cents))
+            || self
+                .community
+                .supporter_tiers_eur
+                .as_deref()
+                .is_some_and(|tiers| !supporter_tiers_valid(tiers))
+            || self
+                .community
+                .supporter_plus_monthly_cents
+                .is_some_and(|cents| !SUPPORTER_PLUS_MONTHLY_CENTS_RANGE.contains(&cents))
             || (self.ai.brain_command_enabled == Some(true)
                 && self
                     .ai
@@ -871,8 +894,11 @@ mod supporter_bound_tests {
             "supporter_sync_interval_seconds=300",
             "supporter_role_sync_max_revokes=0",
             "supporter_role_sync_max_revokes=100",
-            "supporter_funding_goal_cents=5000",
+            "supporter_funding_goal_cents=25000",
             "supporter_twitch_api_base='http://127.0.0.1:8765'",
+            "supporter_tiers_eur=[5, 10, 20, 50]",
+            "supporter_tiers_eur=[5, 10, 20, 50, 100]",
+            "supporter_plus_monthly_cents=300",
         ] {
             assert!(parse(accepted), "{accepted}");
         }
@@ -886,6 +912,16 @@ mod supporter_bound_tests {
             "supporter_funding_goal_cents=10000001",
             "supporter_steam_api_base='https://example.org'",
             "supporter_twitch_api_base=''",
+            "supporter_tiers_eur=[]",
+            "supporter_tiers_eur=[4, 10]",
+            "supporter_tiers_eur=[10, 5]",
+            "supporter_tiers_eur=[5, 5]",
+            "supporter_tiers_eur=[0]",
+            "supporter_tiers_eur=[5, 10, 20, 50, 100, 200]",
+            "supporter_tiers_eur=[5, 4294967296]",
+            "supporter_plus_monthly_cents=0",
+            "supporter_plus_monthly_cents=-300",
+            "supporter_plus_monthly_cents=2147483648",
         ] {
             assert!(!parse(rejected), "{rejected}");
         }

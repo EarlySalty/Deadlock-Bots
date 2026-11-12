@@ -653,8 +653,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
     let supporter_config = supporter::SupporterConfig::from_lookup(env);
+    supporter_config.log_effective();
     let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config);
-    supporter::register(&mut router, supporter_links.clone());
+    supporter::register(
+        &mut router,
+        supporter_links.clone(),
+        &supporter_config.tiers_eur,
+    );
     serversync_concrete
         .set_supporter_funding(supporter_links)
         .await;

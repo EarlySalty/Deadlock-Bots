@@ -2174,6 +2174,15 @@ impl ServerSyncService {
         parse_discord_id("Message-ID", &written.id)
     }
 
+    async fn support_panel_options(&self) -> support_publish::SupportPanelOptions {
+        self.supporter_funding
+            .read()
+            .await
+            .as_ref()
+            .map(|source| source.panel_options())
+            .unwrap_or_default()
+    }
+
     async fn support_funding_for_apply(&self) -> (support_publish::SupportFunding, Option<String>) {
         let source = self.supporter_funding.read().await.clone();
         let fetched = match &source {
@@ -2183,20 +2192,28 @@ impl ServerSyncService {
         match fetched {
             Ok(funding) => (funding, None),
             Err(error) => {
-                let last_live = self
+                let (last_live, kv_error) = match self
                     .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
                     .await
-                    .ok()
-                    .flatten()
-                    .and_then(|raw| support_publish::SupportFunding::from_kv(&raw));
+                {
+                    Ok(raw) => (
+                        raw.and_then(|raw| support_publish::SupportFunding::from_kv(&raw)),
+                        None,
+                    ),
+                    Err(kv_error) => (None, Some(kv_error.to_string())),
+                };
+                let error = match kv_error {
+                    Some(kv_error) => format!("{error}; letzter Stand nicht lesbar: {kv_error}"),
+                    None => error,
+                };
                 let goal_cents = source
                     .as_ref()
                     .map(|source| source.goal_cents())
                     .unwrap_or(support_publish::SUPPORT_FUNDING_GOAL_CENTS_DEFAULT);
-                let funding = last_live.unwrap_or(support_publish::SupportFunding {
-                    raised_cents: 0,
+                let funding = support_publish::SupportFunding {
+                    raised_cents: last_live.map_or(0, |live| live.raised_cents),
                     goal_cents,
-                });
+                };
                 (
                     funding,
                     Some(format!(
@@ -2216,6 +2233,7 @@ impl ServerSyncService {
             return Ok(FundingRefresh::Skipped(missing));
         }
         let funding = source.funding().await.map_err(ServerSyncError::internal)?;
+        let options = source.panel_options();
         let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_payload_format = self
             .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_FORMAT_KEY)
@@ -2254,6 +2272,7 @@ impl ServerSyncService {
             &self.rang_guide_repo_root,
             &stored,
             live,
+            &options,
             true,
         )
         .map_err(ServerSyncError::internal)?;
@@ -2266,6 +2285,7 @@ impl ServerSyncService {
             &self.rang_guide_repo_root,
             &stored,
             funding,
+            &options,
             true,
         )
         .map_err(ServerSyncError::internal)?;
@@ -4234,6 +4254,7 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn support_apply(&self, confirm: bool) -> ServerSyncResult<SupportPublishOutput> {
         let (funding, funding_warning) = self.support_funding_for_apply().await;
+        let options = self.support_panel_options().await;
         let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
@@ -4252,6 +4273,7 @@ impl ServerSyncOps for ServerSyncService {
                 payload_hash: stored_payload_hash.as_deref(),
             },
             funding,
+            &options,
             !confirm,
         )
         .map_err(ServerSyncError::bad_request)?;
@@ -9688,6 +9710,7 @@ title = "**📜 Regelwerk · Deutsche Deadlock Community**"
                 payload_hash,
             },
             support_publish::SupportFunding::default(),
+            &support_publish::SupportPanelOptions::default(),
             dry_run,
         )
     }

@@ -24,6 +24,15 @@ impl fmt::Display for StoreError {
     }
 }
 
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Db(error) => Some(error),
+            Self::Missing | Self::Discord(_) => None,
+        }
+    }
+}
+
 impl From<sqlx::Error> for StoreError {
     fn from(error: sqlx::Error) -> Self {
         let missing = error
@@ -122,4 +131,38 @@ fn to_db_ids(ids: &[u64]) -> Vec<i64> {
         .filter_map(|id| i64::try_from(*id).ok())
         .filter(|id| *id > 0)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[tokio::test]
+    async fn jede_aktive_quelle_zaehlt_auch_plus_unter_fuenf_euro() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO core.supporter_sources
+                 (discord_id, source, source_ref, monthly_cents, valid_until)
+             VALUES (11, 'stripe', 'sub_plus', 300, NULL),
+                    (12, 'stripe', 'tip:pi_old', 500, now() - interval '1 day'),
+                    (13, 'twitch_sub', 'earlysalty', NULL, now() + interval '1 day')",
+        )
+        .execute(pool)
+        .await?;
+        assert_eq!(sync_boost_rows(pool, &[14, 0]).await?.removed, 0);
+        let expected: HashSet<u64> = [11, 13, 14].into_iter().collect();
+        assert_eq!(active_supporters(pool).await?, expected);
+        assert_eq!(sync_boost_rows(pool, &[]).await?.removed, 1);
+        assert!(!active_supporters(pool).await?.contains(&14));
+        assert!(!manual_import_done(pool).await?);
+        assert_eq!(import_manual(pool, &[15, 11]).await?, 2);
+        assert_eq!(import_manual(pool, &[15]).await?, 0);
+        assert!(manual_import_done(pool).await?);
+        let expected: HashSet<u64> = [11, 13, 15].into_iter().collect();
+        assert_eq!(active_supporters(pool).await?, expected);
+        Ok(())
+    }
 }

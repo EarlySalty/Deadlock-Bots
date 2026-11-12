@@ -9,9 +9,9 @@ perks = """## Was du jetzt bekommst
 **Die Rolle Server Unterstützer.** Damit sieht jeder, dass du den Server mitträgst."""
 steam = """## Steam Bot
 
-Der Steam Bot wird zur Funktion für Unterstützer. Für dich holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.
+Als Nächstes wird der Steam Bot zur Funktion für Unterstützer. Dann holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.
 
-Die Umstellung läuft gerade. Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab."""
+Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab."""
 planned = """## Was noch kommt
 
 Das ist geplant und noch nicht fertig:
@@ -34,13 +34,13 @@ funding = """## Monatsziel
 -# Hier zählen die laufenden Abos und die einmaligen Beträge aus diesem Monat."""
 pay = """## So kannst du unterstützen
 
-**Monatlich über Stripe.** 5 €, 10 € oder 20 € im Monat, 5 € sind das Minimum. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.
+**Monatlich über Stripe.** {stufen} im Monat. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.
 
 **Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.
 
-**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
-
-**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."""
+**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch."""
+plus = "**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung. Du bekommst damit dieselbe Rolle, und dein Abo geht ins Monatsziel ein."
+twitch = "**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."
 thanks = "Danke, dass du den Server und die Projekte mitträgst ❤️"
 
 [buttons]

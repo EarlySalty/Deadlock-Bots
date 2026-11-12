@@ -9,12 +9,16 @@ use serenity::model::id::{GuildId, RoleId, UserId};
 use sqlx::PgPool;
 
 use dl_core::runtime_config::{
-    SUPPORTER_FUNDING_GOAL_CENTS_RANGE, SUPPORTER_MAX_REVOKES_RANGE,
-    SUPPORTER_REQUEST_TIMEOUT_MS_RANGE, SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
+    supporter_tiers_valid, SUPPORTER_FUNDING_GOAL_CENTS_RANGE, SUPPORTER_MAX_REVOKES_RANGE,
+    SUPPORTER_PLUS_MONTHLY_CENTS_RANGE, SUPPORTER_REQUEST_TIMEOUT_MS_RANGE,
+    SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
 };
 
-use crate::serversync::support_publish::{SupportFunding, SUPPORT_FUNDING_GOAL_CENTS_DEFAULT};
-use crate::serversync::ServerSyncService;
+use crate::serversync::support_publish::{
+    SupportFunding, SupportPanelOptions, SUPPORT_FUNDING_GOAL_CENTS_DEFAULT,
+    SUPPORT_TIERS_EUR_DEFAULT,
+};
+use crate::serversync::{FundingRefresh, ServerSyncService};
 
 pub const SUPPORTER_ROLE_ID: u64 = 1_483_135_384_098_570_363;
 pub const BOOSTER_ROLE_ID: u64 = 1_414_182_925_460_836_443;
@@ -35,6 +39,23 @@ pub struct SupporterConfig {
     pub steam_token: Option<String>,
     pub twitch_api_base: Option<String>,
     pub twitch_token: Option<String>,
+    pub tiers_eur: Vec<u32>,
+    pub plus_monthly_cents: Option<i64>,
+    pub invalid_keys: Vec<&'static str>,
+}
+
+fn parse_tiers(raw: &str) -> Option<Vec<u32>> {
+    let tiers: Vec<u64> = raw
+        .split(',')
+        .map(|part| part.trim().parse::<u64>().ok())
+        .collect::<Option<_>>()?;
+    if !supporter_tiers_valid(&tiers) {
+        return None;
+    }
+    tiers
+        .into_iter()
+        .map(|eur| u32::try_from(eur).ok())
+        .collect()
 }
 
 impl SupporterConfig {
@@ -44,6 +65,12 @@ impl SupporterConfig {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         };
+        let invalid = std::cell::RefCell::new(Vec::new());
+        let checked = |key: &'static str, valid: bool| {
+            if !valid {
+                invalid.borrow_mut().push(key);
+            }
+        };
         let flag = |key: &str| {
             get(key).is_some_and(|value| {
                 matches!(
@@ -52,12 +79,37 @@ impl SupporterConfig {
                 )
             })
         };
-        let bounded = |key: &str, range: &std::ops::RangeInclusive<u64>| {
-            get(key)
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| range.contains(value))
+        let bounded = |key: &'static str, range: &std::ops::RangeInclusive<u64>| {
+            let raw = get(key)?;
+            let value = raw
+                .parse::<u64>()
+                .ok()
+                .filter(|value| range.contains(value));
+            checked(key, value.is_some());
+            value
         };
-        Self {
+        let goal_cents = get("DL_SUPPORTER_FUNDING_GOAL_CENTS").and_then(|raw| {
+            let value = raw
+                .parse::<i64>()
+                .ok()
+                .filter(|value| SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(value));
+            checked("DL_SUPPORTER_FUNDING_GOAL_CENTS", value.is_some());
+            value
+        });
+        let tiers_eur = get("DL_SUPPORTER_TIERS_EUR").and_then(|raw| {
+            let value = parse_tiers(&raw);
+            checked("DL_SUPPORTER_TIERS_EUR", value.is_some());
+            value
+        });
+        let plus_monthly_cents = get("DL_SUPPORTER_PLUS_MONTHLY_CENTS").and_then(|raw| {
+            let value = raw
+                .parse::<i64>()
+                .ok()
+                .filter(|value| SUPPORTER_PLUS_MONTHLY_CENTS_RANGE.contains(value));
+            checked("DL_SUPPORTER_PLUS_MONTHLY_CENTS", value.is_some());
+            value
+        });
+        let mut config = Self {
             role_grant_apply: flag("DL_SUPPORTER_ROLE_GRANT_APPLY"),
             role_sync_apply: flag("DL_SUPPORTER_ROLE_SYNC_APPLY"),
             max_revokes: bounded(
@@ -78,16 +130,42 @@ impl SupporterConfig {
                 &SUPPORTER_REQUEST_TIMEOUT_MS_RANGE,
             )
             .map(Duration::from_millis),
-            goal_cents: get("DL_SUPPORTER_FUNDING_GOAL_CENTS")
-                .and_then(|value| value.parse::<i64>().ok())
-                .filter(|value| SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(value))
-                .unwrap_or(SUPPORT_FUNDING_GOAL_CENTS_DEFAULT),
+            goal_cents: goal_cents.unwrap_or(SUPPORT_FUNDING_GOAL_CENTS_DEFAULT),
             steam_api_base: get("DL_SUPPORTER_STEAM_API_BASE")
                 .or_else(|| get("STEAM_BOT_API_URL"))
                 .unwrap_or_else(|| dl_bridges::steam::DEFAULT_API_URL.to_string()),
             steam_token: dl_bridges::steam::token_from_lookup(&lookup),
             twitch_api_base: get("DL_SUPPORTER_TWITCH_API_BASE"),
             twitch_token: get("TWITCH_INTERNAL_API_TOKEN"),
+            tiers_eur: tiers_eur.unwrap_or_else(|| SUPPORT_TIERS_EUR_DEFAULT.to_vec()),
+            plus_monthly_cents,
+            invalid_keys: Vec::new(),
+        };
+        config.invalid_keys = invalid.into_inner();
+        config
+    }
+
+    pub fn panel_options(&self) -> SupportPanelOptions {
+        SupportPanelOptions {
+            tiers_eur: self.tiers_eur.clone(),
+            plus_monthly_cents: self.plus_monthly_cents,
+            twitch: self.twitch_api_base.is_some() && self.twitch_token.is_some(),
+        }
+    }
+
+    pub fn log_effective(&self) {
+        tracing::info!(
+            goal_cents = self.goal_cents,
+            tiers_eur = ?self.tiers_eur,
+            plus_monthly_cents = ?self.plus_monthly_cents,
+            twitch = self.panel_options().twitch,
+            "Server-Unterstützer: Panel-Werte"
+        );
+        for key in &self.invalid_keys {
+            tracing::error!(
+                key,
+                "Server-Unterstützer: Wert ungültig, Standard wird verwendet"
+            );
         }
     }
 }
@@ -103,6 +181,17 @@ pub trait FundingSource: Send + Sync {
     fn goal_cents(&self) -> i64 {
         SUPPORT_FUNDING_GOAL_CENTS_DEFAULT
     }
+
+    fn panel_options(&self) -> SupportPanelOptions {
+        SupportPanelOptions::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefreshState {
+    Fine,
+    Skipped(&'static str),
+    Failed,
 }
 
 pub struct SupporterSync {
@@ -139,6 +228,7 @@ impl SupporterSync {
                 "Server-Unterstützer: Abgleich gestartet"
             );
             let mut table_missing_logged = false;
+            let mut refresh_state = RefreshState::Fine;
             let mut ticker = tokio::time::interval(self.config.interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -157,7 +247,7 @@ impl SupporterSync {
                         tracing::warn!(%error, "Server-Unterstützer: Abgleich übersprungen");
                     }
                 }
-                self.refresh_funding().await;
+                refresh_state = self.refresh_funding(refresh_state).await;
             }
         })
     }
@@ -243,16 +333,39 @@ impl SupporterSync {
         }
     }
 
-    async fn refresh_funding(&self) {
-        match self.serversync.support_funding_refresh().await {
-            Ok(outcome) => tracing::debug!(?outcome, "Server-Unterstützer: Monatsziel geprüft"),
+    async fn refresh_funding(&self, previous: RefreshState) -> RefreshState {
+        let outcome = self.serversync.support_funding_refresh().await;
+        let next = match &outcome {
+            Ok(FundingRefresh::Skipped(reason)) => RefreshState::Skipped(reason),
+            Ok(_) => RefreshState::Fine,
+            Err(_) => RefreshState::Failed,
+        };
+        let changed = next != previous;
+        match outcome {
+            Ok(FundingRefresh::Skipped(reason)) if changed => {
+                tracing::warn!(reason, "Server-Unterstützer: Monatsziel nicht aktualisiert")
+            }
+            Err(error) if changed => {
+                tracing::warn!(%error, "Server-Unterstützer: Monatsziel nicht abrufbar")
+            }
+            Ok(outcome) => {
+                if changed {
+                    tracing::info!(?outcome, "Server-Unterstützer: Monatsziel wieder aktuell");
+                }
+                tracing::debug!(?outcome, "Server-Unterstützer: Monatsziel geprüft");
+            }
             Err(error) => {
-                tracing::warn!(%error, "Server-Unterstützer: Monatsziel nicht aktualisiert")
+                tracing::debug!(%error, "Server-Unterstützer: Monatsziel weiter nicht abrufbar")
             }
         }
+        next
     }
 }
 
-pub fn register(router: &mut dl_discord::InteractionRouter, links: Arc<dyn links::SupporterLinks>) {
-    links::register(router, links);
+pub fn register(
+    router: &mut dl_discord::InteractionRouter,
+    links: Arc<dyn links::SupporterLinks>,
+    tiers_eur: &[u32],
+) {
+    links::register(router, links, tiers_eur);
 }

@@ -58,7 +58,9 @@ pub const SUPPORT_MARKER_COMPONENT_IDS: &[u64] = &[
 pub const SUPPORT_TEXT_CHAR_BUDGET: usize = 3500;
 pub const SUPPORT_COMPONENT_BUDGET: usize = 35;
 pub const SUPPORT_ATTACHMENT_BUDGET: usize = 9;
-pub const SUPPORT_FUNDING_GOAL_CENTS_DEFAULT: i64 = 5000;
+pub const SUPPORT_FUNDING_GOAL_CENTS_DEFAULT: i64 = 25_000;
+pub const SUPPORT_TIERS_EUR_DEFAULT: [u32; 4] = [5, 10, 20, 50];
+pub const SUPPORT_TIER_BUTTON_PREFIX: &str = "support:tier:";
 const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 const SUPPORT_MESSAGE_COUNT: usize = 3;
 const FUNDING_BAR_SEGMENTS: i64 = 20;
@@ -77,9 +79,9 @@ pub const SUPPORT_PERKS: &str = "\
 pub const SUPPORT_STEAM: &str = "\
 ## Steam Bot\n\
 \n\
-Der Steam Bot wird zur Funktion für Unterstützer. Für dich holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.\n\
+Als Nächstes wird der Steam Bot zur Funktion für Unterstützer. Dann holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.\n\
 \n\
-Die Umstellung läuft gerade. Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.";
+Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.";
 pub const SUPPORT_PLANNED: &str = "\
 ## Was noch kommt\n\
 \n\
@@ -106,12 +108,14 @@ pub const SUPPORT_FUNDING: &str = "\
 pub const SUPPORT_PAY: &str = "\
 ## So kannst du unterstützen\n\
 \n\
-**Monatlich über Stripe.** 5 €, 10 € oder 20 € im Monat, 5 € sind das Minimum. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.\n\
+**Monatlich über Stripe.** {stufen} im Monat. Die Rolle kommt automatisch, und kündigen kannst du jederzeit selbst über den Button unten.\n\
 \n\
 **Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.\n\
 \n\
-**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.\n\
-\n\
+**Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.";
+pub const SUPPORT_PLUS: &str = "\
+**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung. Du bekommst damit dieselbe Rolle, und dein Abo geht ins Monatsziel ein.";
+pub const SUPPORT_TWITCH: &str = "\
 **Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.";
 pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst ❤️";
 pub const SUPPORT_BECOME_BUTTON_LABEL: &str = "Supporter werden";
@@ -131,6 +135,39 @@ impl Default for SupportFunding {
             raised_cents: 0,
             goal_cents: SUPPORT_FUNDING_GOAL_CENTS_DEFAULT,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportPanelOptions {
+    pub tiers_eur: Vec<u32>,
+    pub plus_monthly_cents: Option<i64>,
+    pub twitch: bool,
+}
+
+impl Default for SupportPanelOptions {
+    fn default() -> Self {
+        Self {
+            tiers_eur: SUPPORT_TIERS_EUR_DEFAULT.to_vec(),
+            plus_monthly_cents: None,
+            twitch: false,
+        }
+    }
+}
+
+pub fn tier_button_id(eur: u32) -> String {
+    format!("{SUPPORT_TIER_BUTTON_PREFIX}{eur}")
+}
+
+pub fn format_tier_list(tiers_eur: &[u32]) -> String {
+    let labels: Vec<String> = tiers_eur
+        .iter()
+        .map(|eur| format_euro(i64::from(*eur) * 100))
+        .collect();
+    match labels.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} oder {last}", rest.join(", ")),
     }
 }
 
@@ -239,6 +276,8 @@ struct ResolvedSupportTexts {
     free: String,
     funding: String,
     pay: String,
+    plus: String,
+    twitch: String,
     thanks: String,
 }
 
@@ -271,6 +310,8 @@ struct SupportBodyTextsToml {
     free: Option<String>,
     funding: Option<String>,
     pay: Option<String>,
+    plus: Option<String>,
+    twitch: Option<String>,
     thanks: Option<String>,
     title: Option<String>,
     boost: Option<String>,
@@ -375,11 +416,12 @@ pub fn build_support_publish_output(
     repo_root: &Path,
     stored: &SupportStoredState<'_>,
     funding: SupportFunding,
+    options: &SupportPanelOptions,
     dry_run: bool,
 ) -> Result<SupportPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_support_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = support_messages(repo_root, &config, funding, &mut warnings);
+    let built_messages = support_messages(repo_root, &config, funding, options, &mut warnings);
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -624,6 +666,8 @@ impl ResolvedSupportConfig {
                 free: SUPPORT_FREE.to_string(),
                 funding: SUPPORT_FUNDING.to_string(),
                 pay: SUPPORT_PAY.to_string(),
+                plus: SUPPORT_PLUS.to_string(),
+                twitch: SUPPORT_TWITCH.to_string(),
                 thanks: SUPPORT_THANKS.to_string(),
             },
             buttons: ResolvedSupportButtons {
@@ -648,6 +692,8 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.texts.free, file.texts.free);
         apply_optional(&mut self.texts.funding, file.texts.funding);
         apply_optional(&mut self.texts.pay, file.texts.pay);
+        apply_optional(&mut self.texts.plus, file.texts.plus);
+        apply_optional(&mut self.texts.twitch, file.texts.twitch);
         apply_optional(&mut self.texts.thanks, file.texts.thanks);
         apply_optional(&mut self.buttons.join, file.buttons.join);
         apply_optional(&mut self.buttons.tip, file.buttons.tip);
@@ -658,6 +704,16 @@ impl ResolvedSupportConfig {
                 "Support-Textdatei enthält alte Felder (Ko-fi, Warum, KI-Abos, Stripe-Link oder ältere Abschnitte). Die werden nicht mehr angezeigt."
                     .to_string(),
             );
+        }
+        for (text, placeholder, field) in [
+            (&self.texts.pay, "{stufen}", "pay"),
+            (&self.texts.plus, "{plus_preis}", "plus"),
+        ] {
+            if !text.contains(placeholder) {
+                warnings.push(format!(
+                    "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {placeholder}; der Betrag fehlt dann im Panel."
+                ));
+            }
         }
         if !self.texts.funding.contains("{stand}") {
             warnings.push(
@@ -679,6 +735,7 @@ fn support_messages(
     repo_root: &Path,
     config: &ResolvedSupportConfig,
     funding: SupportFunding,
+    options: &SupportPanelOptions,
     warnings: &mut Vec<String>,
 ) -> Vec<SupportBuiltMessage> {
     let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, warnings);
@@ -693,7 +750,7 @@ fn support_messages(
             ]),
             Vec::new(),
         ),
-        pay_message(config, funding),
+        pay_message(config, funding, options),
     ];
     debug_assert_eq!(messages.len(), SUPPORT_MESSAGE_COUNT);
     messages
@@ -729,45 +786,64 @@ fn main_message(
     )
 }
 
-fn pay_message(config: &ResolvedSupportConfig, funding: SupportFunding) -> SupportBuiltMessage {
+fn render_pay_text(texts: &ResolvedSupportTexts, options: &SupportPanelOptions) -> String {
+    let mut parts = vec![texts
+        .pay
+        .replace("{stufen}", &format_tier_list(&options.tiers_eur))];
+    if let Some(cents) = options.plus_monthly_cents {
+        parts.push(texts.plus.replace("{plus_preis}", &format_euro(cents)));
+    }
+    if options.twitch {
+        parts.push(texts.twitch.clone());
+    }
+    parts.retain(|part| !part.trim().is_empty());
+    parts.join("\n\n")
+}
+
+fn pay_message(
+    config: &ResolvedSupportConfig,
+    funding: SupportFunding,
+    options: &SupportPanelOptions,
+) -> SupportBuiltMessage {
     let funding_text = render_funding_text(&config.texts.funding, funding);
+    let pay_text = render_pay_text(&config.texts, options);
     let mut children = section_children(&[
         (SUPPORT_COMPONENT_ID_FUNDING, &funding_text),
-        (SUPPORT_COMPONENT_ID_PAY_BODY, &config.texts.pay),
+        (SUPPORT_COMPONENT_ID_PAY_BODY, &pay_text),
         (SUPPORT_COMPONENT_ID_PAY_THANKS, &config.texts.thanks),
     ]);
     if !children.is_empty() {
         children.push(separator(SUPPORT_COMPONENT_ID_PAY_SEP_ACTIONS, 2));
     }
-    children.push(action_row(
-        SUPPORT_COMPONENT_ID_ACTION_ROW,
-        vec![
-            interactive_button(
-                SUPPORT_COMPONENT_ID_BECOME_BUTTON,
-                1,
-                &config.buttons.join,
-                SUPPORT_BUTTON_BECOME,
-            ),
-            interactive_button(
-                SUPPORT_COMPONENT_ID_TIP_BUTTON,
-                2,
-                &config.buttons.tip,
-                SUPPORT_BUTTON_TIP,
-            ),
-            interactive_button(
-                SUPPORT_COMPONENT_ID_MANAGE_BUTTON,
-                2,
-                &config.buttons.manage,
-                SUPPORT_BUTTON_MANAGE,
-            ),
-            interactive_button(
-                SUPPORT_COMPONENT_ID_TWITCH_BUTTON,
-                2,
-                &config.buttons.twitch,
-                SUPPORT_BUTTON_TWITCH,
-            ),
-        ],
-    ));
+    let mut row = vec![
+        interactive_button(
+            SUPPORT_COMPONENT_ID_BECOME_BUTTON,
+            1,
+            &config.buttons.join,
+            SUPPORT_BUTTON_BECOME,
+        ),
+        interactive_button(
+            SUPPORT_COMPONENT_ID_TIP_BUTTON,
+            2,
+            &config.buttons.tip,
+            SUPPORT_BUTTON_TIP,
+        ),
+        interactive_button(
+            SUPPORT_COMPONENT_ID_MANAGE_BUTTON,
+            2,
+            &config.buttons.manage,
+            SUPPORT_BUTTON_MANAGE,
+        ),
+    ];
+    if options.twitch {
+        row.push(interactive_button(
+            SUPPORT_COMPONENT_ID_TWITCH_BUTTON,
+            2,
+            &config.buttons.twitch,
+            SUPPORT_BUTTON_TWITCH,
+        ));
+    }
+    children.push(action_row(SUPPORT_COMPONENT_ID_ACTION_ROW, row));
     message_from_container(
         SUPPORT_COMPONENT_ID_PAY_CONTAINER,
         None,
@@ -1202,7 +1278,7 @@ mod tests {
             temp.path(),
             r#"
 [texts]
-pay = "Runtime Zahlung"
+pay = "Runtime Zahlung {stufen}"
 
 [buttons]
 become = "Runtime Button"
@@ -1211,7 +1287,7 @@ become = "Runtime Button"
         let mut warnings = Vec::new();
         let config = load_support_runtime_config(temp.path(), &mut warnings).expect("config");
         assert_eq!(config.texts.intro, SUPPORT_INTRO);
-        assert_eq!(config.texts.pay, "Runtime Zahlung");
+        assert_eq!(config.texts.pay, "Runtime Zahlung {stufen}");
         assert_eq!(config.texts.perks, SUPPORT_PERKS);
         assert_eq!(config.buttons.join, "Runtime Button");
         assert_eq!(config.buttons.manage, SUPPORT_MANAGE_BUTTON_LABEL);
@@ -1239,9 +1315,14 @@ donate = "https://ko-fi.com/deutschedeadlockcommunity"
 enabled = false
 "#,
         );
-        let output =
-            build_support_publish_output(temp.path(), &stored(&STORED_IDS, None), funding(0), true)
-                .expect("output");
+        let output = build_support_publish_output(
+            temp.path(),
+            &stored(&STORED_IDS, None),
+            funding(0),
+            &SupportPanelOptions::default(),
+            true,
+        )
+        .expect("output");
         let rendered = output
             .messages
             .iter()
@@ -1270,9 +1351,14 @@ enabled = false
     fn support_payload_ist_drei_goldene_karten_mit_banner_balken_und_knoepfen() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_banner_bytes(temp.path(), b"banner");
-        let output =
-            build_support_publish_output(temp.path(), &stored(&[], None), funding(1500), true)
-                .expect("output");
+        let output = build_support_publish_output(
+            temp.path(),
+            &stored(&[], None),
+            funding(1500),
+            &SupportPanelOptions::default(),
+            true,
+        )
+        .expect("output");
         assert_eq!(output.messages.len(), SUPPORT_MESSAGE_COUNT);
         assert_eq!(output.messages[0].message_key, "support");
         assert_eq!(output.messages[1].message_key, "support:vorteile");
@@ -1318,7 +1404,12 @@ enabled = false
         assert_eq!(pay_text.len(), 3);
         assert!(pay_text[0].contains("`██████░░░░░░░░░░░░░░` 30 %"));
         assert!(pay_text[0].contains("**15 € von 50 € im Monat**"));
-        assert_eq!(pay_text[1], SUPPORT_PAY);
+        assert_eq!(
+            pay_text[1],
+            SUPPORT_PAY.replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
+        );
+        assert!(!pay_text[1].contains("Steam Plus"));
+        assert!(!pay_text[1].contains("Twitch"));
         assert_eq!(pay_text[2], SUPPORT_THANKS);
         let pay_buttons = buttons(pay);
         let custom_ids: Vec<&str> = pay_buttons
@@ -1330,8 +1421,7 @@ enabled = false
             vec![
                 SUPPORT_BUTTON_BECOME,
                 SUPPORT_BUTTON_TIP,
-                SUPPORT_BUTTON_MANAGE,
-                SUPPORT_BUTTON_TWITCH
+                SUPPORT_BUTTON_MANAGE
             ]
         );
         assert!(pay_buttons.iter().all(|button| button.get("url").is_none()));
@@ -1366,6 +1456,57 @@ enabled = false
                 "Komponenten-IDs sind je Nachricht eindeutig"
             );
         }
+    }
+
+    #[test]
+    fn plus_und_twitch_erscheinen_nur_wenn_eingerichtet() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = SupportPanelOptions {
+            tiers_eur: vec![5, 10, 20, 50],
+            plus_monthly_cents: Some(300),
+            twitch: true,
+        };
+        let output = build_support_publish_output(
+            temp.path(),
+            &stored(&[], None),
+            funding(0),
+            &options,
+            true,
+        )
+        .expect("output");
+        let pay = &output.messages[2].payload;
+        let pay_text = text_contents(pay);
+        assert!(pay_text[1].contains("**Steam Plus.** Plus beim Steam Bot kostet 3 € im Monat"));
+        assert!(pay_text[1].ends_with(SUPPORT_TWITCH));
+        let custom_ids: Vec<String> = buttons(pay)
+            .iter()
+            .filter_map(|button| button["custom_id"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            custom_ids.last().map(String::as_str),
+            Some(SUPPORT_BUTTON_TWITCH)
+        );
+        let default = build_support_publish_output(
+            temp.path(),
+            &stored(&[], None),
+            funding(0),
+            &SupportPanelOptions::default(),
+            true,
+        )
+        .expect("default output");
+        assert_ne!(default.payload_hash, output.payload_hash);
+    }
+
+    #[test]
+    fn stufenliste_liest_sich_als_satz() {
+        assert_eq!(format_tier_list(&[]), "");
+        assert_eq!(format_tier_list(&[5]), "5 €");
+        assert_eq!(format_tier_list(&[5, 10]), "5 € oder 10 €");
+        assert_eq!(
+            format_tier_list(&SUPPORT_TIERS_EUR_DEFAULT),
+            "5 €, 10 €, 20 € oder 50 €"
+        );
+        assert_eq!(tier_button_id(50), "support:tier:50");
     }
 
     #[test]
@@ -1404,15 +1545,21 @@ enabled = false
     fn support_payload_hash_noop_banner_und_balken_aendern_hash() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_banner_bytes(temp.path(), b"banner-one");
-        let first =
-            build_support_publish_output(temp.path(), &stored(&STORED_IDS, None), funding(0), true)
-                .expect("first output");
+        let first = build_support_publish_output(
+            temp.path(),
+            &stored(&STORED_IDS, None),
+            funding(0),
+            &SupportPanelOptions::default(),
+            true,
+        )
+        .expect("first output");
         assert_eq!(first.messages[0].action, "planned_edit");
 
         let same = build_support_publish_output(
             temp.path(),
             &stored(&STORED_IDS, Some(&first.payload_hash)),
             funding(0),
+            &SupportPanelOptions::default(),
             true,
         )
         .expect("same output");
@@ -1425,6 +1572,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, Some(&first.payload_hash)),
             funding(500),
+            &SupportPanelOptions::default(),
             true,
         )
         .expect("funding output");
@@ -1435,6 +1583,7 @@ enabled = false
             temp.path(),
             &stored(&STORED_IDS, Some(&first.payload_hash)),
             funding(0),
+            &SupportPanelOptions::default(),
             true,
         )
         .expect("changed output");
@@ -1450,8 +1599,14 @@ enabled = false
             payload_format: Some("2"),
             payload_hash: None,
         };
-        let output =
-            build_support_publish_output(temp.path(), &state, funding(0), true).expect("output");
+        let output = build_support_publish_output(
+            temp.path(),
+            &state,
+            funding(0),
+            &SupportPanelOptions::default(),
+            true,
+        )
+        .expect("output");
         assert!(output.repost_required);
         assert!(output
             .messages
@@ -1462,9 +1617,14 @@ enabled = false
     #[test]
     fn eine_gespeicherte_nachricht_wird_als_repost_geplant() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output =
-            build_support_publish_output(temp.path(), &stored(&[7001], None), funding(0), true)
-                .expect("output");
+        let output = build_support_publish_output(
+            temp.path(),
+            &stored(&[7001], None),
+            funding(0),
+            &SupportPanelOptions::default(),
+            true,
+        )
+        .expect("output");
         assert!(output.repost_required);
         assert_eq!(output.messages[0].action, "planned_repost");
         assert_eq!(output.messages[1].action, "planned_post");
