@@ -49,7 +49,6 @@ gateway = false
 
 [moderation]
 enforce = false
-ticket_screenshot_review = false
 
 [concierge]
 timeout_seconds = 100
