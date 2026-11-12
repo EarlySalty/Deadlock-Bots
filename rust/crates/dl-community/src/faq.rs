@@ -2671,7 +2671,7 @@ mod tests {
             "{entry}"
         );
         assert!(
-            entry.contains("Gemeldeter Account: keiner erkannt"),
+            entry.contains("Gemeldeter Account: keiner erkannt (im Text kein Konto genannt, Screenshot nicht ausgelesen"),
             "{entry}"
         );
         assert!(

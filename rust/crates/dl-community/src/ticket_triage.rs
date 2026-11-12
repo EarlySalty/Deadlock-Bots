@@ -529,7 +529,7 @@ pub struct ReportedAccounts {
 }
 
 impl ReportedAccounts {
-    fn lines(&self) -> Vec<String> {
+    fn lines(&self, screenshot: &ScreenshotCheck) -> Vec<String> {
         let mut lines: Vec<String> = self
             .accounts
             .iter()
@@ -544,7 +544,12 @@ impl ReportedAccounts {
             ));
         }
         if lines.is_empty() {
-            lines.push("Gemeldeter Account: keiner erkannt".to_string());
+            let why = match screenshot {
+                ScreenshotCheck::Reviewed(_) => "weder im Text noch im Screenshot ein Konto lesbar",
+                ScreenshotCheck::NoImages => "im Text kein Konto genannt, kein Screenshot dabei",
+                _ => "im Text kein Konto genannt, Screenshot nicht ausgelesen, weil die Bildprüfung nicht gelaufen ist",
+            };
+            lines.push(format!("Gemeldeter Account: keiner erkannt ({why})"));
         }
         if self.overflow {
             lines.push(format!(
@@ -802,7 +807,7 @@ fn needs_mod_line(escalation: &Escalation) -> String {
 
 fn scam_lines(scam: &ScamSection<'_>) -> Vec<String> {
     let mut lines = vec!["Scam-Meldung: ja".to_string(), scam.screenshot.line()];
-    lines.extend(scam.accounts.lines());
+    lines.extend(scam.accounts.lines(scam.screenshot));
     lines.push(format!(
         "Bann-Entscheidung (Shadow, nur Log): {}",
         scam.action.line()
@@ -1345,7 +1350,7 @@ Username: beispiel_scammer";
             ShadowAction::NoBan(reason) if reason.contains("Anzeigename")
         ));
         assert!(accounts
-            .lines()
+            .lines(&scam)
             .iter()
             .any(|line| line.contains("nur der Anzeigename `José 1`")));
 
