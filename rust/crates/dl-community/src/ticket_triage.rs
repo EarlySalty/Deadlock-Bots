@@ -230,6 +230,15 @@ pub fn is_public_report_trigger(text: &str, image_count: usize) -> bool {
     pings_mods || (image_count > 0 && says_scam)
 }
 
+pub fn brain_question(text: &str, attached_images: usize) -> String {
+    match attached_images {
+        _ if text.trim().is_empty() => text.to_string(),
+        0 => text.to_string(),
+        1 => format!("{text}\n\n[Angehängt: 1 Bild]"),
+        count => format!("{text}\n\n[Angehängt: {count} Bilder]"),
+    }
+}
+
 pub fn public_report_escalation(brain: BrainState, text: &str) -> Escalation {
     let mut escalation = escalation(brain, text);
     if !escalation
@@ -1297,6 +1306,20 @@ Username: beispiel_scammer";
         assert!(!is_public_report_trigger("schönes Bild", 1));
         let escalation = public_report_escalation(BrainState::Answered, &ping);
         assert_eq!(escalation.reasons, vec![EscalationReason::ModerationCase]);
+    }
+
+    #[test]
+    fn brain_frage_nennt_angehaengte_bilder() {
+        assert_eq!(brain_question("Scammer", 0), "Scammer");
+        assert_eq!(
+            brain_question("Scammer", 1),
+            "Scammer\n\n[Angehängt: 1 Bild]"
+        );
+        assert_eq!(
+            brain_question("Scammer", 2),
+            "Scammer\n\n[Angehängt: 2 Bilder]"
+        );
+        assert_eq!(brain_question("", 2), "");
     }
 
     #[test]

@@ -1024,8 +1024,12 @@ impl FaqChat {
         question: &TicketQuestion,
     ) -> String {
         let channel_id = source.channel_id();
+        let brain_text = ticket_triage::brain_question(
+            &question.text,
+            question.images.len() + question.skipped_images,
+        );
         let outcome = self
-            .ticket_brain_outcome(&question.text, author_id, channel_id)
+            .ticket_brain_outcome(&brain_text, author_id, channel_id)
             .await;
         let escalation = if source.is_public() {
             ticket_triage::public_report_escalation(outcome.brain, &question.text)
