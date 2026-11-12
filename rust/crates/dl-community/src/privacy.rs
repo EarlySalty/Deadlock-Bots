@@ -5153,6 +5153,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn unterstuetzer_quellen_gehen_mit_der_nutzerloeschung() {
+        let db = mk_db().await;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO core.supporter_sources(discord_id, source, source_ref, monthly_cents)
+             VALUES (42, 'stripe', 'sub_a', 500), (42, 'boost', 'guild', NULL), (43, 'stripe', 'sub_b', 1000)",
+        )
+        .execute(pool)
+        .await
+        .expect("Quellen");
+        let deleted = delete_user_data(pool, 42, "test".into(), 2000)
+            .await
+            .expect("Löschung");
+        assert_eq!(deleted.counts["supporter_sources.discord_id"], 2);
+        let remaining: Vec<i64> =
+            sqlx::query_scalar("SELECT discord_id FROM core.supporter_sources ORDER BY discord_id")
+                .fetch_all(pool)
+                .await
+                .expect("Übrige Quellen");
+        assert_eq!(remaining, vec![43]);
+        let actions: Vec<(String, String)> = sqlx::query_as(
+            "SELECT column_name, erasure_action FROM core.privacy_field_registry
+              WHERE schema_name = 'core' AND table_name = 'supporter_sources'
+              ORDER BY column_name",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("Privacy-Klassifizierung");
+        assert_eq!(
+            actions,
+            vec![
+                ("discord_id".into(), "delete_row_on_user_delete".into()),
+                ("source_ref".into(), "delete_row_on_user_delete".into()),
+            ]
+        );
+    }
+
     async fn seed_privacy_twitch_link(pool: &PgPool, discord_id: i64, twitch_user_id: &str) {
         use dl_central_db::platform_connections::{
             upsert_twitch_connection, TwitchConnection, TwitchUpsertOutcome,

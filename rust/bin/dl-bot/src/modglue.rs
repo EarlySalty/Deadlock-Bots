@@ -2637,36 +2637,18 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
         role_id: u64,
     ) -> Vec<(u64, String, String, String)> {
         let role = serenity::all::RoleId::new(role_id);
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut coaches = Vec::new();
-        loop {
-            let page = match self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
-                .await
-            {
-                Ok(page) => page,
-                Err(err) => {
-                    tracing::warn!(%err, guild_id = self.guild_id, "Coach-Member-Fetch-Fallback fehlgeschlagen");
-                    break;
-                }
-            };
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            coaches.extend(
-                page.iter()
-                    .filter(|member| member.roles.contains(&role))
-                    .map(coach_member_tuple),
-            );
-            if page.len() < 1000 || after.is_none() {
-                break;
+        match crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id)).await
+        {
+            Ok(members) => members
+                .iter()
+                .filter(|member| member.roles.contains(&role))
+                .map(coach_member_tuple)
+                .collect(),
+            Err(err) => {
+                tracing::warn!(%err, guild_id = self.guild_id, "Coach-Member-Fetch-Fallback fehlgeschlagen");
+                Vec::new()
             }
         }
-        coaches
     }
 
     async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String> {
@@ -3440,26 +3422,12 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             }
         }
 
-        let mut after = None;
-        let mut ids = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild, Some(1000), after)
-                .await
-                .map_err(|err| err.to_string())?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            ids.extend(
-                page.into_iter()
-                    .filter(|member| member.roles.contains(&role))
-                    .map(|member| member.user.id.get()),
-            );
-        }
-        Ok(ids)
+        let members = crate::guild_members::fetch_all(&self.adapter.http, guild).await?;
+        Ok(members
+            .into_iter()
+            .filter(|member| member.roles.contains(&role))
+            .map(|member| member.user.id.get())
+            .collect())
     }
 
     async fn private_channel_owned_by_user(

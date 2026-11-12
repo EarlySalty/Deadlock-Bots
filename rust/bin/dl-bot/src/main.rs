@@ -8,6 +8,7 @@
 
 mod aiglue;
 mod build_publisher;
+mod guild_members;
 mod journeyglue;
 mod master;
 mod mcp;

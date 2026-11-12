@@ -23,7 +23,6 @@ pub const SUPPORT_FUNDING_LIVE_KEY: &str = "support_v3_funding_live";
 pub const SUPPORT_PANEL_OPTIONS_KEY: &str = "support_v3_panel_options";
 pub const SUPPORT_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const SUPPORT_ACCENT_GOLD: u64 = 0xC8A86B;
-pub const SUPPORT_FUNDING_MESSAGE_INDEX: usize = 2;
 #[cfg(test)]
 pub const SUPPORT_OWNER_MESSAGE_ID: u64 = 1_483_147_756_192_403_467;
 
@@ -500,19 +499,24 @@ pub fn support_storage_matches(
         && stored_message_ids.len() == expected_message_count
 }
 
-pub fn only_funding_message_differs(
+pub fn changed_messages<'a>(
     current: &SupportPublishOutput,
-    next: &SupportPublishOutput,
-) -> bool {
-    current.messages.len() == next.messages.len()
-        && current
+    next: &'a SupportPublishOutput,
+    message_ids: &[u64],
+) -> Option<Vec<(u64, &'a SupportMessageOutput)>> {
+    if current.messages.len() != next.messages.len() || next.messages.len() != message_ids.len() {
+        return None;
+    }
+    Some(
+        current
             .messages
             .iter()
             .zip(&next.messages)
-            .enumerate()
-            .all(|(index, (left, right))| {
-                index == SUPPORT_FUNDING_MESSAGE_INDEX || left.payload == right.payload
-            })
+            .zip(message_ids)
+            .filter(|((left, right), _)| left.payload != right.payload)
+            .map(|((_, right), message_id)| (*message_id, right))
+            .collect(),
+    )
 }
 
 pub fn support_payload_is_unchanged(output: &SupportPublishOutput) -> bool {

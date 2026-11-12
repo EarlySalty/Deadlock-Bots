@@ -7,6 +7,12 @@ use serde::Deserialize;
 use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use zeroize::{Zeroize, Zeroizing};
 
+const BROKER_TOKEN_NAMES: [&str; 3] = [
+    "MASTER_BROKER_TOKEN",
+    "MAIN_BOT_INTERNAL_TOKEN",
+    "TWITCH_INTERNAL_API_TOKEN",
+];
+
 #[derive(Deserialize)]
 struct Reply {
     #[serde(default)]
@@ -104,24 +110,14 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
         .flat_map(|import| import.secrets)
         .chain(reply.secrets)
     {
-        if [
-            "MASTER_BROKER_TOKEN",
-            "MAIN_BOT_INTERNAL_TOKEN",
-            "TWITCH_INTERNAL_API_TOKEN",
-        ]
-        .contains(&entry.name.as_str())
-        {
+        if BROKER_TOKEN_NAMES.contains(&entry.name.as_str()) {
             values.insert(
                 entry.name.clone(),
                 Zeroizing::new(std::mem::take(&mut entry.value)),
             );
         }
     }
-    for name in [
-        "MASTER_BROKER_TOKEN",
-        "MAIN_BOT_INTERNAL_TOKEN",
-        "TWITCH_INTERNAL_API_TOKEN",
-    ] {
+    for name in BROKER_TOKEN_NAMES {
         if let Some(value) = values.remove(name).filter(|value| !value.trim().is_empty()) {
             return Ok(value);
         }
@@ -192,6 +188,14 @@ async fn bounded_reply(mut response: reqwest::Response) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::{io::Write, net::TcpListener};
+
+    #[test]
+    fn broker_tokens_folgen_der_gemeinsamen_liste() {
+        assert_eq!(
+            BROKER_TOKEN_NAMES.as_slice(),
+            dl_core::internal_tokens::MASTER_BROKER_RECEIVER
+        );
+    }
 
     async fn mock(status: u16, body: &'static str) -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

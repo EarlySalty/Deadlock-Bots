@@ -1106,35 +1106,21 @@ impl ServerSyncService {
     }
 
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut assignments = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
+        let members =
+            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id))
                 .await
-                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            assignments.extend(page.into_iter().map(|member| {
+                .map_err(ServerSyncError::internal)?;
+        let mut assignments: Vec<MemberRoleAssignment> = members
+            .into_iter()
+            .map(|member| {
                 let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
                 role_ids.sort_unstable();
                 MemberRoleAssignment {
                     member_id: member.user.id.get(),
                     role_ids,
                 }
-            }));
-            if assignments.last().is_none() || after.is_none() {
-                break;
-            }
-            if assignments.len() % 1000 != 0 {
-                break;
-            }
-        }
+            })
+            .collect();
         assignments.sort_unstable_by_key(|entry| entry.member_id);
         Ok(assignments)
     }
@@ -1643,21 +1629,13 @@ impl ServerSyncService {
     }
 
     async fn fetch_welcome_team_members(&self) -> ServerSyncResult<Vec<WelcomeTeamMember>> {
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut members = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
+        let fetched =
+            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id))
                 .await
-                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            members.extend(page.into_iter().map(|member| {
+                .map_err(ServerSyncError::internal)?;
+        let mut members: Vec<WelcomeTeamMember> = fetched
+            .into_iter()
+            .map(|member| {
                 let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
                 role_ids.sort_unstable();
                 WelcomeTeamMember {
@@ -1665,14 +1643,8 @@ impl ServerSyncService {
                     role_ids,
                     bot: member.user.bot,
                 }
-            }));
-            if members.last().is_none() || after.is_none() {
-                break;
-            }
-            if members.len() % 1000 != 0 {
-                break;
-            }
-        }
+            })
+            .collect();
         members.sort_unstable_by_key(|entry| entry.user_id);
         Ok(members)
     }
@@ -2288,12 +2260,9 @@ impl ServerSyncService {
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
             .await?;
-        let Some(funding_message_id) = stored_message_ids
-            .get(support_publish::SUPPORT_FUNDING_MESSAGE_INDEX)
-            .copied()
-        else {
+        if stored_message_ids.is_empty() {
             return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
-        };
+        }
         let Some(live) = self
             .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
             .await?
@@ -2340,26 +2309,19 @@ impl ServerSyncService {
             true,
         )
         .map_err(ServerSyncError::internal)?;
-        if !support_publish::only_funding_message_differs(&current, &next) {
-            return Ok(FundingRefresh::Skipped(
-                "Panel braucht eine neue Veröffentlichung",
-            ));
-        }
-        let Some(message) = next
-            .messages
-            .get(support_publish::SUPPORT_FUNDING_MESSAGE_INDEX)
+        let Some(edits) = support_publish::changed_messages(&current, &next, &stored_message_ids)
         else {
-            return Ok(FundingRefresh::Skipped("Panel ohne Monatsziel-Nachricht"));
+            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
         };
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
-        if self
-            .edit_support_message(funding_message_id, message)
-            .await?
-            .is_none()
-        {
-            return Ok(FundingRefresh::Skipped(
-                "Monatsziel-Nachricht nicht gefunden",
-            ));
+        for (message_id, message) in edits {
+            if self
+                .edit_support_message(message_id, message)
+                .await?
+                .is_none()
+            {
+                return Ok(FundingRefresh::Skipped("Panel-Nachricht nicht gefunden"));
+            }
         }
         self.store_serversync_kv_pairs(&[
             (
