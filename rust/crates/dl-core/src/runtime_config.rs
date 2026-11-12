@@ -73,7 +73,11 @@ section!(StartOptions {
     mcp_verified_role_id: u64 => "MCP_VERIFIED_ROLE_ID",
 });
 
+pub const STEAM_HTTP_TIMEOUT_MS: std::ops::RangeInclusive<u64> = 1..=60_000;
+
 section!(BridgeOptions {
+    steam_connect_timeout_ms: u64 => "STEAM_BOT_CONNECT_TIMEOUT_MS",
+    steam_request_timeout_ms: u64 => "STEAM_BOT_REQUEST_TIMEOUT_MS",
     twitch_api_url: String => "TWITCH_INTERNAL_API_BASE_URL",
     twitch_host: IpAddr => "TWITCH_INTERNAL_API_HOST",
     twitch_port: u16 => "TWITCH_INTERNAL_API_PORT",
@@ -254,6 +258,18 @@ impl RuntimeConfig {
 
     pub fn validate(&self) -> Result<(), BotConfigError> {
         let invalid = || BotConfigError::Validation("Ungültiger Betriebswert in runtime");
+        for value in [
+            self.bridges.steam_connect_timeout_ms,
+            self.bridges.steam_request_timeout_ms,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !STEAM_HTTP_TIMEOUT_MS.contains(&value) {
+                return Err(invalid());
+            }
+        }
+
         for seconds in [
             self.community.router_auto_move_delay_seconds,
             self.ai.transparency_error_repeat_seconds,
@@ -821,5 +837,34 @@ mod discord_brain_secret_tests {
             Some("fixture-public-facts")
         );
         assert!(super::secret_value("RUST_LOG").is_none());
+    }
+}
+
+#[cfg(test)]
+mod steam_timeout_tests {
+    use crate::bot_config::BotConfig;
+
+    #[test]
+    fn steam_timeouts_are_bounded_and_projected_from_toml() {
+        for (field, key) in [
+            ("steam_connect_timeout_ms", "STEAM_BOT_CONNECT_TIMEOUT_MS"),
+            ("steam_request_timeout_ms", "STEAM_BOT_REQUEST_TIMEOUT_MS"),
+        ] {
+            for value in ["0", "60001", "-1", "18446744073709551616", "'invalid'"] {
+                assert!(BotConfig::parse(&format!(
+                    "schema_version=1\n[runtime.bridges]\n{field}={value}\n"
+                ))
+                .is_err());
+            }
+            for value in [1, 5000, 15000, 60000] {
+                let config = BotConfig::parse(&format!(
+                    "schema_version=1\n[runtime.bridges]\n{field}={value}\n"
+                ))
+                .expect("valid timeout config");
+                assert_eq!(config.runtime_value(key), Some(value.to_string()));
+            }
+            let config = BotConfig::parse("schema_version=1\n").expect("missing optional setting");
+            assert_eq!(config.runtime_value(key), None);
+        }
     }
 }

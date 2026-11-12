@@ -136,7 +136,14 @@ impl super::steam::SteamBotClient {
             .filter(|value| !value.is_empty())
             .ok_or(Error::Unavailable)?;
         let url = format!("{}/internal/config", self.base_url);
+        self.http.as_ref().ok_or(Error::Unavailable)?;
+        let (connect, total) = self
+            .connect_timeout
+            .zip(self.request_timeout)
+            .ok_or(Error::Unavailable)?;
         let http = reqwest::Client::builder()
+            .connect_timeout(connect)
+            .timeout(total)
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -227,9 +234,11 @@ mod tests {
                 .await
                 .expect("isolierte Testdaten gültig");
         });
-        let client = crate::steam::SteamBotClient::new(
+        let client = crate::steam::SteamBotClient::with_timeouts(
             format!("http://{address}"),
             Some("synthetic-token".into()),
+            Some(5000),
+            Some(15000),
         );
         let response = serde_json::to_value(
             client
@@ -273,9 +282,11 @@ mod tests {
                 .await
                 .expect("isolierte Testdaten gültig");
         });
-        let client = crate::steam::SteamBotClient::new(
+        let client = crate::steam::SteamBotClient::with_timeouts(
             format!("http://{address}"),
             Some("synthetic-token".into()),
+            Some(5000),
+            Some(15000),
         );
         assert!(matches!(
             client.operating_config(None).await,

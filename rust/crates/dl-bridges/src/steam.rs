@@ -19,7 +19,6 @@ use sqlx::PgPool;
 
 pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `/invite` wartet steam-seitig synchron auf ZWEI Steam-Tasks (erst der
@@ -102,7 +101,9 @@ const ADMIN_COMMANDS: [&str; 6] = [
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
 pub struct SteamBotClient {
-    pub(crate) http: reqwest::Client,
+    pub(crate) http: Option<reqwest::Client>,
+    pub(crate) connect_timeout: Option<Duration>,
+    pub(crate) request_timeout: Option<Duration>,
     pub(crate) base_url: String,
     pub(crate) token: Option<String>,
 }
@@ -120,16 +121,53 @@ impl SteamBotClient {
         let token = get("TWITCH_INTERNAL_API_TOKEN")
             .or_else(|| get("MASTER_BROKER_TOKEN"))
             .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"));
-        Self::new(base_url, token)
+        Self::with_timeouts(
+            base_url,
+            token,
+            get("STEAM_BOT_CONNECT_TIMEOUT_MS").and_then(|v| v.parse().ok()),
+            get("STEAM_BOT_REQUEST_TIMEOUT_MS").and_then(|v| v.parse().ok()),
+        )
     }
 
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Arc<Self> {
-        Arc::new(Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .timeout(DEFAULT_TIMEOUT)
+        Self::with_timeouts(
+            base_url,
+            token,
+            dl_core::runtime_config::lookup("STEAM_BOT_CONNECT_TIMEOUT_MS")
+                .and_then(|v| v.parse().ok()),
+            dl_core::runtime_config::lookup("STEAM_BOT_REQUEST_TIMEOUT_MS")
+                .and_then(|v| v.parse().ok()),
+        )
+    }
+
+    pub(crate) fn with_timeouts(
+        base_url: impl Into<String>,
+        token: Option<String>,
+        connect_ms: Option<u64>,
+        request_ms: Option<u64>,
+    ) -> Arc<Self> {
+        let bounded = |value: Option<u64>| {
+            value
+                .filter(|v| dl_core::runtime_config::STEAM_HTTP_TIMEOUT_MS.contains(v))
+                .map(Duration::from_millis)
+        };
+        let connect_timeout = bounded(connect_ms);
+        let request_timeout = bounded(request_ms);
+        let http = connect_timeout.zip(request_timeout).and_then(|(connect, total)| {
+            reqwest::Client::builder()
+                .connect_timeout(connect)
+                .timeout(total)
                 .build()
-                .expect("Steam bridge HTTP client initialization failed"),
+                .map_err(|error| tracing::warn!(%error, "Steam bridge HTTP client initialization failed"))
+                .ok()
+        });
+        if http.is_none() {
+            tracing::warn!("Steam bridge disabled: missing or invalid HTTP timeout configuration");
+        }
+        Arc::new(Self {
+            http,
+            connect_timeout,
+            request_timeout,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
         })
@@ -147,7 +185,12 @@ impl SteamBotClient {
         payload.insert("kind".into(), json!(kind));
         payload.extend(data);
 
-        let mut request = self.http.post(&url).json(&payload).timeout(timeout);
+        let mut request = self
+            .http
+            .as_ref()?
+            .post(&url)
+            .json(&payload)
+            .timeout(timeout);
         if let Some(token) = &self.token {
             request = request.header("X-Internal-Token", token);
         }
@@ -1039,6 +1082,58 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Mutex;
 
+    fn test_client(base_url: impl Into<String>, token: Option<String>) -> Arc<SteamBotClient> {
+        SteamBotClient::with_timeouts(base_url, token, Some(5000), Some(15000))
+    }
+
+    #[tokio::test]
+    async fn timeout_configuration_fails_closed() {
+        for invalid in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("60001"),
+            Some("invalid"),
+            Some("18446744073709551616"),
+        ] {
+            for missing_key in [
+                "STEAM_BOT_CONNECT_TIMEOUT_MS",
+                "STEAM_BOT_REQUEST_TIMEOUT_MS",
+            ] {
+                let client = SteamBotClient::from_env(|key| match key {
+                    "STEAM_BOT_CONNECT_TIMEOUT_MS" | "STEAM_BOT_REQUEST_TIMEOUT_MS" => {
+                        if key == missing_key {
+                            invalid.map(str::to_owned)
+                        } else {
+                            Some("15000".into())
+                        }
+                    }
+                    "TWITCH_INTERNAL_API_TOKEN" => Some("synthetic-token".into()),
+                    _ => None,
+                });
+                assert!(client.http.is_none());
+                assert!(client
+                    .post_event("test", Map::new(), DEFAULT_TIMEOUT)
+                    .await
+                    .is_none());
+                assert!(matches!(
+                    client.operating_config(None).await,
+                    Err(crate::steam_operating::Error::Unavailable)
+                ));
+            }
+        }
+        for boundary in [1, 60000] {
+            assert!(SteamBotClient::with_timeouts(
+                "http://localhost",
+                None,
+                Some(boundary),
+                Some(boundary)
+            )
+            .http
+            .is_some());
+        }
+    }
+
     #[tokio::test]
     async fn client_default_deadline_and_longer_request_override() {
         const RESPONSE_DELAY: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(1));
@@ -1059,11 +1154,22 @@ mod tests {
                 .await
                 .expect("serve test requests");
         });
-        let client = SteamBotClient::new(url.clone(), None);
+        let client = test_client(url.clone(), None);
         let (default, extended) = tokio::time::timeout(REQUEST_TIMEOUT, async {
             tokio::join!(
-                client.http.get(&url).send(),
-                client.http.get(&url).timeout(REQUEST_TIMEOUT).send()
+                client
+                    .http
+                    .as_ref()
+                    .expect("configured client")
+                    .get(&url)
+                    .send(),
+                client
+                    .http
+                    .as_ref()
+                    .expect("configured client")
+                    .get(&url)
+                    .timeout(REQUEST_TIMEOUT)
+                    .send()
             )
         })
         .await
@@ -1100,9 +1206,17 @@ mod tests {
                 .expect("write incomplete response");
             std::future::pending::<()>().await;
         });
-        let client = SteamBotClient::new(url.clone(), None);
+        let client = test_client(url.clone(), None);
         let result = tokio::time::timeout(WATCHDOG_TIMEOUT, async {
-            client.http.get(url).send().await?.bytes().await
+            client
+                .http
+                .as_ref()
+                .expect("configured client")
+                .get(url)
+                .send()
+                .await?
+                .bytes()
+                .await
         })
         .await
         .expect("body read must finish within the watchdog deadline");
@@ -1167,7 +1281,7 @@ mod tests {
     async fn lounge_invite_nutzt_denselben_slash_event_mit_bot_als_admin() {
         let response = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung.";
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": response })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         assert_eq!(
             client
                 .invite_from_bot(99, 7, "123456789", 42)
@@ -1193,7 +1307,7 @@ mod tests {
     #[tokio::test]
     async fn lounge_invite_ohne_handler_antwort_ist_ein_fehler() {
         let (url, _, server) = mock_steam_bot(json!({})).await;
-        assert!(SteamBotClient::new(url, None)
+        assert!(test_client(url, None)
             .invite_from_bot(99, 7, "123456789", 42)
             .await
             .is_err());
@@ -1218,7 +1332,7 @@ mod tests {
         let custom_id = "steam_link_panel:unlink";
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new(url, None));
+        register(&mut router, test_client(url, None));
 
         let reply = router
             .resolve_component(custom_id)
@@ -1239,7 +1353,7 @@ mod tests {
         let custom_id = "steam_link_panel:unlink:confirm";
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new(url, None));
+        register(&mut router, test_client(url, None));
 
         let reply = router
             .resolve_component(custom_id)
@@ -1269,7 +1383,7 @@ mod tests {
         }))
         .await;
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new(url, None));
+        register(&mut router, test_client(url, None));
 
         let panel = router
             .resolve_command("steam links")
@@ -1323,7 +1437,7 @@ mod tests {
             }))
             .await;
             let mut router = InteractionRouter::new();
-            register(&mut router, SteamBotClient::new(url, None));
+            register(&mut router, test_client(url, None));
 
             let reply = router
                 .resolve_component(custom_id)
@@ -1348,7 +1462,7 @@ mod tests {
     #[tokio::test]
     async fn voice_return_wire_format() {
         let (url, received, server) = mock_steam_bot(json!({})).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
 
         client.post_voice_return(42).await;
 
@@ -1372,7 +1486,7 @@ mod tests {
             "buttons": [{ "custom_id": "steam_link_panel:rankcheck", "label": "Weiter", "style": "primary" }],
         }))
         .await;
-        let client = SteamBotClient::new(url, Some("tok".to_string()));
+        let client = test_client(url, Some("tok".to_string()));
         let handler = ForwardComponent {
             client: client.clone(),
         };
@@ -1396,7 +1510,7 @@ mod tests {
     #[tokio::test]
     async fn rankcheck_forward_sendet_display_name_statt_username() {
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         let handler = ForwardComponent { client };
         let reply = handler
             .handle(BridgeInteraction {
@@ -1422,7 +1536,7 @@ mod tests {
     #[tokio::test]
     async fn friend_code_button_oeffnet_modal_lokal() {
         // Kein Server nötig — der Klick darf NICHT geforwarded werden.
-        let client = SteamBotClient::new("http://127.0.0.1:9", None);
+        let client = test_client("http://127.0.0.1:9", None);
         let handler = ForwardComponent { client };
         let reply = handler.handle(interaction("linkpanel_friend_code")).await;
         let modal = reply.modal.expect("modal");
@@ -1433,7 +1547,7 @@ mod tests {
     #[tokio::test]
     async fn modal_submit_forwardet_friend_code() {
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         let handler = FriendCodeSubmit { client };
         let mut itx = interaction(FRIEND_CODE_MODAL_CUSTOM_ID);
         itx.options
@@ -1452,7 +1566,7 @@ mod tests {
     #[tokio::test]
     async fn slash_command_wire_format() {
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         let handler = ForwardSlash {
             client,
             wire_name: "steam_whoami",
@@ -1493,7 +1607,7 @@ mod tests {
         .expect("set");
 
         let handler = PublishPanel {
-            client: SteamBotClient::new(url, None),
+            client: test_client(url, None),
             wire_name: "publish_steam_panel",
             panel_buttons: steam_panel_components(),
             confirmation: BRD09_STEAM_PANEL_POSTED_MSG,
@@ -1517,7 +1631,7 @@ mod tests {
 
     #[tokio::test]
     async fn steam_bot_nicht_erreichbar() {
-        let client = SteamBotClient::new("http://127.0.0.1:9", None); // tote Adresse
+        let client = test_client("http://127.0.0.1:9", None);
         let handler = ForwardComponent { client };
         let reply = handler
             .handle(interaction("steam_link_panel:rankcheck"))
@@ -1529,7 +1643,7 @@ mod tests {
     #[test]
     fn router_registrierung_vollstaendig() {
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new("http://x", None));
+        register(&mut router, test_client("http://x", None));
         // Panels + Legacy + Modal
         for id in PANEL_CUSTOM_IDS {
             assert!(router.resolve_component(id).is_some(), "{id}");
@@ -1566,7 +1680,7 @@ mod tests {
     #[test]
     fn plus_panel_buttons_werden_ueber_den_praefix_geroutet() {
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new("http://x", None));
+        register(&mut router, test_client("http://x", None));
 
         for id in [
             "steam_plus:open",
@@ -1595,7 +1709,7 @@ mod tests {
     #[test]
     fn invite_command_ist_fuer_alle_mit_freundescode_und_user_option() {
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new("http://x", None));
+        register(&mut router, test_client("http://x", None));
 
         assert!(router.resolve_command("invite").is_some());
         let definitions = router.command_definitions();
