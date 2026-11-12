@@ -13,7 +13,7 @@ use crate::answer_support::{acquire_stateful_support_turn, KnowledgeLookup};
 use crate::db::{i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 use crate::ticket_triage::{
     self, BrainState, MemberLookup, ReportedAccounts, ResolvedAccount, ScamSection,
-    ScreenshotCheck, ScreenshotReviewer, ShadowEntry, TicketImage, TICKET_MAX_IMAGES,
+    ScreenshotCheck, ScreenshotReviewSetup, ShadowEntry, TicketImage, TicketIntake,
 };
 
 pub use crate::answer_support::{KnowledgeAnswer, KnowledgeSource};
@@ -85,6 +85,22 @@ fn ticket_auto_outcome_from_knowledge(answer: KnowledgeLookup) -> TicketAutoOutc
             None => TicketAutoOutcome::silence(BrainState::NoAnswer),
         },
     }
+}
+
+fn log_ticket_fail_closed(reason: &str, question_chars: usize, channel_id: u64, author_id: u64) {
+    let absent = "absent";
+    tracing::warn!(
+        question_chars,
+        verdict = %BrainState::NotAsked.verdict(),
+        confidence = "none",
+        retrieval_score = %absent,
+        reason = %reason,
+        sources = %absent,
+        error_class = %reason,
+        channel_id,
+        author_id,
+        "FAQ-Ticket-Auto-Hilfe fail-closed"
+    );
 }
 
 fn truncate_utf16(text: &str, max_units: usize) -> String {
@@ -716,6 +732,7 @@ struct TicketOpening {
     messages: Vec<String>,
     images: Vec<TicketImage>,
     skipped_images: usize,
+    dropped_chars: usize,
     started: tokio::time::Instant,
     last_message: tokio::time::Instant,
 }
@@ -724,6 +741,7 @@ struct TicketQuestion {
     text: String,
     images: Vec<TicketImage>,
     skipped_images: usize,
+    dropped_chars: usize,
 }
 
 impl TicketOpening {
@@ -733,61 +751,67 @@ impl TicketOpening {
             messages: Vec::new(),
             images: Vec::new(),
             skipped_images: 0,
+            dropped_chars: 0,
             started: now,
             last_message: now,
         }
     }
 
     fn add(&mut self, content: &str, images: &[TicketImage], now: tokio::time::Instant) {
-        let added_text = self.add_text(content.trim());
-        let added_images = self.add_images(images);
-        if added_text || added_images {
-            self.last_message = now;
-        }
+        self.add_text(content.trim());
+        self.add_images(images);
+        self.last_message = now;
     }
 
-    fn add_text(&mut self, content: &str) -> bool {
+    fn add_text(&mut self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
         let used: usize = self
             .messages
             .iter()
-            .map(|message| message.chars().count())
+            .map(|message| message.chars().count() + 1)
             .sum();
-        if content.is_empty() || used >= TICKET_OPENING_MAX_CHARS {
-            return false;
+        let room = TICKET_OPENING_MAX_CHARS.saturating_sub(used);
+        let kept: String = content.chars().take(room).collect();
+        let kept_chars = kept.chars().count();
+        self.dropped_chars += content.chars().count() - kept_chars;
+        if kept_chars > 0 {
+            self.messages.push(kept);
         }
-        self.messages.push(content.to_owned());
-        true
     }
 
-    fn add_images(&mut self, images: &[TicketImage]) -> bool {
-        let before = self.images.len();
+    fn add_images(&mut self, images: &[TicketImage]) {
         for image in images {
             if self.images.iter().any(|known| known.url == image.url) {
                 continue;
             }
-            if !image.within_limits() || self.images.len() >= TICKET_MAX_IMAGES {
+            if !image.within_limits() || self.images.len() >= dl_ai::MAX_MULTIMODAL_IMAGES {
                 self.skipped_images += 1;
                 continue;
             }
             self.images.push(image.clone());
         }
-        self.images.len() > before
+    }
+
+    fn is_collecting(&self, quiet: Duration, max: Duration) -> bool {
+        self.started.elapsed() < max
+            && (self.messages.is_empty() || self.last_message.elapsed() < quiet)
     }
 
     fn question(self) -> Option<TicketQuestion> {
-        let joined = self.messages.join("\n");
-        let text: String = joined.chars().take(TICKET_OPENING_MAX_CHARS).collect();
-        (!text.trim().is_empty() || !self.images.is_empty()).then_some(TicketQuestion {
-            text,
+        let nothing =
+            self.messages.is_empty() && self.images.is_empty() && self.skipped_images == 0;
+        (!nothing).then(|| TicketQuestion {
+            text: self.messages.join("\n"),
             images: self.images,
             skipped_images: self.skipped_images,
+            dropped_chars: self.dropped_chars,
         })
     }
 }
 
 struct TicketScamCheck {
-    image_count: usize,
-    skipped_images: usize,
     screenshot: ScreenshotCheck,
     accounts: ReportedAccounts,
     action: ticket_triage::ShadowAction,
@@ -796,8 +820,6 @@ struct TicketScamCheck {
 impl TicketScamCheck {
     fn section(&self) -> ScamSection<'_> {
         ScamSection {
-            image_count: self.image_count,
-            skipped_images: self.skipped_images,
             screenshot: &self.screenshot,
             accounts: &self.accounts,
             action: &self.action,
@@ -815,7 +837,7 @@ pub struct FaqChat {
     ticket_opening_quiet: Duration,
     ticket_opening_max: Duration,
     ticket_opening_poll: Duration,
-    screenshot_reviewer: std::sync::OnceLock<Arc<dyn ScreenshotReviewer>>,
+    screenshot_review: std::sync::OnceLock<ScreenshotReviewSetup>,
     chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -835,13 +857,13 @@ impl FaqChat {
             ticket_opening_quiet: TICKET_OPENING_QUIET,
             ticket_opening_max: TICKET_OPENING_MAX,
             ticket_opening_poll: TICKET_OPENING_POLL,
-            screenshot_reviewer: std::sync::OnceLock::new(),
+            screenshot_review: std::sync::OnceLock::new(),
             chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
-    pub fn install_screenshot_reviewer(&self, reviewer: Arc<dyn ScreenshotReviewer>) {
-        if self.screenshot_reviewer.set(reviewer).is_err() {
+    pub fn install_screenshot_review(&self, setup: ScreenshotReviewSetup) {
+        if self.screenshot_review.set(setup).is_err() {
             tracing::warn!("Ticket-Bildprüfung war bereits installiert");
         }
     }
@@ -929,9 +951,7 @@ impl FaqChat {
                 let Some(opening) = openings.get(&channel_id) else {
                     return;
                 };
-                if opening.last_message.elapsed() < self.ticket_opening_quiet
-                    && opening.started.elapsed() < self.ticket_opening_max
-                {
+                if opening.is_collecting(self.ticket_opening_quiet, self.ticket_opening_max) {
                     None
                 } else {
                     openings
@@ -974,6 +994,7 @@ impl FaqChat {
             question_chars,
             image_count = question.images.len(),
             skipped_images = question.skipped_images,
+            dropped_chars = question.dropped_chars,
             verdict = outcome.brain.verdict(),
             candidate_status,
             needs_mod = escalation.needs_mod(),
@@ -985,10 +1006,15 @@ impl FaqChat {
             ticket_channel_id: channel_id,
             brain_verdict: outcome.brain.verdict(),
             escalation: &escalation,
+            intake: TicketIntake {
+                image_count: question.images.len(),
+                skipped_images: question.skipped_images,
+                dropped_chars: question.dropped_chars,
+            },
             scam: scam.as_ref().map(TicketScamCheck::section),
             candidate: &candidate,
         };
-        let content = truncate_utf16(&ticket_triage::shadow_entry_text(&entry), 3900);
+        let content = ticket_triage::shadow_entry_text(&entry);
         if self
             .port
             .send_message(shadow_channel_id, &content, None)
@@ -1029,12 +1055,10 @@ impl FaqChat {
         }
         let screenshot = self.review_ticket_screenshots(&question.images).await;
         let accounts = self
-            .resolve_reported_accounts(guild_id, author_id, &question.text)
+            .resolve_reported_accounts(guild_id, &question.text)
             .await;
         let action = ticket_triage::shadow_action(&screenshot, &accounts, author_id);
         Some(TicketScamCheck {
-            image_count: question.images.len(),
-            skipped_images: question.skipped_images,
             screenshot,
             accounts,
             action,
@@ -1042,8 +1066,12 @@ impl FaqChat {
     }
 
     async fn review_ticket_screenshots(&self, images: &[TicketImage]) -> ScreenshotCheck {
-        let Some(reviewer) = self.screenshot_reviewer.get() else {
-            return ScreenshotCheck::Disabled;
+        let reviewer = match self.screenshot_review.get() {
+            None | Some(ScreenshotReviewSetup::Off) => return ScreenshotCheck::Disabled,
+            Some(ScreenshotReviewSetup::ModerationAiMissing) => {
+                return ScreenshotCheck::Unavailable
+            }
+            Some(ScreenshotReviewSetup::Active(reviewer)) => reviewer,
         };
         if images.is_empty() {
             return ScreenshotCheck::NoImages;
@@ -1052,13 +1080,8 @@ impl FaqChat {
         ScreenshotCheck::from_result(reviewer.review_reported_screenshots(urls).await)
     }
 
-    async fn resolve_reported_accounts(
-        &self,
-        guild_id: u64,
-        author_id: u64,
-        text: &str,
-    ) -> ReportedAccounts {
-        let found = ticket_triage::reported_account_refs(text, author_id);
+    async fn resolve_reported_accounts(&self, guild_id: u64, text: &str) -> ReportedAccounts {
+        let found = ticket_triage::reported_account_refs(text);
         let mut accounts = Vec::new();
         for reference in found.refs {
             let lookup = self.lookup_reported_member(guild_id, &reference).await;
@@ -1067,6 +1090,7 @@ impl FaqChat {
         ReportedAccounts {
             accounts,
             overflow: found.overflow,
+            unclear: found.unclear,
         }
     }
 
@@ -1579,17 +1603,6 @@ impl FaqChat {
         channel_id: u64,
         author_id: u64,
         content: &str,
-    ) {
-        self.handle_ticket_message_with_images(guild_id, channel_id, author_id, content, &[])
-            .await;
-    }
-
-    pub async fn handle_ticket_message_with_images(
-        self: &Arc<Self>,
-        guild_id: u64,
-        channel_id: u64,
-        author_id: u64,
-        content: &str,
         images: &[TicketImage],
     ) {
         if guild_id == 0 {
@@ -1601,61 +1614,23 @@ impl FaqChat {
             return;
         }
         let problem = content.trim();
-        if problem.is_empty() && !images.iter().any(TicketImage::within_limits) {
+        if problem.is_empty() && images.is_empty() {
             return;
         }
         let question_chars = problem.chars().count();
-        let Some(shadow_channel_id) = self.shadow_channel_id else {
-            let (verdict, confidence, absent) = ("not_asked", "none", "absent");
-            tracing::warn!(
-                question_chars,
-                verdict = %verdict,
-                confidence = %confidence,
-                retrieval_score = %absent,
-                reason = %SHADOW_NOT_CONFIGURED,
-                sources = %absent,
-                error_class = %SHADOW_NOT_CONFIGURED,
-                channel_id,
-                author_id,
-                "FAQ-Ticket-Auto-Hilfe fail-closed"
-            );
-            return;
+        let shadow_channel_id = match self.shadow_channel_id {
+            None => Err(SHADOW_NOT_CONFIGURED),
+            Some(id) if id == channel_id => Err(SHADOW_EQUALS_TICKET),
+            Some(id) if id != LOG_CHANNEL_ID => Err(SHADOW_NOT_ALLOWLISTED),
+            Some(id) => Ok(id),
         };
-        // Fehlkonfiguration: Shadow-Kanal == Ticket-Kanal. Ein Post würde die Bot-Antwort
-        // sichtbar ins Mitglieder-Ticket schreiben. Fail-closed: kein Knowledge, kein Post.
-        if shadow_channel_id == channel_id {
-            let (verdict, confidence, absent) = ("not_asked", "none", "absent");
-            tracing::warn!(
-                question_chars,
-                verdict = %verdict,
-                confidence = %confidence,
-                retrieval_score = %absent,
-                reason = %SHADOW_EQUALS_TICKET,
-                sources = %absent,
-                error_class = %SHADOW_EQUALS_TICKET,
-                channel_id,
-                author_id,
-                "FAQ-Ticket-Auto-Hilfe fail-closed"
-            );
-            return;
-        }
-        if shadow_channel_id != LOG_CHANNEL_ID {
-            let (verdict, confidence, absent) = ("not_asked", "none", "absent");
-            tracing::warn!(
-                question_chars,
-                verdict = %verdict,
-                confidence = %confidence,
-                retrieval_score = %absent,
-                reason = %SHADOW_NOT_ALLOWLISTED,
-                sources = %absent,
-                error_class = %SHADOW_NOT_ALLOWLISTED,
-                channel_id,
-                author_id,
-                shadow_channel_id,
-                "FAQ-Ticket-Auto-Hilfe fail-closed"
-            );
-            return;
-        }
+        let shadow_channel_id = match shadow_channel_id {
+            Ok(id) => id,
+            Err(reason) => {
+                log_ticket_fail_closed(reason, question_chars, channel_id, author_id);
+                return;
+            }
+        };
         {
             let mut openings = self.ticket_openings();
             if let Some(opening) = openings.get_mut(&channel_id) {
@@ -2334,7 +2309,7 @@ pub fn spawn(
                             )
                             .await;
                         if !handled {
-                            faq.handle_ticket_message_with_images(
+                            faq.handle_ticket_message(
                                 event.guild_id.unwrap_or_default(),
                                 event.channel_id,
                                 event.author_id,
@@ -2696,20 +2671,88 @@ mod tests {
                 ticket_channel_id,
                 brain_verdict,
                 escalation: &escalation,
+                intake: TicketIntake::default(),
                 scam: None,
                 candidate,
             })
         };
         let bounded = "🧠".repeat(900);
         let payload = entry(u64::MAX, "uncertain", &bounded);
-        assert!(payload.encode_utf16().count() <= 2000);
         assert!(payload.ends_with(&bounded));
+        assert!(!payload.contains("Bilder:"));
+        assert!(!payload.contains("Text gekürzt"));
         let message = entry(10, "no", "Antwort");
         assert!(message.starts_with("🧪 **Ticket-Shadow**\n"));
         assert!(message.contains("needs_mod: nein"));
         assert!(message.contains("Urteil: no"));
         assert!(message.contains("<#10>"));
         assert!(message.contains("Kandidat:\nAntwort"));
+    }
+
+    #[test]
+    fn ticket_eroeffnung_zaehlt_gekuerzten_text_und_zu_grosse_bilder() {
+        let now = tokio::time::Instant::now();
+        let mut opening = TicketOpening::new(1, now);
+        opening.add(&"a".repeat(3000), &[], now);
+        opening.add(&"b".repeat(1000), &[], now);
+        opening.add(
+            "",
+            &[TicketImage {
+                url: "https://cdn/x.png".into(),
+                size: dl_ai::MAX_OPENAI_IMAGE_BYTES + 1,
+            }],
+            now,
+        );
+        let question = opening.question().expect("Frage");
+        assert_eq!(question.text.chars().count(), TICKET_OPENING_MAX_CHARS);
+        assert_eq!(question.dropped_chars, 501);
+        assert_eq!(question.skipped_images, 1);
+        assert!(question.images.is_empty());
+
+        let mut only_oversized = TicketOpening::new(1, now);
+        only_oversized.add(
+            "",
+            &[TicketImage {
+                url: "https://cdn/y.png".into(),
+                size: dl_ai::MAX_OPENAI_IMAGE_BYTES + 1,
+            }],
+            now,
+        );
+        let question = only_oversized
+            .question()
+            .expect("übersprungene Bilder ergeben einen Eintrag");
+        assert_eq!(question.skipped_images, 1);
+    }
+
+    #[test]
+    fn ticket_eroeffnung_nur_mit_bildern_wartet_auf_text() {
+        let quiet = Duration::from_secs(45);
+        let max = Duration::from_secs(180);
+        let earlier = tokio::time::Instant::now() - Duration::from_secs(60);
+        let mut opening = TicketOpening::new(1, earlier);
+        opening.add(
+            "",
+            &[TicketImage {
+                url: "https://cdn/x.png".into(),
+                size: 10,
+            }],
+            earlier,
+        );
+        assert!(opening.is_collecting(quiet, max));
+        opening.add("Ich wurde gescammt", &[], earlier);
+        assert!(!opening.is_collecting(quiet, max));
+
+        let long_ago = tokio::time::Instant::now() - max;
+        let mut expired = TicketOpening::new(1, long_ago);
+        expired.add(
+            "",
+            &[TicketImage {
+                url: "https://cdn/x.png".into(),
+                size: 10,
+            }],
+            long_ago,
+        );
+        assert!(!expired.is_collecting(quiet, max));
     }
 
     #[tokio::test]
@@ -3145,7 +3188,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl ScreenshotReviewer for ScamReviewer {
+    impl ticket_triage::ScreenshotReviewer for ScamReviewer {
         async fn review_reported_screenshots(
             &self,
             image_urls: Vec<String>,
@@ -4532,7 +4575,7 @@ mod tests {
         .await;
         let faq = ticket_faq_with_shadow(port.clone(), url, None);
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht", &[])
             .await;
         handle.abort();
 
@@ -4558,7 +4601,7 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, &question)
+        faq.handle_ticket_message(1, 222, 111111111111111111, &question, &[])
             .await;
         drop(guard);
 
@@ -4589,10 +4632,16 @@ mod tests {
         let brain = ScriptedBrain::answering("Zweite Nachricht verarbeitet");
         let faq = ticket_faq(port.clone(), brain.clone());
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, " \n ")
+        faq.handle_ticket_message(1, 222, 111111111111111111, " \n ", &[])
             .await;
-        faq.handle_ticket_message(1, 222, 111111111111111111, "Zweite gültige Textnachricht")
-            .await;
+        faq.handle_ticket_message(
+            1,
+            222,
+            111111111111111111,
+            "Zweite gültige Textnachricht",
+            &[],
+        )
+        .await;
 
         assert_eq!(brain.call_count(), 1);
         let body: serde_json::Value =
@@ -4623,10 +4672,10 @@ mod tests {
         );
 
         first
-            .handle_ticket_message(1, 222, 111111111111111111, "Erste Nachricht")
+            .handle_ticket_message(1, 222, 111111111111111111, "Erste Nachricht", &[])
             .await;
         second
-            .handle_ticket_message(1, 222, 111111111111111111, "Nach Neustart")
+            .handle_ticket_message(1, 222, 111111111111111111, "Nach Neustart", &[])
             .await;
 
         assert_eq!(first_brain.call_count() + second_brain.call_count(), 1);
@@ -4654,7 +4703,7 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, ticket_marker)
+        faq.handle_ticket_message(1, 222, 111111111111111111, ticket_marker, &[])
             .await;
         drop(guard);
         handle.abort();
@@ -4685,7 +4734,7 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, question)
+        faq.handle_ticket_message(1, 222, 111111111111111111, question, &[])
             .await;
         drop(guard);
 
@@ -4721,7 +4770,7 @@ mod tests {
             let port = ticket_port();
             let faq = ticket_faq(port.clone(), brain.clone());
 
-            faq.handle_ticket_message(1, 222, 111111111111111111, "Unbekanntes Problem")
+            faq.handle_ticket_message(1, 222, 111111111111111111, "Unbekanntes Problem", &[])
                 .await;
 
             assert_eq!(brain.call_count(), 1);
@@ -4742,23 +4791,34 @@ mod tests {
         let reviewer = Arc::new(ScamReviewer {
             calls: std::sync::Mutex::new(Vec::new()),
         });
-        faq.install_screenshot_reviewer(reviewer.clone());
+        faq.install_screenshot_review(ScreenshotReviewSetup::Active(reviewer.clone()));
         let opener = 111111111111111111;
 
-        faq.handle_ticket_message_with_images(
+        faq.handle_ticket_message(
             1,
             222,
             opener,
             "Ich wurde gescammt, angeblich ausversehen reportet. Username: scammer",
             &[
                 scam_image("a", 10),
-                scam_image("zu_gross", ticket_triage::TICKET_MAX_IMAGE_BYTES + 1),
+                scam_image("zu_gross", dl_ai::MAX_OPENAI_IMAGE_BYTES + 1),
             ],
         )
         .await;
-        faq.handle_ticket_message_with_images(1, 222, opener, "", &[scam_image("b", 10)])
+        faq.handle_ticket_message(1, 222, opener, "", &[scam_image("b", 10)])
             .await;
-        faq.handle_ticket_message_with_images(
+        faq.handle_ticket_message(
+            1,
+            222,
+            opener,
+            "",
+            &[scam_image(
+                "nur_zu_gross",
+                dl_ai::MAX_OPENAI_IMAGE_BYTES + 1,
+            )],
+        )
+        .await;
+        faq.handle_ticket_message(
             1,
             222,
             999999999999999999,
@@ -4786,14 +4846,14 @@ mod tests {
         assert_eq!(sent[0].0, LOG_CHANNEL_ID);
         let entry = &sent[0].1;
         assert!(entry.contains("needs_mod: ja (Moderations-"), "{entry}");
-        assert!(entry.contains("Bilder: 2"), "{entry}");
-        assert!(entry.contains("Nicht geprüft: 1 Bild(er)"), "{entry}");
+        assert!(entry.contains("Bilder: 2 angehängt"), "{entry}");
+        assert!(entry.contains("Nicht geprüft: 2 Bild(er)"), "{entry}");
         assert!(
             entry.contains("Bildprüfung: scam, Sicherheit 0.93, bestätigt ja"),
             "{entry}"
         );
         assert!(
-            entry.contains(&format!("scammer → Mitglied {MOCK_MEMBER_ID}")),
+            entry.contains(&format!("`scammer` → Mitglied {MOCK_MEMBER_ID}")),
             "{entry}"
         );
         assert!(
@@ -4816,7 +4876,7 @@ mod tests {
         let brain = ScriptedBrain::answering("Kandidat");
         let faq = ticket_faq(port.clone(), brain);
 
-        faq.handle_ticket_message_with_images(
+        faq.handle_ticket_message(
             1,
             222,
             111111111111111111,
@@ -4853,7 +4913,7 @@ mod tests {
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, ticket_marker)
+        faq.handle_ticket_message(1, 222, 111111111111111111, ticket_marker, &[])
             .await;
         drop(guard);
         handle.await.unwrap();
@@ -4894,7 +4954,7 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
         let marker = "TICKET_EQUAL_SHADOW_MARKER";
         let question = format!("{marker}{}", '\u{1f}');
-        faq.handle_ticket_message(1, 222, 111111111111111111, &question)
+        faq.handle_ticket_message(1, 222, 111111111111111111, &question, &[])
             .await;
         drop(guard);
         handle.abort();
@@ -4940,7 +5000,7 @@ mod tests {
 
         let marker = "TICKET_NOT_ALLOWLISTED_MARKER";
         let question = format!("{marker}{}", '\0');
-        faq.handle_ticket_message(1, 222, 111111111111111111, &question)
+        faq.handle_ticket_message(1, 222, 111111111111111111, &question, &[])
             .await;
         drop(guard);
         handle.abort();
@@ -4976,7 +5036,7 @@ mod tests {
         .await;
         let faq = ticket_faq_with_shadow(port.clone(), url, None);
 
-        faq.handle_ticket_message(0, 222, 111111111111111111, "Steam geht nicht")
+        faq.handle_ticket_message(0, 222, 111111111111111111, "Steam geht nicht", &[])
             .await;
         handle.abort();
 
@@ -4990,11 +5050,11 @@ mod tests {
         let brain = ScriptedBrain::answering("Gebündelter Kandidat");
         let faq = ticket_faq_with_opening_window(port.clone(), brain.clone());
 
-        faq.handle_ticket_message(1, 222, 111111111111111111, "Erste Nachricht")
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Erste Nachricht", &[])
             .await;
-        faq.handle_ticket_message(1, 222, 111111111111111111, "Zweite Nachricht")
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Zweite Nachricht", &[])
             .await;
-        faq.handle_ticket_message(1, 222, 999999999999999999, "Fremde Nachricht")
+        faq.handle_ticket_message(1, 222, 999999999999999999, "Fremde Nachricht", &[])
             .await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while brain.call_count() == 0 {

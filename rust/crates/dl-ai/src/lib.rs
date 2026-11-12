@@ -38,7 +38,7 @@ const DEFAULT_TOKEN_PLAN_BASE_URL: &str = "https://api.minimax.io/anthropic/v1";
 const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
-const MAX_OPENAI_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_OPENAI_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Content-Length is advisory; enforce the cap while receiving every chunk.
@@ -179,7 +179,7 @@ pub fn fireworks_vision_from_lookup(
 /// Gültige Bild-URL-Präfixe (Original: `valid_prefixes` in `generate_multimodal`).
 const VALID_IMAGE_PREFIXES: [&str; 3] = ["http://", "https://", "data:image/"];
 /// Maximale Bildanzahl pro Request (Original: `valid_images[:4]`).
-const MAX_MULTIMODAL_IMAGES: usize = 4;
+pub const MAX_MULTIMODAL_IMAGES: usize = 4;
 
 pub struct MiniMaxClient {
     http: reqwest::Client,

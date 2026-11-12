@@ -86,16 +86,21 @@ fn install_ticket_screenshot_review(
     moderator: Option<&Arc<dl_moderation::ModerationSystem>>,
     enabled: bool,
 ) {
-    match (enabled, moderator) {
-        (true, Some(moderator)) => {
-            faq.install_screenshot_reviewer(moderator.clone());
-            tracing::info!("Ticket-Bildprüfung für Scam-Meldungen eingeschaltet");
+    use dl_community::ticket_triage::{ScreenshotReviewSetup, ScreenshotReviewer};
+    let reviewer = moderator.map(|moderator| moderator.clone() as Arc<dyn ScreenshotReviewer>);
+    let setup = ScreenshotReviewSetup::from_config(enabled, reviewer);
+    match &setup {
+        ScreenshotReviewSetup::Active(_) => {
+            tracing::info!("Ticket-Bildprüfung für Scam-Meldungen eingeschaltet")
         }
-        (true, None) => tracing::warn!(
+        ScreenshotReviewSetup::ModerationAiMissing => tracing::warn!(
             "Ticket-Bildprüfung eingeschaltet, aber Moderations-KI fehlt; Bildprüfung bleibt aus"
         ),
-        (false, _) => tracing::info!("Ticket-Bildprüfung für Scam-Meldungen ausgeschaltet"),
+        ScreenshotReviewSetup::Off => {
+            tracing::info!("Ticket-Bildprüfung für Scam-Meldungen ausgeschaltet")
+        }
     }
+    faq.install_screenshot_review(setup);
 }
 
 #[cfg(test)]
