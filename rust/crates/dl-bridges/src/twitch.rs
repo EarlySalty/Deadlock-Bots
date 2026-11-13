@@ -86,7 +86,10 @@ impl TwitchApiClient {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let token = get("TWITCH_INTERNAL_API_TOKEN")?;
+        let token = dl_core::internal_tokens::first_token(
+            &lookup,
+            dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
+        )?;
         let base_url = get("TWITCH_INTERNAL_API_BASE_URL").unwrap_or_else(|| {
             let host = get("TWITCH_INTERNAL_API_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
             let port = get("TWITCH_INTERNAL_API_PORT")

@@ -21,8 +21,11 @@ async fn main() -> anyhow::Result<()> {
         .twitch_api_url
         .clone()
         .unwrap_or_else(|| DEFAULT_TWITCH_API_URL.to_string());
-    let token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN")
-        .ok_or_else(|| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt im Infisical-Bootstrap"))?;
+    let token = dl_core::internal_tokens::first_token(
+        dl_core::runtime_config::secret_value,
+        dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
+    )
+    .ok_or_else(|| anyhow::anyhow!("TWITCH_INTERNAL_API_TOKEN fehlt im Infisical-Bootstrap"))?;
     let base = validate_base_url(&base)?;
     let central_dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
         .ok_or_else(|| anyhow::anyhow!("Zentraler Datenbankzugang fehlt im privaten Snapshot"))?;

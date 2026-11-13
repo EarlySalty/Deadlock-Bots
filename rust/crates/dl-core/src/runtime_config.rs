@@ -826,8 +826,7 @@ pub fn secret_value(key: &str) -> Option<String> {
     match key {
         "DISCORD_BRAIN_CLIENT_TOKEN" | "DISCORD_PUBLIC_FACTS_TOKEN" => {
             crate::token_snapshot::value(key)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
+                .and_then(crate::internal_tokens::token_value)
                 .map(str::to_owned)
         }
         "DISCORD_TOKEN"
@@ -863,9 +862,7 @@ pub fn secret_value(key: &str) -> Option<String> {
                 // Unbetroffene Legacy-Binaries behalten ihren Startvertrag.
                 std::env::var(key).ok()
             };
-            value
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
+            value.and_then(|value| crate::internal_tokens::token_value(&value).map(str::to_owned))
         }
         _ => None,
     }
