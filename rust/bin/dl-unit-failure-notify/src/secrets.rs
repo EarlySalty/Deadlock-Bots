@@ -3,9 +3,9 @@
 //! Credentialwerte, Antworttexte, URLs oder JSON-Parserauszüge.
 use crate::Config;
 use anyhow::{bail, Context, Result};
-use dl_core::internal_tokens::MASTER_BROKER_RECEIVER;
+use dl_core::internal_tokens::{token_value, MASTER_BROKER_RECEIVER};
 use serde::Deserialize;
-use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
+use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Deserialize)]
@@ -113,11 +113,11 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
         }
     }
     for name in MASTER_BROKER_RECEIVER {
-        if let Some(value) = values
+        if let Some(token) = values
             .remove(*name)
-            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| token_value(&value).map(|token| Zeroizing::new(token.to_string())))
         {
-            return Ok(value);
+            return Ok(token);
         }
     }
     bail!("Bestehender Broker-Zugang fehlt in Infisical.")
@@ -185,7 +185,7 @@ async fn bounded_reply(mut response: reqwest::Response) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::Write, net::TcpListener};
+    use std::{io::Write, net::TcpListener, time::Duration};
 
     async fn mock(status: u16, body: &'static str) -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

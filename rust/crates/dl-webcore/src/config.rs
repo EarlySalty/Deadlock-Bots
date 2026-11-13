@@ -2,7 +2,7 @@
 //! (public_stats.py / tierlist_public.py), damit dieselbe systemd-Umgebung
 //! beide Welten versorgt.
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebConfig {
     /// Session-Secret: PUBLIC_STATS_SESSION_SECRET → SESSIONS_ENCRYPTION_KEY
     pub session_secret: Option<String>,
@@ -12,9 +12,9 @@ pub struct WebConfig {
     pub cors_origins: Vec<String>,
     /// Interne Dashboard-Basis-URL (DASHBOARD_INTERNAL_API_BASE)
     pub dashboard_base: String,
-    /// Token fürs OAuth-Relay: TURNIER_… → MAIN_BOT_… → TWITCH_…
+    /// Token fürs OAuth-Relay: erster Wert aus `internal_tokens::DASHBOARD_INTERNAL_RECEIVER`
     pub relay_token: Option<String>,
-    /// Token für validate-session (der Endpunkt prüft spezifisch das Twitch-Token)
+    /// Token für validate-session: `internal_tokens::TWITCH_DASHBOARD_RECEIVER`
     pub twitch_token: Option<String>,
     /// Öffentliche Callback-URL des Stats-Auth-Flows (PUBLIC_STATS_CALLBACK_URL)
     pub stats_callback_url: String,
@@ -76,10 +76,13 @@ impl WebConfig {
             dashboard_base: get("DASHBOARD_INTERNAL_API_BASE")
                 .unwrap_or_else(|| "http://127.0.0.1:8766".to_string()),
             relay_token: dl_core::internal_tokens::first_token(
-                get,
+                &lookup,
                 dl_core::internal_tokens::DASHBOARD_INTERNAL_RECEIVER,
             ),
-            twitch_token: get("TWITCH_INTERNAL_API_TOKEN"),
+            twitch_token: dl_core::internal_tokens::first_token(
+                &lookup,
+                dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
+            ),
             stats_callback_url: get("PUBLIC_STATS_CALLBACK_URL").unwrap_or_else(|| {
                 "https://deutsche-deadlock-community.de/aktivitaet/auth/discord/complete"
                     .to_string()
@@ -89,6 +92,35 @@ impl WebConfig {
             static_dir: get("DL_STATIC_DIR").unwrap_or_else(|| "service/static".to_string()),
             tierlist_refresh_enabled: flag("DL_TIERLIST_REFRESH", true),
         }
+    }
+}
+
+impl std::fmt::Debug for WebConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebConfig")
+            .field(
+                "session_secret",
+                &secret_state(self.session_secret.as_deref()),
+            )
+            .field("cookie_secure", &self.cookie_secure)
+            .field("cors_origins", &self.cors_origins)
+            .field("dashboard_base", &self.dashboard_base)
+            .field("relay_token", &secret_state(self.relay_token.as_deref()))
+            .field("twitch_token", &secret_state(self.twitch_token.as_deref()))
+            .field("stats_callback_url", &self.stats_callback_url)
+            .field("stats_host", &self.stats_host)
+            .field("tierlist_host", &self.tierlist_host)
+            .field("static_dir", &self.static_dir)
+            .field("tierlist_refresh_enabled", &self.tierlist_refresh_enabled)
+            .finish()
+    }
+}
+
+fn secret_state(value: Option<&str>) -> &'static str {
+    if value.is_some() {
+        "<gesetzt>"
+    } else {
+        "<fehlt>"
     }
 }
 
@@ -105,6 +137,21 @@ fn default_cors_origins() -> Vec<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn debug_zeigt_keine_geheimnisse() {
+        let map = HashMap::from([
+            ("PUBLIC_STATS_SESSION_SECRET", "sitzung-wert-31a"),
+            ("TURNIER_INTERNAL_API_TOKEN", "relay-wert-8b2"),
+            ("TWITCH_INTERNAL_API_TOKEN", " twitch-wert-5e7 "),
+        ]);
+        let cfg = WebConfig::from_lookup(|key| map.get(key).map(|v| v.to_string()));
+        assert_eq!(cfg.twitch_token.as_deref(), Some("twitch-wert-5e7"));
+        let debug = format!("{cfg:?}");
+        for secret in ["sitzung-wert-31a", "relay-wert-8b2", "twitch-wert-5e7"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
+    }
 
     #[test]
     fn defaults() {

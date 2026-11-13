@@ -55,9 +55,12 @@ pub fn all_tokens(lookup: impl Fn(&str) -> Option<String>, keys: &[&str]) -> Vec
 }
 
 pub fn present(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
-    lookup(key)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    lookup(key).and_then(|value| token_value(&value).map(str::to_string))
+}
+
+pub fn token_value(raw: &str) -> Option<&str> {
+    let value = raw.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 #[cfg(test)]
