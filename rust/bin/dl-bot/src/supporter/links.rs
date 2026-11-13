@@ -880,23 +880,22 @@ mod tests {
         assert_eq!(config.steam_token, None);
         let config = config_from(Default::default(), |key| match key {
             "MASTER_BROKER_TOKEN" => Some("broker".to_string()),
-            "STEAM_INTERNAL_API_TOKEN" => Some("steam".to_string()),
+            "STEAM_INTERNAL_API_TOKEN" => Some("steam-wert-7d1".to_string()),
             _ => None,
         });
-        assert_eq!(config.steam_token.as_deref(), Some("steam"));
+        assert_eq!(config.steam_token.as_deref(), Some("steam-wert-7d1"));
         assert_eq!(config.twitch_token, None);
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("steam-wert-7d1"), "{debug}");
         let config = config_from(Default::default(), |key| match key {
-            "STEAM_INTERNAL_API_TOKEN" => Some("steam".to_string()),
-            "TWITCH_INTERNAL_API_TOKEN" => Some("internal".to_string()),
+            "STEAM_INTERNAL_API_TOKEN" => Some("steam-wert-7d1".to_string()),
+            "TWITCH_INTERNAL_API_TOKEN" => Some("twitch-wert-4c9".to_string()),
             _ => None,
         });
-        assert_eq!(config.twitch_token.as_deref(), Some("internal"));
-        assert_eq!(config.steam_token.as_deref(), Some("internal"));
+        assert_eq!(config.twitch_token.as_deref(), Some("twitch-wert-4c9"));
+        assert_eq!(config.steam_token.as_deref(), Some("twitch-wert-4c9"));
         let debug = format!("{config:?}");
-        assert!(
-            !debug.contains("internal") && !debug.contains("steam\""),
-            "{debug}"
-        );
+        assert!(!debug.contains("twitch-wert-4c9"), "{debug}");
     }
 
     #[test]
