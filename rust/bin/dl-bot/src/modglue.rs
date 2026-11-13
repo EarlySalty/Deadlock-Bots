@@ -6542,9 +6542,12 @@ mod tests {
         ))
         .expect("Normale Consumerkonfiguration");
         let (mut handler, _) = direct_test_handler();
-        handler.answerer =
-            crate::discord_brain_answerer(&config.runtime.ai, Some("fixture-brain-bearer".into()))
-                .expect("Produktiver Consumeranschluss");
+        handler.answerer = crate::discord_brain_answerer(
+            &config.runtime.ai,
+            dl_bridges::http::HttpLimits::from_bridges(&config.runtime.bridges),
+            Some("fixture-brain-bearer".into()),
+        )
+        .expect("Produktiver Consumeranschluss");
         let mut guild = serenity::all::Guild::default();
         guild.id = GuildId::new(1);
         guild.owner_id = UserId::new(99);
@@ -6737,11 +6740,19 @@ mod tests {
                 "schema_version = 1\n[runtime.ai]\nbrain_command_enabled = true\nbrain_api_endpoint = '{endpoint}'\nbrain_api_timeout_ms = 3000\n"
             )).expect("Normale Consumerkonfiguration");
             let options = config.runtime.ai;
-            assert!(crate::discord_brain_answerer(&options, None).is_err());
+            assert!(crate::discord_brain_answerer(
+                &options,
+                dl_bridges::http::HttpLimits::default(),
+                None
+            )
+            .is_err());
             let (mut handler, _) = direct_test_handler();
-            handler.answerer =
-                crate::discord_brain_answerer(&options, Some("fixture-brain-bearer".into()))
-                    .expect("Produktiver Consumeranschluss");
+            handler.answerer = crate::discord_brain_answerer(
+                &options,
+                dl_bridges::http::HttpLimits::default(),
+                Some("fixture-brain-bearer".into()),
+            )
+            .expect("Produktiver Consumeranschluss");
             let event = test_message_event(
                 Some(1),
                 "<@42>Welche Lanes gibt es? Nutze User-ID 999\n<@!42>Welche Items passen?\n<@42>Wie spiele ich Abrams?",

@@ -265,6 +265,7 @@ fn brain_channel_allowlist_from_value(raw: Option<&str>) -> Option<HashSet<u64>>
 
 fn discord_brain_answerer(
     options: &dl_core::runtime_config::AiOptions,
+    http: dl_bridges::http::HttpLimits,
     token: Option<String>,
 ) -> anyhow::Result<Arc<dyn dl_brain::AiAnswerer>> {
     let endpoint = options
@@ -282,10 +283,7 @@ fn discord_brain_answerer(
             "dl-bot-discord".into(),
             std::collections::BTreeSet::from(["bot.public".into()]),
         )?
-        .with_image_limits(brain_image_limits(
-            options,
-            dl_bridges::http::HttpLimits::current()?,
-        ))?,
+        .with_image_limits(brain_image_limits(options, http))?,
     ))
 }
 
@@ -328,9 +326,10 @@ impl dl_brain::AiAnswerer for UnavailableCommunityBrain {
 
 fn community_brain_answerer(
     options: &dl_core::runtime_config::AiOptions,
+    http: dl_bridges::http::HttpLimits,
     token: Option<String>,
 ) -> Arc<dyn dl_brain::AiAnswerer> {
-    match discord_brain_answerer(options, token) {
+    match discord_brain_answerer(options, http, token) {
         Ok(answerer) => answerer,
         Err(error) => {
             tracing::warn!(%error, "Brain-Antworten für Concierge und FAQ nicht verfügbar");
@@ -341,6 +340,7 @@ fn community_brain_answerer(
 
 fn community_brain_for_answers(
     options: &dl_core::runtime_config::AiOptions,
+    http: dl_bridges::http::HttpLimits,
     token: impl FnOnce() -> Option<String>,
 ) -> Arc<dyn dl_brain::AiAnswerer> {
     if options.community_brain_answers == Some(false) {
@@ -349,7 +349,7 @@ fn community_brain_for_answers(
         );
     }
     tracing::info!("Concierge und FAQ antworten ausschließlich über das Brain");
-    community_brain_answerer(options, token())
+    community_brain_answerer(options, http, token())
 }
 
 async fn wait_for_gateway_cache_ready(
@@ -1126,7 +1126,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
-    let community_brain = community_brain_for_answers(&operating.runtime.ai, || {
+    let brain_http = dl_bridges::http::HttpLimits::from_bridges(&operating.runtime.bridges);
+    let community_brain = community_brain_for_answers(&operating.runtime.ai, brain_http, || {
         dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN")
     });
 
@@ -1139,6 +1140,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         } else {
             let answerer = discord_brain_answerer(
                 options,
+                brain_http,
                 dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN"),
             )?;
             tracing::info!("Direkte Discord-Brain-Antworten angeschlossen");
@@ -2260,9 +2262,11 @@ mod tests {
                 community_brain_answers: switch,
                 ..Default::default()
             };
-            let brain = super::community_brain_for_answers(&options, || {
-                Some("fixture-brain-consumer".into())
-            });
+            let brain = super::community_brain_for_answers(
+                &options,
+                dl_bridges::http::HttpLimits::default(),
+                || Some("fixture-brain-consumer".into()),
+            );
             assert_eq!(
                 brain
                     .answer_discord_task(
@@ -2303,8 +2307,17 @@ mod tests {
                 brain_command_enabled: Some(false),
                 ..Default::default()
             };
-            assert!(super::discord_brain_answerer(&options, token.clone()).is_err());
-            let brain = super::community_brain_answerer(&options, token);
+            assert!(super::discord_brain_answerer(
+                &options,
+                dl_bridges::http::HttpLimits::default(),
+                token.clone()
+            )
+            .is_err());
+            let brain = super::community_brain_answerer(
+                &options,
+                dl_bridges::http::HttpLimits::default(),
+                token,
+            );
             for capability in [
                 dl_brain::DiscordAnswerCapability::Concierge,
                 dl_brain::DiscordAnswerCapability::Faq,
