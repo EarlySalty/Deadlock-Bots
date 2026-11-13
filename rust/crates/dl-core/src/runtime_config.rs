@@ -17,7 +17,8 @@ pub const SUPPORTER_TIER_MAX_EUR: u64 = STRIPE_MAX_UNIT_AMOUNT_CENTS as u64 / 10
 pub const SUPPORTER_MAX_TIERS: usize = 5;
 pub const SUPPORTER_CUTOVER_GRACE_DAYS: i32 = 31;
 pub const MINUTE_SECONDS: u64 = 60;
-pub const DAY_SECONDS: u64 = 86_400;
+pub const HOUR_SECONDS: u64 = 3_600;
+pub const DAY_SECONDS: u64 = 24 * HOUR_SECONDS;
 pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
 pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = MINUTE_SECONDS..=DAY_SECONDS;
 pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
@@ -34,7 +35,7 @@ pub const MODERATION_THRESHOLD_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_FUZZY_FLOOR_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
 pub const MATCHER_MAX_AI_PER_SCAN_RANGE: RangeInclusive<u64> = 0..=1_000;
-pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 1..=8_760;
+pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 1..=YEAR_SECONDS / HOUR_SECONDS;
 pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
 pub const BRAIN_IMAGE_COUNT_RANGE: RangeInclusive<usize> = 1..=4;
 pub const BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE: RangeInclusive<u64> = 1..=512 * 1024 * 1024;
@@ -51,6 +52,8 @@ pub const STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const STEAM_SYNC_DEFAULT_TIMEOUT_MS: u64 = 180_000;
 pub const STEAM_INVITE_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const DURATION_SECONDS_RANGE: RangeInclusive<u64> = 0..=YEAR_SECONDS;
+pub const RUNTIME_TTL_RANGE: RangeInclusive<i64> = 1..=YEAR_SECONDS as i64;
+pub const BROKER_IDEMPOTENCY_ENTRIES_RANGE: RangeInclusive<usize> = 1..=1_000_000;
 pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
 pub const SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 300;
 pub const SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS: i64 = 25_000;
@@ -493,7 +496,7 @@ impl RuntimeConfig {
         if self
             .start
             .broker_idempotency_max_entries
-            .is_some_and(|value| value == 0 || value > 1_000_000)
+            .is_some_and(|value| !BROKER_IDEMPOTENCY_ENTRIES_RANGE.contains(&value))
         {
             return Err(invalid());
         }
@@ -559,7 +562,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !(1..=31_536_000).contains(&ttl) {
+            if !RUNTIME_TTL_RANGE.contains(&ttl) {
                 return Err(invalid());
             }
         }

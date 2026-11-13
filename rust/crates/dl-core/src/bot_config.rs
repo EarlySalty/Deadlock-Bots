@@ -17,6 +17,8 @@ pub const TEMPVOICE_GRACE_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
     1..=crate::runtime_config::DAY_SECONDS;
 pub const TWITCH_INVITE_EVALUATION_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
     1..=crate::runtime_config::DAY_SECONDS;
+pub const DISCORD_GUILD_INVITE_LIMIT: u16 = 1_000;
+pub const TWITCH_INVITE_COUNT_RANGE: std::ops::RangeInclusive<u16> = 0..=DISCORD_GUILD_INVITE_LIMIT;
 pub const LLM_MAX_OUTPUT_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 1..=32_768;
 pub const LLM_TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.0..=2.0;
 pub const LLM_REQUEST_TIMEOUT_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
@@ -322,8 +324,8 @@ impl BotConfig {
     pub fn validate(&self) -> Result<(), BotConfigError> {
         self.runtime.validate()?;
         let invalid = BotConfigError::Validation;
-        if self.twitch_invites.personal_links_per_channel > 1000
-            || self.twitch_invites.guild_invite_reserve > 1000
+        if !TWITCH_INVITE_COUNT_RANGE.contains(&self.twitch_invites.personal_links_per_channel)
+            || !TWITCH_INVITE_COUNT_RANGE.contains(&self.twitch_invites.guild_invite_reserve)
             || !TWITCH_INVITE_EVALUATION_SECONDS_RANGE
                 .contains(&self.twitch_invites.evaluation_interval_seconds)
             || self

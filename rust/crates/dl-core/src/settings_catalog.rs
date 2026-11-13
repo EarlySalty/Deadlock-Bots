@@ -272,6 +272,18 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
             range_bounds(&runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE)
         }
         "runtime.ai.brain_image_followup_seconds" => range_bounds(&runtime::DURATION_SECONDS_RANGE),
+        "twitch_invites.personal_links_per_channel" | "twitch_invites.guild_invite_reserve" => {
+            range_bounds(&bot::TWITCH_INVITE_COUNT_RANGE)
+        }
+        "runtime.start.broker_idempotency_max_entries" => {
+            range_bounds(&runtime::BROKER_IDEMPOTENCY_ENTRIES_RANGE)
+        }
+        "runtime.community.survey_interval_days"
+        | "runtime.community.concierge_active_minutes"
+        | "runtime.moderation.timeout_minutes"
+        | "runtime.moderation.behavior_proposal_timeout_minutes"
+        | "runtime.dashboard.session_ttl_seconds"
+        | "runtime.dashboard.oauth_state_ttl_seconds" => range_bounds(&runtime::RUNTIME_TTL_RANGE),
         _ => return None,
     })
 }
@@ -691,5 +703,55 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
             );
         }
         assert!(checked >= 8, "{checked}");
+    }
+
+    fn loads_with(path: &str, value: i64) -> bool {
+        let range = crate::runtime_config::HTTP_TIMEOUT_MS_RANGE;
+        let companion = match path {
+            "runtime.bridges.http_connect_timeout_ms" => {
+                Some(("runtime.bridges.http_request_timeout_ms", *range.end()))
+            }
+            "runtime.bridges.http_request_timeout_ms" => {
+                Some(("runtime.bridges.http_connect_timeout_ms", *range.start()))
+            }
+            _ => None,
+        };
+        let mut changes = BTreeMap::from([(path.to_owned(), json!(value))]);
+        if let Some((other, other_value)) = companion {
+            changes.insert(other.to_owned(), json!(other_value));
+        }
+        let mut document: toml_edit::DocumentMut = "schema_version = 1\n".parse().expect("Basis");
+        if apply(&mut document, &changes).is_err() {
+            return false;
+        }
+        crate::bot_config::BotConfig::parse(&document.to_string()).is_ok()
+    }
+
+    #[test]
+    fn jede_editierbare_ganzzahlgrenze_entspricht_der_ladepruefung() {
+        let fields = fields(crate::admin_settings::SPEC, &[]);
+        let mut checked = 0;
+        let mut drift = Vec::new();
+        for field in fields.iter().filter(|field| {
+            field.writable
+                && matches!(field.kind, Kind::Integer)
+                && catalog_bounds(&field.path).is_some()
+        }) {
+            let (Some(min), Some(max)) = (
+                field.min.as_deref().and_then(|v| v.parse::<i64>().ok()),
+                field.max.as_deref().and_then(|v| v.parse::<i64>().ok()),
+            ) else {
+                continue;
+            };
+            checked += 1;
+            if !loads_with(&field.path, min) || !loads_with(&field.path, max) {
+                drift.push(format!("{} {min}..={max} lädt nicht", field.path));
+            }
+            if max < i64::MAX && loads_with(&field.path, max + 1) {
+                drift.push(format!("{} lädt über {max}", field.path));
+            }
+        }
+        assert!(drift.is_empty(), "{drift:#?}");
+        assert!(checked >= 15, "{checked}");
     }
 }
