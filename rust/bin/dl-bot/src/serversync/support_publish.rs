@@ -1394,7 +1394,7 @@ enabled = false
             .join("\n");
         assert!(!rendered.contains("Warum ich Unterstützung brauche"));
         assert!(!rendered.contains("KI-Abos"));
-        assert!(!rendered.contains("Ko-fi"));
+        assert!(!rendered.to_lowercase().contains("ko-fi"));
         let labels: Vec<String> = output
             .messages
             .iter()
@@ -1520,7 +1520,10 @@ enabled = false
             "admin.",
             "\u{2014}",
         ] {
-            assert!(!rendered.contains(banned), "{banned}");
+            assert!(
+                !rendered.to_lowercase().contains(&banned.to_lowercase()),
+                "{banned}"
+            );
         }
 
         for message in &output.messages {
