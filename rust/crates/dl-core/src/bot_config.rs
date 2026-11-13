@@ -15,6 +15,8 @@ use std::{
 pub const CONCIERGE_TIMEOUT_SECONDS_RANGE: std::ops::RangeInclusive<u64> = 1..=110;
 pub const TEMPVOICE_GRACE_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
     1..=crate::runtime_config::DAY_SECONDS;
+pub const TWITCH_INVITE_EVALUATION_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
+    1..=crate::runtime_config::DAY_SECONDS;
 pub const LLM_MAX_OUTPUT_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 1..=32_768;
 pub const LLM_TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.0..=2.0;
 pub const LLM_REQUEST_TIMEOUT_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
@@ -322,7 +324,8 @@ impl BotConfig {
         let invalid = BotConfigError::Validation;
         if self.twitch_invites.personal_links_per_channel > 1000
             || self.twitch_invites.guild_invite_reserve > 1000
-            || !(1..=86400).contains(&self.twitch_invites.evaluation_interval_seconds)
+            || !TWITCH_INVITE_EVALUATION_SECONDS_RANGE
+                .contains(&self.twitch_invites.evaluation_interval_seconds)
             || self
                 .twitch_invites
                 .excluded_voice_channel_ids

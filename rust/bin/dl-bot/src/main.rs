@@ -2172,6 +2172,35 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn brain_bildgrenzen_der_konfiguration_entsprechen_dem_brain() {
+        use dl_core::runtime_config as runtime;
+        assert_eq!(
+            runtime::BRAIN_IMAGE_COUNT_RANGE,
+            dl_brain::IMAGE_COUNT_RANGE
+        );
+        assert_eq!(
+            runtime::BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE,
+            dl_brain::IMAGE_DOWNLOAD_BYTES_RANGE
+        );
+        assert_eq!(
+            *runtime::BRAIN_IMAGE_EDGE_RANGE.start(),
+            u64::from(*dl_brain::IMAGE_EDGE_RANGE.start())
+        );
+        assert_eq!(
+            *runtime::BRAIN_IMAGE_EDGE_RANGE.end(),
+            u64::from(*dl_brain::IMAGE_EDGE_RANGE.end())
+        );
+        assert_eq!(
+            *runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE.start(),
+            u64::from(*dl_brain::IMAGE_JPEG_QUALITY_RANGE.start())
+        );
+        assert_eq!(
+            *runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE.end(),
+            u64::from(*dl_brain::IMAGE_JPEG_QUALITY_RANGE.end())
+        );
+    }
+
     #[tokio::test]
     async fn community_answers_use_brain_for_every_switch_value() {
         use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};

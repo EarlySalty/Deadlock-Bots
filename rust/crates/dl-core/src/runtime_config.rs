@@ -28,6 +28,8 @@ pub const HTTP_DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
 pub const STEAM_BOT_STRIPE_TIMEOUT_MS: u64 = 10_000;
 pub const HTTP_DEFAULT_REQUEST_TIMEOUT_MS: u64 =
     STEAM_BOT_STRIPE_TIMEOUT_MS + HTTP_DEFAULT_CONNECT_TIMEOUT_MS;
+const _: () = assert!(HTTP_DEFAULT_REQUEST_TIMEOUT_MS > STEAM_BOT_STRIPE_TIMEOUT_MS);
+const _: () = assert!(*HTTP_TIMEOUT_MS_RANGE.end() >= HTTP_DEFAULT_REQUEST_TIMEOUT_MS);
 pub const MODERATION_THRESHOLD_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_FUZZY_FLOOR_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
@@ -1086,7 +1088,6 @@ mod supporter_bound_tests {
         }
         assert!(HTTP_TIMEOUT_MS_RANGE.contains(&HTTP_DEFAULT_CONNECT_TIMEOUT_MS));
         assert!(HTTP_TIMEOUT_MS_RANGE.contains(&HTTP_DEFAULT_REQUEST_TIMEOUT_MS));
-        assert!(HTTP_DEFAULT_REQUEST_TIMEOUT_MS > STEAM_BOT_STRIPE_TIMEOUT_MS);
         assert!(!parse_in(
             "ai",
             &format!("brain_api_timeout_ms={}", max + 1)

@@ -220,6 +220,9 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
     Some(match path {
         "concierge.timeout_seconds" => range_bounds(&bot::CONCIERGE_TIMEOUT_SECONDS_RANGE),
         "tempvoice.empty_lane_grace_seconds" => range_bounds(&bot::TEMPVOICE_GRACE_SECONDS_RANGE),
+        "twitch_invites.evaluation_interval_seconds" => {
+            range_bounds(&bot::TWITCH_INVITE_EVALUATION_SECONDS_RANGE)
+        }
         "runtime.community.supporter_role_sync_max_revokes" => {
             range_bounds(&runtime::SUPPORTER_MAX_REVOKES_RANGE)
         }
