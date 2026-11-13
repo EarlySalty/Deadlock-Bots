@@ -69,7 +69,7 @@ pub async fn sync_boost_rows(pool: &PgPool, boosters: &[u64]) -> Result<BoostSyn
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
          SELECT id, 'boost', 'discord', NULL, NULL, now()
-           FROM UNNEST($1::bigint[]) AS id
+           FROM (SELECT DISTINCT id FROM UNNEST($1::bigint[]) AS id ORDER BY id) AS ids
          ON CONFLICT (discord_id, source, source_ref)
          DO UPDATE SET valid_until = NULL, updated_at = now()",
     )
@@ -106,7 +106,7 @@ pub async fn import_manual(pool: &PgPool, holders: &[u64]) -> Result<u64, StoreE
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
          SELECT id, 'manual', 'role_cutover', NULL, now() + make_interval(days => $2), now()
-           FROM UNNEST($1::bigint[]) AS id
+           FROM (SELECT DISTINCT id FROM UNNEST($1::bigint[]) AS id ORDER BY id) AS ids
          ON CONFLICT (discord_id, source, source_ref) DO NOTHING",
     )
     .bind(&ids)
@@ -141,13 +141,13 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[tokio::test]
-    async fn jede_aktive_quelle_zaehlt_auch_plus_unter_fuenf_euro() -> TestResult {
+    async fn jede_aktive_quelle_zaehlt() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         sqlx::query(
             "INSERT INTO core.supporter_sources
                  (discord_id, source, source_ref, monthly_cents, valid_until)
-             VALUES (11, 'stripe', 'sub_plus', 300, NULL),
+             VALUES (11, 'stripe', 'sub_klein', 300, NULL),
                     (12, 'stripe', 'tip:pi_old', 500, now() - interval '1 day'),
                     (13, 'twitch_sub', 'earlysalty', NULL, now() + interval '1 day')",
         )
@@ -164,6 +164,115 @@ mod tests {
         assert!(manual_import_done(pool).await?);
         let expected: HashSet<u64> = [11, 13, 15].into_iter().collect();
         assert_eq!(active_supporters(pool).await?, expected);
+        Ok(())
+    }
+
+    async fn block_member(pool: &PgPool, user_id: i64, deleted: bool) -> TestResult {
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
+             VALUES ($1, TRUE, CASE WHEN $2 THEN now() END, 'test', now())",
+        )
+        .bind(user_id)
+        .bind(deleted)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn source_rows(pool: &PgPool, user_id: i64) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT count(*) FROM core.supporter_sources WHERE discord_id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn boost_abgleich_legt_abgemeldete_und_geloeschte_nicht_wieder_an() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        block_member(pool, 31, false).await?;
+        block_member(pool, 32, true).await?;
+        sync_boost_rows(pool, &[33, 32, 31, 33]).await?;
+        assert_eq!(source_rows(pool, 31).await?, 0);
+        assert_eq!(source_rows(pool, 32).await?, 0);
+        assert_eq!(source_rows(pool, 33).await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manueller_import_legt_abgemeldete_und_geloeschte_nicht_wieder_an() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        block_member(pool, 41, false).await?;
+        block_member(pool, 42, true).await?;
+        assert_eq!(import_manual(pool, &[43, 42, 41]).await?, 1);
+        assert_eq!(source_rows(pool, 41).await?, 0);
+        assert_eq!(source_rows(pool, 42).await?, 0);
+        assert_eq!(source_rows(pool, 43).await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stripe_und_twitch_schreiber_legen_abgemeldete_nicht_wieder_an() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        block_member(pool, 51, true).await?;
+        let stripe = sqlx::query(
+            "INSERT INTO core.supporter_sources AS s
+               (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
+             VALUES ($1, 'stripe', 'sub_test', 1000, NULL, now())
+             ON CONFLICT (discord_id, source, source_ref) DO UPDATE SET
+               monthly_cents = EXCLUDED.monthly_cents,
+               valid_until = NULL,
+               updated_at = EXCLUDED.updated_at",
+        )
+        .bind(51_i64)
+        .execute(pool)
+        .await?;
+        assert_eq!(stripe.rows_affected(), 0);
+        let twitch = sqlx::query(
+            "INSERT INTO core.supporter_sources
+                 (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
+             VALUES ($1, 'twitch_sub', 'earlysalty', NULL, now() + interval '1 day', now())
+             ON CONFLICT (discord_id, source, source_ref) DO UPDATE SET
+                 valid_until = EXCLUDED.valid_until,
+                 updated_at = now()",
+        )
+        .bind(51_i64)
+        .execute(pool)
+        .await?;
+        assert_eq!(twitch.rows_affected(), 0);
+        assert_eq!(source_rows(pool, 51).await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nach_abmeldung_darf_eine_quelle_nur_enden() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO core.supporter_sources
+                 (discord_id, source, source_ref, monthly_cents, valid_until)
+             VALUES (61, 'stripe', 'sub_ende', 1000, NULL)",
+        )
+        .execute(pool)
+        .await?;
+        block_member(pool, 61, false).await?;
+        let reopened = sqlx::query(
+            "UPDATE core.supporter_sources SET valid_until = NULL, updated_at = now()
+              WHERE discord_id = 61",
+        )
+        .execute(pool)
+        .await?;
+        assert_eq!(reopened.rows_affected(), 0);
+        let ended = sqlx::query(
+            "UPDATE core.supporter_sources SET valid_until = now(), updated_at = now()
+              WHERE discord_id = 61",
+        )
+        .execute(pool)
+        .await?;
+        assert_eq!(ended.rows_affected(), 1);
+        assert!(!active_supporters(pool).await?.contains(&61));
         Ok(())
     }
 }
