@@ -1618,6 +1618,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             serversync::GUILD_ID,
             serversync_concrete.clone(),
             supporter_config.clone(),
+            http_limits,
         )
         .spawn();
         master::spawn_control(
