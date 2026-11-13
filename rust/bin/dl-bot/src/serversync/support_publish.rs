@@ -1509,7 +1509,12 @@ enabled = false
         let rendered = output
             .messages
             .iter()
-            .flat_map(|message| text_contents(&message.payload))
+            .flat_map(|message| {
+                let labels = buttons(&message.payload)
+                    .into_iter()
+                    .filter_map(|button| button["label"].as_str().map(str::to_string));
+                text_contents(&message.payload).into_iter().chain(labels)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         for banned in [
