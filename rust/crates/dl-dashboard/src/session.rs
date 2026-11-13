@@ -22,7 +22,7 @@ const SESSION_KV_NAMESPACE: &str = "dl_dashboard_admin_session";
 /// Original z. B. `owner_override`, `guild_admin:<id>`, `moderator_role:<id>`).
 pub type SessionReason = String;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Session {
     pub user_id: u64,
     pub username: String,
@@ -33,6 +33,22 @@ pub struct Session {
     pub created_at: f64,
     pub last_seen_at: f64,
     pub expires_at: f64,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("display_name", &self.display_name)
+            .field("reason", &self.reason)
+            .field("access_level", &self.access_level)
+            .field("csrf_token", &"<gesetzt>")
+            .field("created_at", &self.created_at)
+            .field("last_seen_at", &self.last_seen_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Session {

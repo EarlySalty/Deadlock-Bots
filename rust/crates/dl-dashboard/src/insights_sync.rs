@@ -80,11 +80,21 @@ const ENDPOINTS: &[Endpoint] = &[
     },
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SyncConfig {
     pub token: String,
     pub guild_id: i64,
     pub archive_dir: PathBuf,
+}
+
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field("token", &"<gesetzt>")
+            .field("guild_id", &self.guild_id)
+            .field("archive_dir", &self.archive_dir)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default)]

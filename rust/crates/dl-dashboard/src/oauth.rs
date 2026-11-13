@@ -14,13 +14,23 @@ use serde_json::Value;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Antwort des Token-Endpunkts (nur die genutzten Felder).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]
     pub token_type: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"<gesetzt>")
+            .field("token_type", &self.token_type)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Discord-Nutzer aus `/users/@me`.
