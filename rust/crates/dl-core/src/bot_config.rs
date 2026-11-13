@@ -354,7 +354,9 @@ impl BotConfig {
             || steam.query().is_some()
             || steam.fragment().is_some()
             || steam.path() != "/"
-            || steam.port_or_known_default() == Some(0)
+            || steam
+                .port_or_known_default()
+                .is_some_and(|port| !crate::runtime_config::PORT_RANGE.contains(&port))
         {
             return Err(invalid(
                 "services.steam_api_url benötigt eine Loopback-Adresse ohne Zugangsdaten oder Pfad",
@@ -383,7 +385,9 @@ impl BotConfig {
             self.services.tierlist_public_port,
             self.services.changelog_port,
         ];
-        if ports.contains(&0)
+        if ports
+            .iter()
+            .any(|port| !crate::runtime_config::PORT_RANGE.contains(port))
             || ports
                 .iter()
                 .enumerate()

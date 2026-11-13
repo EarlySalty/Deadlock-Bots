@@ -55,6 +55,7 @@ pub const DURATION_SECONDS_RANGE: RangeInclusive<u64> = 0..=YEAR_SECONDS;
 pub const RUNTIME_TTL_RANGE: RangeInclusive<i64> = 1..=YEAR_SECONDS as i64;
 pub const BROKER_IDEMPOTENCY_ENTRIES_RANGE: RangeInclusive<usize> = 1..=1_000_000;
 pub const DISCORD_ID_RANGE: RangeInclusive<u64> = 1..=i64::MAX as u64;
+pub const PORT_RANGE: RangeInclusive<u16> = 1..=u16::MAX;
 pub const BRAIN_DAILY_USER_LIMIT_RANGE: RangeInclusive<usize> = 1..=usize::MAX;
 pub const PRESENCE_STATUS_MAX_CHARS: usize = 128;
 pub const BROKER_SECONDS_RANGE: RangeInclusive<f64> = 0.001..=YEAR_SECONDS as f64;
@@ -521,7 +522,7 @@ impl RuntimeConfig {
             .into_iter()
             .flatten()
         {
-            if port == 0 {
+            if !PORT_RANGE.contains(&port) {
                 return Err(invalid());
             }
         }
@@ -712,7 +713,9 @@ fn validate_url(raw: &str, local: bool) -> Result<(), BotConfigError> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || url.port_or_known_default() == Some(0)
+        || url
+            .port_or_known_default()
+            .is_some_and(|port| !PORT_RANGE.contains(&port))
         || (local
             && !url
                 .host_str()

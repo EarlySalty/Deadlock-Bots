@@ -143,6 +143,16 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
             if let Some(range) = catalog_bounds(&path) {
                 bounds = Some(range);
             }
+            let (min, max) = match catalog_number_bounds(&path).filter(|_| kind == Kind::Number) {
+                Some(range) => (
+                    Some(range.start().to_string()),
+                    Some(range.end().to_string()),
+                ),
+                None => (
+                    bounds.map(|(min, _)| min.to_string()),
+                    bounds.map(|(_, max)| max.to_string()),
+                ),
+            };
             result.push(Field {
                 path,
                 group: replace(columns[2]),
@@ -152,8 +162,8 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 writable: columns[4] == "edit",
                 restart_required: true,
                 help: replace(columns[5]),
-                min: bounds.map(|(min, _)| min.to_string()),
-                max: bounds.map(|(_, max)| max.to_string()),
+                min,
+                max,
                 length,
                 choices,
             });
@@ -199,8 +209,23 @@ where
     (wide(*range.start()), wide(*range.end()))
 }
 
-fn float_bounds(range: &std::ops::RangeInclusive<f64>) -> (i64, i64) {
-    (range.start().floor() as i64, range.end().ceil() as i64)
+pub fn catalog_number_bounds(path: &str) -> Option<std::ops::RangeInclusive<f64>> {
+    use crate::bot_config as bot;
+    use crate::runtime_config as runtime;
+    if path.starts_with("llm.use_cases.") && path.ends_with(".temperature") {
+        return Some(bot::LLM_TEMPERATURE_RANGE);
+    }
+    Some(match path {
+        "runtime.moderation.analyze_flag_threshold"
+        | "runtime.moderation.auto_verify_threshold"
+        | "runtime.moderation.propose_verify_threshold" => runtime::MODERATION_THRESHOLD_RANGE,
+        "runtime.bridges.matcher_fuzzy_floor" => runtime::MATCHER_FUZZY_FLOOR_RANGE,
+        "runtime.start.broker_idempotency_ttl_seconds"
+        | "runtime.start.broker_inflight_ttl_seconds"
+        | "runtime.start.broker_waiter_timeout_seconds" => runtime::BROKER_SECONDS_RANGE,
+        "runtime.bridges.twitch_timeout_seconds" => runtime::TWITCH_TIMEOUT_SECONDS_RANGE,
+        _ => return None,
+    })
 }
 
 pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
@@ -209,9 +234,6 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
     if path.starts_with("llm.use_cases.") {
         if path.ends_with(".max_output_tokens") {
             return Some(range_bounds(&bot::LLM_MAX_OUTPUT_TOKENS_RANGE));
-        }
-        if path.ends_with(".temperature") {
-            return Some(float_bounds(&bot::LLM_TEMPERATURE_RANGE));
         }
         if path.ends_with(".request_timeout_seconds") {
             return Some(range_bounds(&bot::LLM_REQUEST_TIMEOUT_SECONDS_RANGE));
@@ -247,12 +269,6 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
         "runtime.bridges.steam_invite_timeout_ms" => {
             range_bounds(&runtime::STEAM_INVITE_TIMEOUT_MS_RANGE)
         }
-        "runtime.moderation.analyze_flag_threshold"
-        | "runtime.moderation.auto_verify_threshold"
-        | "runtime.moderation.propose_verify_threshold" => {
-            float_bounds(&runtime::MODERATION_THRESHOLD_RANGE)
-        }
-        "runtime.bridges.matcher_fuzzy_floor" => float_bounds(&runtime::MATCHER_FUZZY_FLOOR_RANGE),
         "runtime.bridges.matcher_auto_threshold" | "runtime.bridges.matcher_review_threshold" => {
             range_bounds(&runtime::MATCHER_THRESHOLD_RANGE)
         }
@@ -301,7 +317,15 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
         | "runtime.community.concierge_pate_help_channel_id"
         | "runtime.community.concierge_mod_role_id"
         | "runtime.moderation.channel_id"
-        | "runtime.ai.transparency_channel_id" => range_bounds(&runtime::DISCORD_ID_RANGE),
+        | "runtime.ai.transparency_channel_id"
+        | "runtime.start.broker_channels"
+        | "runtime.start.broker_guilds"
+        | "runtime.start.broker_roles"
+        | "runtime.dashboard.auth_guild_ids"
+        | "runtime.community.concierge_test_users"
+        | "runtime.moderation.scan_channel_ids"
+        | "runtime.ai.brain_channels"
+        | "twitch_invites.excluded_voice_channel_ids" => range_bounds(&runtime::DISCORD_ID_RANGE),
         "runtime.ai.brain_daily_user_limit" => range_bounds(&runtime::BRAIN_DAILY_USER_LIMIT_RANGE),
         "twitch_invites.personal_links_per_channel" | "twitch_invites.guild_invite_reserve" => {
             range_bounds(&bot::TWITCH_INVITE_COUNT_RANGE)
@@ -748,7 +772,7 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
         assert!(checked >= 8, "{checked}");
     }
 
-    fn loads_with(path: &str, value: i64) -> bool {
+    fn loads_with(path: &str, value: Value) -> bool {
         let range = crate::runtime_config::HTTP_TIMEOUT_MS_RANGE;
         let companion = match path {
             "runtime.bridges.http_connect_timeout_ms" => {
@@ -759,7 +783,7 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
             }
             _ => None,
         };
-        let mut changes = BTreeMap::from([(path.to_owned(), json!(value))]);
+        let mut changes = BTreeMap::from([(path.to_owned(), value)]);
         if let Some((other, other_value)) = companion {
             changes.insert(other.to_owned(), json!(other_value));
         }
@@ -770,30 +794,58 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
         crate::bot_config::BotConfig::parse(&document.to_string()).is_ok()
     }
 
+    fn edges(field: &Field) -> Option<(Vec<Value>, Vec<Value>)> {
+        let (min, max) = (field.min.as_deref()?, field.max.as_deref()?);
+        if field.kind == Kind::Number {
+            let (min, max) = (min.parse::<f64>().ok()?, max.parse::<f64>().ok()?);
+            let step = |value: f64| value.abs() * 1e-9 + 1e-12;
+            return Some((
+                vec![json!(min), json!(max)],
+                vec![json!(min - step(min)), json!(max + step(max))],
+            ));
+        }
+        let (min, max) = (min.parse::<i64>().ok()?, max.parse::<i64>().ok()?);
+        let outside = [min.checked_sub(1), max.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .map(|value| json!(value))
+            .collect();
+        Some((vec![json!(min), json!(max)], outside))
+    }
+
+    fn sample(field: &Field, value: Value) -> Value {
+        if field.kind == Kind::IntegerList {
+            Value::Array(vec![value; field.length.unwrap_or(1)])
+        } else {
+            value
+        }
+    }
+
     #[test]
-    fn jede_editierbare_ganzzahlgrenze_entspricht_der_ladepruefung() {
+    fn jede_editierbare_zahlengrenze_entspricht_der_ladepruefung() {
         let fields = fields(crate::admin_settings::SPEC, &[]);
         let mut checked = 0;
         let mut drift = Vec::new();
-        for field in fields
-            .iter()
-            .filter(|field| field.writable && matches!(field.kind, Kind::Integer))
-        {
-            let (Some(min), Some(max)) = (
-                field.min.as_deref().and_then(|v| v.parse::<i64>().ok()),
-                field.max.as_deref().and_then(|v| v.parse::<i64>().ok()),
-            ) else {
+        for field in fields.iter().filter(|field| {
+            field.writable && matches!(field.kind, Kind::Integer | Kind::IntegerList | Kind::Number)
+        }) {
+            let Some((inside, outside)) = edges(field) else {
+                drift.push(format!("{} ohne Grenze", field.path));
                 continue;
             };
             checked += 1;
-            if !loads_with(&field.path, min) || !loads_with(&field.path, max) {
-                drift.push(format!("{} {min}..={max} lädt nicht", field.path));
+            for value in inside {
+                if !loads_with(&field.path, sample(field, value.clone())) {
+                    drift.push(format!("{} {value} lädt nicht", field.path));
+                }
             }
-            if max < i64::MAX && loads_with(&field.path, max + 1) {
-                drift.push(format!("{} lädt über {max}", field.path));
+            for value in outside {
+                if loads_with(&field.path, sample(field, value.clone())) {
+                    drift.push(format!("{} {value} lädt", field.path));
+                }
             }
         }
         assert!(drift.is_empty(), "{drift:#?}");
-        assert!(checked >= 45, "{checked}");
+        assert!(checked >= 110, "{checked}");
     }
 }
