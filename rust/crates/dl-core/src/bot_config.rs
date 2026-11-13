@@ -332,7 +332,7 @@ impl BotConfig {
                 .twitch_invites
                 .excluded_voice_channel_ids
                 .iter()
-                .any(|id| *id == 0 || i64::try_from(*id).is_err())
+                .any(|id| !crate::runtime_config::DISCORD_ID_RANGE.contains(id))
         {
             return Err(invalid(
                 "twitch_invites enthält ungültige Grenzen oder Kanal-IDs",

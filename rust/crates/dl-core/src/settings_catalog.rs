@@ -271,7 +271,38 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
         "runtime.ai.brain_image_jpeg_quality" => {
             range_bounds(&runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE)
         }
-        "runtime.ai.brain_image_followup_seconds" => range_bounds(&runtime::DURATION_SECONDS_RANGE),
+        "runtime.community.router_auto_move_delay_seconds"
+        | "runtime.ai.transparency_error_repeat_seconds"
+        | "runtime.ai.transparency_error_followup_seconds"
+        | "runtime.ai.brain_cooldown_seconds"
+        | "runtime.ai.brain_image_followup_seconds" => {
+            range_bounds(&runtime::DURATION_SECONDS_RANGE)
+        }
+        "runtime.start.owner_id"
+        | "runtime.start.command_guild_id"
+        | "runtime.start.mcp_guild_id"
+        | "runtime.start.mcp_verified_role_id"
+        | "runtime.bridges.matcher_guild_id"
+        | "runtime.bridges.matcher_notify_channel_id"
+        | "runtime.bridges.matcher_role_id"
+        | "runtime.dashboard.owner_user_id"
+        | "runtime.dashboard.moderator_role_id"
+        | "runtime.dashboard.audit_bot_user_id"
+        | "runtime.dashboard.insights_guild_id"
+        | "runtime.community.lfg_panel_channel_id"
+        | "runtime.community.lfg_forum_channel_id"
+        | "runtime.community.lfg_freetext_channel_id"
+        | "runtime.community.brain_help_channel_id"
+        | "runtime.community.scrim_category_id"
+        | "runtime.community.concierge_fallback_category_id"
+        | "runtime.community.concierge_pate_category_id"
+        | "runtime.community.concierge_pate_channel_id"
+        | "runtime.community.concierge_pate_panel_channel_id"
+        | "runtime.community.concierge_pate_help_channel_id"
+        | "runtime.community.concierge_mod_role_id"
+        | "runtime.moderation.channel_id"
+        | "runtime.ai.transparency_channel_id" => range_bounds(&runtime::DISCORD_ID_RANGE),
+        "runtime.ai.brain_daily_user_limit" => range_bounds(&runtime::BRAIN_DAILY_USER_LIMIT_RANGE),
         "twitch_invites.personal_links_per_channel" | "twitch_invites.guild_invite_reserve" => {
             range_bounds(&bot::TWITCH_INVITE_COUNT_RANGE)
         }
@@ -659,7 +690,19 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
     }
 
     fn numbers(text: &str) -> Vec<i64> {
-        text.split(|c: char| !c.is_ascii_digit())
+        let chars: Vec<char> = text.chars().collect();
+        let grouped = |index: usize| {
+            chars[index] == '.'
+                && index > 0
+                && chars[index - 1].is_ascii_digit()
+                && chars.get(index + 1).is_some_and(char::is_ascii_digit)
+        };
+        let plain: String = (0..chars.len())
+            .filter(|index| !grouped(*index))
+            .map(|index| chars[index])
+            .collect();
+        plain
+            .split(|c: char| !c.is_ascii_digit())
             .filter(|part| !part.is_empty())
             .filter_map(|part| part.parse().ok())
             .collect()
@@ -667,7 +710,7 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
 
     fn claimed_range(field: &Field) -> Option<(i64, i64)> {
         if let Some(rest) = field.help.split("Erlaubt sind ").nth(1) {
-            let claim = rest.split('.').next().unwrap_or_default();
+            let claim = rest.split(". ").next().unwrap_or_default();
             let found = numbers(claim);
             return Some((*found.first()?, *found.get(1)?));
         }
@@ -732,11 +775,10 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
         let fields = fields(crate::admin_settings::SPEC, &[]);
         let mut checked = 0;
         let mut drift = Vec::new();
-        for field in fields.iter().filter(|field| {
-            field.writable
-                && matches!(field.kind, Kind::Integer)
-                && catalog_bounds(&field.path).is_some()
-        }) {
+        for field in fields
+            .iter()
+            .filter(|field| field.writable && matches!(field.kind, Kind::Integer))
+        {
             let (Some(min), Some(max)) = (
                 field.min.as_deref().and_then(|v| v.parse::<i64>().ok()),
                 field.max.as_deref().and_then(|v| v.parse::<i64>().ok()),
@@ -752,6 +794,6 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
             }
         }
         assert!(drift.is_empty(), "{drift:#?}");
-        assert!(checked >= 15, "{checked}");
+        assert!(checked >= 45, "{checked}");
     }
 }

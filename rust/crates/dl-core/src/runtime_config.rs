@@ -54,6 +54,11 @@ pub const STEAM_INVITE_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const DURATION_SECONDS_RANGE: RangeInclusive<u64> = 0..=YEAR_SECONDS;
 pub const RUNTIME_TTL_RANGE: RangeInclusive<i64> = 1..=YEAR_SECONDS as i64;
 pub const BROKER_IDEMPOTENCY_ENTRIES_RANGE: RangeInclusive<usize> = 1..=1_000_000;
+pub const DISCORD_ID_RANGE: RangeInclusive<u64> = 1..=i64::MAX as u64;
+pub const BRAIN_DAILY_USER_LIMIT_RANGE: RangeInclusive<usize> = 1..=usize::MAX;
+pub const PRESENCE_STATUS_MAX_CHARS: usize = 128;
+pub const BROKER_SECONDS_RANGE: RangeInclusive<f64> = 0.001..=YEAR_SECONDS as f64;
+pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=HOUR_SECONDS as f64;
 pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
 pub const SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 300;
 pub const SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS: i64 = 25_000;
@@ -344,7 +349,11 @@ impl RuntimeConfig {
                 return Err(invalid());
             }
         }
-        if self.ai.brain_daily_user_limit == Some(0) {
+        if self
+            .ai
+            .brain_daily_user_limit
+            .is_some_and(|limit| !BRAIN_DAILY_USER_LIMIT_RANGE.contains(&limit))
+        {
             return Err(invalid());
         }
         if self
@@ -466,7 +475,7 @@ impl RuntimeConfig {
             .is_some_and(|value| {
                 value
                     .parse::<u64>()
-                    .map_or(true, |id| id == 0 || id > i64::MAX as u64)
+                    .map_or(true, |id| !DISCORD_ID_RANGE.contains(&id))
             })
             || self
                 .start
@@ -475,7 +484,7 @@ impl RuntimeConfig {
                 .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
             || self.start.presence_status.as_deref().is_some_and(|value| {
                 value.trim().is_empty()
-                    || value.chars().count() > 128
+                    || value.chars().count() > PRESENCE_STATUS_MAX_CHARS
                     || value.chars().any(char::is_control)
             })
         {
@@ -489,7 +498,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !seconds.is_finite() || !(0.001..=31_536_000.0).contains(&seconds) {
+            if !seconds.is_finite() || !BROKER_SECONDS_RANGE.contains(&seconds) {
                 return Err(invalid());
             }
         }
@@ -566,13 +575,12 @@ impl RuntimeConfig {
                 return Err(invalid());
             }
         }
-        if self
+        if self.bridges.twitch_timeout_seconds.is_some_and(|value| {
+            !value.is_finite() || !TWITCH_TIMEOUT_SECONDS_RANGE.contains(&value)
+        }) || self
             .bridges
-            .twitch_timeout_seconds
-            .is_some_and(|value| !value.is_finite() || !(0.5..=3600.0).contains(&value))
-            || self.bridges.matcher_fuzzy_floor.is_some_and(|value| {
-                !value.is_finite() || !MATCHER_FUZZY_FLOOR_RANGE.contains(&value)
-            })
+            .matcher_fuzzy_floor
+            .is_some_and(|value| !value.is_finite() || !MATCHER_FUZZY_FLOOR_RANGE.contains(&value))
         {
             return Err(invalid());
         }
@@ -616,7 +624,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if id == 0 || id > i64::MAX as u64 {
+            if !DISCORD_ID_RANGE.contains(&id) {
                 return Err(invalid());
             }
         }
@@ -632,7 +640,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if list.iter().any(|id| *id == 0 || *id > i64::MAX as u64) {
+            if list.iter().any(|id| !DISCORD_ID_RANGE.contains(id)) {
                 return Err(invalid());
             }
         }
