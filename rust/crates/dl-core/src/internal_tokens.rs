@@ -32,6 +32,12 @@ pub const TURNIER_API_RECEIVER: &[&str] = &[
 
 pub const TWITCH_DASHBOARD_RECEIVER: &[&str] = &["TWITCH_INTERNAL_API_TOKEN"];
 
+pub const TWITCH_INTERNAL_API_RECEIVER: &[&str] = &["TWITCH_INTERNAL_API_TOKEN"];
+
+pub const MCP_CONNECTOR_RECEIVER: &[&str] = &["TWITCH_INTERNAL_API_TOKEN"];
+
+pub const LAGEBILD_RECEIVER: &[&str] = &["TURNIER_INTERNAL_API_TOKEN"];
+
 pub fn turnier_api_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
     first_token(lookup, TURNIER_API_RECEIVER)
 }

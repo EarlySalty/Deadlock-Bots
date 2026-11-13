@@ -47,7 +47,8 @@ fn env(name: &str) -> Option<String> {
 fn warn_if_lagebild_token_empty(token: &str) {
     if token.is_empty() {
         tracing::warn!(
-            "TURNIER_INTERNAL_API_TOKEN is empty; Lagebild endpoint will reject every request with 401"
+            "{} is empty; Lagebild endpoint will reject every request with 401",
+            dl_core::internal_tokens::key_names(dl_core::internal_tokens::LAGEBILD_RECEIVER)
         );
     }
 }
@@ -756,7 +757,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         None => {
             tracing::warn!(
-                "TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge + Matcher inaktiv"
+                "{} fehlt, Twitch-Live-Bridge und Matcher inaktiv",
+                dl_core::internal_tokens::key_names(
+                    dl_core::internal_tokens::TWITCH_INTERNAL_API_RECEIVER
+                )
             );
             None
         }
@@ -1448,7 +1452,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .await
         .with_context(|| format!("Broker-Port binden: {broker_addr}"))?;
     tracing::info!(addr = %broker_addr, "Master-Broker gebunden");
-    let lagebild_token = env("TURNIER_INTERNAL_API_TOKEN").unwrap_or_default();
+    let lagebild_token =
+        dl_core::internal_tokens::first_token(env, dl_core::internal_tokens::LAGEBILD_RECEIVER)
+            .unwrap_or_default();
     warn_if_lagebild_token_empty(&lagebild_token);
     let mut broker_app = dl_broker::router(broker.clone())
         .merge(dl_broker::twitch_invites::router(
@@ -1532,7 +1538,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
     let mcp_token = dl_core::internal_tokens::first_token(
         dl_core::runtime_config::secret_value,
-        dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
+        dl_core::internal_tokens::MCP_CONNECTOR_RECEIVER,
     );
     let mcp_state = Arc::new(
         mcp::McpState::from_config(

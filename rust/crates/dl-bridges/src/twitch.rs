@@ -79,7 +79,7 @@ pub struct TwitchApiClient {
 }
 
 impl TwitchApiClient {
-    /// ENVs wie das Original; `None` wenn kein TWITCH_INTERNAL_API_TOKEN gesetzt ist.
+    /// ENVs wie das Original; `None` ohne Token aus `internal_tokens::TWITCH_INTERNAL_API_RECEIVER`.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)
@@ -88,7 +88,7 @@ impl TwitchApiClient {
         };
         let token = dl_core::internal_tokens::first_token(
             &lookup,
-            dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
+            dl_core::internal_tokens::TWITCH_INTERNAL_API_RECEIVER,
         )?;
         let base_url = get("TWITCH_INTERNAL_API_BASE_URL").unwrap_or_else(|| {
             let host = get("TWITCH_INTERNAL_API_HOST").unwrap_or_else(|| "127.0.0.1".to_string());

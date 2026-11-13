@@ -488,9 +488,14 @@ pub fn spawn(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Some(token) = dl_core::internal_tokens::first_token(
         dl_core::runtime_config::secret_value,
-        dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
+        dl_core::internal_tokens::TWITCH_INTERNAL_API_RECEIVER,
     ) else {
-        tracing::warn!("TWITCH_INTERNAL_API_TOKEN fehlt, Twitch-Invite-Sync inaktiv");
+        tracing::warn!(
+            "{} fehlt, Twitch-Invite-Sync inaktiv",
+            dl_core::internal_tokens::key_names(
+                dl_core::internal_tokens::TWITCH_INTERNAL_API_RECEIVER
+            )
+        );
         return None;
     };
     let base = config
