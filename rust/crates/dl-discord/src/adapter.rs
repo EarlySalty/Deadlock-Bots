@@ -1069,21 +1069,23 @@ impl DiscordPort for DiscordAdapter {
             .find(|role| role.id == rid)
             .ok_or(PortError::RoleNotFound)?;
         let mut members = Vec::new();
-        let mut after = None;
-        loop {
+        let mut pager = crate::member_pages::MemberPager::default();
+        while !pager.is_done() {
             let page = self
                 .http
-                .get_guild_members(gid, Some(1000), after)
+                .get_guild_members(
+                    gid,
+                    Some(u64::from(crate::member_pages::MEMBER_PAGE_LIMIT)),
+                    pager.after(),
+                )
                 .await
                 .map_err(|err| PortError::Discord(err.to_string()))?;
-            let Some(cursor) = page.iter().map(|member| member.user.id.get()).max() else {
-                break;
-            };
-            if after.is_some_and(|previous| cursor <= previous) {
-                return Err(PortError::Discord(
-                    "member pagination did not advance".into(),
-                ));
-            }
+            pager
+                .advance(
+                    page.iter().map(|member| Some(member.user.id.get())),
+                    page.len(),
+                )
+                .map_err(|err| PortError::Discord(err.to_string()))?;
             members.extend(
                 page.iter()
                     .filter(|member| role_id == guild_id || member.roles.contains(&rid))
@@ -1092,7 +1094,6 @@ impl DiscordPort for DiscordAdapter {
                         display_name: member.display_name().to_string(),
                     }),
             );
-            after = Some(cursor);
         }
         Ok(RoleMembers {
             role_id,

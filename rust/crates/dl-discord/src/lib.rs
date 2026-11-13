@@ -19,6 +19,7 @@ pub mod dm_gate;
 pub mod gateway;
 pub mod interactions;
 pub mod invite_tracker;
+pub mod member_pages;
 pub mod voice_cache;
 
 pub use adapter::DiscordAdapter;

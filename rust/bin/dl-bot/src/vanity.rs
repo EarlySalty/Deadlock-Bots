@@ -293,24 +293,19 @@ async fn sync_member_directory(
 ) -> TaskResult<()> {
     let guild_id_i64 = i64::try_from(guild_id)?;
     let sweep_started_at = Utc::now();
-    let mut after = None;
+    let mut pager = dl_discord::member_pages::MemberPager::default();
     let mut seen = 0usize;
 
-    loop {
-        let page = fetch_member_page(client, token, guild_id, after).await?;
-        if page.is_empty() {
-            break;
-        }
+    while !pager.is_done() {
+        let page = fetch_member_page(client, token, guild_id, pager.after()).await?;
+        pager.advance(
+            page.iter().map(|member| member.user.id.parse::<u64>().ok()),
+            page.len(),
+        )?;
         for member in &page {
             upsert_directory_member(pool, guild_id_i64, member, sweep_started_at).await?;
         }
         seen += page.len();
-        after = page
-            .last()
-            .and_then(|member| member.user.id.parse::<u64>().ok());
-        if page.len() < 1000 || after.is_none() {
-            break;
-        }
     }
 
     let absent = sqlx::query(
@@ -343,7 +338,10 @@ async fn fetch_member_page(
     guild_id: u64,
     after: Option<u64>,
 ) -> TaskResult<Vec<DirectoryMember>> {
-    let mut url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/members?limit=1000");
+    let mut url = format!(
+        "{DISCORD_API_BASE}/guilds/{guild_id}/members?limit={}",
+        dl_discord::member_pages::MEMBER_PAGE_LIMIT
+    );
     if let Some(after) = after {
         url.push_str("&after=");
         url.push_str(&after.to_string());
