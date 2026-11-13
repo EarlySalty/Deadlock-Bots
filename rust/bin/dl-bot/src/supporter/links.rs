@@ -196,17 +196,7 @@ impl HttpSupporterLinks {
             .send()
             .await
             .map_err(|error| LinkError::Failed(format!("{path} nicht erreichbar: {error}")))?;
-        let status = response.status();
-        let body = match response.json::<Value>().await {
-            Ok(body) => body,
-            Err(error) if status.is_success() => {
-                return Err(LinkError::Failed(format!(
-                    "{path} antwortet {status} mit unlesbarem Inhalt: {error}"
-                )))
-            }
-            Err(_) => Value::Null,
-        };
-        Ok((status, body))
+        read_reply(path, response).await.map_err(LinkError::Failed)
     }
 
     async fn steam_link(&self, path: &str, body: Value) -> LinkResult {
@@ -269,25 +259,12 @@ impl FundingSource for HttpSupporterLinks {
             .send()
             .await
             .map_err(|error| format!("{FUNDING_PATH} nicht erreichbar: {error}"))?;
-        let status = response.status();
+        let (status, body) = read_reply(FUNDING_PATH, response).await?;
         if !status.is_success() {
-            let code = response
-                .json::<Value>()
-                .await
-                .ok()
-                .and_then(|body| {
-                    body.get("error")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
-            log_token_rejection(FUNDING_PATH, status, &code);
+            let code = error_code(&body);
+            log_token_rejection(FUNDING_PATH, status, code);
             return Err(format!("{FUNDING_PATH} antwortet {status} {code}"));
         }
-        let body = response
-            .json::<Value>()
-            .await
-            .map_err(|error| format!("{FUNDING_PATH} Antwort unlesbar: {error}"))?;
         parse_funding(&body, self.goal_cents)
     }
 
@@ -316,13 +293,31 @@ fn parse_funding(body: &Value, goal_cents: i64) -> Result<SupportFunding, String
     })
 }
 
+async fn read_reply(
+    path: &str,
+    response: reqwest::Response,
+) -> Result<(StatusCode, Value), String> {
+    let status = response.status();
+    match response.json::<Value>().await {
+        Ok(body) => Ok((status, body)),
+        Err(error) if status.is_success() => Err(format!(
+            "{path} antwortet {status} mit unlesbarem Inhalt: {error}"
+        )),
+        Err(_) => Ok((status, Value::Null)),
+    }
+}
+
+fn error_code(body: &Value) -> &str {
+    body.get("error").and_then(Value::as_str).unwrap_or("")
+}
+
 fn link_outcome(
     path: &str,
     status: StatusCode,
     body: &Value,
     accept: fn(&str) -> bool,
 ) -> LinkResult {
-    let code = body.get("error").and_then(Value::as_str).unwrap_or("");
+    let code = error_code(body);
     match (status, code) {
         (StatusCode::NOT_FOUND, "no_subscription") => return Ok(LinkOutcome::NoSubscription),
         (StatusCode::CONFLICT, "already_subscribed") => return Ok(LinkOutcome::AlreadySubscribed),

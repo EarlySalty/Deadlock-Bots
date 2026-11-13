@@ -30,6 +30,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dl_activity::join_source::classify;
+use dl_bridges::http::HttpLimits;
 use dl_core::bot_config::BotConfig;
 use dl_discord::DiscordAdapter;
 use serde::Deserialize;
@@ -418,17 +419,19 @@ fn ensure_loopback_base(base: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_once(pool: &PgPool, base: &str, token: &str, dry_run: bool) -> anyhow::Result<()> {
+async fn run_once(
+    pool: &PgPool,
+    base: &str,
+    token: &str,
+    dry_run: bool,
+    limits: HttpLimits,
+) -> anyhow::Result<()> {
     ensure_loopback_base(base)?;
     let url = format!(
         "{}/internal/twitch/v1/streamer-invites",
         base.trim_end_matches('/')
     );
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = dl_bridges::http::internal_client(limits)?;
     let entries: Vec<InviteEntry> = client
         .get(&url)
         .header("X-Internal-Token", token)
@@ -457,9 +460,14 @@ async fn run_guarded(
     base: String,
     token: String,
     dry_run: bool,
+    limits: HttpLimits,
 ) -> Result<(), String> {
     let run = tokio::spawn(async move {
-        tokio::time::timeout(SYNC_TIMEOUT, run_once(&pool, &base, &token, dry_run)).await
+        tokio::time::timeout(
+            SYNC_TIMEOUT,
+            run_once(&pool, &base, &token, dry_run, limits),
+        )
+        .await
     });
     match run.await {
         Ok(Ok(Ok(()))) => Ok(()),
@@ -492,6 +500,7 @@ pub fn spawn(
         .clone()
         .unwrap_or_else(|| "http://127.0.0.1:8776".to_string());
     let dry_run = config.twitch_invites.sync_dry_run;
+    let limits = HttpLimits::from_bridges(&config.runtime.bridges);
     Some(tokio::spawn(async move {
         let mut tick = tokio::time::interval(SYNC_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -499,7 +508,7 @@ pub fn spawn(
         let mut last_alert = None;
         loop {
             tick.tick().await;
-            match run_guarded(pool.clone(), base.clone(), token.clone(), dry_run).await {
+            match run_guarded(pool.clone(), base.clone(), token.clone(), dry_run, limits).await {
                 Ok(()) => failures = 0,
                 Err(error) => {
                     failures = failures.saturating_add(1);
